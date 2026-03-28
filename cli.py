@@ -450,7 +450,7 @@ def simulate():
 
 @simulate.command()
 @click.option("--port", "-p", default=7001, help="Server port")
-@click.option("--webhook-port", "-w", default=7000, help="Webhook target port (JIRA Virtual Developer)")
+@click.option("--webhook-port", "-w", default=3000, help="Webhook target port (JIRA Virtual Developer, matches WEBHOOK_PORT default)")
 @click.option("--webhook-secret", "-s", default="dev-secret-key", help="Webhook secret for signing (must match target)")
 def start_server(port: int, webhook_port: int, webhook_secret: str):
     """Start the simulated JIRA server."""
@@ -480,13 +480,13 @@ def start_server(port: int, webhook_port: int, webhook_secret: str):
 @click.option("--labels", "-l", default="ai-assist", help="Comma-separated labels")
 @click.option("--server", default="http://localhost:7001", help="Simulated JIRA server URL")
 def create_issue(summary: str, description: str, assignee: str, labels: str, server: str):
-    """Create a new issue in the simulated JIRA and notify the bot."""
+    """Create a new issue in the simulated JIRA (webhook triggered automatically)."""
     from src.jira.simulated_client import SimulatedJiraClient
     
     labels_list = [l.strip() for l in labels.split(",") if l.strip()]
     
     with SimulatedJiraClient(base_url=server) as client:
-        # Create the issue
+        # Create the issue — server auto-triggers webhook on POST /api/issues
         issue = client.create_issue(
             summary=summary,
             description=description,
@@ -500,21 +500,7 @@ def create_issue(summary: str, description: str, assignee: str, labels: str, ser
             console.print(f"Status: {issue['status']}")
             console.print(f"Assignee: {issue['assignee']}")
             console.print()
-            
-            # Notify the bot
-            result = client.notify_bot(
-                summary=summary,
-                description=description,
-                issue_key=issue['key'],
-                assignee=assignee,
-                labels=labels_list,
-                event_type="jira:issue_created",
-            )
-            
-            if result:
-                console.print(f"[bold green]✓ Bot notified about {issue['key']}[/bold green]")
-            else:
-                console.print(f"[bold yellow]⚠ Failed to notify bot[/bold yellow]")
+            console.print(f"[dim]Webhook triggered automatically by simulated server[/dim]")
         else:
             console.print(f"[bold red]✗ Failed to create issue[/bold red]")
 

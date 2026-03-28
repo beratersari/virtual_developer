@@ -44,20 +44,9 @@ echo -e "${GREEN}✓ npm found${NC}"
 echo ""
 echo -e "${BLUE}Step 1: Installing Python dependencies...${NC}"
 cd "$SCRIPT_DIR"
-pip3 install -r requirements.txt --quiet
+pip3 install -r requirements.txt --quiet --break-system-packages
 echo -e "${GREEN}✓ Python dependencies installed${NC}"
 
-echo ""
-echo -e "${BLUE}Step 2: Installing sample project dependencies...${NC}"
-cd "$SCRIPT_DIR/sample_project"
-# Create virtual environment for sample project
-if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
-    echo -e "${GREEN}✓ Created virtual environment for sample project${NC}"
-fi
-# Install sample project in dev mode
-.venv/bin/pip install -e ".[test]" --quiet
-echo -e "${GREEN}✓ Sample project dependencies installed${NC}"
 
 echo ""
 echo -e "${BLUE}Step 3: Installing OpenCode CLI...${NC}"
@@ -66,6 +55,26 @@ if ! command -v opencode &> /dev/null; then
     echo -e "${GREEN}✓ OpenCode CLI installed${NC}"
 else
     echo -e "${GREEN}✓ OpenCode CLI already installed${NC}"
+fi
+
+echo ""
+echo -e "${BLUE}Step 3b: Installing GitLab CLI (glab)...${NC}"
+if ! command -v glab &> /dev/null; then
+    # Try brew (macOS)
+    if command -v brew &> /dev/null; then
+        brew install glab
+    # Try apt (Debian/Ubuntu)
+    elif command -v apt-get &> /dev/null; then
+        curl -fsSL https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash 2>/dev/null || true
+        apt-get install -y gitlab-cli 2>/dev/null || echo "  (glab install via apt may require manual setup)"
+    else
+        echo -e "${YELLOW}  Please install 'glab' manually: https://gitlab.com/gitlab-org/cli${NC}"
+    fi
+    if command -v glab &> /dev/null; then
+        echo -e "${GREEN}✓ GitLab CLI (glab) installed${NC}"
+    fi
+else
+    echo -e "${GREEN}✓ GitLab CLI (glab) already installed${NC}"
 fi
 
 echo ""

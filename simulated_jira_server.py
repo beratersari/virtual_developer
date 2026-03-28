@@ -363,9 +363,10 @@ def run_server(host="0.0.0.0", port=7001, debug=False):
     print(f"=" * 60)
     
     # Set default webhook to local JIRA Virtual Developer
+    # Default port 3000 matches config.py webhook_port default
     store.webhook_url = os.environ.get(
         "SIMULATED_JIRA_WEBHOOK_URL", 
-        "http://localhost:7000/webhook/jira"
+        "http://localhost:3000/webhook/jira"
     )
     
     # Set webhook secret from environment (must match the target server's secret)

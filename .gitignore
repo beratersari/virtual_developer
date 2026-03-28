@@ -21,7 +21,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+sample_project/
 # Virtual environments
 venv/
 ENV/
@@ -41,7 +41,7 @@ env/
 .env.*.local
 
 # JIRA Virtual Developer specific
-state/
+.jira-agent/state/
 logs/
 *.log
 .jira-agent/

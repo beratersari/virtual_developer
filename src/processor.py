@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.config import settings
+from src.git_manager import GitManager
 from src.jira.client import JiraClient, create_jira_client
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
@@ -22,6 +23,7 @@ class JobProcessor:
         self.state_manager = JiraStateManager()
         self.reporter = JiraReporter()
         self.agent_runner = AgentRunner()
+        self.git_manager = GitManager()
         # Use simulated client if JIRA not properly configured
         use_simulated = not settings.is_configured() or settings.jira_host in ['', 'a', 'https://yourcompany.atlassian.net']
         if use_simulated:
@@ -189,6 +191,9 @@ class JobProcessor:
         """Start Prometheus planning workflow."""
         print(f"Starting planning workflow for {state.issue_key}")
         
+        # Ensure we're on a feature branch before making changes
+        self.git_manager.ensure_feature_branch(state.issue_key)
+        
         self.state_manager.update_state(
             state.issue_key,
             status=TaskStatus.PLANNING,
@@ -227,7 +232,13 @@ class JobProcessor:
         
         # Check result
         if result["returncode"] == 0:
-            # Plan created successfully
+            # Plan created successfully — commit it
+            self.git_manager.commit_changes(
+                issue_key=state.issue_key,
+                summary=f"Plan for {state.issue_key}",
+                description=state.description,
+            )
+            
             plan_path = settings.full_plans_dir / f"{state.issue_key}.md"
             plan_content = ""
             if plan_path.exists():
@@ -266,6 +277,9 @@ class JobProcessor:
         """Start Atlas execution workflow."""
         print(f"Starting execution workflow for {state.issue_key}")
         
+        # Ensure we're on a feature branch before making changes
+        self.git_manager.ensure_feature_branch(state.issue_key)
+        
         self.state_manager.update_state(
             state.issue_key,
             status=TaskStatus.EXECUTING,
@@ -302,6 +316,13 @@ class JobProcessor:
         
         # Check result
         if result["returncode"] == 0:
+            # Commit changes made by Atlas
+            self.git_manager.commit_changes(
+                issue_key=state.issue_key,
+                summary=f"Execution for {state.issue_key}",
+                description=state.description,
+            )
+            
             self.state_manager.update_state(
                 state.issue_key,
                 status=TaskStatus.COMPLETED,
@@ -327,6 +348,9 @@ class JobProcessor:
     async def _start_direct_execution(self, state: JiraAgentState):
         """Start direct Sisyphus execution."""
         print(f"Starting direct execution for {state.issue_key}")
+        
+        # Ensure we're on a feature branch before making changes
+        self.git_manager.ensure_feature_branch(state.issue_key)
         
         self.state_manager.update_state(
             state.issue_key,
@@ -388,6 +412,13 @@ class JobProcessor:
         
         # Handle result
         if result["returncode"] == 0:
+            # Commit changes to the feature branch
+            self.git_manager.commit_changes(
+                issue_key=state.issue_key,
+                summary=state.issue_summary,
+                description=state.description,
+            )
+            
             updated_state = self.state_manager.update_state(
                 state.issue_key,
                 status=TaskStatus.COMPLETED,

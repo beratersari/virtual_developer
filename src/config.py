@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     
+    # Git Configuration (for commits in target project folder)
+    git_user_name: str = Field(default="DevBot", description="Git user name for commits")
+    git_user_email: str = Field(default="devbot@example.com", description="Git user email for commits")
+    
+    # Remote GitLab repository (optional)
+    project_gitlab_url: str = Field(default="", description="GitLab repo URL to clone into PROJECT_ROOT")
+    gitlab_pat: str = Field(default="", description="GitLab Personal Access Token for push/merge-request")
+    
     # Agent Configuration
     default_agent: str = Field(default="sisyphus")
     planning_agent: str = Field(default="prometheus")
