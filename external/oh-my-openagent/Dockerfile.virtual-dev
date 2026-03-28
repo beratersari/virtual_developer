@@ -1,0 +1,48 @@
+# Dockerfile for oh-my-opencode Virtual Developer
+# Use this to containerize your AI agent for Jira automation
+
+FROM oven/bun:1.2-alpine AS base
+
+# Install dependencies for OpenCode
+RUN apk add --no-cache \
+    git \
+    curl \
+    bash \
+    ca-certificates
+
+# Install OpenCode
+RUN curl -fsSL https://opencode.ai/install | bash
+
+# Add opencode to PATH
+ENV PATH="/root/.opencode/bin:$PATH"
+
+# Set working directory
+WORKDIR /app
+
+# Copy oh-my-opencode source (or install from npm if published)
+# Option A: Copy local source
+COPY . .
+
+# Option B: If using published npm package, uncomment:
+# RUN bun install -g oh-my-opencode
+
+# Install dependencies and build
+RUN bun install && bun run build
+
+# Install oh-my-opencode plugin (non-interactive, free models only)
+RUN bun run dist/cli/index.js install --no-tui \
+    --claude=no \
+    --openai=no \
+    --gemini=no \
+    --copilot=no \
+    --opencode-zen=yes
+
+# Configure to use free model by default
+RUN echo '{"$schema":"https://opencode.ai/config.json","plugin":["oh-my-openagent"],"model":"opencode/big-pickle"}' > /root/.config/opencode/opencode.json
+
+# Configure Sisyphus to use free model
+RUN bun -e 'const fs=require("fs"); const p="/root/.config/opencode/oh-my-opencode.json"; let c=JSON.parse(fs.readFileSync(p)); c.agents=c.agents||{}; c.agents.Sisyphus={model:"opencode/big-pickle"}; fs.writeFileSync(p, JSON.stringify(c,null,2))'
+
+# Default command: run the agent
+ENTRYPOINT ["bun", "run", "dist/cli/index.js", "run"]
+CMD ["Your task: Read the Jira ticket and implement the fix. Create branch. Commit. Push."]

@@ -1,0 +1,45 @@
+# docker-compose.virtual-dev.yml
+# Run oh-my-opencode virtual developer against any project
+#
+# Usage:
+#   docker compose -f docker-compose.virtual-dev.yml run --rm agent \
+#     "Read Jira ticket PROJ-123. Implement fix. Create branch. Commit. Push."
+#
+# Or mount your project and let the agent work on it:
+#   docker compose -f docker-compose.virtual-dev.yml run --rm agent \
+#     "In /workspace, find the auth bug and fix it. Create PR."
+
+version: "3.8"
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.virtual-dev
+
+    # Mount your target project here
+    volumes:
+      - ./:/app:ro                    # Read-only: oh-my-opencode source
+      - workspace:/workspace          # Writable: target project
+
+    # Environment variables for API keys (optional if using free models)
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+
+    # Working directory = target project
+    working_dir: /workspace
+
+    # Override default CMD with your task
+    command: >
+      "Your task: Read Jira ticket. Implement fix. Create branch. Commit. Push."
+
+volumes:
+  workspace:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${TARGET_PROJECT:-.}
