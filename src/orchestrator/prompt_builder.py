@@ -33,20 +33,7 @@ class PromptBuilder:
 
 """
         
-        prompt += """## Your Task
-As Prometheus, create a comprehensive work plan for this JIRA issue.
-
-1. **Interview Mode**: Ask clarifying questions if requirements are ambiguous
-2. **Research**: Explore the codebase to understand existing patterns
-3. **Plan Generation**: Create a detailed plan with:
-   - Task breakdown with checkboxes
-   - File references and locations
-   - Implementation approach
-   - Testing strategy
-   - Estimated effort
-
-Output the plan to the designated plan file.
-"""
+        prompt += f"## Your Task\n{settings.prompt_planning}\n"
         
         return prompt
     
@@ -81,19 +68,7 @@ You are Atlas, the orchestrator. Your job is to execute the plan at:
                 prompt += f"- {learning}\n"
             prompt += "\n"
         
-        prompt += """## Delegation Guidelines
-- Use `category="visual-engineering"` for UI/UX work
-- Use `category="deep"` for complex problem-solving
-- Use `category="quick"` for simple fixes
-- Use `subagent_type="oracle"` for architecture decisions
-- Use `subagent_type="explore"` for codebase research
-
-## Success Criteria
-- All plan checkboxes checked
-- Tests passing
-- No type errors
-- Code follows project conventions
-"""
+        prompt += f"{settings.prompt_execution}\n"
         
         return prompt
     
@@ -128,19 +103,7 @@ You are Atlas, the orchestrator. Your job is to execute the plan at:
             
             prompt += "\n"
         
-        prompt += """## Instructions
-1. Analyze the task and current codebase
-2. Create todos for multi-step work
-3. Implement the solution following existing patterns
-4. Run verification (tests, type checking)
-5. Report completion with summary of changes
-
-## Constraints
-- Follow existing code style
-- Add tests for new functionality
-- Do not break existing tests
-- Minimal, focused changes
-"""
+        prompt += f"{settings.prompt_direct_execution}\n"
         
         return prompt
     
@@ -182,6 +145,35 @@ Be concise and actionable in your response.
         return prompt
     
     @staticmethod
+    def build_code_review_prompt(
+        issue_key: str,
+        summary: str,
+        description: str,
+        review_model: str,
+    ) -> str:
+        """Build prompt for code review after successful execution.
+        
+        The review agent is expected to read files and git diff output,
+        but NOT make any edits.  The body of the review instructions comes
+        from ``settings.prompt_code_review`` so it can be customised via .env.
+        """
+        prompt = f"""# Code Review Request
+
+## JIRA Issue: {issue_key}
+**Summary**: {summary}
+
+## Original Task Description
+{description}
+
+## Review Model
+You are running as a code reviewer using model: {review_model}
+
+## Your Task
+{settings.prompt_code_review}
+"""
+        return prompt
+
+    @staticmethod
     def build_oracle_consult_prompt(
         question: str,
         context_files: Optional[List[str]] = None,
@@ -204,14 +196,6 @@ You are Oracle. Provide expert architecture guidance.
                 prompt += f"- {f}\n"
             prompt += "\n"
         
-        prompt += """## Response Format
-1. **Direct Answer**: Clear response to the question
-2. **Rationale**: Why this approach is recommended
-3. **Alternatives**: Other options considered
-4. **Trade-offs**: Pros/cons of each approach
-5. **Implementation Hints**: Key files/patterns to use
-
-Be thorough but concise. Focus on practical guidance.
-"""
+        prompt += f"{settings.prompt_oracle}\n"
         
         return prompt

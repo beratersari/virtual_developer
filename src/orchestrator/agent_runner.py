@@ -29,6 +29,7 @@ class AgentTask:
     session_id: Optional[str] = None
     task_id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
     skills: List[str] = field(default_factory=list)
+    model: Optional[str] = None  # Model override (e.g. for code review with a free model)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -269,8 +270,9 @@ class AgentRunner:
         # Add agent option
         cmd_parts.extend(["--agent", task.agent])
         
-        # Add model fallback for testing without API keys
-        cmd_parts.extend(["--model", "opencode/big-pickle"])
+        # Use task-specific model if provided, otherwise default
+        effective_model = task.model or "opencode/big-pickle"
+        cmd_parts.extend(["--model", effective_model])
         
         # Add session continuation if specified
         if task.session_id:

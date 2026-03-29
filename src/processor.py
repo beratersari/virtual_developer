@@ -440,16 +440,13 @@ class JobProcessor:
 
             self.state_manager.update_state(
                 state.issue_key,
-                status=TaskStatus.COMPLETED,
-                completed_at=completed_at,
-                progress_percentage=100,
                 execution_duration_seconds=duration,
-                # current_opencode_session_id keeps the last retry's session ID
             )
 
-            self.reporter.post_completion(
+            # Proceed to code review instead of marking completed directly
+            await self._start_code_review(
                 self.state_manager.get_state(state.issue_key),
-                summary="All tasks completed successfully.",
+                execution_summary="All tasks completed successfully.",
             )
         else:
             self.state_manager.update_state(
@@ -592,23 +589,18 @@ class JobProcessor:
                 description=state.description,
             )
 
-            updated_state = self.state_manager.update_state(
+            self.state_manager.update_state(
                 state.issue_key,
-                status=TaskStatus.COMPLETED,
-                completed_at=completed_at,
-                progress_percentage=100,
                 execution_duration_seconds=duration,
                 token_usage_input=cost_data["input_tokens"],
                 token_usage_output=cost_data["output_tokens"],
                 estimated_cost=cost_data["estimated_cost"],
-                # current_opencode_session_id keeps the last retry's session ID
             )
 
-            # Use updated state or fall back to original state
-            state_to_use = updated_state or state
-            self.reporter.post_completion(
-                state_to_use,
-                summary=result["stdout"][:1000],  # First 1000 chars
+            # Proceed to code review instead of marking completed directly
+            await self._start_code_review(
+                self.state_manager.get_state(state.issue_key),
+                execution_summary=result["stdout"][:1000],
             )
         else:
             updated_state = self.state_manager.update_state(
@@ -630,6 +622,94 @@ class JobProcessor:
                 result["stderr"],
             )
     
+    async def _start_code_review(self, state: JiraAgentState, execution_summary: str = ""):
+        """Start code review using oh-my-openagent with a free model.
+
+        This runs after successful execution (EXECUTING → CODE_REVIEW → COMPLETED).
+        Uses a different, free model (configured via CODE_REVIEW_MODEL) to review
+        the code changes made during execution.
+        """
+        review_model = settings.code_review_model
+        review_agent = settings.code_review_agent
+
+        print(f"[CodeReview] Starting code review for {state.issue_key} using model={review_model}, agent={review_agent}")
+
+        # Transition to CODE_REVIEW state
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.CODE_REVIEW,
+            code_review_model=review_model,
+        )
+
+        # Build the code review prompt
+        review_prompt = PromptBuilder.build_code_review_prompt(
+            issue_key=state.issue_key,
+            summary=state.issue_summary,
+            description=state.description,
+            review_model=review_model,
+        )
+
+        # Create review task with the free model
+        review_task = AgentTask(
+            description=f"Code Review: {state.issue_key}",
+            prompt=review_prompt,
+            agent=review_agent,
+            issue_key=state.issue_key,
+            model=review_model,  # Use the free model for review
+        )
+
+        # Run the review agent (no retry — review is best-effort)
+        def on_output(stream: str, line: str):
+            """Suppress review output from console — logs go to session file."""
+            pass
+
+        review_result = await self.agent_runner.run_agent(
+            review_task,
+            on_output=on_output,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+        )
+
+        # Extract review content from the result
+        review_text = review_result.get("stdout", "")
+        review_succeeded = review_result.get("returncode") == 0
+
+        if not review_succeeded:
+            # Review agent failed — log but don't block completion
+            review_text = (
+                f"Code review could not be completed (return code: {review_result.get('returncode')}).\n"
+                f"Error: {review_result.get('stderr', 'unknown error')[:500]}"
+            )
+            print(f"[CodeReview] Review failed for {state.issue_key}, proceeding to completion anyway")
+
+        # Store review result and transition to COMPLETED
+        completed_at = datetime.now()
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.COMPLETED,
+            completed_at=completed_at,
+            progress_percentage=100,
+            code_review_result=review_text[:5000],  # Cap stored review text
+            code_review_model=review_model,
+        )
+
+        # Post review results to JIRA
+        try:
+            self.reporter.post_code_review(
+                self.state_manager.get_state(state.issue_key),
+                review_result=review_text,
+                review_model=review_model,
+            )
+        except Exception as e:
+            print(f"[CodeReview] Failed to post review to JIRA: {e}")
+
+        # Post final completion
+        self.reporter.post_completion(
+            self.state_manager.get_state(state.issue_key),
+            summary=execution_summary,
+        )
+
+        print(f"[CodeReview] Code review completed for {state.issue_key}")
+
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""
         print(f"Starting Oracle consultation for {state.issue_key}")

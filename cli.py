@@ -151,6 +151,14 @@ def show(issue_key: str):
         console.print(f"  Total tokens:  {state.token_usage_input + state.token_usage_output:,}")
         console.print(f"  Est. cost:     ${state.estimated_cost:.4f}")
     
+    # Code review info
+    if state.code_review_result:
+        console.print(f"\n[bold magenta]🔍 Code Review:[/bold magenta]")
+        console.print(f"  Review model: {state.code_review_model or 'N/A'}")
+        console.print(f"  Result:")
+        for line in state.code_review_result[:1000].split("\n"):
+            console.print(f"    {line}")
+
     if state.error_message:
         console.print(f"\n[bold red]Error:[/bold red]")
         console.print(state.error_message[:500])
@@ -245,6 +253,8 @@ def config():
     table.add_row("Default Agent", settings.default_agent)
     table.add_row("Planning Agent", settings.planning_agent)
     table.add_row("Orchestrator Agent", settings.orchestrator_agent)
+    table.add_row("Code Review Agent", settings.code_review_agent)
+    table.add_row("Code Review Model", settings.code_review_model)
     table.add_row("Auto-start Plans", str(settings.auto_start_plans))
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Webhook Enabled", str(settings.enable_webhook))
@@ -416,6 +426,50 @@ def test_issue(
         console.print("\n" + "=" * 60)
         if result["returncode"] == 0:
             console.print("[bold green]✓ Agent completed successfully[/bold green]")
+
+            # --- Code Review Phase ---
+            console.print("\n[bold magenta]🔍 Starting Code Review...[/bold magenta]")
+            console.print(f"[dim]Review model: {settings.code_review_model}[/dim]")
+            console.print(f"[dim]Review agent: {settings.code_review_agent}[/dim]")
+
+            state.status = TaskStatus.CODE_REVIEW
+            state.code_review_model = settings.code_review_model
+            state_manager.set_state(state)
+
+            review_prompt = PromptBuilder.build_code_review_prompt(
+                issue_key=issue_key,
+                summary=title,
+                description=description,
+                review_model=settings.code_review_model,
+            )
+            review_task = AgentTask(
+                description=f"Code Review: {title}",
+                prompt=review_prompt,
+                agent=settings.code_review_agent,
+                issue_key=issue_key,
+                model=settings.code_review_model,
+            )
+
+            review_result = await runner.run_agent(
+                review_task,
+                on_output=lambda stream, line: console.print(f"[magenta][review][/magenta] [{stream}] {line}"),
+            )
+
+            if review_result["returncode"] == 0:
+                console.print("[bold green]✓ Code review completed[/bold green]")
+                state.code_review_result = review_result["stdout"][:5000]
+            else:
+                console.print("[bold yellow]⚠ Code review failed (non-blocking)[/bold yellow]")
+                state.code_review_result = (
+                    f"Review failed (rc={review_result['returncode']}): "
+                    f"{review_result.get('stderr', '')[:500]}"
+                )
+
+            if review_result.get("stdout"):
+                console.print("\n[bold magenta]Review Output:[/bold magenta]")
+                console.print(review_result["stdout"][:2000])
+
+            # Transition to COMPLETED
             state.status = TaskStatus.COMPLETED
             state.progress_percentage = 100
         else:

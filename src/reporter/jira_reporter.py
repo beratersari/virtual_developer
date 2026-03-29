@@ -200,6 +200,42 @@ Please review and provide guidance on how to proceed.
         result = self.client.add_comment(issue_key, body)
         return result.get("id") if result else None
     
+    def post_code_review(
+        self,
+        state: JiraAgentState,
+        review_result: str,
+        review_model: str,
+    ) -> Optional[str]:
+        """Post code review results to JIRA."""
+        # Truncate very long reviews
+        truncated_review = review_result[:3000]
+        if len(review_result) > 3000:
+            truncated_review += "\n\n... (review truncated)"
+
+        body = f"""🔍 **Automated Code Review**
+
+**Review Model**: `{review_model}`
+
+{truncated_review}
+
+---
+*Code review performed automatically by AI agent using {review_model}.*
+*Please verify the findings and address any concerns before merging.*
+"""
+
+        result = self.client.add_comment(state.issue_key, body)
+
+        # Add label indicating review is done
+        try:
+            self.client.update_issue(
+                state.issue_key,
+                labels=["ai-reviewed"],
+            )
+        except Exception:
+            pass
+
+        return result.get("id") if result else None
+
     def post_oracle_response(
         self,
         issue_key: str,

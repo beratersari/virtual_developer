@@ -12,6 +12,7 @@ class TaskStatus(Enum):
     PLANNING = "planning"
     PLAN_READY = "plan_ready"
     EXECUTING = "executing"
+    CODE_REVIEW = "code_review"
     COMPLETED = "completed"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -105,6 +106,10 @@ class JiraAgentState:
     # JIRA info
     jira_assignee: Optional[str] = None
 
+    # Code review
+    code_review_result: Optional[str] = None
+    code_review_model: Optional[str] = None
+
     # Trigger info
     triggered_by: Optional[str] = None
 
@@ -140,6 +145,8 @@ class JiraAgentState:
             "token_usage_output": self.token_usage_output,
             "estimated_cost": self.estimated_cost,
             "jira_assignee": self.jira_assignee,
+            "code_review_result": self.code_review_result,
+            "code_review_model": self.code_review_model,
             "triggered_by": self.triggered_by,
         }
     
@@ -194,5 +201,7 @@ class JiraAgentState:
             token_usage_output=data.get("token_usage_output", 0),
             estimated_cost=data.get("estimated_cost", 0.0),
             jira_assignee=data.get("jira_assignee"),
+            code_review_result=data.get("code_review_result"),
+            code_review_model=data.get("code_review_model"),
             triggered_by=data.get("triggered_by"),
         )

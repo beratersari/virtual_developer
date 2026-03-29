@@ -46,7 +46,130 @@ class Settings(BaseSettings):
     planning_agent: str = Field(default="prometheus")
     orchestrator_agent: str = Field(default="atlas")
     execution_category: str = Field(default="deep")
-    
+
+    # Code Review Configuration
+    code_review_agent: str = Field(
+        default="sisyphus",
+        description="Agent to use for code review (uses read-only review prompt)"
+    )
+    code_review_model: str = Field(
+        default="opencode/big-pickle",
+        description="Model to use for code review via oh-my-openagent"
+    )
+
+    # -------------------------------------------------------------------------
+    # System Prompts — customise the instructions sent to each agent workflow.
+    # Use literal \n in the env-var value for newlines.
+    # -------------------------------------------------------------------------
+    prompt_planning: str = Field(
+        default=(
+            "As Prometheus, create a comprehensive work plan for this JIRA issue.\n"
+            "\n"
+            "1. **Interview Mode**: Ask clarifying questions if requirements are ambiguous\n"
+            "2. **Research**: Explore the codebase to understand existing patterns\n"
+            "3. **Plan Generation**: Create a detailed plan with:\n"
+            "   - Task breakdown with checkboxes\n"
+            "   - File references and locations\n"
+            "   - Implementation approach\n"
+            "   - Testing strategy\n"
+            "   - Estimated effort\n"
+            "\n"
+            "Output the plan to the designated plan file."
+        ),
+        description="System prompt for Prometheus planning workflow",
+    )
+
+    prompt_execution: str = Field(
+        default=(
+            "## Delegation Guidelines\n"
+            '- Use `category="visual-engineering"` for UI/UX work\n'
+            '- Use `category="deep"` for complex problem-solving\n'
+            '- Use `category="quick"` for simple fixes\n'
+            '- Use `subagent_type="oracle"` for architecture decisions\n'
+            '- Use `subagent_type="explore"` for codebase research\n'
+            "\n"
+            "## Success Criteria\n"
+            "- All plan checkboxes checked\n"
+            "- Tests passing\n"
+            "- No type errors\n"
+            "- Code follows project conventions"
+        ),
+        description="System prompt for Atlas execution/orchestration workflow",
+    )
+
+    prompt_direct_execution: str = Field(
+        default=(
+            "## Instructions\n"
+            "1. Analyze the task and current codebase\n"
+            "2. Create todos for multi-step work\n"
+            "3. Implement the solution following existing patterns\n"
+            "4. Run verification (tests, type checking)\n"
+            "5. Report completion with summary of changes\n"
+            "\n"
+            "## Constraints\n"
+            "- Follow existing code style\n"
+            "- Add tests for new functionality\n"
+            "- Do not break existing tests\n"
+            "- Minimal, focused changes"
+        ),
+        description="System prompt for Sisyphus direct-execution workflow",
+    )
+
+    prompt_code_review: str = Field(
+        default=(
+            "You are performing a **code review** on the changes that were just made for this JIRA issue.\n"
+            "This is a **read-only review** — do NOT make any edits or changes to the code.\n"
+            "\n"
+            "### Review Steps\n"
+            "1. **Examine Changes**: Run `git diff HEAD~1` (or `git log --oneline -5` then diff) to see what was changed\n"
+            "2. **Read Modified Files**: Read the full content of any modified files to understand context\n"
+            "3. **Analyze Code Quality**: Check for:\n"
+            "   - Correctness: Does the code do what the issue description asks?\n"
+            "   - Bug risks: Potential null references, off-by-one errors, race conditions\n"
+            "   - Code style: Consistency with existing codebase patterns\n"
+            "   - Error handling: Are edge cases covered?\n"
+            "   - Security: Any obvious security concerns (hardcoded secrets, injection risks, etc.)\n"
+            "   - Test coverage: Were tests added or updated?\n"
+            "   - Documentation: Are comments and docstrings adequate?\n"
+            "\n"
+            "### Output Format\n"
+            "Provide your review in this exact format:\n"
+            "\n"
+            "**REVIEW VERDICT**: PASS | NEEDS_ATTENTION | CONCERNS\n"
+            "\n"
+            "**Summary**: One paragraph overview of the changes and overall quality.\n"
+            "\n"
+            "**Findings**:\n"
+            "- [GOOD] Things done well\n"
+            "- [WARN] Things that could be improved (non-blocking)\n"
+            "- [ISSUE] Potential problems that should be addressed\n"
+            "\n"
+            "**Recommendation**: Final recommendation for the human reviewer.\n"
+            "\n"
+            "## Constraints\n"
+            "- Do NOT edit any files\n"
+            "- Do NOT run any build/test commands\n"
+            "- Only READ files and git history\n"
+            "- Be constructive and specific in feedback\n"
+            "- Focus on substantive issues, not nitpicking"
+        ),
+        description="System prompt for Code Review workflow (runs after successful execution)",
+    )
+
+    prompt_oracle: str = Field(
+        default=(
+            "## Response Format\n"
+            "1. **Direct Answer**: Clear response to the question\n"
+            "2. **Rationale**: Why this approach is recommended\n"
+            "3. **Alternatives**: Other options considered\n"
+            "4. **Trade-offs**: Pros/cons of each approach\n"
+            "5. **Implementation Hints**: Key files/patterns to use\n"
+            "\n"
+            "Be thorough but concise. Focus on practical guidance."
+        ),
+        description="System prompt for Oracle architecture-consultation workflow",
+    )
+
     # Feature Flags
     auto_start_plans: bool = Field(default=False)
     max_concurrent_jobs: int = Field(default=3)

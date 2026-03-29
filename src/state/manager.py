@@ -8,6 +8,51 @@ from typing import Any, Dict, List, Optional
 from src.config import settings
 from src.state.models import JiraAgentState, TaskStatus
 
+# ANSI color codes for state transition logging
+_COLORS = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "cyan": "\033[36m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+    "magenta": "\033[35m",
+    "blue": "\033[34m",
+    "white": "\033[37m",
+}
+
+# Color map for each task status
+_STATUS_COLORS = {
+    TaskStatus.PENDING: _COLORS["dim"],
+    TaskStatus.PLANNING: _COLORS["blue"],
+    TaskStatus.PLAN_READY: _COLORS["cyan"],
+    TaskStatus.EXECUTING: _COLORS["yellow"],
+    TaskStatus.CODE_REVIEW: _COLORS["magenta"],
+    TaskStatus.COMPLETED: _COLORS["green"],
+    TaskStatus.ERROR: _COLORS["red"],
+    TaskStatus.CANCELLED: _COLORS["red"],
+}
+
+
+def _log_state_transition(issue_key: str, old_status: TaskStatus, new_status: TaskStatus) -> None:
+    """Print a colored state transition message to the terminal."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    old_color = _STATUS_COLORS.get(old_status, _COLORS["white"])
+    new_color = _STATUS_COLORS.get(new_status, _COLORS["white"])
+    reset = _COLORS["reset"]
+    bold = _COLORS["bold"]
+    dim = _COLORS["dim"]
+
+    print(
+        f"{dim}[{timestamp}]{reset} "
+        f"{bold}[StateTransition]{reset} "
+        f"{bold}{issue_key}{reset}: "
+        f"{old_color}{old_status.value}{reset}"
+        f" → "
+        f"{new_color}{bold}{new_status.value}{reset}"
+    )
+
 
 class JiraStateManager:
     """Manages JIRA agent state persistence to disk."""
@@ -37,8 +82,19 @@ class JiraStateManager:
             return None
     
     def set_state(self, state: JiraAgentState) -> None:
-        """Save state to disk."""
+        """Save state to disk. Logs state transitions to terminal."""
         state_file = self._get_state_file(state.issue_key)
+
+        # Detect state transitions by comparing with current persisted state
+        try:
+            if state_file.exists():
+                with open(state_file, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+                old_status = TaskStatus(old_data.get("status", "pending"))
+                if old_status != state.status:
+                    _log_state_transition(state.issue_key, old_status, state.status)
+        except Exception:
+            pass  # If we can't read old state, skip logging
         
         try:
             with open(state_file, "w", encoding="utf-8") as f:
@@ -55,6 +111,19 @@ class JiraStateManager:
         jira_assignee: Optional[str] = None,
     ) -> JiraAgentState:
         """Create a new state for an issue."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        dim = _COLORS["dim"]
+        bold = _COLORS["bold"]
+        reset = _COLORS["reset"]
+        green = _COLORS["green"]
+        print(
+            f"{dim}[{timestamp}]{reset} "
+            f"{bold}[StateTransition]{reset} "
+            f"{bold}{issue_key}{reset}: "
+            f"{green}created{reset} → "
+            f"{_STATUS_COLORS[TaskStatus.PENDING]}{bold}{TaskStatus.PENDING.value}{reset}"
+        )
+
         state = JiraAgentState(
             issue_key=issue_key,
             issue_summary=issue_summary,
