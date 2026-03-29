@@ -481,17 +481,70 @@ python cli.py cancel PROJ-123
 
 ## Configuration Options
 
+### JIRA Connection
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `JIRA_HOST` | JIRA instance URL | Required |
+| `JIRA_USERNAME` | JIRA user email | Required |
 | `JIRA_API_TOKEN` | API token for authentication | Required |
 | `JIRA_PROJECTS` | Comma-separated project keys | `PROJ` |
+
+### Webhook & Server
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `WEBHOOK_PORT` | Port for webhook server | `3000` |
+| `WEBHOOK_PATH` | Webhook endpoint path | `/webhook/jira` |
+| `WEBHOOK_SECRET` | Secret for webhook signature verification | None |
+| `ENABLE_WEBHOOK` | Enable webhook server | `true` |
+| `ENABLE_POLLING` | Enable JIRA polling fallback | `false` |
+| `POLL_INTERVAL_SECONDS` | Polling interval in seconds | `30` |
+
+### Agent Selection
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `DEFAULT_AGENT` | Default agent for direct tasks | `sisyphus` |
 | `PLANNING_AGENT` | Agent for planning | `prometheus` |
 | `ORCHESTRATOR_AGENT` | Agent for execution | `atlas` |
+| `EXECUTION_CATEGORY` | Category for task execution | `deep` |
+
+### Agent Task Configuration (Timeout & Retry)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_TASK_TIMEOUT_SECONDS` | Maximum time for agent task to complete | `1800` (30 min) |
+| `AGENT_TASK_MAX_RETRIES` | Maximum retry attempts for failed tasks | `3` |
+| `AGENT_TASK_RETRY_DELAY_SECONDS` | Initial delay between retries | `5` |
+| `AGENT_TASK_RETRY_BACKOFF_MULTIPLIER` | Exponential backoff multiplier | `2.0` |
+| `AGENT_TASK_RETRY_ON_TIMEOUT` | Retry tasks that timeout | `true` |
+| `AGENT_TASK_RETRY_ON_ERROR` | Retry tasks that fail with errors | `true` |
+
+The retry mechanism uses exponential backoff. For example, with default settings:
+- Retry 1: 5 seconds delay
+- Retry 2: 10 seconds delay (5 × 2)
+- Retry 3: 20 seconds delay (5 × 2²)
+
+### Behavior & Features
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `AUTO_START_PLANS` | Auto-start after planning | `false` |
 | `MAX_CONCURRENT_JOBS` | Max parallel jobs | `3` |
+| `TRIGGER_LABELS` | Labels that trigger bot (comma-separated) | `ai-assist,bot` |
+| `TRIGGER_ON_ASSIGNMENT` | Trigger when issue is assigned | `true` |
+| `TRIGGER_MENTIONS` | @mentions that trigger bot (comma-separated) | `@DevBot,@AI` |
+
+### Git Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PROJECT_ROOT` | Target project directory | Current directory |
+| `PROJECT_GITLAB_URL` | GitLab repo URL for cloning | None |
+| `GITLAB_PAT` | GitLab Personal Access Token | None |
+| `GIT_USER_NAME` | Git user name for commits | `DevBot` |
+| `GIT_USER_EMAIL` | Git user email for commits | `devbot@example.com` |
 
 ## Real JIRA Server Setup
 
@@ -734,9 +787,25 @@ Each issue state file contains:
   "estimated_cost": 0.045,
   "plan_path": ".sisyphus/plans/PROJ-123_plan.md",
   "error_message": null,
-  "retry_count": 0
+  "retry_count": 2,
+  "max_retries": 3,
+  "last_retry_at": "2024-03-27T10:02:15",
+  "retry_reason": "timeout",
+  "timed_out": false,
+  "timeout_seconds": 1800
 }
 ```
+
+### Timeout and Retry Tracking
+
+The system tracks timeout and retry information for each issue:
+
+- **`timed_out`**: Set to `true` if the task exceeded the configured timeout
+- **`retry_count`**: Number of retry attempts made
+- **`max_retries`**: Maximum retry attempts configured
+- **`last_retry_at`**: Timestamp of the last retry attempt
+- **`retry_reason`**: Reason for the last retry (`timeout` or `error`)
+- **`timeout_seconds`**: Timeout configuration used for this task
 
 ### Cost Tracking
 
@@ -804,6 +873,16 @@ mkdir -p $PROJECT_ROOT/.sisyphus/plans
 - Check session logs: `cat .jira-agent/sessions/session_*.log`
 - Verify oh-my-opencode plugin is installed: `bunx oh-my-opencode install`
 - Check for syntax errors in your codebase
+
+**Task timeouts:**
+- Check if task is genuinely taking too long: `python cli.py show PROJ-123`
+- Increase timeout: `AGENT_TASK_TIMEOUT_SECONDS=3600 python cli.py start`
+- Check for infinite loops or hanging processes in agent output
+
+**Excessive retries:**
+- Check retry configuration: `python cli.py config`
+- View retry history: `python cli.py show PROJ-123`
+- Disable retries for testing: `AGENT_TASK_MAX_RETRIES=0 python cli.py start`
 
 ### JIRA API Errors
 

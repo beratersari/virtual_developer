@@ -53,6 +53,32 @@ class Settings(BaseSettings):
     enable_webhook: bool = Field(default=True)
     enable_polling: bool = Field(default=False)
     poll_interval_seconds: int = Field(default=30)
+
+    # Agent Task Configuration
+    agent_task_timeout_seconds: int = Field(
+        default=1800,
+        description="Maximum time in seconds for an agent task to complete (default: 30 minutes)"
+    )
+    agent_task_max_retries: int = Field(
+        default=3,
+        description="Maximum number of retry attempts for failed agent tasks"
+    )
+    agent_task_retry_delay_seconds: int = Field(
+        default=5,
+        description="Initial delay in seconds between retry attempts (doubles with each retry)"
+    )
+    agent_task_retry_backoff_multiplier: float = Field(
+        default=2.0,
+        description="Multiplier for exponential backoff between retries"
+    )
+    agent_task_retry_on_timeout: bool = Field(
+        default=True,
+        description="Whether to retry tasks that timeout"
+    )
+    agent_task_retry_on_error: bool = Field(
+        default=True,
+        description="Whether to retry tasks that fail with errors"
+    )
     
     # Redis / Celery
     redis_url: str = Field(default="redis://localhost:6379/0")

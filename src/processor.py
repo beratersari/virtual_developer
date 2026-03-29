@@ -13,7 +13,7 @@ from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.reporter.jira_reporter import JiraReporter
 from src.state.manager import JiraStateManager
-from src.state.models import JiraAgentState, TaskStatus
+from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 
 class JobProcessor:
@@ -35,27 +35,19 @@ class JobProcessor:
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
         
-        print(f"[Processor] Received event: {event_type} for issue {issue_key}")
-        
+        # Process event (details logged to state file)
         if event_type == "jira:issue_created":
             await self._handle_issue_created(event)
         elif event_type == "jira:issue_updated":
             await self._handle_issue_updated(event)
         elif event_type == "comment_created":
             await self._handle_comment_created(event)
-        else:
-            print(f"[Processor] Unknown event type: {event_type}")
     
     async def _handle_issue_created(self, event: Dict[str, Any]):
         """Handle new issue creation."""
-        print(f"[Processor] Handling issue created event")
-        
         issue = event.get("issue", {})
         issue_key = issue.get("key", "unknown")
         fields = issue.get("fields", {})
-        
-        print(f"[Processor] Issue key: {issue_key}")
-        print(f"[Processor] Fields: {list(fields.keys())}")
         
         # Check if already processing
         existing = self.state_manager.get_state(issue_key)
@@ -63,7 +55,6 @@ class JobProcessor:
             # Allow reprocessing if previous run completed, failed, or was cancelled
             terminal_states = {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}
             if existing.status in terminal_states:
-                print(f"[Processor] Issue {issue_key} was {existing.status.value}, will reprocess")
                 # Reset state for reprocessing instead of deleting
                 self.state_manager.update_state(
                     issue_key,
@@ -71,10 +62,9 @@ class JobProcessor:
                     progress_percentage=0,
                     error_message=None,
                     current_task_id=None,
-                    current_session_id=None,
+                    current_opencode_session_id=None,
                 )
             else:
-                print(f"[Processor] Issue {issue_key} already being processed (status: {existing.status.value})")
                 return
         
         # Extract issue details
@@ -83,12 +73,8 @@ class JobProcessor:
         assignee_data = fields.get("assignee")
         assignee = assignee_data.get("displayName") if assignee_data else None
         
-        print(f"[Processor] Summary: {summary[:50]}...")
-        print(f"[Processor] Assignee: {assignee}")
-        
         # Determine workflow
         workflow_type = WorkflowRouter.route_issue(issue_key, summary, description)
-        print(f"[Processor] Workflow type: {workflow_type.value}")
         
         # Create state
         state = self.state_manager.create_state(
@@ -100,27 +86,20 @@ class JobProcessor:
         )
         state.metadata["workflow_type"] = workflow_type.value
         self.state_manager.set_state(state)
-        print(f"[Processor] State created for {issue_key}")
         
         # Post acknowledgment
         try:
             self.reporter.post_initial_acknowledgment(state)
-            print(f"[Processor] Acknowledgment posted for {issue_key}")
         except Exception as e:
-            print(f"[Processor] Error posting acknowledgment: {e}")
+            pass
         
         # Route to appropriate handler
-        try:
-            if workflow_type == WorkflowType.PLANNING:
-                await self._start_planning_workflow(state)
-            elif workflow_type == WorkflowType.DIRECT_EXECUTION:
-                await self._start_direct_execution(state)
-            elif workflow_type == WorkflowType.ORACLE_CONSULT:
-                await self._start_oracle_consultation(state)
-        except Exception as e:
-            print(f"[Processor] Error in workflow: {e}")
-            import traceback
-            traceback.print_exc()
+        if workflow_type == WorkflowType.PLANNING:
+            await self._start_planning_workflow(state)
+        elif workflow_type == WorkflowType.DIRECT_EXECUTION:
+            await self._start_direct_execution(state)
+        elif workflow_type == WorkflowType.ORACLE_CONSULT:
+            await self._start_oracle_consultation(state)
     
     async def _handle_issue_updated(self, event: Dict[str, Any]):
         """Handle issue updates (labels, assignee changes)."""
@@ -189,47 +168,112 @@ class JobProcessor:
     
     async def _start_planning_workflow(self, state: JiraAgentState):
         """Start Prometheus planning workflow."""
-        print(f"Starting planning workflow for {state.issue_key}")
-        
+        # Workflow started (logs go to state file)
+
         # Ensure we're on a feature branch before making changes
         self.git_manager.ensure_feature_branch(state.issue_key)
-        
-        self.state_manager.update_state(
-            state.issue_key,
-            status=TaskStatus.PLANNING,
-            started_at=datetime.now(),
-        )
-        
-        # Build prompt for Prometheus
-        prompt = PromptBuilder.build_prometheus_prompt(
-            issue_key=state.issue_key,
-            summary=state.issue_summary,
-            description=state.description,
-        )
-        
-        # Create task
+
+        # Track actual workflow start time (before any retries)
+        workflow_start_time = datetime.now()
+
+        # Create task first
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
-            prompt=prompt,
+            prompt=PromptBuilder.build_prometheus_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary,
+                description=state.description,
+            ),
             agent=settings.planning_agent,
             issue_key=state.issue_key,
         )
-        
-        # Run agent with progress tracking
+
+        # Update state with task configuration and tracking info
+        # current_opencode_session_id will be set when agent outputs it
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.PLANNING,
+            started_at=workflow_start_time,
+            current_task_id=task.task_id,
+            current_opencode_session_id=None,  # Will be set from agent output
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
+        )
+
+        # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
-            """Update progress in state."""
-            print(f"[Progress] {percentage}% - {message[:50]}...")
+            """Update progress in state - suppress from console."""
+            # Progress is tracked in state file, don't print to console
             self.state_manager.update_state(
                 state.issue_key,
                 progress_percentage=percentage,
             )
-        
-        result = await self.agent_runner.run_agent(
+
+        def on_output(stream: str, line: str):
+            """Handle output from agent - suppress all output to console.
+            
+            All output is already logged to session file by agent_runner.
+            Only critical messages (retries, timeouts, errors) are printed separately.
+            """
+            # Suppress all agent output from console - logs go to file only
+            pass
+
+        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+            """Handle retry notification - AgentRunner already prints this."""
+            # AgentRunner prints retry messages, we just update state here
+
+            # Create retry attempt record with error details and opencode session ID
+            retry_attempt = RetryAttempt(
+                attempt_number=attempt_number,
+                timestamp=datetime.now(),
+                reason=reason,
+                delay_seconds=delay_seconds,
+                session_log_path=session_file,
+                error_message=error_message,
+                return_code=return_code,
+                opencode_session_id=session_id,  # Store opencode session ID
+            )
+
+            # Get current state and add retry attempt
+            current_state = self.state_manager.get_state(state.issue_key)
+            if current_state:
+                current_state.add_retry_attempt(retry_attempt)
+                # Update current_opencode_session_id to the opencode session ID from this retry
+                if session_id:
+                    current_state.current_opencode_session_id = session_id
+                self.state_manager.set_state(current_state)
+
+            self.reporter.post_progress_update(
+                self.state_manager.get_state(state.issue_key),
+                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                progress_percentage=state.progress_percentage,
+            )
+
+        result = await self.agent_runner.run_agent_with_retry(
             task,
-            on_output=lambda stream, line: print(f"[{stream}] {line}"),
+            on_output=on_output,
             on_progress=on_progress,
+            on_retry=on_retry,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
         )
-        
+
+        # Update state with retry info and final opencode session ID
+        if result.get("retry_info"):
+            retry_info = result["retry_info"]
+            update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
+            if result.get("timed_out"):
+                update_data["timed_out"] = True
+            # Update current_opencode_session_id to the last opencode session ID from retry_info
+            last_session_id = retry_info.get("last_opencode_session_id")
+            if last_session_id:
+                update_data["current_opencode_session_id"] = last_session_id
+            self.state_manager.update_state(state.issue_key, **update_data)
+
+        # Calculate duration from workflow start to final completion (including all retries)
+        completed_at = datetime.now()
+        duration = (completed_at - workflow_start_time).total_seconds()
+
         # Check result
         if result["returncode"] == 0:
             # Plan created successfully — commit it
@@ -238,24 +282,27 @@ class JobProcessor:
                 summary=f"Plan for {state.issue_key}",
                 description=state.description,
             )
-            
+
             plan_path = settings.full_plans_dir / f"{state.issue_key}.md"
             plan_content = ""
             if plan_path.exists():
                 plan_content = plan_path.read_text()
-            
+
             self.state_manager.update_state(
                 state.issue_key,
                 status=TaskStatus.PLAN_READY,
                 plan_path=str(plan_path),
+                completed_at=completed_at,
+                execution_duration_seconds=duration,
+                # current_opencode_session_id keeps the last retry's session ID
             )
-            
+
             # Post plan summary
             self.reporter.post_plan_summary(
                 self.state_manager.get_state(state.issue_key),
                 plan_content,
             )
-            
+
             # Auto-start if configured
             if settings.auto_start_plans:
                 await self._start_execution_workflow(
@@ -267,6 +314,9 @@ class JobProcessor:
                 state.issue_key,
                 status=TaskStatus.ERROR,
                 error_message=result["stderr"],
+                completed_at=completed_at,
+                execution_duration_seconds=duration,
+                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
             self.reporter.post_error(
                 self.state_manager.get_state(state.issue_key),
@@ -275,45 +325,110 @@ class JobProcessor:
     
     async def _start_execution_workflow(self, state: JiraAgentState):
         """Start Atlas execution workflow."""
-        print(f"Starting execution workflow for {state.issue_key}")
-        
+        # Execution workflow started (logs go to state file)
+
         # Ensure we're on a feature branch before making changes
         self.git_manager.ensure_feature_branch(state.issue_key)
-        
-        self.state_manager.update_state(
-            state.issue_key,
-            status=TaskStatus.EXECUTING,
-        )
-        
-        # Build prompt for Atlas
-        prompt = PromptBuilder.build_atlas_prompt(
-            issue_key=state.issue_key,
-            plan_path=state.plan_path or "",
-        )
-        
-        # Create task
+
+        # Track actual workflow start time (before any retries)
+        workflow_start_time = datetime.now()
+
+        # Create task first
         task = AgentTask(
             description=f"Execute: {state.issue_key}",
-            prompt=prompt,
+            prompt=PromptBuilder.build_atlas_prompt(
+                issue_key=state.issue_key,
+                plan_path=state.plan_path or "",
+            ),
             agent=settings.orchestrator_agent,
             issue_key=state.issue_key,
         )
-        
-        # Run agent with progress tracking
+
+        # Update state with task configuration and tracking info
+        # current_opencode_session_id will be set when agent outputs it
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.EXECUTING,
+            started_at=workflow_start_time,
+            current_task_id=task.task_id,
+            current_opencode_session_id=None,  # Will be set from agent output
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
+        )
+
+        # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
-            """Update progress in state."""
-            print(f"[Progress] {percentage}% - {message[:50]}...")
+            """Update progress in state - suppress from console."""
+            # Progress is tracked in state file, don't print to console
             self.state_manager.update_state(
                 state.issue_key,
                 progress_percentage=percentage,
             )
-        
-        result = await self.agent_runner.run_agent(
+
+        def on_output(stream: str, line: str):
+            """Handle output from agent - suppress all output to console.
+            
+            All output is already logged to session file by agent_runner.
+            """
+            # Suppress all agent output from console - logs go to file only
+            pass
+
+        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+            """Handle retry notification - AgentRunner already prints this."""
+            # AgentRunner prints retry messages, we just update state here
+
+            # Create retry attempt record with error details and opencode session ID
+            retry_attempt = RetryAttempt(
+                attempt_number=attempt_number,
+                timestamp=datetime.now(),
+                reason=reason,
+                delay_seconds=delay_seconds,
+                session_log_path=session_file,
+                error_message=error_message,
+                return_code=return_code,
+                opencode_session_id=session_id,  # Store opencode session ID
+            )
+
+            # Get current state and add retry attempt
+            current_state = self.state_manager.get_state(state.issue_key)
+            if current_state:
+                current_state.add_retry_attempt(retry_attempt)
+                # Update current_opencode_session_id to the opencode session ID from this retry
+                if session_id:
+                    current_state.current_opencode_session_id = session_id
+                self.state_manager.set_state(current_state)
+
+            self.reporter.post_progress_update(
+                self.state_manager.get_state(state.issue_key),
+                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                progress_percentage=state.progress_percentage,
+            )
+
+        result = await self.agent_runner.run_agent_with_retry(
             task,
-            on_output=lambda stream, line: print(f"[{stream}] {line}"),
+            on_output=on_output,
             on_progress=on_progress,
+            on_retry=on_retry,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
         )
-        
+
+        # Update state with retry info and final opencode session ID
+        if result.get("retry_info"):
+            retry_info = result["retry_info"]
+            update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
+            if result.get("timed_out"):
+                update_data["timed_out"] = True
+            # Update current_opencode_session_id to the last opencode session ID from retry_info
+            last_session_id = retry_info.get("last_opencode_session_id")
+            if last_session_id:
+                update_data["current_opencode_session_id"] = last_session_id
+            self.state_manager.update_state(state.issue_key, **update_data)
+
+        # Calculate duration from workflow start to final completion (including all retries)
+        completed_at = datetime.now()
+        duration = (completed_at - workflow_start_time).total_seconds()
+
         # Check result
         if result["returncode"] == 0:
             # Commit changes made by Atlas
@@ -322,14 +437,16 @@ class JobProcessor:
                 summary=f"Execution for {state.issue_key}",
                 description=state.description,
             )
-            
+
             self.state_manager.update_state(
                 state.issue_key,
                 status=TaskStatus.COMPLETED,
-                completed_at=datetime.now(),
+                completed_at=completed_at,
                 progress_percentage=100,
+                execution_duration_seconds=duration,
+                # current_opencode_session_id keeps the last retry's session ID
             )
-            
+
             self.reporter.post_completion(
                 self.state_manager.get_state(state.issue_key),
                 summary="All tasks completed successfully.",
@@ -339,6 +456,9 @@ class JobProcessor:
                 state.issue_key,
                 status=TaskStatus.ERROR,
                 error_message=result["stderr"],
+                completed_at=completed_at,
+                execution_duration_seconds=duration,
+                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
             self.reporter.post_error(
                 self.state_manager.get_state(state.issue_key),
@@ -347,68 +467,121 @@ class JobProcessor:
     
     async def _start_direct_execution(self, state: JiraAgentState):
         """Start direct Sisyphus execution."""
-        print(f"Starting direct execution for {state.issue_key}")
-        
+        # Direct execution started (logs go to state file)
+
         # Ensure we're on a feature branch before making changes
         self.git_manager.ensure_feature_branch(state.issue_key)
-        
-        self.state_manager.update_state(
-            state.issue_key,
-            status=TaskStatus.EXECUTING,
-            started_at=datetime.now(),
-        )
-        
-        # Build prompt
-        prompt = PromptBuilder.build_sisyphus_prompt(
-            issue_key=state.issue_key,
-            task_description=state.description,
-        )
-        
+
+        # Track actual workflow start time (before any retries)
+        workflow_start_time = datetime.now()
+
         # Create task with category
         task = AgentTask(
             description=f"Direct: {state.issue_key}",
-            prompt=prompt,
+            prompt=PromptBuilder.build_sisyphus_prompt(
+                issue_key=state.issue_key,
+                task_description=state.description,
+            ),
             agent=settings.default_agent,
             category=settings.execution_category,
             issue_key=state.issue_key,
         )
+
+        # Update state with task configuration and tracking info
+        # current_opencode_session_id will be set when agent outputs it
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.EXECUTING,
+            started_at=workflow_start_time,
+            current_task_id=task.task_id,
+            current_opencode_session_id=None,  # Will be set from agent output
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
+        )
         
-        # Run agent with progress tracking
+        # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
-            """Update progress in state."""
-            print(f"[Progress] {percentage}% - {message[:50]}...")
+            """Update progress in state - suppress from console."""
+            # Progress is tracked in state file, don't print to console
             self.state_manager.update_state(
                 state.issue_key,
                 progress_percentage=percentage,
             )
-        
-        result = await self.agent_runner.run_agent(
+
+        def on_output(stream: str, line: str):
+            """Handle output from agent - suppress all output to console.
+            
+            All output is already logged to session file by agent_runner.
+            """
+            # Suppress all agent output from console - logs go to file only
+            pass
+
+        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+            """Handle retry notification - AgentRunner already prints this."""
+            # AgentRunner prints retry messages, we just update state here
+
+            # Create retry attempt record with error details and opencode session ID
+            retry_attempt = RetryAttempt(
+                attempt_number=attempt_number,
+                timestamp=datetime.now(),
+                reason=reason,
+                delay_seconds=delay_seconds,
+                session_log_path=session_file,
+                error_message=error_message,
+                return_code=return_code,
+                opencode_session_id=session_id,  # Store opencode session ID
+            )
+
+            # Get current state and add retry attempt
+            current_state = self.state_manager.get_state(state.issue_key)
+            if current_state:
+                current_state.add_retry_attempt(retry_attempt)
+                # Update current_opencode_session_id to the opencode session ID from this retry
+                if session_id:
+                    current_state.current_opencode_session_id = session_id
+                self.state_manager.set_state(current_state)
+
+            self.reporter.post_progress_update(
+                self.state_manager.get_state(state.issue_key),
+                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                progress_percentage=state.progress_percentage,
+            )
+
+        result = await self.agent_runner.run_agent_with_retry(
             task,
-            on_output=lambda stream, line: print(f"[{stream}] {line}"),
+            on_output=on_output,
             on_progress=on_progress,
+            on_retry=on_retry,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
         )
-        
+
+        # Update state with retry info and final opencode session ID
+        if result.get("retry_info"):
+            retry_info = result["retry_info"]
+            update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
+            if result.get("timed_out"):
+                update_data["timed_out"] = True
+            # Update current_opencode_session_id to the last opencode session ID from retry_info
+            last_session_id = retry_info.get("last_opencode_session_id")
+            if last_session_id:
+                update_data["current_opencode_session_id"] = last_session_id
+            self.state_manager.update_state(state.issue_key, **update_data)
+
+        # Calculate duration from workflow start to final completion (including all retries)
+        completed_at = datetime.now()
+        duration = (completed_at - workflow_start_time).total_seconds()
+
         # Calculate cost and timing
         from src.shared.cost_calculator import calculate_cost, format_cost_report
-        
-        duration = (datetime.now() - state.started_at).total_seconds() if state.started_at else 0
+
         cost_data = calculate_cost(
             input_text=task.prompt,
             output_text=result.get("stdout", ""),
             model=settings.execution_category,
         )
-        
-        print(f"\n[Timing] Execution took {duration:.1f} seconds")
-        print(format_cost_report(cost_data))
-        
-        # Update state with cost info
-        self.state_manager.update_state(
-            state.issue_key,
-            token_usage_input=cost_data["input_tokens"],
-            token_usage_output=cost_data["output_tokens"],
-            estimated_cost=cost_data["estimated_cost"],
-            execution_duration_seconds=duration,
-        )
+
+        # Timing and cost info is in state file, suppress from console
         
         # Handle result
         if result["returncode"] == 0:
@@ -418,14 +591,19 @@ class JobProcessor:
                 summary=state.issue_summary,
                 description=state.description,
             )
-            
+
             updated_state = self.state_manager.update_state(
                 state.issue_key,
                 status=TaskStatus.COMPLETED,
-                completed_at=datetime.now(),
+                completed_at=completed_at,
                 progress_percentage=100,
+                execution_duration_seconds=duration,
+                token_usage_input=cost_data["input_tokens"],
+                token_usage_output=cost_data["output_tokens"],
+                estimated_cost=cost_data["estimated_cost"],
+                # current_opencode_session_id keeps the last retry's session ID
             )
-            
+
             # Use updated state or fall back to original state
             state_to_use = updated_state or state
             self.reporter.post_completion(
@@ -437,8 +615,14 @@ class JobProcessor:
                 state.issue_key,
                 status=TaskStatus.ERROR,
                 error_message=result["stderr"],
+                completed_at=completed_at,
+                execution_duration_seconds=duration,
+                token_usage_input=cost_data["input_tokens"],
+                token_usage_output=cost_data["output_tokens"],
+                estimated_cost=cost_data["estimated_cost"],
+                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
-            
+
             # Use updated state or fall back to original state
             state_to_use = updated_state or state
             self.reporter.post_error(

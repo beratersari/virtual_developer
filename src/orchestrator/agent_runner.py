@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,18 +57,29 @@ class AgentRunner:
         on_output: Optional[callable] = None,
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
+        timeout_seconds: Optional[int] = None,
+        attempt_number: int = 0,
     ) -> Dict[str, Any]:
         """Run an agent task asynchronously.
-        
+
         Args:
             task: The agent task to run
             on_output: Callback for output lines (stream, line)
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
+            timeout_seconds: Override timeout from settings (None uses config default)
+            attempt_number: The retry attempt number (0 = first attempt)
         """
-        
-        # Create session file for this task
-        session_file = self._get_session_file(task.task_id)
+        # Use configured timeout if not overridden
+        effective_timeout = timeout_seconds or settings.agent_task_timeout_seconds
+        start_time = asyncio.get_event_loop().time()
+
+        # Create session file for this task with naming convention: JIRAID_DATETIME_RETRYCOUNT
+        session_file = self._get_session_file(
+            task.task_id,
+            issue_key=task.issue_key,
+            attempt_number=attempt_number,
+        )
         session_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Build the command as a list (cross-platform)
@@ -99,67 +111,107 @@ class AgentRunner:
             stderr_lines = []
             last_progress = 0
             
-            # Read output streams with progress tracking
+            # Read output streams with progress tracking and timeout check
             async def read_stream(stream, lines, callback_name, file_handle):
                 nonlocal last_progress
                 while True:
-                    line = await stream.readline()
+                    # Check timeout
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    if elapsed > effective_timeout:
+                        raise asyncio.TimeoutError(
+                            f"Task exceeded timeout of {effective_timeout} seconds"
+                        )
+
+                    try:
+                        line = await asyncio.wait_for(
+                            stream.readline(),
+                            timeout=1.0  # 1 second check interval
+                        )
+                    except asyncio.TimeoutError:
+                        # No data available, check timeout and continue
+                        continue
+
                     if not line:
                         break
                     decoded = line.decode('utf-8', errors='replace').rstrip()
                     lines.append(decoded)
-                    
+
                     # Write to session file
                     file_handle.write(decoded + '\n')
                     file_handle.flush()
-                    
+
                     # Parse progress from output
                     progress = self._parse_progress(decoded)
                     if progress and progress != last_progress:
                         last_progress = progress
                         if on_progress:
                             on_progress(progress, decoded[:100])
-                    
+
                     if on_output:
                         on_output(callback_name, decoded)
-            
-            # Wait for completion
-            await asyncio.gather(
-                read_stream(process.stdout, stdout_lines, "stdout", session_fh),
-                read_stream(process.stderr, stderr_lines, "stderr", session_fh),
-            )
-            
-            returncode = await process.wait()
+
+            try:
+                # Wait for completion with timeout
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(process.stdout, stdout_lines, "stdout", session_fh),
+                        read_stream(process.stderr, stderr_lines, "stderr", session_fh),
+                    ),
+                    timeout=effective_timeout
+                )
+                returncode = await process.wait()
+            except asyncio.TimeoutError:
+                # Kill the process on timeout
+                process.kill()
+                await process.wait()
+                # Extract session ID from output collected so far
+                all_output_lines = stdout_lines + stderr_lines
+                session_id = self._parse_session_id(all_output_lines)
+                return {
+                    "task_id": task.task_id,
+                    "returncode": -1,
+                    "stdout": "\n".join(stdout_lines),
+                    "stderr": f"\n[TIMEOUT] Task exceeded {effective_timeout} seconds",
+                    "session_file": str(session_file),
+                    "opencode_session_id": session_id,  # Include session ID even on timeout
+                    "progress": last_progress,
+                    "timed_out": True,
+                }
         
+        # Extract session ID from output
+        all_output_lines = stdout_lines + stderr_lines
+        session_id = self._parse_session_id(all_output_lines)
+
         result = {
             "task_id": task.task_id,
             "returncode": returncode,
             "stdout": "\n".join(stdout_lines),
             "stderr": "\n".join(stderr_lines),
             "session_file": str(session_file),
+            "opencode_session_id": session_id,  # opencode session ID from CLI output
             "progress": 100 if returncode == 0 else last_progress,
         }
-        
+
         if on_complete:
             on_complete(result)
-        
+
         return result
     
     def _parse_progress(self, line: str) -> Optional[int]:
         """Parse progress percentage from agent output.
-        
+
         Looks for patterns like:
         - "Progress: 75%"
         - "[███████░░░] 70%"
         - "Completed: 8/10 tasks (80%)"
         """
         import re
-        
+
         # Pattern 1: Direct percentage (e.g., "Progress: 75%" or "75%")
         match = re.search(r'(\d+)%', line)
         if match:
             return int(match.group(1))
-        
+
         # Pattern 2: Progress bar blocks
         # Count filled vs empty blocks
         filled_blocks = line.count('█') + line.count('▓') + line.count('■')
@@ -167,14 +219,39 @@ class AgentRunner:
         total_blocks = filled_blocks + empty_blocks
         if total_blocks >= 5 and filled_blocks > 0:
             return int((filled_blocks / total_blocks) * 100)
-        
+
         # Pattern 3: Completed tasks (e.g., "Completed: 8/10 tasks")
         match = re.search(r'(\d+)\s*/\s*(\d+)\s*(?:tasks|steps|items)', line, re.IGNORECASE)
         if match:
             completed, total = int(match.group(1)), int(match.group(2))
             if total > 0:
                 return int((completed / total) * 100)
-        
+
+        return None
+
+    def _parse_session_id(self, lines: List[str]) -> Optional[str]:
+        """Parse opencode session ID from output lines.
+
+        Looks for patterns like:
+        - "Session: ses_abc123" (actual format from oh-my-opencode)
+        - "Session ID: ses_abc123"
+        - "session: ses_abc123"
+        """
+        import re
+
+        # Actual format seen in logs: "Session: ses_2c996b381ffe22SXIwktVa9kc7"
+        patterns = [
+            r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
+            r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
+            r'session[:\s]+(ses_[a-zA-Z0-9_-]+)',
+        ]
+
+        for line in lines:
+            for pattern in patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+
         return None
     
     def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
@@ -232,12 +309,40 @@ class AgentRunner:
             session_file_str = shlex.quote(str(session_file))
             return f'{cmd_str} > {session_file_str} 2>&1'
     
-    def _get_session_file(self, task_id: str) -> Path:
-        """Get path to session output file."""
-        # Use absolute path to ensure shell can find it
-        path = (self.project_root / ".jira-agent" / "sessions" / f"{task_id}.log").resolve()
+    def _get_session_file(
+        self,
+        task_id: str,
+        issue_key: Optional[str] = None,
+        attempt_number: int = 0,
+    ) -> Path:
+        """Get path to session output file.
+
+        Args:
+            task_id: The task ID
+            issue_key: The JIRA issue key (e.g., "PROJ-123")
+            attempt_number: The retry attempt number (0 = first attempt)
+
+        Returns:
+            Path to the session log file
+
+        Naming convention:
+            - First attempt: PROJ-123_20240327_143052_0.log
+            - Retry 1: PROJ-123_20240327_143052_1.log
+            - Retry 2: PROJ-123_20240327_143052_2.log
+        """
         # Ensure directory exists
-        path.parent.mkdir(parents=True, exist_ok=True)
+        sessions_dir = (self.project_root / ".jira-agent" / "sessions").resolve()
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+
+        if issue_key:
+            # Format: JIRAID_DATETIME_RETRYCOUNT.log
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{issue_key}_{timestamp}_{attempt_number}.log"
+        else:
+            # Fallback to task_id if no issue_key provided
+            filename = f"{task_id}.log"
+
+        path = sessions_dir / filename
         return path
     
     async def run_background_agent(
@@ -323,3 +428,142 @@ class AgentRunner:
                 process.terminate()
             return True
         return False
+
+    async def run_agent_with_retry(
+        self,
+        task: AgentTask,
+        on_output: Optional[callable] = None,
+        on_complete: Optional[callable] = None,
+        on_progress: Optional[callable] = None,
+        on_retry: Optional[callable] = None,
+        timeout_seconds: Optional[int] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Run an agent task with automatic retry on failure.
+
+        Args:
+            task: The agent task to run
+            on_output: Callback for output lines (stream, line)
+            on_complete: Callback when complete (result)
+            on_progress: Callback for progress updates (percentage, message)
+            on_retry: Callback when a retry is attempted (attempt_number, delay_seconds, reason, session_file)
+            timeout_seconds: Override timeout from settings
+            max_retries: Override max retries from settings
+
+        Returns:
+            Dict with task result including retry information and all session files
+        """
+        effective_max_retries = max_retries or settings.agent_task_max_retries
+        retry_delay = settings.agent_task_retry_delay_seconds
+        backoff_multiplier = settings.agent_task_retry_backoff_multiplier
+        retry_on_timeout = settings.agent_task_retry_on_timeout
+        retry_on_error = settings.agent_task_retry_on_error
+
+        last_result = None
+        last_session_id = None
+        attempt = 0
+        all_session_files = []
+
+        while attempt <= effective_max_retries:
+            # Run the task with attempt number (0 = first attempt, 1+ = retries)
+            result = await self.run_agent(
+                task,
+                on_output=on_output,
+                on_complete=on_complete,
+                on_progress=on_progress,
+                timeout_seconds=timeout_seconds,
+                attempt_number=attempt,
+            )
+
+            # Track session file and opencode session ID for this attempt
+            if result.get("session_file"):
+                all_session_files.append(result["session_file"])
+            if result.get("opencode_session_id"):
+                last_session_id = result["opencode_session_id"]
+
+            # Check if successful
+            if result.get("returncode") == 0:
+                result["retry_info"] = {
+                    "attempts": attempt + 1,
+                    "max_retries": effective_max_retries,
+                    "retried": attempt > 0,
+                    "all_session_files": all_session_files,
+                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
+                }
+                return result
+
+            # Determine if we should retry
+            should_retry = False
+            retry_reason = ""
+
+            if result.get("timed_out"):
+                if retry_on_timeout and attempt < effective_max_retries:
+                    should_retry = True
+                    retry_reason = "timeout"
+            elif retry_on_error and attempt < effective_max_retries:
+                should_retry = True
+                retry_reason = "error"
+
+            if should_retry:
+                attempt += 1
+
+                # Calculate delay with exponential backoff
+                delay = retry_delay * (backoff_multiplier ** (attempt - 1))
+
+                # Extract error details from the failed attempt
+                error_message = result.get("stderr", "") if result.get("returncode") != 0 else None
+                return_code = result.get("returncode")
+
+                if on_retry:
+                    on_retry(attempt, delay, retry_reason, result.get("session_file"), error_message, return_code, result.get("opencode_session_id"))
+
+                # Log retry attempt
+                print(f"[AgentRunner] {retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} for {task.task_id}, retrying in {delay:.1f}s...")
+
+                # Wait before retry
+                await asyncio.sleep(delay)
+
+                # Create new task ID for retry
+                task.task_id = f"task_{uuid.uuid4().hex[:8]}"
+
+                last_result = result
+            else:
+                # No more retries - include session ID from last attempt
+                result["retry_info"] = {
+                    "attempts": attempt + 1,
+                    "max_retries": effective_max_retries,
+                    "retried": attempt > 0,
+                    "final_failure": True,
+                    "all_session_files": all_session_files,
+                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
+                }
+                return result
+
+        # Should not reach here, but just in case
+        if last_result:
+            last_result["retry_info"] = {
+                "attempts": attempt + 1,
+                "max_retries": effective_max_retries,
+                "retried": True,
+                "final_failure": True,
+                "all_session_files": all_session_files,
+                "last_opencode_session_id": last_session_id,
+            }
+            return last_result
+
+        return {
+            "task_id": task.task_id,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "Max retries exceeded",
+            "session_file": all_session_files[-1] if all_session_files else None,
+            "opencode_session_id": last_session_id,
+            "retry_info": {
+                "attempts": attempt + 1,
+                "max_retries": effective_max_retries,
+                "retried": True,
+                "final_failure": True,
+                "all_session_files": all_session_files,
+                "last_opencode_session_id": last_session_id,
+            },
+        }
