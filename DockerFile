@@ -2,14 +2,25 @@ FROM python:3.13
 
 WORKDIR /app
 
+# Gerekli sistem paketleri
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
 # Tüm projeyi kopyala
 COPY . .
 
-# install.sh executable yap
+# Script executable
 RUN chmod +x install.sh
 
-# scripti çalıştır
+# Install script çalıştır
 RUN ./install.sh
 
-# container açılınca shell
+# PATH fix (opencode için)
+ENV PATH="/root/.opencode/bin:${PATH}"
+
 CMD ["/bin/bash"]
