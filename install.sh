@@ -44,7 +44,7 @@ echo -e "${GREEN}✓ npm found${NC}"
 echo ""
 echo -e "${BLUE}Step 1: Installing Python dependencies...${NC}"
 cd "$SCRIPT_DIR"
-pip3 install -r requirements.txt --quiet --break-system-packages
+python3 -m pip install -r requirements.txt --quiet
 echo -e "${GREEN}✓ Python dependencies installed${NC}"
 
 
