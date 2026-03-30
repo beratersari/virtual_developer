@@ -1,0 +1,15 @@
+FROM python:3.13
+
+WORKDIR /app
+
+# Tüm projeyi kopyala
+COPY . .
+
+# install.sh executable yap
+RUN chmod +x install.sh
+
+# scripti çalıştır
+RUN ./install.sh
+
+# container açılınca shell
+CMD ["/bin/bash"]
