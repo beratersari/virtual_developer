@@ -1,4 +1,4 @@
-FROM python:3.13
+FROM node:20-bullseye
 
 WORKDIR /app
 
