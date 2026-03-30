@@ -20,7 +20,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
     
-RUN apt-get install -y python-is-python3
+RUN ln -s /usr/bin/python3 /usr/bin/python || true
+RUN ln -s /usr/bin/pip3 /usr/bin/pip || true
 
 # Tüm projeyi kopyala
 COPY . .
