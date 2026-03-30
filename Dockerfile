@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
-    
+
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
@@ -19,9 +19,14 @@ RUN apt-get update && apt-get install -y \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
-    
+
 RUN ln -s /usr/bin/python3 /usr/bin/python || true
 RUN ln -s /usr/bin/pip3 /usr/bin/pip || true
+
+# ---------------------------
+# GitLab CLI (glab) install
+# ---------------------------
+RUN curl -sSL https://raw.githubusercontent.com/profclems/glab/trunk/scripts/install.sh | bash
 
 # Tüm projeyi kopyala
 COPY . .
