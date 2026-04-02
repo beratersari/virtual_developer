@@ -952,6 +952,17 @@ taskkill /PID <PID> /F
 4. **Permissions**: Use dedicated JIRA user with minimal permissions
 5. **Rate Limiting**: JIRA has API rate limits (check your plan)
 
+Anlık buglar:
+ - oh-my-code yerine opencode kullanmalı env'de
+ - mr akışı düzeltilmeli commit agent'a checkout, push, mr açma kod ile yapılmalı
+ - rules/ dosyası oluşturup her adım için md dosyaları buraya eklenip koda bir path ile linklenmeli
+ - jira client http verify false yap
+ - dosya silerken permission hatası veriyor git dosyalarında. git dosyalarının bazı bitleri sadece readonly bu durumdan dolayı hata veriyor bunu daha katı hale getir
+ - jira username bağımlılığını kaldır sadece pat kullansa ok
+ - kod içinde default model hardcoded girilmiş .env'e eklenmeli
+ - docker file'a glab kurulumu eklenmeli
+ - 
+
 ## License
 
 MIT
