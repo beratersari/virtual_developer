@@ -961,7 +961,8 @@ Anlık buglar:
  - jira username bağımlılığını kaldır sadece pat kullansa ok
  - kod içinde default model hardcoded girilmiş .env'e eklenmeli
  - docker file'a glab kurulumu eklenmeli
- - 
+ - default branch develop olarak eklenmelı eger yoksa main'fallback yapmalı
+ - logger sistemi daha iyi hale getirmeli, daha düzenli loglar basılmalı. farklı processler aynı anda log bastığı için birbirine giriyor
 
 ## License
 
