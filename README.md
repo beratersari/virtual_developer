@@ -954,8 +954,8 @@ taskkill /PID <PID> /F
 
 Anlık buglar:
  - oh-my-code yerine opencode kullanmalı env'de
- - mr akışı düzeltilmeli commit agent'a checkout, push, mr açma kod ile yapılmalı
- - rules/ dosyası oluşturup her adım için md dosyaları buraya eklenip koda bir path ile linklenmeli
+ - mr akışı düzeltilmeli commit agent'a checkout, push, mr açma kod ile yapılmalı. mr açarken agent'ın attığı son commit başlık olarak kullanılmalı
+ - rules/ dosyası oluşturup her adım için md dosyaları buraya eklenip koda bir path ile linklenmeli. fallbackleri olmalı çünkü her proje farklı md dosyalarına sahip olacak
  - jira client http verify false yap
  - dosya silerken permission hatası veriyor git dosyalarında. git dosyalarının bazı bitleri sadece readonly bu durumdan dolayı hata veriyor bunu daha katı hale getir
  - jira username bağımlılığını kaldır sadece pat kullansa ok
