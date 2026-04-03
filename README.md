@@ -952,7 +952,7 @@ taskkill /PID <PID> /F
 4. **Permissions**: Use dedicated JIRA user with minimal permissions
 5. **Rate Limiting**: JIRA has API rate limits (check your plan)
 
-Anlık buglar:
+Anlık buglar ve gelistirme onerileri:
  - oh-my-code yerine opencode kullanmalı env'de
  - mr akışı düzeltilmeli commit agent'a checkout, push, mr açma kod ile yapılmalı. mr açarken agent'ın attığı son commit başlık olarak kullanılmalı
  - rules/ dosyası oluşturup her adım için md dosyaları buraya eklenip koda bir path ile linklenmeli. fallbackleri olmalı çünkü her proje farklı md dosyalarına sahip olacak
@@ -963,6 +963,7 @@ Anlık buglar:
  - docker file'a glab kurulumu eklenmeli
  - default branch develop olarak eklenmelı eger yoksa main'fallback yapmalı
  - logger sistemi daha iyi hale getirmeli, daha düzenli loglar basılmalı. farklı processler aynı anda log bastığı için birbirine giriyor
+ - ayni anda birden fazla taski ele alabilmek icin her zaman her trigger icin temp dizininde unique bir has ile projeyi klonlamali ve tum islemlerini ilgili dizin uzerinde yapmali. bu sayede paralelde 5-10 farkli jira maddesi ayni anda islenmis olacaktir.
 
 ## License
 
