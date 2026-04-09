@@ -965,6 +965,7 @@ Anlık buglar ve gelistirme onerileri:
  - default branch develop olarak eklenmelı eger yoksa main'fallback yapmalı
  - logger sistemi daha iyi hale getirmeli, daha düzenli loglar basılmalı. farklı processler aynı anda log bastığı için birbirine giriyor
  - ayni anda birden fazla taski ele alabilmek icin her zaman her trigger icin temp dizininde unique bir has ile projeyi klonlamali ve tum islemlerini ilgili dizin uzerinde yapmali. bu sayede paralelde 5-10 farkli jira maddesi ayni anda islenmis olacaktir.
+ - prompt dosyalari duzgunce okunmali
 
 ## License
 
