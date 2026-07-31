@@ -30,8 +30,8 @@ JIRA Virtual Developer is a Python daemon that:
 
 ### State & workflows
 
-- Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `code_review` → `completed` | `error` | `cancelled`.
-- **Never** restart work that is in-flight (`planning` / `executing` / `code_review`) from poll noise.
+- Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
+- **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
 - Terminal reprocess only when the user moves the issue back to **To Do** (or an explicit rework signal).
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.

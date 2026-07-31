@@ -29,7 +29,7 @@ _STATUS_COLORS = {
     TaskStatus.PLANNING: _COLORS["blue"],
     TaskStatus.PLAN_READY: _COLORS["cyan"],
     TaskStatus.EXECUTING: _COLORS["yellow"],
-    TaskStatus.CODE_REVIEW: _COLORS["magenta"],
+
     TaskStatus.COMPLETED: _COLORS["green"],
     TaskStatus.ERROR: _COLORS["red"],
     TaskStatus.CANCELLED: _COLORS["red"],
