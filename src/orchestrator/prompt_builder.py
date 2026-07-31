@@ -7,6 +7,50 @@ from src.config import settings
 
 class PromptBuilder:
     """Builds prompts for various agent workflows."""
+
+    @staticmethod
+    def commit_message_block(issue_key: str) -> str:
+        """Concrete commit template for this issue (agent/rules/EXECUTION.md).
+
+        Agents commit themselves; GitManager's formatter is only a fallback.
+        Injecting the filled-in issue key removes ambiguity from generic rules.
+        """
+        return f"""## Git Commit (MANDATORY if you changed files)
+
+Branch: `feature/{issue_key}` (create it if needed). Do **not** push or open an MR.
+
+**Required subject format** (from EXECUTION.md):
+
+```text
+[{issue_key}] <type>: <description>
+```
+
+Allowed types: `feat` · `fix` · `refactor` · `docs` · `test` · `perf` · `ci` · `build` · `revert` · `chore`
+
+**Doğru format örnekleri for this issue:**
+```text
+[{issue_key}] feat: Yeni özellik eklendi
+[{issue_key}] fix: Hata düzeltildi
+[{issue_key}] refactor: Kodun çalışma şeklini değiştirmeyen iyileştirme
+[{issue_key}] docs: Dökümantasyon işleri
+[{issue_key}] test: Birim testler
+[{issue_key}] perf: Çalışma mantığını değiştirmeyen performans iyileştirmesi
+[{issue_key}] ci: CI/CD değişiklikleri
+[{issue_key}] build: Build sistemi ile ilgili değişiklikler
+[{issue_key}] revert: Kodu geri almak
+[{issue_key}] chore: Genel işler, küçük düzeltmeler
+```
+
+```bash
+git add .
+git commit -m "[{issue_key}] fix: short description of the change"
+```
+
+Rules:
+- Subject MUST be `[{issue_key}] type: description`
+- Do not omit the type; do not use bare `feat:` without the `[{issue_key}]` prefix
+- Do not push / open MR; do not commit secrets (`.env`, tokens)
+"""
     
     @staticmethod
     def build_prometheus_prompt(
@@ -68,7 +112,8 @@ You are Atlas, the orchestrator. Your job is to execute the plan at:
                 prompt += f"- {learning}\n"
             prompt += "\n"
         
-        prompt += f"{settings.prompt_execution}\n"
+        prompt += f"{settings.prompt_execution}\n\n"
+        prompt += PromptBuilder.commit_message_block(issue_key)
         
         return prompt
     
@@ -103,7 +148,8 @@ You are Atlas, the orchestrator. Your job is to execute the plan at:
             
             prompt += "\n"
         
-        prompt += f"{settings.prompt_direct_execution}\n"
+        prompt += f"{settings.prompt_direct_execution}\n\n"
+        prompt += PromptBuilder.commit_message_block(issue_key)
         
         return prompt
     
@@ -142,36 +188,6 @@ If they want to:
 Be concise and actionable in your response.
 """
         
-        return prompt
-    
-    @staticmethod
-    def build_code_review_prompt(
-        issue_key: str,
-        summary: str,
-        description: str,
-        review_model: str,
-    ) -> str:
-        """Build prompt for code review after successful execution.
-        
-        The review agent is expected to read files and git diff output,
-        but NOT make any edits.  The body of the review instructions comes
-        from ``settings.prompt_code_review`` which loads from a markdown file
-        (default: .sisyphus/prompts/code_review.md) or falls back to inline default.
-        """
-        prompt = f"""# Code Review Request
-
-## JIRA Issue: {issue_key}
-**Summary**: {summary}
-
-## Original Task Description
-{description}
-
-## Review Model
-You are running as a code reviewer using model: {review_model}
-
-## Your Task
-{settings.prompt_code_review}
-"""
         return prompt
 
     @staticmethod

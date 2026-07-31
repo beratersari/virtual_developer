@@ -5,34 +5,45 @@
 2. Create todos for multi-step work
 3. Implement the solution following existing patterns
 4. Run verification (tests, type checking)
-5. **COMMIT YOUR CHANGES**: If you modified any code files, you MUST commit with a meaningful message
+5. **COMMIT YOUR CHANGES** (mandatory if you modified any files)
 6. Report completion with summary of changes and commit hash
 
-## Commit Requirements
-- ALWAYS commit after making code changes - this is MANDATORY
-- Use Conventional Commits format: feat:, fix:, chore:, docs:, refactor:, test:
-- Include the JIRA issue key in the commit message
-- See commitMsgFormat.md for detailed commit message guidelines
-- Do NOT commit .env, credentials, or secret files
+## Commit message format (MANDATORY — same as EXECUTION.md)
 
-if [[ -n $INVALID_COMMITS ]]; then
-    echo "❌ Hatalı commit mesajları:"
-    echo "$INVALID_COMMITS"
-    echo ""
-    echo "Doğru format örnekleri:"
-    echo "  [VOLKAN-1905] feat: Yeni özellik eklendi"
-    echo "  [VOLKAN-1905] fix:  Hata düzeltildi"
-    echo "  [VOLKAN-1905] refactor:  Kodun çalışma şeklini değiştirmeyen iyileştirme"
-    echo "  [VOLKAN-1905] docs:  Dökümantasyon işleri"
-    echo "  [VOLKAN-1905] test:  Birim testler"
-    echo "  [VOLKAN-1905] perf:  Çalışma mantığını değiştirmeyen performans iyileştirmesi"
-    echo "  [VOLKAN-1905] ci:  CI/CD değişiklikleri"
-    echo "  [VOLKAN-1905] build:  Build sistemi ile ilgili değişiklikler"
-    echo "  [VOLKAN-1905] revert: Kodu geri almak"
-    echo "  [VOLKAN-1905] chore:  Genel işler, küçük düzeltmeler"
-    echo ""
-    exit 1
-fi
+Every commit subject line MUST use:
+
+```text
+[JIRA-ISSUE-ID] <type>: <description>
+```
+
+### Allowed types
+`feat` · `fix` · `refactor` · `docs` · `test` · `perf` · `ci` · `build` · `revert` · `chore`
+
+### Doğru format örnekleri
+```text
+[JIRA-ISSUE-ID] feat: Yeni özellik eklendi
+[JIRA-ISSUE-ID] fix: Hata düzeltildi
+[JIRA-ISSUE-ID] refactor: Kodun çalışma şeklini değiştirmeyen iyileştirme
+[JIRA-ISSUE-ID] docs: Dökümantasyon işleri
+[JIRA-ISSUE-ID] test: Birim testler
+[JIRA-ISSUE-ID] perf: Çalışma mantığını değiştirmeyen performans iyileştirmesi
+[JIRA-ISSUE-ID] ci: CI/CD değişiklikleri
+[JIRA-ISSUE-ID] build: Build sistemi ile ilgili değişiklikler
+[JIRA-ISSUE-ID] revert: Kodu geri almak
+[JIRA-ISSUE-ID] chore: Genel işler, küçük düzeltmeler
+```
+
+**Example for a real issue:**
+```bash
+git add .
+git commit -m "[PROJ-123] fix: division by zero in calculator"
+```
+
+### Rules
+- Subject MUST be `[ISSUE-KEY] type: description`
+- You create the commit yourself; do **not** push or open an MR
+- Do not commit `.env`, credentials, or secret files
+- Work on branch `feature/{JIRA_ISSUE_ID}` only
 
 ## Constraints
 - Follow existing code style

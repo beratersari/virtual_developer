@@ -19,18 +19,27 @@ def test_atlas_without_learnings():
     p = PromptBuilder.build_atlas_prompt("A-1", "/plans/A-1.md")
     assert "A-1" in p and "/plans/A-1.md" in p
     assert "Previous Learnings" not in p
+    # EXECUTION.md format: [KEY] type: description
+    assert "[A-1]" in p
+    assert "feat:" in p
+    assert "fix:" in p
 
 
 def test_atlas_with_learnings():
     p = PromptBuilder.build_atlas_prompt("A-1", "p.md", previous_learnings=["l1", "l2"])
     assert "Previous Learnings" in p
     assert "l1" in p and "l2" in p
+    assert "[A-1] fix:" in p or "[A-1] feat:" in p
 
 
 def test_sisyphus_no_context():
     p = PromptBuilder.build_sisyphus_prompt("A-1", "do thing")
     assert "do thing" in p
     assert "Context" not in p
+    # EXECUTION.md format injected with real issue key
+    assert "[A-1]" in p
+    assert "feat:" in p
+    assert "feature/A-1" in p
 
 
 def test_sisyphus_with_files_and_patterns():
@@ -40,6 +49,15 @@ def test_sisyphus_with_files_and_patterns():
         context={"files": ["a.py", "b.py"], "patterns": ["singleton"]},
     )
     assert "a.py" in p and "b.py" in p and "singleton" in p
+    assert "[A-1]" in p and "chore:" in p
+
+
+def test_commit_message_block_filled_issue_key():
+    block = PromptBuilder.commit_message_block("KAN-42")
+    assert "[KAN-42] feat:" in block
+    assert "[KAN-42] fix:" in block
+    assert "[KAN-42] chore:" in block
+    assert "feature/KAN-42" in block
 
 
 def test_sisyphus_context_empty_keys():
@@ -56,10 +74,6 @@ def test_comment_response_with_and_without_state():
     p2 = PromptBuilder.build_comment_response_prompt("A-1", "hi", current_state="executing")
     assert "executing" in p2
 
-
-def test_code_review_prompt():
-    p = PromptBuilder.build_code_review_prompt("A-1", "s", "d", "model-x")
-    assert "model-x" in p and "A-1" in p
 
 
 def test_oracle_with_and_without_files():
