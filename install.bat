@@ -15,11 +15,28 @@ setlocal EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "VENDOR_DIR=%SCRIPT_DIR%\vendor"
-set "OPENCODE_HOME=%USERPROFILE%\.opencode"
-set "OPENCODE_BIN=%OPENCODE_HOME%\bin"
 set "VENV_DIR=%SCRIPT_DIR%\.venv"
 set "VERSIONS_FILE=%SCRIPT_DIR%\packaging\windows\versions.env"
 if exist "%VENDOR_DIR%\versions.env" set "VERSIONS_FILE=%VENDOR_DIR%\versions.env"
+
+REM ---------------------------------------------------------------------------
+REM OpenCode install root: SHORT path to avoid Windows MAX_PATH (260).
+REM Prefer C:\vd\opencode; override with VD_OPENCODE_ROOT; fall back to LocalAppData.
+REM Also junction %%USERPROFILE%%\.opencode -> short root when possible.
+REM ---------------------------------------------------------------------------
+if defined VD_OPENCODE_ROOT (
+    set "OPENCODE_HOME=%VD_OPENCODE_ROOT%"
+) else (
+    set "OPENCODE_HOME=%SystemDrive%\vd\opencode"
+)
+if not exist "%SystemDrive%\vd" mkdir "%SystemDrive%\vd" 2>nul
+if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%" 2>nul
+if not exist "%OPENCODE_HOME%" (
+    set "OPENCODE_HOME=%LOCALAPPDATA%\vd\opencode"
+    if not exist "%LOCALAPPDATA%\vd" mkdir "%LOCALAPPDATA%\vd" 2>nul
+    if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%" 2>nul
+)
+set "OPENCODE_BIN=%OPENCODE_HOME%\bin"
 
 echo ========================================
 echo   JIRA Virtual Developer - Installer
@@ -27,7 +44,7 @@ echo   Windows offline / local setup
 echo ========================================
 echo.
 echo Install root : %SCRIPT_DIR%
-echo OpenCode home: %OPENCODE_HOME%
+echo OpenCode home: %OPENCODE_HOME%  ^(short path — avoids MAX_PATH^)
 echo.
 
 REM ---------------------------------------------------------------------------
@@ -38,7 +55,7 @@ if errorlevel 1 (
     echo [ERROR] Python is not installed or not on PATH.
     echo Install Python 3.10+ ^(64-bit^) from https://www.python.org/downloads/
     echo Enable "Add python.exe to PATH" during setup, then re-run install.bat.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -49,7 +66,7 @@ python -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) els
 if errorlevel 1 (
     echo [ERROR] Python 3.10 or newer is required.
     echo Found: %PYTHON_VERSION%
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -66,7 +83,7 @@ if exist "%VENDOR_DIR%\SUPPORTED_PYTHON.txt" (
         echo Enable "Add python.exe to PATH", open a NEW terminal, re-run install.bat.
         echo.
         echo Tip: delete the .venv folder if it was created with the wrong Python.
-        pause
+        call :maybe_pause
         exit /b 1
     )
     echo [OK] Python minor is in vendor\SUPPORTED_PYTHON.txt
@@ -112,7 +129,7 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
     python -m venv "%VENV_DIR%"
     if errorlevel 1 (
         echo [ERROR] Failed to create virtual environment.
-        pause
+        call :maybe_pause
         exit /b 1
     )
     echo [OK] Created %VENV_DIR%
@@ -142,12 +159,12 @@ if exist "%VENDOR_DIR%\python-wheels" (
             echo Supported Python versions in this package:
             type "%VENDOR_DIR%\SUPPORTED_PYTHON.txt"
         )
-        pause
+        call :maybe_pause
         exit /b 1
     )
 ) else if "%HAS_VENDOR%"=="1" (
     echo [ERROR] vendor\ exists but python-wheels is missing. Broken distribution zip.
-    pause
+    call :maybe_pause
     exit /b 1
 ) else (
     echo [INFO] No offline wheels — installing from PyPI ^(needs internet^)...
@@ -155,7 +172,7 @@ if exist "%VENDOR_DIR%\python-wheels" (
     "%VENV_PIP%" install -r "%SCRIPT_DIR%\requirements.txt"
     if errorlevel 1 (
         echo [ERROR] Python dependency install failed.
-        pause
+        call :maybe_pause
         exit /b 1
     )
 )
@@ -176,7 +193,7 @@ if exist "%VENDOR_DIR%\opencode-home.zip" (
     call :extract_opencode_home_zip
     if errorlevel 1 (
         echo [ERROR] Failed to extract OpenCode home archive.
-        pause
+        call :maybe_pause
         exit /b 1
     )
 ) else if exist "%VENDOR_DIR%\opencode-home\bin\opencode.exe" (
@@ -184,7 +201,7 @@ if exist "%VENDOR_DIR%\opencode-home.zip" (
     robocopy "%VENDOR_DIR%\opencode-home" "%OPENCODE_HOME%" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
     if errorlevel 8 (
         echo [ERROR] robocopy failed copying opencode-home
-        pause
+        call :maybe_pause
         exit /b 1
     )
 ) else (
@@ -195,21 +212,21 @@ if exist "%VENDOR_DIR%\opencode-home.zip" (
     echo   set VD_ALLOW_ONLINE=1
     echo then re-run install.bat
     if /i not "%VD_ALLOW_ONLINE%"=="1" (
-        pause
+        call :maybe_pause
         exit /b 1
     )
     echo Online fallback enabled via VD_ALLOW_ONLINE=1 ...
     call :install_opencode_online
     if errorlevel 1 (
         echo [ERROR] Online OpenCode install failed.
-        pause
+        call :maybe_pause
         exit /b 1
     )
 )
 
 if not exist "%OPENCODE_BIN%\opencode.exe" (
     echo [ERROR] opencode.exe missing at %OPENCODE_BIN%\opencode.exe
-    pause
+    call :maybe_pause
     exit /b 1
 )
 echo [OK] opencode.exe -> %OPENCODE_BIN%\opencode.exe
@@ -222,7 +239,7 @@ if exist "%ASSERT_PE%" (
         echo [ERROR] opencode.exe is not a valid 64-bit ^(AMD64^) binary.
         echo This package only supports 64-bit Windows with the official x64 OpenCode build.
         echo Delete "%%USERPROFILE%%\.opencode" and re-install from a fresh package.
-        pause
+        call :maybe_pause
         exit /b 1
     )
 )
@@ -238,15 +255,18 @@ if errorlevel 1 (
     echo corrupt/incomplete ^(bad extract^) or an old 16/32-bit binary is on PATH.
     echo.
     echo Fix:
-    echo   1. rmdir /s /q "%%USERPROFILE%%\.opencode"
-    echo   2. Re-download the latest Actions artifact and extract once
-    echo   3. Run install.bat again
-    echo   4. In a NEW terminal: where opencode
-    echo      It must resolve to %%USERPROFILE%%\.opencode\bin\opencode.exe
-    pause
+    echo   1. rmdir /s /q "%OPENCODE_HOME%"
+    echo   2. rmdir /s /q "%%USERPROFILE%%\.opencode" 2^>nul
+    echo   3. Re-download the latest Actions artifact and extract once
+    echo   4. Run install.bat again
+    echo   5. In a NEW terminal: where opencode
+    echo      It must resolve to %OPENCODE_BIN%\opencode.exe
+    call :maybe_pause
     exit /b 1
 )
 echo [OK] opencode runs ^(64-bit^)
+
+call :link_user_opencode_home
 
 if exist "%OPENCODE_HOME%\opencode.json" (
     echo [OK] config      -> %OPENCODE_HOME%\opencode.json
@@ -339,14 +359,39 @@ echo        cd /d "%SCRIPT_DIR%"
 echo        .venv\Scripts\activate
 echo        python cli.py start
 echo.
-echo Note: Restart terminals so %%USERPROFILE%%\.opencode\bin is on PATH.
+echo Note: Restart terminals so OpenCode bin is on PATH:
+echo        %OPENCODE_BIN%
+echo        ^(also linked from %%USERPROFILE%%\.opencode when junction succeeds^)
 echo.
-pause
+call :maybe_pause
 exit /b 0
 
 REM =============================================================================
 REM Subroutines
 REM =============================================================================
+
+:maybe_pause
+if /i "%VD_NONINTERACTIVE%"=="1" exit /b 0
+pause
+exit /b 0
+
+:link_user_opencode_home
+REM Optional junction so tools that look for %%USERPROFILE%%\.opencode still work
+set "USER_OC=%USERPROFILE%\.opencode"
+if /i "%OPENCODE_HOME%"=="%USER_OC%" exit /b 0
+if exist "%USER_OC%" (
+    REM Remove previous install/junction so we can re-link
+    rmdir "%USER_OC%" 2>nul
+    if exist "%USER_OC%" rmdir /s /q "%USER_OC%" 2>nul
+)
+mklink /J "%USER_OC%" "%OPENCODE_HOME%" >nul 2>&1
+if errorlevel 1 (
+    echo [WARNING] Could not junction %%USERPROFILE%%\.opencode -^> %OPENCODE_HOME%
+    echo           OpenCode still works via PATH: %OPENCODE_BIN%
+) else (
+    echo [OK] Junction: %%USERPROFILE%%\.opencode -^> %OPENCODE_HOME%
+)
+exit /b 0
 
 :extract_opencode_home_zip
 REM Extract vendor\opencode-home.zip into %OPENCODE_HOME% with long-path support.

@@ -413,10 +413,11 @@ Set-Content -Path $pkgPath -Value $pkgBody -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $root "packaging\windows\opencode.json") -Destination (Join-Path $ocHome "opencode.json") -Force
 Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-opencode.json") -Force
 
-Write-Host "  Installing oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm)..."
+Write-Host "  Installing oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."
 Push-Location $ocHome
 try {
-    npm install --omit=dev --no-fund --no-audit "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
+    # Hoisted tree is shallower (fewer nested node_modules) — critical for Windows MAX_PATH
+    npm install --omit=dev --no-fund --no-audit --install-strategy=hoisted "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
     if ($LASTEXITCODE -ne 0) {
         throw "npm install oh-my-opencode@$OH_MY_OPENCODE_VERSION failed (exit $LASTEXITCODE)"
     }
@@ -430,7 +431,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode
 
 Optimize-NodeModules (Join-Path $ocHome "node_modules")
 
-# Single archive in vendor — outer dist zip only has this one file for OpenCode home
+# Hard fail if relative paths are still too long for classic Windows MAX_PATH budgets
+$assertMax = Join-Path $root "packaging\windows\Assert-MaxPath.ps1"
+& $assertMax -Root $ocHome -MaxRelativeChars 200
+if ($LASTEXITCODE -ne 0) {
+    throw "OpenCode home path-length budget exceeded — fix nesting before shipping"
+}
+
+# Single archive in vendor — outer dist must NEVER contain expanded node_modules
 Ensure-Dir $vendor
 $ocHomeZip = Join-Path $vendor "opencode-home.zip"
 Write-Host "  Packing OpenCode home -> vendor\opencode-home.zip ..."
@@ -438,10 +446,10 @@ New-ZipFromDirectory -SourceDir $ocHome -ZipPath $ocHomeZip
 $ocZipSize = (Get-Item -LiteralPath $ocHomeZip).Length
 Write-Host ("  OpenCode home archive: {0:N1} MB" -f ($ocZipSize / 1MB))
 
-# Do not ship expanded tree (prevents long-path extract errors for users)
+# Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to %USERPROFILE%\.opencode)"
+Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to short path C:\vd\opencode)"
 
 # ---------------------------------------------------------------------------
 # 5) Download Python wheels for 3.10+ (win_amd64)
@@ -494,11 +502,13 @@ Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.e
 $howTo = @"
 JIRA Virtual Developer — Windows offline package
 ================================================
-1. You only need ONE extract (the GitHub Actions download).
-2. Open THIS folder (should contain install.bat next to vendor\ and src\).
-3. Install Python from the supported list (see vendor\SUPPORTED_PYTHON.txt).
-4. Double-click install.bat
-5. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
+1. Extract the GitHub Actions download ONCE (you should see install.bat here).
+2. Do NOT manually unpack vendor\opencode-home.zip.
+3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
+4. Run install.bat
+5. OpenCode is installed to a SHORT path: C:\vd\opencode
+   (junction may also create %USERPROFILE%\.opencode)
+6. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
 
 Supported Python (this build): $($supportedPy -join ', ')
 "@

@@ -94,6 +94,13 @@ jobs:
             -OutDir "${{ github.workspace }}\dist" `
             -DistName "${{ steps.meta.outputs.dist_name }}"
 
+      # Platform gate: packaging green is not enough — prove extract+install on Windows.
+      - name: E2E smoke (deep path + install.bat + opencode --version)
+        shell: pwsh
+        run: |
+          & .\packaging\windows\e2e-smoke.ps1 `
+            -PayloadDir "${{ github.workspace }}\dist\stage\${{ steps.meta.outputs.dist_name }}"
+
       # Upload the FOLDER (not a .zip inside a .zip). GitHub still wraps one
       # download archive; after extract you get install.bat at the top level.
       - name: Upload artifact
