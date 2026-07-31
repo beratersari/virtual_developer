@@ -28,16 +28,8 @@ def gm(tmp_path, monkeypatch):
     return g
 
 
-def test_init_disabled_temp():
-    with patch("src.git_manager.settings") as s:
-        s.use_temp_working_dir = False
-        with pytest.raises(RuntimeError, match="disabled"):
-            GitManager(issue_key="X-1")
-
-
 def test_init_no_gitlab_url():
     with patch("src.git_manager.settings") as s:
-        s.use_temp_working_dir = True
         s.project_gitlab_url = ""
         with pytest.raises(RuntimeError, match="PROJECT_GITLAB_URL"):
             GitManager(issue_key="X-1")

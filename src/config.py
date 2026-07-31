@@ -19,11 +19,23 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # JIRA Configuration — auth is host + Bearer token only (on-prem)
+    # JIRA Configuration
+    # - On-prem Server/DC PAT: set JIRA_HOST + JIRA_API_TOKEN (Bearer)
+    # - Jira Cloud API token: set JIRA_HOST + JIRA_EMAIL + JIRA_API_TOKEN (Basic email:token)
     jira_host: str = Field(default="", description="JIRA instance URL")
-    jira_api_token: str = Field(default="", description="JIRA API token (Bearer)")
+    jira_email: str = Field(
+        default="",
+        description="Atlassian account email (required for Jira Cloud API tokens; unused for on-prem Bearer PAT)",
+    )
+    jira_api_token: str = Field(
+        default="",
+        description="JIRA API token (Cloud) or personal access token (on-prem)",
+    )
     jira_projects: str = Field(default="PROJ", description="Comma-separated project keys")
-    jira_board_id: str = Field(default="", description="JIRA Board ID for sprint polling")
+    jira_board_id: str = Field(
+        default="",
+        description="JIRA board id (from URL or GET /rest/agile/1.0/board)",
+    )
     
     # Webhook Configuration
     webhook_port: int = Field(default=3000)
@@ -99,11 +111,7 @@ class Settings(BaseSettings):
     enable_polling: bool = Field(default=False)
     poll_interval_seconds: int = Field(default=30)
 
-    # Temp Directory Configuration (replaces PROJECT_ROOT for agent work)
-    use_temp_working_dir: bool = Field(
-        default=True,
-        description="Enable temp working directory for each JIRA issue (recommended: True)"
-    )
+    # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(
         default=Path(".temp"),
         description="Base directory for temp working folders (relative to agent root)"

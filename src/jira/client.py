@@ -9,28 +9,52 @@ from src.logger import logger
 
 
 class JiraClient:
-    """Client for JIRA REST API (on-prem).
+    """Client for JIRA REST API.
 
-    Auth is Bearer token only — set JIRA_HOST and JIRA_API_TOKEN.
+    Auth:
+      * **On-prem PAT**: ``JIRA_HOST`` + ``JIRA_API_TOKEN`` → ``Authorization: Bearer``
+      * **Jira Cloud API token**: ``JIRA_HOST`` + ``JIRA_EMAIL`` + ``JIRA_API_TOKEN``
+        → HTTP Basic (email as username, token as password). Cloud personal API
+        tokens do not work as Bearer.
     """
     
     def __init__(
         self,
         host: Optional[str] = None,
         api_token: Optional[str] = None,
+        email: Optional[str] = None,
     ):
         self.host = (host or settings.jira_host).rstrip("/")
-        self.api_token = api_token or settings.jira_api_token
+        self.api_token = api_token if api_token is not None else settings.jira_api_token
+        self.email = (email if email is not None else getattr(settings, "jira_email", "")) or ""
         
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
-        headers = {"Content-Type": "application/json"}
-        if self.api_token:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        auth = None
+
+        use_cloud_basic = bool(self.api_token and self.email.strip())
+        # Auto-detect Cloud sites even if email is missing (will log clearly)
+        is_cloud_host = "atlassian.net" in self.host.lower()
+
+        if use_cloud_basic:
+            # Cloud API token: Basic email:token
+            auth = (self.email.strip(), self.api_token)
+            logger.info("JiraClient auth: HTTP Basic (Cloud API token + email)")
+        elif self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
+            if is_cloud_host:
+                logger.warning(
+                    "Jira host looks like Cloud (atlassian.net) but JIRA_EMAIL is empty. "
+                    "Cloud API tokens require Basic auth with email+token; Bearer will fail (403)."
+                )
+            else:
+                logger.info("JiraClient auth: Bearer token (on-prem PAT)")
         
         self.client = httpx.Client(
             base_url=f"{self.host}/rest/api/2",
+            auth=auth,
             headers=headers,
             timeout=30.0,
             verify=False,
@@ -136,12 +160,22 @@ class JiraClient:
             return []
     
     def get_active_sprint(self, board_id: str) -> Optional[Dict[str, Any]]:
-        """Get the active sprint for a board."""
+        """Get the active sprint for a board.
+
+        Returns None for Kanban/simple boards that do not support sprints
+        (HTTP 400) or when no active sprint exists.
+        """
         try:
             # Agile API is at /rest/agile/1.0, not /rest/api/2
-            # Use absolute URL to avoid base_url conflict
             url = f"{self.host}/rest/agile/1.0/board/{board_id}/sprint"
             response = self.client.get(url, params={"state": "active"})
+            if response.status_code == 400:
+                # e.g. "Board does not support sprints" (Kanban / team-managed simple)
+                logger.info(
+                    f"Board {board_id} does not support sprints "
+                    f"({response.text[:200]}); use board issues instead"
+                )
+                return None
             response.raise_for_status()
             data = response.json()
             values = data.get("values", [])
@@ -150,6 +184,17 @@ class JiraClient:
             return None
         except httpx.HTTPError as e:
             logger.error(f"Error getting active sprint: {e}")
+            return None
+
+    def get_board(self, board_id: str) -> Optional[Dict[str, Any]]:
+        """Get board metadata by id."""
+        try:
+            url = f"{self.host}/rest/agile/1.0/board/{board_id}"
+            response = self.client.get(url)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Error getting board {board_id}: {e}")
             return None
     
     def get_sprint_issues(

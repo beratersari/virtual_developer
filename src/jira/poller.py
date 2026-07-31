@@ -57,32 +57,73 @@ class JiraPoller:
             logger.warning(f"Error checking assignee for {issue_key}: {e}")
             return False
     
+    @staticmethod
+    def _is_todo_status(fields: dict) -> bool:
+        """True for To Do / backlog-like columns (locale-safe via statusCategory)."""
+        status = fields.get("status") or {}
+        name = (status.get("name") or "").strip().lower()
+        category_key = ((status.get("statusCategory") or {}).get("key") or "").lower()
+
+        # Jira statusCategory key "new" = blue To Do column in every language
+        if category_key == "new":
+            return True
+
+        todo_names = {
+            "to do",
+            "todo",
+            "open",
+            "backlog",
+            "new",
+            "yapılacaklar",  # Turkish
+            "yapilacaklar",
+        }
+        return name in todo_names
+
     def poll_board(self) -> List[dict]:
         if not self.board_id:
             logger.debug("No board_id configured, skipping poll")
             return []
 
-        logger.debug(f"Polling board {self.board_id} for active sprint")
-        sprint = self.client.get_active_sprint(self.board_id)
-        if not sprint:
-            logger.debug("No active sprint found")
-            return []
+        issue_fields = [
+            "key",
+            "summary",
+            "description",
+            "labels",
+            "assignee",
+            "status",
+            "issuetype",
+        ]
 
-        sprint_id = sprint["id"]
-        sprint_name = sprint.get('name', 'unknown')
-        logger.info(f"Found active sprint: {sprint_name} (id: {sprint_id})")
-        
-        issues = self.client.get_sprint_issues(
-            sprint_id,
-            fields=["key", "summary", "description", "labels", "assignee", "status", "issuetype"],
-            max_results=100,
-        )
+        # Prefer active sprint (Scrum); fall back to board issues (Kanban / simple boards)
+        logger.debug(f"Polling board {self.board_id}")
+        sprint = self.client.get_active_sprint(self.board_id)
+        if sprint:
+            sprint_id = sprint["id"]
+            sprint_name = sprint.get("name", "unknown")
+            logger.info(f"Found active sprint: {sprint_name} (id: {sprint_id})")
+            issues = self.client.get_sprint_issues(
+                sprint_id,
+                fields=issue_fields,
+                max_results=100,
+            )
+            source = f"sprint {sprint_name}"
+        else:
+            logger.info(
+                f"No active sprint on board {self.board_id}; "
+                f"loading issues from board (Kanban/simple)"
+            )
+            issues = self.client.get_board_issues(
+                self.board_id,
+                fields=issue_fields,
+                max_results=100,
+            )
+            source = f"board {self.board_id}"
         
         if not issues:
-            logger.debug("No issues found in sprint")
+            logger.debug(f"No issues found from {source}")
             return []
         
-        logger.debug(f"Found {len(issues)} issues in sprint")
+        logger.debug(f"Found {len(issues)} issues from {source}")
         
         trigger_labels = set(settings.trigger_labels_list)
         logger.debug(f"Trigger labels: {trigger_labels}")
@@ -95,18 +136,18 @@ class JiraPoller:
         for issue in issues:
             issue_key = issue["key"]
             fields = issue.get("fields", {})
-            status = fields.get("status", {}).get("name", "").lower()
-            labels = set(fields.get("labels", []))
+            status_name = (fields.get("status") or {}).get("name", "")
+            status = status_name.lower()
+            labels = set(fields.get("labels") or [])
 
             # Track Jira status for all issues so we can detect real To Do re-entry
-            previous_status = self._last_jira_status.get(issue_key)
             self._last_jira_status[issue_key] = status
             
             has_label = bool(trigger_labels & labels)
             is_assigned_to_bot = self._is_assigned_to_jira_ai_bot(issue_key)
             if is_assigned_to_bot:
                 assigned_to_bot_count += 1
-            is_todo = status == "to do"
+            is_todo = self._is_todo_status(fields)
             seen = issue_key in self._seen_issues
             should_process = has_label or is_assigned_to_bot
             
@@ -122,15 +163,16 @@ class JiraPoller:
         reprocess_issues = self.check_status_changes(todo_issues)
 
         # Deduplicate: prefer create over update when both would fire
-        reprocess_keys = {i["key"] for i in reprocess_issues}
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
 
         if checked_count > 0:
-            logger.info(f"Checked {checked_count} issues in sprint, "
-                       f"{assigned_to_bot_count} assigned to bot, "
-                       f"{len(new_issues)} new to process, "
-                       f"{len(reprocess_issues)} to reprocess")
+            logger.info(
+                f"Checked {checked_count} issues from {source}, "
+                f"{assigned_to_bot_count} assigned to bot, "
+                f"{len(new_issues)} new to process, "
+                f"{len(reprocess_issues)} to reprocess"
+            )
         
         self._last_check = datetime.now()
         return new_issues + reprocess_issues

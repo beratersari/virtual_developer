@@ -34,8 +34,10 @@ class GitManager:
         self.remote_name: str = "unknown"
 
         logger.info(f"Initializing GitManager for issue: {issue_key}")
-        logger.debug(f"Settings - use_temp_working_dir: {settings.use_temp_working_dir}, "
-                     f"project_gitlab_url: {'configured' if settings.project_gitlab_url else 'not configured'}")
+        logger.debug(
+            f"Settings - project_gitlab_url: "
+            f"{'configured' if settings.project_gitlab_url else 'not configured'}"
+        )
         
         if issue_key:
             self._setup_temp_working_dir()
@@ -45,18 +47,17 @@ class GitManager:
             logger.info(f"Temp directory set: {self.temp_dir}")
 
     def _setup_temp_working_dir(self) -> None:
-        """Setup temp working directory for this JIRA issue."""
+        """Setup isolated temp clone for this JIRA issue (always required)."""
         logger.info(f"Setting up temp working directory for issue: {self.issue_key}")
-        
-        if not settings.use_temp_working_dir:
-            logger.error("Temp working directories are disabled in config")
-            raise RuntimeError("Temp working directories are disabled in config")
 
         # Validate remote URL
         gitlab_url = settings.project_gitlab_url.strip()
         if not gitlab_url:
             logger.error("PROJECT_GITLAB_URL not configured")
-            raise RuntimeError("PROJECT_GITLAB_URL not configured. Cannot create temp working directory.")
+            raise RuntimeError(
+                "PROJECT_GITLAB_URL not configured. "
+                "Temp working directories are mandatory; cannot run without a remote to clone."
+            )
 
         self.remote_url = gitlab_url
         self.remote_name = self._extract_remote_name(gitlab_url)
