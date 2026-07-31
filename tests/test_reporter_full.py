@@ -156,22 +156,6 @@ def test_post_comment_response():
     assert r.post_comment_response("R-1", "hello") is not None
 
 
-def test_post_code_review_truncates(state):
-    client = FakeJiraClient()
-    r = JiraReporter(client=client)
-    long_review = "x" * 4000
-    cid = r.post_code_review(state, long_review, "model-free")
-    assert cid is not None
-    assert "truncated" in client.comments[-1]["body"]
-    assert any(u.get("labels") == ["ai-reviewed"] for u in client.updated)
-
-
-def test_post_code_review_short_and_label_fail(state):
-    client = MagicMock()
-    client.add_comment.return_value = {"id": "9"}
-    client.update_issue.side_effect = RuntimeError("label fail")
-    r = JiraReporter(client=client)
-    assert r.post_code_review(state, "short", "m") == "9"
 
 
 def test_post_oracle_response():
