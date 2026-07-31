@@ -20,18 +20,23 @@ class SimulatedJiraClient:
         priority: str = "Medium",
         assignee: Optional[str] = None,
         labels: Optional[List[str]] = None,
+        key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a new issue in the simulated JIRA."""
+        payload = {
+            "summary": summary,
+            "description": description,
+            "issue_type": issue_type,
+            "priority": priority,
+            "assignee": assignee,
+            "labels": labels or [],
+        }
+        if key:
+            payload["key"] = key
+        
         response = self.client.post(
             "/api/issues",
-            json={
-                "summary": summary,
-                "description": description,
-                "issue_type": issue_type,
-                "priority": priority,
-                "assignee": assignee,
-                "labels": labels or [],
-            }
+            json=payload
         )
         if response.status_code == 201:
             return response.json()["issue"]

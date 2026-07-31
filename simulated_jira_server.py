@@ -98,10 +98,12 @@ class SimulatedJiraStore:
         assignee: Optional[str] = None,
         reporter: str = "admin",
         labels: Optional[List[str]] = None,
+        key: Optional[str] = None,
     ) -> Issue:
         """Create a new issue."""
-        self.issue_counter += 1
-        key = f"SIM-{self.issue_counter}"
+        if key is None:
+            self.issue_counter += 1
+            key = f"SIM-{self.issue_counter}"
         
         issue = Issue(
             key=key,
@@ -237,6 +239,7 @@ def create_issue():
         assignee=data.get("assignee"),
         reporter=data.get("reporter", "admin"),
         labels=data.get("labels", []),
+        key=data.get("key"),  # Allow manual key override
     )
     
     # Trigger webhook in background (uses JIRA format)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
+from src.logger import logger
 
 
 # Check if running on Windows
@@ -29,7 +30,8 @@ class AgentTask:
     session_id: Optional[str] = None
     task_id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
     skills: List[str] = field(default_factory=list)
-    model: Optional[str] = None  # Model override (e.g. for code review with a free model)
+    model: Optional[str] = None
+    task_type: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -46,11 +48,12 @@ class AgentTask:
 
 class AgentRunner:
     """Runs agents using Oh My OpenAgent CLI."""
-    
-    def __init__(self, project_root: Optional[Path] = None):
-        self.project_root = project_root or settings.project_root
+
+    def __init__(self, working_directory: Optional[Path] = None):
+        self.working_directory = working_directory
         self.opencode_cli = settings.opencode_cli
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        logger.debug(f"AgentRunner initialized with working_directory={working_directory}")
     
     async def run_agent(
         self,
@@ -71,41 +74,45 @@ class AgentRunner:
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
+        logger.info(f"Starting agent task: task_id={task.task_id}, agent={task.agent}, attempt={attempt_number}")
+        
         # Use configured timeout if not overridden
         effective_timeout = timeout_seconds or settings.agent_task_timeout_seconds
         start_time = asyncio.get_event_loop().time()
+        logger.debug(f"Effective timeout: {effective_timeout}s")
 
         # Create session file for this task with naming convention: JIRAID_DATETIME_RETRYCOUNT
         session_file = self._get_session_file(
             task.task_id,
             issue_key=task.issue_key,
             attempt_number=attempt_number,
+            task_type=task.task_type,
         )
         session_file.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Session file created: {session_file}")
         
         # Build the command as a list (cross-platform)
         cmd_list = self._build_command(task, session_file)
+        logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
         
         # Open session file for writing output
         with open(session_file, 'w', encoding='utf-8') as session_fh:
             # Run the process using exec (no shell) for cross-platform compatibility
             # On Windows, we need to use shell=False and handle the command differently
             if IS_WINDOWS:
-                # Windows: use CREATE_NEW_PROCESS_GROUP for proper termination
                 process = await asyncio.create_subprocess_exec(
                     *cmd_list,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=self.project_root,
+                    cwd=self.working_directory,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
                 )
             else:
-                # Unix/Linux/Mac
                 process = await asyncio.create_subprocess_exec(
                     *cmd_list,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=self.project_root,
+                    cwd=self.working_directory,
                 )
             
             stdout_lines = []
@@ -152,6 +159,7 @@ class AgentRunner:
                         on_output(callback_name, decoded)
 
             try:
+                logger.info(f"Waiting for agent process to complete, timeout={effective_timeout}s")
                 # Wait for completion with timeout
                 await asyncio.wait_for(
                     asyncio.gather(
@@ -161,13 +169,19 @@ class AgentRunner:
                     timeout=effective_timeout
                 )
                 returncode = await process.wait()
+                elapsed = asyncio.get_event_loop().time() - start_time
+                logger.info(f"Agent process completed: returncode={returncode}, elapsed={elapsed:.2f}s, stdout_lines={len(stdout_lines)}, stderr_lines={len(stderr_lines)}")
             except asyncio.TimeoutError:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                logger.error(f"Agent task timed out after {elapsed:.2f}s (limit={effective_timeout}s)")
                 # Kill the process on timeout
                 process.kill()
                 await process.wait()
+                logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far
                 all_output_lines = stdout_lines + stderr_lines
                 session_id = self._parse_session_id(all_output_lines)
+                logger.debug(f"Extracted session ID from partial output: {session_id}")
                 return {
                     "task_id": task.task_id,
                     "returncode": -1,
@@ -182,7 +196,9 @@ class AgentRunner:
         # Extract session ID from output
         all_output_lines = stdout_lines + stderr_lines
         session_id = self._parse_session_id(all_output_lines)
+        logger.debug(f"Extracted session ID: {session_id}")
 
+        elapsed = asyncio.get_event_loop().time() - start_time
         result = {
             "task_id": task.task_id,
             "returncode": returncode,
@@ -192,6 +208,11 @@ class AgentRunner:
             "opencode_session_id": session_id,  # opencode session ID from CLI output
             "progress": 100 if returncode == 0 else last_progress,
         }
+        
+        if returncode == 0:
+            logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
+        else:
+            logger.warning(f"Agent task failed: task_id={task.task_id}, returncode={returncode}, duration={elapsed:.2f}s")
 
         if on_complete:
             on_complete(result)
@@ -264,14 +285,16 @@ class AgentRunner:
         Returns:
             List of command arguments for use with subprocess (no shell needed)
         """
+        logger.debug(f"Building command for task: agent={task.agent}, model={task.model or settings.default_model}, session_id={task.session_id}")
+        
         # Build base command
         cmd_parts = self.opencode_cli.split() + ["run"]
         
         # Add agent option
         cmd_parts.extend(["--agent", task.agent])
         
-        # Use task-specific model if provided, otherwise default
-        effective_model = task.model or "opencode/big-pickle"
+        # Use task-specific model if provided, otherwise use configured default
+        effective_model = task.model or settings.default_model
         cmd_parts.extend(["--model", effective_model])
         
         # Add session continuation if specified
@@ -316,6 +339,7 @@ class AgentRunner:
         task_id: str,
         issue_key: Optional[str] = None,
         attempt_number: int = 0,
+        task_type: Optional[str] = None,
     ) -> Path:
         """Get path to session output file.
 
@@ -323,28 +347,36 @@ class AgentRunner:
             task_id: The task ID
             issue_key: The JIRA issue key (e.g., "PROJ-123")
             attempt_number: The retry attempt number (0 = first attempt)
+            task_type: Optional task type prefix (e.g., "review" for code review)
 
         Returns:
             Path to the session log file
 
         Naming convention:
-            - First attempt: PROJ-123_20240327_143052_0.log
+            - Normal task: PROJ-123_20240327_143052_0.log
+            - Code review: PROJ-123_review_20240327_143052_0.log
             - Retry 1: PROJ-123_20240327_143052_1.log
-            - Retry 2: PROJ-123_20240327_143052_2.log
         """
         # Ensure directory exists
-        sessions_dir = (self.project_root / ".jira-agent" / "sessions").resolve()
+        sessions_dir = (Path.cwd() / ".jira-agent" / "sessions").resolve()
         sessions_dir.mkdir(parents=True, exist_ok=True)
+        
+        logger.debug(f"Generating session file path: task_id={task_id}, issue_key={issue_key}, attempt={attempt_number}, task_type={task_type}")
 
         if issue_key:
-            # Format: JIRAID_DATETIME_RETRYCOUNT.log
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{issue_key}_{timestamp}_{attempt_number}.log"
+            if task_type:
+                # Format: JIRAID_TYPE_DATETIME_RETRYCOUNT.log
+                filename = f"{issue_key}_{task_type}_{timestamp}_{attempt_number}.log"
+            else:
+                # Format: JIRAID_DATETIME_RETRYCOUNT.log
+                filename = f"{issue_key}_{timestamp}_{attempt_number}.log"
         else:
             # Fallback to task_id if no issue_key provided
             filename = f"{task_id}.log"
 
         path = sessions_dir / filename
+        logger.debug(f"Generated session file path: {path}")
         return path
     
     async def run_background_agent(
@@ -355,19 +387,20 @@ class AgentRunner:
         """Start a background agent and return task ID."""
         # Similar to run_agent but non-blocking
         # Returns immediately with task ID for polling
+        logger.info(f"Starting background agent: task_id={task.task_id}, agent={task.agent}")
         
         session_file = self._get_session_file(task.task_id)
         session_file.parent.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Background agent session file: {session_file}")
         
         cmd_list = self._build_command(task, session_file)
         
-        # Start process without waiting (cross-platform)
         if IS_WINDOWS:
             process = await asyncio.create_subprocess_exec(
                 *cmd_list,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.project_root,
+                cwd=self.working_directory,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
             )
         else:
@@ -375,11 +408,12 @@ class AgentRunner:
                 *cmd_list,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.project_root,
+                cwd=self.working_directory,
             )
         
         # Store for later monitoring
         self._running_tasks[task.task_id] = process
+        logger.info(f"Background agent started: task_id={task.task_id}, pid={process.pid}")
         
         return task.task_id
     
@@ -387,17 +421,21 @@ class AgentRunner:
         """Check status of a running background task."""
         process = self._running_tasks.get(task_id)
         if not process:
+            logger.debug(f"Task not found in running tasks: {task_id}")
             return None
         
         # Check if process has completed
         if process.returncode is not None:
             del self._running_tasks[task_id]
+            status = "completed" if process.returncode == 0 else "error"
+            logger.info(f"Background task completed: task_id={task_id}, status={status}, returncode={process.returncode}")
             return {
                 "task_id": task_id,
-                "status": "completed" if process.returncode == 0 else "error",
+                "status": status,
                 "returncode": process.returncode,
             }
         
+        logger.debug(f"Background task still running: task_id={task_id}")
         return {
             "task_id": task_id,
             "status": "running",
@@ -406,29 +444,39 @@ class AgentRunner:
     def read_session_output(self, task_id: str) -> str:
         """Read the output from a session file."""
         session_file = self._get_session_file(task_id)
+        logger.debug(f"Reading session output: task_id={task_id}, file={session_file}")
         if session_file.exists():
-            return session_file.read_text()
+            content = session_file.read_text()
+            logger.debug(f"Read {len(content)} chars from session file: {session_file}")
+            return content
+        logger.debug(f"Session file not found: {session_file}")
         return ""
     
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task."""
         process = self._running_tasks.get(task_id)
         if process and process.returncode is None:
+            logger.info(f"Cancelling running task: task_id={task_id}")
             if IS_WINDOWS:
                 # On Windows, terminate() sends CTRL_BREAK_EVENT to the process group
                 # when CREATE_NEW_PROCESS_GROUP was used
                 try:
                     process.terminate()
+                    logger.info(f"Task terminated: task_id={task_id}")
                 except Exception:
                     # Fallback: kill if terminate doesn't work
                     try:
                         process.kill()
+                        logger.warning(f"Task killed after terminate failed: task_id={task_id}")
                     except Exception:
+                        logger.error(f"Failed to cancel task: task_id={task_id}")
                         pass
             else:
                 # Unix/Linux/Mac: terminate() sends SIGTERM
                 process.terminate()
+                logger.info(f"Task terminated: task_id={task_id}")
             return True
+        logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False
 
     async def run_agent_with_retry(
@@ -460,6 +508,8 @@ class AgentRunner:
         backoff_multiplier = settings.agent_task_retry_backoff_multiplier
         retry_on_timeout = settings.agent_task_retry_on_timeout
         retry_on_error = settings.agent_task_retry_on_error
+        
+        logger.info(f"Starting agent with retry: task_id={task.task_id}, max_retries={effective_max_retries}")
 
         last_result = None
         last_session_id = None
@@ -467,6 +517,8 @@ class AgentRunner:
         all_session_files = []
 
         while attempt <= effective_max_retries:
+            logger.info(f"Agent attempt {attempt + 1}/{effective_max_retries + 1}: task_id={task.task_id}")
+            
             # Run the task with attempt number (0 = first attempt, 1+ = retries)
             result = await self.run_agent(
                 task,
@@ -480,11 +532,13 @@ class AgentRunner:
             # Track session file and opencode session ID for this attempt
             if result.get("session_file"):
                 all_session_files.append(result["session_file"])
+                logger.debug(f"Added session file to tracking: {result['session_file']}")
             if result.get("opencode_session_id"):
                 last_session_id = result["opencode_session_id"]
 
             # Check if successful
             if result.get("returncode") == 0:
+                logger.info(f"Agent succeeded on attempt {attempt + 1}: task_id={task.task_id}")
                 result["retry_info"] = {
                     "attempts": attempt + 1,
                     "max_retries": effective_max_retries,
@@ -502,9 +556,13 @@ class AgentRunner:
                 if retry_on_timeout and attempt < effective_max_retries:
                     should_retry = True
                     retry_reason = "timeout"
+                    logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
             elif retry_on_error and attempt < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
+                logger.warning(f"Agent failed with error on attempt {attempt + 1}, will retry: task_id={task.task_id}, returncode={result.get('returncode')}")
+            else:
+                logger.error(f"Agent failed and no more retries allowed: task_id={task.task_id}, attempt={attempt + 1}")
 
             if should_retry:
                 attempt += 1
@@ -520,17 +578,20 @@ class AgentRunner:
                     on_retry(attempt, delay, retry_reason, result.get("session_file"), error_message, return_code, result.get("opencode_session_id"))
 
                 # Log retry attempt
-                print(f"[AgentRunner] {retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} for {task.task_id}, retrying in {delay:.1f}s...")
+                logger.warning(f"{retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} for {task.task_id}, retrying in {delay:.1f}s...")
 
                 # Wait before retry
                 await asyncio.sleep(delay)
 
                 # Create new task ID for retry
+                old_task_id = task.task_id
                 task.task_id = f"task_{uuid.uuid4().hex[:8]}"
+                logger.debug(f"Created new task ID for retry: old={old_task_id}, new={task.task_id}")
 
                 last_result = result
             else:
                 # No more retries - include session ID from last attempt
+                logger.info(f"All retry attempts exhausted: task_id={task.task_id}, total_attempts={attempt + 1}")
                 result["retry_info"] = {
                     "attempts": attempt + 1,
                     "max_retries": effective_max_retries,
@@ -542,6 +603,7 @@ class AgentRunner:
                 return result
 
         # Should not reach here, but just in case
+        logger.error(f"Unexpected fallback reached in run_agent_with_retry: task_id={task.task_id}")
         if last_result:
             last_result["retry_info"] = {
                 "attempts": attempt + 1,
@@ -551,8 +613,10 @@ class AgentRunner:
                 "all_session_files": all_session_files,
                 "last_opencode_session_id": last_session_id,
             }
+            logger.warning(f"Returning last result due to unexpected state: task_id={task.task_id}")
             return last_result
 
+        logger.error(f"Max retries exceeded with no last result: task_id={task.task_id}")
         return {
             "task_id": task.task_id,
             "returncode": -1,

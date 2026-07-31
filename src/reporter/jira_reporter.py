@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from src.config import settings
 from src.jira.client import JiraClient, create_jira_client
+from src.logger import logger
 from src.state.models import JiraAgentState, TaskStatus
 
 
@@ -18,7 +19,7 @@ class JiraReporter:
             # Auto-detect: use simulated if JIRA not properly configured
             use_simulated = simulated or not settings.is_configured() or settings.jira_host in ['', 'a', 'https://yourcompany.atlassian.net']
             if use_simulated:
-                print("[Reporter] Using simulated JIRA client")
+                logger.info("Using simulated JIRA client")
             self.client = create_jira_client(simulated=use_simulated)
     
     def post_initial_acknowledgment(self, state: JiraAgentState) -> Optional[str]:
@@ -38,7 +39,7 @@ I'll post updates as I make progress.
             result = self.client.add_comment(state.issue_key, body)
             return result.get("id") if result else None
         except Exception as e:
-            print(f"[Reporter] Error posting acknowledgment: {e}")
+            logger.error(f"Error posting acknowledgment: {e}")
             return None
     
     def post_plan_summary(self, state: JiraAgentState, plan_content: str) -> Optional[str]:
@@ -113,7 +114,7 @@ The full plan is available at: `{state.plan_path}`
     ) -> Optional[str]:
         """Post completion message."""
         if state is None:
-            print("[Reporter] Cannot post completion: state is None")
+            logger.error("Cannot post completion: state is None")
             return None
             
         changes_section = ""
@@ -163,7 +164,7 @@ The full plan is available at: `{state.plan_path}`
     ) -> Optional[str]:
         """Post error message."""
         if state is None:
-            print("[Reporter] Cannot post error: state is None")
+            logger.error("Cannot post error: state is None")
             return None
             
         suggestion_section = f"\n**Suggestion**: {suggestion}\n" if suggestion else ""

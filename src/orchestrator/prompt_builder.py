@@ -155,7 +155,8 @@ Be concise and actionable in your response.
         
         The review agent is expected to read files and git diff output,
         but NOT make any edits.  The body of the review instructions comes
-        from ``settings.prompt_code_review`` so it can be customised via .env.
+        from ``settings.prompt_code_review`` which loads from a markdown file
+        (default: .sisyphus/prompts/code_review.md) or falls back to inline default.
         """
         prompt = f"""# Code Review Request
 

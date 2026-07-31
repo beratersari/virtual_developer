@@ -11,6 +11,7 @@ import uvicorn
 from src.config import settings
 from src.jira.poller import JiraPoller
 from src.jira.webhook_server import create_webhook_app
+from src.logger import logger
 from src.processor import JobProcessor
 from src.state.manager import JiraStateManager
 
@@ -33,13 +34,13 @@ class JiraAgentDaemon:
         # Validate configuration
         settings.validate_or_raise()
         
-        print("=" * 60)
-        print("JIRA Virtual Developer Daemon")
-        print("=" * 60)
-        print(f"Project Root: {settings.project_root}")
-        print(f"JIRA Host: {settings.jira_host}")
-        print(f"Auto-start Plans: {settings.auto_start_plans}")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("JIRA Virtual Developer Daemon")
+        logger.info("=" * 60)
+        logger.info(f"Project Root: {settings.project_root}")
+        logger.info(f"JIRA Host: {settings.jira_host}")
+        logger.info(f"Auto-start Plans: {settings.auto_start_plans}")
+        logger.info("=" * 60)
         
         self._running = True
         
@@ -64,23 +65,23 @@ class JiraAgentDaemon:
         tasks = []
         
         # Start webhook server if enabled
-        if settings.enable_webhook:
-            print("\n📡 Starting webhook server...")
-            webhook_task = asyncio.create_task(self._start_webhook())
-            tasks.append(webhook_task)
+        #if settings.enable_webhook:
+        #    print("\n📡 Starting webhook server...")
+        #    webhook_task = asyncio.create_task(self._start_webhook())
+        #    tasks.append(webhook_task)
         
         # Start poller if enabled
-        if settings.enable_polling:
-            print("\n🔄 Starting JIRA poller...")
-            poller_task = asyncio.create_task(self._start_poller())
-            tasks.append(poller_task)
+        # if settings.enable_polling: TO DO
+        logger.info("Starting JIRA poller...")
+        poller_task = asyncio.create_task(self._start_poller())
+        tasks.append(poller_task)
         
         # Start monitoring active issues
-        print("\n👁️  Starting issue monitor...")
+        logger.info("Starting issue monitor...")
         monitor_task = asyncio.create_task(self._monitor_active_issues())
         tasks.append(monitor_task)
         
-        print("\n✅ Daemon started. Press Ctrl+C to stop.\n")
+        logger.info("Daemon started. Press Ctrl+C to stop.")
         
         # Wait for all tasks
         try:
@@ -90,7 +91,7 @@ class JiraAgentDaemon:
     
     async def stop(self):
         """Stop the daemon gracefully."""
-        print("\n\n🛑 Stopping daemon...")
+        logger.info("Stopping daemon...")
         self._running = False
         
         if self._webhook_server:
@@ -105,7 +106,7 @@ class JiraAgentDaemon:
             task.cancel()
         
         await asyncio.gather(*tasks, return_exceptions=True)
-        print("✅ Daemon stopped.")
+        logger.info("Daemon stopped.")
         sys.exit(0)
     
     async def _start_webhook(self):
@@ -127,39 +128,42 @@ class JiraAgentDaemon:
     
     async def _start_poller(self):
         """Start the JIRA poller."""
-        self._poller = JiraPoller()
+        self._poller = JiraPoller(board_id=settings.jira_board_id)
         
         # Run poller in executor since it's blocking
         loop = asyncio.get_event_loop()
+        
+        # Create async-safe handler that works from a different thread
+        def async_handler(event):
+            asyncio.run_coroutine_threadsafe(
+                self.processor.process_event(event),
+                loop
+            )
+        
         await loop.run_in_executor(
             None,
             self._poller.start,
-            self._on_issue_created,
+            async_handler,
         )
     
     async def _monitor_active_issues(self):
-        """Monitor active issues for status changes."""
         while self._running:
             try:
                 active_issues = self.state_manager.get_active_issues()
                 
                 for state in active_issues:
-                    # Check if agent task completed
-                    if state.current_task_id:
+                    if state.current_task_id and self.processor.agent_runner:
                         status = await self.processor.agent_runner.check_task_status(
                             state.current_task_id
                         )
                         
                         if status and status["status"] in ("completed", "error"):
-                            # Task finished - update state
-                            print(f"Task {state.current_task_id} {status['status']}")
+                            logger.info(f"Task {state.current_task_id} {status['status']}")
                             
-                            # Read output
                             output = self.processor.agent_runner.read_session_output(
                                 state.current_task_id
                             )
                             
-                            # Update state based on completion
                             if status["status"] == "completed":
                                 from src.state.models import TaskStatus
                                 self.state_manager.update_state(
@@ -175,11 +179,10 @@ class JiraAgentDaemon:
                                     error_message=output[:500],
                                 )
                 
-                # Check every 5 seconds
                 await asyncio.sleep(5)
                 
             except Exception as e:
-                print(f"Error monitoring issues: {e}")
+                logger.error(f"Error monitoring issues: {e}")
                 await asyncio.sleep(5)
     
     def _on_issue_created(self, event: dict):

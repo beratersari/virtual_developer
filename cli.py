@@ -55,8 +55,16 @@ def start():
 
 @cli.command()
 @click.argument("issue_key")
-def process(issue_key: str):
-    """Process a specific JIRA issue manually."""
+@click.option("--agent", "-a", default=None, help="Override agent (sisyphus, prometheus, atlas)")
+@click.option("--dry-run", is_flag=True, help="Show what would be done without running")
+def process(issue_key: str, agent: Optional[str], dry_run: bool):
+    """Process a specific JIRA issue manually.
+    
+    Examples:
+        python cli.py process SIM-1008
+        python cli.py process SIM-1008 --agent sisyphus
+        python cli.py process SIM-1008 --dry-run
+    """
     validate_config()
     from src.processor import JobProcessor
     from src.jira.client import JiraClient
@@ -67,6 +75,21 @@ def process(issue_key: str):
         issue = client.get_issue(issue_key)
         if not issue:
             console.print(f"[red]Issue {issue_key} not found[/red]")
+            console.print("\n[yellow]Tips:[/yellow]")
+            console.print("  - Check if the issue key is correct")
+            console.print("  - Verify your API token has permissions")
+            console.print(f"  - JIRA_HOST: {settings.jira_host}")
+            return
+        
+        fields = issue.get("fields", {})
+        console.print(f"[green]✓ Found issue:[/green]")
+        console.print(f"  Summary: {fields.get('summary', 'N/A')}")
+        console.print(f"  Status: {fields.get('status', {}).get('name', 'N/A')}")
+        console.print(f"  Assignee: {fields.get('assignee', {}).get('displayName', 'Unassigned')}")
+        console.print(f"  Labels: {', '.join(fields.get('labels', [])) or 'None'}")
+        
+        if dry_run:
+            console.print("\n[yellow]Dry run - not processing[/yellow]")
             return
         
         event = {
@@ -137,14 +160,16 @@ def show(issue_key: str):
     
     if state.completed_at:
         console.print(f"Completed: {state.completed_at}")
-        if state.execution_duration_seconds > 0:
-            console.print(f"Duration: {state.execution_duration_seconds:.1f} seconds")
+        if state.execution_duration_seconds:
+            duration = state.execution_duration_seconds
+            if duration > 0:
+                console.print(f"Duration: {duration:.1f} seconds")
     
     console.print(f"Task ID: {state.current_task_id}")
     console.print(f"Plan Path: {state.plan_path}")
     
     # Cost info
-    if state.estimated_cost > 0:
+    if state.estimated_cost and state.estimated_cost > 0:
         console.print(f"\n[bold]💰 Cost Information:[/bold]")
         console.print(f"  Input tokens:  {state.token_usage_input:,}")
         console.print(f"  Output tokens: {state.token_usage_output:,}")
@@ -162,11 +187,6 @@ def show(issue_key: str):
     if state.error_message:
         console.print(f"\n[bold red]Error:[/bold red]")
         console.print(state.error_message[:500])
-    
-    if state.sub_tasks:
-        console.print("\n[bold]Sub-tasks:[/bold]")
-        for task in state.sub_tasks:
-            console.print(f"  - {task.description}: {task.status}")
 
 
 @cli.command()
@@ -493,7 +513,7 @@ def test_issue(
     
     asyncio.run(run_agent())
     
-    console.print(f"\n[dim]State saved: {state_manager._get_state_path(issue_key)}[/dim]")
+    console.print(f"\n[dim]State saved in: {settings.state_dir}[/dim]")
 
 
 @cli.group()
@@ -532,20 +552,30 @@ def start_server(port: int, webhook_port: int, webhook_secret: str):
 @click.option("--description", "-d", required=True, help="Issue description")
 @click.option("--assignee", "-a", default="DevBot", help="Assignee username")
 @click.option("--labels", "-l", default="ai-assist", help="Comma-separated labels")
+@click.option("--issue-key", "-k", help="Manual issue key to use (e.g., VOLKAN-9683)")
 @click.option("--server", default="http://localhost:7001", help="Simulated JIRA server URL")
-def create_issue(summary: str, description: str, assignee: str, labels: str, server: str):
-    """Create a new issue in the simulated JIRA (webhook triggered automatically)."""
+@click.option("--no-comment", is_flag=True, help="Skip adding comments to real Jira")
+def create_issue(summary: str, description: str, assignee: str, labels: str, issue_key: Optional[str], server: str, no_comment: bool):
+    """Create a new issue in the simulated JIRA (webhook triggered automatically).
+    
+    Use --issue-key to specify a real Jira issue key (must exist in real Jira).
+    
+    Examples:
+        python cli.py simulate create-issue -s "Title" -d "Desc"
+        python cli.py simulate create-issue -s "Title" -d "Desc" -k VOLKAN-9683
+        python cli.py simulate create-issue -s "Title" -d "Desc" -k VOLKAN-9683 --no-comment
+    """
     from src.jira.simulated_client import SimulatedJiraClient
     
     labels_list = [l.strip() for l in labels.split(",") if l.strip()]
     
     with SimulatedJiraClient(base_url=server) as client:
-        # Create the issue — server auto-triggers webhook on POST /api/issues
         issue = client.create_issue(
             summary=summary,
             description=description,
             assignee=assignee,
             labels=labels_list,
+            key=issue_key,
         )
         
         if issue:
@@ -553,6 +583,11 @@ def create_issue(summary: str, description: str, assignee: str, labels: str, ser
             console.print(f"Summary: {issue['summary']}")
             console.print(f"Status: {issue['status']}")
             console.print(f"Assignee: {issue['assignee']}")
+            if issue_key:
+                console.print(f"[yellow]⚠ Using manual key: {issue_key}[/yellow]")
+                console.print(f"[dim]Comments will be posted to real Jira issue {issue_key}[/dim]")
+                if no_comment:
+                    console.print(f"[dim]Comments disabled with --no-comment[/dim]")
             console.print()
             console.print(f"[dim]Webhook triggered automatically by simulated server[/dim]")
         else:

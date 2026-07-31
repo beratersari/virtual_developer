@@ -317,9 +317,14 @@ python cli.py simulate start-server --port 7001 --webhook-port 7000
 # Create a new issue and notify the bot
 python cli.py simulate create-issue \
   --summary "Task title" \
-  --description "Task description" \
+  --description "Create a main.py file add "2+3" then open a pr" \
   --assignee "DevBot" \
   --labels "ai-assist"
+
+
+python cli.py simulate create-issue --summary "Task title"  --description "Create a main.py file add '2+3' "  --assignee "DevBot"  --labels "ai-assist"
+
+set NODE_EXTRA_CA_CERTS=
 
 # Manually notify the bot about an issue
 python cli.py simulate notify \
@@ -951,21 +956,6 @@ taskkill /PID <PID> /F
 3. **Network**: Use HTTPS in production (reverse proxy recommended)
 4. **Permissions**: Use dedicated JIRA user with minimal permissions
 5. **Rate Limiting**: JIRA has API rate limits (check your plan)
-
-Anlık buglar ve gelistirme onerileri:
- - oh-my-code yerine opencode kullanmalı env'de
- - mr akışı düzeltilmeli commit agent'a checkout, push, mr açma kod ile yapılmalı. mr açarken agent'ın attığı son commit başlık olarak kullanılmalı
- - rules/ dosyası oluşturup her adım için md dosyaları buraya eklenip koda bir path ile linklenmeli. fallbackleri olmalı çünkü her proje farklı md dosyalarına sahip olacak
- - jira client http verify false yap
- - dosya silerken permission hatası veriyor git dosyalarında. git dosyalarının bazı bitleri sadece readonly bu durumdan dolayı hata veriyor bunu daha katı hale getir
- - jira username bağımlılığını kaldır sadece pat kullansa ok
- - kod içinde default model hardcoded girilmiş .env'e eklenmeli
- - docker file'a glab kurulumu eklenmeli
- - mr var ise direkt pushlasın
- - default branch develop olarak eklenmelı eger yoksa main'fallback yapmalı
- - logger sistemi daha iyi hale getirmeli, daha düzenli loglar basılmalı. farklı processler aynı anda log bastığı için birbirine giriyor
- - ayni anda birden fazla taski ele alabilmek icin her zaman her trigger icin temp dizininde unique bir has ile projeyi klonlamali ve tum islemlerini ilgili dizin uzerinde yapmali. bu sayede paralelde 5-10 farkli jira maddesi ayni anda islenmis olacaktir.
- - prompt dosyalari duzgunce okunmali
 
 ## License
 

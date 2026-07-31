@@ -51,7 +51,7 @@ sample_project/.jira-agent/
 sample_project/.venv/
 sample_project/src/calculator/__pycache__/
 sample_project/tests/__pycache__/
-
+.temp/
 # OS
 .DS_Store
 Thumbs.db

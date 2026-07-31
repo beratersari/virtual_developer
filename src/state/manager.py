@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
+from src.logger import logger
 from src.state.models import JiraAgentState, TaskStatus
 
 # ANSI color codes for state transition logging
@@ -44,13 +45,8 @@ def _log_state_transition(issue_key: str, old_status: TaskStatus, new_status: Ta
     bold = _COLORS["bold"]
     dim = _COLORS["dim"]
 
-    print(
-        f"{dim}[{timestamp}]{reset} "
-        f"{bold}[StateTransition]{reset} "
-        f"{bold}{issue_key}{reset}: "
-        f"{old_color}{old_status.value}{reset}"
-        f" → "
-        f"{new_color}{bold}{new_status.value}{reset}"
+    logger.info(
+        f"[StateTransition] {issue_key}: {old_status.value} -> {new_status.value}"
     )
 
 
@@ -78,7 +74,7 @@ class JiraStateManager:
                 data = json.load(f)
             return JiraAgentState.from_dict(data)
         except Exception as e:
-            print(f"[StateManager] Error loading state for {issue_key}: {e}")
+            logger.error(f"Error loading state for {issue_key}: {e}")
             return None
     
     def set_state(self, state: JiraAgentState) -> None:
@@ -100,7 +96,7 @@ class JiraStateManager:
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump(state.to_dict(), f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"[StateManager] Error saving state for {state.issue_key}: {e}")
+            logger.error(f"Error saving state for {state.issue_key}: {e}")
     
     def create_state(
         self,
@@ -116,12 +112,8 @@ class JiraStateManager:
         bold = _COLORS["bold"]
         reset = _COLORS["reset"]
         green = _COLORS["green"]
-        print(
-            f"{dim}[{timestamp}]{reset} "
-            f"{bold}[StateTransition]{reset} "
-            f"{bold}{issue_key}{reset}: "
-            f"{green}created{reset} → "
-            f"{_STATUS_COLORS[TaskStatus.PENDING]}{bold}{TaskStatus.PENDING.value}{reset}"
+        logger.info(
+            f"[StateTransition] {issue_key}: created -> {TaskStatus.PENDING.value}"
         )
 
         state = JiraAgentState(
@@ -144,7 +136,7 @@ class JiraStateManager:
         """Update specific fields of an existing state."""
         state = self.get_state(issue_key)
         if not state:
-            print(f"[StateManager] No state found for {issue_key}")
+            logger.warning(f"No state found for {issue_key}")
             return None
         
         # Update fields
@@ -152,7 +144,7 @@ class JiraStateManager:
             if hasattr(state, key):
                 setattr(state, key, value)
             else:
-                print(f"[StateManager] Unknown field: {key}")
+                logger.warning(f"Unknown field: {key}")
         
         self.set_state(state)
         return state
@@ -173,7 +165,7 @@ class JiraStateManager:
                 if state.status not in terminal_states:
                     active.append(state)
             except Exception as e:
-                print(f"[StateManager] Error loading {state_file}: {e}")
+                logger.error(f"Error loading {state_file}: {e}")
         
         return active
     
@@ -185,6 +177,6 @@ class JiraStateManager:
                 state_file.unlink()
                 return True
             except Exception as e:
-                print(f"[StateManager] Error deleting state for {issue_key}: {e}")
+                logger.error(f"Error deleting state for {issue_key}: {e}")
                 return False
         return False

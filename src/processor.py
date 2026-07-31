@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from src.config import settings
 from src.git_manager import GitManager
 from src.jira.client import JiraClient, create_jira_client
+from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
@@ -18,44 +19,67 @@ from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
-    
+
     def __init__(self):
+        self.git_manager: Optional[GitManager] = None
         self.state_manager = JiraStateManager()
         self.reporter = JiraReporter()
-        self.agent_runner = AgentRunner()
-        self.git_manager = GitManager()
+        self.agent_runner: Optional[AgentRunner] = None
+        
+        logger.info("Initializing JobProcessor")
+        
         # Use simulated client if JIRA not properly configured
         use_simulated = not settings.is_configured() or settings.jira_host in ['', 'a', 'https://yourcompany.atlassian.net']
         if use_simulated:
-            print("[Processor] Using simulated JIRA client")
+            logger.info("Using simulated JIRA client")
+        else:
+            logger.info("Using real JIRA client")
+        
         self.jira_client = create_jira_client(simulated=use_simulated)
+        logger.debug(f"JobProcessor initialized - default_agent: {settings.default_agent}, "
+                     f"planning_agent: {settings.planning_agent}, orchestrator_agent: {settings.orchestrator_agent}")
     
     async def process_event(self, event: Dict[str, Any]):
         """Process a JIRA webhook/poll event."""
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
         
+        logger.info(f"Processing event: {event_type} for issue: {issue_key}")
+        logger.debug(f"Event data keys: {list(event.keys())}")
+        
         # Process event (details logged to state file)
         if event_type == "jira:issue_created":
+            logger.info(f"Handling issue created event for {issue_key}")
             await self._handle_issue_created(event)
         elif event_type == "jira:issue_updated":
+            logger.info(f"Handling issue updated event for {issue_key}")
             await self._handle_issue_updated(event)
         elif event_type == "comment_created":
+            logger.info(f"Handling comment created event for {issue_key}")
             await self._handle_comment_created(event)
+        else:
+            logger.debug(f"Unknown event type: {event_type}, ignoring")
     
     async def _handle_issue_created(self, event: Dict[str, Any]):
-        """Handle new issue creation."""
         issue = event.get("issue", {})
         issue_key = issue.get("key", "unknown")
         fields = issue.get("fields", {})
         
-        # Check if already processing
+        summary = fields.get("summary", "")
+        description = fields.get("description", "") or ""
+        
+        logger.info(f"Handling issue created for {issue_key}: {summary[:80]}")
+        logger.debug(f"Issue description length: {len(description)} chars")
+        
         existing = self.state_manager.get_state(issue_key)
+        if existing and existing.status in {TaskStatus.PLANNING, TaskStatus.EXECUTING, TaskStatus.CODE_REVIEW}:
+            logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
+            return
+        
         if existing:
-            # Allow reprocessing if previous run completed, failed, or was cancelled
-            terminal_states = {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}
-            if existing.status in terminal_states:
-                # Reset state for reprocessing instead of deleting
+            logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
+            if existing.status in {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}:
+                logger.info(f"Resetting {issue_key} from {existing.status.value} to PENDING for reprocessing")
                 self.state_manager.update_state(
                     issue_key,
                     status=TaskStatus.PENDING,
@@ -64,36 +88,39 @@ class JobProcessor:
                     current_task_id=None,
                     current_opencode_session_id=None,
                 )
-            else:
-                return
+                refreshed = self.state_manager.get_state(issue_key)
+                if refreshed:
+                    existing = refreshed
+            state = existing
+            workflow_type = WorkflowRouter.route_issue(issue_key, state.issue_summary, state.description)
+            state.metadata["workflow_type"] = workflow_type.value
+            self.state_manager.set_state(state)
+            logger.info(f"Determined workflow type: {workflow_type.value} for existing issue {issue_key}")
+        else:
+            assignee_data = fields.get("assignee")
+            assignee = assignee_data.get("displayName") if assignee_data else None
+            
+            workflow_type = WorkflowRouter.route_issue(issue_key, summary, description)
+            logger.info(f"Determined workflow type: {workflow_type.value} for new issue {issue_key}")
+            
+            state = self.state_manager.create_state(
+                issue_key=issue_key,
+                issue_summary=summary,
+                description=description,
+                triggered_by="webhook",
+                jira_assignee=assignee,
+            )
+            state.metadata["workflow_type"] = workflow_type.value
+            self.state_manager.set_state(state)
+            logger.info(f"Created new state for {issue_key} with workflow type: {workflow_type.value}")
         
-        # Extract issue details
-        summary = fields.get("summary", "")
-        description = fields.get("description", "") or ""
-        assignee_data = fields.get("assignee")
-        assignee = assignee_data.get("displayName") if assignee_data else None
-        
-        # Determine workflow
-        workflow_type = WorkflowRouter.route_issue(issue_key, summary, description)
-        
-        # Create state
-        state = self.state_manager.create_state(
-            issue_key=issue_key,
-            issue_summary=summary,
-            description=description,
-            triggered_by="webhook",
-            jira_assignee=assignee,
-        )
-        state.metadata["workflow_type"] = workflow_type.value
-        self.state_manager.set_state(state)
-        
-        # Post acknowledgment
         try:
+            logger.debug(f"Posting initial acknowledgment for {issue_key}")
             self.reporter.post_initial_acknowledgment(state)
         except Exception as e:
-            pass
+            logger.warning(f"Failed to post initial acknowledgment for {issue_key}: {e}")
         
-        # Route to appropriate handler
+        logger.info(f"Starting {workflow_type.value} workflow for {issue_key}")
         if workflow_type == WorkflowType.PLANNING:
             await self._start_planning_workflow(state)
         elif workflow_type == WorkflowType.DIRECT_EXECUTION:
@@ -102,14 +129,44 @@ class JobProcessor:
             await self._start_oracle_consultation(state)
     
     async def _handle_issue_updated(self, event: Dict[str, Any]):
-        """Handle issue updates (labels, assignee changes)."""
         issue = event["issue"]
         issue_key = issue["key"]
+        fields = issue.get("fields", {})
+        status_data = fields.get("status", {})
+        status_name = status_data.get("name", "")
         
-        # Check if we should start processing
         state = self.state_manager.get_state(issue_key)
+        
+        logger.debug(f"Issue {issue_key} - Event status: '{status_name}', State status: {state.status.value if state else 'NO_STATE'}")
+
         if not state:
-            # New trigger - treat as creation
+            await self._handle_issue_created(event)
+            return
+        
+        if status_name and status_name.upper() == "TO DO":
+            if state.status not in {TaskStatus.PENDING, TaskStatus.PLAN_READY}:
+                logger.info(f"{issue_key} moved back to TO DO from {state.status.value}, reprocessing...")
+                self.state_manager.update_state(
+                    issue_key,
+                    status=TaskStatus.PENDING,
+                    progress_percentage=0,
+                    error_message=None,
+                    current_task_id=None,
+                    current_opencode_session_id=None,
+                )
+                await self._handle_issue_created(event)
+                return
+        
+        if state.status in {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}:
+            logger.info(f"Reprocessing {issue_key} from terminal state: {state.status.value}")
+            self.state_manager.update_state(
+                issue_key,
+                status=TaskStatus.PENDING,
+                progress_percentage=0,
+                error_message=None,
+                current_task_id=None,
+                current_opencode_session_id=None,
+            )
             await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
@@ -156,8 +213,7 @@ class JobProcessor:
                 self.reporter.post_comment_response(issue_key, "No active work found for this issue.")
         
         elif cmd_lower.startswith("/cancel"):
-            # Cancel current work
-            if state and state.current_task_id:
+            if state and state.current_task_id and self.agent_runner:
                 self.agent_runner.cancel_task(state.current_task_id)
                 self.state_manager.update_state(issue_key, status=TaskStatus.CANCELLED)
                 self.reporter.post_comment_response(issue_key, "Work cancelled.")
@@ -166,14 +222,23 @@ class JobProcessor:
             # Treat as a direct request
             await self._handle_direct_request(issue_key, command)
     
+    def _init_git_manager(self, issue_key: str) -> GitManager:
+        logger.info(f"Initializing git manager for {issue_key}")
+        self.git_manager = GitManager(issue_key=issue_key)
+        working_dir = self.git_manager.get_working_directory()
+        logger.debug(f"Working directory: {working_dir}")
+        self.agent_runner = AgentRunner(working_directory=working_dir)
+        logger.debug(f"AgentRunner initialized with working directory: {working_dir}")
+        return self.git_manager
+
     async def _start_planning_workflow(self, state: JiraAgentState):
-        """Start Prometheus planning workflow."""
-        # Workflow started (logs go to state file)
+        logger.info(f"Starting planning workflow for {state.issue_key}")
+        git = self._init_git_manager(state.issue_key)
+        branch_name = git.ensure_feature_branch(state.issue_key)
+        logger.info(f"Feature branch ready: {branch_name}")
 
-        # Ensure we're on a feature branch before making changes
-        self.git_manager.ensure_feature_branch(state.issue_key)
+        assert self.agent_runner is not None, "AgentRunner not initialized"
 
-        # Track actual workflow start time (before any retries)
         workflow_start_time = datetime.now()
 
         # Create task first
@@ -276,12 +341,9 @@ class JobProcessor:
 
         # Check result
         if result["returncode"] == 0:
-            # Plan created successfully — commit it
-            self.git_manager.commit_changes(
-                issue_key=state.issue_key,
-                summary=f"Plan for {state.issue_key}",
-                description=state.description,
-            )
+            # Agent should have already committed the plan
+            # Push branch to remote and create merge request for the plan
+            await self._push_and_create_mr(state)
 
             plan_path = settings.full_plans_dir / f"{state.issue_key}.md"
             plan_content = ""
@@ -324,13 +386,13 @@ class JobProcessor:
             )
     
     async def _start_execution_workflow(self, state: JiraAgentState):
-        """Start Atlas execution workflow."""
-        # Execution workflow started (logs go to state file)
+        logger.info(f"Starting execution workflow for {state.issue_key}")
+        git = self._init_git_manager(state.issue_key)
+        branch_name = git.ensure_feature_branch(state.issue_key)
+        logger.info(f"Feature branch ready: {branch_name}")
 
-        # Ensure we're on a feature branch before making changes
-        self.git_manager.ensure_feature_branch(state.issue_key)
+        assert self.agent_runner is not None, "AgentRunner not initialized"
 
-        # Track actual workflow start time (before any retries)
         workflow_start_time = datetime.now()
 
         # Create task first
@@ -431,12 +493,9 @@ class JobProcessor:
 
         # Check result
         if result["returncode"] == 0:
-            # Commit changes made by Atlas
-            self.git_manager.commit_changes(
-                issue_key=state.issue_key,
-                summary=f"Execution for {state.issue_key}",
-                description=state.description,
-            )
+            # Agent should have already committed changes
+            # Push branch to remote and create merge request
+            await self._push_and_create_mr(state)
 
             self.state_manager.update_state(
                 state.issue_key,
@@ -463,13 +522,15 @@ class JobProcessor:
             )
     
     async def _start_direct_execution(self, state: JiraAgentState):
-        """Start direct Sisyphus execution."""
-        # Direct execution started (logs go to state file)
+        logger.info(f"Starting direct execution workflow for {state.issue_key}")
+        logger.debug(f"Using agent: {settings.default_agent}, category: {settings.execution_category}")
+        
+        git = self._init_git_manager(state.issue_key)
+        branch_name = git.ensure_feature_branch(state.issue_key)
+        logger.info(f"Feature branch ready: {branch_name}")
 
-        # Ensure we're on a feature branch before making changes
-        self.git_manager.ensure_feature_branch(state.issue_key)
+        assert self.agent_runner is not None, "AgentRunner not initialized"
 
-        # Track actual workflow start time (before any retries)
         workflow_start_time = datetime.now()
 
         # Create task with category
@@ -582,12 +643,9 @@ class JobProcessor:
         
         # Handle result
         if result["returncode"] == 0:
-            # Commit changes to the feature branch
-            self.git_manager.commit_changes(
-                issue_key=state.issue_key,
-                summary=state.issue_summary,
-                description=state.description,
-            )
+            # Agent has already committed changes
+            # Now push to remote and create merge request
+            await self._push_and_create_mr(state)
 
             self.state_manager.update_state(
                 state.issue_key,
@@ -632,7 +690,7 @@ class JobProcessor:
         review_model = settings.code_review_model
         review_agent = settings.code_review_agent
 
-        print(f"[CodeReview] Starting code review for {state.issue_key} using model={review_model}, agent={review_agent}")
+        logger.info(f"Starting code review for {state.issue_key} using model={review_model}, agent={review_agent}")
 
         # Transition to CODE_REVIEW state
         self.state_manager.update_state(
@@ -642,6 +700,7 @@ class JobProcessor:
         )
 
         # Build the code review prompt
+        logger.debug(f"Building code review prompt for {state.issue_key}")
         review_prompt = PromptBuilder.build_code_review_prompt(
             issue_key=state.issue_key,
             summary=state.issue_summary,
@@ -655,8 +714,10 @@ class JobProcessor:
             prompt=review_prompt,
             agent=review_agent,
             issue_key=state.issue_key,
-            model=review_model,  # Use the free model for review
+            model=review_model,
+            task_type="review",
         )
+        logger.debug(f"Review task created: {review_task.description}")
 
         # Run the review agent (no retry — review is best-effort)
         def on_output(stream: str, line: str):
@@ -679,7 +740,7 @@ class JobProcessor:
                 f"Code review could not be completed (return code: {review_result.get('returncode')}).\n"
                 f"Error: {review_result.get('stderr', 'unknown error')[:500]}"
             )
-            print(f"[CodeReview] Review failed for {state.issue_key}, proceeding to completion anyway")
+            logger.warning(f"Review failed for {state.issue_key}, proceeding to completion anyway")
 
         # Store review result and transition to COMPLETED
         completed_at = datetime.now()
@@ -691,24 +752,90 @@ class JobProcessor:
             code_review_result=review_text[:5000],  # Cap stored review text
             code_review_model=review_model,
         )
+        logger.info(f"State updated to COMPLETED for {state.issue_key}")
 
         # Post review results to JIRA
         try:
+            logger.debug(f"Posting code review results to JIRA for {state.issue_key}")
             self.reporter.post_code_review(
                 self.state_manager.get_state(state.issue_key),
                 review_result=review_text,
                 review_model=review_model,
             )
         except Exception as e:
-            print(f"[CodeReview] Failed to post review to JIRA: {e}")
+            logger.error(f"Failed to post review to JIRA: {e}")
+        
+        try:
+            mr_url = state.metadata.get("merge_request_url")
+
+            if not mr_url and self.git_manager:
+                mr_url = self.git_manager.get_mr_url()
+
+            if mr_url and self.git_manager:
+                mr_comment = f"""## Automated Code Review
+
+**Model**: `{review_model}`
+
+{review_text[:2000]}
+
+---
+*Code review performed automatically by AI agent. Please verify findings before merging.*
+"""
+                logger.info(f"Adding review comment to MR: {mr_url}")
+                self.git_manager.add_mr_comment(mr_url, mr_comment)
+            else:
+                logger.warning(f"No MR found for {state.issue_key}, skipping MR comment")
+        except Exception as e:
+            logger.error(f"Failed to post review to MR: {e}")
 
         # Post final completion
+        logger.info(f"Posting final completion for {state.issue_key}")
         self.reporter.post_completion(
             self.state_manager.get_state(state.issue_key),
             summary=execution_summary,
         )
 
-        print(f"[CodeReview] Code review completed for {state.issue_key}")
+        logger.info(f"Code review completed for {state.issue_key}")
+
+    async def _push_and_create_mr(self, state: JiraAgentState):
+        if not self.git_manager:
+            logger.warning(f"No git manager for {state.issue_key}")
+            return
+
+        logger.info(f"Starting push and MR creation for {state.issue_key}")
+
+        branch_name = self.git_manager.get_current_branch()
+
+        push_success = self.git_manager.push(branch_name)
+        if not push_success:
+            logger.warning(f"Push failed or remote not configured for {state.issue_key}")
+            return
+
+        commit_subject = self.git_manager.get_last_commit_subject()
+        commit_body = self.git_manager.get_last_commit_message()
+
+        if commit_subject:
+            mr_title = commit_subject
+            mr_body = commit_body if commit_body else commit_subject
+        else:
+            mr_title = f"[{state.issue_key}] {state.issue_summary}"
+            mr_body = state.description or f"Implemented solution for {state.issue_key}"
+
+        target_branch = settings.default_branch.strip() if settings.default_branch else "main"
+        mr_url = self.git_manager.create_merge_request(
+            title=mr_title,
+            body=mr_body,
+            target_branch=target_branch,
+        )
+
+        if mr_url:
+            logger.info(f"Merge request created: {mr_url}")
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={"merge_request_url": mr_url},
+            )
+        else:
+            logger.warning(f"Could not create merge request for {state.issue_key}")
 
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""

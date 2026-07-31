@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from src.config import settings
+from src.logger import logger
 
 # Event handler type
 EventHandler = Callable[[Dict[str, Any]], None]
@@ -46,23 +47,23 @@ def create_webhook_app(
         project = fields.get("project", {}).get("key", "")
         if project and settings.jira_projects_list and settings.jira_projects_list != ['']:
             if project not in settings.jira_projects_list:
-                print(f"[Webhook] Ignoring issue: project '{project}' not in {settings.jira_projects_list}")
+                logger.info(f"Ignoring issue: project '{project}' not in {settings.jira_projects_list}")
                 return False
-        
+
         # Check labels
         labels = fields.get("labels", [])
         if any(label in settings.trigger_labels_list for label in labels):
-            print(f"[Webhook] Processing issue: matched label in {labels}")
+            logger.info(f"Processing issue: matched label in {labels}")
             return True
-        
+
         # Check assignee
         if settings.trigger_on_assignment:
             assignee = fields.get("assignee")
             if assignee:
-                print(f"[Webhook] Processing issue: has assignee {assignee}")
+                logger.info(f"Processing issue: has assignee {assignee}")
                 return True
-        
-        print(f"[Webhook] Ignoring issue: no matching labels or assignee trigger")
+
+        logger.info(f"Ignoring issue: no matching labels or assignee trigger")
         return False
     
     def contains_trigger_mention(body: str) -> bool:
@@ -77,36 +78,36 @@ def create_webhook_app(
     ):
         """Handle incoming JIRA webhook."""
         body = await request.body()
-        
-        print(f"[Webhook] Received request to {settings.webhook_path}")
-        
+
+        logger.info(f"Received request to {settings.webhook_path}")
+
         # Verify signature if configured
         if webhook_secret and not verify_signature(body, x_hub_signature):
-            print(f"[Webhook] Invalid signature")
+            logger.warning(f"Invalid signature")
             raise HTTPException(status_code=401, detail="Invalid signature")
-        
+
         try:
             event = json.loads(body)
         except json.JSONDecodeError:
-            print(f"[Webhook] Invalid JSON")
+            logger.error(f"Invalid JSON")
             raise HTTPException(status_code=400, detail="Invalid JSON")
-        
+
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
-        
-        print(f"[Webhook] Event: {event_type}, Issue: {issue_key}")
+
+        logger.info(f"Event: {event_type}, Issue: {issue_key}")
         
         # Handle issue created
         if event_type == "jira:issue_created":
             issue = event.get("issue", {})
-            print(f"[Webhook] Checking if should process issue {issue_key}")
+            logger.debug(f"Checking if should process issue {issue_key}")
             if should_process_issue(issue):
-                print(f"[Webhook] Processing issue {issue_key}")
+                logger.info(f"Processing issue {issue_key}")
                 if on_issue_created:
                     on_issue_created(event)
                 return {"status": "processed", "event": "issue_created", "issue": issue_key}
             else:
-                print(f"[Webhook] Issue {issue_key} ignored by filters")
+                logger.info(f"Issue {issue_key} ignored by filters")
         
         # Handle issue updated (labels, assignee)
         elif event_type == "jira:issue_updated":
@@ -119,7 +120,7 @@ def create_webhook_app(
             
             if any(item.get("field") in relevant_changes for item in items):
                 if should_process_issue(issue):
-                    print(f"[Webhook] Processing issue update {issue_key}")
+                    logger.info(f"Processing issue update {issue_key}")
                     if on_issue_updated:
                         on_issue_updated(event)
                     return {"status": "processed", "event": "issue_updated", "issue": issue_key}
@@ -130,12 +131,12 @@ def create_webhook_app(
             body_text = comment.get("body", "")
             
             if contains_trigger_mention(body_text):
-                print(f"[Webhook] Processing comment on {issue_key}")
+                logger.info(f"Processing comment on {issue_key}")
                 if on_comment_added:
                     on_comment_added(event)
                 return {"status": "processed", "event": "comment_added", "issue": issue_key}
-        
-        print(f"[Webhook] Event ignored: {event_type}")
+
+        logger.debug(f"Event ignored: {event_type}")
         return {"status": "ignored", "event": event_type, "issue": issue_key}
     
     @app.get("/health")
