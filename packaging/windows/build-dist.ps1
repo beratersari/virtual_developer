@@ -446,6 +446,20 @@ New-ZipFromDirectory -SourceDir $ocHome -ZipPath $ocHomeZip
 $ocZipSize = (Get-Item -LiteralPath $ocHomeZip).Length
 Write-Host ("  OpenCode home archive: {0:N1} MB" -f ($ocZipSize / 1MB))
 
+# Prove the archive still contains a full AMD64 opencode.exe (not a 21-byte stub)
+$verifyDir = Join-Path $env:TEMP ("vd-oc-verify-" + [guid]::NewGuid().ToString("n"))
+Ensure-Dir $verifyDir
+try {
+    Expand-ZipSafe $ocHomeZip $verifyDir
+    $verifyExe = Get-ChildItem -Path $verifyDir -Recurse -Filter "opencode.exe" | Select-Object -First 1
+    if (-not $verifyExe) { throw "opencode-home.zip missing opencode.exe after pack" }
+    & $assertPe -Path $verifyExe.FullName
+    if ($LASTEXITCODE -ne 0) { throw "Packed opencode.exe failed AMD64/size check" }
+    Write-Host ("  Verified packed opencode.exe ({0:N1} MB)" -f ($verifyExe.Length / 1MB))
+} finally {
+    Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 

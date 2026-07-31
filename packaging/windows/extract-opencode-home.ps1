@@ -74,14 +74,62 @@ if (-not (Test-Path -LiteralPath $exe)) {
 Get-ChildItem -LiteralPath $Dest -Recurse -File -ErrorAction SilentlyContinue |
     Unblock-File -ErrorAction SilentlyContinue
 
-# Hard-require 64-bit OpenCode (and glab when present)
-Assert-Pe -Exe $exe
-if (Test-Path -LiteralPath $glab) {
-    # glab is smaller; lower min size
+# Hard-require 64-bit OpenCode (and glab when present).
+# Retry: Windows Defender sometimes quarantines the ~170MB binary right after extract
+# and leaves a tiny stub (users see "not compatible with 64-bit Windows").
+function Wait-HealthyPe([string]$Path, [long]$MinBytes) {
     $assert = Join-Path $PSScriptRoot "Assert-Amd64Pe.ps1"
-    if (Test-Path -LiteralPath $assert) {
-        & $assert -Path $glab -MinBytes 1MB
+    $deadline = (Get-Date).AddSeconds(30)
+    $lastErr = $null
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if ((Test-Path -LiteralPath $Path) -and ((Get-Item -LiteralPath $Path).Length -ge $MinBytes)) {
+                if (Test-Path -LiteralPath $assert) {
+                    & $assert -Path $Path -MinBytes $MinBytes
+                    if ($LASTEXITCODE -eq 0) { return }
+                } else {
+                    return
+                }
+            }
+        } catch {
+            $lastErr = $_
+        }
+        Start-Sleep -Milliseconds 500
     }
+    # Restore from zip once more into a temp folder and copy over (AV race recovery)
+    Write-Host "WARNING: PE not healthy after wait; re-extracting binary from archive..."
+    $tmp2 = Join-Path $env:TEMP ("vd-oc-bin-" + [guid]::NewGuid().ToString("n"))
+    New-Item -ItemType Directory -Path $tmp2 -Force | Out-Null
+    try {
+        & tar -xf $Zip -C $tmp2
+        $fresh = Get-ChildItem -Path $tmp2 -Recurse -Filter (Split-Path $Path -Leaf) | Select-Object -First 1
+        if (-not $fresh) { throw "re-extract could not find $(Split-Path $Path -Leaf)" }
+        $binDir = Split-Path $Path -Parent
+        if (-not (Test-Path -LiteralPath $binDir)) {
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $fresh.FullName -Destination $Path -Force
+        Unblock-File -LiteralPath $Path -ErrorAction SilentlyContinue
+        & $assert -Path $Path -MinBytes $MinBytes
+        if ($LASTEXITCODE -ne 0) {
+            throw "PE still invalid after re-extract: $Path ($lastErr)"
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmp2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Wait-HealthyPe -Path $exe -MinBytes 10MB
+if (Test-Path -LiteralPath $glab) {
+    Wait-HealthyPe -Path $glab -MinBytes 1MB
+}
+
+# Smoke-start in the same process (before Defender can swap the file out mid-flight)
+Write-Host "Smoke: opencode --version"
+$verOut = & $exe --version 2>&1
+Write-Host ($verOut | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    throw "opencode --version failed after extract (exit $LASTEXITCODE)"
 }
 
 Write-Host "OpenCode home ready (AMD64): $Dest"

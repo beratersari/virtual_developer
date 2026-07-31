@@ -78,6 +78,17 @@ Write-Host "Copying payload -> $deepRoot"
 robocopy $PayloadDir $deepRoot /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy payload failed: $LASTEXITCODE" }
 
+Write-Step "Defender exclusions (large opencode.exe is often quarantined on runners)"
+$excludePaths = @($deepRoot, "C:\vd", "C:\vd\opencode")
+foreach ($ep in $excludePaths) {
+    try {
+        Add-MpPreference -ExclusionPath $ep -ErrorAction Stop
+        Write-Host "  exclusion: $ep"
+    } catch {
+        Write-Host "  (skip exclusion $ep : $($_.Exception.Message))"
+    }
+}
+
 Write-Step "Run install.bat non-interactively"
 $env:VD_NONINTERACTIVE = "1"
 $env:VD_OPENCODE_ROOT = "C:\vd\opencode"  # short path used by product
@@ -88,6 +99,10 @@ if (Test-Path -LiteralPath $env:VD_OPENCODE_ROOT) {
 $installBat = Join-Path $deepRoot "install.bat"
 $p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$installBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
 if ($p.ExitCode -ne 0) {
+    $oc = Join-Path $env:VD_OPENCODE_ROOT "bin\opencode.exe"
+    if (Test-Path -LiteralPath $oc) {
+        Write-Host "DEBUG opencode.exe size after failed install: $((Get-Item $oc).Length)"
+    }
     throw "install.bat failed with exit code $($p.ExitCode)"
 }
 

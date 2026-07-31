@@ -231,40 +231,36 @@ if not exist "%OPENCODE_BIN%\opencode.exe" (
 )
 echo [OK] opencode.exe -> %OPENCODE_BIN%\opencode.exe
 
-REM Verify 64-bit PE and clear Mark-of-the-Web (blocked internet downloads)
-set "ASSERT_PE=%SCRIPT_DIR%\packaging\windows\Assert-Amd64Pe.ps1"
-if exist "%ASSERT_PE%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%ASSERT_PE%" -Path "%OPENCODE_BIN%\opencode.exe"
-    if errorlevel 1 (
-        echo [ERROR] opencode.exe is not a valid 64-bit ^(AMD64^) binary.
-        echo This package only supports 64-bit Windows with the official x64 OpenCode build.
-        echo Delete "%%USERPROFILE%%\.opencode" and re-install from a fresh package.
-        call :maybe_pause
-        exit /b 1
-    )
+REM extract-opencode-home.ps1 already verified AMD64 + opencode --version.
+REM Re-check size here: if antivirus replaced the binary with a tiny stub, fail clearly.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$p='%OPENCODE_BIN%\opencode.exe'; $i=Get-Item -LiteralPath $p -ErrorAction Stop; if ($i.Length -lt 10MB) { Write-Host ('ERROR: opencode.exe is only {0} bytes (antivirus quarantine or bad extract). Expected ~170MB.' -f $i.Length); exit 1 }; Write-Host ('OK size {0:N1} MB' -f ($i.Length/1MB)); exit 0"
+if errorlevel 1 (
+    echo.
+    echo [ERROR] OpenCode binary is missing or was replaced by a tiny stub.
+    echo Windows Defender / AV often quarantines large new EXEs and leaves a broken file.
+    echo That surfaces as "not compatible with 64-bit versions of Windows".
+    echo.
+    echo Fix:
+    echo   1. Windows Security -^> Virus ^& threat protection -^> Protection history
+    echo      Restore opencode.exe if quarantined, or allow it.
+    echo   2. Add exclusion for: %OPENCODE_HOME%
+    echo   3. rmdir /s /q "%OPENCODE_HOME%"
+    echo   4. Re-run install.bat
+    call :maybe_pause
+    exit /b 1
 )
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%OPENCODE_BIN%' -File | Unblock-File -ErrorAction SilentlyContinue"
 
 echo Smoke-testing opencode --version ...
 "%OPENCODE_BIN%\opencode.exe" --version
 if errorlevel 1 (
     echo [ERROR] opencode.exe failed to start.
-    echo.
-    echo This package ships the official **64-bit (AMD64)** OpenCode for 64-bit Windows.
-    echo If Windows says the app is incompatible with 64-bit Windows, the file is usually
-    echo corrupt/incomplete ^(bad extract^) or an old 16/32-bit binary is on PATH.
-    echo.
-    echo Fix:
-    echo   1. rmdir /s /q "%OPENCODE_HOME%"
-    echo   2. rmdir /s /q "%%USERPROFILE%%\.opencode" 2^>nul
-    echo   3. Re-download the latest Actions artifact and extract once
-    echo   4. Run install.bat again
-    echo   5. In a NEW terminal: where opencode
-    echo      It must resolve to %OPENCODE_BIN%\opencode.exe
+    echo Check Windows Defender quarantine and PATH ^(where opencode^).
+    echo Expected: %OPENCODE_BIN%\opencode.exe
     call :maybe_pause
     exit /b 1
 )
-echo [OK] opencode runs ^(64-bit^)
+echo [OK] opencode runs ^(64-bit AMD64^)
 
 call :link_user_opencode_home
 
