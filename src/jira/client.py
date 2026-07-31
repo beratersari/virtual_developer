@@ -59,7 +59,8 @@ class JiraClient:
             timeout=30.0,
             verify=False,
         )
-    
+        self.is_cloud = "atlassian.net" in self.host.lower()
+
     def create_issue(
         self,
         project: str,
@@ -261,12 +262,80 @@ class JiraClient:
             return False
     
     def transition_to_in_progress(self, issue_key: str) -> bool:
-        """Transition an issue to 'In Progress' status."""
+        """Transition an issue toward an In Progress-like status.
+
+        * **On-prem (unchanged):** transition whose name contains ``in progress``.
+        * **Cloud (atlassian.net):** also match locale names (e.g. Turkish
+          ``Devam Ediyor``) and prefer destination statusCategory
+          ``indeterminate``, skipping review-like transitions.
+        """
         transitions = self.get_transitions(issue_key)
+        if not transitions:
+            logger.warning(f"No transitions available for {issue_key}")
+            return False
+
+        # --- On-prem / default: exact previous behaviour ---
+        if not self.is_cloud:
+            for t in transitions:
+                if "in progress" in t["name"].lower():
+                    return self.do_transition(issue_key, t["id"])
+            logger.warning(f"No 'In Progress' transition found for {issue_key}")
+            return False
+
+        # --- Cloud: locale-safe matching ---
+        name_hints = (
+            "in progress",
+            "devam ediyor",
+            "start progress",
+            "start work",
+            "başlat",
+            "baslat",
+            "işlemde",
+            "islemde",
+            "doing",
+            "wip",
+        )
+        review_hints = (
+            "review",
+            "inceleme",
+            "peer",
+            "code review",
+            "qa",
+        )
+
+        def _is_review(name: str) -> bool:
+            return any(h in name for h in review_hints)
+
+        # 1) Prefer transition name hints (exclude review)
         for t in transitions:
-            if "in progress" in t["name"].lower():
+            name = (t.get("name") or "").lower()
+            if _is_review(name):
+                continue
+            if any(h in name for h in name_hints):
+                logger.info(
+                    f"Cloud transition for {issue_key}: '{t.get('name')}' (id={t.get('id')})"
+                )
                 return self.do_transition(issue_key, t["id"])
-        logger.warning(f"No 'In Progress' transition found for {issue_key}")
+
+        # 2) Prefer first non-review transition into statusCategory=indeterminate
+        for t in transitions:
+            name = (t.get("name") or "").lower()
+            if _is_review(name):
+                continue
+            to = t.get("to") or {}
+            cat = ((to.get("statusCategory") or {}).get("key") or "").lower()
+            if cat == "indeterminate":
+                logger.info(
+                    f"Cloud transition for {issue_key}: '{t.get('name')}' "
+                    f"(id={t.get('id')}, category=indeterminate)"
+                )
+                return self.do_transition(issue_key, t["id"])
+
+        names = [t.get("name") for t in transitions]
+        logger.warning(
+            f"No In Progress-like transition found for {issue_key} "
+            f"(cloud). Available: {names}"
+        )
         return False
     
     def add_comment(self, issue_key: str, body: str) -> Optional[Dict[str, Any]]:

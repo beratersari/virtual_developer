@@ -232,29 +232,31 @@ class JobProcessor:
             )
             return
 
-        # Terminal → reprocess only when Jira status is explicitly TO DO (user reopened)
+        # Locale-safe To Do (English "To Do", Turkish "Yapılacaklar", statusCategory=new)
+        from src.jira.poller import JiraPoller
+
+        is_todo = JiraPoller._is_todo_status(fields)
+
+        # Terminal → reprocess only when Jira is To Do (user reopened / left in todo)
         if state.status in self.TERMINAL_STATUSES:
-            if status_name and status_name.upper() == "TO DO":
+            if is_todo:
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
-                    f"(Jira status TO DO)"
+                    f"(Jira status '{status_name}' is To Do)"
                 )
                 self._reset_for_reprocess(issue_key)
                 await self._handle_issue_created(event)
             else:
                 logger.debug(
                     f"{issue_key} is {state.status.value}; Jira status "
-                    f"'{status_name}' is not TO DO — not reprocessing"
+                    f"'{status_name}' is not To Do — not reprocessing"
                 )
             return
 
-        # Non-terminal waiting states (PENDING, PLAN_READY): only restart from TO DO
-        # if somehow stuck outside normal paths (PENDING with no active work is rare)
-        if status_name and status_name.upper() == "TO DO":
-            if state.status == TaskStatus.PENDING:
-                # Allow re-kick of PENDING if a create path never started work
-                logger.info(f"{issue_key} is PENDING and still TO DO, starting work...")
-                await self._handle_issue_created(event)
+        # Non-terminal waiting states (PENDING, PLAN_READY): re-kick PENDING if still To Do
+        if is_todo and state.status == TaskStatus.PENDING:
+            logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
+            await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
