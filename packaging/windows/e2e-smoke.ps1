@@ -78,8 +78,20 @@ Write-Host "Copying payload -> $deepRoot"
 robocopy $PayloadDir $deepRoot /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy payload failed: $LASTEXITCODE" }
 
-Write-Step "Defender exclusions (large opencode.exe is often quarantined on runners)"
-$excludePaths = @($deepRoot, "C:\vd", "C:\vd\opencode")
+Write-Step "Defender: disable realtime + exclusions (runner quarantine eats opencode.exe)"
+try {
+    Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+    Write-Host "  realtime monitoring disabled"
+} catch {
+    Write-Host "  (could not disable realtime: $($_.Exception.Message))"
+}
+$excludePaths = @(
+    $deepRoot,
+    "C:\vd",
+    "C:\vd\opencode",
+    (Join-Path $deepRoot "vendor\bin"),
+    (Join-Path $PayloadDir "vendor\bin")
+)
 foreach ($ep in $excludePaths) {
     try {
         Add-MpPreference -ExclusionPath $ep -ErrorAction Stop
@@ -87,6 +99,13 @@ foreach ($ep in $excludePaths) {
     } catch {
         Write-Host "  (skip exclusion $ep : $($_.Exception.Message))"
     }
+}
+# Prefer process exclusion for the binary name when possible
+try {
+    Add-MpPreference -ExclusionProcess "opencode.exe" -ErrorAction Stop
+    Write-Host "  exclusion process: opencode.exe"
+} catch {
+    Write-Host "  (skip process exclusion: $($_.Exception.Message))"
 }
 
 Write-Step "Run install.bat non-interactively"

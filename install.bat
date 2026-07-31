@@ -231,22 +231,21 @@ if not exist "%OPENCODE_BIN%\opencode.exe" (
 )
 echo [OK] opencode.exe -> %OPENCODE_BIN%\opencode.exe
 
-REM extract-opencode-home.ps1 already verified AMD64 + opencode --version.
-REM Re-check size here: if antivirus replaced the binary with a tiny stub, fail clearly.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$p='%OPENCODE_BIN%\opencode.exe'; $i=Get-Item -LiteralPath $p -ErrorAction Stop; if ($i.Length -lt 10MB) { Write-Host ('ERROR: opencode.exe is only {0} bytes (antivirus quarantine or bad extract). Expected ~170MB.' -f $i.Length); exit 1 }; Write-Host ('OK size {0:N1} MB' -f ($i.Length/1MB)); exit 0"
+REM Antivirus may replace opencode.exe with a ~21-byte stub after extract.
+REM Restore from flat vendor\bin backup (short path, not nested in zip).
+call :ensure_opencode_binary
 if errorlevel 1 (
     echo.
-    echo [ERROR] OpenCode binary is missing or was replaced by a tiny stub.
-    echo Windows Defender / AV often quarantines large new EXEs and leaves a broken file.
-    echo That surfaces as "not compatible with 64-bit versions of Windows".
+    echo [ERROR] Could not install a healthy 64-bit opencode.exe.
+    echo Windows Defender often quarantines large EXEs right after extract.
+    echo That shows up as "not compatible with 64-bit versions of Windows".
     echo.
     echo Fix:
     echo   1. Windows Security -^> Virus ^& threat protection -^> Protection history
-    echo      Restore opencode.exe if quarantined, or allow it.
-    echo   2. Add exclusion for: %OPENCODE_HOME%
-    echo   3. rmdir /s /q "%OPENCODE_HOME%"
-    echo   4. Re-run install.bat
+    echo      Allow/restore opencode.exe
+    echo   2. Add folder exclusion: %OPENCODE_HOME%
+    echo   3. Also exclude: %VENDOR_DIR%\bin
+    echo   4. rmdir /s /q "%OPENCODE_HOME%"  ^&  re-run install.bat
     call :maybe_pause
     exit /b 1
 )
@@ -254,9 +253,7 @@ if errorlevel 1 (
 echo Smoke-testing opencode --version ...
 "%OPENCODE_BIN%\opencode.exe" --version
 if errorlevel 1 (
-    echo [ERROR] opencode.exe failed to start.
-    echo Check Windows Defender quarantine and PATH ^(where opencode^).
-    echo Expected: %OPENCODE_BIN%\opencode.exe
+    echo [ERROR] opencode.exe failed to start after restore attempts.
     call :maybe_pause
     exit /b 1
 )
@@ -369,6 +366,34 @@ REM ============================================================================
 :maybe_pause
 if /i "%VD_NONINTERACTIVE%"=="1" exit /b 0
 pause
+exit /b 0
+
+:ensure_opencode_binary
+REM Ensure %OPENCODE_BIN%\opencode.exe is a full ~170MB AMD64 binary.
+REM Prefer re-copy from vendor\bin if AV ate the extracted copy.
+if not exist "%OPENCODE_BIN%" mkdir "%OPENCODE_BIN%"
+set "BACKUP_OC=%VENDOR_DIR%\bin\opencode.exe"
+set "BACKUP_GL=%VENDOR_DIR%\bin\glab.exe"
+set "TARGET_OC=%OPENCODE_BIN%\opencode.exe"
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "$target='%TARGET_OC%'; $backup='%BACKUP_OC%'; $glabTarget='%OPENCODE_BIN%\glab.exe'; $glabBackup='%BACKUP_GL%';" ^
+  "function Ok($p){ return (Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p).Length -ge 10MB) };" ^
+  "for ($i=1; $i -le 5; $i++) {" ^
+  "  if (Ok $target) { Write-Host ('OK opencode.exe attempt {0}: {1:N1} MB' -f $i, ((Get-Item $target).Length/1MB)); break };" ^
+  "  Write-Host ('Restore attempt {0}: target size={1}' -f $i, $(if(Test-Path $target){(Get-Item $target).Length}else{'missing'}));" ^
+  "  if (-not (Test-Path -LiteralPath $backup)) { throw 'Missing backup vendor\\bin\\opencode.exe' };" ^
+  "  if (-not (Ok $backup)) { throw ('Backup also unhealthy: {0} bytes' -f (Get-Item $backup).Length) };" ^
+  "  New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null;" ^
+  "  Copy-Item -LiteralPath $backup -Destination $target -Force;" ^
+  "  Unblock-File -LiteralPath $target -ErrorAction SilentlyContinue;" ^
+  "  if (Test-Path -LiteralPath $glabBackup) { Copy-Item -LiteralPath $glabBackup -Destination $glabTarget -Force; Unblock-File -LiteralPath $glabTarget -ErrorAction SilentlyContinue };" ^
+  "  Start-Sleep -Seconds 1;" ^
+  "};" ^
+  "if (-not (Ok $target)) { exit 1 };" ^
+  "exit 0"
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :link_user_opencode_home

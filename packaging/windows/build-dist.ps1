@@ -388,6 +388,16 @@ Ensure-Dir $ocBin
 
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $ocBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $ocBin "glab.exe") -Force
+# Flat backup copies OUTSIDE the nested zip — short path, easy re-copy if AV
+# quarantines the installed binary (classic 21-byte stub → "not compatible with 64-bit Windows").
+Ensure-Dir $vendor
+$vendorBin = Join-Path $vendor "bin"
+Ensure-Dir $vendorBin
+Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $vendorBin "opencode.exe") -Force
+Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $vendorBin "glab.exe") -Force
+& $assertPe -Path (Join-Path $vendorBin "opencode.exe")
+if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
+
 # Record architecture for install-time checks / support
 @(
     "OPENCODE_ARCH=win_amd64"
@@ -395,7 +405,9 @@ Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $ocBin "glab.ex
     "OPENCODE_SHA256=$ocSha"
     "OPENCODE_BYTES=$((Get-Item -LiteralPath $opencodeExe.FullName).Length)"
     "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
+    "BACKUP=vendor\bin\opencode.exe"
 ) | Set-Content -Path (Join-Path $ocBin "ARCH.txt") -Encoding UTF8
+Copy-Item -LiteralPath (Join-Path $ocBin "ARCH.txt") -Destination (Join-Path $vendorBin "ARCH.txt") -Force
 
 $pkgPath = Join-Path $ocHome "package.json"
 $pkgBody = @"
