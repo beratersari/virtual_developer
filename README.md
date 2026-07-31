@@ -190,35 +190,54 @@ bunx oh-my-opencode install
 python cli.py init
 ```
 
-#### Windows
+#### Windows (recommended: offline zip)
+
+CI builds a self-contained Windows zip (`virtual_developer-windows-x64-*.zip`) that
+already includes pinned **OpenCode**, **oh-my-opencode**, **glab**, and **Python wheels**.
 
 ```cmd
-:: Clone or copy the project
-cd jira_virtual_developer
+:: 1) Download the zip from GitHub Actions artifacts or Releases
+:: 2) Extract anywhere
+cd virtual_developer-windows-x64-*
 
-:: Run the automated install script
+:: 3) One command installs everything
 install.bat
-
-:: Or install manually:
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-
-:: Install OpenCode CLI
-npm install -g opencode
-
-:: Install oh-my-opencode plugin
-oh-my-opencode install
-
-:: Initialize project structure
-python cli.py init
 ```
 
-**Windows Requirements:**
-- Windows 10 or later
-- Python 3.8+ (from python.org or Microsoft Store)
-- Node.js (includes npm) from https://nodejs.org
-- Git for Windows (optional, for cloning)
+What `install.bat` does:
+
+| Step | Result |
+|------|--------|
+| Python venv | Creates `.venv` and installs deps from `vendor\python-wheels` (offline) |
+| OpenCode | Copies CLI + config + plugin to **`%USERPROFILE%\.opencode`** |
+| glab | Places `glab.exe` in `%USERPROFILE%\.opencode\bin` |
+| PATH | Adds `%USERPROFILE%\.opencode\bin` to the **user** PATH |
+| Project | Creates `.env` from `.env.example` if missing; runs `cli.py init` |
+
+OpenCode layout after install:
+
+```text
+%USERPROFILE%\.opencode\
+  bin\opencode.exe
+  bin\glab.exe
+  opencode.json          # plugin registration
+  oh-my-opencode.json
+  package.json
+  node_modules\...       # oh-my-opencode (prebundled in the zip)
+```
+
+**Windows requirements (zip install):**
+
+- Windows 10 or later (x64)
+- **Python 3.12+** (64-bit) from https://www.python.org — enable “Add to PATH”
+- Git for Windows (recommended)
+- **No Node.js/npm required** when using the CI zip
+
+**From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
+it will download OpenCode/glab and use npm for the plugin if available.
+
+Pinned versions live in `packaging/windows/versions.env` and are refreshed by
+`.github/workflows/windows-dist.yml` on pushes to `main`/`develop` and on `v*` tags.
 
 ### 2. Configuration
 

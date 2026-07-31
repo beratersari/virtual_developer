@@ -1,0 +1,122 @@
+# Build a Windows offline distribution zip:
+#   - OpenCode CLI (pinned) + config template for %USERPROFILE%\.opencode
+#   - oh-my-opencode plugin (pinned, preinstalled node_modules)
+#   - glab CLI (pinned)
+#   - Python wheels for requirements.txt (offline pip)
+#   - Application sources + install.bat
+#
+# Users: download zip -> extract -> run install.bat
+
+name: Windows Distribution
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dist_suffix:
+        description: "Optional suffix for the zip name (e.g. beta)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows:
+    name: Package Windows x64 zip
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load pinned versions
+        id: versions
+        shell: pwsh
+        run: |
+          $map = @{}
+          Get-Content packaging/windows/versions.env | ForEach-Object {
+            $line = $_.Trim()
+            if (-not $line -or $line.StartsWith("#")) { return }
+            $p = $line -split "=", 2
+            if ($p.Count -eq 2) { $map[$p[0].Trim()] = $p[1].Trim() }
+          }
+          foreach ($k in @("OPENCODE_VERSION","OH_MY_OPENCODE_VERSION","GLAB_VERSION","PYTHON_VERSION","NODE_VERSION")) {
+            if (-not $map.ContainsKey($k) -or -not $map[$k]) {
+              throw "Missing $k in packaging/windows/versions.env"
+            }
+            Write-Host "$k=$($map[$k])"
+            "$k=$($map[$k])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.versions.outputs.PYTHON_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.versions.outputs.NODE_VERSION }}
+
+      - name: Resolve dist name
+        id: meta
+        shell: pwsh
+        run: |
+          $suffix = "${{ github.event.inputs.dist_suffix }}"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $ver = $env:GITHUB_REF_NAME
+          } else {
+            $sha = $env:GITHUB_SHA.Substring(0, 7)
+            $ver = "dev-$sha"
+          }
+          $name = "virtual_developer-windows-x64-$ver"
+          if ($suffix) { $name = "$name-$suffix" }
+          Write-Host "dist_name=$name"
+          "dist_name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build distribution zip
+        id: build
+        shell: pwsh
+        run: |
+          & .\packaging\windows\build-dist.ps1 `
+            -RepoRoot "${{ github.workspace }}" `
+            -OutDir "${{ github.workspace }}\dist" `
+            -DistName "${{ steps.meta.outputs.dist_name }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}
+          path: dist/${{ steps.meta.outputs.dist_name }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ steps.meta.outputs.dist_name }}.zip
+          generate_release_notes: true
+          body: |
+            ## Windows offline installer
+
+            1. Download **`${{ steps.meta.outputs.dist_name }}.zip`**
+            2. Extract anywhere
+            3. Double-click or run **`install.bat`**
+
+            This installs OpenCode + config under `%USERPROFILE%\.opencode`,
+            glab next to it, and Python deps from the bundled wheels.
+
+            ### Bundled versions
+            - OpenCode: `${{ steps.versions.outputs.OPENCODE_VERSION }}`
+            - oh-my-opencode: `${{ steps.versions.outputs.OH_MY_OPENCODE_VERSION }}`
+            - glab: `${{ steps.versions.outputs.GLAB_VERSION }}`
+            - Python wheels built for: `${{ steps.versions.outputs.PYTHON_VERSION }}`
+
+            **Requirement on the machine:** Python ${{ steps.versions.outputs.PYTHON_VERSION }}+ (64-bit) and Git (recommended).
+            No npm/Node required for install when using this zip.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
