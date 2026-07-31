@@ -220,8 +220,6 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            s.code_review_model = "m"
-            s.code_review_agent = "e"
             await p._start_execution_workflow(state)
 
     state2 = state_manager.create_state("OO-2", "fix", "fix")
@@ -232,6 +230,4 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            s.code_review_model = "m"
-            s.code_review_agent = "e"
             await p._start_direct_execution(state2)

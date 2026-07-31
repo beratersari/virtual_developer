@@ -1,0 +1,85 @@
+"""Processor must move Jira issues to In Progress when work starts."""
+
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.state.models import TaskStatus
+
+
+@pytest.fixture
+def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+    return proc
+
+
+def test_mark_jira_in_progress_calls_client(processor, fake_jira):
+    fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+    processor._mark_jira_in_progress("KAN-1")
+    fake_jira.transition_to_in_progress.assert_called_once_with("KAN-1")
+
+
+def test_mark_jira_in_progress_soft_fails(processor, fake_jira):
+    fake_jira.transition_to_in_progress = MagicMock(side_effect=RuntimeError("boom"))
+    # must not raise
+    processor._mark_jira_in_progress("KAN-1")
+
+
+@pytest.mark.asyncio
+async def test_direct_execution_transitions_in_progress(
+    processor, state_manager, fake_jira, tmp_path
+):
+    """cli.py process / direct path must transition Jira, not only the poller."""
+    state = state_manager.create_state("KAN-IP", "test", "create main.cpp")
+    fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+
+    git = MagicMock()
+    git.ensure_feature_branch.return_value = "feature/KAN-IP"
+    git.get_working_directory.return_value = tmp_path
+    git.get_current_branch.return_value = "feature/KAN-IP"
+    git.push.return_value = True
+    git.get_last_commit_subject.return_value = "feat: x"
+    git.get_last_commit_message.return_value = "feat: x"
+    git.create_merge_request.return_value = "http://mr/1"
+    git.get_mr_url.return_value = "http://mr/1"
+    git.cleanup.return_value = True
+
+    runner = MagicMock()
+    runner.run_agent_with_retry = AsyncMock(
+        return_value={
+            "returncode": 0,
+            "stdout": "done",
+            "stderr": "",
+            "session_file": None,
+            "opencode_session_id": "s1",
+            "retry_info": {"attempts": 1, "max_retries": 3, "retried": False},
+            "timed_out": False,
+        }
+    )
+    runner.run_agent = AsyncMock(
+        return_value={
+            "returncode": 0,
+            "stdout": "review ok",
+            "stderr": "",
+            "session_file": None,
+            "opencode_session_id": "s2",
+        }
+    )
+
+    processor._contexts["KAN-IP"] = {"git": git, "runner": runner}
+    processor.git_manager = git
+    processor.agent_runner = runner
+
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        await processor._start_direct_execution(state)
+
+    fake_jira.transition_to_in_progress.assert_called_with("KAN-IP")
+    assert state_manager.get_state("KAN-IP").status == TaskStatus.COMPLETED

@@ -17,19 +17,6 @@ from tests.conftest import FakeJiraClient, make_issue_event
 # config
 # ---------------------------------------------------------------------------
 
-def test_code_review_prompt_not_a_file(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    from src.config import Settings, set_current_temp_dir
-
-    set_current_temp_dir(None)
-    # Create path that exists but is a directory named CODE_REVIEW.md
-    d = tmp_path / "agent" / "rules" / "CODE_REVIEW.md"
-    d.mkdir(parents=True)
-    s = Settings()
-    s.code_review_prompt_file = Path("agent/rules/CODE_REVIEW.md")
-    text = s.prompt_code_review
-    assert isinstance(text, str)
-
 
 def test_validate_missing_both():
     from src.config import Settings
@@ -113,7 +100,7 @@ async def test_daemon_stop_with_tasks_and_without_servers():
 
 
 @pytest.mark.asyncio
-async def test_monitor_skips_without_started_at_and_young(state_manager, reporter, fake_jira):
+async def test_monitor_fails_without_started_at_and_skips_young(state_manager, reporter, fake_jira):
     from src.daemon import JiraAgentDaemon
     from src.processor import JobProcessor
     from datetime import datetime
@@ -143,7 +130,10 @@ async def test_monitor_skips_without_started_at_and_young(state_manager, reporte
 
     with patch("asyncio.sleep", side_effect=stop):
         await daemon._monitor_active_issues()
-    assert state_manager.get_state("M-1").status == TaskStatus.EXECUTING
+    # Missing started_at must ERROR (not stuck forever)
+    assert state_manager.get_state("M-1").status == TaskStatus.ERROR
+    # Young jobs with started_at stay in-flight
+    assert state_manager.get_state("M-2").status == TaskStatus.PLANNING
 
 
 # ---------------------------------------------------------------------------
@@ -212,18 +202,21 @@ def test_git_mr_already_exists_stderr(tmp_path):
         g = GitManager(issue_key=None)
     g.temp_dir = tmp_path
     g.remote_enabled = True
+    g.remote_url = "https://gitlab.example.com/group/repo.git"
     with patch.object(g, "get_current_branch", return_value="feature/x"):
         with patch.object(g, "_get_existing_mr_url", side_effect=[None, "http://mr/9"]):
-            with patch(
-                "src.git_manager.subprocess.run",
+            with patch.object(
+                g,
+                "_run_glab",
                 return_value=subprocess.CompletedProcess(
                     [], 1, "", "Error: already exists (409)"
                 ),
             ):
                 with patch("src.git_manager.settings") as s:
                     s.default_branch = "main"
+                    s.gitlab_pat = "token"
+                    s.project_gitlab_url = "https://gitlab.example.com/group/repo.git"
                     assert g.create_merge_request("t") == "http://mr/9"
-
 
 # ---------------------------------------------------------------------------
 # poller process without summary
@@ -248,6 +241,7 @@ def test_webhook_verify_no_secret_and_ignore_filters():
     from src.jira.webhook_server import create_webhook_app
     from src.config import settings
 
+    # No secret → reject unauthenticated traffic
     app = create_webhook_app(secret=None)
     c = TestClient(app)
     body = {
@@ -261,16 +255,8 @@ def test_webhook_verify_no_secret_and_ignore_filters():
             },
         },
     }
-    with patch("src.jira.webhook_server.settings") as s:
-        s.webhook_path = settings.webhook_path
-        s.webhook_secret = None
-        s.jira_projects_list = ["PROJ"]
-        s.trigger_labels_list = ["ai-assist"]
-        s.trigger_on_assignment = False
-        s.trigger_mentions_list = ["@DevBot"]
-        r = c.post(settings.webhook_path, json=body)
-        assert r.status_code == 200
-        assert r.json()["status"] == "ignored"
+    r = c.post(settings.webhook_path, json=body)
+    assert r.status_code == 401
 
 
 def test_webhook_signature_missing_when_secret():
@@ -519,8 +505,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             s.default_branch = "main"
-            s.code_review_model = "m"
-            s.code_review_agent = "e"
             await proc._start_execution_workflow(state)
 
     # direct with retry callbacks
@@ -532,8 +516,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             s.default_branch = "main"
-            s.code_review_model = "m"
-            s.code_review_agent = "e"
             await proc._start_direct_execution(state2)
 
 
@@ -560,24 +542,6 @@ async def test_push_progress_exceptions(proc, state_manager):
 
 
 @pytest.mark.asyncio
-async def test_code_review_mr_exception(proc, state_manager, tmp_path):
-    state = state_manager.create_state("CRM-1", "s", "d")
-    state_manager.update_state("CRM-1", metadata={"merge_request_url": "http://mr/1"})
-    runner = MagicMock()
-    runner.run_agent = AsyncMock(
-        return_value={"returncode": 0, "stdout": "ok", "stderr": ""}
-    )
-    git = MagicMock()
-    git.add_mr_comment.side_effect = RuntimeError("mr fail")
-    proc.agent_runner = runner
-    proc.git_manager = git
-    with patch("src.processor.settings") as s:
-        s.code_review_model = "m"
-        s.code_review_agent = "e"
-        s.agent_task_timeout_seconds = 5
-        # call on_output inside
-        await proc._start_code_review(state, "sum")
-
 
 @pytest.mark.asyncio
 async def test_direct_request_failure(proc, state_manager, fake_jira):
@@ -588,7 +552,9 @@ async def test_direct_request_failure(proc, state_manager, fake_jira):
     )
     proc.agent_runner = runner
     await proc._handle_direct_request("DRF-1", "help")
-    assert state_manager.get_state("DRF-1").status == TaskStatus.ERROR
+    # Soft failure: issue status unchanged; user still gets a comment
+    assert state_manager.get_state("DRF-1").status == TaskStatus.PENDING
+    assert any("could not complete" in c["body"].lower() or "bad" in c["body"] for c in fake_jira.comments)
 
 
 # ---------------------------------------------------------------------------

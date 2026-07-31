@@ -93,7 +93,7 @@ async def test_process_event_unhandled_sets_error(processor, state_manager, fake
 @pytest.mark.asyncio
 async def test_handle_created_skips_in_flight(processor, state_manager):
     state_manager.create_state("IF-1", "s", "d")
-    state_manager.update_state("IF-1", status=TaskStatus.CODE_REVIEW)
+    state_manager.update_state("IF-1", status=TaskStatus.EXECUTING)
     with patch.object(processor, "_start_direct_execution", new_callable=AsyncMock) as m:
         await processor._handle_issue_created(make_issue_event(key="IF-1"))
         m.assert_not_called()
@@ -180,8 +180,7 @@ async def test_bot_commands(processor, state_manager, tmp_path, fake_jira):
         await processor._handle_bot_command("BC-1", "/start-work")
         m.assert_awaited()
 
-    await processor._handle_bot_command("BC-1", "/start-work")  # after mock not plan ready if changed
-    # force not plan ready
+    # force not plan ready so a second /start-work does not run real execution
     state_manager.update_state("BC-1", status=TaskStatus.PENDING)
     await processor._handle_bot_command("BC-1", "/start-work")
 
@@ -313,8 +312,6 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            s.code_review_model = "free"
-            s.code_review_agent = "explore"
             await processor._start_execution_workflow(state)
 
     assert state_manager.get_state("EX-1").status == TaskStatus.COMPLETED
@@ -347,8 +344,6 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            s.code_review_model = "m"
-            s.code_review_agent = "explore"
             await processor._start_direct_execution(state_d)
     assert state_manager.get_state("DX-1").status == TaskStatus.COMPLETED
 
@@ -364,31 +359,6 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             await processor._start_direct_execution(state_df)
     assert state_manager.get_state("DX-F").status == TaskStatus.ERROR
 
-
-@pytest.mark.asyncio
-async def test_code_review_post_failures(processor, state_manager, tmp_path, fake_jira):
-    state = state_manager.create_state("CR-1", "s", "d")
-    state_manager.update_state("CR-1", metadata={"merge_request_url": "http://mr/9"})
-    git, runner = _mock_git_and_agent(processor, tmp_path, returncode=0, stdout="looks good")
-    processor.reporter.post_code_review = MagicMock(side_effect=RuntimeError("jira down"))
-    processor.reporter.post_completion = MagicMock(return_value="1")
-    with patch("src.processor.settings") as s:
-        s.code_review_model = "m"
-        s.code_review_agent = "explore"
-        s.agent_task_timeout_seconds = 5
-        await processor._start_code_review(state, execution_summary="ok")
-    assert state_manager.get_state("CR-1").status == TaskStatus.COMPLETED
-
-    # MR comment fail + no mr url
-    state2 = state_manager.create_state("CR-2", "s", "d")
-    git.get_mr_url.return_value = None
-    processor.git_manager = git
-    processor.reporter.post_code_review = MagicMock(return_value="1")
-    with patch("src.processor.settings") as s:
-        s.code_review_model = "m"
-        s.code_review_agent = "explore"
-        s.agent_task_timeout_seconds = 5
-        await processor._start_code_review(state2, "ok")
 
 
 @pytest.mark.asyncio

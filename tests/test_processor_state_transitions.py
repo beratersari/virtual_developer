@@ -28,7 +28,7 @@ def processor(state_manager, reporter, fake_jira, tmp_path):
 
 @pytest.mark.asyncio
 async def test_in_flight_issue_updated_is_ignored(processor, state_manager, fake_jira):
-    """CRITICAL: do not restart PLANNING/EXECUTING/CODE_REVIEW on update events."""
+    """CRITICAL: do not restart PLANNING/EXECUTING on update events."""
     state_manager.create_state("PROJ-10", "Work", "do stuff")
     state_manager.update_state("PROJ-10", status=TaskStatus.EXECUTING)
 

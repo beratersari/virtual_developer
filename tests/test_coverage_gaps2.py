@@ -68,13 +68,17 @@ def test_poller_non_terminal_non_inflight(state_manager, fake_jira):
 
 
 def test_webhook_no_match_returns_false_path():
+    import hashlib
+    import hmac
+    import json
     from fastapi.testclient import TestClient
     from src.jira.webhook_server import create_webhook_app
     from src.config import settings
 
-    app = create_webhook_app(secret=None)
+    secret = "test-secret"
+    app = create_webhook_app(secret=secret)
     c = TestClient(app)
-    body = {
+    payload = {
         "webhookEvent": "jira:issue_created",
         "issue": {
             "key": "Z-9",
@@ -85,13 +89,19 @@ def test_webhook_no_match_returns_false_path():
             },
         },
     }
+    body = json.dumps(payload).encode()
+    sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     with patch("src.jira.webhook_server.settings") as s:
         s.webhook_path = settings.webhook_path
         s.jira_projects_list = ["PROJ"]
         s.trigger_labels_list = ["ai-assist"]
         s.trigger_on_assignment = False
         s.trigger_mentions_list = ["@DevBot"]
-        r = c.post(settings.webhook_path, json=body)
+        r = c.post(
+            settings.webhook_path,
+            content=body,
+            headers={"X-Hub-Signature": sig, "Content-Type": "application/json"},
+        )
         assert r.json()["status"] == "ignored"
 
 
@@ -287,29 +297,3 @@ async def test_execution_on_retry_no_state(state_manager, reporter, fake_jira, t
             s.agent_task_max_retries = 1
             s.default_branch = "main"
             await p._start_execution_workflow(state)
-
-
-@pytest.mark.asyncio
-async def test_code_review_on_output_callable(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
-    from src.processor import JobProcessor
-
-    monkeypatch.chdir(tmp_path)
-    with patch("src.processor.create_jira_client", return_value=fake_jira):
-        p = JobProcessor()
-    p.state_manager = state_manager
-    p.reporter = reporter
-    state = state_manager.create_state("COO-1", "s", "d")
-
-    async def run_agent(task, on_output=None, **kw):
-        if on_output:
-            on_output("stdout", "line")
-        return {"returncode": 0, "stdout": "ok", "stderr": ""}
-
-    p.agent_runner = MagicMock()
-    p.agent_runner.run_agent = run_agent
-    p.git_manager = None
-    with patch("src.processor.settings") as s:
-        s.code_review_model = "m"
-        s.code_review_agent = "e"
-        s.agent_task_timeout_seconds = 5
-        await p._start_code_review(state, "sum")
