@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import platform
 import shlex
 import subprocess
@@ -17,6 +18,54 @@ from src.logger import logger
 
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
+
+# oh-my-openagent registers agents under display names, not short keys.
+# Map config/short names so --agent resolves without "not found" fallback.
+OPENCODE_AGENT_ALIASES: Dict[str, str] = {
+    "sisyphus": "Sisyphus - ultraworker",
+    "prometheus": "Prometheus - Plan Builder",
+    "atlas": "Atlas - Plan Executor",
+    "oracle": "oracle",
+    "explore": "explore",
+    "librarian": "librarian",
+    "metis": "Metis - Plan Consultant",
+    "momus": "Momus - Plan Critic",
+    "sisyphus-junior": "Sisyphus-Junior",
+    "hephaestus": "Hephaestus",
+    "multimodal-looker": "multimodal-looker",
+}
+
+
+def resolve_opencode_agent_name(agent: str) -> str:
+    """Map short agent keys to OpenCode agent IDs registered by oh-my-openagent."""
+    if not agent:
+        return agent
+    key = agent.strip()
+    # Exact display-name passthrough
+    if key in OPENCODE_AGENT_ALIASES.values():
+        return key
+    mapped = OPENCODE_AGENT_ALIASES.get(key.lower())
+    if mapped:
+        return mapped
+    # Title-case single tokens often still fail; try lower map again
+    return OPENCODE_AGENT_ALIASES.get(key.lower().replace("_", "-"), key)
+
+# Secrets the agent subprocess must not inherit (push/auth is host-side)
+_AGENT_ENV_DENYLIST = (
+    "JIRA_API_TOKEN",
+    "JIRA_PASSWORD",
+    "GITLAB_PAT",
+    "GITLAB_TOKEN",
+    "WEBHOOK_SECRET",
+)
+
+
+def _agent_subprocess_env() -> Dict[str, str]:
+    """Host env with high-value secrets stripped for agent children."""
+    env = dict(os.environ)
+    for key in _AGENT_ENV_DENYLIST:
+        env.pop(key, None)
+    return env
 
 
 @dataclass
@@ -52,7 +101,8 @@ class AgentRunner:
     def __init__(self, working_directory: Optional[Path] = None):
         self.working_directory = working_directory
         self.opencode_cli = settings.opencode_cli
-        self._running_tasks: Dict[str, asyncio.Task] = {}
+        # task_id -> asyncio subprocess (Process), for cancel_task / watchdog
+        self._running_tasks: Dict[str, Any] = {}
         # Maps task_id -> last session log path (run_agent naming may include issue_key)
         self._session_files: Dict[str, Path] = {}
         logger.debug(f"AgentRunner initialized with working_directory={working_directory}")
@@ -106,12 +156,14 @@ class AgentRunner:
         with open(session_file, 'w', encoding='utf-8') as session_fh:
             # Run the process using exec (no shell) for cross-platform compatibility
             # On Windows, we need to use shell=False and handle the command differently
+            child_env = _agent_subprocess_env()
             if IS_WINDOWS:
                 process = await asyncio.create_subprocess_exec(
                     *cmd_list,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.working_directory,
+                    env=child_env,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
                 )
             else:
@@ -120,7 +172,12 @@ class AgentRunner:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=self.working_directory,
+                    env=child_env,
+                    start_new_session=True,  # own process group for killpg on cancel/timeout
                 )
+
+            # Register so /cancel and stuck-watchdog can terminate foreground agents
+            self._running_tasks[task.task_id] = process
             
             stdout_lines = []
             stderr_lines = []
@@ -181,9 +238,11 @@ class AgentRunner:
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.error(f"Agent task timed out after {elapsed:.2f}s (limit={effective_timeout}s)")
-                # Kill the process on timeout
-                process.kill()
-                await process.wait()
+                self._kill_process_tree(process)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Process wait timed out after kill: {task.task_id}")
                 logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far
                 all_output_lines = stdout_lines + stderr_lines
@@ -199,6 +258,8 @@ class AgentRunner:
                     "progress": last_progress,
                     "timed_out": True,
                 }
+            finally:
+                self._running_tasks.pop(task.task_id, None)
         
         # Extract session ID from output
         all_output_lines = stdout_lines + stderr_lines
@@ -295,21 +356,32 @@ class AgentRunner:
         Returns:
             List of command arguments for use with subprocess (no shell needed)
         """
-        logger.debug(f"Building command for task: agent={task.agent}, model={task.model or settings.default_model}, session_id={task.session_id}")
+        agent_name = resolve_opencode_agent_name(task.agent)
+        logger.debug(
+            f"Building command for task: agent={task.agent} -> {agent_name}, "
+            f"model={task.model or settings.default_model}, session_id={task.session_id}"
+        )
         
         # Build base command
         cmd_parts = self.opencode_cli.split() + ["run"]
+
+        # Force OpenCode into the issue temp clone (otherwise it walks up to the
+        # host git root and edits/commits the wrong repository).
+        if self.working_directory:
+            cmd_parts.extend(["--dir", str(self.working_directory)])
         
-        # Add agent option
-        cmd_parts.extend(["--agent", task.agent])
+        # Add agent option (resolved OpenCode / oh-my-openagent ID)
+        cmd_parts.extend(["--agent", agent_name])
         
         # Use task-specific model if provided, otherwise use configured default
         effective_model = task.model or settings.default_model
-        cmd_parts.extend(["--model", effective_model])
+        if effective_model:
+            cmd_parts.extend(["--model", effective_model])
         
         # Add session continuation if specified
         if task.session_id:
-            cmd_parts.extend(["--session-id", task.session_id])
+            # Current OpenCode CLI uses --session, not --session-id
+            cmd_parts.extend(["--session", task.session_id])
         
         # Add the prompt as the final argument
         cmd_parts.append(task.prompt)
@@ -408,12 +480,14 @@ class AgentRunner:
         
         cmd_list = self._build_command(task, session_file)
         
+        child_env = _agent_subprocess_env()
         if IS_WINDOWS:
             process = await asyncio.create_subprocess_exec(
                 *cmd_list,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=self.working_directory,
+                env=child_env,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
             )
         else:
@@ -422,9 +496,11 @@ class AgentRunner:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=self.working_directory,
+                env=child_env,
+                start_new_session=True,
             )
         
-        # Store for later monitoring
+        # Store for later monitoring / cancel
         self._running_tasks[task.task_id] = process
         logger.info(f"Background agent started: task_id={task.task_id}, pid={process.pid}")
         
@@ -471,29 +547,47 @@ class AgentRunner:
         logger.debug(f"Session file not found: {session_file}")
         return ""
     
+    def _kill_process_tree(self, process: Any) -> None:
+        """Terminate process and, on Unix, its process group."""
+        if process is None:
+            return
+        try:
+            if IS_WINDOWS:
+                try:
+                    process.terminate()
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                return
+
+            pid = getattr(process, "pid", None)
+            if pid is not None:
+                try:
+                    import signal
+                    os.killpg(pid, signal.SIGTERM)
+                    return
+                except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                    pass
+            # Fallback: terminate/kill the direct child (mocks, non-group procs)
+            try:
+                process.terminate()
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        except ProcessLookupError:
+            pass
+
     def cancel_task(self, task_id: str) -> bool:
-        """Cancel a running task."""
+        """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
         if process and process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
-            if IS_WINDOWS:
-                # On Windows, terminate() sends CTRL_BREAK_EVENT to the process group
-                # when CREATE_NEW_PROCESS_GROUP was used
-                try:
-                    process.terminate()
-                    logger.info(f"Task terminated: task_id={task_id}")
-                except Exception:
-                    # Fallback: kill if terminate doesn't work
-                    try:
-                        process.kill()
-                        logger.warning(f"Task killed after terminate failed: task_id={task_id}")
-                    except Exception:
-                        logger.error(f"Failed to cancel task: task_id={task_id}")
-                        pass
-            else:
-                # Unix/Linux/Mac: terminate() sends SIGTERM
-                process.terminate()
-                logger.info(f"Task terminated: task_id={task_id}")
+            self._kill_process_tree(process)
+            logger.info(f"Task cancel signal sent: task_id={task_id}")
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False

@@ -8,12 +8,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.orchestrator.agent_runner import AgentRunner, AgentTask
+from src.orchestrator.agent_runner import (
+    AgentRunner,
+    AgentTask,
+    resolve_opencode_agent_name,
+)
 
 
 @pytest.fixture
 def runner(tmp_path):
     return AgentRunner(working_directory=tmp_path)
+
+
+def test_resolve_opencode_agent_name_sisyphus_stack():
+    assert resolve_opencode_agent_name("sisyphus") == "Sisyphus - ultraworker"
+    assert resolve_opencode_agent_name("prometheus") == "Prometheus - Plan Builder"
+    assert resolve_opencode_agent_name("atlas") == "Atlas - Plan Executor"
+    assert resolve_opencode_agent_name("oracle") == "oracle"
+    assert (
+        resolve_opencode_agent_name("Sisyphus - ultraworker")
+        == "Sisyphus - ultraworker"
+    )
 
 
 def test_agent_task_to_dict():
@@ -54,9 +69,11 @@ def test_build_command_with_session_and_model(runner):
         s.default_model = "default-model"
         cmd = runner._build_command(t, Path("/tmp/x.log"))
     assert "--agent" in cmd
-    assert "sisyphus" in cmd
+    # short key maps to oh-my-openagent OpenCode agent ID
+    assert "Sisyphus - ultraworker" in cmd
     assert "custom-model" in cmd
-    assert "--session-id" in cmd
+    assert "--session" in cmd
+    assert "ses_1" in cmd
     assert cmd[-1] == "hello world"
 
 
