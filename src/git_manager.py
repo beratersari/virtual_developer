@@ -4,15 +4,18 @@ Handles branch creation, commits, and git operations within temp working directo
 Each JIRA issue gets its own isolated temp folder cloned from remote.
 """
 
+import json
+import os
 import re
-import subprocess
-from pathlib import Path
-from typing import Optional
 import shutil
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+from urllib.parse import quote, urlparse
+
 from src.config import settings, set_current_temp_dir
 from src.logger import logger
-import os
-from datetime import datetime
 
 
 class GitManager:
@@ -123,10 +126,14 @@ class GitManager:
         )
 
         if result.returncode != 0:
-            logger.error(f"Clone failed: {result.stderr}")
-            raise RuntimeError(f"Failed to clone repository: {result.stderr}")
+            # Never surface PAT-bearing URLs from git stderr to callers/logs
+            safe_err = (result.stderr or "").replace(gitlab_pat, "***") if gitlab_pat else result.stderr
+            logger.error(f"Clone failed: {safe_err}")
+            raise RuntimeError(f"Failed to clone repository: {safe_err}")
 
         logger.info("Clone completed successfully")
+        # Scrub credentials from origin so PAT is not left on disk in .git/config
+        self._scrub_remote_credentials()
 
         self._sync_remote_branches()
 
@@ -141,6 +148,26 @@ class GitManager:
                 return base_url.replace("http://", f"http://oauth2:{pat}@")
         logger.debug("Building clone URL without PAT")
         return base_url
+
+    def _scrub_remote_credentials(self) -> None:
+        """Point origin at the clean remote URL (no embedded PAT)."""
+        if not self.remote_url or not self.temp_dir:
+            return
+        try:
+            self._run_git(["remote", "set-url", "origin", self.remote_url], check=False)
+            logger.debug("Scrubbed credentials from origin remote URL")
+        except Exception as e:
+            logger.warning(f"Could not scrub origin credentials: {e}")
+
+    def _with_auth_remote(self) -> None:
+        """Temporarily re-embed PAT in origin for push/fetch operations."""
+        if not self.remote_url:
+            return
+        pat = (settings.gitlab_pat or "").strip()
+        if not pat:
+            return
+        auth_url = self._build_clone_url(self.remote_url, pat)
+        self._run_git(["remote", "set-url", "origin", auth_url], check=False)
 
     def _sync_remote_branches(self) -> None:
         """Sync all remote branches locally."""
@@ -188,7 +215,8 @@ class GitManager:
             raise RuntimeError(f"Git operations locked: temp directory '{cwd}' does not exist")
 
         cmd = ["git"] + args
-        logger.debug(f"Running git command: git {' '.join(args)}")
+        safe_args = self._redact_git_args(args)
+        logger.debug(f"Running git command: git {' '.join(safe_args)}")
         
         result = subprocess.run(
             cmd,
@@ -198,13 +226,34 @@ class GitManager:
         )
         
         if result.returncode != 0:
-            logger.error(f"Git command failed: {' '.join(cmd)}\n{result.stderr}")
+            safe_err = self._redact_secret_text(result.stderr or "")
+            logger.error(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
             if check:
-                raise RuntimeError(f"Git command failed: {' '.join(cmd)}\n{result.stderr}")
+                raise RuntimeError(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
         else:
-            logger.debug(f"Git command succeeded: git {' '.join(args)}")
+            logger.debug(f"Git command succeeded: git {' '.join(safe_args)}")
         
         return result
+
+    @staticmethod
+    def _redact_secret_text(text: str) -> str:
+        """Strip embedded PATs/tokens from git URLs in logs/errors."""
+        if not text:
+            return text
+        # https://oauth2:TOKEN@host  or https://user:TOKEN@host
+        text = re.sub(
+            r"(https?://)([^/@\s]+):([^@/\s]+)@",
+            r"\1\2:***@",
+            text,
+        )
+        pat = (settings.gitlab_pat or "").strip()
+        if pat:
+            text = text.replace(pat, "***")
+        return text
+
+    @classmethod
+    def _redact_git_args(cls, args: list) -> list:
+        return [cls._redact_secret_text(str(a)) for a in args]
 
     def _has_commits(self) -> bool:
         """Check if the repo has any commits."""
@@ -301,25 +350,41 @@ class GitManager:
         return self._checkout_or_create_branch(branch_name)
 
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
-        """Format a commit message according to commitMsgFormat.md."""
+        """Format a commit message per agent/rules/EXECUTION.md.
+
+        Required subject: ``[ISSUE-KEY] type: description``
+        ``summary`` should already include the type prefix (e.g. ``fix: foo``).
+        If it does not, ``chore:`` is prepended so the subject stays valid.
+        """
         max_title_len = 72
         prefix = f"[{issue_key}] "
+        body = (summary or "").strip()
+        # Strip a leading [KEY] if caller already included it
+        if body.startswith(f"[{issue_key}]"):
+            body = body[len(f"[{issue_key}]"):].strip()
+        allowed_types = (
+            "feat", "fix", "refactor", "docs", "test",
+            "perf", "ci", "build", "revert", "chore",
+        )
+        has_type = any(
+            body.lower().startswith(f"{t}:") for t in allowed_types
+        )
+        if not has_type:
+            body = f"chore: {body}" if body else "chore: update"
+
         available = max_title_len - len(prefix)
+        short_summary = body
+        if len(body) > available:
+            short_summary = body[: available - 3] + "..."
 
-        short_summary = summary
-        if len(summary) > available:
-            short_summary = summary[:available - 3] + "..."
-
-        lines = [f"{prefix}{short_summary}", ""]
+        lines = [f"{prefix}{short_summary}"]
 
         if description and description.strip():
             desc = description.strip()
             if len(desc) > 500:
                 desc = desc[:500] + "..."
-            lines.append(desc)
             lines.append("")
-
-        lines.append(f"Closes: {issue_key}")
+            lines.append(desc)
 
         return "\n".join(lines)
 
@@ -387,36 +452,157 @@ class GitManager:
         branch = branch_name or self.get_current_branch()
 
         try:
-            self._run_git(["push", "-u", "origin", branch])
-            logger.info(f"Pushed branch '{branch}' to origin.")
-            return True
-        except RuntimeError:
-            logger.warning(f"Push failed, attempting to pull and merge...")
+            self._with_auth_remote()
             try:
-                self._run_git(["fetch", "origin", branch], check=False)
-                self._run_git(["merge", f"origin/{branch}", "-m", f"Merge remote branch {branch}"], check=False)
                 self._run_git(["push", "-u", "origin", branch])
-                logger.info(f"Pushed branch '{branch}' after merge.")
+                logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
-            except RuntimeError as e2:
-                logger.error(f"Push failed after merge attempt: {e2}")
-                return False
+            except RuntimeError:
+                logger.warning(f"Push failed, attempting to pull and merge...")
+                try:
+                    self._run_git(["fetch", "origin", branch], check=False)
+                    self._run_git(
+                        ["merge", f"origin/{branch}", "-m", f"Merge remote branch {branch}"],
+                        check=False,
+                    )
+                    self._run_git(["push", "-u", "origin", branch])
+                    logger.info(f"Pushed branch '{branch}' after merge.")
+                    return True
+                except RuntimeError as e2:
+                    logger.error(f"Push failed after merge attempt: {e2}")
+                    return False
+        finally:
+            self._scrub_remote_credentials()
+
+    def _gitlab_host_and_project(self) -> tuple[str, str]:
+        """Return (api_host, path_with_namespace) from PROJECT_GITLAB_URL."""
+        raw = self.remote_url or getattr(settings, "project_gitlab_url", "") or ""
+        if not isinstance(raw, str):
+            raw = str(raw) if raw else ""
+        raw = raw.strip()
+        if not raw:
+            return "gitlab.com", ""
+        if not raw.startswith("http"):
+            raw = "https://" + raw
+        parsed = urlparse(raw)
+        host = parsed.hostname or "gitlab.com"
+        path = (parsed.path or "").strip("/").removesuffix(".git")
+        return host, path
+
+    def _glab_env(self) -> Dict[str, str]:
+        """Env for glab subprocesses: inject GITLAB_TOKEN from .env settings."""
+        env = dict(os.environ)
+        pat = (settings.gitlab_pat or "").strip()
+        host, _ = self._gitlab_host_and_project()
+        if pat:
+            env["GITLAB_TOKEN"] = pat
+            # Common aliases used by different glab versions
+            env.setdefault("GITLAB_ACCESS_TOKEN", pat)
+            env.setdefault("GL_TOKEN", pat)
+        env["GITLAB_HOST"] = host
+        # Prefer HTTPS API; git push still uses authenticated remote URL separately
+        env.setdefault("GITLAB_PROTOCOL", "https")
+        return env
+
+    def _run_glab(self, args: List[str], *, check: bool = False) -> subprocess.CompletedProcess:
+        """Run glab with auth from settings (never log the token)."""
+        cmd = ["glab", *args]
+        logger.debug(f"Running glab: glab {' '.join(args)}")
+        return subprocess.run(
+            cmd,
+            cwd=self.temp_dir,
+            capture_output=True,
+            text=True,
+            env=self._glab_env(),
+        )
+
+    def _create_mr_via_api(
+        self,
+        title: str,
+        body: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> Optional[str]:
+        """Create MR via GitLab REST API using GITLAB_PAT (fallback if glab fails)."""
+        pat = (settings.gitlab_pat or "").strip()
+        if not pat:
+            logger.error("Cannot create MR via API: GITLAB_PAT is empty")
+            return None
+        host, project = self._gitlab_host_and_project()
+        if not project:
+            logger.error("Cannot create MR via API: project path missing from PROJECT_GITLAB_URL")
+            return None
+        enc = quote(project, safe="")
+        url = f"https://{host}/api/v4/projects/{enc}/merge_requests"
+        payload = {
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "title": title,
+            "description": body or title,
+        }
+        try:
+            import httpx
+
+            headers = {
+                "PRIVATE-TOKEN": pat,
+                "Content-Type": "application/json",
+            }
+            with httpx.Client(timeout=30.0, verify=True) as client:
+                resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    web = data.get("web_url")
+                    logger.info(f"Merge request created via API: {web}")
+                    return web
+                # Already exists
+                if resp.status_code == 409 or "already exists" in (resp.text or "").lower():
+                    logger.info("MR already exists (API 409); resolving URL")
+                    return self._get_existing_mr_url(source_branch)
+                logger.error(
+                    f"GitLab API MR create failed ({resp.status_code}): "
+                    f"{self._redact_secret_text(resp.text[:500])}"
+                )
+                return None
+        except Exception as e:
+            logger.error(f"GitLab API MR create error: {e}")
+            return None
 
     def _get_existing_mr_url(self, branch: str) -> Optional[str]:
+        # 1) glab with token env
         try:
-            result = subprocess.run(
-                ["glab", "mr", "list", "--source-branch", branch, "--json"],
-                cwd=self.temp_dir,
-                capture_output=True,
-                text=True
+            result = self._run_glab(
+                ["mr", "list", "--source-branch", branch, "--json"]
             )
             if result.returncode == 0 and result.stdout.strip():
-                import json
                 mrs = json.loads(result.stdout)
                 if mrs and len(mrs) > 0:
-                    return mrs[0].get("web_url")
+                    return mrs[0].get("web_url") or mrs[0].get("url")
         except Exception:
             pass
+
+        # 2) REST API fallback
+        pat = (settings.gitlab_pat or "").strip()
+        if not pat:
+            return None
+        host, project = self._gitlab_host_and_project()
+        if not project:
+            return None
+        try:
+            import httpx
+
+            enc = quote(project, safe="")
+            url = (
+                f"https://{host}/api/v4/projects/{enc}/merge_requests"
+                f"?source_branch={quote(branch)}&state=opened"
+            )
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.get(url, headers={"PRIVATE-TOKEN": pat})
+                if resp.status_code == 200:
+                    mrs = resp.json()
+                    if mrs:
+                        return mrs[0].get("web_url")
+        except Exception as e:
+            logger.debug(f"API MR list failed: {e}")
         return None
 
     def create_merge_request(self, title: str, body: str = "", target_branch: Optional[str] = None) -> Optional[str]:
@@ -437,36 +623,86 @@ class GitManager:
         if not target_branch:
             target_branch = settings.default_branch.strip() if settings.default_branch else "main"
 
+        # Prefer configured default, then common fallbacks when remote lacks the branch
+        candidates = []
+        for b in (target_branch, "main", "master", "develop"):
+            if b and b not in candidates:
+                candidates.append(b)
+
+        last_err = ""
         try:
-            cmd = [
-                "glab", "mr", "create",
-                "--title", title,
-                "--source-branch", branch,
-                "--target-branch", target_branch
-            ]
-            if body:
-                cmd.extend(["--description", body])
-            result = subprocess.run(cmd, cwd=self.temp_dir, capture_output=True, text=True)
-            if result.returncode == 0:
-                output = result.stdout + result.stderr
-                for line in output.splitlines():
-                    if "gitlab.com" in line or "http" in line:
-                        url = line.strip()
-                        logger.info(f"Merge request created: {url}")
-                        return url
-                logger.info("Merge request created.")
-                return "created"
-            else:
-                if "already exists" in result.stderr.lower() or "409" in result.stderr:
+            for target in candidates:
+                cmd = [
+                    "mr", "create",
+                    "--title", title,
+                    "--source-branch", branch,
+                    "--target-branch", target,
+                    "--yes",
+                ]
+                if body:
+                    cmd.extend(["--description", body])
+                result = self._run_glab(cmd)
+                if result.returncode == 0:
+                    output = result.stdout + result.stderr
+                    for line in output.splitlines():
+                        if "http" in line and (
+                            "merge_request" in line
+                            or "gitlab" in line
+                            or "/-/merge" in line
+                        ):
+                            url = line.strip().split()[-1]
+                            logger.info(f"Merge request created: {url} (target={target})")
+                            return url
+                    logger.info(f"Merge request created (target={target}).")
+                    return "created"
+
+                err = (result.stderr or "") + (result.stdout or "")
+                last_err = err
+                if "already exists" in err.lower() or "409" in err:
                     logger.info("MR already exists, getting URL...")
                     return self._get_existing_mr_url(branch)
-                logger.error(f"Merge request failed: {result.stderr}")
-                return None
+                # Try next candidate when target branch is missing
+                if "target_branch" in err.lower() or "does not exist" in err.lower():
+                    logger.warning(f"MR target '{target}' unavailable; trying next fallback")
+                    continue
+                # Auth / generic failure — try API for this target before giving up
+                logger.warning(
+                    f"glab MR create failed for target={target}; trying REST API. "
+                    f"Detail: {self._redact_secret_text(err)[:300]}"
+                )
+                api_url = self._create_mr_via_api(title, body, branch, target)
+                if api_url:
+                    return api_url
+                if "target_branch" in err.lower() or "does not exist" in err.lower():
+                    continue
+                # keep trying other targets after API miss
+                continue
+
+            # Final API pass over candidates if glab missing entirely
+            for target in candidates:
+                api_url = self._create_mr_via_api(title, body, branch, target)
+                if api_url:
+                    return api_url
+
+            logger.error(
+                f"Merge request failed after glab+API fallbacks: "
+                f"{self._redact_secret_text(last_err)}"
+            )
+            return None
         except FileNotFoundError:
-            logger.error("'glab' CLI not found.")
+            logger.warning("'glab' CLI not found; creating MR via GitLab REST API")
+            for target in candidates:
+                api_url = self._create_mr_via_api(title, body, branch, target)
+                if api_url:
+                    return api_url
             return None
         except Exception as e:
             logger.error(f"Merge request error: {e}")
+            # Last chance API
+            for target in candidates:
+                api_url = self._create_mr_via_api(title, body, branch, target)
+                if api_url:
+                    return api_url
             return None
 
     def add_mr_comment(self, mr_url: str, comment: str) -> bool:
@@ -482,14 +718,16 @@ class GitManager:
                 logger.warning(f"Could not extract MR ID from URL: {mr_url}")
                 return False
 
-            cmd = ["glab", "mr", "note", mr_id, "-m", comment]
-            result = subprocess.run(cmd, cwd=self.temp_dir, capture_output=True, text=True)
+            result = self._run_glab(["mr", "note", mr_id, "-m", comment])
 
             if result.returncode == 0:
                 logger.info(f"Comment added to MR #{mr_id}")
                 return True
             else:
-                logger.error(f"Failed to add comment to MR: {result.stderr}")
+                logger.error(
+                    f"Failed to add comment to MR: "
+                    f"{self._redact_secret_text(result.stderr or '')}"
+                )
                 return False
         except FileNotFoundError:
             logger.error("'glab' CLI not found. Install with: brew install glab (mac) or apt install gitlab-cli (linux)")
@@ -502,20 +740,9 @@ class GitManager:
         """Get the URL of the current branch's merge request."""
         if not self.remote_enabled:
             return None
-
         try:
             branch = self.get_current_branch()
-
-            cmd = ["glab", "mr", "list", "--source-branch", branch, "--json"]
-            result = subprocess.run(cmd, cwd=self.temp_dir, capture_output=True, text=True)
-
-            if result.returncode == 0 and result.stdout.strip():
-                import json
-                mrs = json.loads(result.stdout)
-                if mrs and len(mrs) > 0:
-                    return mrs[0].get("web_url")
-
-            return None
+            return self._get_existing_mr_url(branch)
         except Exception as e:
             logger.error(f"Error getting MR URL: {e}")
             return None
@@ -524,16 +751,35 @@ class GitManager:
         """Get the temp working directory path."""
         return self.temp_dir
 
-    def cleanup(self) -> bool:
-        """Clean up the temp directory if cleanup policy allows."""
+    def cleanup(self, *, success: Optional[bool] = None) -> bool:
+        """Clean up the temp directory according to temp_cleanup_policy.
+
+        Policies:
+        - never: keep directory
+        - always: delete directory
+        - on_success: delete only when success is True
+        """
         if not self.temp_dir or not self.temp_dir.exists():
             return True
 
-        policy = settings.temp_cleanup_policy
+        policy = (settings.temp_cleanup_policy or "never").strip().lower()
 
         if policy == "never":
             logger.info(f"Keeping temp directory: {self.temp_dir}")
             return True
 
-        logger.info(f"Cleanup policy '{policy}' - temp directory preserved: {self.temp_dir}")
-        return True
+        should_delete = policy == "always" or (policy == "on_success" and success is True)
+        if not should_delete:
+            logger.info(
+                f"Cleanup policy '{policy}' - temp directory preserved: {self.temp_dir}"
+            )
+            return True
+
+        try:
+            shutil.rmtree(self.temp_dir)
+            logger.info(f"Removed temp directory: {self.temp_dir}")
+            self.temp_dir = None
+            return True
+        except Exception as e:
+            logger.error(f"Failed to remove temp directory {self.temp_dir}: {e}")
+            return False

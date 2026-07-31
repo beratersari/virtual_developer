@@ -186,9 +186,15 @@ def test_ensure_feature_branch(gm):
 
 
 def test_format_commit_message(gm):
-    msg = gm._format_commit_message("GM-1", "short", "body")
-    assert "[GM-1]" in msg and "Closes: GM-1" in msg
-    long_sum = "x" * 100
+    # EXECUTION.md format: [KEY] type: description
+    msg = gm._format_commit_message("GM-1", "fix: short", "body")
+    assert msg.startswith("[GM-1] fix: short")
+    assert "body" in msg
+    assert "Closes:" not in msg
+    # bare summary gets chore: prefix
+    msg_plain = gm._format_commit_message("GM-1", "short")
+    assert msg_plain.startswith("[GM-1] chore: short")
+    long_sum = "fix: " + ("x" * 100)
     msg2 = gm._format_commit_message("GM-1", long_sum, "y" * 600)
     assert "..." in msg2
 
@@ -240,21 +246,28 @@ def test_push_paths(gm):
     gm.remote_enabled = False
     assert gm.push() is False
     gm.remote_enabled = True
+    # push() does: auth set-url, push, scrub set-url (and more on merge retry)
     with patch.object(gm, "get_current_branch", return_value="feature/x"):
         with patch.object(gm, "_run_git", return_value=_cp()):
             assert gm.push() is True
+        # auth set-url ok, push fails, fetch/merge/push ok, scrub set-url
         with patch.object(gm, "_run_git", side_effect=[
-            RuntimeError("fail"),
-            _cp(),
-            _cp(),
-            _cp(),
+            _cp(),  # auth set-url
+            RuntimeError("fail"),  # push
+            _cp(),  # fetch
+            _cp(),  # merge
+            _cp(),  # push retry
+            _cp(),  # scrub
         ]):
             assert gm.push("feature/x") is True
+        # auth ok, push fail, fetch/merge/push fail, scrub
         with patch.object(gm, "_run_git", side_effect=[
-            RuntimeError("fail"),
-            _cp(),
-            _cp(),
-            RuntimeError("fail2"),
+            _cp(),  # auth
+            RuntimeError("fail"),  # push
+            _cp(),  # fetch
+            _cp(),  # merge
+            RuntimeError("fail2"),  # push retry
+            _cp(),  # scrub
         ]):
             assert gm.push("feature/x") is False
 
@@ -342,12 +355,22 @@ def test_get_mr_url(gm):
             assert gm.get_mr_url() is None
 
 
-def test_working_dir_and_cleanup(gm):
+def test_working_dir_and_cleanup(gm, tmp_path):
     assert gm.get_working_directory() == gm.temp_dir
+    keep_dir = tmp_path / "keep"
+    keep_dir.mkdir()
+    gm.temp_dir = keep_dir
     with patch("src.git_manager.settings") as s:
         s.temp_cleanup_policy = "never"
         assert gm.cleanup() is True
+        assert keep_dir.exists()
+
+        s.temp_cleanup_policy = "on_success"
+        assert gm.cleanup(success=False) is True
+        assert keep_dir.exists()
+
         s.temp_cleanup_policy = "always"
         assert gm.cleanup() is True
+        assert not keep_dir.exists()
     gm.temp_dir = None
     assert gm.cleanup() is True
