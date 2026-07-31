@@ -480,7 +480,16 @@ class JobProcessor:
             # Suppress all agent output from console - logs go to file only
             pass
 
-        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+        def on_retry(
+            attempt_number: int,
+            delay_seconds: float,
+            reason: str,
+            session_file: Optional[str] = None,
+            error_message: Optional[str] = None,
+            return_code: Optional[int] = None,
+            session_id: Optional[str] = None,
+            new_task_id: Optional[str] = None,
+        ):
             """Handle retry notification - AgentRunner already prints this."""
             # AgentRunner prints retry messages, we just update state here
 
@@ -503,6 +512,9 @@ class JobProcessor:
                 # Update current_opencode_session_id to the opencode session ID from this retry
                 if session_id:
                     current_state.current_opencode_session_id = session_id
+                # Keep cancel/watchdog pointed at the live retry process
+                if new_task_id:
+                    current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
 
             self.reporter.post_progress_update(
@@ -640,7 +652,16 @@ class JobProcessor:
             # Suppress all agent output from console - logs go to file only
             pass
 
-        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+        def on_retry(
+            attempt_number: int,
+            delay_seconds: float,
+            reason: str,
+            session_file: Optional[str] = None,
+            error_message: Optional[str] = None,
+            return_code: Optional[int] = None,
+            session_id: Optional[str] = None,
+            new_task_id: Optional[str] = None,
+        ):
             """Handle retry notification - AgentRunner already prints this."""
             # AgentRunner prints retry messages, we just update state here
 
@@ -663,6 +684,9 @@ class JobProcessor:
                 # Update current_opencode_session_id to the opencode session ID from this retry
                 if session_id:
                     current_state.current_opencode_session_id = session_id
+                # Keep cancel/watchdog pointed at the live retry process
+                if new_task_id:
+                    current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
 
             self.reporter.post_progress_update(
@@ -791,7 +815,16 @@ class JobProcessor:
             # Suppress all agent output from console - logs go to file only
             pass
 
-        def on_retry(attempt_number: int, delay_seconds: float, reason: str, session_file: Optional[str] = None, error_message: Optional[str] = None, return_code: Optional[int] = None, session_id: Optional[str] = None):
+        def on_retry(
+            attempt_number: int,
+            delay_seconds: float,
+            reason: str,
+            session_file: Optional[str] = None,
+            error_message: Optional[str] = None,
+            return_code: Optional[int] = None,
+            session_id: Optional[str] = None,
+            new_task_id: Optional[str] = None,
+        ):
             """Handle retry notification - AgentRunner already prints this."""
             # AgentRunner prints retry messages, we just update state here
 
@@ -814,6 +847,9 @@ class JobProcessor:
                 # Update current_opencode_session_id to the opencode session ID from this retry
                 if session_id:
                     current_state.current_opencode_session_id = session_id
+                # Keep cancel/watchdog pointed at the live retry process
+                if new_task_id:
+                    current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
 
             self.reporter.post_progress_update(

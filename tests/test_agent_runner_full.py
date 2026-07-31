@@ -248,6 +248,7 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
         }
 
     retries = []
+    original_id = None
     with patch.object(runner, "run_agent", side_effect=flaky):
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.agent_task_max_retries = 2
@@ -256,6 +257,7 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
             s.agent_task_retry_on_timeout = True
             s.agent_task_retry_on_error = True
             task = AgentTask(description="d", prompt="p", agent="a")
+            original_id = task.task_id
             result = await runner.run_agent_with_retry(
                 task,
                 on_retry=lambda *args: retries.append(args),
@@ -263,6 +265,12 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
     assert result["returncode"] == 0
     assert result["retry_info"]["retried"] is True
     assert retries
+    # 8th arg is new_task_id for the upcoming attempt (must differ from first)
+    assert len(retries[0]) >= 8
+    new_task_id = retries[0][7]
+    assert new_task_id
+    assert new_task_id != original_id
+    assert task.task_id == new_task_id
 
 
 @pytest.mark.asyncio

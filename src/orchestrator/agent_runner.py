@@ -609,7 +609,11 @@ class AgentRunner:
             on_output: Callback for output lines (stream, line)
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
-            on_retry: Callback when a retry is attempted (attempt_number, delay_seconds, reason, session_file)
+            on_retry: Callback when a retry is attempted
+                ``(attempt_number, delay_seconds, reason, session_file,
+                error_message, return_code, session_id, new_task_id)``.
+                ``new_task_id`` is the id of the upcoming attempt (must be
+                stored as ``current_task_id`` for cancel/watchdog).
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
 
@@ -692,19 +696,35 @@ class AgentRunner:
                 error_message = result.get("stderr", "") if result.get("returncode") != 0 else None
                 return_code = result.get("returncode")
 
+                # Mint new task_id BEFORE on_retry so callers can refresh
+                # state.current_task_id. Otherwise /cancel and stuck-watchdog
+                # keep the first-attempt id and cannot kill the live process.
+                old_task_id = task.task_id
+                task.task_id = f"task_{uuid.uuid4().hex[:8]}"
+                logger.debug(
+                    f"Created new task ID for retry: old={old_task_id}, new={task.task_id}"
+                )
+
                 if on_retry:
-                    on_retry(attempt, delay, retry_reason, result.get("session_file"), error_message, return_code, result.get("opencode_session_id"))
+                    on_retry(
+                        attempt,
+                        delay,
+                        retry_reason,
+                        result.get("session_file"),
+                        error_message,
+                        return_code,
+                        result.get("opencode_session_id"),
+                        task.task_id,  # new_task_id for state sync
+                    )
 
                 # Log retry attempt
-                logger.warning(f"{retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} for {task.task_id}, retrying in {delay:.1f}s...")
+                logger.warning(
+                    f"{retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} "
+                    f"for {task.task_id}, retrying in {delay:.1f}s..."
+                )
 
                 # Wait before retry
                 await asyncio.sleep(delay)
-
-                # Create new task ID for retry
-                old_task_id = task.task_id
-                task.task_id = f"task_{uuid.uuid4().hex[:8]}"
-                logger.debug(f"Created new task ID for retry: old={old_task_id}, new={task.task_id}")
 
                 last_result = result
             else:

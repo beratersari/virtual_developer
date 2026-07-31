@@ -75,6 +75,41 @@ def _bind_git_agent(processor, issue_key: str, tmp_path: Path, *, push_ok: bool 
 
 
 @pytest.mark.asyncio
+async def test_retry_refreshes_current_task_id(processor, state_manager, tmp_path):
+    """Retries mint a new task_id; state.current_task_id must track it for cancel."""
+    state = state_manager.create_state("RETRY-1", "s", "implement the feature")
+    git, runner = _bind_git_agent(processor, "RETRY-1", tmp_path)
+    seen = {}
+
+    async def with_retry(task, on_retry=None, **kwargs):
+        seen["original"] = task.task_id
+        # Simulate agent_runner minting a new id and notifying on_retry
+        new_id = "task_retry_second"
+        task.task_id = new_id
+        if on_retry:
+            on_retry(1, 0.0, "error", None, "boom", 1, "ses_old", new_id)
+        seen["after_retry_state"] = state_manager.get_state("RETRY-1").current_task_id
+        return {
+            "returncode": 0,
+            "stdout": "done",
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_new",
+            "retry_info": {"attempts": 2, "retried": True},
+        }
+
+    runner.run_agent_with_retry = AsyncMock(side_effect=with_retry)
+
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        await processor._start_direct_execution(state)
+
+    assert seen["after_retry_state"] == "task_retry_second"
+    # Completed job should not leave a stale running id (may be cleared or final)
+    loaded = state_manager.get_state("RETRY-1")
+    assert loaded.status == TaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_push_failure_does_not_complete(processor, state_manager, tmp_path, fake_jira):
     """Agent success + push fail must ERROR, never COMPLETED."""
     state = state_manager.create_state("PUSH-1", "s", "d")
