@@ -14,6 +14,25 @@ from src.logger import logger
 EventHandler = Callable[[Dict[str, Any]], None]
 
 
+def verify_webhook_signature(
+    body: bytes,
+    signature: Optional[str],
+    webhook_secret: Optional[str],
+) -> bool:
+    """Verify JIRA webhook signature if secret is configured."""
+    if not webhook_secret:
+        return True
+    if signature is None or signature == "":
+        return False
+
+    expected = hmac.new(
+        webhook_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(f"sha256={expected}", signature)
+
+
 def create_webhook_app(
     on_issue_created: Optional[EventHandler] = None,
     on_issue_updated: Optional[EventHandler] = None,
@@ -26,18 +45,7 @@ def create_webhook_app(
     webhook_secret = secret or settings.webhook_secret
     
     def verify_signature(body: bytes, signature: Optional[str]) -> bool:
-        """Verify JIRA webhook signature if secret is configured."""
-        if not webhook_secret:
-            return True
-        if not signature:
-            return False
-        
-        expected = hmac.new(
-            webhook_secret.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(f"sha256={expected}", signature)
+        return verify_webhook_signature(body, signature, webhook_secret)
     
     def should_process_issue(issue_data: Dict[str, Any]) -> bool:
         """Check if issue should be processed based on filters."""

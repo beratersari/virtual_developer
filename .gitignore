@@ -55,3 +55,9 @@ sample_project/tests/__pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test / coverage artifacts
+.coverage
+coverage.json
+.pytest_cache/
+htmlcov/

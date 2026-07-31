@@ -602,9 +602,10 @@ class AgentRunner:
                 }
                 return result
 
-        # Should not reach here, but just in case
+        # Should not reach here with normal control flow (loop always returns).
+        # Defensive fallback kept for safety; last_result branch is effectively dead.
         logger.error(f"Unexpected fallback reached in run_agent_with_retry: task_id={task.task_id}")
-        if last_result:
+        if last_result:  # pragma: no cover
             last_result["retry_info"] = {
                 "attempts": attempt + 1,
                 "max_retries": effective_max_retries,
