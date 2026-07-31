@@ -19,10 +19,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # JIRA Configuration - all optional with defaults for init command
+    # JIRA Configuration — auth is host + Bearer token only (on-prem)
     jira_host: str = Field(default="", description="JIRA instance URL")
-    jira_username: str = Field(default="", description="JIRA username/email")
-    jira_api_token: str = Field(default="", description="JIRA API token")
+    jira_api_token: str = Field(default="", description="JIRA API token (Bearer)")
     jira_projects: str = Field(default="PROJ", description="Comma-separated project keys")
     jira_board_id: str = Field(default="", description="JIRA Board ID for sprint polling")
     

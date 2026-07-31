@@ -141,7 +141,6 @@ echo.
 echo 3. To use with JIRA (optional):
 echo    Edit .env file with your JIRA credentials:
 echo    - JIRA_HOST=https://yourcompany.atlassian.net
-echo    - JIRA_USERNAME=your-email@example.com
 echo    - JIRA_API_TOKEN=your-api-token
 echo.
 echo Note: You may need to restart your terminal for all changes to take effect.

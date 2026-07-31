@@ -491,8 +491,7 @@ python cli.py cancel PROJ-123
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `JIRA_HOST` | JIRA instance URL | Required |
-| `JIRA_USERNAME` | JIRA user email | Required |
-| `JIRA_API_TOKEN` | API token for authentication | Required |
+| `JIRA_API_TOKEN` | API token (Bearer) for authentication | Required |
 | `JIRA_PROJECTS` | Comma-separated project keys | `PROJ` |
 
 ### Webhook & Server
@@ -586,8 +585,7 @@ Edit your `.env` file:
 
 ```env
 # JIRA Connection (Required for real JIRA)
-JIRA_HOST=https://yourcompany.atlassian.net
-JIRA_USERNAME=your-email@example.com
+JIRA_HOST=https://your-jira.example.com
 JIRA_API_TOKEN=your-api-token-from-step-1
 JIRA_PROJECTS=PROJ,DEV,ENG  # Comma-separated project keys
 

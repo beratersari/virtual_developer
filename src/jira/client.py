@@ -9,35 +9,31 @@ from src.logger import logger
 
 
 class JiraClient:
-    """Client for JIRA REST API."""
+    """Client for JIRA REST API (on-prem).
+
+    Auth is Bearer token only — set JIRA_HOST and JIRA_API_TOKEN.
+    """
     
     def __init__(
         self,
         host: Optional[str] = None,
-        username: Optional[str] = None,
         api_token: Optional[str] = None,
     ):
         self.host = (host or settings.jira_host).rstrip("/")
-        self.username = username or settings.jira_username
         self.api_token = api_token or settings.jira_api_token
         
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
-        auth = None
         headers = {"Content-Type": "application/json"}
-        
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
-        elif self.username and self.api_token:
-            auth = (self.username, self.api_token)
         
         self.client = httpx.Client(
             base_url=f"{self.host}/rest/api/2",
-            auth=auth,
             headers=headers,
             timeout=30.0,
-            verify=False
+            verify=False,
         )
     
     def create_issue(
