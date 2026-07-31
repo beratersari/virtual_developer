@@ -175,14 +175,6 @@ def show(issue_key: str):
         console.print(f"  Total tokens:  {state.token_usage_input + state.token_usage_output:,}")
         console.print(f"  Est. cost:     ${state.estimated_cost:.4f}")
     
-    # Code review info
-    if state.code_review_result:
-        console.print(f"\n[bold magenta]🔍 Code Review:[/bold magenta]")
-        console.print(f"  Review model: {state.code_review_model or 'N/A'}")
-        console.print(f"  Result:")
-        for line in state.code_review_result[:1000].split("\n"):
-            console.print(f"    {line}")
-
     if state.error_message:
         console.print(f"\n[bold red]Error:[/bold red]")
         console.print(state.error_message[:500])
@@ -272,8 +264,6 @@ def config():
     table.add_row("Default Agent", settings.default_agent)
     table.add_row("Planning Agent", settings.planning_agent)
     table.add_row("Orchestrator Agent", settings.orchestrator_agent)
-    table.add_row("Code Review Agent", settings.code_review_agent)
-    table.add_row("Code Review Model", settings.code_review_model)
     table.add_row("Auto-start Plans", str(settings.auto_start_plans))
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Webhook Enabled", str(settings.enable_webhook))
@@ -319,6 +309,8 @@ def init():
 @click.option("--category", "-c", help="Category for task (quick, deep, visual-engineering, etc.)")
 @click.option("--plan-only", is_flag=True, help="Only create a plan (Prometheus), don't execute")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running agent")
+@click.option("--model", "-m", default=None, help="Override DEFAULT_MODEL for this run")
+@click.option("--timeout", default=None, type=int, help="Agent timeout seconds (default from settings)")
 def test_issue(
     project: str,
     title: str,
@@ -327,6 +319,8 @@ def test_issue(
     category: Optional[str],
     plan_only: bool,
     dry_run: bool,
+    model: Optional[str],
+    timeout: Optional[int],
 ):
     """Test the agent with a simulated issue (no JIRA required).
     
@@ -386,7 +380,11 @@ def test_issue(
     console.print(f"Detected workflow: [green]{workflow.value}[/green]\n")
     
     async def run_agent():
-        runner = AgentRunner(project_root=Path(project).resolve())
+        project_path = Path(project).resolve()
+        if not project_path.exists():
+            console.print(f"[red]Project path does not exist: {project_path}[/red]")
+            raise SystemExit(1)
+        runner = AgentRunner(working_directory=project_path)
         
         if plan_only or workflow == WorkflowType.PLANNING:
             # Planning workflow
@@ -404,6 +402,7 @@ def test_issue(
                 prompt=prompt,
                 agent="prometheus",
                 issue_key=issue_key,
+                model=model,
             )
         elif agent == "oracle":
             # Oracle consultation
@@ -416,6 +415,7 @@ def test_issue(
                 prompt=prompt,
                 agent="oracle",
                 issue_key=issue_key,
+                model=model,
             )
         else:
             # Direct execution
@@ -433,62 +433,25 @@ def test_issue(
                 agent=agent,
                 category=category or settings.execution_category,
                 issue_key=issue_key,
+                model=model,
             )
         
+        effective_timeout = timeout if timeout is not None else settings.agent_task_timeout_seconds
+        if model:
+            console.print(f"[dim]Model override: {model}[/dim]")
+        console.print(f"[dim]Timeout: {effective_timeout}s[/dim]")
+
         # Run the agent
         result = await runner.run_agent(
             task,
             on_output=lambda stream, line: console.print(f"[{stream}] {line}"),
+            timeout_seconds=effective_timeout,
         )
         
         # Show results
         console.print("\n" + "=" * 60)
         if result["returncode"] == 0:
             console.print("[bold green]✓ Agent completed successfully[/bold green]")
-
-            # --- Code Review Phase ---
-            console.print("\n[bold magenta]🔍 Starting Code Review...[/bold magenta]")
-            console.print(f"[dim]Review model: {settings.code_review_model}[/dim]")
-            console.print(f"[dim]Review agent: {settings.code_review_agent}[/dim]")
-
-            state.status = TaskStatus.CODE_REVIEW
-            state.code_review_model = settings.code_review_model
-            state_manager.set_state(state)
-
-            review_prompt = PromptBuilder.build_code_review_prompt(
-                issue_key=issue_key,
-                summary=title,
-                description=description,
-                review_model=settings.code_review_model,
-            )
-            review_task = AgentTask(
-                description=f"Code Review: {title}",
-                prompt=review_prompt,
-                agent=settings.code_review_agent,
-                issue_key=issue_key,
-                model=settings.code_review_model,
-            )
-
-            review_result = await runner.run_agent(
-                review_task,
-                on_output=lambda stream, line: console.print(f"[magenta][review][/magenta] [{stream}] {line}"),
-            )
-
-            if review_result["returncode"] == 0:
-                console.print("[bold green]✓ Code review completed[/bold green]")
-                state.code_review_result = review_result["stdout"][:5000]
-            else:
-                console.print("[bold yellow]⚠ Code review failed (non-blocking)[/bold yellow]")
-                state.code_review_result = (
-                    f"Review failed (rc={review_result['returncode']}): "
-                    f"{review_result.get('stderr', '')[:500]}"
-                )
-
-            if review_result.get("stdout"):
-                console.print("\n[bold magenta]Review Output:[/bold magenta]")
-                console.print(review_result["stdout"][:2000])
-
-            # Transition to COMPLETED
             state.status = TaskStatus.COMPLETED
             state.progress_percentage = 100
         else:
@@ -551,7 +514,7 @@ def start_server(port: int, webhook_port: int, webhook_secret: str):
 @click.option("--description", "-d", required=True, help="Issue description")
 @click.option("--assignee", "-a", default="DevBot", help="Assignee username")
 @click.option("--labels", "-l", default="ai-assist", help="Comma-separated labels")
-@click.option("--issue-key", "-k", help="Manual issue key to use (e.g., VOLKAN-9683)")
+@click.option("--issue-key", "-k", help="Manual issue key to use (e.g., KAN-9683)")
 @click.option("--server", default="http://localhost:7001", help="Simulated JIRA server URL")
 @click.option("--no-comment", is_flag=True, help="Skip adding comments to real Jira")
 def create_issue(summary: str, description: str, assignee: str, labels: str, issue_key: Optional[str], server: str, no_comment: bool):
@@ -561,8 +524,8 @@ def create_issue(summary: str, description: str, assignee: str, labels: str, iss
     
     Examples:
         python cli.py simulate create-issue -s "Title" -d "Desc"
-        python cli.py simulate create-issue -s "Title" -d "Desc" -k VOLKAN-9683
-        python cli.py simulate create-issue -s "Title" -d "Desc" -k VOLKAN-9683 --no-comment
+        python cli.py simulate create-issue -s "Title" -d "Desc" -k KAN-9683
+        python cli.py simulate create-issue -s "Title" -d "Desc" -k KAN-9683 --no-comment
     """
     from src.jira.simulated_client import SimulatedJiraClient
     

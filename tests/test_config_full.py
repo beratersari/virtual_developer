@@ -79,6 +79,21 @@ def test_load_prompt_defaults_when_missing(tmp_path, monkeypatch):
     assert "Prometheus" in text or "plan" in text.lower()
 
 
+def test_load_prompt_from_agent_rules(tmp_path, monkeypatch):
+    """Canonical location is agent/rules/ (not the old agent/prompts/ path)."""
+    monkeypatch.chdir(tmp_path)
+    rdir = tmp_path / "agent" / "rules"
+    rdir.mkdir(parents=True)
+    (rdir / "DIRECT_EXECUTION.md").write_text(
+        "RULES DIRECT\n[JIRA-ISSUE-ID] fix: example\n"
+    )
+    s = Settings()
+    s.prompt_direct_execution_file = Path("agent/rules/DIRECT_EXECUTION.md")
+    text = s.prompt_direct_execution
+    assert "RULES DIRECT" in text
+    assert "fix:" in text
+
+
 def test_load_prompt_env_and_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     f = tmp_path / "abs_prompt.md"
@@ -118,45 +133,7 @@ def test_load_prompt_dir_not_file(tmp_path, monkeypatch):
     assert isinstance(text, str)
 
 
-def test_prompt_code_review_paths(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    s = Settings()
-    # default fallback has C++ review content
-    text = s.prompt_code_review
-    assert "Review" in text or "review" in text.lower()
 
-    # with file in agent/rules
-    rdir = tmp_path / "agent" / "rules"
-    rdir.mkdir(parents=True)
-    (rdir / "CODE_REVIEW.md").write_text("CUSTOM REVIEW")
-    s.code_review_prompt_file = Path("agent/rules/CODE_REVIEW.md")
-    # may still use default path resolution
-    set_current_temp_dir(tmp_path / "temp_proj")
-    (tmp_path / "temp_proj" / "agent" / "rules").mkdir(parents=True)
-    (tmp_path / "temp_proj" / "agent" / "rules" / "CODE_REVIEW.md").write_text("TEMP REVIEW")
-    text2 = s.prompt_code_review
-    assert "REVIEW" in text2.upper()
-    set_current_temp_dir(None)
-
-
-def test_prompt_code_review_env(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    f = tmp_path / "cr.md"
-    f.write_text("ENV_CR")
-    monkeypatch.setenv("PROMPT_CODE_REVIEW_FILE", str(f))
-    s = Settings()
-    assert "ENV_CR" in s.prompt_code_review
-
-
-def test_prompt_code_review_read_error(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    rdir = tmp_path / "agent" / "rules"
-    rdir.mkdir(parents=True)
-    (rdir / "CODE_REVIEW.md").write_text("x")
-    s = Settings()
-    with patch("pathlib.Path.read_text", side_effect=OSError("e")):
-        text = s.prompt_code_review
-        assert isinstance(text, str)
 
 
 def test_temp_dir_helpers(tmp_path):

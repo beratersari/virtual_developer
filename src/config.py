@@ -71,39 +71,25 @@ class Settings(BaseSettings):
     # Configure file paths via environment variables or keep defaults.
     # -------------------------------------------------------------------------
     prompt_planning_file: Path = Field(
-        default=Path("agent/prompts/PLANNING.md"),
+        default=Path("agent/rules/PLANNING.md"),
         description="Path to planning prompt markdown file",
     )
     
     prompt_execution_file: Path = Field(
-        default=Path("agent/prompts/EXECUTION.md"),
+        default=Path("agent/rules/EXECUTION.md"),
         description="Path to execution prompt markdown file",
     )
     
     prompt_direct_execution_file: Path = Field(
-        default=Path("agent/prompts/DIRECT_EXECUTION.md"),
+        default=Path("agent/rules/DIRECT_EXECUTION.md"),
         description="Path to direct execution prompt markdown file",
     )
     
     prompt_oracle_file: Path = Field(
-        default=Path("agent/prompts/ORACLE.md"),
+        default=Path("agent/rules/ORACLE.md"),
         description="Path to oracle prompt markdown file",
     )
     
-    # Code Review Configuration
-    code_review_agent: str = Field(
-        default="explore",
-        description="Agent to use for code review (uses read-only review prompt)"
-    )
-    code_review_model: str = Field(
-        default="",
-        description="Model to use for code review via oh-my-openagent"
-    )
-    code_review_prompt_file: Path = Field(
-        default=Path("agent/rules/CODE_REVIEW.md"),
-        description="Path to code review prompt markdown file"
-    )
-
     # Feature Flags
     auto_start_plans: bool = Field(default=False)
     max_concurrent_jobs: int = Field(default=3)
@@ -233,24 +219,22 @@ class Settings(BaseSettings):
         
         paths_to_try = []
         
-        temp_prompt_path = cwd / "agent" / "prompts" / prompt_file.name
-        paths_to_try.append(("temp_dir", temp_prompt_path))
-        
-        vd_prompt_path = cwd / "agent" / "prompts" / prompt_file.name
-        paths_to_try.append(("vd_project", vd_prompt_path))
-        
+        # Prefer configured path, then agent/rules (canonical), then legacy agent/prompts.
         env_var_name = f"PROMPT_{prompt_name.upper().replace(' ', '_')}_FILE"
         env_path = os.environ.get(env_var_name)
         if env_path:
-            paths_to_try.insert(0, ("env_var", PathLib(env_path)))
+            paths_to_try.append(("env_var", PathLib(env_path)))
             logger.debug(f"Found env var {env_var_name}: {env_path}")
         else:
             logger.debug(f"No env var {env_var_name} set")
         
         if prompt_file.is_absolute():
-            paths_to_try.insert(0, ("absolute", prompt_file))
+            paths_to_try.append(("absolute", prompt_file))
         else:
-            paths_to_try.insert(0, ("relative_cwd", cwd / prompt_file))
+            paths_to_try.append(("relative_cwd", cwd / prompt_file))
+        
+        paths_to_try.append(("agent_rules", cwd / "agent" / "rules" / prompt_file.name))
+        paths_to_try.append(("agent_prompts_legacy", cwd / "agent" / "prompts" / prompt_file.name))
         
         logger.debug(f"Will try {len(paths_to_try)} paths in order:")
         for i, (source, path) in enumerate(paths_to_try, 1):
@@ -319,24 +303,53 @@ class Settings(BaseSettings):
             "- All plan checkboxes checked\n"
             "- Tests passing\n"
             "- No type errors\n"
-            "- Code follows project conventions"
+            "- Code follows project conventions\n"
+            "\n"
+            "## Commit message format (MANDATORY)\n"
+            "`[JIRA-ISSUE-ID] <type>: <description>`\n"
+            "Types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
+            "Examples: `[KEY] feat: ...` · `[KEY] fix: ...` · `[KEY] chore: ...`"
         )
     
     def _get_default_direct_execution_prompt(self) -> str:
-        """Default direct execution prompt (fallback if file not found)."""
+        """Default direct execution prompt (fallback if file not found).
+
+        Commit format must match agent/rules/EXECUTION.md:
+        [JIRA-KEY] type: description
+        """
         return (
             "## Instructions\n"
             "1. Analyze the task and current codebase\n"
             "2. Create todos for multi-step work\n"
             "3. Implement the solution following existing patterns\n"
             "4. Run verification (tests, type checking)\n"
-            "5. **COMMIT YOUR CHANGES**: If you modified any code files, you MUST commit with a meaningful message\n"
+            "5. **COMMIT YOUR CHANGES** (mandatory if you modified any files)\n"
             "6. Report completion with summary of changes and commit hash\n"
             "\n"
-            "## Commit Requirements\n"
-            "- ALWAYS commit after making code changes - this is MANDATORY\n"
-            "- Use Conventional Commits format: feat:, fix:, chore:, docs:, refactor:, test:\n"
-            "- Include the JIRA issue key in the commit message\n"
+            "## Commit message format (MANDATORY — same as EXECUTION.md)\n"
+            "After code changes you MUST create a git commit yourself. Use ONLY this format:\n"
+            "\n"
+            "```\n"
+            "[JIRA-ISSUE-ID] <type>: <description>\n"
+            "```\n"
+            "\n"
+            "Allowed types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
+            "\n"
+            "Doğru format örnekleri:\n"
+            "  [JIRA-ISSUE-ID] feat: Yeni özellik eklendi\n"
+            "  [JIRA-ISSUE-ID] fix: Hata düzeltildi\n"
+            "  [JIRA-ISSUE-ID] refactor: Kodun çalışma şeklini değiştirmeyen iyileştirme\n"
+            "  [JIRA-ISSUE-ID] docs: Dökümantasyon işleri\n"
+            "  [JIRA-ISSUE-ID] test: Birim testler\n"
+            "  [JIRA-ISSUE-ID] perf: Çalışma mantığını değiştirmeyen performans iyileştirmesi\n"
+            "  [JIRA-ISSUE-ID] ci: CI/CD değişiklikleri\n"
+            "  [JIRA-ISSUE-ID] build: Build sistemi ile ilgili değişiklikler\n"
+            "  [JIRA-ISSUE-ID] revert: Kodu geri almak\n"
+            "  [JIRA-ISSUE-ID] chore: Genel işler, küçük düzeltmeler\n"
+            "\n"
+            "Rules:\n"
+            "- Subject MUST be `[ISSUE-KEY] type: description`\n"
+            "- Do NOT push or create merge requests (the system does that)\n"
             "- Do NOT commit .env, credentials, or secret files\n"
             "\n"
             "## Constraints\n"
@@ -359,358 +372,7 @@ class Settings(BaseSettings):
             "Be thorough but concise. Focus on practical guidance."
         )
     
-    @property
-    def prompt_code_review(self) -> str:
-        from pathlib import Path as PathLib
-        import os
-        
-        prompt_file = self.code_review_prompt_file
-        cwd = PathLib.cwd()
-        prompt_name = "code review"
-        current_temp = get_current_temp_dir()
-        
-        logger.debug(f"========== Loading {prompt_name.upper()} PROMPT ==========")
-        logger.debug(f"Current working directory: {cwd}")
-        logger.debug(f"Active temp directory: {current_temp}")
-        logger.debug(f"code_review_prompt_file: {prompt_file}")
-        
-        paths_to_try = []
-        
-        if current_temp:
-            temp_project_path = current_temp / "agent" / "rules" / prompt_file.name
-            paths_to_try.append(("temp_project", temp_project_path))
-        
-        vd_project_path = cwd / "agent" / "rules" / prompt_file.name
-        paths_to_try.append(("vd_project", vd_project_path))
-        
-        env_path = os.environ.get("PROMPT_CODE_REVIEW_FILE")
-        if env_path:
-            paths_to_try.insert(0, ("env_var", PathLib(env_path)))
-            logger.debug(f"Found env var PROMPT_CODE_REVIEW_FILE: {env_path}")
-        
-        logger.debug(f"Will try {len(paths_to_try)} paths in order:")
-        for i, (source, path) in enumerate(paths_to_try, 1):
-            exists = "EXISTS" if path.exists() else "NOT FOUND"
-            logger.debug(f"  {i}. [{source}] {path} {exists}")
-        
-        for source, path in paths_to_try:
-            logger.debug(f"Trying: {path} (source: {source})")
-            
-            if not path.exists():
-                logger.debug(f"  Path does not exist")
-                continue
-            
-            if not path.is_file():
-                logger.debug(f"  Path exists but is not a file (is_dir={path.is_dir()})")
-                continue
-            
-            try:
-                content = path.read_text(encoding="utf-8")
-                file_size = len(content)
-                line_count = len(content.splitlines())
-                logger.info(f"SUCCESS! Loaded {file_size} bytes, {line_count} lines from {path}")
-                logger.debug(f"========== {prompt_name.upper()} PROMPT LOADED ==========")
-                return content
-            except Exception as e:
-                logger.error(f"Error reading file: {e}")
-                continue
-        
-        logger.warning(f"ALL PATHS FAILED for {prompt_name} prompt - Using default inline prompt")
-        logger.debug(f"========== {prompt_name.upper()} PROMPT DEFAULT USED ==========")
-        return ("""
-           ---
-name: cpp-review
-description: Ruthless C++ code review for correctness, lifetime safety, ownership, concurrency, performance, and maintainability.
----
 
-# C++ Review Skill
-
-You are performing a **code review** on the changes that were just made for this JIRA issue.\nThis is a **read-only review** — do NOT make any edits or changes to the code.
-
-### Review Steps
-
-1. **Examine Changes**: Run `git diff HEAD~1` (or `git log --oneline -5` then diff) to see what was changed
-2. **Read Modified Files**: Read the full content of any modified files to understand context
-3. **Analyze Code Quality**: Check for:\n   - Correctness: Does the code do what the issue description asks?
-
-Use this skill when reviewing C++ code, PRs, diffs, tests, headers, APIs, or architecture changes.
-
-## Mission
-Perform a strict senior-level review. Prioritize correctness and safety over style. Assume the code may compile yet still be wrong.
-
-## Review order
-
-### 1) Correctness
-Look for:
-- wrong logic
-- bad assumptions
-- edge-case failures
-- invalid state transitions
-- ignored failure modes
-- unchecked inputs
-- off-by-one errors
-- invalid container access
-- integer overflow / narrowing / signedness traps
-- misuse of standard library APIs
-- stale or invalid iterators
-
-Questions:
-- Can this produce wrong results?
-- Can this crash?
-- Can this silently corrupt state?
-- Are error paths handled?
-
----
-
-### 2) Lifetime and undefined behavior
-Look for:
-- dangling references
-- dangling pointers
-- use-after-free patterns
-- returning references/views to dead objects
-- storing references to temporaries
-- invalid `string_view` / `span` / iterator lifetimes
-- unsafe lambda captures
-- invalidation after vector/map reallocation or erase
-- object slicing
-- uninitialized reads
-- strict aliasing / reinterpret cast misuse
-- null dereference risk
-- double delete / manual ownership bugs
-
-Questions:
-- Who owns this object?
-- Can this reference outlive its source?
-- Can this container mutation invalidate something used later?
-- Is there UB even if tests pass?
-
----
-
-### 3) Resource management and ownership
-Look for:
-- raw `new/delete`
-- ambiguous ownership
-- incorrect smart pointer choice
-- cyclic `shared_ptr`
-- leaks on early return
-- cleanup logic spread across code paths
-- file/socket/lock/resource lifetime bugs
-- custom destructors that suggest missing RAII
-
-Questions:
-- Is ownership explicit?
-- Can a resource leak or be released twice?
-- Would RAII remove complexity here?
-
-Preferred direction:
-- automatic storage
-- RAII wrappers
-- `std::unique_ptr` for exclusive ownership
-- `std::shared_ptr` only with a real shared-lifetime need
-
----
-
-### 4) Thread safety and concurrency
-Look for:
-- unsynchronized shared mutable state
-- race conditions
-- detached thread lifetime hazards
-- unsafe access across callbacks
-- lock ordering problems
-- atomics used without clear reasoning
-- condition variable misuse
-- data published without synchronization
-- reference captures crossing thread boundaries
-
-Questions:
-- Can two threads access this concurrently?
-- Is the synchronization strategy clear?
-- Is object lifetime valid for async work?
-- Is this deterministic enough for production?
-
----
-
-### 5) Exception safety
-Look for:
-- partial state updates on failure
-- resource leaks on throw
-- exception-unsafe move/copy logic
-- destructors that may throw
-- failure paths that leave invalid state
-- low-level code depending on exceptions casually
-
-Questions:
-- What happens if construction/allocation/call fails?
-- Does this provide no-throw, basic, or strong guarantee?
-- Is the failure model consistent?
-
----
-
-### 6) Performance
-Look for:
-- unnecessary copies
-- missed `std::move`
-- expensive pass-by-value without benefit
-- repeated allocations
-- no `reserve()` where obvious
-- temporary object churn
-- string formatting/copy overhead
-- poor cache locality
-- unnecessary indirection
-- virtual dispatch in hot paths
-- work done inside tight loops that can be hoisted
-
-Questions:
-- Is this on a hot path?
-- Is there an obvious cheaper version?
-- Is complexity acceptable?
-- Is the code trading clarity for fake optimization?
-
-Do not suggest micro-optimizations unless meaningful.
-
----
-
-### 7) API and design
-Look for:
-- mixed responsibilities
-- leaky abstractions
-- poor separation of concerns
-- misleading names
-- hidden side effects
-- bool/flag-heavy interfaces
-- unclear units or invariants
-- interfaces that make misuse easy
-- over-generalized abstractions
-- inheritance where composition is better
-
-Questions:
-- Is this API hard to misuse?
-- Does the name reflect the behavior?
-- Are preconditions and invariants clear?
-- Is the abstraction paying for itself?
-
----
-
-### 8) Readability and maintainability
-Look for:
-- long functions with mixed concerns
-- deeply nested control flow
-- repeated logic
-- magic numbers
-- confusing naming
-- weak comments
-- unnecessary cleverness
-- hidden coupling
-- poor file/namespace structure
-
-Questions:
-- Can another engineer understand this quickly?
-- Is the complexity essential or accidental?
-- Would this be easy to modify safely?
-
----
-
-### 9) Testing
-Look for:
-- missing tests for core logic
-- missing edge cases
-- missing failure-path tests
-- missing lifetime/concurrency-sensitive tests
-- weak assertions
-- brittle tests tied to implementation details
-- no test around bug-prone parsing/state/ownership logic
-
-Questions:
-- What can break that is untested?
-- Are edge cases covered?
-- Are error conditions asserted?
-- Are tests deterministic?
-
----
-
-## Output format
-
-Use exactly this structure:
-
-### CRITICAL
-- [issue]
-  - Why it matters
-  - Concrete fix
-
-### HIGH
-- [issue]
-  - Why it matters
-  - Concrete fix
-
-### MEDIUM
-- [issue]
-  - Why it matters
-  - Concrete fix
-
-### LOW
-- [issue]
-  - Why it matters
-  - Concrete fix
-
-If there are no items in a section, write:
-- None
-
----
-
-## Review style
-- Be blunt and precise.
-- Focus on the highest-risk issues first.
-- Prefer evidence from the code.
-- Do not overpraise.
-- Do not flood the review with trivial nits before addressing real risk.
-- Quote small code snippets only when needed.
-- Suggest fixes that a real engineer could apply immediately.
-
----
-
-## Special review heuristics for C++
-Pay extra attention to:
-- `std::string_view`, `std::span`, iterators, references, pointers
-- move-from state misuse
-- capturing `this` in async callbacks
-- container invalidation after mutation
-- signed/unsigned comparisons
-- implicit narrowing conversions
-- ownership hidden in APIs
-- locking scope and lock lifetime
-- constructors that do too much
-- destructors and exception behavior
-- base classes without virtual destructors when polymorphic deletion is possible
-- copying non-copy-safe or expensive objects by accident
-- returning references to internal mutable state
-- magic boolean parameters in APIs
-- manual memory management where RAII should exist
-
----
-
-## Patch review mode
-If reviewing a diff:
-- Focus first on newly introduced risk.
-- Check whether the patch breaks old invariants.
-- Check if tests actually cover the new behavior.
-- Check whether a “small change” creates lifetime or ownership regressions elsewhere.
-
----
-
-## Header review mode
-If reviewing a header:
-- Focus on API clarity, ownership, constness, dependency hygiene, exception model, and misuse resistance.
-
----
-
-## Test review mode
-If reviewing tests:
-- Check whether the tests would catch real regressions.
-- Check whether assertions are meaningful.
-- Check whether important failure paths and edge cases are missing.
-- Check whether the test setup hides l"""
-        )
-    
     @property
     def trigger_mentions_list(self) -> List[str]:
         """Get trigger mentions as a list."""
