@@ -40,25 +40,41 @@ env/
 .env.local
 .env.*.local
 
-# JIRA Virtual Developer specific
+# JIRA Virtual Developer runtime (sessions, state, logs)
+.jira-agent/
+.jira-agent/sessions/
 .jira-agent/state/
 logs/
 *.log
-.jira-agent/
 
-# Sample project - contains generated test files
+# Per-issue temp git clones
+.temp/
+
+# OpenCode / oh-my-openagent local run artifacts (must not pollute repo)
+.omo/
+.codegraph/
+
+# Sample project - local fixture / generated test files
+sample_project/
 sample_project/.jira-agent/
 sample_project/.venv/
-sample_project/src/calculator/__pycache__/
-sample_project/tests/__pycache__/
-.temp/
+sample_project/**/__pycache__/
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Test / coverage artifacts
 .coverage
+.coverage.*
 coverage.json
+coverage.xml
 .pytest_cache/
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Env secrets (never commit)
 .env
+.env.local
+.env.*.local
