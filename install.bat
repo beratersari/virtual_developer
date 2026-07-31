@@ -214,6 +214,40 @@ if not exist "%OPENCODE_BIN%\opencode.exe" (
 )
 echo [OK] opencode.exe -> %OPENCODE_BIN%\opencode.exe
 
+REM Verify 64-bit PE and clear Mark-of-the-Web (blocked internet downloads)
+set "ASSERT_PE=%SCRIPT_DIR%\packaging\windows\Assert-Amd64Pe.ps1"
+if exist "%ASSERT_PE%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%ASSERT_PE%" -Path "%OPENCODE_BIN%\opencode.exe"
+    if errorlevel 1 (
+        echo [ERROR] opencode.exe is not a valid 64-bit ^(AMD64^) binary.
+        echo This package only supports 64-bit Windows with the official x64 OpenCode build.
+        echo Delete "%%USERPROFILE%%\.opencode" and re-install from a fresh package.
+        pause
+        exit /b 1
+    )
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%OPENCODE_BIN%' -File | Unblock-File -ErrorAction SilentlyContinue"
+
+echo Smoke-testing opencode --version ...
+"%OPENCODE_BIN%\opencode.exe" --version
+if errorlevel 1 (
+    echo [ERROR] opencode.exe failed to start.
+    echo.
+    echo This package ships the official **64-bit (AMD64)** OpenCode for 64-bit Windows.
+    echo If Windows says the app is incompatible with 64-bit Windows, the file is usually
+    echo corrupt/incomplete ^(bad extract^) or an old 16/32-bit binary is on PATH.
+    echo.
+    echo Fix:
+    echo   1. rmdir /s /q "%%USERPROFILE%%\.opencode"
+    echo   2. Re-download the latest Actions artifact and extract once
+    echo   3. Run install.bat again
+    echo   4. In a NEW terminal: where opencode
+    echo      It must resolve to %%USERPROFILE%%\.opencode\bin\opencode.exe
+    pause
+    exit /b 1
+)
+echo [OK] opencode runs ^(64-bit^)
+
 if exist "%OPENCODE_HOME%\opencode.json" (
     echo [OK] config      -> %OPENCODE_HOME%\opencode.json
 ) else (
@@ -349,16 +383,17 @@ if not errorlevel 1 (
     echo [OK] User PATH already contains %ADD_PATH%
     goto :eof
 )
+REM Prepend so our 64-bit opencode wins over any older install
 if defined USER_PATH (
-    setx PATH "%USER_PATH%;%ADD_PATH%" >nul
+    setx PATH "%ADD_PATH%;%USER_PATH%" >nul
 ) else (
     setx PATH "%ADD_PATH%" >nul
 )
 if errorlevel 1 (
-    echo [WARNING] Could not update user PATH via setx. Add manually:
+    echo [WARNING] Could not update user PATH via setx. Add manually at the FRONT of PATH:
     echo   %ADD_PATH%
 ) else (
-    echo [OK] Appended to user PATH: %ADD_PATH%
+    echo [OK] Prepended to user PATH: %ADD_PATH%
 )
 goto :eof
 

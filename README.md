@@ -235,10 +235,14 @@ OpenCode layout after install:
 
 **Windows requirements (zip install):**
 
-- Windows 10 or later (x64)
-- **Python 3.10+** (64-bit; wheels cover 3.10–3.13) from https://www.python.org — enable “Add to PATH”
+- **Windows 10/11 64-bit (x64 / AMD64)** — OpenCode is the official `opencode-windows-x64` build (not 32-bit, not ARM)
+- **Python 3.10+** (64-bit; see `vendor\SUPPORTED_PYTHON.txt`) from https://www.python.org — enable “Add to PATH”
 - Git for Windows (recommended)
 - **No Node.js/npm required** when using the CI zip
+
+If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
+**corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Delete
+`%USERPROFILE%\.opencode`, re-install from a fresh package, then run `where opencode`.
 **From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
 it will download OpenCode/glab and use npm for the plugin if available.
 

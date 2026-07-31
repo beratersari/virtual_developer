@@ -318,8 +318,11 @@ $vendor = Join-Path $payload "vendor"
 $dl = Join-Path $vendor "_downloads"
 Ensure-Dir $dl
 
-$opencodeZip = Join-Path $dl "opencode-windows-x64.zip"
-$opencodeUrl = "https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/opencode-windows-x64.zip"
+# Official 64-bit Windows CLI (AMD64). Do NOT use arm64 or any 32-bit asset.
+$OPENCODE_ASSET = "opencode-windows-x64.zip"
+$opencodeZip = Join-Path $dl $OPENCODE_ASSET
+$opencodeUrl = "https://github.com/anomalyco/opencode/releases/download/v$OPENCODE_VERSION/$OPENCODE_ASSET"
+Write-Host "  Asset: $OPENCODE_ASSET (AMD64 / 64-bit Windows)"
 Download-File $opencodeUrl $opencodeZip
 
 $opencodeExtract = Join-Path $dl "opencode-extract"
@@ -332,6 +335,15 @@ $opencodeExe = Get-ChildItem -Path $opencodeExtract -Filter "opencode.exe" -Recu
 if (-not $opencodeExe) {
     throw "opencode.exe not found inside $opencodeZip"
 }
+
+# Fail the build if GitHub ever ships a non-x64 binary under this name
+$assertPe = Join-Path $root "packaging\windows\Assert-Amd64Pe.ps1"
+& $assertPe -Path $opencodeExe.FullName
+if ($LASTEXITCODE -ne 0) {
+    throw "OpenCode binary is not AMD64 — refusing to package a broken/wrong-arch build"
+}
+$ocSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $opencodeExe.FullName).Hash
+Write-Host "  OpenCode SHA256: $ocSha"
 
 # ---------------------------------------------------------------------------
 # 3) Fetch glab Windows CLI (pinned)
@@ -353,6 +365,10 @@ $glabExe = Get-ChildItem -Path $glabExtract -Filter "glab.exe" -Recurse | Select
 if (-not $glabExe) {
     throw "glab.exe not found inside $glabZip"
 }
+& $assertPe -Path $glabExe.FullName -MinBytes 1MB
+if ($LASTEXITCODE -ne 0) {
+    throw "glab.exe is not AMD64"
+}
 
 # ---------------------------------------------------------------------------
 # 4) Build OpenCode home in a SHORT temp path, then pack as ONE zip
@@ -372,6 +388,14 @@ Ensure-Dir $ocBin
 
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $ocBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $ocBin "glab.exe") -Force
+# Record architecture for install-time checks / support
+@(
+    "OPENCODE_ARCH=win_amd64"
+    "OPENCODE_ASSET=$OPENCODE_ASSET"
+    "OPENCODE_SHA256=$ocSha"
+    "OPENCODE_BYTES=$((Get-Item -LiteralPath $opencodeExe.FullName).Length)"
+    "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
+) | Set-Content -Path (Join-Path $ocBin "ARCH.txt") -Encoding UTF8
 
 $pkgPath = Join-Path $ocHome "package.json"
 $pkgBody = @"
