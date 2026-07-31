@@ -52,6 +52,12 @@ jobs:
             Write-Host "$k=$($map[$k])"
             "$k=$($map[$k])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           }
+          $minPy = if ($map["PYTHON_MIN_VERSION"]) { $map["PYTHON_MIN_VERSION"] } else { "3.10" }
+          $wheelPy = if ($map["PYTHON_WHEEL_VERSIONS"]) { $map["PYTHON_WHEEL_VERSIONS"] } else { "3.10,3.11,3.12,3.13" }
+          "PYTHON_MIN_VERSION=$minPy" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "PYTHON_WHEEL_VERSIONS=$wheelPy" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "PYTHON_MIN_VERSION=$minPy"
+          Write-Host "PYTHON_WHEEL_VERSIONS=$wheelPy"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -116,9 +122,10 @@ jobs:
             - OpenCode: `${{ steps.versions.outputs.OPENCODE_VERSION }}`
             - oh-my-opencode: `${{ steps.versions.outputs.OH_MY_OPENCODE_VERSION }}`
             - glab: `${{ steps.versions.outputs.GLAB_VERSION }}`
-            - Python wheels built for: `${{ steps.versions.outputs.PYTHON_VERSION }}`
+            - Python wheels for: `${{ steps.versions.outputs.PYTHON_WHEEL_VERSIONS }}` (min runtime `${{ steps.versions.outputs.PYTHON_MIN_VERSION }}`)
+            - OpenCode home is a **single** `vendor/opencode-home.zip` (no deep `node_modules` in the outer zip)
 
-            **Requirement on the machine:** Python ${{ steps.versions.outputs.PYTHON_VERSION }}+ (64-bit) and Git (recommended).
+            **Requirement on the machine:** Python ${{ steps.versions.outputs.PYTHON_MIN_VERSION }}+ 64-bit (3.10–3.13 recommended) and Git (recommended).
             No npm/Node required for install when using this zip.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

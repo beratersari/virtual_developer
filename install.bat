@@ -2,13 +2,12 @@
 REM =============================================================================
 REM JIRA Virtual Developer - Windows Installer
 REM =============================================================================
-REM Offline-friendly when run from a CI-built distribution zip (vendor\ present):
-REM   - Copies OpenCode + config + oh-my-opencode to %USERPROFILE%\.opencode
-REM   - Installs glab into %USERPROFILE%\.opencode\bin
-REM   - Creates .venv and installs Python deps from vendor\python-wheels
+REM Offline when run from a CI-built distribution zip (vendor\ present):
+REM   - Extracts vendor\opencode-home.zip -> %USERPROFILE%\.opencode
+REM     (single archive avoids long-path / slow node_modules extract of the outer zip)
+REM   - Creates .venv and installs Python deps from vendor\python-wheels (3.10+)
 REM
-REM Also works from a git clone (online fallback): downloads deps if vendor\
-REM is missing (requires npm/network).
+REM Online fallback only if VD_ALLOW_ONLINE=1 and vendor is missing.
 REM =============================================================================
 
 setlocal EnableDelayedExpansion
@@ -32,12 +31,12 @@ echo OpenCode home: %OPENCODE_HOME%
 echo.
 
 REM ---------------------------------------------------------------------------
-REM Prerequisites: Python only (Node/npm only needed for online fallback)
+REM Prerequisites: Python 3.10+ (64-bit). No Node required for CI zip.
 REM ---------------------------------------------------------------------------
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not on PATH.
-    echo Install Python 3.12+ ^(64-bit^) from https://www.python.org/downloads/
+    echo Install Python 3.10+ ^(64-bit^) from https://www.python.org/downloads/
     echo Enable "Add python.exe to PATH" during setup, then re-run install.bat.
     pause
     exit /b 1
@@ -46,16 +45,17 @@ if errorlevel 1 (
 for /f "tokens=*" %%a in ('python --version 2^>^&1') do set "PYTHON_VERSION=%%a"
 echo [OK] %PYTHON_VERSION%
 
-python -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)" >nul 2>&1
+python -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python 3.12+ is required ^(bundled wheels target 3.12^).
+    echo [ERROR] Python 3.10 or newer is required.
     echo Found: %PYTHON_VERSION%
+    echo Bundled wheels cover CPython 3.10–3.13 ^(win_amd64^).
     pause
     exit /b 1
 )
 
 REM ---------------------------------------------------------------------------
-REM Load pinned versions (for messages / online fallback)
+REM Load pinned versions
 REM ---------------------------------------------------------------------------
 set "OPENCODE_VERSION=1.18.10"
 set "OH_MY_OPENCODE_VERSION=4.19.3"
@@ -71,13 +71,18 @@ if exist "%VERSIONS_FILE%" (
 )
 
 set "HAS_VENDOR=0"
+if exist "%VENDOR_DIR%\opencode-home.zip" set "HAS_VENDOR=1"
 if exist "%VENDOR_DIR%\opencode-home\bin\opencode.exe" set "HAS_VENDOR=1"
+
 if exist "%VENDOR_DIR%\VERSIONS.txt" (
     echo [OK] Offline vendor bundle detected
     type "%VENDOR_DIR%\VERSIONS.txt"
     echo.
+) else if "%HAS_VENDOR%"=="1" (
+    echo [OK] Offline vendor bundle detected
+    echo.
 ) else (
-    echo [INFO] No vendor\ bundle — will use online install fallback where needed.
+    echo [INFO] No vendor\ bundle — online install requires VD_ALLOW_ONLINE=1.
     echo.
 )
 
@@ -103,12 +108,12 @@ set "VENV_PIP=%VENV_DIR%\Scripts\pip.exe"
 echo.
 echo Step 2: Installing Python packages...
 if exist "%VENDOR_DIR%\python-wheels" (
-    echo Using offline wheels from vendor\python-wheels ^(no network^)...
+    echo Using offline wheels from vendor\python-wheels ^(no network, Python 3.10+^)...
     "%VENV_PIP%" install --upgrade pip --no-index --find-links="%VENDOR_DIR%\python-wheels" 2>nul
     "%VENV_PIP%" install --no-index --find-links="%VENDOR_DIR%\python-wheels" -r "%SCRIPT_DIR%\requirements.txt"
     if errorlevel 1 (
         echo [ERROR] Offline wheel install failed. Refusing to use the network.
-        echo Check that Python is 3.12 x64 and vendor\python-wheels is complete.
+        echo Ensure you have 64-bit Python 3.10–3.13 and a complete vendor\python-wheels folder.
         pause
         exit /b 1
     )
@@ -127,6 +132,7 @@ if exist "%VENDOR_DIR%\python-wheels" (
     )
 )
 echo [OK] Python dependencies installed into .venv
+
 REM ---------------------------------------------------------------------------
 REM Step 3: Deploy OpenCode home -> %USERPROFILE%\.opencode
 REM ---------------------------------------------------------------------------
@@ -136,19 +142,26 @@ echo Step 3: Installing OpenCode under %OPENCODE_HOME% ...
 if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%"
 if not exist "%OPENCODE_BIN%" mkdir "%OPENCODE_BIN%"
 
-if "%HAS_VENDOR%"=="1" (
-    echo Copying prebuilt OpenCode home from vendor\opencode-home ^(offline, no network^)...
-    REM /E all subdirs, /I assume dest is dir, /Y overwrite, /Q quiet
-    xcopy "%VENDOR_DIR%\opencode-home\*" "%OPENCODE_HOME%\" /E /I /Y /Q
+if exist "%VENDOR_DIR%\opencode-home.zip" (
+    echo Extracting vendor\opencode-home.zip -^> %OPENCODE_HOME%
+    echo ^(single archive: avoids long Windows paths / slow outer-zip extract^)
+    call :extract_opencode_home_zip
     if errorlevel 1 (
-        echo [ERROR] Failed to copy vendor\opencode-home to %OPENCODE_HOME%
+        echo [ERROR] Failed to extract OpenCode home archive.
+        pause
+        exit /b 1
+    )
+) else if exist "%VENDOR_DIR%\opencode-home\bin\opencode.exe" (
+    echo Copying expanded vendor\opencode-home ^(legacy layout^)...
+    robocopy "%VENDOR_DIR%\opencode-home" "%OPENCODE_HOME%" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
+    if errorlevel 8 (
+        echo [ERROR] robocopy failed copying opencode-home
         pause
         exit /b 1
     )
 ) else (
-    echo [ERROR] No vendor\opencode-home bundle found.
-    echo This offline installer requires the CI zip ^(vendor\ folder^).
-    echo Download virtual_developer-windows-x64-*.zip and extract it fully, then re-run.
+    echo [ERROR] No vendor\opencode-home.zip ^(or expanded opencode-home^) found.
+    echo This offline installer requires the CI zip with vendor\ folder.
     echo.
     echo If you intentionally want an online git-clone install, set:
     echo   set VD_ALLOW_ONLINE=1
@@ -194,33 +207,28 @@ if exist "%OPENCODE_HOME%\opencode.json" (
 if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
     copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%OC_CONFIG_DIR%\oh-my-opencode.json" >nul
 )
-REM Plugin deps: ensure global config dir can resolve npm plugin if OpenCode looks there
 if exist "%OPENCODE_HOME%\package.json" (
     copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
 )
 echo [OK] Mirrored config to %OC_CONFIG_DIR%
 
 REM ---------------------------------------------------------------------------
-REM Step 4: Ensure glab is on OpenCode bin
+REM Step 4: glab
 REM ---------------------------------------------------------------------------
 echo.
 echo Step 4: GitLab CLI ^(glab^)...
 if exist "%OPENCODE_BIN%\glab.exe" (
-    echo [OK] glab.exe already at %OPENCODE_BIN%\glab.exe
-) else if exist "%VENDOR_DIR%\opencode-home\bin\glab.exe" (
-    copy /Y "%VENDOR_DIR%\opencode-home\bin\glab.exe" "%OPENCODE_BIN%\glab.exe" >nul
-    echo [OK] glab.exe copied
+    echo [OK] glab.exe at %OPENCODE_BIN%\glab.exe
 ) else (
-    echo [WARNING] glab.exe not bundled. Install from https://gitlab.com/gitlab-org/cli/-/releases
+    echo [WARNING] glab.exe not found under %OPENCODE_BIN%
 )
 
 REM ---------------------------------------------------------------------------
-REM Step 5: User PATH  (%USERPROFILE%\.opencode\bin)
+REM Step 5: User PATH
 REM ---------------------------------------------------------------------------
 echo.
 echo Step 5: Adding OpenCode bin to user PATH...
 call :ensure_user_path "%OPENCODE_BIN%"
-REM Current session
 set "PATH=%OPENCODE_BIN%;%PATH%"
 echo [OK] PATH includes %OPENCODE_BIN% ^(this session + user env^)
 
@@ -250,9 +258,6 @@ if errorlevel 1 (
     echo [OK] Project initialized
 )
 
-REM ---------------------------------------------------------------------------
-REM Done
-REM ---------------------------------------------------------------------------
 echo.
 echo ========================================
 echo   Installation Complete!
@@ -272,9 +277,6 @@ echo        cd /d "%SCRIPT_DIR%"
 echo        .venv\Scripts\activate
 echo        python cli.py start
 echo.
-echo Quick smoke test:
-echo        .venv\Scripts\python cli.py test-issue --title "demo" --description "ping"
-echo.
 echo Note: Restart terminals so %%USERPROFILE%%\.opencode\bin is on PATH.
 echo.
 pause
@@ -284,9 +286,34 @@ REM ============================================================================
 REM Subroutines
 REM =============================================================================
 
+:extract_opencode_home_zip
+REM Extract vendor\opencode-home.zip into %OPENCODE_HOME% with long-path support.
+set "OC_ZIP=%VENDOR_DIR%\opencode-home.zip"
+if not exist "%OC_ZIP%" exit /b 1
+
+if exist "%OPENCODE_HOME%\node_modules" (
+    echo   Removing previous node_modules under .opencode ...
+    rmdir /s /q "%OPENCODE_HOME%\node_modules" 2>nul
+)
+
+set "EXTRACT_PS1=%SCRIPT_DIR%\packaging\windows\extract-opencode-home.ps1"
+if exist "%EXTRACT_PS1%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%EXTRACT_PS1%" -Zip "%OC_ZIP%" -Dest "%OPENCODE_HOME%"
+    if errorlevel 1 exit /b 1
+    if exist "%OPENCODE_BIN%\opencode.exe" exit /b 0
+    exit /b 1
+)
+
+REM Fallback if packaging scripts were stripped from the dist
+where tar >nul 2>&1
+if not errorlevel 1 (
+    tar -xf "%OC_ZIP%" -C "%OPENCODE_HOME%"
+    if exist "%OPENCODE_BIN%\opencode.exe" exit /b 0
+)
+exit /b 1
+
 :ensure_user_path
 set "ADD_PATH=%~1"
-REM Read current user PATH from registry
 set "USER_PATH="
 for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USER_PATH=%%B"
 echo ;%USER_PATH%; | find /I ";%ADD_PATH%;" >nul
@@ -308,7 +335,6 @@ if errorlevel 1 (
 goto :eof
 
 :install_opencode_online
-REM Requires network + PowerShell. npm optional for plugin.
 echo   Fetching OpenCode v!OPENCODE_VERSION! ...
 set "TMP_OC=%TEMP%\vd-opencode-%RANDOM%"
 mkdir "!TMP_OC!" 2>nul
@@ -360,7 +386,7 @@ if not errorlevel 1 (
 
 where npm >nul 2>&1
 if errorlevel 1 (
-    echo [WARNING] npm not found — plugin not installed. Install Node.js or use the CI zip.
+    echo [WARNING] npm not found — plugin not installed. Use the CI zip instead.
 ) else (
     pushd "!OPENCODE_HOME!"
     call npm install --omit=dev --no-fund --no-audit "oh-my-opencode@!OH_MY_OPENCODE_VERSION!"

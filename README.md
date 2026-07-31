@@ -208,11 +208,15 @@ What `install.bat` does:
 
 | Step | Result |
 |------|--------|
-| Python venv | Creates `.venv` and installs deps from `vendor\python-wheels` (offline) |
-| OpenCode | Copies CLI + config + plugin to **`%USERPROFILE%\.opencode`** |
+| Python venv | Creates `.venv` and installs deps from `vendor\python-wheels` (offline; **3.10–3.13**) |
+| OpenCode | Extracts `vendor\opencode-home.zip` → **`%USERPROFILE%\.opencode`** |
 | glab | Places `glab.exe` in `%USERPROFILE%\.opencode\bin` |
 | PATH | Adds `%USERPROFILE%\.opencode\bin` to the **user** PATH |
 | Project | Creates `.env` from `.env.example` if missing; runs `cli.py init` |
+
+The outer zip does **not** expand `node_modules` (avoids Windows path-too-long and slow
+Explorer extract). OpenCode + plugin ship as one file: `vendor\opencode-home.zip`,
+which `install.bat` unpacks with `tar` into a short path under your user profile.
 
 OpenCode layout after install:
 
@@ -223,16 +227,15 @@ OpenCode layout after install:
   opencode.json          # plugin registration
   oh-my-opencode.json
   package.json
-  node_modules\...       # oh-my-opencode (prebundled in the zip)
+  node_modules\...       # extracted by install.bat from opencode-home.zip
 ```
 
 **Windows requirements (zip install):**
 
 - Windows 10 or later (x64)
-- **Python 3.12+** (64-bit) from https://www.python.org — enable “Add to PATH”
+- **Python 3.10+** (64-bit; wheels cover 3.10–3.13) from https://www.python.org — enable “Add to PATH”
 - Git for Windows (recommended)
 - **No Node.js/npm required** when using the CI zip
-
 **From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
 it will download OpenCode/glab and use npm for the plugin if available.
 

@@ -10,16 +10,23 @@ This folder drives the **Windows-only** offline installer shipped as a zip from 
 
 OpenCode is installed under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 
+## Design notes (Windows pain points)
+
+| Problem | Fix |
+|---------|-----|
+| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with `tar` into `%USERPROFILE%\.opencode` |
+| Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
+
 ## Files
 
 | Path | Role |
 |------|------|
-| `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python / Node versions |
+| `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python wheel set / Node |
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
 | `opencode.json` | Registers `oh-my-opencode` plugin |
 | `oh-my-opencode.json` | Default plugin config stub |
 | `build-dist.ps1` | Fetches pinned artifacts from the web and builds the zip |
-| `../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
+| `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
 
 ## Bumping versions
 
