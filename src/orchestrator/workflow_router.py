@@ -29,10 +29,17 @@ class WorkflowRouter:
         "add", "remove", "delete", "rename",
     ]
     
-    # Keywords indicating Oracle consultation
+    # Keywords indicating Oracle consultation (pure Q&A, not implementation)
     ORACLE_KEYWORDS = [
         "should we", "architecture", "design pattern",
         "best practice", "how to", "approach",
+    ]
+
+    # Words that signal real implementation work (must not route to oracle-only)
+    IMPLEMENTATION_KEYWORDS = [
+        "implement", "create", "build", "fix", "bug", "add", "remove",
+        "delete", "rename", "refactor", "migrate", "update", "change",
+        "feature", "epic",
     ]
     
     @classmethod
@@ -50,9 +57,11 @@ class WorkflowRouter:
             return WorkflowType.COMMENT_RESPONSE
         
         combined_text = f"{summary} {description}".lower()
-        
-        # Check for Oracle consultation indicators
-        if any(kw in combined_text for kw in cls.ORACLE_KEYWORDS):
+        has_implementation = any(kw in combined_text for kw in cls.IMPLEMENTATION_KEYWORDS)
+        has_oracle_phrase = any(kw in combined_text for kw in cls.ORACLE_KEYWORDS)
+
+        # Oracle only when consultative and not asking for code/implementation work
+        if has_oracle_phrase and not has_implementation:
             return WorkflowType.ORACLE_CONSULT
         
         # Check complexity to decide planning vs direct
@@ -69,7 +78,7 @@ class WorkflowRouter:
         score = 0
         text = f"{summary} {description}".lower()
         
-        # Score based on planning keywords
+        # Score based on planning keywords (unique hits)
         for kw in cls.PLANNING_KEYWORDS:
             if kw in text:
                 score += 1

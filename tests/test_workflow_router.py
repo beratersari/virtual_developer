@@ -11,8 +11,15 @@ def test_route_comment_returns_comment_response():
 
 
 def test_route_oracle_keywords():
-    wt = WorkflowRouter.route_issue("X-1", "how to design this", "should we use pattern")
+    # Pure consult — no implementation verbs
+    wt = WorkflowRouter.route_issue("X-1", "how to structure this", "should we use pattern")
     assert wt == WorkflowType.ORACLE_CONSULT
+
+
+def test_route_implement_not_oracle():
+    """Implementation work must not be stolen by oracle phrases like 'how to'."""
+    wt = WorkflowRouter.route_issue("X-1", "how to implement auth", "add OAuth login")
+    assert wt != WorkflowType.ORACLE_CONSULT
 
 
 def test_route_planning_high_complexity():
