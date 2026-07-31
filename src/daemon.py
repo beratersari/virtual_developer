@@ -147,40 +147,61 @@ class JiraAgentDaemon:
         )
     
     async def _monitor_active_issues(self):
+        """Watch for stuck in-flight issues and report them to Jira.
+
+        Foreground workflows await the agent directly, so process-status polling
+        is not used. Instead we enforce a wall-clock stuck timeout based on
+        started_at + timeout_seconds * retries, then ERROR + Jira post_error.
+        """
+        from datetime import datetime
+
+        from src.config import settings
+        from src.state.models import TaskStatus
+
+        in_flight = {
+            TaskStatus.PLANNING,
+            TaskStatus.EXECUTING,
+            TaskStatus.CODE_REVIEW,
+        }
+
         while self._running:
             try:
                 active_issues = self.state_manager.get_active_issues()
-                
+
                 for state in active_issues:
-                    if state.current_task_id and self.processor.agent_runner:
-                        status = await self.processor.agent_runner.check_task_status(
-                            state.current_task_id
-                        )
-                        
-                        if status and status["status"] in ("completed", "error"):
-                            logger.info(f"Task {state.current_task_id} {status['status']}")
-                            
-                            output = self.processor.agent_runner.read_session_output(
-                                state.current_task_id
-                            )
-                            
-                            if status["status"] == "completed":
-                                from src.state.models import TaskStatus
-                                self.state_manager.update_state(
-                                    state.issue_key,
-                                    status=TaskStatus.COMPLETED,
-                                    progress_percentage=100,
-                                )
-                            else:
-                                from src.state.models import TaskStatus
-                                self.state_manager.update_state(
-                                    state.issue_key,
-                                    status=TaskStatus.ERROR,
-                                    error_message=output[:500],
-                                )
-                
-                await asyncio.sleep(5)
-                
+                    if state.status not in in_flight:
+                        continue
+                    if not state.started_at:
+                        continue
+
+                    timeout = state.timeout_seconds or settings.agent_task_timeout_seconds
+                    retries = state.max_retries or settings.agent_task_max_retries
+                    # Allow full retry budget plus 50% headroom for backoff/overhead
+                    limit_seconds = timeout * (retries + 1) * 1.5
+                    age = (datetime.now() - state.started_at).total_seconds()
+
+                    if age <= limit_seconds:
+                        continue
+
+                    logger.error(
+                        f"Issue {state.issue_key} stuck in {state.status.value} "
+                        f"for {int(age)}s (limit {int(limit_seconds)}s)"
+                    )
+                    self.processor._fail_issue(
+                        state.issue_key,
+                        (
+                            f"Job stuck in '{state.status.value}' for {int(age)}s "
+                            f"(limit {int(limit_seconds)}s). The agent may have hung "
+                            f"or the daemon may have lost the process."
+                        ),
+                        suggestion=(
+                            "Check session logs under .jira-agent/sessions/, then "
+                            "move the issue back to TO DO to re-queue."
+                        ),
+                    )
+
+                await asyncio.sleep(30)
+
             except Exception as e:
                 logger.error(f"Error monitoring issues: {e}")
                 await asyncio.sleep(5)

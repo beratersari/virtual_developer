@@ -39,6 +39,63 @@ class JobProcessor:
         logger.debug(f"JobProcessor initialized - default_agent: {settings.default_agent}, "
                      f"planning_agent: {settings.planning_agent}, orchestrator_agent: {settings.orchestrator_agent}")
     
+    # Statuses where an agent is actively running — never restart these from updates
+    IN_FLIGHT_STATUSES = {
+        TaskStatus.PLANNING,
+        TaskStatus.EXECUTING,
+        TaskStatus.CODE_REVIEW,
+    }
+    TERMINAL_STATUSES = {
+        TaskStatus.COMPLETED,
+        TaskStatus.ERROR,
+        TaskStatus.CANCELLED,
+    }
+
+    def _fail_issue(
+        self,
+        issue_key: str,
+        error_message: str,
+        *,
+        suggestion: Optional[str] = None,
+    ) -> None:
+        """Mark issue ERROR and always attempt to notify the user via Jira."""
+        error_text = (error_message or "Unknown error")[:2000]
+        try:
+            updated = self.state_manager.update_state(
+                issue_key,
+                status=TaskStatus.ERROR,
+                error_message=error_text,
+                completed_at=datetime.now(),
+            )
+            state = updated or self.state_manager.get_state(issue_key)
+            if state is None:
+                # State missing — still try a bare comment so the user is not blind
+                self.reporter.post_comment_response(
+                    issue_key,
+                    f"❌ **Agent Error**\n\n```\n{error_text}\n```",
+                )
+                return
+            comment_id = self.reporter.post_error(
+                state, error_text, suggestion=suggestion
+            )
+            if not comment_id:
+                logger.error(f"Jira post_error returned no comment for {issue_key}")
+        except Exception as e:
+            logger.exception(f"Failed to report error for {issue_key}: {e}", e)
+
+    def _reset_for_reprocess(self, issue_key: str) -> None:
+        """Clear runtime fields before restarting work on an issue."""
+        self.state_manager.update_state(
+            issue_key,
+            status=TaskStatus.PENDING,
+            progress_percentage=0,
+            error_message=None,
+            current_task_id=None,
+            current_opencode_session_id=None,
+            timed_out=False,
+            completed_at=None,
+        )
+
     async def process_event(self, event: Dict[str, Any]):
         """Process a JIRA webhook/poll event."""
         event_type = event.get("webhookEvent", "")
@@ -47,18 +104,27 @@ class JobProcessor:
         logger.info(f"Processing event: {event_type} for issue: {issue_key}")
         logger.debug(f"Event data keys: {list(event.keys())}")
         
-        # Process event (details logged to state file)
-        if event_type == "jira:issue_created":
-            logger.info(f"Handling issue created event for {issue_key}")
-            await self._handle_issue_created(event)
-        elif event_type == "jira:issue_updated":
-            logger.info(f"Handling issue updated event for {issue_key}")
-            await self._handle_issue_updated(event)
-        elif event_type == "comment_created":
-            logger.info(f"Handling comment created event for {issue_key}")
-            await self._handle_comment_created(event)
-        else:
-            logger.debug(f"Unknown event type: {event_type}, ignoring")
+        try:
+            # Accept both on-prem/cloud comment event names
+            if event_type == "jira:issue_created":
+                logger.info(f"Handling issue created event for {issue_key}")
+                await self._handle_issue_created(event)
+            elif event_type == "jira:issue_updated":
+                logger.info(f"Handling issue updated event for {issue_key}")
+                await self._handle_issue_updated(event)
+            elif event_type in ("comment_created", "jira:issue_commented"):
+                logger.info(f"Handling comment created event for {issue_key}")
+                await self._handle_comment_created(event)
+            else:
+                logger.debug(f"Unknown event type: {event_type}, ignoring")
+        except Exception as e:
+            logger.exception(f"Unhandled error processing event for {issue_key}: {e}", e)
+            if issue_key and issue_key != "unknown":
+                self._fail_issue(
+                    issue_key,
+                    f"Unhandled error while processing event: {e}",
+                    suggestion="Check daemon logs and re-queue the issue if needed.",
+                )
     
     async def _handle_issue_created(self, event: Dict[str, Any]):
         issue = event.get("issue", {})
@@ -67,31 +133,36 @@ class JobProcessor:
         
         summary = fields.get("summary", "")
         description = fields.get("description", "") or ""
+        if not isinstance(description, str):
+            # On-prem is usually plain text; tolerate accidental non-string payloads
+            description = str(description)
         
         logger.info(f"Handling issue created for {issue_key}: {summary[:80]}")
         logger.debug(f"Issue description length: {len(description)} chars")
         
         existing = self.state_manager.get_state(issue_key)
-        if existing and existing.status in {TaskStatus.PLANNING, TaskStatus.EXECUTING, TaskStatus.CODE_REVIEW}:
+        if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
+            return
+        # Also skip PLAN_READY — waiting for /start-work or auto-start; do not re-plan
+        if existing and existing.status == TaskStatus.PLAN_READY:
+            logger.info(f"Issue {issue_key} has plan ready, skipping re-create")
             return
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
-            if existing.status in {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}:
+            if existing.status in self.TERMINAL_STATUSES:
                 logger.info(f"Resetting {issue_key} from {existing.status.value} to PENDING for reprocessing")
-                self.state_manager.update_state(
-                    issue_key,
-                    status=TaskStatus.PENDING,
-                    progress_percentage=0,
-                    error_message=None,
-                    current_task_id=None,
-                    current_opencode_session_id=None,
-                )
+                self._reset_for_reprocess(issue_key)
                 refreshed = self.state_manager.get_state(issue_key)
                 if refreshed:
                     existing = refreshed
             state = existing
+            # Prefer fresh summary/description from the event when present
+            if summary:
+                state.issue_summary = summary
+            if description:
+                state.description = description
             workflow_type = WorkflowRouter.route_issue(issue_key, state.issue_summary, state.description)
             state.metadata["workflow_type"] = workflow_type.value
             self.state_manager.set_state(state)
@@ -121,16 +192,27 @@ class JobProcessor:
             logger.warning(f"Failed to post initial acknowledgment for {issue_key}: {e}")
         
         logger.info(f"Starting {workflow_type.value} workflow for {issue_key}")
-        if workflow_type == WorkflowType.PLANNING:
-            await self._start_planning_workflow(state)
-        elif workflow_type == WorkflowType.DIRECT_EXECUTION:
-            await self._start_direct_execution(state)
-        elif workflow_type == WorkflowType.ORACLE_CONSULT:
-            await self._start_oracle_consultation(state)
+        try:
+            if workflow_type == WorkflowType.PLANNING:
+                await self._start_planning_workflow(state)
+            elif workflow_type == WorkflowType.DIRECT_EXECUTION:
+                await self._start_direct_execution(state)
+            elif workflow_type == WorkflowType.ORACLE_CONSULT:
+                await self._start_oracle_consultation(state)
+        except Exception as e:
+            logger.exception(f"Workflow {workflow_type.value} crashed for {issue_key}: {e}", e)
+            self._fail_issue(
+                issue_key,
+                f"Workflow failed: {e}",
+                suggestion="Check agent/session logs, then move the issue back to TO DO to retry.",
+            )
     
     async def _handle_issue_updated(self, event: Dict[str, Any]):
-        issue = event["issue"]
-        issue_key = issue["key"]
+        issue = event.get("issue") or {}
+        issue_key = issue.get("key")
+        if not issue_key:
+            logger.warning("issue_updated event missing issue key, ignoring")
+            return
         fields = issue.get("fields", {})
         status_data = fields.get("status", {})
         status_name = status_data.get("name", "")
@@ -142,32 +224,37 @@ class JobProcessor:
         if not state:
             await self._handle_issue_created(event)
             return
-        
-        if status_name and status_name.upper() == "TO DO":
-            if state.status not in {TaskStatus.PENDING, TaskStatus.PLAN_READY}:
-                logger.info(f"{issue_key} moved back to TO DO from {state.status.value}, reprocessing...")
-                self.state_manager.update_state(
-                    issue_key,
-                    status=TaskStatus.PENDING,
-                    progress_percentage=0,
-                    error_message=None,
-                    current_task_id=None,
-                    current_opencode_session_id=None,
-                )
-                await self._handle_issue_created(event)
-                return
-        
-        if state.status in {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}:
-            logger.info(f"Reprocessing {issue_key} from terminal state: {state.status.value}")
-            self.state_manager.update_state(
-                issue_key,
-                status=TaskStatus.PENDING,
-                progress_percentage=0,
-                error_message=None,
-                current_task_id=None,
-                current_opencode_session_id=None,
+
+        # Never interrupt or restart in-flight agent work from poll/webhook noise
+        if state.status in self.IN_FLIGHT_STATUSES:
+            logger.info(
+                f"{issue_key} is in-flight ({state.status.value}); ignoring update event"
             )
-            await self._handle_issue_created(event)
+            return
+
+        # Terminal → reprocess only when Jira status is explicitly TO DO (user reopened)
+        if state.status in self.TERMINAL_STATUSES:
+            if status_name and status_name.upper() == "TO DO":
+                logger.info(
+                    f"Reprocessing {issue_key} from terminal state {state.status.value} "
+                    f"(Jira status TO DO)"
+                )
+                self._reset_for_reprocess(issue_key)
+                await self._handle_issue_created(event)
+            else:
+                logger.debug(
+                    f"{issue_key} is {state.status.value}; Jira status "
+                    f"'{status_name}' is not TO DO — not reprocessing"
+                )
+            return
+
+        # Non-terminal waiting states (PENDING, PLAN_READY): only restart from TO DO
+        # if somehow stuck outside normal paths (PENDING with no active work is rare)
+        if status_name and status_name.upper() == "TO DO":
+            if state.status == TaskStatus.PENDING:
+                # Allow re-kick of PENDING if a create path never started work
+                logger.info(f"{issue_key} is PENDING and still TO DO, starting work...")
+                await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -176,6 +263,9 @@ class JobProcessor:
         
         issue_key = issue.get("key")
         comment_body = comment.get("body", "")
+        if isinstance(comment_body, dict):
+            # ADF-ish payload — extract plain text best-effort
+            comment_body = str(comment_body)
         
         if not issue_key or not comment_body:
             return
@@ -197,7 +287,15 @@ class JobProcessor:
         if cmd_lower.startswith("/start-work"):
             # Start execution of existing plan
             if state and state.status == TaskStatus.PLAN_READY:
-                await self._start_execution_workflow(state)
+                try:
+                    await self._start_execution_workflow(state)
+                except Exception as e:
+                    logger.exception(f"Execution workflow crashed for {issue_key}: {e}", e)
+                    self._fail_issue(
+                        issue_key,
+                        f"Execution workflow failed: {e}",
+                        suggestion="Check logs, then try /start-work again.",
+                    )
             else:
                 self.reporter.post_comment_response(
                     issue_key,
@@ -213,10 +311,16 @@ class JobProcessor:
                 self.reporter.post_comment_response(issue_key, "No active work found for this issue.")
         
         elif cmd_lower.startswith("/cancel"):
+            # Always cancel state and notify Jira, even if no live process to kill
             if state and state.current_task_id and self.agent_runner:
                 self.agent_runner.cancel_task(state.current_task_id)
+            if state:
                 self.state_manager.update_state(issue_key, status=TaskStatus.CANCELLED)
                 self.reporter.post_comment_response(issue_key, "Work cancelled.")
+            else:
+                self.reporter.post_comment_response(
+                    issue_key, "No active work found to cancel."
+                )
         
         else:
             # Treat as a direct request
@@ -806,9 +910,35 @@ class JobProcessor:
 
         branch_name = self.git_manager.get_current_branch()
 
+        # Refuse to push protected default branches
+        protected = {
+            "main",
+            "master",
+            (settings.default_branch or "").strip().lower(),
+        }
+        if branch_name and branch_name.lower() in protected:
+            msg = (
+                f"Refusing to push protected branch '{branch_name}'. "
+                f"Agent must work on a feature branch."
+            )
+            logger.error(msg)
+            try:
+                self.reporter.post_progress_update(state, f"⚠ {msg}")
+            except Exception:
+                pass
+            return
+
         push_success = self.git_manager.push(branch_name)
         if not push_success:
             logger.warning(f"Push failed or remote not configured for {state.issue_key}")
+            try:
+                self.reporter.post_progress_update(
+                    state,
+                    "⚠ Git push failed or remote not configured. "
+                    "Local work may exist in the temp workspace; no MR was created.",
+                )
+            except Exception:
+                pass
             return
 
         commit_subject = self.git_manager.get_last_commit_subject()
@@ -830,16 +960,50 @@ class JobProcessor:
 
         if mr_url:
             logger.info(f"Merge request created: {mr_url}")
+            # Merge into existing metadata (do not wipe workflow_type, etc.)
             self.state_manager.update_state(
                 state.issue_key,
                 metadata={"merge_request_url": mr_url},
             )
         else:
             logger.warning(f"Could not create merge request for {state.issue_key}")
+            try:
+                self.reporter.post_progress_update(
+                    state,
+                    "⚠ Could not create merge request. Branch may be pushed without an MR link.",
+                )
+            except Exception:
+                pass
+
+    def _ensure_agent_runner(self, issue_key: str) -> AgentRunner:
+        """Ensure an AgentRunner exists for lightweight paths (oracle/comments).
+
+        Prefers a full git workspace when possible; falls back to project_root
+        so comment/oracle paths never crash with agent_runner is None.
+        """
+        if self.agent_runner is not None:
+            return self.agent_runner
+        try:
+            self._init_git_manager(issue_key)
+        except Exception as e:
+            logger.warning(
+                f"Git workspace init failed for {issue_key}, "
+                f"using project_root for agent: {e}"
+            )
+            self.agent_runner = AgentRunner(working_directory=settings.project_root)
+        assert self.agent_runner is not None
+        return self.agent_runner
 
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""
-        print(f"Starting Oracle consultation for {state.issue_key}")
+        logger.info(f"Starting Oracle consultation for {state.issue_key}")
+
+        self._ensure_agent_runner(state.issue_key)
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.EXECUTING,
+            started_at=datetime.now(),
+        )
         
         prompt = PromptBuilder.build_oracle_consult_prompt(
             question=state.description,
@@ -864,11 +1028,24 @@ class JobProcessor:
                 state.issue_key,
                 status=TaskStatus.COMPLETED,
                 completed_at=datetime.now(),
+                progress_percentage=100,
+            )
+        else:
+            self._fail_issue(
+                state.issue_key,
+                result.get("stderr") or "Oracle consultation failed",
+                suggestion="Rephrase the architecture question or check agent logs.",
             )
     
     async def _handle_direct_request(self, issue_key: str, request: str):
         """Handle a direct request from comment."""
         state = self.state_manager.get_state(issue_key)
+
+        try:
+            self._ensure_agent_runner(issue_key)
+        except Exception as e:
+            self._fail_issue(issue_key, f"Could not start agent for comment: {e}")
+            return
         
         prompt = PromptBuilder.build_comment_response_prompt(
             issue_key=issue_key,
@@ -887,3 +1064,9 @@ class JobProcessor:
         
         if result["returncode"] == 0:
             self.reporter.post_comment_response(issue_key, result["stdout"])
+        else:
+            self._fail_issue(
+                issue_key,
+                result.get("stderr") or "Comment response agent failed",
+                suggestion="Retry the @mention command or check agent logs.",
+            )

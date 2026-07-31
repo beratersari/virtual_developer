@@ -32,6 +32,9 @@ class JiraPoller:
         
         self._last_check: Optional[datetime] = None
         self._seen_issues: Set[str] = set()
+        # Last observed Jira status name (lowercased) per issue — used to detect
+        # real transitions into "To Do" rather than re-queueing every poll.
+        self._last_jira_status: Dict[str, str] = {}
         self._running = False
         self._handler: Optional[Callable[[dict], None]] = None
 
@@ -94,6 +97,10 @@ class JiraPoller:
             fields = issue.get("fields", {})
             status = fields.get("status", {}).get("name", "").lower()
             labels = set(fields.get("labels", []))
+
+            # Track Jira status for all issues so we can detect real To Do re-entry
+            previous_status = self._last_jira_status.get(issue_key)
+            self._last_jira_status[issue_key] = status
             
             has_label = bool(trigger_labels & labels)
             is_assigned_to_bot = self._is_assigned_to_jira_ai_bot(issue_key)
@@ -105,18 +112,19 @@ class JiraPoller:
             
             checked_count += 1
             
-            # logger.debug(f"Checking {issue_key}: status={status}, labels={labels}, "
-            #            f"has_trigger_label={has_label}, is_assigned_to_bot={is_assigned_to_bot}, "
-            #            f"is_todo={is_todo}, seen={seen}")
-            
             if should_process and is_todo:
                 if not seen:
-                    self._seen_issues.add(issue_key)
+                    # Mark after deciding "new" so first event is create, not update
                     new_issues.append(issue)
                     logger.info(f"New issue to process: {issue_key}")
                 todo_issues.append(issue)
         
         reprocess_issues = self.check_status_changes(todo_issues)
+
+        # Deduplicate: prefer create over update when both would fire
+        reprocess_keys = {i["key"] for i in reprocess_issues}
+        new_keys = {i["key"] for i in new_issues}
+        reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
 
         if checked_count > 0:
             logger.info(f"Checked {checked_count} issues in sprint, "
@@ -128,17 +136,59 @@ class JiraPoller:
         return new_issues + reprocess_issues
     
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
+        """Re-queue only when an issue *transitions back* into To Do after leaving it.
+
+        Never re-queue in-flight work (PLANNING/EXECUTING/CODE_REVIEW) just because
+        Jira still says To Do — that caused infinite re-execution loops.
+        Terminal states (COMPLETED/ERROR/CANCELLED) are reprocessed only on a real
+        status transition into To Do (user reopened the ticket).
+        """
         reprocess_issues = []
+        terminal = {
+            TaskStatus.COMPLETED,
+            TaskStatus.ERROR,
+            TaskStatus.CANCELLED,
+        }
+        in_flight = {
+            TaskStatus.PLANNING,
+            TaskStatus.EXECUTING,
+            TaskStatus.CODE_REVIEW,
+        }
+
         for issue in todo_issues:
             issue_key = issue["key"]
             state = self.state_manager.get_state(issue_key)
             if not state:
                 continue
-            
-            if state.status in {TaskStatus.EXECUTING, TaskStatus.PLANNING, TaskStatus.CODE_REVIEW, TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}:
-                logger.info(f"Status Change] {issue_key}: {state.status.value} -> TO DO (reprocessing)")
-                reprocess_issues.append(issue)
-        
+
+            # Never interrupt active agent work via poll reprocess
+            if state.status in in_flight:
+                logger.debug(
+                    f"Skipping reprocess for in-flight {issue_key} ({state.status.value})"
+                )
+                continue
+
+            if state.status not in terminal:
+                continue
+
+            # Only reprocess terminal work when we observed a real transition into To Do
+            # (previous Jira status was set and was not To Do).
+            previous = self._last_jira_status.get(issue_key)
+            # previous was already overwritten to "to do" in poll_board — use transition
+            # marker stored before overwrite via a dedicated key.
+            # We store pre-update in check via metadata on a side map.
+            # Use _previous_before_poll if available.
+            prev_before = getattr(self, "_status_before_poll", {}).get(issue_key)
+            if prev_before is None or prev_before == "to do":
+                # Still To Do since last poll (or first sighting) — do not loop
+                continue
+
+            logger.info(
+                f"[Status Change] {issue_key}: Jira {prev_before} -> to do "
+                f"(local {state.status.value}); reprocessing"
+            )
+            reprocess_issues.append(issue)
+
         return reprocess_issues
     
     def process_issue(self, issue: dict, is_update: bool = False) -> None:
@@ -167,12 +217,17 @@ class JiraPoller:
         
         while self._running:
             try:
+                # Snapshot prior statuses so check_status_changes can detect transitions
+                self._status_before_poll = dict(self._last_jira_status)
                 issues = self.poll_board()
                 if issues:
                     logger.info(f"=== Found {len(issues)} issue(s) to process ===")
                     for issue in issues:
-                        is_update = issue["key"] in self._seen_issues
+                        issue_key = issue["key"]
+                        # is_update only if we already processed this key in a prior cycle
+                        is_update = issue_key in self._seen_issues
                         self.process_issue(issue, is_update)
+                        self._seen_issues.add(issue_key)
                     logger.info("========================")
 
             except Exception as e:

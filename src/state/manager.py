@@ -139,12 +139,15 @@ class JiraStateManager:
             logger.warning(f"No state found for {issue_key}")
             return None
         
-        # Update fields
+        # Update fields (merge metadata instead of replacing the whole dict)
         for key, value in kwargs.items():
-            if hasattr(state, key):
-                setattr(state, key, value)
-            else:
+            if not hasattr(state, key):
                 logger.warning(f"Unknown field: {key}")
+                continue
+            if key == "metadata" and isinstance(value, dict):
+                state.metadata = {**(state.metadata or {}), **value}
+            else:
+                setattr(state, key, value)
         
         self.set_state(state)
         return state

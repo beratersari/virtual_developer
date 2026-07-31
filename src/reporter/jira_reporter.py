@@ -124,14 +124,19 @@ The full plan is available at: `{state.plan_path}`
 {changes_list}
 """
         
-        session_id = getattr(state, 'current_session_id', None) or 'N/A'
+        session_id = (
+            getattr(state, "current_opencode_session_id", None)
+            or getattr(state, "current_session_id", None)
+            or "N/A"
+        )
         completed_time = state.completed_at.strftime("%Y-%m-%d %H:%M:%S") if state.completed_at else "N/A"
         
         # Cost info
         cost_section = ""
         if state.estimated_cost > 0:
+            duration = state.execution_duration_seconds or 0.0
             cost_section = f"""\n💰 **Cost Summary**:
-• Duration: {state.execution_duration_seconds:.1f}s
+• Duration: {duration:.1f}s
 • Input tokens: {state.token_usage_input:,}
 • Output tokens: {state.token_usage_output:,}
 • Total tokens: {state.token_usage_input + state.token_usage_output:,}
@@ -149,12 +154,12 @@ The full plan is available at: `{state.plan_path}`
 *Work completed by AI agent. Please review and verify.*
 """
         
-        result = self.client.add_comment(state.issue_key, body)
-        
-        # Transition to Done if configured
-        # self.client.transition_issue(state.issue_key, "Done")
-        
-        return result.get("id") if result else None
+        try:
+            result = self.client.add_comment(state.issue_key, body)
+            return result.get("id") if result else None
+        except Exception as e:
+            logger.error(f"Error posting completion for {state.issue_key}: {e}")
+            return None
     
     def post_error(
         self,
@@ -168,6 +173,16 @@ The full plan is available at: `{state.plan_path}`
             return None
             
         suggestion_section = f"\n**Suggestion**: {suggestion}\n" if suggestion else ""
+
+        timeout_section = ""
+        if getattr(state, "timed_out", False):
+            limit = state.timeout_seconds or "unknown"
+            timeout_section = f"\n**Timed out**: yes (limit {limit}s)\n"
+        retry_section = ""
+        if state.max_retries and state.retry_count >= state.max_retries:
+            retry_section = f"\n**Retries exhausted**: {state.retry_count}/{state.max_retries}\n"
+
+        session_id = state.current_opencode_session_id or "N/A"
         
         body = f"""❌ **Agent Error**
 
@@ -175,16 +190,21 @@ An error occurred while processing this issue:
 
 ```
 {error_message}
-```{suggestion_section}
+```{suggestion_section}{timeout_section}{retry_section}
 
 **Status**: {state.status.value}
 **Retry Count**: {state.retry_count}
+**Agent Session**: `{session_id}`
 
 Please review and provide guidance on how to proceed.
 """
         
-        result = self.client.add_comment(state.issue_key, body)
-        return result.get("id") if result else None
+        try:
+            result = self.client.add_comment(state.issue_key, body)
+            return result.get("id") if result else None
+        except Exception as e:
+            logger.error(f"Error posting error for {state.issue_key}: {e}")
+            return None
     
     def post_comment_response(
         self,
