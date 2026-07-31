@@ -39,6 +39,10 @@ def test_create_issue_success(client):
     http.post.return_value = _resp(201, {"key": "P-1", "id": "1"})
     result = c.create_issue("PROJ", "sum", "desc", assignee="bob", labels=["a"])
     assert result["key"] == "P-1"
+    payload = http.post.call_args.kwargs["json"]
+    assert "fields" in payload
+    assert payload["fields"]["project"]["key"] == "PROJ"
+    assert payload["fields"]["assignee"] == {"name": "bob"}
 
 
 def test_create_issue_error(client):
@@ -172,7 +176,9 @@ def test_get_comments(client):
 def test_assign_and_attachment(client, tmp_path):
     c, http = client
     http.put.return_value = _resp(204)
-    assert c.assign_issue("P-1", "account-1") is True
+    assert c.assign_issue("P-1", "jdoe") is True
+    put_payload = http.put.call_args.kwargs["json"]
+    assert put_payload["fields"]["assignee"] == {"name": "jdoe"}
 
     missing = c.add_attachment("P-1", str(tmp_path / "nope.txt"))
     assert missing is None
@@ -206,6 +212,17 @@ def test_create_jira_client_factory():
         with patch("src.jira.client.httpx.Client"):
             client = create_jira_client(simulated=False)
             assert isinstance(client, JiraClient)
+
+
+def test_add_labels_merges_existing(client):
+    c, http = client
+    http.get.return_value = _resp(
+        200, {"key": "P-1", "fields": {"labels": ["ai-assist", "bot"]}}
+    )
+    http.put.return_value = _resp(204)
+    assert c.add_labels("P-1", ["ai-plan-ready"]) is True
+    labels = http.put.call_args.kwargs["json"]["fields"]["labels"]
+    assert labels == ["ai-assist", "bot", "ai-plan-ready"]
 
 
 def test_client_auth_bearer_only():
