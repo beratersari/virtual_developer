@@ -65,8 +65,6 @@ def test_jira_agent_state_roundtrip_full():
         token_usage_output=20,
         estimated_cost=0.01,
         jira_assignee="bot",
-        code_review_result="ok",
-        code_review_model="m",
         triggered_by="webhook",
     )
     d = state.to_dict()
@@ -76,7 +74,6 @@ def test_jira_agent_state_roundtrip_full():
     assert s2.timed_out is True
     assert len(s2.retry_history) == 1
     assert s2.retry_history[0].reason == "timeout"
-    assert s2.code_review_model == "m"
 
 
 def test_from_dict_minimal_defaults():
