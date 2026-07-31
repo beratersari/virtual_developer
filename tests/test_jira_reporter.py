@@ -19,7 +19,9 @@ def test_post_completion_uses_opencode_session_id(reporter, fake_jira):
     assert comment_id is not None
     body = fake_jira.comments[-1]["body"]
     assert "ses_abc123" in body
-    assert "N/A" not in body or "ses_abc123" in body
+    assert "Work Completed" in body
+    assert "token" not in body.lower()
+    assert "Cost" not in body
 
 
 def test_post_error_includes_timeout_and_retries(reporter, fake_jira):

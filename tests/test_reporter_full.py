@@ -61,7 +61,7 @@ def test_post_initial_ack_success(state):
     r = JiraReporter(client=client)
     cid = r.post_initial_acknowledgment(state)
     assert cid == "1"
-    assert "AI Agent Activated" in client.comments[0]["body"]
+    assert "Work Started" in client.comments[0]["body"]
 
 
 def test_post_initial_ack_exception(state):
@@ -96,24 +96,31 @@ def test_post_progress_with_and_without_pct(state):
     assert r.post_progress_update(state, "working") is not None
 
 
-def test_post_completion_with_changes_and_cost(state):
+def test_post_completion_with_changes_no_cost_or_tokens(state):
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     cid = r.post_completion(state, "done", changes_made=["a", "b"])
     assert cid is not None
     body = client.comments[-1]["body"]
-    assert "Changes Made" in body
-    assert "Cost Summary" in body
+    assert "Changes made" in body
+    assert "Cost Summary" not in body
+    assert "token" not in body.lower()
     assert "ses_r1" in body
+    assert "Work Completed" in body
 
 
-def test_post_completion_zero_cost(state):
-    state.estimated_cost = 0
+def test_post_completion_omits_token_cost_even_when_estimated(state):
+    state.estimated_cost = 1.23
+    state.token_usage_input = 999
+    state.token_usage_output = 888
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     body_id = r.post_completion(state, "done")
     assert body_id is not None
-    assert "Cost Summary" not in client.comments[-1]["body"]
+    body = client.comments[-1]["body"]
+    assert "Cost Summary" not in body
+    assert "token" not in body.lower()
+    assert "$" not in body
 
 
 def test_post_completion_no_completed_at(state):

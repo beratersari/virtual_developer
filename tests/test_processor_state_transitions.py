@@ -92,7 +92,7 @@ async def test_fail_issue_sets_error_and_posts_jira(processor, state_manager, fa
     assert loaded.status == TaskStatus.ERROR
     assert "git clone failed" in (loaded.error_message or "")
     assert len(fake_jira.comments) >= 1
-    assert "Agent Error" in fake_jira.comments[-1]["body"]
+    assert "Error" in fake_jira.comments[-1]["body"]
     assert "git clone failed" in fake_jira.comments[-1]["body"]
 
 

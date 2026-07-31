@@ -72,7 +72,7 @@ class JobProcessor:
                 # State missing — still try a bare comment so the user is not blind
                 self.reporter.post_comment_response(
                     issue_key,
-                    f"❌ **Agent Error**\n\n```\n{error_text}\n```",
+                    f"An error occurred while processing this issue:\n\n{{code}}\n{error_text}\n{{code}}",
                 )
                 return
             comment_id = self.reporter.post_error(
@@ -923,7 +923,7 @@ class JobProcessor:
             )
             logger.error(msg)
             try:
-                self.reporter.post_progress_update(state, f"⚠ {msg}")
+                self.reporter.post_progress_update(state, msg)
             except Exception:
                 pass
             return
@@ -934,8 +934,8 @@ class JobProcessor:
             try:
                 self.reporter.post_progress_update(
                     state,
-                    "⚠ Git push failed or remote not configured. "
-                    "Local work may exist in the temp workspace; no MR was created.",
+                    "Git push failed or remote is not configured. "
+                    "Local work may exist in the temp workspace; no merge request was created.",
                 )
             except Exception:
                 pass
@@ -970,7 +970,7 @@ class JobProcessor:
             try:
                 self.reporter.post_progress_update(
                     state,
-                    "⚠ Could not create merge request. Branch may be pushed without an MR link.",
+                    "Could not create a merge request. The branch may be pushed without an MR link.",
                 )
             except Exception:
                 pass
