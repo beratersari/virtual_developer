@@ -58,6 +58,21 @@ class JiraPoller:
             return False
     
     @staticmethod
+    def _is_todo_status_name(name: str) -> bool:
+        """True when a lowercased Jira status *name* is To Do / backlog-like."""
+        n = (name or "").strip().lower()
+        todo_names = {
+            "to do",
+            "todo",
+            "open",
+            "backlog",
+            "new",
+            "yapılacaklar",  # Turkish
+            "yapilacaklar",
+        }
+        return n in todo_names
+
+    @staticmethod
     def _is_todo_status(fields: dict) -> bool:
         """True for To Do / backlog-like columns (locale-safe via statusCategory)."""
         status = fields.get("status") or {}
@@ -68,16 +83,7 @@ class JiraPoller:
         if category_key == "new":
             return True
 
-        todo_names = {
-            "to do",
-            "todo",
-            "open",
-            "backlog",
-            "new",
-            "yapılacaklar",  # Turkish
-            "yapilacaklar",
-        }
-        return name in todo_names
+        return JiraPoller._is_todo_status_name(name)
 
     def poll_board(self) -> List[dict]:
         if not self.board_id:
@@ -180,7 +186,7 @@ class JiraPoller:
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
         """Re-queue only when an issue *transitions back* into To Do after leaving it.
 
-        Never re-queue in-flight work (PLANNING/EXECUTING/CODE_REVIEW) just because
+        Never re-queue in-flight work (PLANNING/EXECUTING) just because
         Jira still says To Do — that caused infinite re-execution loops.
         Terminal states (COMPLETED/ERROR/CANCELLED) are reprocessed only on a real
         status transition into To Do (user reopened the ticket).
@@ -194,7 +200,7 @@ class JiraPoller:
         in_flight = {
             TaskStatus.PLANNING,
             TaskStatus.EXECUTING,
-            TaskStatus.CODE_REVIEW,
+
         }
 
         for issue in todo_issues:
@@ -221,8 +227,9 @@ class JiraPoller:
             # We store pre-update in check via metadata on a side map.
             # Use _previous_before_poll if available.
             prev_before = getattr(self, "_status_before_poll", {}).get(issue_key)
-            if prev_before is None or prev_before == "to do":
-                # Still To Do since last poll (or first sighting) — do not loop
+            # Treat all To Do-like names the same (open, backlog, Turkish, …)
+            if prev_before is None or self._is_todo_status_name(prev_before):
+                # Still To Do-like since last poll (or first sighting) — do not loop
                 continue
 
             logger.info(

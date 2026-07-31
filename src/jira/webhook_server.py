@@ -19,9 +19,13 @@ def verify_webhook_signature(
     signature: Optional[str],
     webhook_secret: Optional[str],
 ) -> bool:
-    """Verify JIRA webhook signature if secret is configured."""
+    """Verify JIRA webhook HMAC signature.
+
+    A missing/empty secret is treated as misconfiguration: verification fails
+    so unauthenticated traffic cannot drive agent workflows.
+    """
     if not webhook_secret:
-        return True
+        return False
     if signature is None or signature == "":
         return False
 
@@ -64,14 +68,20 @@ def create_webhook_app(
             logger.info(f"Processing issue: matched label in {labels}")
             return True
 
-        # Check assignee
+        # Check assignee — bot only (match poller naming heuristics), not any user
         if settings.trigger_on_assignment:
-            assignee = fields.get("assignee")
-            if assignee:
-                logger.info(f"Processing issue: has assignee {assignee}")
+            assignee = fields.get("assignee") or {}
+            display = (assignee.get("displayName") or assignee.get("name") or "").lower()
+            is_bot = (
+                "jira ai bot" in display
+                or "jira-ai-bot" in display
+                or "jiraai" in display
+            )
+            if is_bot:
+                logger.info(f"Processing issue: assigned to bot {display}")
                 return True
 
-        logger.info(f"Ignoring issue: no matching labels or assignee trigger")
+        logger.info(f"Ignoring issue: no matching labels or bot-assignee trigger")
         return False
     
     def contains_trigger_mention(body: str) -> bool:
@@ -89,9 +99,12 @@ def create_webhook_app(
 
         logger.info(f"Received request to {settings.webhook_path}")
 
-        # Verify signature if configured
-        if webhook_secret and not verify_signature(body, x_hub_signature):
-            logger.warning(f"Invalid signature")
+        # Always require a valid signature (secret must be configured)
+        if not verify_signature(body, x_hub_signature):
+            logger.warning(
+                "Webhook signature verification failed "
+                f"(secret_configured={bool(webhook_secret)})"
+            )
             raise HTTPException(status_code=401, detail="Invalid signature")
 
         try:

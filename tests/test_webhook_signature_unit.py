@@ -6,9 +6,11 @@ import hmac
 from src.jira.webhook_server import verify_webhook_signature
 
 
-def test_no_secret_always_true():
-    assert verify_webhook_signature(b"body", None, None) is True
-    assert verify_webhook_signature(b"body", "x", "") is True
+def test_no_secret_always_false():
+    """Missing/empty secret must reject traffic (no open webhook)."""
+    assert verify_webhook_signature(b"body", None, None) is False
+    assert verify_webhook_signature(b"body", "x", "") is False
+    assert verify_webhook_signature(b"body", "x", None) is False
 
 
 def test_secret_missing_signature():

@@ -74,3 +74,22 @@ def test_check_status_changes_skips_planning(poller, state_manager):
     poller._status_before_poll = {"P-4": "to do"}
     issues = [{"key": "P-4", "fields": {"status": {"name": "To Do"}}}]
     assert poller.check_status_changes(issues) == []
+
+
+def test_check_status_changes_skips_open_still_open(poller, state_manager):
+    """Non-English/Open To Do-like names must not reprocess every poll."""
+    state_manager.create_state("P-5", "done", "")
+    state_manager.update_state("P-5", status=TaskStatus.COMPLETED)
+    poller._status_before_poll = {"P-5": "open"}
+    poller._last_jira_status = {"P-5": "open"}
+    issues = [{"key": "P-5", "fields": {"status": {"name": "Open"}}}]
+    assert poller.check_status_changes(issues) == []
+
+
+def test_check_status_changes_skips_turkish_still_todo(poller, state_manager):
+    state_manager.create_state("P-6", "done", "")
+    state_manager.update_state("P-6", status=TaskStatus.ERROR)
+    poller._status_before_poll = {"P-6": "yapılacaklar"}
+    poller._last_jira_status = {"P-6": "yapılacaklar"}
+    issues = [{"key": "P-6", "fields": {"status": {"name": "Yapılacaklar"}}}]
+    assert poller.check_status_changes(issues) == []
