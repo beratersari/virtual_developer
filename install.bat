@@ -49,9 +49,27 @@ python -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) els
 if errorlevel 1 (
     echo [ERROR] Python 3.10 or newer is required.
     echo Found: %PYTHON_VERSION%
-    echo Bundled wheels cover CPython 3.10–3.13 ^(win_amd64^).
     pause
     exit /b 1
+)
+
+REM Reject Python versions that have no offline wheels (e.g. 3.14 without pydantic-core)
+if exist "%VENDOR_DIR%\SUPPORTED_PYTHON.txt" (
+    python -c "import sys,pathlib; p=pathlib.Path(r'%VENDOR_DIR%')/'SUPPORTED_PYTHON.txt'; lines=[l.strip() for l in p.read_text(encoding='utf-8',errors='ignore').splitlines() if l.strip() and not l.strip().startswith('#')]; ver=f'{sys.version_info.major}.{sys.version_info.minor}'; ok=ver in lines; print('Supported in this package:', ', '.join(lines)); print('Your Python minor:', ver); raise SystemExit(0 if ok else 1)"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Your Python is too new ^(or unsupported^) for the bundled offline wheels.
+        echo Example: Python 3.14 often has no pydantic-core wheel yet, so offline install fails.
+        echo.
+        echo Fix: install a supported version from the list above ^(64-bit^), e.g. Python 3.12:
+        echo   https://www.python.org/downloads/
+        echo Enable "Add python.exe to PATH", open a NEW terminal, re-run install.bat.
+        echo.
+        echo Tip: delete the .venv folder if it was created with the wrong Python.
+        pause
+        exit /b 1
+    )
+    echo [OK] Python minor is in vendor\SUPPORTED_PYTHON.txt
 )
 
 REM ---------------------------------------------------------------------------
@@ -113,7 +131,17 @@ if exist "%VENDOR_DIR%\python-wheels" (
     "%VENV_PIP%" install --no-index --find-links="%VENDOR_DIR%\python-wheels" -r "%SCRIPT_DIR%\requirements.txt"
     if errorlevel 1 (
         echo [ERROR] Offline wheel install failed. Refusing to use the network.
-        echo Ensure you have 64-bit Python 3.10–3.13 and a complete vendor\python-wheels folder.
+        echo.
+        echo Common causes:
+        echo   - Wrong Python version ^(use one listed in vendor\SUPPORTED_PYTHON.txt^)
+        echo   - 32-bit Python ^(need 64-bit / AMD64^)
+        echo   - Old/incomplete package ^(re-download the latest Actions artifact^)
+        echo   - Nested extract path too deep — extract so install.bat is only 1 folder deep
+        if exist "%VENDOR_DIR%\SUPPORTED_PYTHON.txt" (
+            echo.
+            echo Supported Python versions in this package:
+            type "%VENDOR_DIR%\SUPPORTED_PYTHON.txt"
+        )
         pause
         exit /b 1
     )

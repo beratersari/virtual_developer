@@ -196,13 +196,16 @@ CI builds a self-contained Windows zip (`virtual_developer-windows-x64-*.zip`) t
 already includes pinned **OpenCode**, **oh-my-opencode**, **glab**, and **Python wheels**.
 
 ```cmd
-:: 1) Download the zip from GitHub Actions artifacts or Releases
-:: 2) Extract anywhere
-cd virtual_developer-windows-x64-*
-
-:: 3) One command installs everything
+:: 1) Download the artifact from GitHub Actions (or the Release zip)
+:: 2) Extract ONCE — you should see install.bat next to vendor\ and src\
+::    (no "zip inside zip"; do not re-extract vendor files)
+:: 3) Use a supported Python (see vendor\SUPPORTED_PYTHON.txt — usually 3.10–3.13)
+:: 4) Install
 install.bat
 ```
+
+**Important:** Python **3.14** is often **not** supported yet (packages like `pydantic-core`
+may lack wheels). Prefer **Python 3.12 x64** for the smoothest offline install.
 
 What `install.bat` does:
 

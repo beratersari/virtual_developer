@@ -159,30 +159,50 @@ function Download-WheelsForPythonVersions([string]$Requirements, [string]$Wheels
             Write-Host "  WARNING: incomplete wheel set for Python $pv (some packages may lack cp$tag wheels)"
         }
 
-        # abi3 / stable ABI wheels often tagged cp3X but also py3
-        python -m pip download `
-            -r $Requirements `
-            -d $WheelsDir `
+        # Critical native dep used by pydantic (often fails first if missing)
+        python -m pip download "pydantic-core" -d $WheelsDir `
             --python-version $pv `
             --platform win_amd64 `
             --implementation cp `
-            --abi none `
-            --only-binary=:all: `
-            --prefer-binary 2>$null | Out-Null
+            --abi "cp$tag" `
+            --only-binary=:all: 2>$null | Out-Null
     }
 
     # Bootstrap helpers (py3-none-any or version-specific)
     Write-Host "  pip download pip/setuptools/wheel helpers..."
     python -m pip download pip setuptools wheel -d $WheelsDir --prefer-binary
     foreach ($pv in $PyVersions) {
+        $tag = ($pv -replace "\.", "")
         python -m pip download pip setuptools wheel -d $WheelsDir `
             --python-version $pv `
             --platform win_amd64 `
             --implementation cp `
-            --abi ("cp" + ($pv -replace "\.", "")) `
+            --abi "cp$tag" `
             --only-binary=:all: `
             --prefer-binary 2>$null | Out-Null
     }
+}
+
+function Get-SupportedPythonVersions([string]$WheelsDir, [string[]]$Candidates) {
+    # A version is supported only if pydantic-core has a matching cpXXX win wheel
+    # (pure py3-none-any packages work everywhere; binary deps are the gate).
+    $supported = New-Object System.Collections.Generic.List[string]
+    foreach ($pv in $Candidates) {
+        $tag = ($pv -replace "\.", "")
+        $hits = @(Get-ChildItem -Path $WheelsDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "pydantic_core-.*-cp$tag-.*" -or $_.Name -match "pydantic_core-.*-cp$tag m-.*" })
+        # Also match tags like cp314-cp314-win_amd64
+        if (-not $hits -or $hits.Count -eq 0) {
+            $hits = @(Get-ChildItem -Path $WheelsDir -File -Filter "*pydantic_core*cp$tag*" -ErrorAction SilentlyContinue)
+        }
+        if ($hits -and $hits.Count -gt 0) {
+            [void]$supported.Add($pv)
+            Write-Host "  supported Python $pv (found $($hits[0].Name))"
+        } else {
+            Write-Host "  UNSUPPORTED Python $pv (no pydantic-core cp$tag wheel in vendor)"
+        }
+    }
+    return ,$supported.ToArray()
 }
 
 # ---------------------------------------------------------------------------
@@ -412,6 +432,21 @@ Download-WheelsForPythonVersions -Requirements $req -WheelsDir $wheels -PyVersio
 $wheelCount = (Get-ChildItem -Path $wheels -File -ErrorAction SilentlyContinue).Count
 Write-Host "  Wheels staged: $wheelCount files"
 
+Write-Host "  Detecting which Python versions have complete binary wheels..."
+$supportedPy = Get-SupportedPythonVersions -WheelsDir $wheels -Candidates $wheelVersionList
+if (-not $supportedPy -or $supportedPy.Count -eq 0) {
+    throw "No supported Python versions found (pydantic-core wheels missing). Aborting."
+}
+
+$supportedFile = Join-Path $vendor "SUPPORTED_PYTHON.txt"
+$supportedBody = @(
+    "# CPython minor versions with offline wheels in this build (win_amd64).",
+    "# install.bat rejects any other version (e.g. too-new 3.x without wheels).",
+    ""
+) + $supportedPy
+Set-Content -Path $supportedFile -Value ($supportedBody -join "`n") -Encoding UTF8
+Write-Host "  SUPPORTED_PYTHON.txt: $($supportedPy -join ', ')"
+
 # ---------------------------------------------------------------------------
 # 6) Vendor metadata + drop download cache
 # ---------------------------------------------------------------------------
@@ -424,32 +459,49 @@ OH_MY_OPENCODE_VERSION=$OH_MY_OPENCODE_VERSION
 GLAB_VERSION=$GLAB_VERSION
 PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
+SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-OPENCODE_HOME_ARCHIVE=opencode-home.zip
+NOTE=Run install.bat from this folder. Do not manually unpack vendor files.
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
+
+# Clear one-screen install hint at payload root
+$howTo = @"
+JIRA Virtual Developer — Windows offline package
+================================================
+1. You only need ONE extract (the GitHub Actions download).
+2. Open THIS folder (should contain install.bat next to vendor\ and src\).
+3. Install Python from the supported list (see vendor\SUPPORTED_PYTHON.txt).
+4. Double-click install.bat
+5. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
+
+Supported Python (this build): $($supportedPy -join ', ')
+"@
+Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 
 if (Test-Path -LiteralPath $dl) {
     Remove-Item -LiteralPath $dl -Recurse -Force
 }
 
 # ---------------------------------------------------------------------------
-# 7) Zip outer distribution (no deep node_modules — fast extract)
+# 7) Optional single zip for GitHub Releases only (CI artifact uploads the FOLDER)
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "Step 7: Creating distribution zip..."
+Write-Host "Step 7: Creating optional release zip (folder is primary artifact)..."
 
 $zipPath = Join-Path $OutDir "$DistName.zip"
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
 
+# Zip the payload directory WITHOUT an extra nested folder name:
+# contents of zip root = install.bat, vendor\, src\, ...
 $tar = Get-Command tar -ErrorAction SilentlyContinue
 if ($tar) {
-    Push-Location $stage
+    Push-Location $payload
     try {
-        & tar -a -cf $zipPath $DistName
+        & tar -a -cf $zipPath *
         if ($LASTEXITCODE -ne 0) { throw "tar failed creating dist zip" }
     } finally {
         Pop-Location
@@ -460,23 +512,28 @@ if ($tar) {
         $payload,
         $zipPath,
         [System.IO.Compression.CompressionLevel]::Optimal,
-        $true
+        $false  # do not nest an extra root directory
     )
 }
 
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
+$payloadSize = (Get-ChildItem -Path $payload -Recurse -File -ErrorAction SilentlyContinue |
+    Measure-Object -Property Length -Sum).Sum
+
 Write-Host ""
 Write-Host "========================================"
 Write-Host "  Build complete"
 Write-Host "========================================"
-Write-Host ("Zip : {0}" -f $zipPath)
-Write-Host ("Size: {0:N1} MB" -f ($zipSize / 1MB))
+Write-Host ("Folder : {0}" -f $payload)
+Write-Host ("Folder size ~ {0:N1} MB" -f ($payloadSize / 1MB))
+Write-Host ("Zip    : {0} ({1:N1} MB) — for Releases only" -f $zipPath, ($zipSize / 1MB))
 Write-Host ""
-Write-Host "User flow: extract zip (fast) -> run install.bat"
-Write-Host "  install.bat extracts vendor\opencode-home.zip -> %USERPROFILE%\.opencode"
-Write-Host "  Python wheels cover: $($wheelVersionList -join ', ')"
+Write-Host "CI uploads the FOLDER (one extract = install.bat at top level)."
+Write-Host "Supported Python: $($supportedPy -join ', ')"
 
 if ($env:GITHUB_OUTPUT) {
     "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "dist_name=$DistName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "payload_path=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "supported_python=$($supportedPy -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 }
