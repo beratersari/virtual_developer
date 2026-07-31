@@ -155,7 +155,6 @@ def test_git_manager_full_setup(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 
     with patch("src.git_manager.settings") as s:
-        s.use_temp_working_dir = True
         s.project_gitlab_url = "https://gitlab.example.com/g/repo.git"
         s.gitlab_pat = "pat"
         s.temp_dir_base = Path(".temp")
