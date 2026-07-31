@@ -146,6 +146,26 @@ class JiraAgentDaemon:
             async_handler,
         )
     
+    def _abort_stuck_issue(self, state, message: str) -> None:
+        """Fail issue, notify Jira, and best-effort kill the agent process."""
+        # Try to stop the live agent before marking ERROR so success path cannot
+        # overwrite after the watchdog fires.
+        try:
+            runner = self.processor._runner_for(state.issue_key)
+            if runner and state.current_task_id:
+                runner.cancel_task(state.current_task_id)
+        except Exception as e:
+            logger.warning(f"Could not cancel agent for stuck {state.issue_key}: {e}")
+
+        self.processor._fail_issue(
+            state.issue_key,
+            message,
+            suggestion=(
+                "Check session logs under .jira-agent/sessions/, then "
+                "move the issue back to TO DO to re-queue."
+            ),
+        )
+
     async def _monitor_active_issues(self):
         """Watch for stuck in-flight issues and report them to Jira.
 
@@ -161,7 +181,6 @@ class JiraAgentDaemon:
         in_flight = {
             TaskStatus.PLANNING,
             TaskStatus.EXECUTING,
-            TaskStatus.CODE_REVIEW,
         }
 
         while self._running:
@@ -171,13 +190,32 @@ class JiraAgentDaemon:
                 for state in active_issues:
                     if state.status not in in_flight:
                         continue
-                    if not state.started_at:
-                        continue
 
                     timeout = state.timeout_seconds or settings.agent_task_timeout_seconds
-                    retries = state.max_retries or settings.agent_task_max_retries
+                    # Treat falsy 0 as a real zero retries; only None falls back to settings
+                    retries = (
+                        state.max_retries
+                        if state.max_retries is not None
+                        else settings.agent_task_max_retries
+                    )
                     # Allow full retry budget plus 50% headroom for backoff/overhead
                     limit_seconds = timeout * (retries + 1) * 1.5
+
+                    # Missing started_at must not leave jobs stuck forever.
+                    if not state.started_at:
+                        logger.error(
+                            f"Issue {state.issue_key} in-flight with no started_at; "
+                            f"marking ERROR"
+                        )
+                        self._abort_stuck_issue(
+                            state,
+                            (
+                                f"Job stuck in '{state.status.value}' with no start timestamp. "
+                                f"Marking as error so it can be re-queued."
+                            ),
+                        )
+                        continue
+
                     age = (datetime.now() - state.started_at).total_seconds()
 
                     if age <= limit_seconds:
@@ -187,16 +225,12 @@ class JiraAgentDaemon:
                         f"Issue {state.issue_key} stuck in {state.status.value} "
                         f"for {int(age)}s (limit {int(limit_seconds)}s)"
                     )
-                    self.processor._fail_issue(
-                        state.issue_key,
+                    self._abort_stuck_issue(
+                        state,
                         (
                             f"Job stuck in '{state.status.value}' for {int(age)}s "
                             f"(limit {int(limit_seconds)}s). The agent may have hung "
                             f"or the daemon may have lost the process."
-                        ),
-                        suggestion=(
-                            "Check session logs under .jira-agent/sessions/, then "
-                            "move the issue back to TO DO to re-queue."
                         ),
                     )
 
