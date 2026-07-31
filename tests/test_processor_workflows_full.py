@@ -406,7 +406,33 @@ async def test_oracle_success(processor, state_manager, tmp_path):
     )
     processor.agent_runner = runner
     await processor._start_oracle_consultation(state)
-    assert state_manager.get_state("OR-1").status == TaskStatus.COMPLETED
+    loaded = state_manager.get_state("OR-1")
+    assert loaded.status == TaskStatus.COMPLETED
+    assert loaded.current_task_id is None  # cleared after success
+
+
+@pytest.mark.asyncio
+async def test_oracle_sets_current_task_id_before_run(processor, state_manager):
+    """Oracle must register current_task_id so /cancel and stuck watchdog work."""
+    state = state_manager.create_state("OR-TID", "how to design", "architecture question")
+    seen = {}
+
+    async def _run(task):
+        st = state_manager.get_state("OR-TID")
+        seen["task_id"] = task.task_id
+        seen["state_task_id"] = st.current_task_id if st else None
+        seen["status"] = st.status if st else None
+        return {"returncode": 0, "stdout": "answer", "stderr": ""}
+
+    runner = MagicMock()
+    runner.run_agent = AsyncMock(side_effect=_run)
+    processor.agent_runner = runner
+
+    await processor._start_oracle_consultation(state)
+
+    assert seen["status"] == TaskStatus.EXECUTING
+    assert seen["state_task_id"] is not None
+    assert seen["state_task_id"] == seen["task_id"]
 
 
 @pytest.mark.asyncio

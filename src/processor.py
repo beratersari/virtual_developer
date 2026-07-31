@@ -1122,30 +1122,37 @@ class JobProcessor:
         logger.info(f"Starting Oracle consultation for {state.issue_key}")
 
         runner = self._ensure_agent_runner(state.issue_key)
-        self.state_manager.update_state(
-            state.issue_key,
-            status=TaskStatus.EXECUTING,
-            started_at=datetime.now(),
-        )
-        self._mark_jira_in_progress(state.issue_key)
-        
+
         prompt = PromptBuilder.build_oracle_consult_prompt(
             question=state.description,
         )
-        
+
         task = AgentTask(
             description=f"Consult: {state.issue_key}",
             prompt=prompt,
             agent="oracle",
             issue_key=state.issue_key,
         )
-        
+
+        # Same in-flight fields as plan/execute so /cancel and stuck watchdog
+        # can resolve and kill the live agent via current_task_id.
+        self.state_manager.update_state(
+            state.issue_key,
+            status=TaskStatus.EXECUTING,
+            started_at=datetime.now(),
+            current_task_id=task.task_id,
+            current_opencode_session_id=None,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
+        )
+        self._mark_jira_in_progress(state.issue_key)
+
         result = await runner.run_agent(task)
 
         if self._is_aborted(state.issue_key):
             logger.info(f"Oracle aborted for {state.issue_key}")
             return
-        
+
         if result["returncode"] == 0:
             self.reporter.post_oracle_response(
                 state.issue_key,
@@ -1157,6 +1164,7 @@ class JobProcessor:
                 status=TaskStatus.COMPLETED,
                 completed_at=datetime.now(),
                 progress_percentage=100,
+                current_task_id=None,
             )
         else:
             self._fail_issue(

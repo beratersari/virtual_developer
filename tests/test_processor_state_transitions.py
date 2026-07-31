@@ -173,6 +173,29 @@ async def test_oracle_failure_reports_error(processor, state_manager, fake_jira)
 
 
 @pytest.mark.asyncio
+async def test_oracle_cancel_uses_current_task_id(processor, state_manager, fake_jira):
+    """While Oracle is EXECUTING, /cancel must call cancel_task with the stored id."""
+    state_manager.create_state("OR-CAN", "q", "architecture question")
+    runner = MagicMock()
+    runner.cancel_task.return_value = True
+    processor.agent_runner = runner
+    processor._contexts["OR-CAN"] = {"git": None, "runner": runner}
+
+    # Simulate Oracle mid-flight state
+    state_manager.update_state(
+        "OR-CAN",
+        status=TaskStatus.EXECUTING,
+        current_task_id="oracle-task-42",
+        started_at=datetime.now(),
+    )
+
+    await processor._handle_bot_command("OR-CAN", "/cancel")
+
+    runner.cancel_task.assert_called_once_with("oracle-task-42")
+    assert state_manager.get_state("OR-CAN").status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_comment_created_alias_event(processor):
     """Accept jira:issue_commented (sim) as well as comment_created."""
     with patch.object(
