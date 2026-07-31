@@ -71,23 +71,25 @@ def test_logic_progress_percent_should_be_clamped_0_100():
 
 def test_logic_update_issue_labels_should_merge_not_replace():
     """
-    WHY: JiraReporter.post_plan_summary calls update_issue(labels=['ai-plan-ready'])
-    which PUTs labels as a full replacement field. On-prem Jira replaces the entire
-    label set, wiping existing labels like 'ai-assist'. Correct behavior is merge/append.
+    Labels added by the bot must merge with existing issue labels (e.g. ai-assist).
     """
     from src.reporter.jira_reporter import JiraReporter
     from src.state.models import JiraAgentState
 
     client = MagicMock()
     client.add_comment.return_value = {"id": "1"}
-    # Simulate that client receives only the new label (bug) — test expected API
+    client.get_issue.return_value = {
+        "fields": {"labels": ["ai-assist", "bot"]},
+    }
     captured = {}
 
-    def update_issue(issue_key, fields=None, labels=None):
-        captured["labels"] = labels
+    def add_labels(issue_key, labels):
+        existing = client.get_issue(issue_key)["fields"]["labels"]
+        captured["labels"] = list(dict.fromkeys([*existing, *labels]))
         return True
 
-    client.update_issue.side_effect = update_issue
+    # Prefer add_labels path used by reporter
+    client.add_labels.side_effect = add_labels
     r = JiraReporter(client=client)
     state = JiraAgentState(
         issue_key="L-1",
@@ -97,15 +99,10 @@ def test_logic_update_issue_labels_should_merge_not_replace():
     )
     r.post_plan_summary(state, "# plan\nstep")
 
-    # Expected: either merge API or include previous labels — not solely ['ai-plan-ready']
-    # Documented correct intent: preserve ai-assist
     labels = captured.get("labels")
-    assert labels is None or "ai-assist" in (labels or []) or set(labels or []) != {
-        "ai-plan-ready"
-    }, (
-        "post_plan_summary replaces labels with only ['ai-plan-ready'], "
-        "which drops existing Jira labels on Server/DC"
-    )
+    assert labels is not None
+    assert "ai-assist" in labels
+    assert "ai-plan-ready" in labels
 
 
 def test_logic_create_issue_payload_should_wrap_fields():

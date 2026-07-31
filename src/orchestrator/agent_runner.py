@@ -53,6 +53,8 @@ class AgentRunner:
         self.working_directory = working_directory
         self.opencode_cli = settings.opencode_cli
         self._running_tasks: Dict[str, asyncio.Task] = {}
+        # Maps task_id -> last session log path (run_agent naming may include issue_key)
+        self._session_files: Dict[str, Path] = {}
         logger.debug(f"AgentRunner initialized with working_directory={working_directory}")
     
     async def run_agent(
@@ -76,8 +78,12 @@ class AgentRunner:
         """
         logger.info(f"Starting agent task: task_id={task.task_id}, agent={task.agent}, attempt={attempt_number}")
         
-        # Use configured timeout if not overridden
-        effective_timeout = timeout_seconds or settings.agent_task_timeout_seconds
+        # Use configured timeout if not overridden (allow explicit 0)
+        effective_timeout = (
+            settings.agent_task_timeout_seconds
+            if timeout_seconds is None
+            else timeout_seconds
+        )
         start_time = asyncio.get_event_loop().time()
         logger.debug(f"Effective timeout: {effective_timeout}s")
 
@@ -89,6 +95,7 @@ class AgentRunner:
             task_type=task.task_type,
         )
         session_file.parent.mkdir(parents=True, exist_ok=True)
+        self._session_files[task.task_id] = session_file
         logger.info(f"Session file created: {session_file}")
         
         # Build the command as a list (cross-platform)
@@ -229,10 +236,13 @@ class AgentRunner:
         """
         import re
 
+        def _clamp(pct: int) -> int:
+            return max(0, min(100, pct))
+
         # Pattern 1: Direct percentage (e.g., "Progress: 75%" or "75%")
         match = re.search(r'(\d+)%', line)
         if match:
-            return int(match.group(1))
+            return _clamp(int(match.group(1)))
 
         # Pattern 2: Progress bar blocks
         # Count filled vs empty blocks
@@ -240,14 +250,14 @@ class AgentRunner:
         empty_blocks = line.count('░') + line.count('▒') + line.count(' ')
         total_blocks = filled_blocks + empty_blocks
         if total_blocks >= 5 and filled_blocks > 0:
-            return int((filled_blocks / total_blocks) * 100)
+            return _clamp(int((filled_blocks / total_blocks) * 100))
 
         # Pattern 3: Completed tasks (e.g., "Completed: 8/10 tasks")
         match = re.search(r'(\d+)\s*/\s*(\d+)\s*(?:tasks|steps|items)', line, re.IGNORECASE)
         if match:
             completed, total = int(match.group(1)), int(match.group(2))
             if total > 0:
-                return int((completed / total) * 100)
+                return _clamp(int((completed / total) * 100))
 
         return None
 
@@ -376,6 +386,9 @@ class AgentRunner:
             filename = f"{task_id}.log"
 
         path = sessions_dir / filename
+        # Register so read_session_output can resolve issue-keyed filenames
+        if task_id:
+            self._session_files[task_id] = path
         logger.debug(f"Generated session file path: {path}")
         return path
     
@@ -442,11 +455,17 @@ class AgentRunner:
         }
     
     def read_session_output(self, task_id: str) -> str:
-        """Read the output from a session file."""
-        session_file = self._get_session_file(task_id)
+        """Read the output from a session file for a task.
+
+        Prefers the path registered when the agent ran (which may include
+        issue_key and timestamp), then falls back to the task_id-only name.
+        """
+        session_file = self._session_files.get(task_id)
+        if session_file is None:
+            session_file = self._get_session_file(task_id)
         logger.debug(f"Reading session output: task_id={task_id}, file={session_file}")
         if session_file.exists():
-            content = session_file.read_text()
+            content = session_file.read_text(encoding="utf-8", errors="replace")
             logger.debug(f"Read {len(content)} chars from session file: {session_file}")
             return content
         logger.debug(f"Session file not found: {session_file}")
@@ -503,7 +522,12 @@ class AgentRunner:
         Returns:
             Dict with task result including retry information and all session files
         """
-        effective_max_retries = max_retries or settings.agent_task_max_retries
+        # Allow max_retries=0 to mean "no retries" (do not treat 0 as unset)
+        effective_max_retries = (
+            settings.agent_task_max_retries
+            if max_retries is None
+            else max_retries
+        )
         retry_delay = settings.agent_task_retry_delay_seconds
         backoff_multiplier = settings.agent_task_retry_backoff_multiplier
         retry_on_timeout = settings.agent_task_retry_on_timeout

@@ -45,20 +45,23 @@ class JiraClient:
         assignee: Optional[str] = None,
         labels: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Create a new issue in JIRA."""
-        payload = {
+        """Create a new issue in JIRA (REST API v2 fields wrapper)."""
+        fields: Dict[str, Any] = {
             "project": {"key": project},
             "summary": summary,
             "description": description,
             "issuetype": {"name": issue_type},
         }
-        
+
         if assignee:
-            payload["assignee"] = {"name": assignee}
-        
+            # On-prem Server/DC uses name (not Cloud accountId)
+            fields["assignee"] = {"name": assignee}
+
         if labels:
-            payload["labels"] = labels
-        
+            fields["labels"] = labels
+
+        payload = {"fields": fields}
+
         try:
             response = self.client.post("/issue", json=payload)
             logger.info(f"Create issue status: {response.status_code}")
@@ -250,7 +253,11 @@ class JiraClient:
         fields: Optional[Dict[str, Any]] = None,
         labels: Optional[List[str]] = None,
     ) -> bool:
-        """Update issue fields."""
+        """Update issue fields.
+
+        Note: When ``labels`` is provided it replaces the full label set.
+        Prefer :meth:`add_labels` to merge with existing labels on Server/DC.
+        """
         payload: Dict[str, Any] = {}
         
         if fields:
@@ -269,6 +276,21 @@ class JiraClient:
         except httpx.HTTPError as e:
             logger.error(f"Error updating issue {issue_key}: {e}")
             return False
+
+    def add_labels(self, issue_key: str, labels: List[str]) -> bool:
+        """Merge labels into an issue without dropping existing ones (on-prem safe)."""
+        if not labels:
+            return True
+
+        existing: List[str] = []
+        issue = self.get_issue(issue_key)
+        if issue and isinstance(issue, dict):
+            raw = (issue.get("fields") or {}).get("labels") or []
+            if isinstance(raw, list):
+                existing = [str(x) for x in raw]
+
+        merged = list(dict.fromkeys([*existing, *labels]))
+        return self.update_issue(issue_key, labels=merged)
     
     def transition_issue(
         self,
@@ -314,11 +336,11 @@ class JiraClient:
             logger.error(f"Error fetching comments for {issue_key}: {e}")
             return []
     
-    def assign_issue(self, issue_key: str, account_id: str) -> bool:
-        """Assign issue to a user."""
+    def assign_issue(self, issue_key: str, username: str) -> bool:
+        """Assign issue to a user (on-prem Server/DC uses assignee.name)."""
         return self.update_issue(
             issue_key,
-            fields={"assignee": {"accountId": account_id}},
+            fields={"assignee": {"name": username}},
         )
     
     def add_attachment(
