@@ -291,12 +291,6 @@ async def test_stuck_without_started_at_errors(state_manager, reporter, fake_jir
     assert any("stuck" in c["body"].lower() or "timestamp" in c["body"].lower() for c in fake_jira.comments)
 
 
-def test_webhook_empty_secret_rejects():
-    from src.jira.webhook_server import verify_webhook_signature
-
-    assert verify_webhook_signature(b"{}", None, None) is False
-
-
 def test_cleanup_always_deletes(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 

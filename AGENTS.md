@@ -8,7 +8,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 JIRA Virtual Developer is a Python daemon that:
 
-1. Discovers issues (board poller; webhooks optional)
+1. Discovers issues (board poller only)
 2. Routes work (plan / direct execution / oracle)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
@@ -69,7 +69,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
 - Poller focuses on board/sprint + To Do + trigger labels / bot assignee.
-- Webhook is optional; do not assume comments are ingested unless webhooks (or comment polling) are enabled.
+- **No HTTP webhook intake** — comments are not ingested unless a separate comment-polling path is added later.
 
 ### Config checklist (common)
 
@@ -77,9 +77,9 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
-| `JIRA_PROJECTS` | Project filter (webhook path) |
-| `JIRA_BOARD_ID` | Sprint poller board |
-| `ENABLE_POLLING` / `ENABLE_WEBHOOK` | Intake mode (daemon may hardcode poller today — keep flags honest when you touch daemon) |
+| `JIRA_PROJECTS` | Project keys (config/reference; board scopes poller) |
+| `JIRA_BOARD_ID` | Sprint/board poller board |
+| `POLL_INTERVAL_SECONDS` | Board poller interval (poller always runs) |
 
 ---
 

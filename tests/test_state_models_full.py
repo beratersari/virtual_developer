@@ -65,7 +65,7 @@ def test_jira_agent_state_roundtrip_full():
         token_usage_output=20,
         estimated_cost=0.01,
         jira_assignee="bot",
-        triggered_by="webhook",
+        triggered_by="poller",
     )
     d = state.to_dict()
     s2 = JiraAgentState.from_dict(d)

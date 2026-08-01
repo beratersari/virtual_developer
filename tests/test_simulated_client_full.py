@@ -55,19 +55,6 @@ def test_get_list_comment_assign(client):
     assert c.assign_issue("S-1", "bot") is None
 
 
-def test_notify_and_webhook(client):
-    c, http = client
-    http.post.return_value = _resp(200, {"ok": True})
-    assert c.notify_bot("s", "d")["ok"] is True
-    http.post.return_value = _resp(500)
-    assert c.notify_bot("s", "d") is None
-
-    http.post.return_value = _resp(200)
-    assert c.register_webhook("http://localhost/hook") is True
-    http.post.return_value = _resp(400)
-    assert c.register_webhook("http://x") is False
-
-
 def test_context_manager(client):
     c, http = client
     with c:

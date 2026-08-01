@@ -36,12 +36,7 @@ class Settings(BaseSettings):
         default="",
         description="JIRA board id (from URL or GET /rest/agile/1.0/board)",
     )
-    
-    # Webhook Configuration
-    webhook_port: int = Field(default=3000)
-    webhook_path: str = Field(default="/webhook/jira")
-    webhook_secret: Optional[str] = Field(default=None)
-    
+
     # Oh My OpenAgent Configuration
     opencode_cli: str = Field(default="opencode", description="OpenCode CLI command")
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
@@ -93,8 +88,7 @@ class Settings(BaseSettings):
     # Feature Flags
     auto_start_plans: bool = Field(default=False)
     max_concurrent_jobs: int = Field(default=3)
-    enable_webhook: bool = Field(default=True)
-    enable_polling: bool = Field(default=False)
+    # Board poller is always on (sole intake path)
     poll_interval_seconds: int = Field(default=30)
 
     # Temp Directory Configuration — per-issue clones are always required

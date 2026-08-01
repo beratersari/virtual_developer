@@ -4,11 +4,11 @@ A Python-based integration between **JIRA** and **Oh My OpenAgent** that enables
 
 ## Overview
 
-This daemon listens for JIRA events (via webhooks or polling) and triggers Oh My OpenAgent workflows to:
+This daemon **polls** a JIRA board for issues and triggers Oh My OpenAgent workflows to:
 
 1. **Plan** complex tasks using Prometheus
 2. **Execute** plans using Atlas orchestration
-3. **Respond** to @mentions in comments
+3. **Respond** to bot commands when processed via CLI (comment polling is not built-in)
 4. **Consult** on architecture using Oracle
 
 ## Table of Contents
@@ -17,7 +17,6 @@ This daemon listens for JIRA events (via webhooks or polling) and triggers Oh My
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [Real JIRA Server Setup](#real-jira-server-setup)
-- [Webhook Configuration](#webhook-configuration)
 - [Testing Without JIRA](#testing-without-jira)
 - [CLI Commands](#cli-commands)
 - [Configuration](#configuration)
@@ -29,12 +28,12 @@ When integrated with your actual JIRA server, the system works as follows:
 
 ### Workflow
 
-1. **Issue Created** in JIRA → JIRA sends webhook to your server
-2. **Webhook Received** → Bot validates signature and extracts issue data
+1. **Issue lands in To Do** on the configured board (label and/or bot assignee)
+2. **Board poller** discovers the issue on the next poll interval
 3. **Workflow Detection** → Bot determines if issue needs planning or direct execution
-4. **Agent Execution** → Oh My OpenAgent runs in background with appropriate agent
+4. **Agent Execution** → Oh My OpenAgent runs with the appropriate agent in a temp clone
 5. **Progress Updates** → Bot posts comments to JIRA with status and progress
-6. **Completion** → Results posted to JIRA with cost summary and session details
+6. **Completion** → Results posted to JIRA; feature branch pushed and MR opened when configured
 
 ### Real JIRA Integration Architecture
 
@@ -42,24 +41,24 @@ When integrated with your actual JIRA server, the system works as follows:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           YOUR JIRA SERVER                               │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────────┐  │
-│  │   Issue     │    │   Comment   │    │         Webhook             │  │
-│  │  Created    │───▶│   Added     │───▶│   http://your-server:7000   │  │
+│  │   Issue     │    │  To Do +    │    │     Board / Sprint          │  │
+│  │  Created    │───▶│  label/bot  │───▶│     (Agile REST API)        │  │
 │  └─────────────┘    └─────────────┘    └─────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
-                                          │
+                                          │ poll every N seconds
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     JIRA VIRTUAL DEVELOPER (Port 7000)                   │
+│                     JIRA VIRTUAL DEVELOPER (daemon)                      │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐   │
-│  │  Webhook Server  │───▶│  Job Processor   │───▶│  Agent Runner    │   │
-│  │  (FastAPI)       │    │  (Workflow)      │    │  (Oh My OpenCode)│   │
+│  │  Board Poller    │───▶│  Job Processor   │───▶│  Agent Runner    │   │
+│  │  (thread)        │    │  (Workflow)      │    │  (OpenCode)      │   │
 │  └──────────────────┘    └──────────────────┘    └──────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
                                           │
                                           ▼
                               ┌─────────────────────┐
-                              │   YOUR CODEBASE     │
-                              │   (PROJECT_ROOT)    │
+                              │  TEMP GIT CLONE     │
+                              │  feature/{ISSUE}    │
                               └─────────────────────┘
 ```
 
@@ -67,35 +66,27 @@ When integrated with your actual JIRA server, the system works as follows:
 
 **Yes, it will work with your JIRA server** when properly configured:
 
-1. **Webhook Events**: JIRA will send HTTP POST requests to your configured webhook URL whenever issues are created, updated, or commented on
-2. **Authentication**: Uses JIRA API token for posting comments and updating issues
-3. **Project Filtering**: Only processes issues from configured project keys
-4. **Label-Based Activation**: Only processes issues with the `ai-assist` label (configurable)
-5. **Signature Verification**: Webhooks are verified using HMAC-SHA256 signature
+1. **Board polling**: Daemon polls the board (active sprint or board issues) for To Do work
+2. **Authentication**: Uses JIRA API token (Bearer PAT on-prem; optional Cloud Basic with email)
+3. **Board scope**: Configure `JIRA_BOARD_ID` for the board to poll
+4. **Label / assignee activation**: Processes issues with trigger labels and/or assigned to the bot
 
 ### Data Flow with Real JIRA
 
 ```
-JIRA Issue Created
+JIRA Issue in To Do (label or bot assignee)
         │
         ▼
 ┌─────────────────┐
-│  Webhook Sent   │  POST /webhook/jira
-│  to Your Server │  Headers: X-Jira-Event, X-Jira-Signature
+│  Board Poller   │  GET /rest/agile/1.0/...
+│  finds issue    │
 └────────┬────────┘
          │
          ▼
-┌─────────────────┐     ┌─────────────────┐
-│  Signature      │────▶│  Extract Issue  │
-│  Verified?      │     │  Data (key,     │
-└────────┬────────┘     │  summary, etc.) │
-         │              └────────┬────────┘
-    Yes  │                       │
-         ▼                       ▼
-┌─────────────────┐     ┌─────────────────┐
-│  Workflow       │────▶│  Execute Agent  │
-│  Router         │     │  (Sisyphus/     │
-│  (Plan/Direct)  │     │  Prometheus)    │
+┌─────────────────┐
+│  Job Processor  │────▶│  Execute Agent  │
+│  (Plan/Direct)  │     │  (Sisyphus/     │
+│                 │     │  Prometheus)    │
 └─────────────────┘     └────────┬────────┘
                                  │
                     ┌────────────┼────────────┐
@@ -123,7 +114,7 @@ The JIRA Virtual Developer consists of these main components:
 
 | Component | Purpose | Technology |
 |-----------|---------|------------|
-| **Webhook Server** | Receives JIRA events | FastAPI (Python) |
+| **Board Poller** | Discovers To Do issues on board/sprint | JIRA Agile REST |
 | **Job Processor** | Routes issues to workflows | Python asyncio |
 | **Agent Runner** | Executes Oh My OpenAgent | Bun subprocess |
 | **JIRA Client** | API communication | Requests + JIRA REST API |
@@ -330,15 +321,15 @@ python cli.py test-issue \
 
 ### 4. Simulated JIRA Server (PoC Mode)
 
-For a more realistic testing experience, use the **Simulated JIRA Server**. This mimics a real JIRA environment with webhooks, issues, and comments.
+For local experiments, use the **Simulated JIRA Server** — an in-memory issue store. It does **not** push work to the daemon; use the board poller against real Jira or `cli.py process`.
 
 **Architecture:**
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Simulated      │────▶│  JIRA Virtual    │────▶│   Oh My          │
-│  JIRA Server    │     │  Developer       │     │   OpenAgent      │
-│  (Port 7001)    │     │  (Port 7000)     │     │                  │
-└─────────────────┘     └──────────────────┘     └──────────────────┘
+┌─────────────────┐
+│  Simulated      │  In-memory REST only
+│  JIRA Server    │  (no push to daemon)
+│  (Port 7001)    │
+└─────────────────┘
 ```
 
 **Quick Start:**
@@ -347,14 +338,15 @@ For a more realistic testing experience, use the **Simulated JIRA Server**. This
 # Terminal 1: Start the simulated JIRA server
 python cli.py simulate start-server
 
-# Terminal 2: Create an issue and notify the bot
+# Terminal 2: Create an issue in the simulated store (does not start the agent)
 python cli.py simulate create-issue \
   --summary "Fix calculator bugs" \
   --description "Fix all bugs in calculator/calc.py" \
   --assignee "DevBot" \
   --labels "ai-assist,bug"
 
-# The bot will automatically receive the webhook and start working!
+# To run work against a real issue key:
+python cli.py process PROJ-123
 ```
 
 **Available Commands:**
@@ -362,7 +354,7 @@ python cli.py simulate create-issue \
 ```bash
 # Start the simulated JIRA server (runs on port 7001)
 python cli.py simulate start-server
-python cli.py simulate start-server --port 7001 --webhook-port 7000
+python cli.py simulate start-server --port 7001
 
 # Create a new issue and notify the bot
 python cli.py simulate create-issue \
@@ -375,11 +367,6 @@ python cli.py simulate create-issue \
 python cli.py simulate create-issue --summary "Task title"  --description "Create a main.py file add '2+3' "  --assignee "DevBot"  --labels "ai-assist"
 
 set NODE_EXTRA_CA_CERTS=
-
-# Manually notify the bot about an issue
-python cli.py simulate notify \
-  --summary "Fix bugs" \
-  --description "Fix the calculator"
 
 # List all issues in the simulated JIRA
 python cli.py simulate list-issues
@@ -398,8 +385,6 @@ The simulated JIRA server provides these REST API endpoints:
 - `PUT  /api/issues/<key>` - Update issue
 - `POST /api/issues/<key>/comments` - Add comment
 - `POST /api/issues/<key>/assign` - Assign issue
-- `POST /api/webhook` - Register webhook URL
-- `POST /api/notify` - Manual bot notification
 
 **Example using curl:**
 
@@ -414,28 +399,13 @@ curl -X POST http://localhost:7001/api/issues \
     "labels": ["ai-assist"]
   }'
 
-# Notify the bot
-curl -X POST http://localhost:7001/api/notify \
-  -H "Content-Type: application/json" \
-  -d '{
-    "summary": "Fix bugs",
-    "description": "Fix calculator bugs",
-    "assignee": "DevBot",
-    "labels": ["ai-assist"]
-  }'
 ```
 
 ### 5. Run the Daemon (With JIRA)
 
 ```bash
-# Start the daemon
+# Start the daemon (board poller + stuck monitor)
 python cli.py start
-
-# Or with webhook only
-ENABLE_WEBHOOK=true ENABLE_POLLING=false python cli.py start
-
-# Or with polling only
-ENABLE_WEBHOOK=false ENABLE_POLLING=true python cli.py start
 ```
 
 ## Usage
@@ -498,7 +468,7 @@ python cli.py test-issue --title "Task title" --description "Task description"
 ```bash
 # Start the simulated JIRA server
 python cli.py simulate start-server
-python cli.py simulate start-server --port 7001 --webhook-port 7000
+python cli.py simulate start-server --port 7001
 
 # Create an issue and notify the bot
 python cli.py simulate create-issue \
@@ -544,15 +514,11 @@ python cli.py cancel PROJ-123
 | `JIRA_API_TOKEN` | API token (Bearer) for authentication | Required |
 | `JIRA_PROJECTS` | Comma-separated project keys | `PROJ` |
 
-### Webhook & Server
+### Intake (board poller)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `WEBHOOK_PORT` | Port for webhook server | `3000` |
-| `WEBHOOK_PATH` | Webhook endpoint path | `/webhook/jira` |
-| `WEBHOOK_SECRET` | Secret for webhook signature verification | None |
-| `ENABLE_WEBHOOK` | Enable webhook server | `true` |
-| `ENABLE_POLLING` | Enable JIRA polling fallback | `false` |
+| `JIRA_BOARD_ID` | Board id to poll | Required for discovery |
 | `POLL_INTERVAL_SECONDS` | Polling interval in seconds | `30` |
 
 ### Agent Selection
@@ -608,7 +574,7 @@ This section explains how to connect the JIRA Virtual Developer to your actual J
 
 1. **JIRA Instance**: Access to JIRA Cloud or JIRA Server/Data Center
 2. **API Token**: For JIRA Cloud, generate at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-api-tokens)
-3. **Network Access**: Your server must be accessible from JIRA (for webhooks)
+3. **Network Access**: Daemon must reach JIRA REST/Agile APIs (outbound)
 4. **Project Permissions**: Your JIRA user needs:
    - Browse Projects
    - Create Issues
@@ -639,10 +605,9 @@ JIRA_HOST=https://your-jira.example.com
 JIRA_API_TOKEN=your-api-token-from-step-1
 JIRA_PROJECTS=PROJ,DEV,ENG  # Comma-separated project keys
 
-# Webhook Configuration
-WEBHOOK_PORT=7000
-WEBHOOK_SECRET=your-secret-key-here  # Used to verify webhook signatures
-WEBHOOK_PATH=/webhook/jira
+# Board poller (always on)
+JIRA_BOARD_ID=1
+POLL_INTERVAL_SECONDS=30
 
 # Oh My OpenAgent Configuration
 OPENCODE_CLI=bunx oh-my-opencode
@@ -658,9 +623,6 @@ AUTO_START_PLANS=false
 EXECUTION_CATEGORY=deep
 MAX_CONCURRENT_JOBS=3
 
-# Features
-ENABLE_WEBHOOK=true
-ENABLE_POLLING=false
 ```
 
 ### Step 3: Start the Daemon
@@ -668,9 +630,6 @@ ENABLE_POLLING=false
 ```bash
 # Start the JIRA Virtual Developer
 python cli.py start
-
-# Or with specific settings
-WEBHOOK_PORT=7000 python cli.py start
 
 # Run in background (Linux/Mac)
 nohup python cli.py start > jira-agent.log 2>&1 &
@@ -688,120 +647,6 @@ python cli.py process PROJ-123
 # View status
 python cli.py status
 ```
-
-## Webhook Configuration
-
-Webhooks are how JIRA notifies your bot when issues are created or updated. This is **critical** for real-time operation.
-
-### JIRA Cloud Webhook Setup
-
-1. **Navigate to Webhooks:**
-   - JIRA Settings (gear icon) → System → WebHooks
-   - Or directly: `https://yourcompany.atlassian.net/plugins/servlet/webhooks`
-
-2. **Create New Webhook:**
-   - Click "Create a WebHook"
-   - Name: "AI Virtual Developer"
-   - Status: Enabled
-   - URL: `http://your-server:7000/webhook/jira`
-   - Description: "Webhook for AI agent integration"
-
-3. **Configure Events:**
-   - Issue → created
-   - Issue → updated
-   - Comment → created
-   - Comment → updated (optional)
-
-4. **Set Secret:**
-   - In "Advanced" section, set "Secret" to match your `WEBHOOK_SECRET` env var
-   - This ensures only JIRA can send valid webhooks
-
-5. **Issue Filters (Recommended):**
-   - Add JQL: `labels = "ai-assist"`
-   - This ensures only issues with the `ai-assist` label trigger the bot
-
-### JIRA Server/Data Center Webhook Setup
-
-1. **Navigate to:**
-   - Administration → System → Advanced → WebHooks
-
-2. **Same configuration as Cloud**, but note:
-   - Your server must be accessible from the JIRA server network
-   - If behind firewall, whitelist JIRA server IPs
-   - For HTTPS, ensure valid SSL certificate
-
-### Webhook Payload Structure
-
-When an issue is created, JIRA sends:
-
-```json
-{
-  "timestamp": 1234567890,
-  "webhookEvent": "jira:issue_created",
-  "issue_event_type_name": "issue_created",
-  "user": {
-    "self": "https://...",
-    "accountId": "...",
-    "displayName": "John Doe"
-  },
-  "issue": {
-    "id": "10001",
-    "self": "https://...",
-    "key": "PROJ-123",
-    "fields": {
-      "summary": "Fix calculator bugs",
-      "description": "The divide method doesn't handle division by zero...",
-      "issuetype": { "name": "Bug" },
-      "project": { "key": "PROJ" },
-      "labels": ["ai-assist", "bug"],
-      "priority": { "name": "High" },
-      "status": { "name": "To Do" }
-    }
-  }
-}
-```
-
-### Webhook Security
-
-The bot verifies webhook signatures using HMAC-SHA256:
-
-```python
-# JIRA sends header: X-Hub-Signature: sha256=<signature>
-# Signature = HMAC-SHA256(WEBHOOK_SECRET, request_body)
-```
-
-**If signature verification fails**, the webhook is rejected with 401 Unauthorized.
-
-### Troubleshooting Webhooks
-
-**Check if webhooks are being sent:**
-```bash
-# On your server, watch incoming requests
-tail -f jira-agent.log
-
-# Or use netcat to test
-nc -l 7000
-```
-
-**Verify webhook URL is accessible:**
-```bash
-# From another machine
-curl -X POST http://your-server:7000/webhook/jira \
-  -H "Content-Type: application/json" \
-  -d '{"test": true}'
-
-# Should return 401 (unauthorized without signature)
-```
-
-**Common webhook issues:**
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| 401 Unauthorized | Signature mismatch | Check WEBHOOK_SECRET matches JIRA |
-| 404 Not Found | Wrong path | Ensure URL ends with `/webhook/jira` |
-| Connection refused | Firewall/port | Open port 7000, check firewall |
-| No events received | JQL filter | Remove JQL filter for testing |
-| Events but no action | Project filter | Check JIRA_PROJECTS includes your project |
 
 ## State Management
 
@@ -902,11 +747,11 @@ curl -u your-email@example.com:your-api-token \
 # Should return your user info
 ```
 
-**Webhook not receiving events:**
-- Check firewall: `sudo ufw allow 7000/tcp`
-- Verify URL is accessible from internet (use ngrok for local testing)
-- Check JIRA webhook logs (System → Troubleshooting → Logs)
-- Ensure `WEBHOOK_SECRET` matches exactly
+**Poller not picking up issues:**
+- Confirm `JIRA_BOARD_ID` and that the issue is in **To Do** (or statusCategory `new`)
+- Confirm trigger label and/or bot assignee match
+- Check daemon logs for poll cycle messages
+- Use `python cli.py process KEY` to force one issue
 
 ### Agent Issues
 
@@ -1000,7 +845,7 @@ taskkill /PID <PID> /F
 ## Security Considerations
 
 1. **API Tokens**: Store in `.env`, never commit to git
-2. **Webhook Secret**: Use strong random string, rotate periodically
+2. **JIRA_API_TOKEN / GITLAB_PAT**: Store only in `.env`, never commit
 3. **Network**: Use HTTPS in production (reverse proxy recommended)
 4. **Permissions**: Use dedicated JIRA user with minimal permissions
 5. **Rate Limiting**: JIRA has API rate limits (check your plan)

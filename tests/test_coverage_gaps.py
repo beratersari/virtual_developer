@@ -88,8 +88,9 @@ async def test_daemon_stop_with_tasks_and_without_servers():
     from src.daemon import JiraAgentDaemon
 
     daemon = JiraAgentDaemon()
-    daemon._webhook_server = None
     daemon._poller = None
+    daemon.processor = MagicMock()
+    daemon.processor.shutdown_processing = MagicMock(return_value=0)
     fake_task = MagicMock()
     with patch("sys.exit"):
         with patch("asyncio.all_tasks", return_value=[fake_task]):
@@ -97,7 +98,7 @@ async def test_daemon_stop_with_tasks_and_without_servers():
                 with patch("asyncio.gather", new_callable=AsyncMock):
                     await daemon.stop()
     fake_task.cancel.assert_called()
-
+    daemon.processor.shutdown_processing.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_monitor_fails_without_started_at_and_skips_young(state_manager, reporter, fake_jira):
@@ -230,44 +231,6 @@ def test_poller_process_no_summary_field(state_manager, fake_jira):
     p.client.transition_to_in_progress.return_value = False
     p._handler = lambda e: None
     p.process_issue({"key": "Z-1", "fields": {}})
-
-
-# ---------------------------------------------------------------------------
-# webhook no secret verify true + ignore no match
-# ---------------------------------------------------------------------------
-
-def test_webhook_verify_no_secret_and_ignore_filters():
-    from fastapi.testclient import TestClient
-    from src.jira.webhook_server import create_webhook_app
-    from src.config import settings
-
-    # No secret → reject unauthenticated traffic
-    app = create_webhook_app(secret=None)
-    c = TestClient(app)
-    body = {
-        "webhookEvent": "jira:issue_created",
-        "issue": {
-            "key": "X-1",
-            "fields": {
-                "project": {"key": "OTHER"},
-                "labels": [],
-                "assignee": None,
-            },
-        },
-    }
-    r = c.post(settings.webhook_path, json=body)
-    assert r.status_code == 401
-
-
-def test_webhook_signature_missing_when_secret():
-    from fastapi.testclient import TestClient
-    from src.jira.webhook_server import create_webhook_app
-    from src.config import settings
-
-    app = create_webhook_app(secret="sec")
-    c = TestClient(app)
-    r = c.post(settings.webhook_path, content=b'{"webhookEvent":"x"}')
-    assert r.status_code == 401
 
 
 # ---------------------------------------------------------------------------
