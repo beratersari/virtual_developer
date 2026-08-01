@@ -236,6 +236,8 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 .venv/bin/python -m src.daemon   # or project’s documented start command
 ```
 
+**Windows (offline zip from CI):** extract artifact → `install.bat` → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
+
 ---
 
 ## 8. Do / Don’t checklist for agents
@@ -247,6 +249,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Use conventional `type(scope): summary` for every commit and MR.
 - Keep Jira user-visible on failure/stuck states.
 - Preserve on-prem Bearer auth only.
+- For Windows dist changes: run/extend `packaging/windows/e2e-smoke.ps1` expectations (plugin tree size, `rg.exe`, pinned `oh-my-openagent@`, launcher).
 
 **Don’t**
 
@@ -255,14 +258,109 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Leave jobs stuck without Jira notification.
 - Use merge titles like “Merged from feature/…”.
 - Reintroduce Jira username/basic auth without an explicit product decision.
+- Ship Windows packaging that prunes plugin `*.md`, uses junctions for Bun cache, or registers legacy `oh-my-opencode` without the openagent id (see §9).
 
 ---
 
-## 9. Related docs
+## 9. Windows offline dist & OpenCode — hard-won rules
+
+This section exists so agents **do not reintroduce** bugs we already paid for in production installers. Packaging lives under `packaging/windows/` and `.github/workflows/windows-dist.yml`.
+
+### 9.1 Product layout (must stay true)
+
+| Item | Rule |
+|------|------|
+| OpenCode home | **`%USERPROFILE%\.opencode` only** (bin, plugin `node_modules`, configs). No second install at `C:\vd\opencode` unless `VD_OPENCODE_ROOT` is set on purpose. |
+| Global config | Mirror valid JSON to **`%USERPROFILE%\.config\opencode\`** (OpenCode’s real discovery path). |
+| Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
+| TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
+| Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
+
+### 9.2 cmd.exe / install.bat landmines
+
+1. **Never `echo ... -> path` in `.bat` files.** In cmd, `>` is redirect.  
+   `echo [OK] config -> %OPENCODE_HOME%\opencode.json` **overwrites** `opencode.json` with the text `[OK] config -` (exactly the “invalid JSON” failure users hit).  
+   Same pattern can clobber `opencode.exe`. Always use `^>` or rephrase without `>`.
+2. **`install.bat` must be idempotent:** wipe previous `.opencode`, legacy short paths, stale PATH entries, and broken managed configs before extract — users should only re-run the installer.
+3. Prefer **PowerShell `-File` scripts** for non-trivial logic; never use PowerShell parameter name **`$args`** (automatic variable — breaks `Start-Process -ArgumentList`).
+
+### 9.3 oh-my-openagent / oh-my-opencode plugin
+
+| Symptom | Real cause | Correct approach |
+|---------|------------|------------------|
+| TUI black screen 2–3+ min, then default **build/plan** agents | Bun cannot resolve plugin offline; falls back to stock OpenCode | Full offline `node_modules` + seed cache; pin plugin with **version** |
+| Config `plugin: ["oh-my-opencode"]` or unversioned name | OpenCode **auto-migrates** to `oh-my-openagent@…` and may re-fetch via Bun | Register **`oh-my-openagent@X.Y.Z`** in `opencode.json` from the start |
+| “Install finished too fast” but agents wrong | Junction-only cache or incomplete tree | **robocopy** full tree; assert **≥ ~500 files** and many `*.md` skills |
+| Plugin “there” but no Sisyphus/Prometheus | **Pruned `*.md`** / deleted `docs`/`test` dirs that held skills | Do **not** strip skill markdown. Light prune (e.g. `*.map`) only |
+| Dual package names | Rename transition: npm still has both | Offline install **both** `oh-my-openagent` and `oh-my-opencode` at the same pin (or full duplicate folders) |
+
+**Pin format (required):**
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "plugin": ["oh-my-openagent@4.19.3"]
+}
+```
+
+`autoupdate: false` reduces surprise network work on air-gapped / flaky networks.
+
+### 9.4 Offline / first-run network hangs (black screen)
+
+User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
+
+1. **`directory="C:\\Users\\anon"`** — entire home treated as the project → long hang at “booting location services”.
+2. **`downloading ripgrep`** into `~/.cache/opencode/bin/rg.exe` — stalls offline; tools hang.
+3. **`Failed to fetch models.dev`** — log spam / slow start on restricted networks.
+
+**Mitigations already in the dist (keep them):**
+
+- Seed **`%USERPROFILE%\.cache\opencode\bin\rg.exe`** from `vendor\bin\rg.exe` during `install.bat`.
+- Set user env **`OPENCODE_DISABLE_MODELS_FETCH=1`** (and set it in `start-opencode.bat`).
+- Launcher always starts in the **product/project folder**, not the user profile.
+
+### 9.5 CI / packaging process (do not weaken)
+
+1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
+2. **E2E smoke must prove real user install:** extract to a deep path, run `install.bat` non-interactively, assert:
+   - AMD64 `opencode.exe` + `--version`
+   - Valid JSON configs (not echo garbage)
+   - Full plugin tree under home **and** cache (file count + `dist/agents` + markdown)
+   - Plugin id pinned to **`oh-my-openagent@…`**
+   - `rg.exe` present under cache `bin`
+   - `start-opencode.bat` present at payload root
+3. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
+4. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
+
+### 9.6 Debugging a black screen (shareable evidence)
+
+When TUI shows nothing, **logs still exist**:
+
+| Path | What |
+|------|------|
+| `%USERPROFILE%\.local\share\opencode\log\` | Runtime logs (often the smoking gun) |
+| `%USERPROFILE%\.config\opencode\opencode.json` | Plugin registration |
+| File counts under `.opencode` / `.cache\opencode` | Incomplete offline seed |
+| `packaging\windows\collect-opencode-diag.bat` | Zip of configs + counts + non-TUI commands |
+
+**Safe-mode test:** temporarily `"plugin": []` — if TUI works, hang is plugin/Bun/cache; if still black, check cwd (home vs project) and network.
+
+### 9.7 Agent_runner note
+
+Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI.
+
+---
+
+## 10. Related docs
 
 | File | Purpose |
 |------|---------|
 | `README.md` | User-facing setup and architecture |
+| `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
+| `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
+| `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
+| `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `commitMsgFormat.md` | Agent commit/branch rules in **target** project clones |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |
