@@ -190,35 +190,85 @@ bunx oh-my-opencode install
 python cli.py init
 ```
 
-#### Windows
+#### Windows (recommended: offline zip)
+
+CI builds a self-contained Windows zip (`virtual_developer-windows-x64-*.zip`) that
+already includes pinned **OpenCode**, **oh-my-opencode**, **glab**, and **Python wheels**.
 
 ```cmd
-:: Clone or copy the project
-cd jira_virtual_developer
-
-:: Run the automated install script
+:: 1) Download the artifact from GitHub Actions (or the Release zip)
+:: 2) Extract ONCE — you should see install.bat next to vendor\ and src\
+::    (no "zip inside zip"; do not re-extract vendor files)
+:: 3) Use a supported Python (see vendor\SUPPORTED_PYTHON.txt — usually 3.10–3.13)
+:: 4) Install
 install.bat
-
-:: Or install manually:
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-
-:: Install OpenCode CLI
-npm install -g opencode
-
-:: Install oh-my-opencode plugin
-oh-my-opencode install
-
-:: Initialize project structure
-python cli.py init
 ```
 
-**Windows Requirements:**
-- Windows 10 or later
-- Python 3.8+ (from python.org or Microsoft Store)
-- Node.js (includes npm) from https://nodejs.org
-- Git for Windows (optional, for cloning)
+**Important:** Python **3.14** is often **not** supported yet (packages like `pydantic-core`
+may lack wheels). Prefer **Python 3.12 x64** for the smoothest offline install.
+
+What `install.bat` does:
+
+| Step | Result |
+|------|--------|
+| Python venv | Creates `.venv` and installs deps from `vendor\python-wheels` (offline; **3.10–3.13**) |
+| OpenCode | Extracts `vendor\opencode-home.zip` → **`%USERPROFILE%\.opencode`** |
+| glab | Places `glab.exe` in `%USERPROFILE%\.opencode\bin` |
+| PATH | Adds `%USERPROFILE%\.opencode\bin` to the **user** PATH |
+| Project | Creates `.env` from `.env.example` if missing; runs `cli.py init` |
+
+The outer zip does **not** expand `node_modules` (avoids Windows path-too-long and slow
+Explorer extract). OpenCode + plugin ship as one file: `vendor\opencode-home.zip`,
+which `install.bat` unpacks into **`%USERPROFILE%\.opencode` only** (no second copy under `C:\vd`).
+
+OpenCode layout after install:
+
+```text
+%USERPROFILE%\.opencode\
+  bin\opencode.exe
+  bin\glab.exe
+  opencode.json          # plugin registration (valid JSON)
+  oh-my-opencode.json
+  package.json
+  node_modules\...       # extracted by install.bat from opencode-home.zip
+
+%USERPROFILE%\.config\opencode\
+  opencode.json          # mirrored for OpenCode global config discovery
+```
+
+**Windows requirements (zip install):**
+
+- **Windows 10/11 64-bit (x64 / AMD64)** — OpenCode is the official `opencode-windows-x64` build (not 32-bit, not ARM)
+- **Python 3.10+** (64-bit; see `vendor\SUPPORTED_PYTHON.txt`) from https://www.python.org — enable “Add to PATH”
+- Git for Windows (recommended)
+- **No Node.js/npm required** when using the CI zip
+
+`install.bat` is **idempotent**: each run wipes previous OpenCode roots
+(`%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`), removes stale PATH entries,
+replaces broken config, and **seeds** `%USERPROFILE%\.cache\opencode` with the
+bundled `oh-my-opencode` plugin so the TUI does not hang on a black screen while
+Bun tries to download packages. You only need to re-run `install.bat` (from a
+current package).
+
+If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
+**corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Re-run
+`install.bat` from a fresh package, open a **new** terminal, then run `where opencode`
+(expect a single path under `%USERPROFILE%\.opencode\bin`).
+
+**From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
+set `VD_ALLOW_ONLINE=1` and it will download OpenCode/glab and use npm for the plugin if available.
+
+**Product version** lives in the repo root `VERSION` file (SemVer `MAJOR.MINOR.PATCH`).
+CI names Windows zips from that file:
+
+| Trigger | Artifact name pattern |
+|---------|------------------------|
+| Tag `vX.Y.Z` | `virtual_developer-windows-x64-X.Y.Z` (+ GitHub Release) |
+| Push `develop` | `…-X.Y.Z-dev.YYYYMMDD.N.gSHA` |
+| Push `main` | `…-X.Y.Z.gSHA` |
+
+Dependency pins (OpenCode, oh-my-openagent, glab, Python) live in
+`packaging/windows/versions.env`. Workflow: `.github/workflows/windows-dist.yml`.
 
 ### 2. Configuration
 

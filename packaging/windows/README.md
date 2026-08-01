@@ -1,0 +1,70 @@
+# Windows offline distribution
+
+This folder drives the **Windows-only** offline installer shipped as a zip from CI.
+
+## Versioning (SemVer)
+
+| Source of truth | File |
+|-----------------|------|
+| Product base version | repo root `VERSION` (`MAJOR.MINOR.PATCH`) |
+
+| Trigger | Dist name example |
+|---------|-------------------|
+| Tag `v0.2.0` | `virtual_developer-windows-x64-0.2.0` (+ GitHub Release) |
+| Push `develop` | `virtual_developer-windows-x64-0.2.0-dev.20260801.42.gb99d2d9` |
+| Push `main` | `virtual_developer-windows-x64-0.2.0.gb99d2d9` |
+| Manual dispatch | same as branch + optional suffix |
+
+Resolver: `resolve-version.ps1` (used by `.github/workflows/windows-dist.yml`).
+
+Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tagging `vX.Y.Z` for a formal Release zip.
+
+## User flow
+
+1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
+2. Extract.
+3. Run `install.bat`.
+4. Open the TUI with **`start-opencode.bat`** (never from your user home folder).
+
+OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
+Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
+
+Do **not** expect a second install at `C:\vd\opencode` (that was a short-lived workaround).
+Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
+
+## Design notes (Windows pain points)
+
+| Problem | Fix |
+|---------|-----|
+| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
+| Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
+| `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
+| Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
+| Dirty re-install | `install.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
+| Black/blank TUI / default agents | OpenCode Bun-installs plugins into `~/.cache/opencode`; installer **full-copies** the complete `oh-my-opencode` tree (agents + skill `.md`), pins version, seeds `node_modules` + `packages` + `.config` |
+
+## Files
+
+| Path | Role |
+|------|------|
+| `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python wheel set / Node |
+| `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
+| `opencode.json` | Registers `oh-my-opencode` plugin |
+| `oh-my-opencode.json` | Default plugin config stub |
+| `build-dist.ps1` | Fetches pinned artifacts from the web and builds the zip |
+| `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
+
+## Bumping versions
+
+1. Edit `versions.env` (and the version inside `package.json` if you change oh-my-opencode).
+2. Push to `develop` / `main`, or run the **Windows Distribution** workflow manually.
+3. Download the new artifact and smoke-test `install.bat` on a clean Windows machine.
+
+## Local pack (Windows)
+
+```powershell
+# Requires Python 3.12 + Node 20 on PATH
+.\packaging\windows\build-dist.ps1 -OutDir .\dist
+```
+
+Output: `dist\virtual_developer-windows-x64.zip` (or the name you pass via `-DistName`).

@@ -1,0 +1,3 @@
+{
+  "comment": "Default oh-my-opencode plugin config for JIRA Virtual Developer. Override providers via OpenCode auth / env as needed."
+}
