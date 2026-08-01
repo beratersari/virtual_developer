@@ -603,47 +603,106 @@ echo [OK] Mirrored valid config to %OC_CONFIG_DIR%
 exit /b 0
 
 :seed_opencode_plugin_cache
-REM OpenCode loads npm plugins from %%USERPROFILE%%\.cache\opencode\node_modules at TUI start.
-REM Pre-seed with a junction to the offline tree (fast; no double robocopy).
+REM OpenCode loads npm plugins via Bun from cache at TUI start. Junctions are unreliable
+REM (Bun often fails to resolve them) — do a REAL full copy. This is intentionally slower.
 if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
-    echo [WARNING] No node_modules\oh-my-opencode under %OPENCODE_HOME% — cannot seed cache
+    echo [ERROR] No node_modules\oh-my-opencode under %OPENCODE_HOME% — offline plugin missing
     exit /b 1
 )
 
-REM Rename compat: OpenCode may ask for oh-my-openagent@X
-if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
-    mklink /J "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OPENCODE_HOME%\node_modules\oh-my-opencode" >nul 2>&1
+call :verify_oh_my_plugin "%OPENCODE_HOME%\node_modules\oh-my-opencode"
+if errorlevel 1 exit /b 1
+
+REM Rename compat: real copy of alias tree if missing (OpenCode rewrites plugin id)
+if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent\package.json" (
+    echo   Creating oh-my-openagent alias tree ^(full copy^)...
+    robocopy "%OPENCODE_HOME%\node_modules\oh-my-opencode" "%OPENCODE_HOME%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
+    if errorlevel 8 (
+        echo [WARNING] Could not duplicate as oh-my-openagent; continuing with oh-my-opencode only
+    )
 )
 
 set "OC_CACHE=%USERPROFILE%\.cache\opencode"
+set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
 if not exist "%OC_CACHE%" mkdir "%OC_CACHE%"
+if not exist "%OC_CONFIG_DIR%" mkdir "%OC_CONFIG_DIR%"
 
-echo   Seeding plugin cache: %OC_CACHE%\node_modules
-if exist "%OC_CACHE%\node_modules" (
-    rmdir "%OC_CACHE%\node_modules" 2>nul
-    if exist "%OC_CACHE%\node_modules" rmdir /s /q "%OC_CACHE%\node_modules" 2>nul
+echo   Full-copy plugin tree into OpenCode cache ^(this may take 1-3 minutes^)...
+echo   Source: %OPENCODE_HOME%\node_modules
+
+REM Remove previous cache completely so Bun does not mix partial trees
+if exist "%OC_CACHE%\node_modules" rmdir /s /q "%OC_CACHE%\node_modules" 2>nul
+if exist "%OC_CACHE%\packages" rmdir /s /q "%OC_CACHE%\packages" 2>nul
+if exist "%OC_CONFIG_DIR%\node_modules" rmdir /s /q "%OC_CONFIG_DIR%\node_modules" 2>nul
+
+REM 1) ~/.cache/opencode/node_modules  (docs path)
+robocopy "%OPENCODE_HOME%\node_modules" "%OC_CACHE%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:2 /W:1 >nul
+if errorlevel 8 (
+    echo [ERROR] robocopy to %OC_CACHE%\node_modules failed
+    exit /b 1
 )
-mklink /J "%OC_CACHE%\node_modules" "%OPENCODE_HOME%\node_modules" >nul 2>&1
-if errorlevel 1 (
-    echo   Junction failed — copying node_modules once ^(slower^)...
-    robocopy "%OPENCODE_HOME%\node_modules" "%OC_CACHE%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
-    if errorlevel 8 (
-        echo [ERROR] Could not seed plugin cache
-        exit /b 1
-    )
-    if not exist "%OC_CACHE%\node_modules\oh-my-openagent" (
-        mklink /J "%OC_CACHE%\node_modules\oh-my-openagent" "%OC_CACHE%\node_modules\oh-my-opencode" >nul 2>&1
-    )
+
+REM 2) ~/.cache/opencode/packages/<name>  (actual path used by some OpenCode versions)
+if not exist "%OC_CACHE%\packages" mkdir "%OC_CACHE%\packages"
+if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
+    robocopy "%OPENCODE_HOME%\node_modules\oh-my-opencode" "%OC_CACHE%\packages\oh-my-opencode" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
+)
+if exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
+    robocopy "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OC_CACHE%\packages\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
+)
+
+REM 3) ~/.config/opencode/node_modules + package.json (bun install target for global deps)
+robocopy "%OPENCODE_HOME%\node_modules" "%OC_CONFIG_DIR%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
+if errorlevel 8 (
+    echo [ERROR] robocopy to %OC_CONFIG_DIR%\node_modules failed
+    exit /b 1
 )
 if exist "%OPENCODE_HOME%\package.json" (
     copy /Y "%OPENCODE_HOME%\package.json" "%OC_CACHE%\package.json" >nul
+    copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
 )
 
-if not exist "%OC_CACHE%\node_modules\oh-my-opencode" (
-    echo [ERROR] Plugin missing after cache seed: %OC_CACHE%\node_modules\oh-my-opencode
+call :verify_oh_my_plugin "%OC_CACHE%\node_modules\oh-my-opencode"
+if errorlevel 1 exit /b 1
+call :verify_oh_my_plugin "%OC_CONFIG_DIR%\node_modules\oh-my-opencode"
+if errorlevel 1 exit /b 1
+
+REM File-count report so install is visibly "heavy" when the plugin is complete
+set "OMO_COUNT=0"
+for /f %%C in ('dir /s /b "%OPENCODE_HOME%\node_modules\oh-my-opencode" 2^>nul ^| find /c /v ""') do set "OMO_COUNT=%%C"
+set "CACHE_COUNT=0"
+for /f %%C in ('dir /s /b "%OC_CACHE%\node_modules" 2^>nul ^| find /c /v ""') do set "CACHE_COUNT=%%C"
+echo   oh-my-opencode files : %OMO_COUNT%
+echo   cache node_modules   : %CACHE_COUNT% files
+if %OMO_COUNT% LSS 500 (
+    echo [ERROR] oh-my-opencode tree looks incomplete ^(%OMO_COUNT% files^). Expected thousands.
+    echo         Re-download the CI zip; vendor\opencode-home.zip may be truncated.
     exit /b 1
 )
-echo [OK] Plugin cache seeded ^(junction to %OPENCODE_HOME%\node_modules^)
+echo [OK] Full plugin tree seeded to cache + config ^(no junction^)
+exit /b 0
+
+:verify_oh_my_plugin
+REM Arg1 = path to oh-my-opencode package root
+set "OMO_ROOT=%~1"
+if not exist "%OMO_ROOT%\package.json" (
+    echo [ERROR] Missing %OMO_ROOT%\package.json
+    exit /b 1
+)
+if not exist "%OMO_ROOT%\dist\index.js" (
+    echo [ERROR] Missing %OMO_ROOT%\dist\index.js — plugin package incomplete
+    exit /b 1
+)
+if not exist "%OMO_ROOT%\dist\agents" (
+    echo [ERROR] Missing %OMO_ROOT%\dist\agents — Sisyphus/Prometheus agents missing
+    exit /b 1
+)
+REM Skills are markdown; if pruning deleted them, plugin falls back to defaults
+dir /s /b "%OMO_ROOT%\*.md" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] No .md skill/agent files under %OMO_ROOT% — package was over-pruned
+    exit /b 1
+)
 exit /b 0
 
 :extract_opencode_home_zip

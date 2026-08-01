@@ -175,12 +175,43 @@ if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode
     throw "oh-my-opencode plugin missing under $ocHome\node_modules"
 }
 
-# OpenCode loads npm plugins from ~/.cache/opencode — must be seeded offline
-$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
-if (-not (Test-Path -LiteralPath $cachePlugin)) {
-    throw "Plugin cache not seeded (black-screen cause): $cachePlugin"
+# Full plugin package must exist (not a thin junction) with agents + skill markdown
+function Assert-OmoTree([string]$Root, [string]$Label) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "package.json"))) {
+        throw "$Label missing package.json: $Root"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.js"))) {
+        throw "$Label missing dist\index.js: $Root"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\agents"))) {
+        throw "$Label missing dist\agents (Sisyphus etc.): $Root"
+    }
+    $md = @(Get-ChildItem -LiteralPath $Root -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
+    if ($md.Count -lt 10) {
+        throw "$Label has only $($md.Count) .md files — skills/agents over-pruned: $Root"
+    }
+    $files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)
+    if ($files.Count -lt 500) {
+        throw "$Label only $($files.Count) files — incomplete plugin tree: $Root"
+    }
+    # Must be a real directory, not a reparse/junction-only stub without content
+    $item = Get-Item -LiteralPath $Root -Force
+    Write-Host "OK $Label : $($files.Count) files, $($md.Count) md, agents present"
 }
-Write-Host "OK plugin cache: $cachePlugin"
+
+$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
+$configPlugin = Join-Path $ocConfigDir "node_modules\oh-my-opencode"
+$homePlugin = Join-Path $ocHome "node_modules\oh-my-opencode"
+Assert-OmoTree $homePlugin "home"
+Assert-OmoTree $cachePlugin "cache"
+Assert-OmoTree $configPlugin "config"
+
+$packagesPlugin = Join-Path $env:USERPROFILE ".cache\opencode\packages\oh-my-opencode"
+if (Test-Path -LiteralPath $packagesPlugin) {
+    Assert-OmoTree $packagesPlugin "cache/packages"
+} else {
+    Write-Host "WARNING: cache/packages/oh-my-opencode missing (some OpenCode builds use this path)"
+}
 
 # Config must pin plugin version (unversioned => Bun fetch hang / black TUI).
 # OpenCode may rewrite oh-my-opencode@X -> oh-my-openagent@X (package rename).
@@ -196,10 +227,9 @@ if ($cfgObj.autoupdate -ne $false) {
 }
 Write-Host "OK pinned plugin: $($pinned -join ', ')"
 
-# Both package names must resolve offline (rename compat)
 $cacheOma = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
-if (-not (Test-Path -LiteralPath $cacheOma)) {
-    throw "Plugin cache missing oh-my-openagent alias: $cacheOma"
+if (-not (Test-Path -LiteralPath (Join-Path $cacheOma "dist\index.js"))) {
+    throw "Plugin cache missing oh-my-openagent tree: $cacheOma"
 }
 Write-Host "OK plugin alias cache: $cacheOma"
 

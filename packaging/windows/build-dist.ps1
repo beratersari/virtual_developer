@@ -69,29 +69,17 @@ function Expand-ZipSafe([string]$ZipPath, [string]$Dest) {
 }
 
 function Optimize-NodeModules([string]$NodeModules) {
+    # IMPORTANT: oh-my-opencode ships agents/skills as ***.md** and nested package trees.
+    # Aggressive pruning (delete all *.md / test/docs dirs) strips the plugin and OpenCode
+    # silently falls back to default build/plan agents after a multi-minute Bun hang.
+    # Only drop heavyweight non-runtime junk that cannot affect plugin load.
     if (-not (Test-Path -LiteralPath $NodeModules)) { return }
-    Write-Host "  Pruning node_modules (docs/tests/maps) to shrink archive..."
+    Write-Host "  Light prune of node_modules (source maps only — keep all plugin .md/skills)..."
 
-    $dirNames = @(
-        "test", "tests", "__tests__", "docs", "doc", "example", "examples",
-        "coverage", ".github", ".circleci", ".vscode", "benchmark", "benchmarks",
-        "man", "website", "demo", "demos"
-    )
-    Get-ChildItem -Path $NodeModules -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $dirNames -contains $_.Name } |
+    Get-ChildItem -Path $NodeModules -Recurse -Force -File -Filter "*.map" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
         }
-
-    # Only strip docs/maps — do NOT delete *.ts / package sources.
-    # OpenCode loads plugins via Bun; over-pruning has caused blank TUI on startup.
-    $fileFilters = @("*.map", "*.md", "*.markdown", "CHANGELOG*", "HISTORY*", "AUTHORS*", ".npmignore", ".eslintrc*")
-    foreach ($filter in $fileFilters) {
-        Get-ChildItem -Path $NodeModules -Recurse -Force -File -Filter $filter -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
-            }
-    }
 }
 
 function New-ZipFromDirectory([string]$SourceDir, [string]$ZipPath) {
@@ -448,14 +436,29 @@ if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode
     throw "oh-my-opencode missing after npm install"
 }
 
-# Do NOT put junctions in the zip (tar/zip may omit reparse targets).
-# install.bat creates the oh-my-openagent alias + cache junction on the user machine.
-
 Optimize-NodeModules (Join-Path $ocHome "node_modules")
+
+# Prove the offline plugin tree is complete (agents + skill markdown + size)
+$omoRoot = Join-Path $ocHome "node_modules\oh-my-opencode"
+if (-not (Test-Path -LiteralPath (Join-Path $omoRoot "dist\index.js"))) {
+    throw "oh-my-opencode missing dist\index.js after install/prune"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $omoRoot "dist\agents"))) {
+    throw "oh-my-opencode missing dist\agents after install/prune"
+}
+$omoFiles = @(Get-ChildItem -LiteralPath $omoRoot -Recurse -File -ErrorAction SilentlyContinue)
+$omoMd = @(Get-ChildItem -LiteralPath $omoRoot -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
+Write-Host "  oh-my-opencode tree: $($omoFiles.Count) files, $($omoMd.Count) markdown (skills/docs)"
+if ($omoFiles.Count -lt 500) {
+    throw "oh-my-opencode tree too small ($($omoFiles.Count) files) — incomplete offline plugin"
+}
+if ($omoMd.Count -lt 10) {
+    throw "oh-my-opencode has almost no .md files ($($omoMd.Count)) — skills were pruned"
+}
 
 # Hard fail if relative paths are still too long for classic Windows MAX_PATH budgets
 $assertMax = Join-Path $root "packaging\windows\Assert-MaxPath.ps1"
-& $assertMax -Root $ocHome -MaxRelativeChars 200
+& $assertMax -Root $ocHome -MaxRelativeChars 220
 if ($LASTEXITCODE -ne 0) {
     throw "OpenCode home path-length budget exceeded — fix nesting before shipping"
 }
