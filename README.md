@@ -244,9 +244,11 @@ OpenCode layout after install:
 - **No Node.js/npm required** when using the CI zip
 
 `install.bat` is **idempotent**: each run wipes previous OpenCode roots
-(`%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`), removes stale PATH entries, and
-replaces a broken `%USERPROFILE%\.config\opencode\opencode.json` before extracting a
-fresh install. You only need to re-run `install.bat` (from a current package).
+(`%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`), removes stale PATH entries,
+replaces broken config, and **seeds** `%USERPROFILE%\.cache\opencode` with the
+bundled `oh-my-opencode` plugin so the TUI does not hang on a black screen while
+Bun tries to download packages. You only need to re-run `install.bat` (from a
+current package).
 
 If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
 **corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Re-run

@@ -83,22 +83,15 @@ function Optimize-NodeModules([string]$NodeModules) {
             Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-    $fileFilters = @("*.map", "*.md", "*.markdown", "CHANGELOG*", "HISTORY*", "AUTHORS*", ".npmignore", ".eslintrc*", "tsconfig*.json", "*.ts")
+    # Only strip docs/maps — do NOT delete *.ts / package sources.
+    # OpenCode loads plugins via Bun; over-pruning has caused blank TUI on startup.
+    $fileFilters = @("*.map", "*.md", "*.markdown", "CHANGELOG*", "HISTORY*", "AUTHORS*", ".npmignore", ".eslintrc*")
     foreach ($filter in $fileFilters) {
         Get-ChildItem -Path $NodeModules -Recurse -Force -File -Filter $filter -ErrorAction SilentlyContinue |
-            Where-Object {
-                # Keep package entrypoints that might be .ts in rare packages; drop types/source maps/docs
-                $_.Name -notmatch '^\.d\.ts$' -and $_.Extension -ne ".d.ts"
-            } |
             ForEach-Object {
-                # Do not delete package.json-adjacent runtime needs; *.ts sources are not required at runtime
                 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
             }
     }
-
-    # Drop TypeScript declaration files (runtime not needed)
-    Get-ChildItem -Path $NodeModules -Recurse -Force -File -Filter "*.d.ts" -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 }
 
 function New-ZipFromDirectory([string]$SourceDir, [string]$ZipPath) {
@@ -422,7 +415,21 @@ $pkgBody = @"
 "@
 Set-Content -Path $pkgPath -Value $pkgBody -Encoding UTF8
 
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\opencode.json") -Destination (Join-Path $ocHome "opencode.json") -Force
+# Pin plugin version so OpenCode does not resolve "latest" at TUI startup (blank screen).
+# autoupdate=false avoids network hangs on offline machines.
+$ocCfgBody = @"
+{
+  "`$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "plugin": ["oh-my-opencode@$OH_MY_OPENCODE_VERSION"]
+}
+"@
+Set-Content -Path (Join-Path $ocHome "opencode.json") -Value $ocCfgBody -Encoding UTF8
+# Also ship template under packaging\ in the payload (install.bat fallback)
+$pkgWindows = Join-Path $payload "packaging\windows"
+if (Test-Path -LiteralPath $pkgWindows) {
+    Set-Content -Path (Join-Path $pkgWindows "opencode.json") -Value $ocCfgBody -Encoding UTF8
+}
 Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-opencode.json") -Force
 
 Write-Host "  Installing oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."

@@ -23,6 +23,7 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 | `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
 | Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
 | Dirty re-install | `install.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
+| Black/blank TUI | OpenCode fetches npm plugins into `~/.cache/opencode` at start; installer **pins** `oh-my-opencode@VERSION`, seeds that cache offline, sets `autoupdate: false` |
 
 ## Files
 

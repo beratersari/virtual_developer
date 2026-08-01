@@ -175,5 +175,55 @@ if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode
     throw "oh-my-opencode plugin missing under $ocHome\node_modules"
 }
 
+# OpenCode loads npm plugins from ~/.cache/opencode — must be seeded offline
+$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
+if (-not (Test-Path -LiteralPath $cachePlugin)) {
+    throw "Plugin cache not seeded (black-screen cause): $cachePlugin"
+}
+Write-Host "OK plugin cache: $cachePlugin"
+
+# Config must pin plugin version (unversioned => Bun fetch hang / black TUI)
+$globalCfg = Join-Path $ocConfigDir "opencode.json"
+$cfgObj = Get-Content -LiteralPath $globalCfg -Raw | ConvertFrom-Json
+$plugins = @($cfgObj.plugin)
+$pinned = $plugins | Where-Object { $_ -match '^oh-my-opencode@' }
+if (-not $pinned) {
+    throw "FAIL: opencode.json plugin not version-pinned: $($plugins -join ', ')"
+}
+if ($cfgObj.autoupdate -ne $false) {
+    Write-Host "WARNING: autoupdate is not false (may hang offline)"
+}
+Write-Host "OK pinned plugin: $($pinned -join ', ')"
+
+# Non-interactive command must return quickly (no TUI black-screen hang)
+Write-Step "Non-interactive opencode smoke (debug config / run --help)"
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $oc
+$psi.Arguments = "debug config"
+$psi.UseShellExecute = $false
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$psi.CreateNoWindow = $true
+$proc = [System.Diagnostics.Process]::Start($psi)
+if (-not $proc.WaitForExit(120000)) {
+    try { $proc.Kill() } catch {}
+    throw "opencode debug config hung >120s (black-screen class failure)"
+}
+$stdout = $proc.StandardOutput.ReadToEnd()
+$stderr = $proc.StandardError.ReadToEnd()
+Write-Host "debug config exit=$($proc.ExitCode)"
+if ($proc.ExitCode -ne 0) {
+    Write-Host "stdout: $stdout"
+    Write-Host "stderr: $stderr"
+    # debug subcommand may differ by version — try run --help
+    $help = & $oc run --help 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "opencode non-interactive commands failed (exit $($proc.ExitCode) / run --help $LASTEXITCODE)"
+    }
+    Write-Host "OK opencode run --help"
+} else {
+    Write-Host "OK opencode debug config"
+}
+
 Write-Step "E2E smoke PASSED"
 exit 0

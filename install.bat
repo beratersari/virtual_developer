@@ -293,12 +293,29 @@ if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
     echo [WARNING] oh-my-opencode plugin not found under node_modules
 )
 
-REM Mirror config into %USERPROFILE%\.config\opencode for OpenCode global discovery
+REM Mirror config + seed plugin locations OpenCode actually loads at TUI startup.
+REM Blank/black screen is usually Bun trying to download the plugin into ~/.cache/opencode.
 call :mirror_opencode_config
 if errorlevel 1 (
     echo [ERROR] Failed to install valid config at %%USERPROFILE%%\.config\opencode
     call :maybe_pause
     exit /b 1
+)
+call :seed_opencode_plugin_cache
+if errorlevel 1 (
+    echo [ERROR] Failed to seed OpenCode plugin cache ^(needed to avoid black-screen hang^)
+    call :maybe_pause
+    exit /b 1
+)
+
+REM Non-interactive smoke (TUI not launched). Ensures plugin/config resolve without hang.
+echo Smoke-testing opencode debug config ...
+"%OPENCODE_BIN%\opencode.exe" debug config >nul 2>&1
+if errorlevel 1 (
+    echo [WARNING] opencode debug config failed — try: opencode --print-logs --log-level DEBUG
+    echo           Logs: %%USERPROFILE%%\.local\share\opencode\log
+) else (
+    echo [OK] opencode debug config
 )
 
 REM ---------------------------------------------------------------------------
@@ -421,7 +438,7 @@ if errorlevel 1 exit /b 1
 exit /b 0
 
 :clean_previous_opencode
-REM Idempotent wipe of previous OpenCode installs + bad global config.
+REM Idempotent wipe of previous OpenCode installs + bad global config + plugin cache.
 REM Safe to re-run; does not touch this dist's .venv or project files.
 echo   Cleaning previous OpenCode installs and stale config...
 
@@ -444,6 +461,24 @@ if exist "%OC_CONFIG_DIR%\oh-my-opencode.json" (
 )
 if exist "%OC_CONFIG_DIR%\package.json" (
     del /f /q "%OC_CONFIG_DIR%\package.json" >nul 2>&1
+)
+REM Drop preinstalled node_modules under config dir (will re-seed)
+if exist "%OC_CONFIG_DIR%\node_modules" (
+    call :force_remove_dir "%OC_CONFIG_DIR%\node_modules"
+)
+
+REM OpenCode installs npm plugins into ~/.cache/opencode at TUI start — wipe stale cache
+set "OC_CACHE=%USERPROFILE%\.cache\opencode"
+if exist "%OC_CACHE%" (
+    echo   Removing plugin cache %OC_CACHE%
+    call :force_remove_dir "%OC_CACHE%"
+)
+
+REM Windows alt prefix used by some oh-my-opencode docs
+if defined APPDATA (
+    if exist "%APPDATA%\opencode\node_modules" (
+        call :force_remove_dir "%APPDATA%\opencode\node_modules"
+    )
 )
 
 REM Remove install roots (junction or real tree). Order: user home, target, legacy.
@@ -536,13 +571,33 @@ if errorlevel 1 (
     if exist "%PKG_OC%\opencode.json" (
         copy /Y "%PKG_OC%\opencode.json" "%OPENCODE_HOME%\opencode.json" >nul
     ) else (
-        > "%OPENCODE_HOME%\opencode.json" echo {"$schema":"https://opencode.ai/config.json","plugin":["oh-my-opencode"]}
+        > "%OPENCODE_HOME%\opencode.json" echo {"$schema":"https://opencode.ai/config.json","autoupdate":false,"plugin":["oh-my-opencode@!OH_MY_OPENCODE_VERSION!"]}
     )
     python -c "import json,sys; p=sys.argv[1]; json.load(open(p,encoding='utf-8-sig'))" "%OPENCODE_HOME%\opencode.json" >nul 2>&1
     if errorlevel 1 (
         echo [ERROR] Could not write valid opencode.json
         exit /b 1
     )
+)
+REM Ensure plugin entry is version-pinned (unversioned npm plugins hang/black-screen on Windows)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$p='%OPENCODE_HOME%\opencode.json'; $v='!OH_MY_OPENCODE_VERSION!';" ^
+  "if (-not (Test-Path -LiteralPath $p)) { exit 1 };" ^
+  "$want = 'oh-my-opencode@' + $v;" ^
+  "$d = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json;" ^
+  "$plugs = @(); if ($null -ne $d.plugin) { $plugs = @($d.plugin) };" ^
+  "$fixed = New-Object System.Collections.Generic.List[object]; $seen=$false; $ch=$false;" ^
+  "foreach ($x in $plugs) {" ^
+  "  $s = [string]$x;" ^
+  "  if ($s -eq 'oh-my-opencode' -or $s -eq 'oh-my-openagent' -or $s -match '^oh-my-opencod(e|agent)(@|$)') {" ^
+  "    if ($s -ne $want) { $ch = $true }; if (-not $seen) { [void]$fixed.Add($want); $seen = $true }" ^
+  "  } else { [void]$fixed.Add($x) }" ^
+  "};" ^
+  "if (-not $seen) { [void]$fixed.Add($want); $ch = $true };" ^
+  "if ($d.PSObject.Properties.Name -notcontains 'autoupdate' -or $d.autoupdate -ne $false) { $d | Add-Member -NotePropertyName autoupdate -NotePropertyValue $false -Force; $ch = $true };" ^
+  "if ($ch) { $d.plugin = $fixed.ToArray(); ($d | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $p -Encoding UTF8; Write-Host ('  pinned plugin ' + $want) }"
+if errorlevel 1 (
+    echo [WARNING] Could not pin plugin version in opencode.json
 )
 exit /b 0
 
@@ -569,6 +624,57 @@ if errorlevel 1 (
     exit /b 1
 )
 echo [OK] Mirrored valid config to %OC_CONFIG_DIR%
+exit /b 0
+
+:seed_opencode_plugin_cache
+REM OpenCode installs npm plugins with Bun into %%USERPROFILE%%\.cache\opencode\node_modules
+REM at startup. Offline / slow installs freeze the TUI (black screen). Pre-seed from vendor.
+if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
+    echo [WARNING] No node_modules\oh-my-opencode under %OPENCODE_HOME% — cannot seed cache
+    exit /b 1
+)
+
+set "OC_CACHE=%USERPROFILE%\.cache\opencode"
+set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
+if not exist "%OC_CACHE%" mkdir "%OC_CACHE%"
+if not exist "%OC_CONFIG_DIR%" mkdir "%OC_CONFIG_DIR%"
+
+echo   Seeding plugin cache: %OC_CACHE%\node_modules
+if exist "%OC_CACHE%\node_modules" rmdir /s /q "%OC_CACHE%\node_modules" 2>nul
+robocopy "%OPENCODE_HOME%\node_modules" "%OC_CACHE%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:2 /W:1 >nul
+if errorlevel 8 (
+    echo [ERROR] robocopy to plugin cache failed
+    exit /b 1
+)
+if exist "%OPENCODE_HOME%\package.json" (
+    copy /Y "%OPENCODE_HOME%\package.json" "%OC_CACHE%\package.json" >nul
+)
+
+REM Also place deps under global config dir (OpenCode may bun-install package.json deps here)
+echo   Seeding config node_modules: %OC_CONFIG_DIR%\node_modules
+if exist "%OC_CONFIG_DIR%\node_modules" rmdir /s /q "%OC_CONFIG_DIR%\node_modules" 2>nul
+robocopy "%OPENCODE_HOME%\node_modules" "%OC_CONFIG_DIR%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:2 /W:1 >nul
+if errorlevel 8 (
+    echo [ERROR] robocopy to config node_modules failed
+    exit /b 1
+)
+
+REM Optional Windows APPDATA prefix (oh-my-openagent docs)
+if defined APPDATA (
+    if not exist "%APPDATA%\opencode" mkdir "%APPDATA%\opencode"
+    if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
+        copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%APPDATA%\opencode\oh-my-opencode.json" >nul
+    )
+    if exist "%OPENCODE_HOME%\package.json" (
+        copy /Y "%OPENCODE_HOME%\package.json" "%APPDATA%\opencode\package.json" >nul
+    )
+)
+
+if not exist "%OC_CACHE%\node_modules\oh-my-opencode" (
+    echo [ERROR] Plugin missing after cache seed: %OC_CACHE%\node_modules\oh-my-opencode
+    exit /b 1
+)
+echo [OK] Plugin cache seeded ^(avoids black-screen npm/Bun download at TUI start^)
 exit /b 0
 
 :extract_opencode_home_zip
