@@ -98,10 +98,20 @@ class JiraClient:
             logger.error(f"Error creating issue: {e}")
             return None
     
-    def get_issue(self, issue_key: str) -> Optional[Dict[str, Any]]:
-        """Get issue details by key."""
+    def get_issue(
+        self,
+        issue_key: str,
+        fields: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Get issue details by key.
+
+        ``fields`` limits payload size when only a subset is needed (e.g. description).
+        """
         try:
-            response = self.client.get(f"/issue/{issue_key}")
+            params: Dict[str, Any] = {}
+            if fields:
+                params["fields"] = ",".join(fields)
+            response = self.client.get(f"/issue/{issue_key}", params=params or None)
             if response.status_code != 200:
                 logger.warning(f"Get issue {issue_key}: {response.status_code}")
                 logger.debug(f"Get issue response: {response.text}")

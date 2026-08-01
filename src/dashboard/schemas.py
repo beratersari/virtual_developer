@@ -98,6 +98,28 @@ class PollStatusResponse(BaseModel):
     server_time: str
 
 
+class ModelOption(BaseModel):
+    """One model from GET /api/models (display DTO; inventory is backend-only)."""
+
+    id: str
+    name: str = ""
+    provider: str = ""
+    source: str = "cli"  # cli | config | config_default | settings
+    # Pre-formatted for the UI — frontend must not invent labels
+    label: str = ""
+
+
+class ModelsResponse(BaseModel):
+    """OpenCode model inventory — sole source for the Settings model list."""
+
+    default_model: str = ""
+    models: List[ModelOption] = Field(default_factory=list)
+    opencode_config_model: Optional[str] = None
+    opencode_config_path: Optional[str] = None
+    error: Optional[str] = None
+    server_time: str = ""
+
+
 class SettingsView(BaseModel):
     """Safe settings projection (secrets never included as plaintext values)."""
 
@@ -116,6 +138,8 @@ class SettingsView(BaseModel):
     jira_token_configured: bool = False
     gitlab_pat_configured: bool = False
     jira_email_configured: bool = False
+    # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
+    default_model: str = ""
 
 
 class SettingsUpdate(BaseModel):
@@ -126,7 +150,8 @@ class SettingsUpdate(BaseModel):
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     auto_start_plans: Optional[bool] = None
-    max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=32)
+    max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
+    default_model: Optional[str] = Field(default=None, max_length=200)
 
 
 class DashboardEnvelope(BaseModel):

@@ -474,6 +474,96 @@ def test_issue(
     console.print(f"\n[dim]State saved in: {settings.state_dir}[/dim]")
 
 
+@cli.command("models")
+@click.option("--refresh", is_flag=True, help="Bypass short in-process cache")
+@click.option(
+    "--set",
+    "set_model",
+    default=None,
+    help="Set runtime DEFAULT_MODEL (process memory only; also set DEFAULT_MODEL in .env for persistence)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON")
+def models_cmd(refresh: bool, set_model: Optional[str], as_json: bool):
+    """List available OpenCode models and optionally set the default.
+
+    Sources: ``opencode models`` CLI + models declared in opencode.json(c)
+    (including custom provider hosts you configure there).
+
+    Examples:
+        python cli.py models
+        python cli.py models --set opencode/deepseek-v4-flash-free
+        python cli.py models --refresh --json
+    """
+    from src.opencode_models import clear_models_cache, list_available_models
+
+    if set_model is not None:
+        model = set_model.strip()
+        if not model:
+            console.print("[red]Model id must not be empty[/red]")
+            sys.exit(1)
+        settings.default_model = model
+        console.print(f"[green]Runtime default_model set to:[/green] {model}")
+        console.print(
+            "[dim]Persists only for this process. For the daemon, use dashboard Settings "
+            "or set DEFAULT_MODEL in .env and restart.[/dim]"
+        )
+
+    if refresh:
+        clear_models_cache()
+
+    items, err, cfg_path, cfg_model = list_available_models(refresh=refresh)
+    current = (settings.default_model or "").strip()
+
+    if as_json:
+        import json as _json
+
+        console.print(
+            _json.dumps(
+                {
+                    "default_model": current,
+                    "opencode_config_path": cfg_path,
+                    "opencode_config_model": cfg_model,
+                    "models_error": err,
+                    "models": [
+                        {
+                            "id": m.id,
+                            "name": m.name,
+                            "provider": m.provider,
+                            "source": m.source,
+                        }
+                        for m in items
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    console.print(f"\n[bold]Current DEFAULT_MODEL:[/bold] {current or '(unset)'}")
+    if cfg_path:
+        console.print(f"[dim]OpenCode config:[/dim] {cfg_path}")
+        if cfg_model:
+            console.print(f"[dim]Config model key:[/dim] {cfg_model}")
+    else:
+        console.print("[dim]No opencode.json / opencode.jsonc found[/dim]")
+    if err:
+        console.print(f"[yellow]CLI list warning:[/yellow] {err}")
+
+    table = Table(title=f"Available models ({len(items)})")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Source", style="dim")
+    table.add_column("", style="green")
+    for m in items:
+        mark = "← active" if m.id == current else ""
+        table.add_row(m.id, m.name or "", m.source, mark)
+    console.print(table)
+    console.print(
+        "\n[dim]Set via: python cli.py models --set provider/model  |  "
+        "dashboard Settings  |  DEFAULT_MODEL in .env[/dim]\n"
+    )
+
+
 @cli.group()
 def simulate():
     """Simulated JIRA server commands for testing."""

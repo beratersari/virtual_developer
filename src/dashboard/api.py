@@ -18,6 +18,7 @@ from src.dashboard.service import (
     build_dashboard_payload,
     build_jobs,
     build_meta,
+    build_models_response,
     build_poll_status,
     build_settings_view,
     build_task_detail,
@@ -175,6 +176,11 @@ def create_dashboard_app(
     def get_settings() -> dict:
         return build_settings_view().model_dump()
 
+    @app.get("/api/models")
+    def get_models(refresh: bool = False) -> dict:
+        """List OpenCode models (CLI + opencode.json). Sole inventory endpoint for the UI."""
+        return build_models_response(refresh=refresh).model_dump()
+
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
         view = apply_settings_update(body)
@@ -252,9 +258,19 @@ def create_dashboard_app(
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
+        def _spa_index() -> FileResponse:
+            # Always revalidate HTML so browsers pick up new hashed asset names
+            return FileResponse(
+                static / "index.html",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            )
+
         @app.get("/")
         def index() -> FileResponse:
-            return FileResponse(static / "index.html")
+            return _spa_index()
 
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Any:
@@ -276,7 +292,7 @@ def create_dashboard_app(
             safe = _safe_under_static(static, full_path)
             if safe is not None:
                 return FileResponse(safe)
-            return FileResponse(static / "index.html")
+            return _spa_index()
     else:
 
         @app.get("/")
@@ -290,6 +306,7 @@ def create_dashboard_app(
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
+                    "models": "/api/models",
                     "dashboard": "/api/dashboard",
                     "ws": "/ws",
                 },

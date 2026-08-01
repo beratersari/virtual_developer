@@ -4,13 +4,22 @@ import {
   dashboardWsUrl,
   fetchDashboard,
   fetchJobs,
+  fetchModels,
   fetchTaskDetail,
   patchSettings,
 } from './api'
+import {
+  navigateTo,
+  parseLocation,
+  pathForTab,
+  pathForTask,
+  tabFromRoute,
+} from './routes'
 import type {
   DashboardPayload,
   JobItem,
   JobsPayload,
+  ModelsPayload,
   SettingsPayload,
   TaskDetail,
   TaskItem,
@@ -65,11 +74,19 @@ export default function App() {
   /** When opening detail from a job row, highlight that job's ids */
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [settingsDirty, setSettingsDirty] = useState(false)
+  /** Model inventory from GET /api/models only (not derived on the client). */
+  const [modelsPayload, setModelsPayload] = useState<ModelsPayload | null>(null)
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsFetchError, setModelsFetchError] = useState<string | null>(null)
   const issueFilterRef = useRef(issueFilter)
   issueFilterRef.current = issueFilter
   const detailRequestId = useRef(0)
   const jobsRequestId = useRef(0)
   const lastPollCycle = useRef<number | null>(null)
+  const openIssueKeyRef = useRef<string | null>(null)
+  const selectedJobIdRef = useRef<string | null>(null)
+  selectedJobIdRef.current = selectedJobId
+  const lastDetailRefreshRef = useRef(0)
 
   const applyPayload = useCallback((payload: DashboardPayload) => {
     setData(payload)
@@ -79,6 +96,27 @@ export default function App() {
     // (caller refetches when filter or poll cycle changes).
     if (!filter) {
       setJobsView(payload.jobs ?? null)
+    }
+    // Soft-refresh open task detail so Jira description/status stay live
+    const openKey = openIssueKeyRef.current
+    if (openKey) {
+      const now = Date.now()
+      if (now - lastDetailRefreshRef.current >= 4000) {
+        lastDetailRefreshRef.current = now
+        const jobId = selectedJobIdRef.current
+        void (async () => {
+          try {
+            const d = await fetchTaskDetail(openKey)
+            if (openIssueKeyRef.current !== openKey) return
+            setDetail(d)
+            if (jobId && d.jobs?.some((j) => j.job_id === jobId)) {
+              setSelectedJobId(jobId)
+            }
+          } catch {
+            /* keep existing detail on transient failure */
+          }
+        })()
+      }
     }
   }, [])
 
@@ -106,26 +144,48 @@ export default function App() {
       .catch((e: Error) => setError(e.message))
   }, [applyPayload, reloadJobs])
 
-  const closeDetail = useCallback(() => {
+  const closeDetail = useCallback((opts?: { skipNavigate?: boolean }) => {
     detailRequestId.current += 1
+    openIssueKeyRef.current = null
     setDetail(null)
     setDetailError(null)
     setDetailLoading(false)
     setSelectedJobId(null)
+    if (!opts?.skipNavigate) {
+      navigateTo(pathForTab('tasks'))
+      setTab('tasks')
+    }
   }, [])
 
-  const openTaskDetail = async (issueKey: string, jobId?: string | null) => {
+  const openTaskDetail = async (
+    issueKey: string,
+    jobId?: string | null,
+    opts?: { skipNavigate?: boolean; replace?: boolean },
+  ) => {
+    const key = issueKey.trim().toUpperCase()
     const req = ++detailRequestId.current
+    openIssueKeyRef.current = key
+    setTab('tasks')
     setDetailLoading(true)
     setDetailError(null)
     setDetailTab('overview')
     setSelectedJobId(jobId ?? null)
+    if (!opts?.skipNavigate) {
+      navigateTo(pathForTask(key, jobId), opts?.replace === true)
+    }
     try {
-      const d = await fetchTaskDetail(issueKey)
+      const d = await fetchTaskDetail(key)
       if (req !== detailRequestId.current) return
       setDetail(d)
-      if (!jobId && d.jobs?.length) {
-        setSelectedJobId(d.jobs[0].job_id)
+      lastDetailRefreshRef.current = Date.now()
+      let resolvedJob = jobId ?? null
+      if (!resolvedJob && d.jobs?.length) {
+        resolvedJob = d.jobs[0].job_id
+        setSelectedJobId(resolvedJob)
+        // Keep URL in sync once we know the newest job id
+        if (!opts?.skipNavigate && resolvedJob) {
+          navigateTo(pathForTask(key, resolvedJob), true)
+        }
       }
     } catch (e) {
       if (req !== detailRequestId.current) return
@@ -140,8 +200,29 @@ export default function App() {
 
   const refreshDetail = async () => {
     if (!detail?.issue_key) return
-    await openTaskDetail(detail.issue_key, selectedJobId)
+    await openTaskDetail(detail.issue_key, selectedJobId, {
+      skipNavigate: true,
+    })
   }
+
+  // Deep-link / browser back-forward
+  useEffect(() => {
+    const applyRoute = () => {
+      const route = parseLocation()
+      const nextTab = tabFromRoute(route)
+      setTab(nextTab)
+      if (route.kind === 'task') {
+        void openTaskDetail(route.issueKey, route.jobId, { skipNavigate: true })
+      } else {
+        closeDetail({ skipNavigate: true })
+      }
+    }
+    applyRoute()
+    window.addEventListener('popstate', applyRoute)
+    return () => window.removeEventListener('popstate', applyRoute)
+    // Intentionally once on mount; openTaskDetail/closeDetail are stable enough via refs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const selectedJob: JobItem | null = useMemo(() => {
     if (!detail?.jobs?.length) return null
@@ -238,8 +319,28 @@ export default function App() {
       trigger_on_assignment: data.settings.trigger_on_assignment,
       auto_start_plans: data.settings.auto_start_plans,
       max_concurrent_jobs: data.settings.max_concurrent_jobs,
+      default_model: data.settings.default_model,
     })
   }, [data?.settings, settingsDirty])
+
+  const loadModels = useCallback(async (refresh = false) => {
+    setModelsLoading(true)
+    setModelsFetchError(null)
+    try {
+      const payload = await fetchModels(refresh)
+      setModelsPayload(payload)
+    } catch (e) {
+      setModelsFetchError(e instanceof Error ? e.message : 'Failed to load models')
+    } finally {
+      setModelsLoading(false)
+    }
+  }, [])
+
+  // Settings tab: load inventory from backend API (display only)
+  useEffect(() => {
+    if (tab !== 'settings') return
+    void loadModels(false)
+  }, [tab, loadModels])
 
   const displayTime = useMemo(() => {
     // Smooth local clock; server_time is still exposed in meta for API consumers
@@ -275,6 +376,7 @@ export default function App() {
         trigger_on_assignment: settingsDraft.trigger_on_assignment,
         auto_start_plans: settingsDraft.auto_start_plans,
         max_concurrent_jobs: Number(settingsDraft.max_concurrent_jobs),
+        default_model: (settingsDraft.default_model ?? '').trim(),
       }
       if (
         !Number.isFinite(body.poll_interval_seconds) ||
@@ -292,6 +394,12 @@ export default function App() {
             }
           : prev,
       )
+      // Keep models panel default_model in sync after save
+      setModelsPayload((prev) =>
+        prev
+          ? { ...prev, default_model: updated.default_model }
+          : prev,
+      )
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Settings save failed')
     } finally {
@@ -304,8 +412,9 @@ export default function App() {
       key={id}
       type="button"
       onClick={() => {
+        navigateTo(pathForTab(id))
         setTab(id)
-        closeDetail()
+        closeDetail({ skipNavigate: true })
       }}
       className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${
         tab === id && !detail && !detailLoading
@@ -391,7 +500,6 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     closeDetail()
-                    setTab('tasks')
                   }}
                   className="mb-2 text-sm text-indigo-400 hover:text-indigo-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
                 >
@@ -421,9 +529,22 @@ export default function App() {
                 {detail && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <StatusBadge status={detail.status} />
+                    {detail.jira_status && (
+                      <span
+                        className="rounded-md border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[11px] text-slate-300"
+                        title="Jira board column (live)"
+                      >
+                        Jira: {detail.jira_status}
+                      </span>
+                    )}
                     {detail.live && (
                       <span className="text-[10px] font-semibold uppercase text-amber-300">
-                        live
+                        agent live
+                      </span>
+                    )}
+                    {detail.jira_live === false && (
+                      <span className="text-[10px] text-amber-400/90">
+                        Jira live fetch unavailable — showing local cache
                       </span>
                     )}
                   </div>
@@ -596,44 +717,6 @@ export default function App() {
                           </div>
                         )}
                       </div>
-                    </div>
-                  </div>
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    <div>
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-indigo-300/90">
-                        Description of selected job only
-                        {selectedJob ? ` · ${selectedJob.job_id}` : ''}
-                      </div>
-                      <pre className="max-h-64 min-h-[5rem] overflow-auto whitespace-pre-wrap rounded-lg border border-indigo-800/50 bg-indigo-950/20 p-4 text-xs text-slate-100">
-                        {selectedJob
-                          ? selectedJob.description?.trim()
-                            ? selectedJob.description
-                            : '(not captured on this job — older run without prompt snapshot)'
-                          : detail.description || '(none)'}
-                      </pre>
-                    </div>
-                    <div>
-                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Current issue description (live — changes with Jira)
-                      </div>
-                      <pre className="max-h-64 min-h-[5rem] overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-xs text-slate-400">
-                        {detail.description || '(none)'}
-                      </pre>
-                      {selectedJob?.description?.trim() &&
-                        detail.description &&
-                        selectedJob.description.trim() === detail.description.trim() && (
-                          <p className="mt-1 text-[11px] text-slate-500">
-                            Matches live issue text for this selection (this job used the current
-                            description).
-                          </p>
-                        )}
-                      {selectedJob?.description?.trim() &&
-                        detail.description &&
-                        selectedJob.description.trim() !== detail.description.trim() && (
-                          <p className="mt-1 text-[11px] text-amber-300/90">
-                            Differs from live issue — this job ran with an older description.
-                          </p>
-                        )}
                     </div>
                   </div>
                   {detail.error_message && (
@@ -1041,6 +1124,114 @@ export default function App() {
             </div>
 
             <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/40 p-5">
+              {/* OpenCode model — list from GET /api/models; FE only renders DTOs */}
+              <div className="space-y-3 rounded-lg border border-indigo-700/50 bg-indigo-950/30 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-semibold text-indigo-100">
+                      OpenCode model
+                    </div>
+                    <p className="mt-1 text-xs text-slate-400">
+                      List loaded from <code className="text-slate-300">GET /api/models</code>{' '}
+                      (backend runs <code className="text-slate-300">opencode models</code> and
+                      reads opencode.json). Saving updates runtime{' '}
+                      <code className="text-slate-300">DEFAULT_MODEL</code>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={modelsLoading}
+                    onClick={() => void loadModels(true)}
+                    className="shrink-0 rounded-lg border border-indigo-600/50 px-2.5 py-1 text-xs text-indigo-200 hover:bg-indigo-900/50 disabled:opacity-50"
+                  >
+                    {modelsLoading ? 'Loading…' : 'Refresh list'}
+                  </button>
+                </div>
+                <label className="block text-sm">
+                  <span className="text-slate-300">Default model</span>
+                  <select
+                    className="mt-1 w-full rounded-lg border border-indigo-600/40 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-indigo-400"
+                    disabled={modelsLoading && !modelsPayload}
+                    value={
+                      settingsDraft.default_model ??
+                      data.settings.default_model ??
+                      ''
+                    }
+                    onChange={(e) => {
+                      setSettingsDirty(true)
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        default_model: e.target.value,
+                      }))
+                    }}
+                  >
+                    <option value="">
+                      {modelsLoading ? 'Loading models…' : '— select a model —'}
+                    </option>
+                    {(modelsPayload?.models ?? []).map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label || m.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className="text-slate-300">Or type provider/model id</span>
+                  <input
+                    className="mt-1 w-full rounded-lg border border-indigo-600/40 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 outline-none focus:border-indigo-400"
+                    value={
+                      settingsDraft.default_model ?? data.settings.default_model ?? ''
+                    }
+                    placeholder="opencode/deepseek-v4-flash-free"
+                    onChange={(e) => {
+                      setSettingsDirty(true)
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        default_model: e.target.value,
+                      }))
+                    }}
+                  />
+                </label>
+                {(modelsFetchError || modelsPayload?.error) && (
+                  <p className="text-xs text-amber-300">
+                    {modelsFetchError || modelsPayload?.error}
+                  </p>
+                )}
+                <div className="text-xs text-slate-400">
+                  Active:{' '}
+                  <span className="font-mono text-indigo-200">
+                    {settingsDraft.default_model ||
+                      data.settings.default_model ||
+                      modelsPayload?.default_model ||
+                      '(unset)'}
+                  </span>
+                  {modelsPayload != null && (
+                    <span> · {modelsPayload.models.length} from API</span>
+                  )}
+                </div>
+                <div className="text-xs text-slate-500 break-all">
+                  {!modelsPayload ? (
+                    <>Model inventory loads from GET /api/models when this tab opens.</>
+                  ) : modelsPayload.opencode_config_path ? (
+                    <>
+                      OpenCode config:{' '}
+                      <span className="font-mono text-slate-400">
+                        {modelsPayload.opencode_config_path}
+                      </span>
+                      {modelsPayload.opencode_config_model
+                        ? ` · model key: ${modelsPayload.opencode_config_model}`
+                        : ''}
+                    </>
+                  ) : (
+                    <>
+                      No opencode.json / opencode.jsonc found (checked project root and
+                      ~/.config/opencode). Custom provider models will appear here once you
+                      add that file.
+                    </>
+                  )}
+                </div>
+              </div>
+
               <label className="block text-sm">
                 <span className="text-slate-400">Jira host (read-only)</span>
                 <input

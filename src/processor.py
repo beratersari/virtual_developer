@@ -413,6 +413,28 @@ class JobProcessor:
         )
         logger.info(f"{issue_key} OpenCode session: {session_id}")
 
+    def _link_job_session_paths(
+        self,
+        issue_key: str,
+        session_path: Optional[str] = None,
+        prompt_path: Optional[str] = None,
+    ) -> None:
+        """Attach session/prompt paths to the active job as soon as files exist."""
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id:
+            return
+        patch: Dict[str, Any] = {}
+        if session_path:
+            patch["session_log_path"] = session_path
+        if prompt_path:
+            patch["prompt_path"] = prompt_path
+        if not patch:
+            return
+        try:
+            self.job_store.update_job(job_id, **patch)
+        except Exception:
+            pass
+
     def _apply_agent_result_session(self, issue_key: str, result: Dict[str, Any]) -> None:
         """Pull session id from agent result (and retry_info) into state."""
         sid = result.get("opencode_session_id")
@@ -1238,6 +1260,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1428,6 +1453,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1606,6 +1634,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1926,7 +1957,12 @@ class JobProcessor:
             )
             self._mark_jira_in_progress(state.issue_key)
 
-            result = await runner.run_agent(task)
+            result = await runner.run_agent(
+                task,
+                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                    state.issue_key, sp, pp
+                ),
+            )
             self._apply_agent_result_session(state.issue_key, result)
 
             if self._is_aborted(state.issue_key):

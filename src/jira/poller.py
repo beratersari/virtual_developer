@@ -114,14 +114,15 @@ class JiraPoller:
             )
             return []
 
+        # Lightweight fields for board scan (no description — large ADF payloads)
         issue_fields = [
             "key",
             "summary",
-            "description",
             "labels",
             "assignee",
             "status",
             "issuetype",
+            "parent",
         ]
 
         logger.debug(f"Polling board {self.board_id}")
@@ -355,7 +356,32 @@ class JiraPoller:
 
         return reprocess_issues
 
+    def _enrich_issue_for_work(self, issue: dict) -> dict:
+        """Fetch full issue (incl. description) only for keys we will process."""
+        issue_key = issue.get("key") or ""
+        fields = issue.get("fields") or {}
+        if fields.get("description") not in (None, ""):
+            return issue
+        if not hasattr(self.client, "get_issue"):
+            return issue
+        try:
+            full = self.client.get_issue(
+                issue_key,
+                fields=["summary", "description", "labels", "assignee", "status", "issuetype"],
+            )
+            if full and full.get("fields"):
+                # Merge full fields onto the light poll payload
+                merged = dict(issue)
+                merged_fields = dict(fields)
+                merged_fields.update(full.get("fields") or {})
+                merged["fields"] = merged_fields
+                return merged
+        except Exception as e:
+            logger.warning(f"Could not enrich {issue_key} from Jira: {e}")
+        return issue
+
     def process_issue(self, issue: dict, is_update: bool = False) -> None:
+        issue = self._enrich_issue_for_work(issue)
         issue_key = issue["key"]
         fields = issue.get("fields", {})
         summary = fields.get("summary", "No summary")
@@ -378,6 +404,8 @@ class JiraPoller:
             self._last_jira_status[issue_key] = "in progress"
 
     def start(self, handler: Callable[[dict], None]):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         self._running = True
         self._handler = handler
 
@@ -401,12 +429,34 @@ class JiraPoller:
                 issues = self.poll_board()
                 if issues:
                     logger.info(f"Poll cycle: {len(issues)} issue(s) to process")
-                    for issue in issues:
-                        issue_key = issue["key"]
-                        # is_update only if we already processed this key in a prior cycle
-                        is_update = issue_key in self._seen_issues
+                    workers = max(
+                        1,
+                        min(
+                            32,
+                            int(getattr(settings, "poll_dispatch_workers", None) or 8),
+                        ),
+                    )
+                    # Parallel dispatch: enrich + fire handler + transition
+                    # (agent work itself is capped by max_concurrent_jobs)
+                    def _one(issue: dict) -> str:
+                        key = issue["key"]
+                        is_update = key in self._seen_issues
                         self.process_issue(issue, is_update)
-                        self._seen_issues.add(issue_key)
+                        return key
+
+                    if len(issues) == 1 or workers == 1:
+                        for issue in issues:
+                            key = _one(issue)
+                            self._seen_issues.add(key)
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as pool:
+                            futures = [pool.submit(_one, issue) for issue in issues]
+                            for fut in as_completed(futures):
+                                try:
+                                    key = fut.result()
+                                    self._seen_issues.add(key)
+                                except Exception as e:
+                                    logger.error(f"Dispatch failed for an issue: {e}")
 
             except Exception as e:
                 logger.error(f"Error during poll: {e}")

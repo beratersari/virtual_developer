@@ -115,6 +115,7 @@ class AgentRunner:
         on_output: Optional[callable] = None,
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
+        on_session_file: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         attempt_number: int = 0,
     ) -> Dict[str, Any]:
@@ -125,6 +126,7 @@ class AgentRunner:
             on_output: Callback for output lines (stream, line)
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
+            on_session_file: Callback (session_path, prompt_path) when log/prompt files are created
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
@@ -151,13 +153,25 @@ class AgentRunner:
         logger.info(f"Session file created: {session_file}")
 
         # Persist full agent prompt for dashboard task detail
+        prompt_path: Optional[Path] = None
         try:
             prompt_path = session_file.with_suffix(".prompt.txt")
             prompt_path.write_text(task.prompt or "", encoding="utf-8")
             logger.debug(f"Prompt file written: {prompt_path}")
         except Exception as e:
             logger.warning(f"Could not write prompt file for {task.task_id}: {e}")
-        
+            prompt_path = None
+
+        # Link JobStore immediately so dashboard does not invent a legacy_* twin
+        if on_session_file is not None:
+            try:
+                on_session_file(
+                    str(session_file),
+                    str(prompt_path) if prompt_path is not None else None,
+                )
+            except Exception as e:
+                logger.debug(f"on_session_file callback failed: {e}")
+
         # Build the command as a list (cross-platform)
         cmd_list = self._build_command(task, session_file)
         logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
@@ -711,6 +725,7 @@ class AgentRunner:
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
         on_retry: Optional[callable] = None,
+        on_session_file: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -726,6 +741,7 @@ class AgentRunner:
                 error_message, return_code, session_id, new_task_id)``.
                 ``new_task_id`` is the id of the upcoming attempt (must be
                 stored as ``current_task_id`` for cancel/watchdog).
+            on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
 
@@ -759,6 +775,7 @@ class AgentRunner:
                 on_output=on_output,
                 on_complete=on_complete,
                 on_progress=on_progress,
+                on_session_file=on_session_file,
                 timeout_seconds=timeout_seconds,
                 attempt_number=attempt,
             )

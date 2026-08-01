@@ -87,7 +87,16 @@ class Settings(BaseSettings):
     
     # Feature Flags
     auto_start_plans: bool = Field(default=False)
-    max_concurrent_jobs: int = Field(default=3)
+    # How many agent jobs run at once (raise for large boards / many subtasks)
+    max_concurrent_jobs: int = Field(
+        default=6,
+        description="Max concurrent agent jobs (1–32; also writable on dashboard)",
+    )
+    # Parallel Jira transitions / dispatch inside one poll cycle
+    poll_dispatch_workers: int = Field(
+        default=8,
+        description="Thread pool size for dispatching issues after a poll",
+    )
     # Board poller is always on (sole intake path)
     poll_interval_seconds: int = Field(default=30)
 

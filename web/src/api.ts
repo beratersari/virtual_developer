@@ -1,6 +1,12 @@
 /** Thin HTTP helpers — display layer only. */
 
-import type { DashboardPayload, JobsPayload, SettingsPayload, TaskDetail } from './types'
+import type {
+  DashboardPayload,
+  JobsPayload,
+  ModelsPayload,
+  SettingsPayload,
+  TaskDetail,
+} from './types'
 
 export async function fetchDashboard(): Promise<DashboardPayload> {
   const res = await fetch('/api/dashboard')
@@ -42,7 +48,18 @@ export async function cancelTask(issueKey: string): Promise<{ ok: boolean; messa
 }
 
 export async function patchSettings(
-  body: Partial<SettingsPayload>,
+  body: Partial<
+    Pick<
+      SettingsPayload,
+      | 'jira_board_id'
+      | 'poll_interval_seconds'
+      | 'trigger_labels'
+      | 'trigger_on_assignment'
+      | 'auto_start_plans'
+      | 'max_concurrent_jobs'
+      | 'default_model'
+    >
+  >,
 ): Promise<SettingsPayload> {
   const res = await fetch('/api/settings', {
     method: 'PATCH',
@@ -51,6 +68,16 @@ export async function patchSettings(
   })
   if (!res.ok) {
     throw new Error(`Settings update failed: ${res.status}`)
+  }
+  return res.json()
+}
+
+/** Fetch OpenCode model inventory from the backend (no client-side discovery). */
+export async function fetchModels(refresh = false): Promise<ModelsPayload> {
+  const q = refresh ? '?refresh=true' : ''
+  const res = await fetch(`/api/models${q}`)
+  if (!res.ok) {
+    throw new Error(`Models API error: ${res.status}`)
   }
   return res.json()
 }
