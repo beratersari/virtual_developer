@@ -56,7 +56,7 @@ _AGENT_ENV_DENYLIST = (
     "JIRA_PASSWORD",
     "GITLAB_PAT",
     "GITLAB_TOKEN",
-    "WEBHOOK_SECRET",
+
 )
 
 
@@ -591,6 +591,19 @@ class AgentRunner:
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False
+
+    def cancel_all_tasks(self) -> int:
+        """Kill every live child process tracked by this runner. Returns count signalled."""
+        killed = 0
+        for task_id, process in list(self._running_tasks.items()):
+            if process is None:
+                continue
+            if getattr(process, "returncode", None) is not None:
+                continue
+            logger.info(f"Cancelling task on shutdown: task_id={task_id}")
+            self._kill_process_tree(process)
+            killed += 1
+        return killed
 
     async def run_agent_with_retry(
         self,

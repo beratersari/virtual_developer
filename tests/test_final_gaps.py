@@ -55,39 +55,6 @@ async def test_monitor_continues_for_plan_ready(state_manager, reporter, fake_ji
         await daemon._monitor_active_issues()
 
 
-def test_webhook_verify_signature_none_direct():
-    """Call create_webhook_app and exercise verify via signature=None."""
-    from src.jira.webhook_server import create_webhook_app
-    from fastapi.testclient import TestClient
-    from src.config import settings
-    import hashlib
-    import hmac
-
-    app = create_webhook_app(secret="s3cret")
-    c = TestClient(app)
-    # No X-Hub-Signature header
-    r = c.post(
-        settings.webhook_path,
-        content=b'{"webhookEvent":"x"}',
-        headers={},
-    )
-    assert r.status_code == 401
-
-    # Wrong signature
-    r2 = c.post(
-        settings.webhook_path,
-        content=b'{"webhookEvent":"x"}',
-        headers={"X-Hub-Signature": "sha256=deadbeef"},
-    )
-    assert r2.status_code == 401
-
-    # Valid signature
-    body = b'{"webhookEvent":"noop","issue":{"key":"K"}}'
-    sig = "sha256=" + hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
-    r3 = c.post(settings.webhook_path, content=body, headers={"X-Hub-Signature": sig})
-    assert r3.status_code == 200
-
-
 @pytest.mark.asyncio
 async def test_agent_inner_timeout_raise(tmp_path, monkeypatch):
     """Force elapsed > timeout inside read_stream (line 129)."""

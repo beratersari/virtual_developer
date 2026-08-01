@@ -16,8 +16,7 @@ async def test_start_and_stop_unix():
         s.jira_host = "http://j"
         s.auto_start_plans = False
         s.jira_board_id = "1"
-        s.webhook_port = 3000
-        s.enable_webhook = False
+        s.poll_interval_seconds = 30
 
         daemon = JiraAgentDaemon()
         daemon.processor = MagicMock()
@@ -37,9 +36,6 @@ async def test_start_and_stop_unix():
                     with patch("asyncio.get_event_loop") as gel:
                         loop = MagicMock()
                         gel.return_value = loop
-                        # start will gather tasks - monitor stops running
-                        # Actually _running set True then gather waits forever
-                        # Better approach: patch gather
                         with patch("asyncio.gather", new_callable=AsyncMock) as gather:
                             gather.return_value = None
                             await daemon.start()
@@ -52,8 +48,9 @@ async def test_stop_cancels_tasks():
 
     daemon = JiraAgentDaemon()
     daemon._running = True
-    daemon._webhook_server = MagicMock()
     daemon._poller = MagicMock()
+    daemon.processor = MagicMock()
+    daemon.processor.shutdown_processing = MagicMock(return_value=0)
 
     with patch("sys.exit") as ex:
         with patch("asyncio.all_tasks", return_value=[]):
@@ -61,27 +58,34 @@ async def test_stop_cancels_tasks():
                 await daemon.stop()
                 ex.assert_called_with(0)
     assert daemon._running is False
-    daemon._webhook_server.should_exit = True
     daemon._poller.stop.assert_called()
+    daemon.processor.shutdown_processing.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_start_webhook_and_poller():
+async def test_stop_is_idempotent():
+    from src.daemon import JiraAgentDaemon
+
+    daemon = JiraAgentDaemon()
+    daemon._running = True
+    daemon._poller = MagicMock()
+    daemon.processor = MagicMock()
+    daemon.processor.shutdown_processing = MagicMock(return_value=0)
+
+    with patch("sys.exit"):
+        with patch("asyncio.all_tasks", return_value=[]):
+            with patch("asyncio.gather", new_callable=AsyncMock):
+                await daemon.stop()
+                await daemon.stop()  # second call no-ops
+    assert daemon.processor.shutdown_processing.call_count == 1
+
+@pytest.mark.asyncio
+async def test_start_poller_schedules_handler():
     from src.daemon import JiraAgentDaemon
 
     daemon = JiraAgentDaemon()
     daemon.processor = MagicMock()
     daemon.processor.process_event = AsyncMock()
-
-    with patch("src.daemon.create_webhook_app", return_value=MagicMock()):
-        with patch("src.daemon.uvicorn.Server") as Srv:
-            srv = MagicMock()
-            srv.serve = AsyncMock()
-            Srv.return_value = srv
-            with patch("src.daemon.settings") as s:
-                s.webhook_port = 3000
-                await daemon._start_webhook()
-            assert daemon._webhook_server is srv
 
     with patch("src.daemon.JiraPoller") as Poller:
         poller = MagicMock()
@@ -93,28 +97,10 @@ async def test_start_webhook_and_poller():
                 loop.run_in_executor = AsyncMock(return_value=None)
                 gel.return_value = loop
                 await daemon._start_poller()
-                # invoke async_handler
-                handler = poller.start.call_args[0][0] if poller.start.call_args else None
-                # start is called as run_in_executor(None, self._poller.start, async_handler)
-                # so args are on executor call
                 call_args = loop.run_in_executor.call_args
                 assert call_args is not None
                 async_handler = call_args[0][2]
                 async_handler({"webhookEvent": "x"})
-
-
-def test_webhook_callbacks_create_tasks():
-    from src.daemon import JiraAgentDaemon
-
-    daemon = JiraAgentDaemon()
-    daemon.processor = MagicMock()
-    daemon.processor.process_event = AsyncMock()
-
-    with patch("asyncio.create_task") as ct:
-        daemon._on_issue_created({"a": 1})
-        daemon._on_issue_updated({"b": 2})
-        daemon._on_comment_added({"c": 3})
-        assert ct.call_count == 3
 
 
 def test_main_entry():

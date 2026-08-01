@@ -267,8 +267,8 @@ def config():
     table.add_row("Orchestrator Agent", settings.orchestrator_agent)
     table.add_row("Auto-start Plans", str(settings.auto_start_plans))
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
-    table.add_row("Webhook Enabled", str(settings.enable_webhook))
-    table.add_row("Polling Enabled", str(settings.enable_polling))
+    table.add_row("Poll Interval (s)", str(settings.poll_interval_seconds))
+    table.add_row("Board ID", settings.jira_board_id or "(not set)")
     
     console.print(table)
 
@@ -487,25 +487,17 @@ def simulate():
 
 @simulate.command()
 @click.option("--port", "-p", default=7001, help="Server port")
-@click.option("--webhook-port", "-w", default=3000, help="Webhook target port (JIRA Virtual Developer, matches WEBHOOK_PORT default)")
-@click.option("--webhook-secret", "-s", default="dev-secret-key", help="Webhook secret for signing (must match target)")
-def start_server(port: int, webhook_port: int, webhook_secret: str):
-    """Start the simulated JIRA server."""
+def start_server(port: int):
+    """Start the simulated JIRA server (in-memory REST; no push to daemon)."""
     import subprocess
     import sys
-    
+
     console.print(f"[bold green]Starting Simulated JIRA Server on port {port}...[/bold green]")
-    console.print(f"[dim]Webhook target: http://localhost:{webhook_port}/webhook/jira[/dim]")
-    console.print(f"[dim]Webhook secret: {webhook_secret[:10]}...[/dim]")
+    console.print("[dim]In-memory issue store only — daemon intake is board poller[/dim]")
     console.print()
-    
-    # Set environment variables for the server
-    env = os.environ.copy()
-    env["SIMULATED_JIRA_WEBHOOK_URL"] = f"http://localhost:{webhook_port}/webhook/jira"
-    env["WEBHOOK_SECRET"] = webhook_secret
-    
+
     try:
-        subprocess.run([sys.executable, "simulated_jira_server.py", str(port)], env=env)
+        subprocess.run([sys.executable, "simulated_jira_server.py", str(port)])
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped[/yellow]")
 
@@ -519,19 +511,20 @@ def start_server(port: int, webhook_port: int, webhook_secret: str):
 @click.option("--server", default="http://localhost:7001", help="Simulated JIRA server URL")
 @click.option("--no-comment", is_flag=True, help="Skip adding comments to real Jira")
 def create_issue(summary: str, description: str, assignee: str, labels: str, issue_key: Optional[str], server: str, no_comment: bool):
-    """Create a new issue in the simulated JIRA (webhook triggered automatically).
-    
+    """Create a new issue in the simulated JIRA (in-memory store only).
+
     Use --issue-key to specify a real Jira issue key (must exist in real Jira).
-    
+    To run agent work, use ``cli.py process`` or put the issue on a polled board.
+
     Examples:
         python cli.py simulate create-issue -s "Title" -d "Desc"
         python cli.py simulate create-issue -s "Title" -d "Desc" -k KAN-9683
         python cli.py simulate create-issue -s "Title" -d "Desc" -k KAN-9683 --no-comment
     """
     from src.jira.simulated_client import SimulatedJiraClient
-    
+
     labels_list = [l.strip() for l in labels.split(",") if l.strip()]
-    
+
     with SimulatedJiraClient(base_url=server) as client:
         issue = client.create_issue(
             summary=summary,
@@ -540,7 +533,7 @@ def create_issue(summary: str, description: str, assignee: str, labels: str, iss
             labels=labels_list,
             key=issue_key,
         )
-        
+
         if issue:
             console.print(f"[bold green]✓ Created issue: {issue['key']}[/bold green]")
             console.print(f"Summary: {issue['summary']}")
@@ -552,34 +545,9 @@ def create_issue(summary: str, description: str, assignee: str, labels: str, iss
                 if no_comment:
                     console.print(f"[dim]Comments disabled with --no-comment[/dim]")
             console.print()
-            console.print(f"[dim]Webhook triggered automatically by simulated server[/dim]")
+            console.print("[dim]Issue stored in simulated server only — use poller or cli.py process[/dim]")
         else:
-            console.print(f"[bold red]✗ Failed to create issue[/bold red]")
-
-
-@simulate.command()
-@click.option("--key", "-k", help="Existing issue key (creates new if not provided)")
-@click.option("--summary", "-s", help="Issue summary (if creating new)")
-@click.option("--description", "-d", help="Issue description (if creating new)")
-@click.option("--server", default="http://localhost:7001", help="Simulated JIRA server URL")
-def notify(key: Optional[str], summary: Optional[str], description: Optional[str], server: str):
-    """Manually notify the bot about an issue (triggers webhook)."""
-    from src.jira.simulated_client import SimulatedJiraClient
-    
-    with SimulatedJiraClient(base_url=server) as client:
-        result = client.notify_bot(
-            issue_key=key,
-            summary=summary or "Test notification",
-            description=description or "Test description",
-            event_type="jira:issue_created",
-        )
-        
-        if result:
-            console.print(f"[bold green]✓ Notification sent for {result['issue']['key']}[/bold green]")
-            console.print(f"Summary: {result['issue']['summary']}")
-            console.print(f"Status: {result['issue']['status']}")
-        else:
-            console.print(f"[bold red]✗ Failed to send notification[/bold red]")
+            console.print("[bold red]✗ Failed to create issue[/bold red]")
 
 
 @simulate.command()

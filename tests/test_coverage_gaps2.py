@@ -67,57 +67,6 @@ def test_poller_non_terminal_non_inflight(state_manager, fake_jira):
     assert p.check_status_changes(issues) == []
 
 
-def test_webhook_no_match_returns_false_path():
-    import hashlib
-    import hmac
-    import json
-    from fastapi.testclient import TestClient
-    from src.jira.webhook_server import create_webhook_app
-    from src.config import settings
-
-    secret = "test-secret"
-    app = create_webhook_app(secret=secret)
-    c = TestClient(app)
-    payload = {
-        "webhookEvent": "jira:issue_created",
-        "issue": {
-            "key": "Z-9",
-            "fields": {
-                "project": {"key": "PROJ"},
-                "labels": ["not-a-trigger"],
-                "assignee": None,
-            },
-        },
-    }
-    body = json.dumps(payload).encode()
-    sig = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    with patch("src.jira.webhook_server.settings") as s:
-        s.webhook_path = settings.webhook_path
-        s.jira_projects_list = ["PROJ"]
-        s.trigger_labels_list = ["ai-assist"]
-        s.trigger_on_assignment = False
-        s.trigger_mentions_list = ["@DevBot"]
-        r = c.post(
-            settings.webhook_path,
-            content=body,
-            headers={"X-Hub-Signature": sig, "Content-Type": "application/json"},
-        )
-        assert r.json()["status"] == "ignored"
-
-
-def test_webhook_verify_signature_false_no_header():
-    """Cover verify_signature when secret set and signature is None."""
-    from src.jira.webhook_server import create_webhook_app
-    from fastapi.testclient import TestClient
-    from src.config import settings
-
-    app = create_webhook_app(secret="abc")
-    # Access nested verify via posting without header - already 401
-    c = TestClient(app)
-    r = c.post(settings.webhook_path, content=b"{}")
-    assert r.status_code == 401
-
-
 @pytest.mark.asyncio
 async def test_monitor_skips_plan_ready_and_exception(state_manager, reporter, fake_jira):
     from src.daemon import JiraAgentDaemon

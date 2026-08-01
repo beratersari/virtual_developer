@@ -63,7 +63,7 @@ class JobProcessor:
         """Move the Jira issue to an In Progress-like status when work starts.
 
         Called from the processor (not only the poller) so ``cli.py process``
-        and webhook paths also transition the board column.
+        also transitions the board column.
         Soft-fails: a missing transition must not block agent work.
         """
         try:
@@ -156,8 +156,157 @@ class JobProcessor:
             except Exception as e:
                 logger.warning(f"Cleanup failed for {issue_key}: {e}")
 
+    def _is_live_processing(self, issue_key: str) -> bool:
+        """True when this process holds an in-memory processing slot for the issue."""
+        return issue_key in self._contexts
+
+    def list_live_processing_keys(self) -> list[str]:
+        """Issue keys currently held in the in-memory processing cache."""
+        return list(self._contexts.keys())
+
+    def _kill_children_for_issue(self, issue_key: str) -> None:
+        """Best-effort kill of agent subprocesses for one issue."""
+        state = self.state_manager.get_state(issue_key)
+        runner = self._runner_for(issue_key)
+        if not runner:
+            return
+        try:
+            if state and state.current_task_id:
+                runner.cancel_task(state.current_task_id)
+            if hasattr(runner, "cancel_all_tasks"):
+                runner.cancel_all_tasks()
+        except Exception as e:
+            logger.warning(f"Could not kill agent processes for {issue_key}: {e}")
+
+    def _cancel_issue_state(
+        self,
+        issue_key: str,
+        *,
+        message: str,
+        status: TaskStatus = TaskStatus.CANCELLED,
+    ) -> None:
+        """Write a terminal status and notify Jira; clear runtime task fields."""
+        text = (message or "Work interrupted")[:2000]
+        try:
+            updated = self.state_manager.update_state(
+                issue_key,
+                status=status,
+                error_message=text,
+                completed_at=datetime.now(),
+                current_task_id=None,
+                current_opencode_session_id=None,
+            )
+            state = updated or self.state_manager.get_state(issue_key)
+            if state is None:
+                self.reporter.post_comment_response(
+                    issue_key,
+                    f"Work interrupted:\n\n{{code}}\n{text}\n{{code}}",
+                )
+                return
+            if status == TaskStatus.ERROR:
+                self.reporter.post_error(
+                    state,
+                    text,
+                    suggestion=(
+                        "Move the issue back to To Do to re-queue after the daemon is running."
+                    ),
+                )
+            else:
+                self.reporter.post_comment_response(
+                    issue_key,
+                    (
+                        f"*Work interrupted* (`{status.value}`)\n\n"
+                        f"{text}\n\n"
+                        "Move the issue back to *To Do* to re-queue when ready."
+                    ),
+                )
+        except Exception as e:
+            logger.exception(f"Failed to finalise interrupted state for {issue_key}: {e}", e)
+
+    def recover_orphaned_in_flight(self) -> int:
+        """On cold start: disk PLANNING/EXECUTING cannot be live — finalise them.
+
+        In-memory cache is empty after a process restart, so any leftover
+        in-flight status is orphaned (no child process). Mark ERROR so poller
+        can re-queue from To Do, and Jira users are not left with a silent hang.
+        """
+        recovered = 0
+        for state in self.state_manager.get_active_issues():
+            if state.status not in self.IN_FLIGHT_STATUSES:
+                continue
+            logger.warning(
+                f"Orphaned in-flight state for {state.issue_key} "
+                f"({state.status.value}); recovering to ERROR"
+            )
+            self._cancel_issue_state(
+                state.issue_key,
+                message=(
+                    f"Daemon started with leftover status '{state.status.value}' "
+                    "but no live agent process. The previous run was interrupted "
+                    "or crashed. Marking as error so work can be re-queued from To Do."
+                ),
+                status=TaskStatus.ERROR,
+            )
+            recovered += 1
+        if recovered:
+            logger.info(f"Recovered {recovered} orphaned in-flight issue(s) on startup")
+        return recovered
+
+    def shutdown_processing(self, *, reason: str = "Daemon stopped") -> int:
+        """Stop all child agents and finalise every live/in-flight job.
+
+        Uses the in-memory processing cache (``_contexts``) plus disk in-flight
+        statuses so nothing is left as planning/executing after a clean quit.
+        """
+        logger.info(f"Shutting down processing: {reason}")
+        keys: set[str] = set(self._contexts.keys())
+        for state in self.state_manager.get_active_issues():
+            if state.status in self.IN_FLIGHT_STATUSES:
+                keys.add(state.issue_key)
+
+        # Also kill legacy single-slot runner if present
+        if self.agent_runner is not None and hasattr(self.agent_runner, "cancel_all_tasks"):
+            try:
+                self.agent_runner.cancel_all_tasks()
+            except Exception as e:
+                logger.warning(f"Legacy agent_runner cancel_all failed: {e}")
+
+        finalised = 0
+        for issue_key in list(keys):
+            try:
+                self._kill_children_for_issue(issue_key)
+                state = self.state_manager.get_state(issue_key)
+                if state and state.status in self.IN_FLIGHT_STATUSES:
+                    self._cancel_issue_state(
+                        issue_key,
+                        message=(
+                            f"{reason}. Agent process was stopped; local status is "
+                            f"no longer '{state.status.value}'."
+                        ),
+                        status=TaskStatus.CANCELLED,
+                    )
+                    finalised += 1
+                elif issue_key in self._contexts:
+                    # Context without in-flight status — still drop context/children
+                    finalised += 1
+            finally:
+                try:
+                    self._release_context(issue_key, success=False)
+                except Exception as e:
+                    logger.warning(f"Context release failed for {issue_key}: {e}")
+
+        self.git_manager = None
+        self.agent_runner = None
+        logger.info(f"Shutdown processing complete: {finalised} issue(s) finalised")
+        return finalised
+
     async def process_event(self, event: Dict[str, Any]):
-        """Process a JIRA webhook/poll event."""
+        """Process a JIRA poll (or CLI) event.
+
+        Events use a ``webhookEvent`` key for historical compatibility with
+        the poller envelope (``jira:issue_created`` / ``jira:issue_updated``).
+        HTTP webhooks are not supported.
+        """
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
         
@@ -205,6 +354,11 @@ class JobProcessor:
         logger.info(f"Handling issue created for {issue_key}: {summary[:80]}")
         logger.debug(f"Issue description length: {len(description)} chars")
         
+        # Live in-memory cache wins over disk — never double-start a held job
+        if self._is_live_processing(issue_key):
+            logger.info(f"Issue {issue_key} already live in processing cache, skipping")
+            return
+
         existing = self.state_manager.get_state(issue_key)
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
@@ -243,7 +397,7 @@ class JobProcessor:
                 issue_key=issue_key,
                 issue_summary=summary,
                 description=description,
-                triggered_by="webhook",
+                triggered_by="poller",
                 jira_assignee=assignee,
             )
             state.metadata["workflow_type"] = workflow_type.value
@@ -282,15 +436,19 @@ class JobProcessor:
         status_data = fields.get("status", {})
         status_name = status_data.get("name", "")
         
+        if self._is_live_processing(issue_key):
+            logger.info(f"{issue_key} is live in processing cache; ignoring update event")
+            return
+
         state = self.state_manager.get_state(issue_key)
-        
+
         logger.debug(f"Issue {issue_key} - Event status: '{status_name}', State status: {state.status.value if state else 'NO_STATE'}")
 
         if not state:
             await self._handle_issue_created(event)
             return
 
-        # Never interrupt or restart in-flight agent work from poll/webhook noise
+        # Never interrupt or restart in-flight agent work from poll noise
         if state.status in self.IN_FLIGHT_STATUSES:
             logger.info(
                 f"{issue_key} is in-flight ({state.status.value}); ignoring update event"
@@ -434,7 +592,7 @@ class JobProcessor:
         logger.info(f"Starting planning workflow for {state.issue_key}")
         workflow_start_time = datetime.now()
 
-        # Claim in-flight BEFORE slow git clone so poll/webhook cannot double-start
+        # Claim in-flight BEFORE slow git clone so poll cannot double-start
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
             prompt=PromptBuilder.build_prometheus_prompt(
