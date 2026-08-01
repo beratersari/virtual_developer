@@ -382,11 +382,18 @@ def _legacy_jobs_from_sessions(
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
-    limit: int = 200,
+    limit: int = 25,
+    page: int = 1,
+    page_size: Optional[int] = None,
     processor: Optional["JobProcessor"] = None,
     store: Optional[JobStore] = None,
     state_manager: Optional[JiraStateManager] = None,
 ) -> JobsResponse:
+    """List agent jobs with server-side pagination.
+
+    ``page`` / ``page_size`` are preferred. ``limit`` alone is treated as page_size
+    on page 1 (backward compatible for callers that only pass limit).
+    """
     js = store or default_job_store
     live_keys = set()
     active_job_ids = set()
@@ -399,7 +406,14 @@ def build_jobs(
         for st in state_manager.get_all_states():
             summaries[st.issue_key] = st.issue_summary or ""
 
-    raw = js.list_jobs(issue_key=issue_key, limit=limit)
+    size = int(page_size if page_size is not None else limit or 25)
+    size = max(1, min(size, 100))
+    page_n = max(1, int(page or 1))
+    offset = (page_n - 1) * size
+
+    # Load a wide window so we can merge legacy session rows then paginate
+    fetch_cap = 2000
+    raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
     covered_paths: set = set()
     # Open JobStore runs without session_log_path yet — suppress matching session logs
     suppress_logs_after: Dict[str, str] = {}
@@ -427,7 +441,7 @@ def build_jobs(
                 suppress_logs_after[ik] = started
 
     # Merge stored jobs with legacy session-derived rows (newest first after merge)
-    remaining = max(1, limit) - len(raw)
+    remaining = max(0, fetch_cap - len(raw))
     if remaining > 0:
         legacy = _legacy_jobs_from_sessions(
             issue_key=issue_key,
@@ -441,10 +455,12 @@ def build_jobs(
             key=lambda j: j.get("started_at") or j.get("updated_at") or "",
             reverse=True,
         )
-        raw = raw[: max(1, limit)]
+
+    total = len(raw)
+    page_raw = raw[offset : offset + size]
 
     items: List[JobItem] = []
-    for j in raw:
+    for j in page_raw:
         jid = j.get("job_id") or ""
         ik = j.get("issue_key") or ""
         if not j.get("summary") and ik in summaries:
@@ -484,7 +500,9 @@ def build_jobs(
         )
     return JobsResponse(
         jobs=items,
-        total=len(items),
+        total=total,
+        page=page_n,
+        page_size=size,
         issue_key_filter=(issue_key or None),
         server_time=datetime.now().isoformat(timespec="seconds"),
     )
@@ -503,6 +521,8 @@ def build_dashboard_payload(
         "tasks": build_tasks(state_manager, processor).model_dump(),
         "jobs": build_jobs(
             issue_key=issue_key_filter,
+            page=1,
+            page_size=25,
             processor=processor,
             state_manager=state_manager,
         ).model_dump(),

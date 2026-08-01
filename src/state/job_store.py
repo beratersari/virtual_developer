@@ -198,8 +198,12 @@ class JobStore:
         *,
         issue_key: Optional[str] = None,
         limit: int = 200,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """Return jobs newest-first, optional filter by issue key (case-insensitive)."""
+        """Return jobs newest-first, optional filter by issue key (case-insensitive).
+
+        ``offset`` skips that many rows after sorting (for pagination).
+        """
         jobs: List[Dict[str, Any]] = []
         if not self.jobs_dir.is_dir():
             return jobs
@@ -214,7 +218,26 @@ class JobStore:
             except Exception as e:
                 logger.error(f"Error loading {path}: {e}")
         jobs.sort(key=lambda j: j.get("started_at") or j.get("updated_at") or "", reverse=True)
-        return jobs[: max(1, limit)]
+        off = max(0, int(offset or 0))
+        lim = max(1, int(limit or 1))
+        return jobs[off : off + lim]
+
+    def count_jobs(self, *, issue_key: Optional[str] = None) -> int:
+        """Count stored jobs matching optional issue filter."""
+        if not self.jobs_dir.is_dir():
+            return 0
+        needle = (issue_key or "").strip().upper()
+        n = 0
+        for path in self.jobs_dir.glob("job_*.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    job = json.load(f)
+                if needle and (job.get("issue_key") or "").upper() != needle:
+                    continue
+                n += 1
+            except Exception:
+                continue
+        return n
 
     def active_job_for_issue(self, issue_key: str) -> Optional[Dict[str, Any]]:
         for job in self.list_jobs(issue_key=issue_key, limit=50):

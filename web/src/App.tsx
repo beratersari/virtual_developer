@@ -23,7 +23,6 @@ import type {
   ModelsPayload,
   SettingsPayload,
   TaskDetail,
-  TaskItem,
 } from './types'
 
 type Tab = 'tasks' | 'poll' | 'settings'
@@ -73,6 +72,10 @@ export default function App() {
   const [starting, setStarting] = useState(false)
   const [issueFilter, setIssueFilter] = useState('')
   const [jobsView, setJobsView] = useState<JobsPayload | null>(null)
+  const [jobsPage, setJobsPage] = useState(1)
+  const [jobsPageSize] = useState(25)
+  const jobsPageRef = useRef(1)
+  jobsPageRef.current = jobsPage
   /** When opening detail from a job row, highlight that job's ids */
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [settingsDirty, setSettingsDirty] = useState(false)
@@ -93,12 +96,7 @@ export default function App() {
   const applyPayload = useCallback((payload: DashboardPayload) => {
     setData(payload)
     setError(null)
-    const filter = issueFilterRef.current.trim()
-    // Unfiltered: take WS jobs. Filtered: keep list until REST reload
-    // (caller refetches when filter or poll cycle changes).
-    if (!filter) {
-      setJobsView(payload.jobs ?? null)
-    }
+    // Jobs list is always loaded via paginated REST (not full WS dump)
     // Soft-refresh open task detail so Jira description/status stay live
     const openKey = openIssueKeyRef.current
     if (openKey) {
@@ -122,26 +120,32 @@ export default function App() {
     }
   }, [])
 
-  const reloadJobs = useCallback(async (filter?: string) => {
-    const req = ++jobsRequestId.current
-    try {
-      const j = await fetchJobs(filter)
-      if (req !== jobsRequestId.current) return
-      setJobsView(j)
-    } catch (e) {
-      if (req !== jobsRequestId.current) return
-      setError(e instanceof Error ? e.message : 'Failed to load jobs')
-    }
-  }, [])
+  const reloadJobs = useCallback(
+    async (opts?: { filter?: string; page?: number }) => {
+      const req = ++jobsRequestId.current
+      const filter = (opts?.filter ?? issueFilterRef.current).trim()
+      const page = opts?.page ?? jobsPageRef.current
+      try {
+        const j = await fetchJobs({
+          issueKey: filter || undefined,
+          page,
+          pageSize: jobsPageSize,
+        })
+        if (req !== jobsRequestId.current) return
+        setJobsView(j)
+      } catch (e) {
+        if (req !== jobsRequestId.current) return
+        setError(e instanceof Error ? e.message : 'Failed to load jobs')
+      }
+    },
+    [jobsPageSize],
+  )
 
   const loadDashboard = useCallback(() => {
     fetchDashboard()
       .then((payload) => {
         applyPayload(payload)
-        const filter = issueFilterRef.current.trim()
-        if (filter) {
-          void reloadJobs(filter)
-        }
+        void reloadJobs()
       })
       .catch((e: Error) => setError(e.message))
   }, [applyPayload, reloadJobs])
@@ -273,20 +277,23 @@ export default function App() {
 
   useEffect(() => {
     const t = window.setTimeout(() => {
-      void reloadJobs(issueFilter.trim() || undefined)
+      setJobsPage(1)
+      void reloadJobs({ filter: issueFilter, page: 1 })
     }, 250)
     return () => window.clearTimeout(t)
   }, [issueFilter, reloadJobs])
 
-  // When filtered, refresh jobs list on each poll cycle from WS
+  useEffect(() => {
+    void reloadJobs({ page: jobsPage })
+  }, [jobsPage, reloadJobs])
+
+  // Refresh jobs list on each poll cycle
   useEffect(() => {
     const cycle = data?.poll?.cycle
     if (cycle == null) return
     if (lastPollCycle.current === cycle) return
     lastPollCycle.current = cycle
-    if (issueFilterRef.current.trim()) {
-      void reloadJobs(issueFilterRef.current.trim())
-    }
+    void reloadJobs()
   }, [data?.poll?.cycle, reloadJobs])
 
   useEffect(() => {
@@ -915,11 +922,10 @@ export default function App() {
           <section className="space-y-6">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
-                <h2 className="text-base font-semibold text-slate-100">Jobs &amp; issues</h2>
+                <h2 className="text-base font-semibold text-slate-100">Jobs</h2>
                 <p className="text-xs text-slate-500">
-                  Each agent run is a job. Filter by Jira key to see every run for that issue.
-                  Click a job or issue row for full detail (overview, prompts, OpenCode, logs,
-                  cancel).
+                  Each agent run is a job. Filter by Jira key, open a row for detail.
+                  Board issues live under Poll monitor — click a key there for the same detail view.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -944,57 +950,52 @@ export default function App() {
               </div>
             </div>
 
-            <div className="text-xs text-slate-500">
-              Showing{' '}
-              {issueFilter.trim()
-                ? (jobsView?.total ?? 0)
-                : (jobsView?.total ?? data.jobs?.total ?? 0)}{' '}
-              job(s)
-              {issueFilter.trim() ? ` for ${issueFilter.trim().toUpperCase()}` : ''}
-              {' · '}
-              Issues in store:{' '}
-              {
-                (issueFilter.trim()
-                  ? data.tasks.tasks.filter(
-                      (t) =>
-                        t.issue_key.toUpperCase() === issueFilter.trim().toUpperCase(),
-                    )
-                  : data.tasks.tasks
-                ).length
-              }
-            </div>
+            {(() => {
+              const total = jobsView?.total ?? 0
+              const page = jobsView?.page ?? jobsPage
+              const size = jobsView?.page_size ?? jobsPageSize
+              const totalPages = Math.max(1, Math.ceil(total / size) || 1)
+              const from = total === 0 ? 0 : (page - 1) * size + 1
+              const to = Math.min(page * size, total)
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+                    <span>
+                      Showing {from}–{to} of {total} job(s)
+                      {issueFilter.trim()
+                        ? ` for ${issueFilter.trim().toUpperCase()}`
+                        : ''}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={page <= 1}
+                        onClick={() => setJobsPage((p) => Math.max(1, p - 1))}
+                        className="rounded-md border border-slate-700 px-2 py-1 text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Previous
+                      </button>
+                      <span className="font-mono text-slate-400">
+                        Page {page} / {totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={page >= totalPages}
+                        onClick={() => setJobsPage((p) => p + 1)}
+                        className="rounded-md border border-slate-700 px-2 py-1 text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
 
-            <div>
-              <h3 className="mb-2 text-sm font-medium text-slate-300">Jobs (runs)</h3>
-              <JobsTable
-                jobs={
-                  issueFilter.trim()
-                    ? (jobsView?.jobs ?? [])
-                    : (jobsView?.jobs ?? data.jobs?.jobs ?? [])
-                }
-                onOpenIssue={(key, jobId) => void openTaskDetail(key, jobId)}
-              />
-            </div>
-
-            <div>
-              <h3 className="mb-2 text-sm font-medium text-slate-300">
-                Issues (current state — latest slot only)
-              </h3>
-              <p className="mb-2 text-xs text-slate-500">
-                One row per Jira key. Task/session columns show the latest run only.
-                Use the Jobs table above for full history.
-              </p>
-              <IssuesTable
-                tasks={(issueFilter.trim()
-                  ? data.tasks.tasks.filter(
-                      (t) =>
-                        t.issue_key.toUpperCase() === issueFilter.trim().toUpperCase(),
-                    )
-                  : data.tasks.tasks
-                )}
-                onOpenIssue={(key) => void openTaskDetail(key)}
-              />
-            </div>
+                  <JobsTable
+                    jobs={jobsView?.jobs ?? []}
+                    onOpenIssue={(key, jobId) => void openTaskDetail(key, jobId)}
+                  />
+                </>
+              )
+            })()}
           </section>
         )}
 
@@ -1073,7 +1074,14 @@ export default function App() {
                       }
                     >
                       <td className="px-4 py-3">
-                        <div className="font-mono text-indigo-300">{i.key}</div>
+                        <button
+                          type="button"
+                          className="font-mono text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+                          onClick={() => void openTaskDetail(i.key)}
+                          title="Open issue detail"
+                        >
+                          {i.key}
+                        </button>
                         <div className="max-w-sm truncate text-slate-300">{i.summary}</div>
                         {i.labels.length > 0 && (
                           <div className="mt-1 flex flex-wrap gap-1">
@@ -1395,73 +1403,6 @@ function PromptBlock({
       >
         {body}
       </pre>
-    </div>
-  )
-}
-
-function IssuesTable({
-  tasks,
-  onOpenIssue,
-}: {
-  tasks: TaskItem[]
-  onOpenIssue: (issueKey: string) => void
-}) {
-  return (
-    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
-      <table className="min-w-full text-left text-sm">
-        <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
-          <tr>
-            <th className="px-4 py-3 font-medium">Issue</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Workflow</th>
-            <th className="px-4 py-3 font-medium">Updated</th>
-            <th className="px-4 py-3 font-medium">Progress</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-800/80">
-          {tasks.length === 0 && (
-            <tr>
-              <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                No issues match this filter.
-              </td>
-            </tr>
-          )}
-          {tasks.map((t) => (
-            <tr key={t.issue_key} className="hover:bg-slate-800/40">
-              <td className="px-4 py-3">
-                <button
-                  type="button"
-                  className="text-left font-mono text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
-                  onClick={() => onOpenIssue(t.issue_key)}
-                >
-                  {t.issue_key}
-                </button>
-                <div className="max-w-xs truncate text-xs text-slate-400" title={t.summary}>
-                  {t.summary}
-                </div>
-              </td>
-              <td className="px-4 py-3">
-                <StatusBadge status={t.status} />
-                {t.live && (
-                  <div className="mt-0.5 text-[10px] font-semibold uppercase text-amber-300">
-                    live
-                  </div>
-                )}
-                {t.error_message && (
-                  <div className="mt-1 max-w-xs truncate text-xs text-rose-300/90">
-                    {t.error_message}
-                  </div>
-                )}
-              </td>
-              <td className="px-4 py-3 text-slate-300">{t.workflow_type || '—'}</td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                {t.completed_at || t.started_at || '—'}
-              </td>
-              <td className="px-4 py-3 text-slate-300">{t.progress_percentage}%</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   )
 }

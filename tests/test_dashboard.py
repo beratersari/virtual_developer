@@ -133,6 +133,33 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
             assert "version" in d.json()["meta"]
 
 
+def test_build_jobs_pagination(tmp_path):
+    from src.dashboard.service import build_jobs
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    for i in range(7):
+        jobs.create_job(
+            issue_key="PAG-1",
+            summary=f"run {i}",
+            description="d",
+            workflow_type="direct",
+            agent="sisyphus",
+        )
+    page1 = build_jobs(issue_key="PAG-1", page=1, page_size=3, store=jobs, state_manager=sm)
+    assert page1.total == 7
+    assert page1.page == 1
+    assert page1.page_size == 3
+    assert len(page1.jobs) == 3
+    page2 = build_jobs(issue_key="PAG-1", page=2, page_size=3, store=jobs, state_manager=sm)
+    assert len(page2.jobs) == 3
+    page3 = build_jobs(issue_key="PAG-1", page=3, page_size=3, store=jobs, state_manager=sm)
+    assert len(page3.jobs) == 1
+    ids = {j.job_id for j in page1.jobs + page2.jobs + page3.jobs}
+    assert len(ids) == 7
+
+
 def test_poll_api_hides_unmatched_board_issues(tmp_path):
     """Poll DTO lists only bot-eligible issues (label or assignee match)."""
     from src.dashboard.service import build_poll_status

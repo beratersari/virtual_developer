@@ -124,6 +124,8 @@ export type JobItem = {
 export type JobsPayload = {
   jobs: JobItem[]
   total: number
+  page?: number
+  page_size?: number
   issue_key_filter?: string | null
   server_time: string
 }

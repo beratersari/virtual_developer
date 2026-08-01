@@ -112,11 +112,20 @@ def create_dashboard_app(
     @app.get("/api/jobs")
     def jobs(
         issue_key: Optional[str] = None,
-        limit: int = Query(default=200, ge=1, le=500),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        limit: Optional[int] = Query(
+            default=None,
+            ge=1,
+            le=100,
+            description="Deprecated alias for page_size (page forced to 1 if set alone)",
+        ),
     ) -> dict:
+        size = page_size if limit is None else limit
         return build_jobs(
             issue_key=issue_key,
-            limit=limit,
+            page=page,
+            page_size=size,
             processor=app.state.processor,
             state_manager=app.state.state_manager,
         ).model_dump()
