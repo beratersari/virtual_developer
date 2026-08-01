@@ -3,6 +3,7 @@
   "private": true,
   "description": "OpenCode user home dependencies for JIRA Virtual Developer",
   "dependencies": {
+    "oh-my-openagent": "4.19.3",
     "oh-my-opencode": "4.19.3"
   }
 }

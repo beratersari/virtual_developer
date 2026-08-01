@@ -194,44 +194,62 @@ function Assert-OmoTree([string]$Root, [string]$Label) {
     if ($files.Count -lt 500) {
         throw "$Label only $($files.Count) files — incomplete plugin tree: $Root"
     }
-    # Must be a real directory, not a reparse/junction-only stub without content
-    $item = Get-Item -LiteralPath $Root -Force
     Write-Host "OK $Label : $($files.Count) files, $($md.Count) md, agents present"
 }
 
-$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
-$configPlugin = Join-Path $ocConfigDir "node_modules\oh-my-opencode"
-$homePlugin = Join-Path $ocHome "node_modules\oh-my-opencode"
-Assert-OmoTree $homePlugin "home"
-Assert-OmoTree $cachePlugin "cache"
-Assert-OmoTree $configPlugin "config"
+# Primary package id is oh-my-openagent (avoids auto-migration hang)
+$homePlugin = Join-Path $ocHome "node_modules\oh-my-openagent"
+$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
+$configPlugin = Join-Path $ocConfigDir "node_modules\oh-my-openagent"
+Assert-OmoTree $homePlugin "home/openagent"
+Assert-OmoTree $cachePlugin "cache/openagent"
+Assert-OmoTree $configPlugin "config/openagent"
 
-$packagesPlugin = Join-Path $env:USERPROFILE ".cache\opencode\packages\oh-my-opencode"
+$packagesPlugin = Join-Path $env:USERPROFILE ".cache\opencode\packages\oh-my-openagent"
 if (Test-Path -LiteralPath $packagesPlugin) {
-    Assert-OmoTree $packagesPlugin "cache/packages"
+    Assert-OmoTree $packagesPlugin "cache/packages/openagent"
 } else {
-    Write-Host "WARNING: cache/packages/oh-my-opencode missing (some OpenCode builds use this path)"
+    Write-Host "WARNING: cache/packages/oh-my-openagent missing"
 }
 
-# Config must pin plugin version (unversioned => Bun fetch hang / black TUI).
-# OpenCode may rewrite oh-my-opencode@X -> oh-my-openagent@X (package rename).
+# Legacy name should also exist offline
+$legacy = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
+if (-not (Test-Path -LiteralPath (Join-Path $legacy "dist\index.js"))) {
+    throw "Legacy oh-my-opencode cache missing: $legacy"
+}
+Write-Host "OK legacy oh-my-opencode cache present"
+
+# Config must pin NEW package id (legacy name triggers migration + Bun re-fetch)
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
 $cfgObj = Get-Content -LiteralPath $globalCfg -Raw | ConvertFrom-Json
 $plugins = @($cfgObj.plugin)
-$pinned = $plugins | Where-Object { $_ -match '^oh-my-opencod(e|agent)@' }
+$pinned = $plugins | Where-Object { $_ -match '^oh-my-openagent@' }
 if (-not $pinned) {
-    throw "FAIL: opencode.json plugin not version-pinned: $($plugins -join ', ')"
+    throw "FAIL: opencode.json must pin oh-my-openagent@VERSION, got: $($plugins -join ', ')"
 }
 if ($cfgObj.autoupdate -ne $false) {
     Write-Host "WARNING: autoupdate is not false (may hang offline)"
 }
 Write-Host "OK pinned plugin: $($pinned -join ', ')"
 
-$cacheOma = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
-if (-not (Test-Path -LiteralPath (Join-Path $cacheOma "dist\index.js"))) {
-    throw "Plugin cache missing oh-my-openagent tree: $cacheOma"
+# ripgrep offline seed
+$rg = Join-Path $env:USERPROFILE ".cache\opencode\bin\rg.exe"
+if (-not (Test-Path -LiteralPath $rg)) {
+    throw "rg.exe not seeded at $rg — first TUI run will hang downloading ripgrep"
 }
-Write-Host "OK plugin alias cache: $cacheOma"
+Write-Host "OK ripgrep: $rg"
+
+# Project launcher exists
+$launcher = Join-Path $deepRoot "start-opencode.bat"
+if (-not (Test-Path -LiteralPath $launcher)) {
+    throw "start-opencode.bat missing at project root after install"
+}
+Write-Host "OK launcher: $launcher"
+
+# Env for models.dev skip (set by install.bat via setx; process may not see it)
+if ($env:OPENCODE_DISABLE_MODELS_FETCH -ne "1") {
+    Write-Host "WARNING: OPENCODE_DISABLE_MODELS_FETCH not set in this process (setx is user-env)"
+}
 
 # Non-interactive: --version already passed. Optional help must not hang.
 Write-Step "Non-interactive opencode run --help (30s cap)"

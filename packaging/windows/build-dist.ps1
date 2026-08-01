@@ -397,19 +397,20 @@ $pkgBody = @"
   "private": true,
   "description": "OpenCode user home dependencies for JIRA Virtual Developer",
   "dependencies": {
+    "oh-my-openagent": "$OH_MY_OPENCODE_VERSION",
     "oh-my-opencode": "$OH_MY_OPENCODE_VERSION"
   }
 }
 "@
 Set-Content -Path $pkgPath -Value $pkgBody -Encoding UTF8
 
-# Pin plugin version so OpenCode does not resolve "latest" at TUI startup (blank screen).
+# Use NEW package id oh-my-openagent (legacy oh-my-opencode triggers auto-migration + Bun re-fetch hang).
 # autoupdate=false avoids network hangs on offline machines.
 $ocCfgBody = @"
 {
   "`$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
-  "plugin": ["oh-my-opencode@$OH_MY_OPENCODE_VERSION"]
+  "plugin": ["oh-my-openagent@$OH_MY_OPENCODE_VERSION"]
 }
 "@
 Set-Content -Path (Join-Path $ocHome "opencode.json") -Value $ocCfgBody -Encoding UTF8
@@ -419,42 +420,81 @@ if (Test-Path -LiteralPath $pkgWindows) {
     Set-Content -Path (Join-Path $pkgWindows "opencode.json") -Value $ocCfgBody -Encoding UTF8
 }
 Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-opencode.json") -Force
+# New basename used by oh-my-openagent docs
+Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-openagent.json") -Force
 
-Write-Host "  Installing oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."
+Write-Host "  Installing oh-my-openagent@$OH_MY_OPENCODE_VERSION + oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."
 Push-Location $ocHome
 try {
     # Hoisted tree is shallower (fewer nested node_modules) — critical for Windows MAX_PATH
-    npm install --omit=dev --no-fund --no-audit --install-strategy=hoisted "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
+    # Install BOTH names: config uses openagent; some tools still resolve legacy opencode name.
+    npm install --omit=dev --no-fund --no-audit --install-strategy=hoisted `
+        "oh-my-openagent@$OH_MY_OPENCODE_VERSION" `
+        "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
     if ($LASTEXITCODE -ne 0) {
-        throw "npm install oh-my-opencode@$OH_MY_OPENCODE_VERSION failed (exit $LASTEXITCODE)"
+        throw "npm install oh-my-openagent/opencode @$OH_MY_OPENCODE_VERSION failed (exit $LASTEXITCODE)"
     }
 } finally {
     Pop-Location
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode"))) {
+# Ensure both package folders exist (npm may dedupe one away)
+$omoRoot = Join-Path $ocHome "node_modules\oh-my-opencode"
+$omaRoot = Join-Path $ocHome "node_modules\oh-my-openagent"
+if (-not (Test-Path -LiteralPath $omaRoot) -and (Test-Path -LiteralPath $omoRoot)) {
+    Write-Host "  Duplicating oh-my-opencode -> oh-my-openagent (npm dedupe)"
+    Copy-Item -LiteralPath $omoRoot -Destination $omaRoot -Recurse -Force
+}
+if (-not (Test-Path -LiteralPath $omoRoot) -and (Test-Path -LiteralPath $omaRoot)) {
+    Write-Host "  Duplicating oh-my-openagent -> oh-my-opencode (npm dedupe)"
+    Copy-Item -LiteralPath $omaRoot -Destination $omoRoot -Recurse -Force
+}
+if (-not (Test-Path -LiteralPath $omaRoot)) {
+    throw "oh-my-openagent missing after npm install"
+}
+if (-not (Test-Path -LiteralPath $omoRoot)) {
     throw "oh-my-opencode missing after npm install"
 }
 
 Optimize-NodeModules (Join-Path $ocHome "node_modules")
 
 # Prove the offline plugin tree is complete (agents + skill markdown + size)
-$omoRoot = Join-Path $ocHome "node_modules\oh-my-opencode"
-if (-not (Test-Path -LiteralPath (Join-Path $omoRoot "dist\index.js"))) {
-    throw "oh-my-opencode missing dist\index.js after install/prune"
+foreach ($label in @("oh-my-openagent", "oh-my-opencode")) {
+    $pRoot = Join-Path $ocHome "node_modules\$label"
+    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\index.js"))) {
+        throw "$label missing dist\index.js after install/prune"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\agents"))) {
+        throw "$label missing dist\agents after install/prune"
+    }
+    $pFiles = @(Get-ChildItem -LiteralPath $pRoot -Recurse -File -ErrorAction SilentlyContinue)
+    $pMd = @(Get-ChildItem -LiteralPath $pRoot -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
+    Write-Host "  $label tree: $($pFiles.Count) files, $($pMd.Count) markdown (skills/docs)"
+    if ($pFiles.Count -lt 500) {
+        throw "$label tree too small ($($pFiles.Count) files) — incomplete offline plugin"
+    }
+    if ($pMd.Count -lt 10) {
+        throw "$label has almost no .md files ($($pMd.Count)) — skills were pruned"
+    }
 }
-if (-not (Test-Path -LiteralPath (Join-Path $omoRoot "dist\agents"))) {
-    throw "oh-my-opencode missing dist\agents after install/prune"
-}
-$omoFiles = @(Get-ChildItem -LiteralPath $omoRoot -Recurse -File -ErrorAction SilentlyContinue)
-$omoMd = @(Get-ChildItem -LiteralPath $omoRoot -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-Write-Host "  oh-my-opencode tree: $($omoFiles.Count) files, $($omoMd.Count) markdown (skills/docs)"
-if ($omoFiles.Count -lt 500) {
-    throw "oh-my-opencode tree too small ($($omoFiles.Count) files) — incomplete offline plugin"
-}
-if ($omoMd.Count -lt 10) {
-    throw "oh-my-opencode has almost no .md files ($($omoMd.Count)) — skills were pruned"
-}
+
+# Bundle ripgrep so first TUI run does not hang downloading from GitHub
+# OpenCode looks for: %USERPROFILE%\.cache\opencode\bin\rg.exe
+Write-Host "  Fetching ripgrep for offline OpenCode tools..."
+$rgVer = "15.1.0"
+$rgZip = Join-Path $dl "ripgrep-$rgVer-x86_64-pc-windows-msvc.zip"
+$rgUrl = "https://github.com/BurntSushi/ripgrep/releases/download/$rgVer/ripgrep-$rgVer-x86_64-pc-windows-msvc.zip"
+Download-File $rgUrl $rgZip
+$rgExtract = Join-Path $dl "rg-extract"
+if (Test-Path -LiteralPath $rgExtract) { Remove-Item -LiteralPath $rgExtract -Recurse -Force }
+Expand-ZipSafe $rgZip $rgExtract
+$rgExe = Get-ChildItem -Path $rgExtract -Recurse -Filter "rg.exe" | Select-Object -First 1
+if (-not $rgExe) { throw "rg.exe not found in ripgrep archive" }
+# Into OpenCode home bin (also on PATH after install)
+Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $ocBin "rg.exe") -Force
+# Into vendor for install.bat seed of ~/.cache/opencode/bin
+Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $vendorBin "rg.exe") -Force
+Write-Host ("  ripgrep: {0:N1} MB" -f ($rgExe.Length / 1MB))
 
 # Hard fail if relative paths are still too long for classic Windows MAX_PATH budgets
 $assertMax = Join-Path $root "packaging\windows\Assert-MaxPath.ps1"
@@ -544,13 +584,14 @@ JIRA Virtual Developer — Windows offline package
 1. Extract the GitHub Actions download ONCE (you should see install.bat here).
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
-4. Run install.bat  (it removes old C:\vd\opencode, %USERPROFILE%\.opencode,
-   and a bad %USERPROFILE%\.config\opencode\opencode.json automatically)
-5. OpenCode is installed only under: %USERPROFILE%\.opencode
-   (bin\opencode.exe, config, oh-my-opencode plugin)
-   Config is also mirrored to: %USERPROFILE%\.config\opencode\
-6. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
-7. Verify a single install:  where opencode
+4. Run install.bat
+5. OpenCode is under: %USERPROFILE%\.opencode
+6. To open the OpenCode TUI use ONLY:
+      start-opencode.bat
+   NEVER run "opencode" from C:\Users\<you> — that indexes your entire
+   profile and freezes on a black screen for minutes.
+7. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
+8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
 "@

@@ -18,8 +18,10 @@ if (-not $Version) {
     throw "Version is required"
 }
 
-$wantOmo = "oh-my-opencode@$Version"
+# Prefer the new package id — legacy "oh-my-opencode" triggers an auto-migration
+# that re-fetches via Bun and freezes the TUI on restricted networks.
 $wantOma = "oh-my-openagent@$Version"
+$wantOmo = "oh-my-opencode@$Version"
 $raw = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8
 $d = $raw | ConvertFrom-Json
 $plugs = @()
@@ -32,14 +34,9 @@ $changed = $false
 foreach ($x in $plugs) {
     $s = [string]$x
     if ($s -eq "oh-my-opencode" -or $s -eq "oh-my-openagent" -or $s -match "^oh-my-opencod(e|agent)(@|$)") {
-        $pinnedOk = ($s -eq $wantOmo -or $s -eq $wantOma)
-        if (-not $pinnedOk) { $changed = $true }
+        if ($s -ne $wantOma) { $changed = $true }
         if (-not $seen) {
-            if ($s -like "oh-my-openagent*") {
-                [void]$fixed.Add($wantOma)
-            } else {
-                [void]$fixed.Add($wantOmo)
-            }
+            [void]$fixed.Add($wantOma)
             $seen = $true
         }
     } else {
@@ -48,7 +45,7 @@ foreach ($x in $plugs) {
 }
 
 if (-not $seen) {
-    [void]$fixed.Add($wantOmo)
+    [void]$fixed.Add($wantOma)
     $changed = $true
 }
 

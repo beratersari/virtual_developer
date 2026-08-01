@@ -307,6 +307,21 @@ if errorlevel 1 (
     call :maybe_pause
     exit /b 1
 )
+call :seed_ripgrep_bin
+if errorlevel 1 (
+    echo [WARNING] ripgrep not seeded — first OpenCode run may hang downloading rg.exe
+)
+
+REM Skip models.dev network fetch ^(black-screen on restricted networks^)
+setx OPENCODE_DISABLE_MODELS_FETCH 1 >nul 2>&1
+set "OPENCODE_DISABLE_MODELS_FETCH=1"
+echo [OK] OPENCODE_DISABLE_MODELS_FETCH=1 ^(user env + this session^)
+
+REM Project launcher: always starts OpenCode from this folder ^(not user home^)
+if exist "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" (
+    copy /Y "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" "%SCRIPT_DIR%\start-opencode.bat" >nul
+    echo [OK] start-opencode.bat in project root — use this to open OpenCode
+)
 
 REM ---------------------------------------------------------------------------
 REM Step 4: glab
@@ -379,7 +394,11 @@ echo   2. Open a NEW terminal ^(so PATH updates apply^)
 echo   3. Verify a single OpenCode install:
 echo        where opencode
 echo        ^(should show only %OPENCODE_BIN%\opencode.exe^)
-echo   4. Activate venv and start:
+echo   4. To open OpenCode TUI, ALWAYS use the project launcher:
+echo        cd /d "%SCRIPT_DIR%"
+echo        start-opencode.bat
+echo      NEVER run "opencode" from C:\Users\... ^(indexes entire home = black screen^)
+echo   5. Activate venv and start the daemon:
 echo        cd /d "%SCRIPT_DIR%"
 echo        .venv\Scripts\activate
 echo        python cli.py start
@@ -587,6 +606,9 @@ if exist "%OPENCODE_HOME%\opencode.json" (
 if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
     copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%OC_CONFIG_DIR%\oh-my-opencode.json" >nul
 )
+if exist "%OPENCODE_HOME%\oh-my-openagent.json" (
+    copy /Y "%OPENCODE_HOME%\oh-my-openagent.json" "%OC_CONFIG_DIR%\oh-my-openagent.json" >nul
+)
 if exist "%OPENCODE_HOME%\package.json" (
     copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
 )
@@ -605,21 +627,28 @@ exit /b 0
 :seed_opencode_plugin_cache
 REM OpenCode loads npm plugins via Bun from cache at TUI start. Junctions are unreliable
 REM (Bun often fails to resolve them) — do a REAL full copy. This is intentionally slower.
-if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
-    echo [ERROR] No node_modules\oh-my-opencode under %OPENCODE_HOME% — offline plugin missing
+REM Primary package id is oh-my-openagent (new name); keep oh-my-opencode as alias.
+if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
+    echo [ERROR] No oh-my-openagent / oh-my-opencode under %OPENCODE_HOME%\node_modules
     exit /b 1
 )
 
-call :verify_oh_my_plugin "%OPENCODE_HOME%\node_modules\oh-my-opencode"
-if errorlevel 1 exit /b 1
+if exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
+    call :verify_oh_my_plugin "%OPENCODE_HOME%\node_modules\oh-my-openagent"
+    if errorlevel 1 exit /b 1
+) else (
+    call :verify_oh_my_plugin "%OPENCODE_HOME%\node_modules\oh-my-opencode"
+    if errorlevel 1 exit /b 1
+)
 
-REM Rename compat: real copy of alias tree if missing (OpenCode rewrites plugin id)
+REM Ensure both package names exist as full trees
 if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent\package.json" (
-    echo   Creating oh-my-openagent alias tree ^(full copy^)...
+    echo   Creating oh-my-openagent tree from oh-my-opencode...
     robocopy "%OPENCODE_HOME%\node_modules\oh-my-opencode" "%OPENCODE_HOME%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
-    if errorlevel 8 (
-        echo [WARNING] Could not duplicate as oh-my-openagent; continuing with oh-my-opencode only
-    )
+)
+if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode\package.json" (
+    echo   Creating oh-my-opencode tree from oh-my-openagent...
+    robocopy "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OPENCODE_HOME%\node_modules\oh-my-opencode" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
 )
 
 set "OC_CACHE=%USERPROFILE%\.cache\opencode"
@@ -662,28 +691,55 @@ if exist "%OPENCODE_HOME%\package.json" (
     copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
 )
 
-call :verify_oh_my_plugin "%OC_CACHE%\node_modules\oh-my-opencode"
-if errorlevel 1 exit /b 1
-call :verify_oh_my_plugin "%OC_CONFIG_DIR%\node_modules\oh-my-opencode"
-if errorlevel 1 exit /b 1
+call :verify_oh_my_plugin "%OC_CACHE%\node_modules\oh-my-openagent"
+if errorlevel 1 (
+    call :verify_oh_my_plugin "%OC_CACHE%\node_modules\oh-my-opencode"
+    if errorlevel 1 exit /b 1
+)
+call :verify_oh_my_plugin "%OC_CONFIG_DIR%\node_modules\oh-my-openagent"
+if errorlevel 1 (
+    call :verify_oh_my_plugin "%OC_CONFIG_DIR%\node_modules\oh-my-opencode"
+    if errorlevel 1 exit /b 1
+)
 
 REM File-count report so install is visibly "heavy" when the plugin is complete
-set "OMO_COUNT=0"
-for /f %%C in ('dir /s /b "%OPENCODE_HOME%\node_modules\oh-my-opencode" 2^>nul ^| find /c /v ""') do set "OMO_COUNT=%%C"
+set "OMA_COUNT=0"
+for /f %%C in ('dir /s /b "%OPENCODE_HOME%\node_modules\oh-my-openagent" 2^>nul ^| find /c /v ""') do set "OMA_COUNT=%%C"
 set "CACHE_COUNT=0"
 for /f %%C in ('dir /s /b "%OC_CACHE%\node_modules" 2^>nul ^| find /c /v ""') do set "CACHE_COUNT=%%C"
-echo   oh-my-opencode files : %OMO_COUNT%
+echo   oh-my-openagent files: %OMA_COUNT%
 echo   cache node_modules   : %CACHE_COUNT% files
-if %OMO_COUNT% LSS 500 (
-    echo [ERROR] oh-my-opencode tree looks incomplete ^(%OMO_COUNT% files^). Expected thousands.
+if %OMA_COUNT% LSS 500 (
+    echo [ERROR] oh-my-openagent tree looks incomplete ^(%OMA_COUNT% files^). Expected thousands.
     echo         Re-download the CI zip; vendor\opencode-home.zip may be truncated.
     exit /b 1
 )
 echo [OK] Full plugin tree seeded to cache + config ^(no junction^)
 exit /b 0
 
+:seed_ripgrep_bin
+REM OpenCode downloads rg.exe into %%USERPROFILE%%\.cache\opencode\bin on first use.
+REM Pre-seed offline to avoid multi-minute black-screen hangs.
+set "RG_SRC="
+if exist "%VENDOR_DIR%\bin\rg.exe" set "RG_SRC=%VENDOR_DIR%\bin\rg.exe"
+if not defined RG_SRC if exist "%OPENCODE_BIN%\rg.exe" set "RG_SRC=%OPENCODE_BIN%\rg.exe"
+if not defined RG_SRC (
+    echo [WARNING] rg.exe not in vendor\bin or OpenCode bin
+    exit /b 1
+)
+set "RG_CACHE_BIN=%USERPROFILE%\.cache\opencode\bin"
+if not exist "%RG_CACHE_BIN%" mkdir "%RG_CACHE_BIN%"
+copy /Y "%RG_SRC%" "%RG_CACHE_BIN%\rg.exe" >nul
+if exist "%OPENCODE_BIN%" copy /Y "%RG_SRC%" "%OPENCODE_BIN%\rg.exe" >nul
+if not exist "%RG_CACHE_BIN%\rg.exe" (
+    echo [ERROR] Failed to seed %RG_CACHE_BIN%\rg.exe
+    exit /b 1
+)
+echo [OK] ripgrep seeded: %RG_CACHE_BIN%\rg.exe
+exit /b 0
+
 :verify_oh_my_plugin
-REM Arg1 = path to oh-my-opencode package root
+REM Arg1 = path to oh-my-opencode or oh-my-openagent package root
 set "OMO_ROOT=%~1"
 if not exist "%OMO_ROOT%\package.json" (
     echo [ERROR] Missing %OMO_ROOT%\package.json
