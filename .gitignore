@@ -6,7 +6,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+/dist/
 downloads/
 eggs/
 .eggs/
@@ -77,3 +77,8 @@ htmlcov/
 
 # Packaging build output (local only)
 packaging/windows/_downloads/
+
+# Frontend
+node_modules/
+web/node_modules/
+

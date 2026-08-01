@@ -111,25 +111,24 @@ class JiraStateManager:
         self.set_state(state)
         return state
     
-    def get_active_issues(self) -> List[JiraAgentState]:
-        """Get all issues that are not in a terminal state."""
-        terminal_states = {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}
-        active = []
-        
+    def get_all_states(self) -> List[JiraAgentState]:
+        """Load every persisted issue state (all statuses)."""
+        states: List[JiraAgentState] = []
         if not self.state_dir.exists():
-            return active
-        
+            return states
         for state_file in self.state_dir.glob("*.json"):
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                state = JiraAgentState.from_dict(data)
-                if state.status not in terminal_states:
-                    active.append(state)
+                states.append(JiraAgentState.from_dict(data))
             except Exception as e:
                 logger.error(f"Error loading {state_file}: {e}")
-        
-        return active
+        return states
+
+    def get_active_issues(self) -> List[JiraAgentState]:
+        """Get all issues that are not in a terminal state."""
+        terminal_states = {TaskStatus.COMPLETED, TaskStatus.ERROR, TaskStatus.CANCELLED}
+        return [s for s in self.get_all_states() if s.status not in terminal_states]
     
     def delete_state(self, issue_key: str) -> bool:
         """Delete state file for an issue."""

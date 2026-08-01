@@ -13,6 +13,7 @@ JIRA Virtual Developer is a Python daemon that:
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
 5. Pushes feature branches and opens merge requests
+6. Serves an **ops dashboard** (same process) for tasks, poll monitor, and safe settings
 
 **Default development branch:** `develop` (not `main`).  
 **Integration branch for releases / stable:** `main`.
@@ -80,6 +81,52 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_PROJECTS` | Project keys (config/reference; board scopes poller) |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (poller always runs) |
+| `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
+| `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
+| `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
+
+---
+
+## 3b. Ops dashboard
+
+### Stack
+
+| Layer | Technology |
+|-------|------------|
+| API | FastAPI in the **daemon process** (with poller + jobs) |
+| Live updates | WebSocket `/ws` |
+| Frontend | Vite + React + TypeScript + Tailwind (`web/`) — **display only** |
+| Palette | Slate base, indigo accent; status colors: green completed, amber executing, sky planning, rose error |
+
+### Rules
+
+- **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
+- Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
+- Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, auto_start_plans, max_concurrent_jobs.
+- **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
+- Version is read from repo root `VERSION`.
+
+### Layout
+
+```text
+src/dashboard/     # FastAPI app, schemas, service, poll snapshot
+web/               # React SPA (build → web/dist, served by FastAPI)
+```
+
+Build UI: `cd web && npm install && npm run build`.  
+Open: `http://127.0.0.1:8080` after daemon start.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/meta` | Version + server time |
+| GET | `/api/tasks` | Agent job list |
+| GET | `/api/poll` | Last poll snapshot + countdown |
+| GET/PATCH | `/api/settings` | Safe settings |
+| GET | `/api/dashboard` | Full envelope |
+| WS | `/ws` | Live dashboard pushes |
 
 ---
 
@@ -358,6 +405,8 @@ Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. T
 |------|---------|
 | `README.md` | User-facing setup and architecture |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
+| `web/` | Ops dashboard frontend (React) |
+| `src/dashboard/` | Dashboard API and poll snapshot |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |

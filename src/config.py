@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     # Board poller is always on (sole intake path)
     poll_interval_seconds: int = Field(default=30)
 
+    # Ops dashboard (FastAPI UI; no auth in v1)
+    dashboard_host: str = Field(default="127.0.0.1", description="Dashboard bind host")
+    dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
+    dashboard_enabled: bool = Field(default=True, description="Serve ops dashboard with the daemon")
+
     # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(
         default=Path(".temp"),
