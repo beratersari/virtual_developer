@@ -583,19 +583,21 @@ REM Ensure plugin entry is version-pinned (unversioned npm plugins hang/black-sc
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$p='%OPENCODE_HOME%\opencode.json'; $v='!OH_MY_OPENCODE_VERSION!';" ^
   "if (-not (Test-Path -LiteralPath $p)) { exit 1 };" ^
-  "$want = 'oh-my-opencode@' + $v;" ^
+  "$wantOmo = 'oh-my-opencode@' + $v; $wantOma = 'oh-my-openagent@' + $v;" ^
   "$d = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json;" ^
   "$plugs = @(); if ($null -ne $d.plugin) { $plugs = @($d.plugin) };" ^
   "$fixed = New-Object System.Collections.Generic.List[object]; $seen=$false; $ch=$false;" ^
   "foreach ($x in $plugs) {" ^
   "  $s = [string]$x;" ^
   "  if ($s -eq 'oh-my-opencode' -or $s -eq 'oh-my-openagent' -or $s -match '^oh-my-opencod(e|agent)(@|$)') {" ^
-  "    if ($s -ne $want) { $ch = $true }; if (-not $seen) { [void]$fixed.Add($want); $seen = $true }" ^
+  "    $pinnedOk = ($s -eq $wantOmo -or $s -eq $wantOma);" ^
+  "    if (-not $pinnedOk) { $ch = $true };" ^
+  "    if (-not $seen) { [void]$fixed.Add($(if ($s -like 'oh-my-openagent*') { $wantOma } else { $wantOmo })); $seen = $true }" ^
   "  } else { [void]$fixed.Add($x) }" ^
   "};" ^
-  "if (-not $seen) { [void]$fixed.Add($want); $ch = $true };" ^
+  "if (-not $seen) { [void]$fixed.Add($wantOmo); $ch = $true };" ^
   "if ($d.PSObject.Properties.Name -notcontains 'autoupdate' -or $d.autoupdate -ne $false) { $d | Add-Member -NotePropertyName autoupdate -NotePropertyValue $false -Force; $ch = $true };" ^
-  "if ($ch) { $d.plugin = $fixed.ToArray(); ($d | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $p -Encoding UTF8; Write-Host ('  pinned plugin ' + $want) }"
+  "if ($ch) { $d.plugin = $fixed.ToArray(); ($d | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $p -Encoding UTF8; Write-Host ('  pinned plugin ' + ($fixed -join ',')) }"
 if errorlevel 1 (
     echo [WARNING] Could not pin plugin version in opencode.json
 )
@@ -673,6 +675,22 @@ if defined APPDATA (
 if not exist "%OC_CACHE%\node_modules\oh-my-opencode" (
     echo [ERROR] Plugin missing after cache seed: %OC_CACHE%\node_modules\oh-my-opencode
     exit /b 1
+)
+REM Ensure oh-my-openagent alias exists (OpenCode may rewrite plugin id during rename)
+if not exist "%OC_CACHE%\node_modules\oh-my-openagent" (
+    mklink /J "%OC_CACHE%\node_modules\oh-my-openagent" "%OC_CACHE%\node_modules\oh-my-opencode" >nul 2>&1
+    if errorlevel 1 (
+        robocopy "%OC_CACHE%\node_modules\oh-my-opencode" "%OC_CACHE%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
+    )
+)
+if exist "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" if not exist "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" (
+    mklink /J "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" >nul 2>&1
+    if errorlevel 1 (
+        robocopy "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
+    )
+)
+if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
+    mklink /J "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OPENCODE_HOME%\node_modules\oh-my-opencode" >nul 2>&1
 )
 echo [OK] Plugin cache seeded ^(avoids black-screen npm/Bun download at TUI start^)
 exit /b 0

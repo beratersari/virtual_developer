@@ -448,6 +448,20 @@ if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode
     throw "oh-my-opencode missing after npm install"
 }
 
+# OpenCode/oh-my-openagent rename: config may resolve either package name.
+# Dual-publish on npm is not always present offline — junction both names to one tree.
+$omoPkg = Join-Path $ocHome "node_modules\oh-my-opencode"
+$omaPkg = Join-Path $ocHome "node_modules\oh-my-openagent"
+if (-not (Test-Path -LiteralPath $omaPkg)) {
+    Write-Host "  Linking node_modules\oh-my-openagent -> oh-my-opencode (rename compat)"
+    try {
+        New-Item -ItemType Junction -Path $omaPkg -Target $omoPkg -Force | Out-Null
+    } catch {
+        # Junction may fail on some FS; fall back to copy
+        Copy-Item -LiteralPath $omoPkg -Destination $omaPkg -Recurse -Force
+    }
+}
+
 Optimize-NodeModules (Join-Path $ocHome "node_modules")
 
 # Hard fail if relative paths are still too long for classic Windows MAX_PATH budgets

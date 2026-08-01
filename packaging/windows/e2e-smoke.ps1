@@ -182,11 +182,12 @@ if (-not (Test-Path -LiteralPath $cachePlugin)) {
 }
 Write-Host "OK plugin cache: $cachePlugin"
 
-# Config must pin plugin version (unversioned => Bun fetch hang / black TUI)
+# Config must pin plugin version (unversioned => Bun fetch hang / black TUI).
+# OpenCode may rewrite oh-my-opencode@X -> oh-my-openagent@X (package rename).
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
 $cfgObj = Get-Content -LiteralPath $globalCfg -Raw | ConvertFrom-Json
 $plugins = @($cfgObj.plugin)
-$pinned = $plugins | Where-Object { $_ -match '^oh-my-opencode@' }
+$pinned = $plugins | Where-Object { $_ -match '^oh-my-opencod(e|agent)@' }
 if (-not $pinned) {
     throw "FAIL: opencode.json plugin not version-pinned: $($plugins -join ', ')"
 }
@@ -194,6 +195,13 @@ if ($cfgObj.autoupdate -ne $false) {
     Write-Host "WARNING: autoupdate is not false (may hang offline)"
 }
 Write-Host "OK pinned plugin: $($pinned -join ', ')"
+
+# Both package names must resolve offline (rename compat)
+$cacheOma = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
+if (-not (Test-Path -LiteralPath $cacheOma)) {
+    throw "Plugin cache missing oh-my-openagent alias: $cacheOma"
+}
+Write-Host "OK plugin alias cache: $cacheOma"
 
 # Non-interactive command must return quickly (no TUI black-screen hang)
 Write-Step "Non-interactive opencode smoke (debug config / run --help)"
