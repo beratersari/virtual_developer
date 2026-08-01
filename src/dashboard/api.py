@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,11 +16,14 @@ from src.dashboard.schemas import SettingsUpdate
 from src.dashboard.service import (
     apply_settings_update,
     build_dashboard_payload,
+    build_jobs,
     build_meta,
     build_poll_status,
     build_settings_view,
+    build_task_detail,
     build_tasks,
 )
+from src.state.job_store import job_store
 from src.dashboard.snapshot import poll_snapshot_store
 from src.logger import logger
 from src.state.manager import JiraStateManager
@@ -73,6 +76,64 @@ def create_dashboard_app(
     @app.get("/api/tasks")
     def tasks() -> dict:
         return build_tasks(app.state.state_manager, app.state.processor).model_dump()
+
+    @app.get("/api/jobs")
+    def jobs(issue_key: Optional[str] = None, limit: int = 200) -> dict:
+        return build_jobs(
+            issue_key=issue_key,
+            limit=limit,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+        ).model_dump()
+
+    @app.get("/api/jobs/{job_id}")
+    def job_detail(job_id: str) -> dict:
+        job = job_store.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"No job {job_id}")
+        issue_key = job.get("issue_key") or ""
+        detail = build_task_detail(
+            issue_key,
+            state_manager=app.state.state_manager,
+            processor=app.state.processor,
+        )
+        # Attach this job record; detail may still be current issue state
+        return {
+            "job": job,
+            "issue": detail,
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/tasks/{issue_key}")
+    def task_detail(issue_key: str) -> dict:
+        detail = build_task_detail(
+            issue_key,
+            state_manager=app.state.state_manager,
+            processor=app.state.processor,
+        )
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"No state for {issue_key}")
+        # Include all historical jobs for this Jira issue
+        detail["jobs"] = build_jobs(
+            issue_key=issue_key,
+            limit=100,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+        ).model_dump()["jobs"]
+        return detail
+
+    @app.post("/api/tasks/{issue_key}/cancel")
+    def task_cancel(issue_key: str) -> dict:
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        result = proc.cancel_job(
+            issue_key,
+            reason="Cancelled from ops dashboard",
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Cancel failed")
+        return result
 
     @app.get("/api/poll")
     def poll() -> dict:
@@ -171,6 +232,8 @@ def create_dashboard_app(
                 "api": {
                     "meta": "/api/meta",
                     "tasks": "/api/tasks",
+                    "task_detail": "/api/tasks/{issue_key}",
+                    "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
                     "dashboard": "/api/dashboard",

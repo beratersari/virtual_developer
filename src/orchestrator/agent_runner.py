@@ -147,6 +147,14 @@ class AgentRunner:
         session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_files[task.task_id] = session_file
         logger.info(f"Session file created: {session_file}")
+
+        # Persist full agent prompt for dashboard task detail
+        try:
+            prompt_path = session_file.with_suffix(".prompt.txt")
+            prompt_path.write_text(task.prompt or "", encoding="utf-8")
+            logger.debug(f"Prompt file written: {prompt_path}")
+        except Exception as e:
+            logger.warning(f"Could not write prompt file for {task.task_id}: {e}")
         
         # Build the command as a list (cross-platform)
         cmd_list = self._build_command(task, session_file)
@@ -246,7 +254,9 @@ class AgentRunner:
                 logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far
                 all_output_lines = stdout_lines + stderr_lines
-                session_id = self._parse_session_id(all_output_lines)
+                session_id = self._resolve_session_id(
+                    task, all_output_lines, session_file=session_file
+                )
                 logger.debug(f"Extracted session ID from partial output: {session_id}")
                 return {
                     "task_id": task.task_id,
@@ -254,16 +264,18 @@ class AgentRunner:
                     "stdout": "\n".join(stdout_lines),
                     "stderr": f"\n[TIMEOUT] Task exceeded {effective_timeout} seconds",
                     "session_file": str(session_file),
-                    "opencode_session_id": session_id,  # Include session ID even on timeout
+                    "opencode_session_id": session_id,
                     "progress": last_progress,
                     "timed_out": True,
                 }
             finally:
                 self._running_tasks.pop(task.task_id, None)
         
-        # Extract session ID from output
+        # Extract session ID from output / OpenCode DB
         all_output_lines = stdout_lines + stderr_lines
-        session_id = self._parse_session_id(all_output_lines)
+        session_id = self._resolve_session_id(
+            task, all_output_lines, session_file=session_file
+        )
         logger.debug(f"Extracted session ID: {session_id}")
 
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -273,7 +285,7 @@ class AgentRunner:
             "stdout": "\n".join(stdout_lines),
             "stderr": "\n".join(stderr_lines),
             "session_file": str(session_file),
-            "opencode_session_id": session_id,  # opencode session ID from CLI output
+            "opencode_session_id": session_id,
             "progress": 100 if returncode == 0 else last_progress,
         }
         
@@ -326,17 +338,16 @@ class AgentRunner:
         """Parse opencode session ID from output lines.
 
         Looks for patterns like:
-        - "Session: ses_abc123" (actual format from oh-my-opencode)
-        - "Session ID: ses_abc123"
-        - "session: ses_abc123"
+        - "Session: ses_abc123"
+        - bare ``ses_…`` tokens (JSON / UI variants)
         """
         import re
 
-        # Actual format seen in logs: "Session: ses_2c996b381ffe22SXIwktVa9kc7"
         patterns = [
             r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
             r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
-            r'session[:\s]+(ses_[a-zA-Z0-9_-]+)',
+            r'"sessionID"\s*:\s*"(ses_[a-zA-Z0-9_-]+)"',
+            r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
         ]
 
         for line in lines:
@@ -382,11 +393,44 @@ class AgentRunner:
         if task.session_id:
             # Current OpenCode CLI uses --session, not --session-id
             cmd_parts.extend(["--session", task.session_id])
+
+        # Title helps map sessions back to Jira issues in the OpenCode DB
+        if task.issue_key:
+            title = f"{task.issue_key}: {(task.description or '')[:80]}"
+            cmd_parts.extend(["--title", title])
         
         # Add the prompt as the final argument
         cmd_parts.append(task.prompt)
         
         return cmd_parts
+
+    def _resolve_session_id(
+        self,
+        task: AgentTask,
+        output_lines: List[str],
+        *,
+        session_file: Optional[Path] = None,
+    ) -> Optional[str]:
+        """Parse CLI output, then fall back to OpenCode SQLite by issue/dir."""
+        session_id = self._parse_session_id(output_lines)
+        if not session_id and task.issue_key:
+            try:
+                from src.opencode_sessions import resolve_session_id
+
+                session_id = resolve_session_id(
+                    task.issue_key,
+                    working_directory=self.working_directory,
+                )
+            except Exception as e:
+                logger.debug(f"Session DB lookup failed: {e}")
+        if session_id and session_file is not None:
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    session_id + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+        return session_id
     
     def _build_shell_command(self, task: AgentTask, session_file: Path) -> str:
         """Build shell command with redirection (fallback for compatibility).

@@ -158,7 +158,8 @@ class JiraAgentDaemon:
     async def _start_poller(self):
         """Start the JIRA poller."""
         self._poller = JiraPoller(board_id=settings.jira_board_id)
-        # Link live poller to dashboard settings updates
+        # Link live poller for dashboard settings + cancel re-queue status markers
+        self.processor._poller = self._poller
         app = getattr(self, "_dashboard_app", None)
         if app is not None:
             app.state.poller = self._poller

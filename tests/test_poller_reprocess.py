@@ -93,3 +93,38 @@ def test_check_status_changes_skips_turkish_still_todo(poller, state_manager):
     poller._last_jira_status = {"P-6": "yapılacaklar"}
     issues = [{"key": "P-6", "fields": {"status": {"name": "Yapılacaklar"}}}]
     assert poller.check_status_changes(issues) == []
+
+
+def test_check_status_changes_reprocesses_cancelled_after_marker(poller, state_manager):
+    """Cancel sets __cancelled__ marker so return to To Do re-queues."""
+    state_manager.create_state("P-7", "cancelled job", "")
+    state_manager.update_state(
+        "P-7",
+        status=TaskStatus.CANCELLED,
+        metadata={"requeue_eligible": True},
+    )
+    poller._status_before_poll = {"P-7": "__cancelled__"}
+    issues = [
+        {
+            "key": "P-7",
+            "fields": {
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "labels": ["ai-assist"],
+            },
+        }
+    ]
+    result = poller.check_status_changes(issues)
+    assert len(result) == 1
+    assert result[0]["key"] == "P-7"
+
+
+def test_process_issue_updates_last_status_after_in_progress(poller, fake_jira):
+    """After starting work, tracker must not keep stale 'to do'."""
+    fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+    poller._last_jira_status = {"P-8": "to do"}
+    poller._handler = None
+    poller.process_issue(
+        {"key": "P-8", "fields": {"summary": "s", "status": {"name": "To Do"}}},
+        is_update=False,
+    )
+    assert poller._last_jira_status["P-8"] == "in progress"

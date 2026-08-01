@@ -13,6 +13,7 @@ from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.reporter.jira_reporter import JiraReporter
+from src.state.job_store import JobStore, job_store
 from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
@@ -29,6 +30,9 @@ class JobProcessor:
         # Per-issue isolation: concurrent jobs must not share git/agent slots
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._job_semaphore: Optional[asyncio.Semaphore] = None
+        self.job_store: JobStore = job_store
+        # issue_key -> active job_id for this process
+        self._active_jobs: Dict[str, str] = {}
         
         logger.info("Initializing JobProcessor")
         
@@ -98,6 +102,9 @@ class JobProcessor:
                 error_message=error_text,
                 completed_at=datetime.now(),
             )
+            self._finish_job_record(
+                issue_key, status="error", error_message=error_text, progress_percentage=0
+            )
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
                 # State missing — still try a bare comment so the user is not blind
@@ -114,8 +121,70 @@ class JobProcessor:
         except Exception as e:
             logger.exception(f"Failed to report error for {issue_key}: {e}", e)
 
+    def _archive_run_identifiers(
+        self,
+        issue_key: str,
+        *,
+        task_id: Optional[str] = None,
+        opencode_session_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build metadata patch that appends ids to history (never replace history).
+
+        Issue-level ``current_*`` fields are single-slot; multi-run history lives
+        in ``metadata.task_ids``, ``opencode_session_ids``, and ``job_ids``.
+        """
+        prior = self.state_manager.get_state(issue_key)
+        meta = dict((prior.metadata if prior else None) or {})
+        patch: Dict[str, Any] = {}
+
+        tid = task_id
+        if tid is None and prior is not None:
+            tid = prior.current_task_id
+        if tid:
+            task_ids = list(meta.get("task_ids") or [])
+            if tid not in task_ids:
+                task_ids.append(tid)
+            patch["task_ids"] = task_ids[-100:]
+            patch["last_task_id"] = tid
+
+        sid = opencode_session_id
+        if sid is None and prior is not None:
+            sid = prior.current_opencode_session_id
+        if sid:
+            history = list(meta.get("opencode_session_ids") or [])
+            if sid not in history:
+                history.append(sid)
+            patch["opencode_session_ids"] = history[-100:]
+            patch["last_opencode_session_id"] = sid
+
+        jid = job_id
+        if jid is None:
+            jid = meta.get("current_job_id")
+        if jid:
+            job_ids = list(meta.get("job_ids") or [])
+            if jid not in job_ids:
+                job_ids.append(jid)
+            patch["job_ids"] = job_ids[-200:]
+
+        return patch
+
     def _reset_for_reprocess(self, issue_key: str) -> None:
-        """Clear runtime fields before restarting work on an issue."""
+        """Clear runtime fields before restarting work on an issue.
+
+        Archives previous task/session/job ids into metadata history so a new
+        run never erases identifiers of earlier jobs.
+        """
+        # Close any still-open job record for this issue
+        self._finish_job_record(
+            issue_key,
+            status="superseded",
+            error_message="Superseded by reprocess",
+        )
+        meta_patch = self._archive_run_identifiers(issue_key)
+        meta_patch["requeue_eligible"] = False
+        # Drop live pointer only; history keys stay in meta_patch
+        meta_patch["current_job_id"] = None
         self.state_manager.update_state(
             issue_key,
             status=TaskStatus.PENDING,
@@ -125,6 +194,14 @@ class JobProcessor:
             current_opencode_session_id=None,
             timed_out=False,
             completed_at=None,
+            metadata=meta_patch,
+        )
+
+    def _clear_requeue_flag(self, issue_key: str) -> None:
+        """Clear poller re-queue eligibility when work actually starts."""
+        self.state_manager.update_state(
+            issue_key,
+            metadata={"requeue_eligible": False},
         )
 
     def _runner_for(self, issue_key: str) -> Optional[AgentRunner]:
@@ -164,6 +241,274 @@ class JobProcessor:
         """Issue keys currently held in the in-memory processing cache."""
         return list(self._contexts.keys())
 
+    def _record_opencode_session(
+        self,
+        issue_key: str,
+        session_id: Optional[str],
+        *,
+        session_file: Optional[str] = None,
+    ) -> None:
+        """Persist current OpenCode session id and append to history metadata."""
+        if not session_id:
+            return
+        state = self.state_manager.get_state(issue_key)
+        if not state:
+            return
+        history = list((state.metadata or {}).get("opencode_session_ids") or [])
+        if session_id not in history:
+            history.append(session_id)
+        entries = list((state.metadata or {}).get("opencode_sessions") or [])
+        entries.append(
+            {
+                "id": session_id,
+                "session_file": session_file,
+                "recorded_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        # Keep last 50 history entries
+        entries = entries[-50:]
+        self.state_manager.update_state(
+            issue_key,
+            current_opencode_session_id=session_id,
+            metadata={
+                "opencode_session_ids": history,
+                "opencode_sessions": entries,
+            },
+        )
+        logger.info(f"{issue_key} OpenCode session: {session_id}")
+
+    def _apply_agent_result_session(self, issue_key: str, result: Dict[str, Any]) -> None:
+        """Pull session id from agent result (and retry_info) into state."""
+        sid = result.get("opencode_session_id")
+        if not sid and result.get("retry_info"):
+            sid = result["retry_info"].get("last_opencode_session_id")
+        self._record_opencode_session(
+            issue_key,
+            sid,
+            session_file=result.get("session_file"),
+        )
+        job_id = self._active_jobs.get(issue_key)
+        if job_id:
+            patch: Dict[str, Any] = {}
+            if sid:
+                patch["opencode_session_id"] = sid
+            if result.get("session_file"):
+                patch["session_log_path"] = result.get("session_file")
+                try:
+                    p = Path(str(result["session_file"]))
+                    prompt = p.parent / f"{p.stem}.prompt.txt"
+                    if prompt.is_file():
+                        patch["prompt_path"] = str(prompt)
+                        # Backfill description from frozen prompt if missing
+                        existing = self.job_store.get_job(job_id) or {}
+                        if not (existing.get("description") or "").strip():
+                            from src.state.job_store import description_from_prompt_path
+
+                            recovered = description_from_prompt_path(str(prompt))
+                            if recovered:
+                                patch["description"] = recovered
+                except Exception:
+                    pass
+            if patch:
+                self.job_store.update_job(job_id, **patch)
+
+    def _begin_workflow_run(
+        self,
+        state: JiraAgentState,
+        *,
+        status: TaskStatus,
+        task: AgentTask,
+        workflow_type: str,
+        agent: str,
+        job_status: str,
+        started_at: Optional[datetime] = None,
+    ) -> str:
+        """Archive previous run ids, claim in-flight fields, create a new job.
+
+        Call this instead of writing ``current_task_id`` then starting a job
+        separately — archive must run **before** the previous task id is
+        overwritten.
+        """
+        archive = self._archive_run_identifiers(state.issue_key)
+        archive["requeue_eligible"] = False
+        self.state_manager.update_state(
+            state.issue_key,
+            status=status,
+            started_at=started_at or datetime.now(),
+            current_task_id=task.task_id,
+            current_opencode_session_id=None,
+            timeout_seconds=settings.agent_task_timeout_seconds,
+            max_retries=settings.agent_task_max_retries,
+            metadata=archive,
+        )
+        state.current_task_id = task.task_id
+        state.current_opencode_session_id = None
+        return self._start_job_record(
+            state,
+            workflow_type=workflow_type,
+            agent=agent,
+            task_id=task.task_id,
+            status=job_status,
+        )
+
+    def _start_job_record(
+        self,
+        state: JiraAgentState,
+        *,
+        workflow_type: str,
+        agent: str,
+        task_id: Optional[str] = None,
+        status: str = "running",
+    ) -> str:
+        """Create a **new** job history row for this run; returns job_id.
+
+        Never reuses or overwrites a previous job file. Each run gets a unique
+        ``job_*`` record with its own task_id / session_id fields.
+        """
+        # If a previous run left an active job pointer, finish it first
+        if self._active_jobs.get(state.issue_key):
+            self._finish_job_record(
+                state.issue_key,
+                status="superseded",
+                error_message="Superseded by new job start",
+            )
+
+        job = self.job_store.create_job(
+            issue_key=state.issue_key,
+            summary=state.issue_summary or "",
+            # Snapshot at run start — never share live issue description
+            description=state.description or "",
+            workflow_type=workflow_type,
+            agent=agent,
+            task_id=task_id,
+            status=status,
+        )
+        job_id = job["job_id"]
+        self._active_jobs[state.issue_key] = job_id
+
+        st = self.state_manager.get_state(state.issue_key)
+        meta = dict((st.metadata if st else None) or {})
+        job_ids = list(meta.get("job_ids") or [])
+        if job_id not in job_ids:
+            job_ids.append(job_id)
+        task_ids = list(meta.get("task_ids") or [])
+        if task_id and task_id not in task_ids:
+            task_ids.append(task_id)
+        patch: Dict[str, Any] = {
+            "job_ids": job_ids[-200:],
+            "current_job_id": job_id,
+        }
+        if task_id:
+            patch["task_ids"] = task_ids[-100:]
+            patch["last_task_id"] = task_id
+        self.state_manager.update_state(state.issue_key, metadata=patch)
+        logger.info(
+            f"Job started: {job_id} issue={state.issue_key} "
+            f"task_id={task_id} workflow={workflow_type}"
+        )
+        return job_id
+
+    def _finish_job_record(
+        self,
+        issue_key: str,
+        *,
+        status: str,
+        error_message: Optional[str] = None,
+        progress_percentage: Optional[int] = None,
+    ) -> None:
+        job_id = self._active_jobs.pop(issue_key, None)
+        if not job_id:
+            st = self.state_manager.get_state(issue_key)
+            job_id = (st.metadata or {}).get("current_job_id") if st else None
+        if not job_id:
+            return
+        # Do not overwrite a terminal status with another terminal on the same job
+        existing = self.job_store.get_job(job_id)
+        if existing and (existing.get("status") or "") in (
+            "completed",
+            "error",
+            "cancelled",
+            "superseded",
+        ):
+            # Still allow progress/session fill-in if missing
+            fill: Dict[str, Any] = {}
+            st = self.state_manager.get_state(issue_key)
+            if st and st.current_opencode_session_id and not existing.get("opencode_session_id"):
+                fill["opencode_session_id"] = st.current_opencode_session_id
+            if st and st.current_task_id and not existing.get("task_id"):
+                fill["task_id"] = st.current_task_id
+            if fill:
+                self.job_store.update_job(job_id, **fill)
+            return
+
+        fields: Dict[str, Any] = {
+            "status": status,
+            "completed_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if error_message is not None:
+            fields["error_message"] = (error_message or "")[:2000]
+        if progress_percentage is not None:
+            fields["progress_percentage"] = progress_percentage
+        st = self.state_manager.get_state(issue_key)
+        if st and st.current_opencode_session_id:
+            fields["opencode_session_id"] = st.current_opencode_session_id
+        if st and st.current_task_id:
+            fields["task_id"] = st.current_task_id
+        self.job_store.update_job(job_id, **fields)
+        # Keep job_id in history lists
+        self.state_manager.update_state(
+            issue_key,
+            metadata=self._archive_run_identifiers(issue_key, job_id=job_id),
+        )
+
+    def cancel_job(self, issue_key: str, *, reason: str = "Cancelled from dashboard") -> dict:
+        """Cancel a job: kill agent children, set CANCELLED, notify Jira.
+
+        Returns a status dict for the dashboard API.
+        """
+        state = self.state_manager.get_state(issue_key)
+        if not state:
+            return {"ok": False, "error": "No local state for this issue", "issue_key": issue_key}
+
+        if state.status in self.TERMINAL_STATUSES:
+            return {
+                "ok": False,
+                "error": f"Issue is already terminal ({state.status.value})",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+
+        killed = False
+        try:
+            runner = self._runner_for(issue_key)
+            if runner and state.current_task_id:
+                killed = bool(runner.cancel_task(state.current_task_id))
+            if runner and hasattr(runner, "cancel_all_tasks"):
+                runner.cancel_all_tasks()
+                killed = True
+        except Exception as e:
+            logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
+
+        self._cancel_issue_state(
+            issue_key,
+            message=reason,
+            status=TaskStatus.CANCELLED,
+        )
+        try:
+            self._release_context(issue_key, success=False)
+        except Exception as e:
+            logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
+
+        logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
+        refreshed = self.state_manager.get_state(issue_key)
+        return {
+            "ok": True,
+            "issue_key": issue_key,
+            "status": refreshed.status.value if refreshed else "cancelled",
+            "process_signalled": killed,
+            "message": reason,
+        }
+
     def _kill_children_for_issue(self, issue_key: str) -> None:
         """Best-effort kill of agent subprocesses for one issue."""
         state = self.state_manager.get_state(issue_key)
@@ -185,17 +530,44 @@ class JobProcessor:
         message: str,
         status: TaskStatus = TaskStatus.CANCELLED,
     ) -> None:
-        """Write a terminal status and notify Jira; clear runtime task fields."""
+        """Write a terminal status and notify Jira; clear live task id only.
+
+        Preserves OpenCode session id and records last_task_id in metadata so
+        the dashboard can still show identifiers after cancel.
+        """
         text = (message or "Work interrupted")[:2000]
         try:
-            updated = self.state_manager.update_state(
+            prior = self.state_manager.get_state(issue_key)
+            meta_patch = self._archive_run_identifiers(issue_key)
+            # Allow poller to re-queue when the user returns the issue to To Do
+            if status in (TaskStatus.CANCELLED, TaskStatus.ERROR):
+                meta_patch["requeue_eligible"] = True
+
+            update_kwargs: Dict[str, Any] = {
+                "status": status,
+                "error_message": text,
+                "completed_at": datetime.now(),
+                # Live agent slot is free; ids kept in metadata.task_ids / last_task_id
+                "current_task_id": None,
+                "metadata": meta_patch,
+            }
+            # Intentionally do NOT clear current_opencode_session_id
+
+            updated = self.state_manager.update_state(issue_key, **update_kwargs)
+            self._finish_job_record(
                 issue_key,
-                status=status,
+                status=status.value,
                 error_message=text,
-                completed_at=datetime.now(),
-                current_task_id=None,
-                current_opencode_session_id=None,
             )
+
+            # Nudge poller status history so next "To Do" sighting is a real change
+            try:
+                poller = getattr(self, "_poller", None)
+                if poller is not None and hasattr(poller, "_last_jira_status"):
+                    poller._last_jira_status[issue_key] = "__cancelled__"
+            except Exception:
+                pass
+
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
                 self.reporter.post_comment_response(
@@ -556,13 +928,18 @@ class JobProcessor:
                 if runner:
                     runner.cancel_task(state.current_task_id)
             if state:
-                self.state_manager.update_state(issue_key, status=TaskStatus.CANCELLED)
-                self.reporter.post_comment_response(
+                self._cancel_issue_state(
                     issue_key,
-                    "Work cancelled. The agent process was signalled to stop and "
-                    "local status is set to *cancelled*. Move the issue back to "
-                    "To Do if you want to re-queue later.",
+                    message=(
+                        "Work cancelled via bot command. The agent process was "
+                        "signalled to stop."
+                    ),
+                    status=TaskStatus.CANCELLED,
                 )
+                try:
+                    self._release_context(issue_key, success=False)
+                except Exception:
+                    pass
             else:
                 self.reporter.post_comment_response(
                     issue_key,
@@ -603,14 +980,14 @@ class JobProcessor:
             agent=settings.planning_agent,
             issue_key=state.issue_key,
         )
-        self.state_manager.update_state(
-            state.issue_key,
+        self._begin_workflow_run(
+            state,
             status=TaskStatus.PLANNING,
+            task=task,
+            workflow_type="planning",
+            agent=settings.planning_agent,
+            job_status="planning",
             started_at=workflow_start_time,
-            current_task_id=task.task_id,
-            current_opencode_session_id=None,
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
         )
         self._mark_jira_in_progress(state.issue_key)
 
@@ -628,6 +1005,9 @@ class JobProcessor:
                 state.issue_key,
                 progress_percentage=percentage,
             )
+            jid = self._active_jobs.get(state.issue_key)
+            if jid:
+                self.job_store.update_job(jid, progress_percentage=percentage)
 
         def on_output(stream: str, line: str):
             """Handle output from agent - suppress all output to console.
@@ -674,6 +1054,10 @@ class JobProcessor:
                 if new_task_id:
                     current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
+            if session_id:
+                self._record_opencode_session(
+                    state.issue_key, session_id, session_file=session_file
+                )
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -689,6 +1073,7 @@ class JobProcessor:
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
+        self._apply_agent_result_session(state.issue_key, result)
 
         # Aborted while agent ran (cancel / stuck watchdog) — do not overwrite
         if self._is_aborted(state.issue_key):
@@ -696,16 +1081,12 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
             return
 
-        # Update state with retry info and final opencode session ID
+        # Update state with retry info
         if result.get("retry_info"):
             retry_info = result["retry_info"]
             update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
             if result.get("timed_out"):
                 update_data["timed_out"] = True
-            # Update current_opencode_session_id to the last opencode session ID from retry_info
-            last_session_id = retry_info.get("last_opencode_session_id")
-            if last_session_id:
-                update_data["current_opencode_session_id"] = last_session_id
             self.state_manager.update_state(state.issue_key, **update_data)
 
         # Calculate duration from workflow start to final completion (including all retries)
@@ -730,6 +1111,9 @@ class JobProcessor:
                 completed_at=completed_at,
                 execution_duration_seconds=duration,
                 # current_opencode_session_id keeps the last retry's session ID
+            )
+            self._finish_job_record(
+                state.issue_key, status="plan_ready", progress_percentage=100
             )
             self._release_context(state.issue_key, success=True)
 
@@ -775,15 +1159,15 @@ class JobProcessor:
             issue_key=state.issue_key,
         )
 
-        # Claim in-flight before git clone
-        self.state_manager.update_state(
-            state.issue_key,
+        # Claim in-flight before git clone (archives prior task/session/job ids)
+        self._begin_workflow_run(
+            state,
             status=TaskStatus.EXECUTING,
+            task=task,
+            workflow_type="execution",
+            agent=settings.orchestrator_agent,
+            job_status="executing",
             started_at=workflow_start_time,
-            current_task_id=task.task_id,
-            current_opencode_session_id=None,  # Will be set from agent output
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
         )
         self._mark_jira_in_progress(state.issue_key)
 
@@ -801,6 +1185,9 @@ class JobProcessor:
                 state.issue_key,
                 progress_percentage=percentage,
             )
+            jid = self._active_jobs.get(state.issue_key)
+            if jid:
+                self.job_store.update_job(jid, progress_percentage=percentage)
 
         def on_output(stream: str, line: str):
             """Handle output from agent - suppress all output to console.
@@ -846,6 +1233,10 @@ class JobProcessor:
                 if new_task_id:
                     current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
+            if session_id:
+                self._record_opencode_session(
+                    state.issue_key, session_id, session_file=session_file
+                )
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -861,22 +1252,19 @@ class JobProcessor:
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
+        self._apply_agent_result_session(state.issue_key, result)
 
         if self._is_aborted(state.issue_key):
             logger.info(f"Execution aborted for {state.issue_key}; skipping success path")
             self._release_context(state.issue_key, success=False)
             return
 
-        # Update state with retry info and final opencode session ID
+        # Update state with retry info
         if result.get("retry_info"):
             retry_info = result["retry_info"]
             update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
             if result.get("timed_out"):
                 update_data["timed_out"] = True
-            # Update current_opencode_session_id to the last opencode session ID from retry_info
-            last_session_id = retry_info.get("last_opencode_session_id")
-            if last_session_id:
-                update_data["current_opencode_session_id"] = last_session_id
             self.state_manager.update_state(state.issue_key, **update_data)
 
         # Calculate duration from workflow start to final completion (including all retries)
@@ -938,15 +1326,15 @@ class JobProcessor:
             issue_key=state.issue_key,
         )
 
-        # Claim in-flight before git clone
-        self.state_manager.update_state(
-            state.issue_key,
+        # Claim in-flight before git clone (archives prior task/session/job ids)
+        self._begin_workflow_run(
+            state,
             status=TaskStatus.EXECUTING,
+            task=task,
+            workflow_type="direct",
+            agent=settings.default_agent,
+            job_status="executing",
             started_at=workflow_start_time,
-            current_task_id=task.task_id,
-            current_opencode_session_id=None,  # Will be set from agent output
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
         )
         self._mark_jira_in_progress(state.issue_key)
 
@@ -964,6 +1352,9 @@ class JobProcessor:
                 state.issue_key,
                 progress_percentage=percentage,
             )
+            jid = self._active_jobs.get(state.issue_key)
+            if jid:
+                self.job_store.update_job(jid, progress_percentage=percentage)
 
         def on_output(stream: str, line: str):
             """Handle output from agent - suppress all output to console.
@@ -1009,6 +1400,10 @@ class JobProcessor:
                 if new_task_id:
                     current_state.current_task_id = new_task_id
                 self.state_manager.set_state(current_state)
+            if session_id:
+                self._record_opencode_session(
+                    state.issue_key, session_id, session_file=session_file
+                )
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1024,22 +1419,19 @@ class JobProcessor:
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
+        self._apply_agent_result_session(state.issue_key, result)
 
         if self._is_aborted(state.issue_key):
             logger.info(f"Direct execution aborted for {state.issue_key}; skipping success path")
             self._release_context(state.issue_key, success=False)
             return
 
-        # Update state with retry info and final opencode session ID
+        # Update state with retry info
         if result.get("retry_info"):
             retry_info = result["retry_info"]
             update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
             if result.get("timed_out"):
                 update_data["timed_out"] = True
-            # Update current_opencode_session_id to the last opencode session ID from retry_info
-            last_session_id = retry_info.get("last_opencode_session_id")
-            if last_session_id:
-                update_data["current_opencode_session_id"] = last_session_id
             self.state_manager.update_state(state.issue_key, **update_data)
 
         # Calculate duration from workflow start to final completion (including all retries)
@@ -1121,6 +1513,9 @@ class JobProcessor:
             status=TaskStatus.COMPLETED,
             completed_at=completed_at,
             progress_percentage=100,
+        )
+        self._finish_job_record(
+            state.issue_key, status="completed", progress_percentage=100
         )
         logger.info(f"State updated to COMPLETED for {state.issue_key}")
 
@@ -1330,18 +1725,18 @@ class JobProcessor:
 
         # Same in-flight fields as plan/execute so /cancel and stuck watchdog
         # can resolve and kill the live agent via current_task_id.
-        self.state_manager.update_state(
-            state.issue_key,
+        self._begin_workflow_run(
+            state,
             status=TaskStatus.EXECUTING,
-            started_at=datetime.now(),
-            current_task_id=task.task_id,
-            current_opencode_session_id=None,
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            task=task,
+            workflow_type="oracle",
+            agent="oracle",
+            job_status="executing",
         )
         self._mark_jira_in_progress(state.issue_key)
 
         result = await runner.run_agent(task)
+        self._apply_agent_result_session(state.issue_key, result)
 
         if self._is_aborted(state.issue_key):
             logger.info(f"Oracle aborted for {state.issue_key}")
@@ -1359,6 +1754,9 @@ class JobProcessor:
                 completed_at=datetime.now(),
                 progress_percentage=100,
                 current_task_id=None,
+            )
+            self._finish_job_record(
+                state.issue_key, status="completed", progress_percentage=100
             )
         else:
             self._fail_issue(
