@@ -49,7 +49,7 @@ def test_module_level_wrappers():
 
 
 def test_format_has_no_emoji_and_stable_columns():
-    """Professional layout: timestamp, level, location, function, message — no icons."""
+    """Professional layout: timestamp, level, [file:line], function, message — no icons."""
     lg = Logger()
     lg.set_color_output(False)
     text = lg._format_message(
@@ -62,11 +62,22 @@ def test_format_has_no_emoji_and_stable_columns():
     for emoji in ("🐛", "ℹ️", "⚠️", "❌", "🔥"):
         assert emoji not in text
     assert "INFO" in text
-    assert "client.py:44" in text
+    assert "[client.py:44]" in text
     assert "__init__" in text
     assert "hello world" in text
     # timestamp shape YYYY-MM-DD
     assert text[:4].isdigit()
+
+
+def test_info_line_includes_caller_file_and_line(capsys):
+    """Live logger.info must print the caller's file and line number."""
+    lg = Logger()
+    lg.set_color_output(False)
+    lg.set_level(LogLevel.DEBUG)
+    lg.info("caller location check")
+    out = capsys.readouterr().out
+    assert "test_logger_full.py:" in out
+    assert "caller location check" in out
 
 
 def test_format_collapses_multiline_message():

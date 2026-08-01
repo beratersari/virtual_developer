@@ -59,7 +59,9 @@ class Logger:
 
     Layout::
 
-        2026-08-01 14:13:39.643  INFO      client.py:44                 __init__  message
+        2026-08-01 14:13:39.643  INFO      [client.py:44]  __init__  message
+
+    Source file and line are always included in brackets after the level.
     """
 
     _min_level: LogLevel = LogLevel.DEBUG
@@ -113,9 +115,9 @@ class Logger:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         level_name, level_color, bg_color = self._LEVEL_CONFIG[level]
         level_str = f"{level_name:<8}"
-        location = f"{filename}:{line_no}"
-        # Fixed widths so multi-line grepping stays column-aligned
-        location_pad = f"{location:<28}"
+        # Always show source file and line (padded for alignment)
+        location = f"[{filename}:{line_no}]"
+        location_pad = f"{location:<30}"
         func_pad = f"{func_name:<20}"
         # Collapse accidental multi-line messages onto one logical line for the body
         body = " ".join(str(message).splitlines()) if message is not None else ""
@@ -126,7 +128,8 @@ class Logger:
                 lvl = f"{bg_color}{Colors.BOLD}{level_color}{level_str}{Colors.RESET}"
             else:
                 lvl = f"{level_color}{level_str}{Colors.RESET}"
-            loc = f"{Colors.BRIGHT_BLACK}{location_pad}{Colors.RESET}"
+            # Cyan so file:line stays readable (not dim/grey)
+            loc = f"{Colors.CYAN}{location_pad}{Colors.RESET}"
             fn = f"{Colors.DIM}{func_pad}{Colors.RESET}"
             msg = f"{Colors.WHITE}{body}{Colors.RESET}"
             result = f"{ts}  {lvl}  {loc}  {fn}  {msg}"
