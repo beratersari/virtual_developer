@@ -417,7 +417,7 @@ async def test_oracle_sets_current_task_id_before_run(processor, state_manager):
     state = state_manager.create_state("OR-TID", "how to design", "architecture question")
     seen = {}
 
-    async def _run(task):
+    async def _run(task, **_kwargs):
         st = state_manager.get_state("OR-TID")
         seen["task_id"] = task.task_id
         seen["state_task_id"] = st.current_task_id if st else None
@@ -468,7 +468,15 @@ async def test_fail_issue_missing_state(processor, fake_jira):
 
 
 @pytest.mark.asyncio
-async def test_init_git_manager(processor, tmp_path):
+async def test_init_git_manager(processor, tmp_path, state_manager):
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "{params}\n"
+    )
+    state_manager.create_state("IG-1", "task", desc)
     with patch("src.processor.GitManager") as GM:
         inst = MagicMock()
         inst.get_working_directory.return_value = tmp_path
@@ -476,6 +484,24 @@ async def test_init_git_manager(processor, tmp_path):
         with patch("src.processor.AgentRunner"):
             g = processor._init_git_manager("IG-1")
             assert g is inst
+            GM.assert_called()
+            kwargs = GM.call_args.kwargs
+            assert "gitlab.example.com" in kwargs.get("remote_url", "")
+            assert kwargs.get("source_branch") == "develop"
+            assert kwargs.get("target_branch") == "main"
+
+
+@pytest.mark.asyncio
+async def test_prepare_git_workspace_template_error(processor, state_manager, fake_jira):
+    state = state_manager.create_state("TPL-1", "no git fields", "just a task")
+    processor._begin_workflow_run = MagicMock()
+    # Already need an in-flight-ish state for fail path
+    out = processor._prepare_git_workspace(state)
+    assert out is None
+    assert fake_jira.comments  # Jira notified
+    loaded = state_manager.get_state("TPL-1")
+    assert loaded is not None
+    assert loaded.status == TaskStatus.ERROR
 
 
 @pytest.mark.asyncio

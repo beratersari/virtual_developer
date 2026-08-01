@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.config import settings
-from src.git_manager import GitManager
+from src.git_manager import (
+    GitCloneError,
+    GitManager,
+    GitSourceBranchError,
+    GitTargetBranchError,
+)
+from src.issue_git_spec import IssueGitConfigError, require_issue_git_spec
 from src.jira.client import JiraClient, create_jira_client
 from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
@@ -1127,19 +1133,168 @@ class JobProcessor:
             # Treat as a direct request
             await self._handle_direct_request(issue_key, command)
     
-    def _init_git_manager(self, issue_key: str) -> GitManager:
+    def _refresh_issue_text_from_jira(
+        self,
+        issue_key: str,
+        state: Optional[JiraAgentState] = None,
+    ) -> tuple[str, str]:
+        """Load live summary/description from Jira so git params match the ticket.
+
+        Stale state (or job snapshot) can lag behind edits on the issue; always
+        prefer the live fields when the API is available.
+        """
+        st = state or self.state_manager.get_state(issue_key)
+        summary = (st.issue_summary if st else "") or ""
+        description = (st.description if st else "") or ""
+        try:
+            issue = self.jira_client.get_issue(
+                issue_key, fields=["summary", "description"]
+            )
+        except Exception as e:
+            logger.warning(f"{issue_key}: live Jira refresh failed: {e}")
+            issue = None
+        if issue:
+            fields = issue.get("fields") or {}
+            live_summary = fields.get("summary")
+            live_desc = fields.get("description")
+            if live_summary is not None and str(live_summary).strip():
+                summary = str(live_summary)
+            if live_desc is not None:
+                if not isinstance(live_desc, str):
+                    live_desc = str(live_desc)
+                # Allow empty description only when API returned a value
+                description = live_desc
+            if st and (summary != (st.issue_summary or "") or description != (st.description or "")):
+                logger.info(
+                    f"{issue_key}: refreshed summary/description from live Jira "
+                    f"(desc_len={len(description or '')})"
+                )
+                self.state_manager.update_state(
+                    issue_key,
+                    issue_summary=summary,
+                    description=description,
+                )
+                st.issue_summary = summary
+                st.description = description
+        return summary, description
+
+    def _init_git_manager(
+        self,
+        issue_key: str,
+        state: Optional[JiraAgentState] = None,
+    ) -> GitManager:
+        """Clone from the issue template (Repository + Source + Target).
+
+        Always re-reads summary/description from Jira when possible so
+        ``{params}`` matches the current ticket, not a stale state snapshot.
+
+        Raises IssueGitConfigError / GitCloneError / GitSourceBranchError /
+        GitTargetBranchError with user-facing messages suitable for Jira comments.
+        """
         logger.info(f"Initializing git manager for {issue_key}")
-        git = GitManager(issue_key=issue_key)
+        st = state or self.state_manager.get_state(issue_key)
+        summary, description = self._refresh_issue_text_from_jira(issue_key, st)
+        # Re-load state after refresh (update may have persisted)
+        st = self.state_manager.get_state(issue_key) or st
+        spec = require_issue_git_spec(summary=summary, description=description)
+        logger.info(
+            f"{issue_key} git from issue: repo={spec.repository_url} "
+            f"source_branch={spec.source_branch} target_branch={spec.target_branch} "
+            f"(MR plan: work branch from target, then MR source → target)"
+        )
+        if st:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={
+                    "repository_url": spec.repository_url,
+                    "source_branch": spec.source_branch,
+                    "target_branch": spec.target_branch,
+                },
+            )
+
+        git = GitManager(
+            issue_key=issue_key,
+            remote_url=spec.repository_url,
+            source_branch=spec.source_branch,
+            target_branch=spec.target_branch,
+        )
         working_dir = git.get_working_directory()
         logger.debug(f"Working directory: {working_dir}")
         runner = AgentRunner(working_directory=working_dir)
         logger.debug(f"AgentRunner initialized with working directory: {working_dir}")
-        # Per-issue context so concurrent jobs do not clobber each other
+        # Per-issue isolation: concurrent jobs must not share git/agent slots
         self._contexts[issue_key] = {"git": git, "runner": runner}
         # Keep legacy mirrors for tests/call sites that still use the fields
         self.git_manager = git
         self.agent_runner = runner
         return git
+
+    def _prepare_git_workspace(self, state: JiraAgentState) -> Optional[GitManager]:
+        """Init git + work branch from target, or fail the issue with a Jira message.
+
+        Returns GitManager on success, None after calling ``_fail_issue``.
+        """
+        try:
+            git = self._init_git_manager(state.issue_key, state)
+            branch_name = git.ensure_feature_branch(state.issue_key)
+            logger.info(
+                f"Work branch ready: {branch_name} "
+                f"(based on target={git.target_branch}; MR {branch_name} → {git.target_branch})"
+            )
+            return git
+        except IssueGitConfigError as e:
+            logger.warning(
+                f"{state.issue_key} git template error: {e.user_message[:200]}"
+            )
+            self._fail_issue(
+                state.issue_key,
+                e.user_message,
+                suggestion=(
+                    "Update the issue `{params}` block with Repository, "
+                    "Source branch, and Target branch, then move back to To Do."
+                ),
+            )
+            self._release_context(state.issue_key, success=False)
+            return None
+        except GitCloneError as e:
+            logger.error(f"{state.issue_key} clone failed: {e}")
+            self._fail_issue(
+                state.issue_key,
+                e.user_message,
+                suggestion="Fix repository access or URL, then move back to To Do.",
+            )
+            self._release_context(state.issue_key, success=False)
+            return None
+        except GitTargetBranchError as e:
+            logger.error(f"{state.issue_key} target branch failed: {e}")
+            self._fail_issue(
+                state.issue_key,
+                e.user_message,
+                suggestion=(
+                    "Fix Target branch on the issue so it names a branch that "
+                    "already exists on GitLab, then move back to To Do."
+                ),
+            )
+            self._release_context(state.issue_key, success=False)
+            return None
+        except GitSourceBranchError as e:
+            logger.error(f"{state.issue_key} source/work branch failed: {e}")
+            self._fail_issue(
+                state.issue_key,
+                e.user_message,
+                suggestion="Fix Source branch on the issue, then move back to To Do.",
+            )
+            self._release_context(state.issue_key, success=False)
+            return None
+        except Exception as e:
+            logger.exception(f"{state.issue_key} git workspace setup failed: {e}", e)
+            self._fail_issue(
+                state.issue_key,
+                f"*Virtual Developer* could not prepare the git workspace.\n\n`{e}`",
+                suggestion="Check logs, then move the issue back to To Do.",
+            )
+            self._release_context(state.issue_key, success=False)
+            return None
 
     async def _start_planning_workflow(self, state: JiraAgentState):
         logger.info(f"Starting planning workflow for {state.issue_key}")
@@ -1167,9 +1322,9 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._init_git_manager(state.issue_key)
-        branch_name = git.ensure_feature_branch(state.issue_key)
-        logger.info(f"Feature branch ready: {branch_name}")
+        git = self._prepare_git_workspace(state)
+        if git is None:
+            return
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
 
@@ -1361,9 +1516,9 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._init_git_manager(state.issue_key)
-        branch_name = git.ensure_feature_branch(state.issue_key)
-        logger.info(f"Feature branch ready: {branch_name}")
+        git = self._prepare_git_workspace(state)
+        if git is None:
+            return
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
 
@@ -1523,7 +1678,8 @@ class JobProcessor:
             description=f"Direct: {state.issue_key}",
             prompt=PromptBuilder.build_sisyphus_prompt(
                 issue_key=state.issue_key,
-                task_description=state.description,
+                task_description=state.description or "",
+                summary=state.issue_summary or "",
             ),
             agent=settings.default_agent,
             category=settings.execution_category,
@@ -1542,12 +1698,12 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._init_git_manager(state.issue_key)
-        branch_name = git.ensure_feature_branch(state.issue_key)
-        logger.info(f"Feature branch ready: {branch_name}")
+        git = self._prepare_git_workspace(state)
+        if git is None:
+            return
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
-        
+
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
             """Update progress in state - suppress from console."""
@@ -1770,16 +1926,16 @@ class JobProcessor:
 
         branch_name = git.get_current_branch()
 
-        # Refuse to push protected default branches
-        protected = {
-            "main",
-            "master",
-            (settings.default_branch or "").strip().lower(),
-        }
+        # Refuse to push protected bases / MR target (agent must use work branch)
+        target = (getattr(git, "target_branch", None) or "").strip().lower()
+        protected = {"main", "master", "develop", "trunk", "dev"}
+        if target:
+            protected.add(target)
         if branch_name and branch_name.lower() in protected:
             msg = (
                 f"Refusing to push protected branch '{branch_name}'. "
-                f"Agent must work on a feature branch."
+                f"Agent must work on a feature/work branch "
+                f"(MR source → target `{getattr(git, 'target_branch', '')}`)."
             )
             logger.error(msg)
             try:
@@ -1822,7 +1978,11 @@ class JobProcessor:
             mr_title = f"[{state.issue_key}] {state.issue_summary}"
             mr_body = state.description or f"Implemented solution for {state.issue_key}"
 
-        target_branch = settings.default_branch.strip() if settings.default_branch else "main"
+        target_branch = (
+            (getattr(git, "target_branch", None) or getattr(git, "source_branch", None) or "")
+            .strip()
+            or None
+        )
         mr_url = git.create_merge_request(
             title=mr_title,
             body=mr_body,
@@ -1937,7 +2097,9 @@ class JobProcessor:
             runner = self._ensure_agent_runner(state.issue_key)
 
             prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=state.description,
+                question=state.description or state.issue_summary or "",
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
             )
 
             task = AgentTask(
@@ -2017,14 +2179,17 @@ class JobProcessor:
             else:
                 created_context = issue_key in self._contexts
 
-            prompt = PromptBuilder.build_comment_response_prompt(
+            # Free-form @mention text uses the same direct (Sisyphus) kit path —
+            # no separate comment prompt template.
+            summary = (state.issue_summary if state else "") or ""
+            prompt = PromptBuilder.build_sisyphus_prompt(
                 issue_key=issue_key,
-                comment_text=request,
-                current_state=state.status.value if state else None,
+                task_description=request,
+                summary=summary,
             )
 
             task = AgentTask(
-                description=f"Comment response: {issue_key}",
+                description=f"Direct request: {issue_key}",
                 prompt=prompt,
                 agent=settings.default_agent,
                 issue_key=issue_key,
@@ -2035,11 +2200,11 @@ class JobProcessor:
             if result["returncode"] == 0:
                 self.reporter.post_comment_response(issue_key, result["stdout"])
             else:
-                err = result.get("stderr") or "Comment response agent failed"
+                err = result.get("stderr") or "Agent failed for free-form request"
                 self.reporter.post_comment_response(
                     issue_key,
-                    f"Could not complete comment request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
-                    "Retry the @mention or check agent logs.",
+                    f"Could not complete request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
+                    "Retry or check agent logs.",
                 )
         finally:
             if created_context:

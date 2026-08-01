@@ -24,15 +24,29 @@ def gm(tmp_path, monkeypatch):
     g.remote_enabled = True
     g.remote_url = "https://gitlab.example.com/group/repo.git"
     g.remote_name = "repo"
+    g.source_branch = "develop"
+    g.target_branch = "develop"
     g.issue_key = "GM-1"
     return g
 
 
-def test_init_no_gitlab_url():
-    with patch("src.git_manager.settings") as s:
-        s.project_gitlab_url = ""
-        with pytest.raises(RuntimeError, match="PROJECT_GITLAB_URL"):
-            GitManager(issue_key="X-1")
+def test_init_no_repository_url():
+    from src.git_manager import GitCloneError
+
+    with pytest.raises(GitCloneError, match="no repository URL"):
+        GitManager(issue_key="X-1", remote_url="", source_branch="develop")
+
+
+def test_init_no_target_branch():
+    from src.git_manager import GitTargetBranchError
+
+    with pytest.raises(GitTargetBranchError, match="no target branch"):
+        GitManager(
+            issue_key="X-1",
+            remote_url="https://gitlab.example.com/g/r.git",
+            source_branch="",
+            target_branch="",
+        )
 
 
 def test_extract_remote_name(gm):
@@ -75,8 +89,11 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
         run.return_value = _cp(returncode=1, stderr="fail")
         with patch("src.git_manager.settings") as s:
             s.gitlab_pat = ""
-            with pytest.raises(RuntimeError):
+            from src.git_manager import GitCloneError
+
+            with pytest.raises(GitCloneError) as ei:
                 gm._clone_into_temp()
+            assert "clone" in ei.value.user_message.lower()
     gm.temp_dir = None
     with pytest.raises(RuntimeError):
         gm._clone_into_temp()
@@ -147,46 +164,123 @@ def test_delete_local_branch(gm):
             assert gm._delete_local_branch("feature/x") is False
 
 
-def test_checkout_or_create_branch(gm):
-    with patch.object(gm, "_delete_local_branch", return_value=True):
-        with patch.object(gm, "_run_git", return_value=_cp(stdout="refs/heads/feature/GM-1")):
-            # remote exists
+def test_checkout_or_create_branch_requires_target(gm):
+    """Work branch is always created from target; missing target fails first."""
+    gm.target_branch = "develop"
+    with patch.object(gm, "_require_target_on_remote", return_value="develop") as req:
+        with patch.object(
+            gm, "_checkout_work_branch_from_target", return_value="feature/GM-1"
+        ) as work:
             name = gm._checkout_or_create_branch("feature/GM-1")
             assert name == "feature/GM-1"
+            req.assert_called_once()
+            work.assert_called_once_with("feature/GM-1", "develop")
 
-        with patch.object(gm, "_run_git", return_value=_cp(stdout="")):
-            with patch.object(gm, "_checkout_default_branch", return_value=True):
-                name = gm._checkout_or_create_branch("feature/GM-1")
+    with patch.object(
+        gm,
+        "_require_target_on_remote",
+        side_effect=__import__(
+            "src.git_manager", fromlist=["GitTargetBranchError"]
+        ).GitTargetBranchError("missing target"),
+    ):
+        from src.git_manager import GitTargetBranchError
+
+        with pytest.raises(GitTargetBranchError):
+            gm._checkout_or_create_branch("feature/GM-1")
+
+
+def test_require_target_on_remote_missing(gm):
+    gm.target_branch = "develop"
+    with patch.object(gm, "_remote_head_exists", return_value=False):
+        with patch.object(gm, "_run_git", return_value=_cp()):
+            from src.git_manager import GitTargetBranchError
+
+            with pytest.raises(GitTargetBranchError) as ei:
+                gm._require_target_on_remote()
+            assert "develop" in ei.value.user_message.lower()
+            assert "target" in ei.value.user_message.lower()
+
+
+def test_require_target_on_remote_ok(gm):
+    gm.target_branch = "develop"
+    with patch.object(gm, "_remote_head_exists", return_value=True):
+        with patch.object(gm, "_run_git", return_value=_cp()):
+            assert gm._require_target_on_remote() == "develop"
+
+
+def test_resolve_work_branch_name(gm):
+    gm.target_branch = "develop"
+    gm.source_branch = "develop"
+    assert gm._resolve_work_branch_name("GM-1") == "feature/GM-1"
+
+    gm.source_branch = "main"
+    assert gm._resolve_work_branch_name("GM-1") == "feature/GM-1"
+
+    gm.source_branch = "feature/custom"
+    assert gm._resolve_work_branch_name("GM-1") == "feature/custom"
+
+
+def test_checkout_work_branch_from_target(gm):
+    gm.target_branch = "develop"
+    with patch.object(gm, "_delete_local_branch", return_value=True):
+        with patch.object(gm, "_branch_exists", return_value=True):
+            with patch.object(gm, "_run_git", return_value=_cp()) as run:
+                name = gm._checkout_work_branch_from_target("feature/GM-1", "develop")
                 assert name == "feature/GM-1"
-
-        with patch.object(gm, "_run_git", return_value=_cp(stdout="")):
-            with patch.object(gm, "_checkout_default_branch", return_value=False):
-                with pytest.raises(RuntimeError):
-                    gm._checkout_or_create_branch("feature/GM-1")
-
-
-def test_checkout_default_branch(gm):
-    with patch("src.git_manager.settings") as s:
-        s.default_branch = "develop"
-        with patch.object(gm, "_branch_exists", side_effect=lambda b, **k: b == "develop"):
-            with patch.object(gm, "_run_git", return_value=_cp()):
-                assert gm._checkout_default_branch() is True
-        with patch.object(gm, "_branch_exists", return_value=False):
-            assert gm._checkout_default_branch() is False
-        s.default_branch = ""
-        with patch.object(gm, "_branch_exists", side_effect=lambda b, **k: b == "main"):
-            with patch.object(gm, "_run_git", return_value=_cp()):
-                assert gm._checkout_default_branch() is True
+                assert gm.work_branch == "feature/GM-1"
+                assert gm.source_branch == "feature/GM-1"
+                calls = [" ".join(str(a) for a in c.args[0]) for c in run.call_args_list]
+                assert any(
+                    "checkout" in c and "feature/GM-1" in c and "origin/develop" in c
+                    for c in calls
+                )
 
 
-def test_ensure_feature_branch(gm):
-    with patch.object(gm, "_checkout_or_create_branch", return_value="feature/GM-1") as m:
-        assert gm.ensure_feature_branch("GM-1") == "feature/GM-1"
-        m.assert_called()
+def test_ensure_feature_branch_from_target(gm):
+    """ensure_feature_branch: require target, resolve work name, create from target."""
+    gm.source_branch = "develop"
+    gm.target_branch = "develop"
+    with patch.object(gm, "_require_target_on_remote", return_value="develop"):
+        with patch.object(
+            gm, "_checkout_work_branch_from_target", return_value="feature/GM-1"
+        ) as work:
+            assert gm.ensure_feature_branch("GM-1") == "feature/GM-1"
+            work.assert_called_once_with("feature/GM-1", "develop")
+
+
+def test_ensure_feature_branch_custom_source(gm):
+    gm.source_branch = "feature/custom"
+    gm.target_branch = "main"
+    with patch.object(gm, "_require_target_on_remote", return_value="main"):
+        with patch.object(
+            gm, "_checkout_work_branch_from_target", return_value="feature/custom"
+        ) as work:
+            assert gm.ensure_feature_branch("GM-1") == "feature/custom"
+            work.assert_called_once_with("feature/custom", "main")
+
+
+def test_create_source_from_target(gm):
+    gm.source_branch = "feature-base"
+    gm.target_branch = "main"
+
+    def exists(name, check_remote=False, **_k):
+        if name == "main":
+            return True
+        return False
+
+    with patch.object(gm, "_remote_head_exists", return_value=True):
+        with patch.object(gm, "_branch_exists", side_effect=exists):
+            with patch.object(gm, "_run_git", return_value=_cp()) as run:
+                with patch.object(gm, "_delete_local_branch", return_value=True):
+                    assert gm._create_source_from_target("feature-base", "main") is True
+                    calls = [
+                        " ".join(str(a) for a in c.args[0]) for c in run.call_args_list
+                    ]
+                    assert any("checkout" in c and "feature-base" in c for c in calls)
 
 
 def test_format_commit_message(gm):
-    # EXECUTION.md format: [KEY] type: description
+    # §policy.commit format: [KEY] type: description
     msg = gm._format_commit_message("GM-1", "fix: short", "body")
     assert msg.startswith("[GM-1] fix: short")
     assert "body" in msg
@@ -287,15 +381,17 @@ def test_mr_and_comments(gm):
             assert gm.create_merge_request("t") == "http://mr/1"
 
         with patch.object(gm, "_get_existing_mr_url", return_value=None):
-            with patch("src.git_manager.subprocess.run", return_value=_cp(stdout="https://gitlab.com/mr/2\n")):
-                with patch("src.git_manager.settings") as s:
-                    s.default_branch = "develop"
-                    assert "http" in gm.create_merge_request("t", "body")
+            with patch(
+                "src.git_manager.subprocess.run",
+                return_value=_cp(stdout="https://gitlab.com/mr/2\n"),
+            ):
+                assert "http" in gm.create_merge_request("t", "body")
 
-            with patch("src.git_manager.subprocess.run", return_value=_cp(stdout="created ok\n")):
-                with patch("src.git_manager.settings") as s:
-                    s.default_branch = ""
-                    assert gm.create_merge_request("t") == "created"
+            with patch(
+                "src.git_manager.subprocess.run",
+                return_value=_cp(stdout="created ok\n"),
+            ):
+                assert gm.create_merge_request("t") == "created"
 
             with patch(
                 "src.git_manager.subprocess.run",

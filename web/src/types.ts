@@ -181,10 +181,7 @@ export type TaskDetail = {
   prompts: {
     workflow_type?: string
     agent?: string
-    system_rules?: string
-    reconstructed_agent_prompt?: string
-    execution_system_rules?: string
-    execution_agent_prompt?: string
+    /** Captured *.prompt.txt files — what was actually sent to the agent. */
     captured_prompt_files?: TextArtifact[]
     error?: string
   }

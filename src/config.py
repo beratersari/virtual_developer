@@ -47,12 +47,8 @@ class Settings(BaseSettings):
     git_user_name: str = Field(default="DevBot", description="Git user name for commits")
     git_user_email: str = Field(default="devbot@example.com", description="Git user email for commits")
     
-    # Default branch to checkout before creating feature branches (optional)
-    # If not set, falls back to 'main', then logs a message if neither exists
-    default_branch: str = Field(default="develop", description="Default branch to checkout before creating feature branches")
-    
-    # Remote GitLab repository (optional)
-    project_gitlab_url: str = Field(default="", description="GitLab repo URL to clone into PROJECT_ROOT")
+    # GitLab PAT only — repository URL and source branch come from each Jira issue
+    # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
     gitlab_pat: str = Field(default="", description="GitLab Personal Access Token for push/merge-request")
     
     # Agent Configuration
@@ -61,28 +57,10 @@ class Settings(BaseSettings):
     orchestrator_agent: str = Field(default="atlas")
     execution_category: str = Field(default="deep")
 
-    # -------------------------------------------------------------------------
-    # System Prompts — loaded from markdown files with fallback to inline defaults.
-    # Configure file paths via environment variables or keep defaults.
-    # -------------------------------------------------------------------------
-    prompt_planning_file: Path = Field(
-        default=Path("agent/rules/PLANNING.md"),
-        description="Path to planning prompt markdown file",
-    )
-    
-    prompt_execution_file: Path = Field(
-        default=Path("agent/rules/EXECUTION.md"),
-        description="Path to execution prompt markdown file",
-    )
-    
-    prompt_direct_execution_file: Path = Field(
-        default=Path("agent/rules/DIRECT_EXECUTION.md"),
-        description="Path to direct execution prompt markdown file",
-    )
-    
-    prompt_oracle_file: Path = Field(
-        default=Path("agent/rules/ORACLE.md"),
-        description="Path to oracle prompt markdown file",
+    # Agent prompts: one kit file with ## §section_id headers (see agent/AGENT_PROMPT.md)
+    prompt_kit_file: Path = Field(
+        default=Path("agent/AGENT_PROMPT.md"),
+        description="Unified agent prompt kit",
     )
     
     # Feature Flags
@@ -184,201 +162,40 @@ class Settings(BaseSettings):
             return ["ai-assist", "bot"]
         return [item.strip() for item in self.trigger_labels.split(",") if item.strip()]
     
+    def _kit_section(self, section_id: str) -> str:
+        from src.orchestrator.prompt_kit import get_section
+
+        return get_section(section_id, kit_path=self.prompt_kit_file)
+
     @property
     def prompt_planning(self) -> str:
-        """Load planning prompt from file if it exists, otherwise use default."""
-        return self._load_prompt_from_file(
-            self.prompt_planning_file,
-            self._get_default_planning_prompt(),
-            "planning"
-        )
-    
+        """Planning role rules (kit §role.planning)."""
+        return self._kit_section("role.planning")
+
     @property
     def prompt_execution(self) -> str:
-        """Load execution prompt from file if it exists, otherwise use default."""
-        return self._load_prompt_from_file(
-            self.prompt_execution_file,
-            self._get_default_execution_prompt(),
-            "execution"
-        )
-    
+        """Atlas execution role rules (kit §role.execution)."""
+        return self._kit_section("role.execution")
+
     @property
     def prompt_direct_execution(self) -> str:
-        """Load direct execution prompt from file if it exists, otherwise use default."""
-        return self._load_prompt_from_file(
-            self.prompt_direct_execution_file,
-            self._get_default_direct_execution_prompt(),
-            "direct execution"
-        )
-    
+        """Sisyphus direct-execution rules (kit §role.direct)."""
+        return self._kit_section("role.direct")
+
     @property
     def prompt_oracle(self) -> str:
-        """Load oracle prompt from file if it exists, otherwise use default."""
-        return self._load_prompt_from_file(
-            self.prompt_oracle_file,
-            self._get_default_oracle_prompt(),
-            "oracle"
-        )
-    
-    def _load_prompt_from_file(self, prompt_file: Path, default_prompt: str, prompt_name: str) -> str:
-        from pathlib import Path as PathLib
-        import os
-        
-        cwd = PathLib.cwd()
-        logger.info(f"Loading {prompt_name} prompt from file")
-        logger.debug(f"Current working directory: {cwd}")
-        logger.debug(f"Input prompt_file parameter: {prompt_file}")
-        
-        paths_to_try = []
-        
-        # Prefer configured path, then agent/rules (canonical), then legacy agent/prompts.
-        env_var_name = f"PROMPT_{prompt_name.upper().replace(' ', '_')}_FILE"
-        env_path = os.environ.get(env_var_name)
-        if env_path:
-            paths_to_try.append(("env_var", PathLib(env_path)))
-            logger.debug(f"Found env var {env_var_name}: {env_path}")
-        else:
-            logger.debug(f"No env var {env_var_name} set")
-        
-        if prompt_file.is_absolute():
-            paths_to_try.append(("absolute", prompt_file))
-        else:
-            paths_to_try.append(("relative_cwd", cwd / prompt_file))
-        
-        paths_to_try.append(("agent_rules", cwd / "agent" / "rules" / prompt_file.name))
-        paths_to_try.append(("agent_prompts_legacy", cwd / "agent" / "prompts" / prompt_file.name))
-        
-        logger.debug(
-            f"Resolving {prompt_name} prompt; {len(paths_to_try)} candidate path(s)"
-        )
-        for source, path in paths_to_try:
-            kind = (
-                "file"
-                if path.exists() and path.is_file()
-                else ("dir" if path.exists() else "missing")
-            )
-            logger.debug(f"Prompt candidate source={source} path={path} status={kind}")
+        """Oracle consultation rules (kit §role.oracle)."""
+        return self._kit_section("role.oracle")
 
-            if not path.exists() or not path.is_file():
-                continue
+    def prompt_commit_policy(self, issue_key: str) -> str:
+        """Issue-keyed git policy from kit §policy.commit."""
+        from src.orchestrator.prompt_kit import get_section
 
-            try:
-                content = path.read_text(encoding="utf-8")
-                logger.info(
-                    f"Loaded {prompt_name} prompt from {source}: "
-                    f"{len(content)} bytes, {len(content.splitlines())} lines"
-                )
-                return content
-            except Exception as e:
-                logger.error(f"Failed reading {prompt_name} prompt from {path}: {e}")
-                continue
-
-        logger.warning(
-            f"{prompt_name.capitalize()} prompt file not found; "
-            f"using default inline prompt ({len(default_prompt)} chars)"
+        return get_section(
+            "policy.commit",
+            kit_path=self.prompt_kit_file,
+            issue_key=issue_key,
         )
-        return default_prompt
-    
-    def _get_default_planning_prompt(self) -> str:
-        """Default planning prompt (fallback if file not found)."""
-        return (
-            "As Prometheus, create a comprehensive work plan for this JIRA issue.\n"
-            "\n"
-            "1. **Interview Mode**: Ask clarifying questions if requirements are ambiguous\n"
-            "2. **Research**: Explore the codebase to understand existing patterns\n"
-            "3. **Plan Generation**: Create a detailed plan with:\n"
-            "   - Task breakdown with checkboxes\n"
-            "   - File references and locations\n"
-            "   - Implementation approach\n"
-            "   - Testing strategy\n"
-            "   - Estimated effort\n"
-            "\n"
-            "Output the plan to the designated plan file."
-        )
-    
-    def _get_default_execution_prompt(self) -> str:
-        """Default execution prompt (fallback if file not found)."""
-        return (
-            "## Delegation Guidelines\n"
-            '- Use `category="visual-engineering"` for UI/UX work\n'
-            '- Use `category="deep"` for complex problem-solving\n'
-            '- Use `category="quick"` for simple fixes\n'
-            '- Use `subagent_type="oracle"` for architecture decisions\n'
-            '- Use `subagent_type="explore"` for codebase research\n'
-            "\n"
-            "## Success Criteria\n"
-            "- All plan checkboxes checked\n"
-            "- Tests passing\n"
-            "- No type errors\n"
-            "- Code follows project conventions\n"
-            "\n"
-            "## Commit message format (MANDATORY)\n"
-            "`[JIRA-ISSUE-ID] <type>: <description>`\n"
-            "Types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
-            "Examples: `[KEY] feat: ...` · `[KEY] fix: ...` · `[KEY] chore: ...`"
-        )
-    
-    def _get_default_direct_execution_prompt(self) -> str:
-        """Default direct execution prompt (fallback if file not found).
-
-        Commit format must match agent/rules/EXECUTION.md:
-        [JIRA-KEY] type: description
-        """
-        return (
-            "## Instructions\n"
-            "1. Analyze the task and current codebase\n"
-            "2. Create todos for multi-step work\n"
-            "3. Implement the solution following existing patterns\n"
-            "4. Run verification (tests, type checking)\n"
-            "5. **COMMIT YOUR CHANGES** (mandatory if you modified any files)\n"
-            "6. Report completion with summary of changes and commit hash\n"
-            "\n"
-            "## Commit message format (MANDATORY — same as EXECUTION.md)\n"
-            "After code changes you MUST create a git commit yourself. Use ONLY this format:\n"
-            "\n"
-            "```\n"
-            "[JIRA-ISSUE-ID] <type>: <description>\n"
-            "```\n"
-            "\n"
-            "Allowed types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
-            "\n"
-            "Doğru format örnekleri:\n"
-            "  [JIRA-ISSUE-ID] feat: Yeni özellik eklendi\n"
-            "  [JIRA-ISSUE-ID] fix: Hata düzeltildi\n"
-            "  [JIRA-ISSUE-ID] refactor: Kodun çalışma şeklini değiştirmeyen iyileştirme\n"
-            "  [JIRA-ISSUE-ID] docs: Dökümantasyon işleri\n"
-            "  [JIRA-ISSUE-ID] test: Birim testler\n"
-            "  [JIRA-ISSUE-ID] perf: Çalışma mantığını değiştirmeyen performans iyileştirmesi\n"
-            "  [JIRA-ISSUE-ID] ci: CI/CD değişiklikleri\n"
-            "  [JIRA-ISSUE-ID] build: Build sistemi ile ilgili değişiklikler\n"
-            "  [JIRA-ISSUE-ID] revert: Kodu geri almak\n"
-            "  [JIRA-ISSUE-ID] chore: Genel işler, küçük düzeltmeler\n"
-            "\n"
-            "Rules:\n"
-            "- Subject MUST be `[ISSUE-KEY] type: description`\n"
-            "- Do NOT push or create merge requests (the system does that)\n"
-            "- Do NOT commit .env, credentials, or secret files\n"
-            "\n"
-            "## Constraints\n"
-            "- Follow existing code style\n"
-            "- Add tests for new functionality\n"
-            "- Do not break existing tests\n"
-            "- Minimal, focused changes"
-        )
-    
-    def _get_default_oracle_prompt(self) -> str:
-        """Default oracle prompt (fallback if file not found)."""
-        return (
-            "## Response Format\n"
-            "1. **Direct Answer**: Clear response to the question\n"
-            "2. **Rationale**: Why this approach is recommended\n"
-            "3. **Alternatives**: Other options considered\n"
-            "4. **Trade-offs**: Pros/cons of each approach\n"
-            "5. **Implementation Hints**: Key files/patterns to use\n"
-            "\n"
-            "Be thorough but concise. Focus on practical guidance."
-        )
-    
 
     @property
     def trigger_mentions_list(self) -> List[str]:

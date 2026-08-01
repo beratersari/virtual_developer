@@ -5,11 +5,6 @@ from unittest.mock import patch
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 
 
-def test_route_comment_returns_comment_response():
-    wt = WorkflowRouter.route_issue("X-1", "sum", "desc", comment="@DevBot hi")
-    assert wt == WorkflowType.COMMENT_RESPONSE
-
-
 def test_route_oracle_keywords():
     # Pure consult — no implementation verbs
     wt = WorkflowRouter.route_issue("X-1", "how to structure this", "should we use pattern")
@@ -47,9 +42,8 @@ def test_complexity_mid_length():
     assert score == 1
 
 
-def test_should_auto_start_direct_and_comment():
+def test_should_auto_start_direct():
     assert WorkflowRouter.should_auto_start(WorkflowType.DIRECT_EXECUTION) is True
-    assert WorkflowRouter.should_auto_start(WorkflowType.COMMENT_RESPONSE) is True
 
 
 def test_should_auto_start_planning_follows_setting():
@@ -66,8 +60,10 @@ def test_get_agent_for_workflow_all_types():
         s.planning_agent = "prometheus"
         s.default_agent = "sisyphus"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "prometheus"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.DIRECT_EXECUTION) == "sisyphus"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.COMMENT_RESPONSE) == "sisyphus"
+        assert (
+            WorkflowRouter.get_agent_for_workflow(WorkflowType.DIRECT_EXECUTION)
+            == "sisyphus"
+        )
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT) == "oracle"
 
 
@@ -83,3 +79,8 @@ def test_extract_mention_command_not_found():
     with patch("src.orchestrator.workflow_router.settings") as s:
         s.trigger_mentions_list = ["@DevBot"]
         assert WorkflowRouter.extract_mention_command("no bot here") is None
+
+
+def test_no_comment_workflow_type():
+    assert not hasattr(WorkflowType, "COMMENT_RESPONSE")
+    assert {w.value for w in WorkflowType} == {"planning", "direct", "oracle"}

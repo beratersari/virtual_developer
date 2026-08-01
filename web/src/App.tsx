@@ -762,75 +762,66 @@ export default function App() {
               {detail && detailTab === 'prompts' && (
                 <div className="space-y-4 text-sm">
                   <p className="text-xs text-slate-500">
-                    Prefer the selected job&apos;s captured prompt (frozen at that run). The
-                    reconstructed prompt always uses the <em>current</em> issue description and
-                    can look the same for every job.
+                    Exact text sent to the agent for each run (
+                    <code className="text-slate-400">agent/AGENT_PROMPT.md</code> + Jira body,
+                    frozen in <code className="text-slate-400">*.prompt.txt</code>).
                   </p>
-                  {selectedJob?.description?.trim() && (
-                    <PromptBlock
-                      title={`Job description snapshot · ${selectedJob.job_id}`}
-                      body={selectedJob.description}
-                    />
-                  )}
                   {(() => {
                     const captured = detail.prompts?.captured_prompt_files || []
+                    const selectedPath = selectedJob?.prompt_path
                     const jobPrompt =
-                      selectedJob?.prompt_path &&
+                      selectedPath &&
                       captured.find(
                         (f) =>
-                          f.path === selectedJob.prompt_path ||
-                          f.path?.endsWith(
-                            selectedJob.prompt_path!.split(/[/\\]/).pop() || '',
-                          ),
+                          f.path === selectedPath ||
+                          f.path?.endsWith(selectedPath.split(/[/\\]/).pop() || ''),
                       )
-                    if (jobPrompt) {
+                    const others = captured.filter((f) => f !== jobPrompt)
+                    if (captured.length === 0) {
                       return (
-                        <PromptBlock
-                          title={`Captured prompt for selected job${jobPrompt.truncated ? ' (truncated)' : ''}`}
-                          body={jobPrompt.content || jobPrompt.error || '(empty)'}
-                        />
+                        <p className="text-slate-500">
+                          No captured prompt yet for this issue (written when an agent run
+                          starts).
+                        </p>
                       )
                     }
-                    return null
+                    return (
+                      <>
+                        {jobPrompt && (
+                          <PromptBlock
+                            title={`Sent to agent · ${selectedJob?.job_id || 'selected job'}${
+                              jobPrompt.truncated ? ' (truncated)' : ''
+                            }`}
+                            body={jobPrompt.content || jobPrompt.error || '(empty)'}
+                          />
+                        )}
+                        {!jobPrompt &&
+                          captured.map((f) => (
+                            <PromptBlock
+                              key={f.path}
+                              title={`Sent to agent · ${f.name || f.path}${
+                                f.truncated ? ' (truncated)' : ''
+                              }`}
+                              body={f.content || f.error || '(empty)'}
+                            />
+                          ))}
+                        {jobPrompt && others.length > 0 && (
+                          <>
+                            <div className="text-xs uppercase tracking-wide text-slate-500">
+                              Other runs
+                            </div>
+                            {others.map((f) => (
+                              <PromptBlock
+                                key={f.path}
+                                title={`${f.name || f.path}${f.truncated ? ' (truncated)' : ''}`}
+                                body={f.content || f.error || '(empty)'}
+                              />
+                            ))}
+                          </>
+                        )}
+                      </>
+                    )
                   })()}
-                  <PromptBlock
-                    title="System rules (workflow)"
-                    body={detail.prompts?.system_rules || '(none)'}
-                  />
-                  <PromptBlock
-                    title="Reconstructed agent prompt (uses LIVE issue description — not historical)"
-                    body={detail.prompts?.reconstructed_agent_prompt || '(none)'}
-                  />
-                  {detail.prompts?.execution_system_rules && (
-                    <PromptBlock
-                      title="Execution system rules"
-                      body={detail.prompts.execution_system_rules}
-                    />
-                  )}
-                  {detail.prompts?.execution_agent_prompt && (
-                    <PromptBlock
-                      title="Execution agent prompt"
-                      body={detail.prompts.execution_agent_prompt}
-                    />
-                  )}
-                  <div className="text-xs uppercase tracking-wide text-slate-500">
-                    All captured prompts for this issue
-                  </div>
-                  {(detail.prompts?.captured_prompt_files || []).map((f) => (
-                    <PromptBlock
-                      key={f.path}
-                      title={`Captured: ${f.name || f.path}${f.truncated ? ' (truncated)' : ''}${
-                        selectedJob?.prompt_path &&
-                        (f.path === selectedJob.prompt_path ||
-                          f.path?.endsWith(
-                            selectedJob.prompt_path!.split(/[/\\]/).pop() || '',
-                          ))
-                          ? ' · SELECTED JOB'
-                          : ''
-                      }`}
-                      body={f.content || f.error || '(empty)'}
-                    />
-                  ))}
                 </div>
               )}
 
@@ -1331,7 +1322,7 @@ export default function App() {
                   GitLab PAT:{' '}
                   {data.settings.gitlab_pat_configured ? 'configured' : 'missing'}
                 </div>
-                <div>Default branch: {data.settings.default_branch}</div>
+                <div>Base branch: {data.settings.default_branch}</div>
                 <div>
                   Dashboard: {data.settings.dashboard_host}:{data.settings.dashboard_port}
                 </div>
@@ -1393,7 +1384,6 @@ function IssuesTable({
             <th className="px-4 py-3 font-medium">Issue</th>
             <th className="px-4 py-3 font-medium">Status</th>
             <th className="px-4 py-3 font-medium">Workflow</th>
-            <th className="px-4 py-3 font-medium">OpenCode session</th>
             <th className="px-4 py-3 font-medium">Updated</th>
             <th className="px-4 py-3 font-medium">Progress</th>
           </tr>
@@ -1401,7 +1391,7 @@ function IssuesTable({
         <tbody className="divide-y divide-slate-800/80">
           {tasks.length === 0 && (
             <tr>
-              <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+              <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
                 No issues match this filter.
               </td>
             </tr>
@@ -1434,18 +1424,6 @@ function IssuesTable({
                 )}
               </td>
               <td className="px-4 py-3 text-slate-300">{t.workflow_type || '—'}</td>
-              <td className="px-4 py-3">
-                {t.opencode_session_id ? (
-                  <div
-                    className="max-w-[11rem] truncate font-mono text-[11px] text-cyan-300"
-                    title={t.opencode_session_id}
-                  >
-                    {t.opencode_session_id}
-                  </div>
-                ) : (
-                  <span className="text-slate-500">—</span>
-                )}
-              </td>
               <td className="px-4 py-3 font-mono text-xs text-slate-400">
                 {t.completed_at || t.started_at || '—'}
               </td>
@@ -1476,11 +1454,9 @@ function JobsTable({
           <tr>
             <th className="px-4 py-3 font-medium">Job</th>
             <th className="px-4 py-3 font-medium">Issue</th>
-            <th className="px-4 py-3 font-medium">Description (this run)</th>
             <th className="px-4 py-3 font-medium">Status</th>
             <th className="px-4 py-3 font-medium">Task id</th>
             {!compact && <th className="px-4 py-3 font-medium">Workflow</th>}
-            <th className="px-4 py-3 font-medium">OpenCode session</th>
             <th className="px-4 py-3 font-medium">Started</th>
             {!compact && <th className="px-4 py-3 font-medium">Progress</th>}
           </tr>
@@ -1489,7 +1465,7 @@ function JobsTable({
           {jobs.length === 0 && (
             <tr>
               <td
-                colSpan={compact ? 7 : 9}
+                colSpan={compact ? 5 : 7}
                 className="px-4 py-8 text-center text-slate-500"
               >
                 No jobs for this filter. Historical session logs and new runs will appear here.
@@ -1531,14 +1507,6 @@ function JobsTable({
                 </div>
               </td>
               <td className="px-4 py-3">
-                <div
-                  className="max-w-md whitespace-pre-wrap break-words text-xs text-slate-200"
-                  title={j.description || undefined}
-                >
-                  {j.description?.trim() ? j.description : '—'}
-                </div>
-              </td>
-              <td className="px-4 py-3">
                 <StatusBadge status={j.status} />
                 {j.error_message && (
                   <div className="mt-1 max-w-xs truncate text-xs text-rose-300/90">
@@ -1562,18 +1530,6 @@ function JobsTable({
                   ) : null}
                 </td>
               )}
-              <td className="px-4 py-3">
-                {j.opencode_session_id ? (
-                  <div
-                    className="max-w-[11rem] truncate font-mono text-[11px] text-cyan-300"
-                    title={j.opencode_session_id}
-                  >
-                    {j.opencode_session_id}
-                  </div>
-                ) : (
-                  <span className="text-xs text-slate-500">—</span>
-                )}
-              </td>
               <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
                 {j.started_at ?? '—'}
               </td>

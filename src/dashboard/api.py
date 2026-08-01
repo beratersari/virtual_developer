@@ -265,6 +265,22 @@ def create_dashboard_app(
                 headers={
                     "Cache-Control": "no-cache, no-store, must-revalidate",
                     "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+
+        def _static_file(path: Path) -> FileResponse:
+            # Hashed assets are immutable; non-hashed files revalidate
+            name = path.name
+            if name.startswith("index-") and name.endswith((".js", ".css")):
+                cache = "public, max-age=31536000, immutable"
+            else:
+                cache = "no-cache, no-store, must-revalidate"
+            return FileResponse(
+                path,
+                headers={
+                    "Cache-Control": cache,
+                    "Pragma": "no-cache" if "no-cache" in cache else "public",
                 },
             )
 
@@ -276,13 +292,6 @@ def create_dashboard_app(
         def spa_fallback(full_path: str) -> Any:
             # Never serve files outside web/dist (blocks ../ path traversal)
             # Do not SPA-fallback reserved API/docs paths (docs are disabled)
-            reserved = (
-                "api/",
-                "docs",
-                "redoc",
-                "openapi.json",
-                "ws",
-            )
             low = (full_path or "").lstrip("/").lower()
             if low == "docs" or low.startswith("docs/") or low in (
                 "redoc",
@@ -291,7 +300,7 @@ def create_dashboard_app(
                 raise HTTPException(status_code=404, detail="Not found")
             safe = _safe_under_static(static, full_path)
             if safe is not None:
-                return FileResponse(safe)
+                return _static_file(safe)
             return _spa_index()
     else:
 

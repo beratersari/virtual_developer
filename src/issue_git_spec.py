@@ -1,0 +1,300 @@
+"""Parse repository URL and branches from a Jira issue ``{params}`` block.
+
+Put git settings **between** matching ``{params}`` markers (anywhere in the
+description). Example::
+
+    {params}
+    Repository: https://gitlab.example.com/group/repo.git
+    Source branch: feature/PROJ-123
+    Target branch: develop
+    {params}
+
+GitLab MR semantics (source → target):
+
+* **Target branch** — must already exist on the remote. Work is based on this
+  tip; the merge request merges **into** this branch.
+* **Source branch** — the work branch (MR *source*). If it does not exist on
+  the remote, it is created **from target**. When source equals target, or
+  source is a primary base name (``main`` / ``master`` / ``develop`` / …),
+  the agent uses ``feature/{ISSUE_KEY}`` as the work branch instead.
+
+Only text inside the first ``{params}`` … ``{params}`` pair is scanned
+(so free-form acceptance criteria cannot confuse the parser).
+
+Aliases inside the block:
+* Repository / Repo / GitLab / Project URL
+* Source branch / Work branch
+* Target branch / MR target / Merge into / Base branch
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Optional, Tuple
+from urllib.parse import urlparse
+
+# First {params} ... {params} block (case-insensitive tag; body may span lines)
+_PARAMS_BLOCK = re.compile(
+    r"(?is)\{params\}\s*(.*?)\s*\{params\}"
+)
+
+# Jira wiki: [label|url] or [url|url|smart-card]
+_JIRA_LINK = re.compile(
+    r"\[([^\]|\n]+)\|([^\]|\n]+)(?:\|[^\]\n]+)?\]"
+)
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
+
+_REPO_KEY = r"(?:repository|repo|gitlab(?:\s*url)?|project(?:\s*url)?)"
+# Work / MR source branch (not the integration base)
+_SOURCE_KEY = r"(?:source\s*branch|work\s*branch)"
+# MR destination / base that must exist — includes "base branch" alias
+_TARGET_KEY = r"(?:target\s*branch|mr\s*target|merge\s*into|merge\s*target|base\s*branch)"
+_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY})"
+
+_REPO_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r])\s*{_REPO_KEY}\s*:\s*(.*?)(?=\s*{_ANY_KEY}\s*:|\Z)"
+)
+_SOURCE_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_SOURCE_KEY}\s*:\s*(\S+)"
+)
+_TARGET_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_TARGET_KEY}\s*:\s*(\S+)"
+)
+
+_URL_TOKEN = re.compile(
+    r"(?i)\b((?:https?://|git@)[^\s\[\]<>\"']+)"
+)
+
+TEMPLATE_HELP = """\
+{params}
+Repository: https://gitlab.example.com/group/your-repo.git
+Source branch: feature/PROJ-123
+Target branch: develop
+{params}
+"""
+
+
+@dataclass(frozen=True)
+class IssueGitSpec:
+    """Git target resolved from a Jira issue."""
+
+    repository_url: str
+    source_branch: str
+    target_branch: str
+
+
+class IssueGitConfigError(Exception):
+    """Issue text does not satisfy the repository/branch template."""
+
+    def __init__(self, user_message: str):
+        self.user_message = user_message
+        super().__init__(user_message)
+
+
+def _expand_links(text: str) -> str:
+    """Turn Jira/markdown links into bare URLs for easier field parsing."""
+
+    def jira_repl(m: re.Match) -> str:
+        left, right = m.group(1).strip(), m.group(2).strip()
+        if _looks_like_git_url(right) or right.startswith("http"):
+            return right
+        if _looks_like_git_url(left) or left.startswith("http"):
+            return left
+        return right
+
+    text = _JIRA_LINK.sub(jira_repl, text)
+    text = _MD_LINK.sub(lambda m: m.group(2), text)
+    return text
+
+
+def _normalize_repo_url(raw: str) -> str:
+    url = (raw or "").strip().strip("<>").strip("`").strip()
+    url = url.rstrip(").,;\"'")
+    if url and not _looks_like_git_url(url):
+        m = _URL_TOKEN.search(url)
+        if m:
+            url = m.group(1).rstrip(").,;\"'")
+    return url
+
+
+def _normalize_branch(raw: str) -> str:
+    branch = (raw or "").strip().strip("`").strip()
+    if branch.startswith("refs/heads/"):
+        branch = branch[len("refs/heads/") :]
+    return branch
+
+
+def _looks_like_git_url(url: str) -> bool:
+    if not url:
+        return False
+    lower = url.lower()
+    if lower.startswith("git@"):
+        return ":" in url
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https", "ssh"):
+        return False
+    if not parsed.netloc:
+        return False
+    path = (parsed.path or "").strip("/")
+    return bool(path)
+
+
+def _looks_like_branch(name: str) -> bool:
+    if not name or len(name) > 255:
+        return False
+    if any(c in name for c in (" ", "\t", "\\")):
+        return False
+    if ".." in name:
+        return False
+    if name.startswith("/") or name.endswith("/"):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9._/\-]+$", name))
+
+
+def _extract_params_block(text: str) -> Optional[str]:
+    """Return body between first ``{params}`` … ``{params}``, or None."""
+    if not text:
+        return None
+    m = _PARAMS_BLOCK.search(text)
+    if not m:
+        return None
+    return (m.group(1) or "").strip()
+
+
+def _extract_repo(text: str) -> str:
+    """Repository URL from field value and/or following lines inside params."""
+    m = _REPO_FIELD.search(text)
+    if not m:
+        # Fallback: first URL-looking token inside the block
+        um = _URL_TOKEN.search(text)
+        if um:
+            cand = _normalize_repo_url(um.group(1))
+            if _looks_like_git_url(cand):
+                return cand
+        return ""
+    blob = (m.group(1) or "").strip()
+    for line in blob.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        url = _normalize_repo_url(line)
+        if _looks_like_git_url(url):
+            return url
+        um = _URL_TOKEN.search(line)
+        if um:
+            cand = _normalize_repo_url(um.group(1))
+            if _looks_like_git_url(cand):
+                return cand
+    um = _URL_TOKEN.search(blob)
+    if um:
+        cand = _normalize_repo_url(um.group(1))
+        if _looks_like_git_url(cand):
+            return cand
+    return _normalize_repo_url(blob)
+
+
+def parse_issue_git_spec(
+    summary: str = "",
+    description: str = "",
+) -> Tuple[Optional[IssueGitSpec], Optional[str]]:
+    """Extract repository, source branch, and target branch from ``{params}``.
+
+    Target branch is optional; when omitted it defaults to the source branch
+    (agent will still use ``feature/{KEY}`` as the work branch when they match).
+
+    Returns ``(spec, None)`` on success, or ``(None, user_error_message)`` on failure.
+    """
+    raw = f"{summary or ''}\n{description or ''}"
+    # Expand wiki/markdown links in the whole issue first (params may wrap them)
+    expanded = _expand_links(raw)
+    block = _extract_params_block(expanded)
+    # Also try unexpanded raw (escaped braces / wiki quirks)
+    if block is None:
+        block = _extract_params_block(raw)
+        if block is not None:
+            block = _expand_links(block)
+    else:
+        block = _expand_links(block)
+
+    if block is None:
+        return None, (
+            "*Virtual Developer* could not start: no ``{params}`` block found on the issue.\n\n"
+            "Wrap the git settings between ``{params}`` markers in the *description* "
+            "(or summary), then move the issue back to *To Do*:\n\n"
+            "{code}\n"
+            f"{TEMPLATE_HELP.strip()}\n"
+            "{code}"
+        )
+
+    text = block
+    repo = _extract_repo(text)
+    source_m = _SOURCE_FIELD.search(text)
+    target_m = _TARGET_FIELD.search(text)
+
+    source = _normalize_branch(source_m.group(1)) if source_m else ""
+    target = _normalize_branch(target_m.group(1)) if target_m else ""
+
+    missing = []
+    if not repo:
+        missing.append(
+            "Repository (e.g. `Repository: https://gitlab.example.com/group/repo.git`)"
+        )
+    if not source:
+        missing.append(
+            "Source branch (e.g. `Source branch: feature/PROJ-123` "
+            "or `Source branch: develop` to auto-use feature/{KEY})"
+        )
+
+
+    if missing:
+        return None, (
+            "*Virtual Developer* could not start: the ``{params}`` block is incomplete.\n\n"
+            f"Missing: {', '.join(missing)}.\n\n"
+            "Use this shape inside ``{params}`` … ``{params}``:\n\n"
+            "{code}\n"
+            f"{TEMPLATE_HELP.strip()}\n"
+            "{code}"
+        )
+
+    if not target:
+        target = source
+
+    if not _looks_like_git_url(repo):
+        return None, (
+            "*Virtual Developer* could not start: the repository URL looks invalid.\n\n"
+            f"Parsed value: `{repo}`\n\n"
+            "Use a full HTTPS (or SSH) GitLab URL inside ``{params}``, for example:\n"
+            "`Repository: https://gitlab.example.com/group/repo.git`"
+        )
+
+    if not _looks_like_branch(source):
+        return None, (
+            "*Virtual Developer* could not start: the source branch name looks invalid.\n\n"
+            f"Parsed value: `{source}`\n\n"
+            "Example: `Source branch: feature/PROJ-123`"
+        )
+
+    if not _looks_like_branch(target):
+        return None, (
+            "*Virtual Developer* could not start: the target branch name looks invalid.\n\n"
+            f"Parsed value: `{target}`\n\n"
+            "Example: `Target branch: develop` (must already exist on GitLab)"
+        )
+
+    return (
+        IssueGitSpec(
+            repository_url=repo,
+            source_branch=source,
+            target_branch=target,
+        ),
+        None,
+    )
+
+
+def require_issue_git_spec(summary: str = "", description: str = "") -> IssueGitSpec:
+    """Like ``parse_issue_git_spec`` but raises ``IssueGitConfigError``."""
+    spec, err = parse_issue_git_spec(summary, description)
+    if err or spec is None:
+        raise IssueGitConfigError(err or "Invalid git template on issue.")
+    return spec

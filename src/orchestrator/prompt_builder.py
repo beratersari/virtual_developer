@@ -1,57 +1,67 @@
-"""Build prompts for different agent types."""
+"""Build prompts for different agent types from the unified prompt kit."""
+
+from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
+from src.orchestrator.prompt_kit import get_section, substitute_issue_key
 
 
 class PromptBuilder:
-    """Builds prompts for various agent workflows."""
+    """Builds prompts from ``agent/AGENT_PROMPT.md`` sections + Jira body.
+
+    Paths:
+
+    * **planning** — ``§role.planning`` + summary/description (no git policy)
+    * **direct** — ``§role.direct`` + ``§policy.commit`` + summary/description
+    * **execution** — ``§role.execution`` + ``§policy.commit`` + plan path
+    * **oracle** — ``§role.oracle`` + question (no git policy)
+    """
+
+    @staticmethod
+    def _kit_path():
+        return settings.prompt_kit_file
+
+    @staticmethod
+    def role_section(role: str) -> str:
+        """Load a role section: planning | execution | direct | oracle."""
+        section_id = role if role.startswith("role.") else f"role.{role}"
+        return get_section(section_id, kit_path=PromptBuilder._kit_path())
 
     @staticmethod
     def commit_message_block(issue_key: str) -> str:
-        """Concrete commit template for this issue (agent/rules/EXECUTION.md).
+        """Issue-keyed git policy from ``§policy.commit``."""
+        body = get_section(
+            "policy.commit",
+            kit_path=PromptBuilder._kit_path(),
+            issue_key=issue_key,
+        )
+        return f"## Git policy\n\n{body}"
 
-        Agents commit themselves; GitManager's formatter is only a fallback.
-        Injecting the filled-in issue key removes ambiguity from generic rules.
-        """
-        return f"""## Git Commit (MANDATORY if you changed files)
+    @staticmethod
+    def _join_blocks(*parts: str) -> str:
+        return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
 
-Branch: `feature/{issue_key}` (create it if needed). Do **not** push or open an MR.
+    @staticmethod
+    def _jira_body(
+        issue_key: str,
+        summary: str = "",
+        description: str = "",
+        *,
+        extra_heading: str = "### Description",
+    ) -> str:
+        summary = (summary or "").strip()
+        description = (description or "").strip()
+        parts = [f"## Jira issue: {issue_key}"]
+        if summary:
+            parts.append(f"**Summary:** {summary}")
+        if description:
+            parts.append(f"{extra_heading}\n{description}")
+        elif not summary:
+            parts.append("(no summary or description provided)")
+        return "\n\n".join(parts)
 
-**Required subject format** (from EXECUTION.md):
-
-```text
-[{issue_key}] <type>: <description>
-```
-
-Allowed types: `feat` · `fix` · `refactor` · `docs` · `test` · `perf` · `ci` · `build` · `revert` · `chore`
-
-**Doğru format örnekleri for this issue:**
-```text
-[{issue_key}] feat: Yeni özellik eklendi
-[{issue_key}] fix: Hata düzeltildi
-[{issue_key}] refactor: Kodun çalışma şeklini değiştirmeyen iyileştirme
-[{issue_key}] docs: Dökümantasyon işleri
-[{issue_key}] test: Birim testler
-[{issue_key}] perf: Çalışma mantığını değiştirmeyen performans iyileştirmesi
-[{issue_key}] ci: CI/CD değişiklikleri
-[{issue_key}] build: Build sistemi ile ilgili değişiklikler
-[{issue_key}] revert: Kodu geri almak
-[{issue_key}] chore: Genel işler, küçük düzeltmeler
-```
-
-```bash
-git add .
-git commit -m "[{issue_key}] fix: short description of the change"
-```
-
-Rules:
-- Subject MUST be `[{issue_key}] type: description`
-- Do not omit the type; do not use bare `feat:` without the `[{issue_key}]` prefix
-- Do not push / open MR; do not commit secrets (`.env`, tokens)
-"""
-    
     @staticmethod
     def build_prometheus_prompt(
         issue_key: str,
@@ -59,160 +69,113 @@ Rules:
         description: str,
         acceptance_criteria: Optional[str] = None,
     ) -> str:
-        """Build prompt for Prometheus (planning agent)."""
-        
-        prompt = f"""# Task Planning Request
+        """Planning (Prometheus): kit §role.planning + Jira body. No git policy."""
+        jira = PromptBuilder._jira_body(issue_key, summary, description)
+        if acceptance_criteria and str(acceptance_criteria).strip():
+            jira += f"\n\n### Acceptance criteria\n{acceptance_criteria.strip()}"
 
-## JIRA Issue: {issue_key}
-**Summary**: {summary}
+        return PromptBuilder._join_blocks(
+            "# Task planning request",
+            f"## Role\n\n{PromptBuilder.role_section('planning')}",
+            jira,
+        )
 
-## Description
-{description}
-
-"""
-        
-        if acceptance_criteria:
-            prompt += f"""## Acceptance Criteria
-{acceptance_criteria}
-
-"""
-        
-        prompt += f"## Your Task\n{settings.prompt_planning}\n"
-        
-        return prompt
-    
     @staticmethod
     def build_atlas_prompt(
         issue_key: str,
         plan_path: str,
         previous_learnings: Optional[List[str]] = None,
     ) -> str:
-        """Build prompt for Atlas (orchestrator)."""
-        
-        prompt = f"""# Task Execution Request
-
-## JIRA Issue: {issue_key}
-
-## Your Role
-You are Atlas, the orchestrator. Your job is to execute the plan at:
-{plan_path}
-
-## Instructions
-1. Read the plan file
-2. Break down tasks and delegate to appropriate agents using the `task` tool
-3. Accumulate wisdom from each subtask
-4. Verify all work before marking complete
-5. Update the plan file checkboxes as tasks complete
-
-"""
-        
+        """Execution (Atlas): kit §role.execution + git policy + plan path."""
+        body = (
+            f"## Jira issue: {issue_key}\n\n"
+            f"Execute the plan at:\n`{plan_path or '(no plan path)'}`\n"
+        )
         if previous_learnings:
-            prompt += "## Previous Learnings\n"
+            body += "\n### Previous learnings\n"
             for learning in previous_learnings:
-                prompt += f"- {learning}\n"
-            prompt += "\n"
-        
-        prompt += f"{settings.prompt_execution}\n\n"
-        prompt += PromptBuilder.commit_message_block(issue_key)
-        
-        return prompt
-    
+                body += f"- {learning}\n"
+
+        return PromptBuilder._join_blocks(
+            "# Task execution request",
+            f"## Role\n\n{PromptBuilder.role_section('execution')}",
+            PromptBuilder.commit_message_block(issue_key),
+            body,
+        )
+
     @staticmethod
     def build_sisyphus_prompt(
         issue_key: str,
         task_description: str,
         context: Optional[Dict[str, Any]] = None,
+        *,
+        summary: str = "",
     ) -> str:
-        """Build prompt for Sisyphus (direct execution)."""
-        
-        prompt = f"""# Direct Task Execution
+        """Direct execution (Sisyphus): kit §role.direct + git policy + Jira body.
 
-## JIRA Issue: {issue_key}
-
-## Task
-{task_description}
-
-"""
-        
+        ``task_description`` is the Jira description (or free-form request text).
+        Optional ``summary`` is the issue summary.
+        """
+        jira = PromptBuilder._jira_body(
+            issue_key,
+            summary,
+            task_description,
+            extra_heading="### Task",
+        )
         if context:
-            prompt += "## Context\n"
-            if "files" in context:
-                prompt += "\n**Relevant Files**:\n"
-                for f in context["files"]:
-                    prompt += f"- {f}\n"
-            
-            if "patterns" in context:
-                prompt += "\n**Code Patterns**:\n"
-                for p in context["patterns"]:
-                    prompt += f"- {p}\n"
-            
-            prompt += "\n"
-        
-        prompt += f"{settings.prompt_direct_execution}\n\n"
-        prompt += PromptBuilder.commit_message_block(issue_key)
-        
-        return prompt
-    
-    @staticmethod
-    def build_comment_response_prompt(
-        issue_key: str,
-        comment_text: str,
-        current_state: Optional[str] = None,
-    ) -> str:
-        """Build prompt for responding to @bot mentions."""
-        
-        prompt = f"""# Comment Response Request
+            ctx_bits: List[str] = []
+            if context.get("files"):
+                ctx_bits.append(
+                    "**Relevant files:**\n"
+                    + "\n".join(f"- {f}" for f in context["files"])
+                )
+            if context.get("patterns"):
+                ctx_bits.append(
+                    "**Code patterns:**\n"
+                    + "\n".join(f"- {p}" for p in context["patterns"])
+                )
+            extra = {
+                k: v for k, v in context.items() if k not in ("files", "patterns")
+            }
+            if extra:
+                ctx_bits.append(
+                    "**Other context:**\n"
+                    + "\n".join(f"- {k}: {v}" for k, v in extra.items())
+                )
+            if ctx_bits:
+                jira += "\n\n### Context\n" + "\n\n".join(ctx_bits)
 
-## JIRA Issue: {issue_key}
-
-## User Comment
-{comment_text}
-
-"""
-        
-        if current_state:
-            prompt += f"""## Current Work State
-{current_state}
-
-"""
-        
-        prompt += """## Instructions
-Respond to the user's request in the comment.
-
-If they want to:
-- **Start work**: Begin execution if a plan exists
-- **Check status**: Report current progress
-- **Make changes**: Implement the specific request
-- **Ask question**: Provide a clear answer
-
-Be concise and actionable in your response.
-"""
-        
-        return prompt
+        return PromptBuilder._join_blocks(
+            "# Direct task execution",
+            f"## Role\n\n{PromptBuilder.role_section('direct')}",
+            PromptBuilder.commit_message_block(issue_key),
+            jira,
+        )
 
     @staticmethod
     def build_oracle_consult_prompt(
         question: str,
         context_files: Optional[List[str]] = None,
+        *,
+        issue_key: str = "",
+        summary: str = "",
     ) -> str:
-        """Build prompt for Oracle (architecture consultation)."""
-        
-        prompt = f"""# Architecture Consultation
-
-## Question
-{question}
-
-## Your Role
-You are Oracle. Provide expert architecture guidance.
-
-"""
-        
+        """Oracle: kit §role.oracle + question. No git policy."""
+        parts: List[str] = []
+        if issue_key:
+            parts.append(PromptBuilder._jira_body(issue_key, summary, question, extra_heading="### Question"))
+        else:
+            parts.append(f"## Question\n{(question or '').strip() or '(empty)'}")
         if context_files:
-            prompt += "## Context Files\n"
-            for f in context_files:
-                prompt += f"- {f}\n"
-            prompt += "\n"
-        
-        prompt += f"{settings.prompt_oracle}\n"
-        
-        return prompt
+            parts.append(
+                "## Context files\n" + "\n".join(f"- {f}" for f in context_files)
+            )
+
+        return PromptBuilder._join_blocks(
+            "# Architecture consultation",
+            f"## Role\n\n{PromptBuilder.role_section('oracle')}",
+            *parts,
+        )
+
+
+__all__ = ["PromptBuilder", "substitute_issue_key"]
