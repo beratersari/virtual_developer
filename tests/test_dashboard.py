@@ -133,6 +133,63 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
             assert "version" in d.json()["meta"]
 
 
+def test_poll_api_hides_unmatched_board_issues(tmp_path):
+    """Poll DTO lists only bot-eligible issues (label or assignee match)."""
+    from src.dashboard.service import build_poll_status
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = PollSnapshotStore()
+    store.end_poll(
+        source="board 1",
+        issues=[
+            {
+                "key": "MATCH-1",
+                "summary": "has trigger",
+                "jira_status": "To Do",
+                "labels": ["ai-assist"],
+                "assignee": None,
+                "matched_label": True,
+                "matched_assignee": False,
+                "is_todo": True,
+                "will_process": True,
+                "matched_labels": ["ai-assist"],
+            },
+            {
+                "key": "NOISE-9",
+                "summary": "unrelated ticket",
+                "jira_status": "To Do",
+                "labels": ["other"],
+                "assignee": "Alice",
+                "matched_label": False,
+                "matched_assignee": False,
+                "is_todo": True,
+                "will_process": False,
+                "matched_labels": [],
+            },
+            {
+                "key": "BOT-2",
+                "summary": "assigned to bot",
+                "jira_status": "In Progress",
+                "labels": [],
+                "assignee": "Jira AI Bot",
+                "matched_label": False,
+                "matched_assignee": True,
+                "is_todo": False,
+                "will_process": False,
+                "matched_labels": [],
+            },
+        ],
+        interval_seconds=30,
+    )
+    poll = build_poll_status(store, sm)
+    keys = {i.key for i in poll.issues}
+    assert keys == {"MATCH-1", "BOT-2"}
+    assert "NOISE-9" not in keys
+    # Counts still reflect the full board snapshot
+    assert poll.matched_count == 2
+    assert poll.will_process_count == 1
+
+
 def test_api_settings_patch(tmp_path, monkeypatch):
     from src.config import settings
 

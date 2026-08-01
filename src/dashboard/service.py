@@ -146,6 +146,13 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
+        # Ops list: only issues the Virtual Developer can act on (trigger
+        # label and/or bot assignee). Full board rows stay in the raw
+        # snapshot for counts / debug; UI must not show noise.
+        matched_label = bool(row.get("matched_label"))
+        matched_assignee = bool(row.get("matched_assignee"))
+        if not (matched_label or matched_assignee):
+            continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
         issues.append(
@@ -155,8 +162,8 @@ def build_poll_status(
                 jira_status=row.get("jira_status") or "",
                 labels=list(row.get("labels") or []),
                 assignee=row.get("assignee"),
-                matched_label=bool(row.get("matched_label")),
-                matched_assignee=bool(row.get("matched_assignee")),
+                matched_label=matched_label,
+                matched_assignee=matched_assignee,
                 is_todo=bool(row.get("is_todo")),
                 will_process=bool(row.get("will_process")),
                 local_status=local.status.value if local else row.get("local_status"),

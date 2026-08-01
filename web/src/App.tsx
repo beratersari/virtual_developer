@@ -1058,7 +1058,8 @@ export default function App() {
                   {data.poll.issues.length === 0 && (
                     <tr>
                       <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                        Waiting for first poll cycle…
+                        No bot-eligible issues this cycle (trigger label or bot
+                        assignee). Unmatched board issues are hidden.
                       </td>
                     </tr>
                   )}
@@ -1127,7 +1128,8 @@ export default function App() {
               </table>
             </div>
             <p className="text-xs text-slate-500">
-              Last poll: {data.poll.last_poll_at ?? '—'} · Cycle {data.poll.cycle}
+              Last poll: {data.poll.last_poll_at ?? '—'} · Cycle {data.poll.cycle} ·
+              Showing only bot-eligible issues (label / assignee match)
             </p>
           </section>
         )}
