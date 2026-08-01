@@ -1,11 +1,11 @@
 # Build a Windows offline distribution zip:
-#   - OpenCode CLI (pinned) + config template for %USERPROFILE%\.opencode
-#   - oh-my-opencode plugin (pinned, preinstalled node_modules)
+#   - OpenCode CLI (pinned) + oh-my-opencode (preinstalled node_modules)
 #   - glab CLI (pinned)
 #   - Python wheels for requirements.txt (offline pip)
 #   - Application sources + install.bat
 #
-# Users: download zip -> extract -> run install.bat
+# Users: download artifact/zip -> extract once -> run install.bat
+# Install target: %USERPROFILE%\.opencode only (config also under .config\opencode)
 
 name: Windows Distribution
 
@@ -125,6 +125,7 @@ jobs:
             2. You should see `install.bat`, `START_HERE.txt`, `vendor\`, `src\`
             3. Install a **supported** Python (see `vendor\SUPPORTED_PYTHON.txt` inside the package)
             4. Run **`install.bat`**
+            5. OpenCode lands only under `%USERPROFILE%\.opencode` — verify with `where opencode`
 
             ### Bundled versions
             - OpenCode: `${{ steps.versions.outputs.OPENCODE_VERSION }}`
@@ -134,5 +135,9 @@ jobs:
 
             No npm/Node required. Do not use Python versions newer than the supported list
             (e.g. 3.14 often lacks `pydantic-core` wheels).
+
+            If you previously installed and see both `C:\vd\opencode` and `%USERPROFILE%\.opencode`,
+            delete the legacy `C:\vd\opencode` folder, fix/remove a bad
+            `%USERPROFILE%\.config\opencode\opencode.json`, and re-run `install.bat`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

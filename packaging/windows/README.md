@@ -8,14 +8,20 @@ This folder drives the **Windows-only** offline installer shipped as a zip from 
 2. Extract.
 3. Run `install.bat`.
 
-OpenCode is installed under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
+OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
+Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
+
+Do **not** expect a second install at `C:\vd\opencode` (that was a short-lived workaround).
+Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 
 ## Design notes (Windows pain points)
 
 | Problem | Fix |
 |---------|-----|
-| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with `tar` into `%USERPROFILE%\.opencode` |
+| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
 | Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
+| `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
+| Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
 
 ## Files
 

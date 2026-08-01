@@ -50,18 +50,18 @@ try {
     Write-Host "Max relative path length: $maxRel"
     Write-Host "Worst path: $worst"
 
-    # Leave headroom for C:\vd\opencode\ (14) or LocalAppData prefixes (~40-80)
+    # Leave headroom for %USERPROFILE%\.opencode\ (~40-80 chars for typical profiles)
     $limit = 200
     if ($maxRel -gt $limit) {
         throw "FAIL: relative path $maxRel > $limit chars — Windows extract will break for many users. Prune/flatten node_modules."
     }
 
-    # Simulated absolute path on a long username
+    # Simulated absolute path on a long username under the product default home
     $fakePrefix = "C:\Users\VeryLongUserNameHere\.opencode\"
     $fakeAbs = $fakePrefix.Length + $maxRel
     Write-Host "Simulated abs length under long profile: $fakeAbs"
     if ($fakeAbs -gt 250) {
-        Write-Host "WARNING: would exceed classic MAX_PATH under user profile — install uses short root C:\vd\opencode"
+        Write-Host "WARNING: would exceed classic MAX_PATH under user profile — long-path extract is required"
     }
 } finally {
     Remove-Item -LiteralPath $tmpAudit -Recurse -Force -ErrorAction SilentlyContinue
@@ -78,6 +78,10 @@ Write-Host "Copying payload -> $deepRoot"
 robocopy $PayloadDir $deepRoot /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy payload failed: $LASTEXITCODE" }
 
+# Product default: %USERPROFILE%\.opencode (override only for advanced short-path tests)
+$ocHome = Join-Path $env:USERPROFILE ".opencode"
+$ocConfigDir = Join-Path $env:USERPROFILE ".config\opencode"
+
 Write-Step "Defender: disable realtime + exclusions (runner quarantine eats opencode.exe)"
 try {
     Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
@@ -87,8 +91,8 @@ try {
 }
 $excludePaths = @(
     $deepRoot,
-    "C:\vd",
-    "C:\vd\opencode",
+    $ocHome,
+    $ocConfigDir,
     (Join-Path $deepRoot "vendor\bin"),
     (Join-Path $PayloadDir "vendor\bin")
 )
@@ -108,25 +112,33 @@ try {
     Write-Host "  (skip process exclusion: $($_.Exception.Message))"
 }
 
-Write-Step "Run install.bat non-interactively"
+Write-Step "Run install.bat non-interactively (home = %USERPROFILE%\.opencode)"
 $env:VD_NONINTERACTIVE = "1"
-$env:VD_OPENCODE_ROOT = "C:\vd\opencode"  # short path used by product
-# Clean previous smoke install
-if (Test-Path -LiteralPath $env:VD_OPENCODE_ROOT) {
-    Remove-Item -LiteralPath $env:VD_OPENCODE_ROOT -Recurse -Force -ErrorAction SilentlyContinue
+# Do NOT set VD_OPENCODE_ROOT — product default is %USERPROFILE%\.opencode
+Remove-Item Env:VD_OPENCODE_ROOT -ErrorAction SilentlyContinue
+# Clean previous smoke install (real dir or leftover junction)
+if (Test-Path -LiteralPath $ocHome) {
+    Remove-Item -LiteralPath $ocHome -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $ocHome) {
+        cmd /c "rmdir `"$ocHome`"" 2>$null
+    }
 }
+if (Test-Path -LiteralPath (Join-Path $ocConfigDir "opencode.json")) {
+    Remove-Item -LiteralPath (Join-Path $ocConfigDir "opencode.json") -Force -ErrorAction SilentlyContinue
+}
+
 $installBat = Join-Path $deepRoot "install.bat"
 $p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$installBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
 if ($p.ExitCode -ne 0) {
-    $oc = Join-Path $env:VD_OPENCODE_ROOT "bin\opencode.exe"
+    $oc = Join-Path $ocHome "bin\opencode.exe"
     if (Test-Path -LiteralPath $oc) {
         Write-Host "DEBUG opencode.exe size after failed install: $((Get-Item $oc).Length)"
     }
     throw "install.bat failed with exit code $($p.ExitCode)"
 }
 
-Write-Step "Verify installed OpenCode (AMD64 + --version)"
-$oc = Join-Path $env:VD_OPENCODE_ROOT "bin\opencode.exe"
+Write-Step "Verify installed OpenCode (AMD64 + --version + valid config JSON)"
+$oc = Join-Path $ocHome "bin\opencode.exe"
 if (-not (Test-Path -LiteralPath $oc)) {
     throw "opencode.exe missing after install: $oc"
 }
@@ -138,6 +150,29 @@ $ver = & $oc --version 2>&1
 Write-Host "opencode --version => $ver"
 if ($LASTEXITCODE -ne 0) {
     throw "opencode --version failed (exit $LASTEXITCODE): $ver"
+}
+
+# Regression: unescaped "echo ... -> path" used to overwrite opencode.json with "[OK] config ..."
+$homeCfg = Join-Path $ocHome "opencode.json"
+$globalCfg = Join-Path $ocConfigDir "opencode.json"
+foreach ($cfg in @($homeCfg, $globalCfg)) {
+    if (-not (Test-Path -LiteralPath $cfg)) {
+        throw "Missing config after install: $cfg"
+    }
+    $raw = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop
+    if ($raw -match '\[OK\]' -or $raw -match 'config\s+-') {
+        throw "FAIL: config looks like install.bat echo output (redirect bug): $cfg => $raw"
+    }
+    try {
+        $null = $raw | ConvertFrom-Json
+    } catch {
+        throw "FAIL: config is not valid JSON: $cfg => $raw"
+    }
+    Write-Host "OK valid JSON: $cfg"
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode"))) {
+    throw "oh-my-opencode plugin missing under $ocHome\node_modules"
 }
 
 Write-Step "E2E smoke PASSED"

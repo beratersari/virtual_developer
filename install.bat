@@ -3,11 +3,14 @@ REM ============================================================================
 REM JIRA Virtual Developer - Windows Installer
 REM =============================================================================
 REM Offline when run from a CI-built distribution zip (vendor\ present):
-REM   - Extracts vendor\opencode-home.zip -> %USERPROFILE%\.opencode
+REM   - Extracts vendor\opencode-home.zip into %%USERPROFILE%%\.opencode
 REM     (single archive avoids long-path / slow node_modules extract of the outer zip)
 REM   - Creates .venv and installs Python deps from vendor\python-wheels (3.10+)
 REM
 REM Online fallback only if VD_ALLOW_ONLINE=1 and vendor is missing.
+REM
+REM IMPORTANT (cmd.exe): never write unescaped "->" in echo lines — ">" is redirect
+REM and will overwrite the path on the right (e.g. opencode.json / opencode.exe).
 REM =============================================================================
 
 setlocal EnableDelayedExpansion
@@ -20,23 +23,24 @@ set "VERSIONS_FILE=%SCRIPT_DIR%\packaging\windows\versions.env"
 if exist "%VENDOR_DIR%\versions.env" set "VERSIONS_FILE=%VENDOR_DIR%\versions.env"
 
 REM ---------------------------------------------------------------------------
-REM OpenCode install root: SHORT path to avoid Windows MAX_PATH (260).
-REM Prefer C:\vd\opencode; override with VD_OPENCODE_ROOT; fall back to LocalAppData.
-REM Also junction %%USERPROFILE%%\.opencode -> short root when possible.
+REM OpenCode install root: always %%USERPROFILE%%\.opencode (product default).
+REM Override only via VD_OPENCODE_ROOT (advanced / CI short-path testing).
 REM ---------------------------------------------------------------------------
 if defined VD_OPENCODE_ROOT (
     set "OPENCODE_HOME=%VD_OPENCODE_ROOT%"
 ) else (
-    set "OPENCODE_HOME=%SystemDrive%\vd\opencode"
+    set "OPENCODE_HOME=%USERPROFILE%\.opencode"
 )
-if not exist "%SystemDrive%\vd" mkdir "%SystemDrive%\vd" 2>nul
 if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%" 2>nul
 if not exist "%OPENCODE_HOME%" (
-    set "OPENCODE_HOME=%LOCALAPPDATA%\vd\opencode"
-    if not exist "%LOCALAPPDATA%\vd" mkdir "%LOCALAPPDATA%\vd" 2>nul
-    if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%" 2>nul
+    echo [ERROR] Cannot create OpenCode home: %OPENCODE_HOME%
+    call :maybe_pause
+    exit /b 1
 )
 set "OPENCODE_BIN=%OPENCODE_HOME%\bin"
+set "USER_OC_HOME=%USERPROFILE%\.opencode"
+set "LEGACY_OC_HOME=%SystemDrive%\vd\opencode"
+set "LEGACY_OC_HOME2=%LOCALAPPDATA%\vd\opencode"
 
 echo ========================================
 echo   JIRA Virtual Developer - Installer
@@ -44,7 +48,7 @@ echo   Windows offline / local setup
 echo ========================================
 echo.
 echo Install root : %SCRIPT_DIR%
-echo OpenCode home: %OPENCODE_HOME%  ^(short path — avoids MAX_PATH^)
+echo OpenCode home: %OPENCODE_HOME%
 echo.
 
 REM ---------------------------------------------------------------------------
@@ -179,10 +183,22 @@ if exist "%VENDOR_DIR%\python-wheels" (
 echo [OK] Python dependencies installed into .venv
 
 REM ---------------------------------------------------------------------------
-REM Step 3: Deploy OpenCode home -> %USERPROFILE%\.opencode
+REM Step 3: Deploy OpenCode home under %%USERPROFILE%%\.opencode (or VD_OPENCODE_ROOT)
 REM ---------------------------------------------------------------------------
 echo.
 echo Step 3: Installing OpenCode under %OPENCODE_HOME% ...
+
+REM If %%USERPROFILE%%\.opencode is a leftover junction to C:\vd\opencode, break it
+REM so we install into a real directory under the user profile (single install root).
+if /i "%OPENCODE_HOME%"=="%USER_OC_HOME%" (
+    if exist "%USER_OC_HOME%" (
+        fsutil reparsepoint query "%USER_OC_HOME%" >nul 2>&1
+        if not errorlevel 1 (
+            echo   Removing junction at %%USERPROFILE%%\.opencode ^(legacy short-path link^)...
+            rmdir "%USER_OC_HOME%" 2>nul
+        )
+    )
+)
 
 if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%"
 if not exist "%OPENCODE_BIN%" mkdir "%OPENCODE_BIN%"
@@ -229,7 +245,7 @@ if not exist "%OPENCODE_BIN%\opencode.exe" (
     call :maybe_pause
     exit /b 1
 )
-echo [OK] opencode.exe -> %OPENCODE_BIN%\opencode.exe
+echo [OK] opencode.exe at %OPENCODE_BIN%\opencode.exe
 
 REM Antivirus may replace opencode.exe with a ~21-byte stub after extract.
 REM Restore from flat vendor\bin backup (short path, not nested in zip).
@@ -259,33 +275,36 @@ if errorlevel 1 (
 )
 echo [OK] opencode runs ^(64-bit AMD64^)
 
+REM If install root is not %%USERPROFILE%%\.opencode, junction for tools that look there.
 call :link_user_opencode_home
 
+REM Seed / repair configs (never use echo with "->" — that overwrites the file via redirect)
+call :ensure_opencode_configs
+if errorlevel 1 (
+    echo [ERROR] OpenCode config under %OPENCODE_HOME% is missing or invalid JSON.
+    call :maybe_pause
+    exit /b 1
+)
+
 if exist "%OPENCODE_HOME%\opencode.json" (
-    echo [OK] config      -> %OPENCODE_HOME%\opencode.json
+    echo [OK] config at %OPENCODE_HOME%\opencode.json
 ) else (
     echo [WARNING] opencode.json not found under %OPENCODE_HOME%
 )
 
 if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
-    echo [OK] plugin     -> oh-my-opencode in %OPENCODE_HOME%\node_modules
+    echo [OK] plugin oh-my-opencode in %OPENCODE_HOME%\node_modules
 ) else (
     echo [WARNING] oh-my-opencode plugin not found under node_modules
 )
 
 REM Mirror config into %USERPROFILE%\.config\opencode for OpenCode global discovery
-set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
-if not exist "%OC_CONFIG_DIR%" mkdir "%OC_CONFIG_DIR%"
-if exist "%OPENCODE_HOME%\opencode.json" (
-    copy /Y "%OPENCODE_HOME%\opencode.json" "%OC_CONFIG_DIR%\opencode.json" >nul
+call :mirror_opencode_config
+if errorlevel 1 (
+    echo [ERROR] Failed to install valid config at %%USERPROFILE%%\.config\opencode
+    call :maybe_pause
+    exit /b 1
 )
-if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
-    copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%OC_CONFIG_DIR%\oh-my-opencode.json" >nul
-)
-if exist "%OPENCODE_HOME%\package.json" (
-    copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
-)
-echo [OK] Mirrored config to %OC_CONFIG_DIR%
 
 REM ---------------------------------------------------------------------------
 REM Step 4: glab
@@ -299,13 +318,28 @@ if exist "%OPENCODE_BIN%\glab.exe" (
 )
 
 REM ---------------------------------------------------------------------------
-REM Step 5: User PATH
+REM Step 5: User PATH (single install: only OPENCODE_BIN; drop legacy short roots)
 REM ---------------------------------------------------------------------------
 echo.
 echo Step 5: Adding OpenCode bin to user PATH...
+call :remove_user_path_entry "%LEGACY_OC_HOME%\bin"
+call :remove_user_path_entry "%LEGACY_OC_HOME2%\bin"
+REM If home is user .opencode, do not leave a second PATH entry for a short root
+if /i not "%OPENCODE_HOME%"=="%USER_OC_HOME%" (
+    REM short/override root is primary; still ensure user .opencode\bin is not a stale second copy on PATH
+    call :remove_user_path_entry "%USER_OC_HOME%\bin"
+)
 call :ensure_user_path "%OPENCODE_BIN%"
 set "PATH=%OPENCODE_BIN%;%PATH%"
 echo [OK] PATH includes %OPENCODE_BIN% ^(this session + user env^)
+
+if exist "%LEGACY_OC_HOME%\bin\opencode.exe" (
+    if /i not "%OPENCODE_HOME%"=="%LEGACY_OC_HOME%" (
+        echo [INFO] Legacy install still present at %LEGACY_OC_HOME%
+        echo        It was removed from PATH. Safe to delete later:
+        echo          rmdir /s /q "%LEGACY_OC_HOME%"
+    )
+)
 
 REM ---------------------------------------------------------------------------
 REM Step 6: .env + project init
@@ -342,19 +376,22 @@ echo OpenCode home : %OPENCODE_HOME%
 echo   bin         : %OPENCODE_BIN%\opencode.exe
 if exist "%OPENCODE_BIN%\glab.exe" echo   glab        : %OPENCODE_BIN%\glab.exe
 echo   config      : %OPENCODE_HOME%\opencode.json
+echo   global cfg  : %USERPROFILE%\.config\opencode\opencode.json
 echo Python venv   : %VENV_DIR%
 echo.
 echo Next steps:
 echo   1. Edit .env with your Jira / GitLab settings
 echo   2. Open a NEW terminal ^(so PATH updates apply^)
-echo   3. Activate venv and start:
+echo   3. Verify a single OpenCode install:
+echo        where opencode
+echo        ^(should show only %OPENCODE_BIN%\opencode.exe^)
+echo   4. Activate venv and start:
 echo        cd /d "%SCRIPT_DIR%"
 echo        .venv\Scripts\activate
 echo        python cli.py start
 echo.
 echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%
-echo        ^(also linked from %%USERPROFILE%%\.opencode when junction succeeds^)
 echo.
 call :maybe_pause
 exit /b 0
@@ -397,7 +434,7 @@ if errorlevel 1 exit /b 1
 exit /b 0
 
 :link_user_opencode_home
-REM Optional junction so tools that look for %%USERPROFILE%%\.opencode still work
+REM Only when OPENCODE_HOME is NOT already %%USERPROFILE%%\.opencode (VD_OPENCODE_ROOT).
 set "USER_OC=%USERPROFILE%\.opencode"
 if /i "%OPENCODE_HOME%"=="%USER_OC%" exit /b 0
 if exist "%USER_OC%" (
@@ -407,11 +444,76 @@ if exist "%USER_OC%" (
 )
 mklink /J "%USER_OC%" "%OPENCODE_HOME%" >nul 2>&1
 if errorlevel 1 (
-    echo [WARNING] Could not junction %%USERPROFILE%%\.opencode -^> %OPENCODE_HOME%
+    echo [WARNING] Could not junction %%USERPROFILE%%\.opencode to %OPENCODE_HOME%
     echo           OpenCode still works via PATH: %OPENCODE_BIN%
 ) else (
-    echo [OK] Junction: %%USERPROFILE%%\.opencode -^> %OPENCODE_HOME%
+    echo [OK] Junction: %%USERPROFILE%%\.opencode =^> %OPENCODE_HOME%
 )
+exit /b 0
+
+:ensure_opencode_configs
+REM Ensure opencode.json / oh-my-opencode.json / package.json exist and are valid JSON.
+REM Prefer files already in OPENCODE_HOME (from opencode-home.zip); fall back to packaging templates.
+set "PKG_OC=%SCRIPT_DIR%\packaging\windows"
+if not exist "%OPENCODE_HOME%\opencode.json" (
+    if exist "%PKG_OC%\opencode.json" (
+        copy /Y "%PKG_OC%\opencode.json" "%OPENCODE_HOME%\opencode.json" >nul
+    )
+)
+if not exist "%OPENCODE_HOME%\oh-my-opencode.json" (
+    if exist "%PKG_OC%\oh-my-opencode.json" (
+        copy /Y "%PKG_OC%\oh-my-opencode.json" "%OPENCODE_HOME%\oh-my-opencode.json" >nul
+    )
+)
+if not exist "%OPENCODE_HOME%\package.json" (
+    if exist "%PKG_OC%\package.json" (
+        copy /Y "%PKG_OC%\package.json" "%OPENCODE_HOME%\package.json" >nul
+    )
+)
+if not exist "%OPENCODE_HOME%\opencode.json" (
+    echo [ERROR] opencode.json missing under %OPENCODE_HOME%
+    exit /b 1
+)
+REM If config was corrupted (e.g. old installer wrote echo output via "->"), re-seed from packaging.
+python -c "import json,sys; p=sys.argv[1]; json.load(open(p,encoding='utf-8-sig'))" "%OPENCODE_HOME%\opencode.json" >nul 2>&1
+if errorlevel 1 (
+    echo [WARNING] opencode.json is not valid JSON — restoring from package template
+    if exist "%PKG_OC%\opencode.json" (
+        copy /Y "%PKG_OC%\opencode.json" "%OPENCODE_HOME%\opencode.json" >nul
+    ) else (
+        > "%OPENCODE_HOME%\opencode.json" echo {"$schema":"https://opencode.ai/config.json","plugin":["oh-my-opencode"]}
+    )
+    python -c "import json,sys; p=sys.argv[1]; json.load(open(p,encoding='utf-8-sig'))" "%OPENCODE_HOME%\opencode.json" >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Could not write valid opencode.json
+        exit /b 1
+    )
+)
+exit /b 0
+
+:mirror_opencode_config
+REM Mirror home configs into %%USERPROFILE%%\.config\opencode (OpenCode global discovery).
+set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
+if not exist "%OC_CONFIG_DIR%" mkdir "%OC_CONFIG_DIR%"
+if exist "%OPENCODE_HOME%\opencode.json" (
+    copy /Y "%OPENCODE_HOME%\opencode.json" "%OC_CONFIG_DIR%\opencode.json" >nul
+)
+if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
+    copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%OC_CONFIG_DIR%\oh-my-opencode.json" >nul
+)
+if exist "%OPENCODE_HOME%\package.json" (
+    copy /Y "%OPENCODE_HOME%\package.json" "%OC_CONFIG_DIR%\package.json" >nul
+)
+if not exist "%OC_CONFIG_DIR%\opencode.json" (
+    echo [ERROR] Failed to mirror opencode.json to %OC_CONFIG_DIR%
+    exit /b 1
+)
+python -c "import json,sys; p=sys.argv[1]; json.load(open(p,encoding='utf-8-sig'))" "%OC_CONFIG_DIR%\opencode.json" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Mirrored opencode.json is not valid JSON: %OC_CONFIG_DIR%\opencode.json
+    exit /b 1
+)
+echo [OK] Mirrored valid config to %OC_CONFIG_DIR%
 exit /b 0
 
 :extract_opencode_home_zip
@@ -420,7 +522,7 @@ set "OC_ZIP=%VENDOR_DIR%\opencode-home.zip"
 if not exist "%OC_ZIP%" exit /b 1
 
 if exist "%OPENCODE_HOME%\node_modules" (
-    echo   Removing previous node_modules under .opencode ...
+    echo   Removing previous node_modules under OpenCode home ...
     rmdir /s /q "%OPENCODE_HOME%\node_modules" 2>nul
 )
 
@@ -447,7 +549,7 @@ for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set
 echo ;%USER_PATH%; | find /I ";%ADD_PATH%;" >nul
 if not errorlevel 1 (
     echo [OK] User PATH already contains %ADD_PATH%
-    goto :eof
+    exit /b 0
 )
 REM Prepend so our 64-bit opencode wins over any older install
 if defined USER_PATH (
@@ -461,7 +563,26 @@ if errorlevel 1 (
 ) else (
     echo [OK] Prepended to user PATH: %ADD_PATH%
 )
-goto :eof
+exit /b 0
+
+:remove_user_path_entry
+REM Drop a PATH segment (e.g. legacy C:\vd\opencode\bin) so only one OpenCode remains.
+set "DROP_PATH=%~1"
+if not defined DROP_PATH exit /b 0
+set "USER_PATH="
+for /f "tokens=2*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "USER_PATH=%%B"
+if not defined USER_PATH exit /b 0
+echo ;%USER_PATH%; | find /I ";%DROP_PATH%;" >nul
+if errorlevel 1 exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$drop='%DROP_PATH%';" ^
+  "$raw=[Environment]::GetEnvironmentVariable('Path','User');" ^
+  "if ([string]::IsNullOrEmpty($raw)) { exit 0 };" ^
+  "$parts=$raw -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ne $drop.TrimEnd('\')) -and ($_.ToLowerInvariant() -ne $drop.ToLowerInvariant()) };" ^
+  "$new=($parts -join ';').Trim(';');" ^
+  "[Environment]::SetEnvironmentVariable('Path',$new,'User');" ^
+  "Write-Host ('[OK] Removed from user PATH: {0}' -f $drop)"
+exit /b 0
 
 :install_opencode_online
 echo   Fetching OpenCode v!OPENCODE_VERSION! ...

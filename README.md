@@ -219,7 +219,7 @@ What `install.bat` does:
 
 The outer zip does **not** expand `node_modules` (avoids Windows path-too-long and slow
 Explorer extract). OpenCode + plugin ship as one file: `vendor\opencode-home.zip`,
-which `install.bat` unpacks with `tar` into a short path under your user profile.
+which `install.bat` unpacks into **`%USERPROFILE%\.opencode` only** (no second copy under `C:\vd`).
 
 OpenCode layout after install:
 
@@ -227,10 +227,13 @@ OpenCode layout after install:
 %USERPROFILE%\.opencode\
   bin\opencode.exe
   bin\glab.exe
-  opencode.json          # plugin registration
+  opencode.json          # plugin registration (valid JSON)
   oh-my-opencode.json
   package.json
   node_modules\...       # extracted by install.bat from opencode-home.zip
+
+%USERPROFILE%\.config\opencode\
+  opencode.json          # mirrored for OpenCode global config discovery
 ```
 
 **Windows requirements (zip install):**
@@ -242,9 +245,16 @@ OpenCode layout after install:
 
 If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
 **corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Delete
-`%USERPROFILE%\.opencode`, re-install from a fresh package, then run `where opencode`.
+`%USERPROFILE%\.opencode`, remove any leftover `C:\vd\opencode`, re-install from a fresh
+package, open a **new** terminal, then run `where opencode` (expect a single path under
+`%USERPROFILE%\.opencode\bin`).
+
+If `opencode` reports **invalid JSON** for `.config\opencode\opencode.json`, delete that
+file and re-run `install.bat` (older installer builds could overwrite the config via a
+cmd `echo` redirect bug).
+
 **From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
-it will download OpenCode/glab and use npm for the plugin if available.
+set `VD_ALLOW_ONLINE=1` and it will download OpenCode/glab and use npm for the plugin if available.
 
 Pinned versions live in `packaging/windows/versions.env` and are refreshed by
 `.github/workflows/windows-dist.yml` on pushes to `main`/`develop` and on `v*` tags.

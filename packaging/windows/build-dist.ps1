@@ -475,7 +475,7 @@ try {
 # Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to short path C:\vd\opencode)"
+Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to %USERPROFILE%\.opencode)"
 
 # ---------------------------------------------------------------------------
 # 5) Download Python wheels for 3.10+ (win_amd64)
@@ -532,9 +532,11 @@ JIRA Virtual Developer — Windows offline package
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
 4. Run install.bat
-5. OpenCode is installed to a SHORT path: C:\vd\opencode
-   (junction may also create %USERPROFILE%\.opencode)
+5. OpenCode is installed only under: %USERPROFILE%\.opencode
+   (bin\opencode.exe, config, oh-my-opencode plugin)
+   Config is also mirrored to: %USERPROFILE%\.config\opencode\
 6. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
+7. Verify a single install:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
 "@
