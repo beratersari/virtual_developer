@@ -19,6 +19,9 @@ export type TaskItem = {
   feature_branch?: string | null
   merge_request_url?: string | null
   live: boolean
+  task_id?: string | null
+  opencode_session_id?: string | null
+  opencode_session_ids?: string[]
 }
 
 export type TasksPayload = {
@@ -74,10 +77,94 @@ export type SettingsPayload = {
   jira_email_configured: boolean
 }
 
+export type JobItem = {
+  job_id: string
+  issue_key: string
+  summary: string
+  /** Snapshot of Jira description at job start (not live issue text). */
+  description?: string
+  workflow_type: string
+  agent: string
+  status: string
+  task_id?: string | null
+  task_ids?: string[]
+  opencode_session_id?: string | null
+  opencode_session_ids?: string[]
+  session_log_path?: string | null
+  prompt_path?: string | null
+  progress_percentage: number
+  error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  updated_at?: string | null
+  live: boolean
+}
+
+export type JobsPayload = {
+  jobs: JobItem[]
+  total: number
+  issue_key_filter?: string | null
+  server_time: string
+}
+
 export type DashboardPayload = {
   type: string
   meta: Meta
   tasks: TasksPayload
+  jobs?: JobsPayload
   poll: PollPayload
   settings: SettingsPayload
+}
+
+export type TextArtifact = {
+  path: string
+  name?: string
+  size_bytes?: number
+  content: string
+  truncated: boolean
+  error?: string | null
+}
+
+export type SystemLogLine = {
+  timestamp: string
+  message: string
+}
+
+export type TaskDetail = {
+  issue_key: string
+  summary: string
+  description: string
+  status: string
+  progress_percentage: number
+  live: boolean
+  can_cancel: boolean
+  workflow_type?: string | null
+  plan_path?: string | null
+  current_task_id?: string | null
+  current_opencode_session_id?: string | null
+  task_ids?: string[]
+  job_ids?: string[]
+  current_job_id?: string | null
+  opencode_session_ids?: string[]
+  opencode_sessions?: Array<Record<string, unknown>>
+  error_message?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  feature_branch?: string | null
+  merge_request_url?: string | null
+  retry_history: Array<Record<string, unknown>>
+  prompts: {
+    workflow_type?: string
+    agent?: string
+    system_rules?: string
+    reconstructed_agent_prompt?: string
+    execution_system_rules?: string
+    execution_agent_prompt?: string
+    captured_prompt_files?: TextArtifact[]
+    error?: string
+  }
+  session_logs: TextArtifact[]
+  system_logs: SystemLogLine[]
+  jobs?: JobItem[]
+  server_time: string
 }

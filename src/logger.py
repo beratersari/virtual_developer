@@ -166,6 +166,19 @@ class Logger:
         print(formatted, file=stream)
         stream.flush()
 
+        # Feed dashboard issue log buffer (plain text, no ANSI)
+        try:
+            from src.dashboard.issue_logs import issue_log_ring
+
+            plain = (
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  "
+                f"{self._LEVEL_CONFIG[level][0]:<8}  "
+                f"[{filename}:{line_no}]  {func_name}  {message}"
+            )
+            issue_log_ring.append(plain)
+        except Exception:
+            pass
+
     def debug(self, message: str) -> None:
         self._log(LogLevel.DEBUG, message)
 

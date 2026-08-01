@@ -1,6 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { dashboardWsUrl, fetchDashboard, patchSettings } from './api'
-import type { DashboardPayload, SettingsPayload } from './types'
+import {
+  cancelTask,
+  dashboardWsUrl,
+  fetchDashboard,
+  fetchJobs,
+  fetchTaskDetail,
+  patchSettings,
+} from './api'
+import type {
+  DashboardPayload,
+  JobItem,
+  JobsPayload,
+  SettingsPayload,
+  TaskDetail,
+  TaskItem,
+} from './types'
 
 type Tab = 'tasks' | 'poll' | 'settings'
 
@@ -39,16 +53,97 @@ export default function App() {
   const [localClock, setLocalClock] = useState(() => new Date())
   const [saving, setSaving] = useState(false)
   const [settingsDraft, setSettingsDraft] = useState<Partial<SettingsPayload>>({})
+  const [detail, setDetail] = useState<TaskDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailTab, setDetailTab] = useState<'overview' | 'prompts' | 'opencode' | 'logs'>(
+    'overview',
+  )
+  const [cancelling, setCancelling] = useState(false)
+  const [issueFilter, setIssueFilter] = useState('')
+  const [jobsView, setJobsView] = useState<JobsPayload | null>(null)
+  /** When opening detail from a job row, highlight that job's ids */
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
 
   const applyPayload = useCallback((payload: DashboardPayload) => {
     setData(payload)
     setError(null)
+    // Keep filtered jobs if user has a filter; otherwise use WS jobs
+    setJobsView((prev) => {
+      if (issueFilter.trim()) return prev
+      return payload.jobs ?? prev
+    })
+  }, [issueFilter])
+
+  const reloadJobs = useCallback(async (filter?: string) => {
+    try {
+      const j = await fetchJobs(filter)
+      setJobsView(j)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load jobs')
+    }
   }, [])
+
+  const openTaskDetail = async (issueKey: string, jobId?: string | null) => {
+    setDetailLoading(true)
+    setDetailError(null)
+    setDetailTab('overview')
+    setSelectedJobId(jobId ?? null)
+    try {
+      const d = await fetchTaskDetail(issueKey)
+      setDetail(d)
+      // If no explicit job, select the newest for this issue
+      if (!jobId && d.jobs?.length) {
+        setSelectedJobId(d.jobs[0].job_id)
+      }
+    } catch (e) {
+      setDetail(null)
+      setDetailError(e instanceof Error ? e.message : 'Failed to load task')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const refreshDetail = async () => {
+    if (!detail?.issue_key) return
+    await openTaskDetail(detail.issue_key, selectedJobId)
+  }
+
+  const selectedJob: JobItem | null = useMemo(() => {
+    if (!detail?.jobs?.length) return null
+    if (selectedJobId) {
+      return detail.jobs.find((j) => j.job_id === selectedJobId) ?? detail.jobs[0]
+    }
+    return detail.jobs[0]
+  }, [detail, selectedJobId])
+
+  const onCancelJob = async () => {
+    if (!detail?.issue_key || !detail.can_cancel) return
+    if (!window.confirm(`Cancel running work for ${detail.issue_key}?`)) return
+    setCancelling(true)
+    try {
+      await cancelTask(detail.issue_key)
+      await refreshDetail()
+      const dash = await fetchDashboard()
+      applyPayload(dash)
+    } catch (e) {
+      setDetailError(e instanceof Error ? e.message : 'Cancel failed')
+    } finally {
+      setCancelling(false)
+    }
+  }
 
   useEffect(() => {
     const id = window.setInterval(() => setLocalClock(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void reloadJobs(issueFilter.trim() || undefined)
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [issueFilter, reloadJobs])
 
   useEffect(() => {
     let ws: WebSocket | null = null
@@ -152,9 +247,13 @@ export default function App() {
     <button
       key={id}
       type="button"
-      onClick={() => setTab(id)}
+      onClick={() => {
+        setTab(id)
+        setDetail(null)
+        setDetailError(null)
+      }}
       className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-        tab === id
+        tab === id && !detail && !detailLoading
           ? 'bg-indigo-600 text-white shadow'
           : 'text-slate-300 hover:bg-slate-800 hover:text-white'
       }`}
@@ -196,7 +295,7 @@ export default function App() {
           </div>
         </div>
         <div className="mx-auto flex max-w-7xl gap-2 px-4 pb-3">
-          {navBtn('tasks', 'Tasks')}
+          {navBtn('tasks', 'Jobs')}
           {navBtn('poll', 'Poll monitor')}
           {navBtn('settings', 'Settings')}
         </div>
@@ -213,92 +312,515 @@ export default function App() {
           <div className="text-sm text-slate-400">Loading dashboard…</div>
         )}
 
-        {data && tab === 'tasks' && (
-          <section className="space-y-3">
-            <div className="flex items-end justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-slate-100">Current tasks</h2>
-                <p className="text-xs text-slate-500">
-                  Agent job state from disk and live process cache ({data.tasks.total} total)
+        {/* Full-page task detail (replaces list while open) */}
+        {(detail || detailLoading || detailError) && (
+          <section className="space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDetail(null)
+                    setDetailError(null)
+                    setSelectedJobId(null)
+                    setTab('tasks')
+                  }}
+                  className="mb-2 text-sm text-indigo-400 hover:text-indigo-300"
+                >
+                  ← Back to jobs
+                </button>
+                <h2 className="font-mono text-xl text-indigo-300">
+                  {detail?.issue_key ?? (detailLoading ? 'Loading…' : '—')}
+                </h2>
+                <p className="text-base text-slate-200">
+                  {selectedJob?.summary || detail?.summary}
                 </p>
+                {selectedJob?.description?.trim() ? (
+                  <p className="mt-2 whitespace-pre-wrap rounded-lg border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-sm text-indigo-100">
+                    <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-indigo-300/80">
+                      Description for job {selectedJob.job_id}
+                    </span>
+                    {selectedJob.description}
+                  </p>
+                ) : null}
+                {selectedJob?.summary &&
+                  detail?.summary &&
+                  selectedJob.summary !== detail.summary && (
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Current issue summary: {detail.summary}
+                    </p>
+                  )}
+                {detail && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <StatusBadge status={detail.status} />
+                    {detail.live && (
+                      <span className="text-[10px] font-semibold uppercase text-amber-300">
+                        live
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {detail?.can_cancel && (
+                  <button
+                    type="button"
+                    disabled={cancelling}
+                    onClick={onCancelJob}
+                    className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-medium text-white hover:bg-rose-600 disabled:opacity-50"
+                  >
+                    {cancelling ? 'Cancelling…' : 'Cancel job'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={refreshDetail}
+                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                >
+                  Refresh
+                </button>
               </div>
             </div>
-            <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
-              <table className="min-w-full text-left text-sm">
-                <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
-                  <tr>
-                    <th className="px-4 py-3 font-medium">Issue</th>
-                    <th className="px-4 py-3 font-medium">Status</th>
-                    <th className="px-4 py-3 font-medium">Progress</th>
-                    <th className="px-4 py-3 font-medium">Workflow</th>
-                    <th className="px-4 py-3 font-medium">Branch / MR</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/80">
-                  {data.tasks.tasks.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                        No tasks in state store yet
-                      </td>
-                    </tr>
-                  )}
-                  {data.tasks.tasks.map((t) => (
-                    <tr key={t.issue_key} className="hover:bg-slate-800/30">
-                      <td className="px-4 py-3">
-                        <div className="font-mono text-indigo-300">{t.issue_key}</div>
-                        <div className="max-w-md truncate text-slate-300">{t.summary}</div>
-                        {t.live && (
-                          <span className="mt-1 inline-block text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-                            live process
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge status={t.status} />
-                        {t.error_message && (
-                          <div className="mt-1 max-w-xs truncate text-xs text-rose-300/90">
-                            {t.error_message}
+
+            <div className="flex flex-wrap gap-1 border-b border-slate-800">
+              {(
+                [
+                  ['overview', 'Overview'],
+                  ['prompts', 'Prompts'],
+                  ['opencode', 'OpenCode output'],
+                  ['logs', 'System logs'],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setDetailTab(id)}
+                  className={`rounded-t-lg px-4 py-2.5 text-sm font-medium ${
+                    detailTab === id
+                      ? 'border border-b-0 border-slate-700 bg-slate-900 text-indigo-300'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-[50vh] rounded-xl border border-slate-800 bg-slate-900/40 p-5">
+              {detailLoading && (
+                <p className="text-sm text-slate-400">Loading task detail…</p>
+              )}
+              {detailError && (
+                <p className="text-sm text-rose-300">{detailError}</p>
+              )}
+
+              {detail && detailTab === 'overview' && (
+                <div className="space-y-4 text-sm">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+                      <div className="text-xs text-slate-500">Workflow / agent</div>
+                      <div className="mt-1 text-slate-200">
+                        {detail.workflow_type ?? '—'} / {detail.prompts?.agent ?? '—'}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+                      <div className="text-xs text-slate-500">Progress</div>
+                      <div className="mt-1 text-slate-200">{detail.progress_percentage}%</div>
+                    </div>
+                    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
+                      <div className="text-xs text-slate-500">Started</div>
+                      <div className="mt-1 font-mono text-xs text-slate-300">
+                        {detail.started_at ?? '—'}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-indigo-900/40 bg-indigo-950/20 p-4 sm:col-span-2 lg:col-span-3">
+                      <div className="text-xs font-medium uppercase tracking-wide text-indigo-300/80">
+                        Selected job (ids for this run only)
+                      </div>
+                      {selectedJob ? (
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-500">Job id</div>
+                            <div className="break-all font-mono text-xs text-slate-200">
+                              {selectedJob.job_id}
+                            </div>
                           </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-800">
-                            <div
-                              className="h-full rounded-full bg-indigo-500"
-                              style={{ width: `${Math.min(100, t.progress_percentage)}%` }}
-                            />
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-500">Status</div>
+                            <StatusBadge status={selectedJob.status} />
                           </div>
-                          <span className="font-mono text-xs text-slate-400">
-                            {t.progress_percentage}%
-                          </span>
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-500">
+                              Task id (this job)
+                            </div>
+                            <div className="break-all font-mono text-sm text-amber-200">
+                              {selectedJob.task_id ?? '—'}
+                            </div>
+                            {(selectedJob.task_ids?.length ?? 0) > 1 && (
+                              <div className="mt-1 font-mono text-[10px] text-slate-500">
+                                retries: {selectedJob.task_ids!.join(', ')}
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-500">
+                              OpenCode session (this job)
+                            </div>
+                            <div className="break-all font-mono text-sm text-cyan-300">
+                              {selectedJob.opencode_session_id ?? '—'}
+                            </div>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <div className="text-[10px] uppercase text-slate-500">
+                              Session log
+                            </div>
+                            <div className="break-all font-mono text-[11px] text-slate-400">
+                              {selectedJob.session_log_path ?? '—'}
+                            </div>
+                          </div>
+                          <div className="sm:col-span-2">
+                            <div className="text-[10px] uppercase text-slate-500">
+                              Summary at job start
+                            </div>
+                            <div className="text-sm text-slate-200">
+                              {selectedJob.summary || '—'}
+                            </div>
+                          </div>
                         </div>
-                      </td>
-                      <td className="px-4 py-3 text-slate-300">{t.workflow_type ?? '—'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-400">
-                        {t.feature_branch && <div className="font-mono">{t.feature_branch}</div>}
-                        {t.merge_request_url ? (
-                          <a
-                            className="text-indigo-400 hover:underline"
-                            href={t.merge_request_url}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Merge request
-                          </a>
-                        ) : (
-                          !t.feature_branch && '—'
+                      ) : (
+                        <p className="mt-2 text-sm text-slate-500">
+                          No job selected. Pick a row in the jobs table below.
+                        </p>
+                      )}
+                      <div className="mt-4 border-t border-slate-800 pt-3">
+                        <div className="text-[10px] uppercase tracking-wide text-slate-500">
+                          Latest on issue (live slot — overwrites each new run)
+                        </div>
+                        <div className="mt-1 break-all font-mono text-xs text-slate-400">
+                          task: {detail.current_task_id ?? '—'}
+                          <br />
+                          session: {detail.current_opencode_session_id ?? '—'}
+                        </div>
+                        {(detail.task_ids?.length ?? 0) > 0 && (
+                          <div className="mt-2">
+                            <div className="text-[10px] uppercase text-slate-500">
+                              All task ids (history)
+                            </div>
+                            <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] text-slate-400">
+                              {detail.task_ids!.map((tid) => (
+                                <li key={tid}>{tid}</li>
+                              ))}
+                            </ul>
+                          </div>
                         )}
-                      </td>
-                    </tr>
+                        {(detail.opencode_session_ids?.length ?? 0) > 0 && (
+                          <div className="mt-2">
+                            <div className="text-[10px] uppercase text-slate-500">
+                              All OpenCode sessions (history)
+                            </div>
+                            <ul className="mt-0.5 space-y-0.5 font-mono text-[11px] text-slate-400">
+                              {detail.opencode_session_ids!.map((sid) => (
+                                <li key={sid} className="break-all">
+                                  {sid}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-indigo-300/90">
+                        Description of selected job only
+                        {selectedJob ? ` · ${selectedJob.job_id}` : ''}
+                      </div>
+                      <pre className="max-h-64 min-h-[5rem] overflow-auto whitespace-pre-wrap rounded-lg border border-indigo-800/50 bg-indigo-950/20 p-4 text-xs text-slate-100">
+                        {selectedJob
+                          ? selectedJob.description?.trim()
+                            ? selectedJob.description
+                            : '(not captured on this job — older run without prompt snapshot)'
+                          : detail.description || '(none)'}
+                      </pre>
+                    </div>
+                    <div>
+                      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Current issue description (live — changes with Jira)
+                      </div>
+                      <pre className="max-h-64 min-h-[5rem] overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/40 p-4 text-xs text-slate-400">
+                        {detail.description || '(none)'}
+                      </pre>
+                      {selectedJob?.description?.trim() &&
+                        detail.description &&
+                        selectedJob.description.trim() === detail.description.trim() && (
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            Matches live issue text for this selection (this job used the current
+                            description).
+                          </p>
+                        )}
+                      {selectedJob?.description?.trim() &&
+                        detail.description &&
+                        selectedJob.description.trim() !== detail.description.trim() && (
+                          <p className="mt-1 text-[11px] text-amber-300/90">
+                            Differs from live issue — this job ran with an older description.
+                          </p>
+                        )}
+                    </div>
+                  </div>
+                  {detail.error_message && (
+                    <div>
+                      <div className="mb-1 text-xs uppercase tracking-wide text-rose-400">
+                        Error
+                      </div>
+                      <pre className="whitespace-pre-wrap rounded-lg border border-rose-900/40 bg-rose-950/30 p-4 text-xs text-rose-100">
+                        {detail.error_message}
+                      </pre>
+                    </div>
+                  )}
+                  {detail.retry_history?.length > 0 && (
+                    <div>
+                      <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">
+                        Retry history
+                      </div>
+                      <pre className="max-h-56 overflow-auto rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-xs text-slate-400">
+                        {JSON.stringify(detail.retry_history, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+                  <div>
+                    <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
+                      All jobs for {detail.issue_key} ({detail.jobs?.length ?? 0}) — click a
+                      row to inspect that run&apos;s task/session ids
+                    </div>
+                    <JobsTable
+                      jobs={detail.jobs ?? []}
+                      selectedJobId={selectedJobId}
+                      onOpenIssue={(key, jobId) => {
+                        setSelectedJobId(jobId ?? null)
+                        if (key !== detail.issue_key) {
+                          void openTaskDetail(key, jobId)
+                        }
+                      }}
+                      compact
+                    />
+                  </div>
+                </div>
+              )}
+
+              {detail && detailTab === 'prompts' && (
+                <div className="space-y-4 text-sm">
+                  <p className="text-xs text-slate-500">
+                    Prefer the selected job&apos;s captured prompt (frozen at that run). The
+                    reconstructed prompt always uses the <em>current</em> issue description and
+                    can look the same for every job.
+                  </p>
+                  {selectedJob?.description?.trim() && (
+                    <PromptBlock
+                      title={`Job description snapshot · ${selectedJob.job_id}`}
+                      body={selectedJob.description}
+                    />
+                  )}
+                  {(() => {
+                    const captured = detail.prompts?.captured_prompt_files || []
+                    const jobPrompt =
+                      selectedJob?.prompt_path &&
+                      captured.find(
+                        (f) =>
+                          f.path === selectedJob.prompt_path ||
+                          f.path?.endsWith(
+                            selectedJob.prompt_path!.split(/[/\\]/).pop() || '',
+                          ),
+                      )
+                    if (jobPrompt) {
+                      return (
+                        <PromptBlock
+                          title={`Captured prompt for selected job${jobPrompt.truncated ? ' (truncated)' : ''}`}
+                          body={jobPrompt.content || jobPrompt.error || '(empty)'}
+                        />
+                      )
+                    }
+                    return null
+                  })()}
+                  <PromptBlock
+                    title="System rules (workflow)"
+                    body={detail.prompts?.system_rules || '(none)'}
+                  />
+                  <PromptBlock
+                    title="Reconstructed agent prompt (uses LIVE issue description — not historical)"
+                    body={detail.prompts?.reconstructed_agent_prompt || '(none)'}
+                  />
+                  {detail.prompts?.execution_system_rules && (
+                    <PromptBlock
+                      title="Execution system rules"
+                      body={detail.prompts.execution_system_rules}
+                    />
+                  )}
+                  {detail.prompts?.execution_agent_prompt && (
+                    <PromptBlock
+                      title="Execution agent prompt"
+                      body={detail.prompts.execution_agent_prompt}
+                    />
+                  )}
+                  <div className="text-xs uppercase tracking-wide text-slate-500">
+                    All captured prompts for this issue
+                  </div>
+                  {(detail.prompts?.captured_prompt_files || []).map((f) => (
+                    <PromptBlock
+                      key={f.path}
+                      title={`Captured: ${f.name || f.path}${f.truncated ? ' (truncated)' : ''}${
+                        selectedJob?.prompt_path &&
+                        (f.path === selectedJob.prompt_path ||
+                          f.path?.endsWith(
+                            selectedJob.prompt_path!.split(/[/\\]/).pop() || '',
+                          ))
+                          ? ' · SELECTED JOB'
+                          : ''
+                      }`}
+                      body={f.content || f.error || '(empty)'}
+                    />
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )}
+
+              {detail && detailTab === 'opencode' && (
+                <div className="space-y-4 text-sm">
+                  {detail.session_logs.length === 0 && (
+                    <p className="text-slate-500">
+                      No session logs under .jira-agent/sessions for this issue yet.
+                    </p>
+                  )}
+                  {selectedJob?.session_log_path && (
+                    <p className="text-xs text-slate-500">
+                      Selected job log: {selectedJob.session_log_path}
+                    </p>
+                  )}
+                  {detail.session_logs.map((f) => {
+                    const isSelected =
+                      !!selectedJob?.session_log_path &&
+                      (f.path === selectedJob.session_log_path ||
+                        f.path?.endsWith(
+                          selectedJob.session_log_path!.split(/[/\\]/).pop() || '',
+                        ))
+                    return (
+                      <PromptBlock
+                        key={f.path}
+                        title={`${f.name || f.path}${f.truncated ? ' (truncated)' : ''}${
+                          isSelected ? ' · SELECTED JOB' : ''
+                        }`}
+                        body={f.content || f.error || '(empty)'}
+                        mono
+                      />
+                    )
+                  })}
+                </div>
+              )}
+
+              {detail && detailTab === 'logs' && (
+                <div className="space-y-2 text-sm">
+                  <p className="text-xs text-slate-500">
+                    In-process log lines that mention this issue key (since daemon start).
+                  </p>
+                  {detail.system_logs.length === 0 && (
+                    <p className="text-slate-500">No matching system log lines.</p>
+                  )}
+                  <div className="max-h-[70vh] overflow-auto rounded-lg border border-slate-800 bg-slate-950/80 p-4 font-mono text-[11px] leading-relaxed text-slate-300">
+                    {detail.system_logs.map((line, i) => (
+                      <div
+                        key={`${line.timestamp}-${i}`}
+                        className="border-b border-slate-800/50 py-0.5"
+                      >
+                        <span className="text-slate-500">{line.timestamp} </span>
+                        {line.message}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         )}
 
-        {data && tab === 'poll' && (
+        {data && tab === 'tasks' && !detail && !detailLoading && !detailError && (
+          <section className="space-y-6">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h2 className="text-base font-semibold text-slate-100">Jobs &amp; issues</h2>
+                <p className="text-xs text-slate-500">
+                  Each agent run is a job. Filter by Jira key to see every run for that issue.
+                  Click a job or issue row for full detail (overview, prompts, OpenCode, logs,
+                  cancel).
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs text-slate-400">
+                  Filter by Jira issue
+                  <input
+                    className="ml-2 w-40 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 font-mono text-sm text-slate-100 outline-none focus:border-indigo-500"
+                    placeholder="e.g. KAN-1"
+                    value={issueFilter}
+                    onChange={(e) => setIssueFilter(e.target.value)}
+                  />
+                </label>
+                {issueFilter.trim() && (
+                  <button
+                    type="button"
+                    className="text-xs text-indigo-400 hover:underline"
+                    onClick={() => setIssueFilter('')}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-500">
+              Showing {jobsView?.total ?? data.jobs?.total ?? 0} job(s)
+              {issueFilter.trim() ? ` for ${issueFilter.trim().toUpperCase()}` : ''}
+              {' · '}
+              Issues in store:{' '}
+              {
+                (issueFilter.trim()
+                  ? data.tasks.tasks.filter(
+                      (t) =>
+                        t.issue_key.toUpperCase() === issueFilter.trim().toUpperCase(),
+                    )
+                  : data.tasks.tasks
+                ).length
+              }
+            </div>
+
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-slate-300">Jobs (runs)</h3>
+              <JobsTable
+                jobs={jobsView?.jobs ?? data.jobs?.jobs ?? []}
+                onOpenIssue={(key, jobId) => void openTaskDetail(key, jobId)}
+              />
+            </div>
+
+            <div>
+              <h3 className="mb-2 text-sm font-medium text-slate-300">
+                Issues (current state — latest slot only)
+              </h3>
+              <p className="mb-2 text-xs text-slate-500">
+                One row per Jira key. Task/session columns show the latest run only.
+                Use the Jobs table above for full history.
+              </p>
+              <IssuesTable
+                tasks={(issueFilter.trim()
+                  ? data.tasks.tasks.filter(
+                      (t) =>
+                        t.issue_key.toUpperCase() === issueFilter.trim().toUpperCase(),
+                    )
+                  : data.tasks.tasks
+                )}
+                onOpenIssue={(key) => void openTaskDetail(key)}
+              />
+            </div>
+          </section>
+        )}
+
+        {data && tab === 'poll' && !detail && !detailLoading && !detailError && (
           <section className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
@@ -432,7 +954,7 @@ export default function App() {
           </section>
         )}
 
-        {data && tab === 'settings' && (
+        {data && tab === 'settings' && !detail && !detailLoading && !detailError && (
           <section className="max-w-xl space-y-4">
             <div>
               <h2 className="text-base font-semibold text-slate-100">Settings</h2>
@@ -554,6 +1076,237 @@ export default function App() {
           </section>
         )}
       </main>
+    </div>
+  )
+}
+
+function PromptBlock({
+  title,
+  body,
+  mono = true,
+}: {
+  title: string
+  body: string
+  mono?: boolean
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+        {title}
+      </div>
+      <pre
+        className={`max-h-[min(70vh,40rem)] overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/80 p-4 text-xs leading-relaxed text-slate-200 ${
+          mono ? 'font-mono' : ''
+        }`}
+      >
+        {body}
+      </pre>
+    </div>
+  )
+}
+
+function IssuesTable({
+  tasks,
+  onOpenIssue,
+}: {
+  tasks: TaskItem[]
+  onOpenIssue: (issueKey: string) => void
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
+      <table className="min-w-full text-left text-sm">
+        <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
+          <tr>
+            <th className="px-4 py-3 font-medium">Issue</th>
+            <th className="px-4 py-3 font-medium">Status</th>
+            <th className="px-4 py-3 font-medium">Workflow</th>
+            <th className="px-4 py-3 font-medium">OpenCode session</th>
+            <th className="px-4 py-3 font-medium">Updated</th>
+            <th className="px-4 py-3 font-medium">Progress</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-800/80">
+          {tasks.length === 0 && (
+            <tr>
+              <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                No issues match this filter.
+              </td>
+            </tr>
+          )}
+          {tasks.map((t) => (
+            <tr
+              key={t.issue_key}
+              className="cursor-pointer hover:bg-slate-800/40"
+              onClick={() => onOpenIssue(t.issue_key)}
+            >
+              <td className="px-4 py-3">
+                <div className="font-mono text-indigo-300">{t.issue_key}</div>
+                <div className="max-w-xs truncate text-xs text-slate-400">{t.summary}</div>
+              </td>
+              <td className="px-4 py-3">
+                <StatusBadge status={t.status} />
+                {t.live && (
+                  <div className="mt-0.5 text-[10px] font-semibold uppercase text-amber-300">
+                    live
+                  </div>
+                )}
+                {t.error_message && (
+                  <div className="mt-1 max-w-xs truncate text-xs text-rose-300/90">
+                    {t.error_message}
+                  </div>
+                )}
+              </td>
+              <td className="px-4 py-3 text-slate-300">{t.workflow_type || '—'}</td>
+              <td className="px-4 py-3">
+                {t.opencode_session_id ? (
+                  <div
+                    className="max-w-[11rem] truncate font-mono text-[11px] text-cyan-300"
+                    title={t.opencode_session_id}
+                  >
+                    {t.opencode_session_id}
+                  </div>
+                ) : (
+                  <span className="text-slate-500">—</span>
+                )}
+              </td>
+              <td className="px-4 py-3 font-mono text-xs text-slate-400">
+                {t.completed_at || t.started_at || '—'}
+              </td>
+              <td className="px-4 py-3 text-slate-300">{t.progress_percentage}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function JobsTable({
+  jobs,
+  onOpenIssue,
+  compact = false,
+  selectedJobId = null,
+}: {
+  jobs: JobItem[]
+  onOpenIssue: (issueKey: string, jobId?: string) => void
+  compact?: boolean
+  selectedJobId?: string | null
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
+      <table className="min-w-full text-left text-sm">
+        <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
+          <tr>
+            <th className="px-4 py-3 font-medium">Job</th>
+            <th className="px-4 py-3 font-medium">Issue</th>
+            <th className="px-4 py-3 font-medium">Description (this run)</th>
+            <th className="px-4 py-3 font-medium">Status</th>
+            <th className="px-4 py-3 font-medium">Task id</th>
+            {!compact && <th className="px-4 py-3 font-medium">Workflow</th>}
+            <th className="px-4 py-3 font-medium">OpenCode session</th>
+            <th className="px-4 py-3 font-medium">Started</th>
+            {!compact && <th className="px-4 py-3 font-medium">Progress</th>}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-800/80">
+          {jobs.length === 0 && (
+            <tr>
+              <td
+                colSpan={compact ? 7 : 9}
+                className="px-4 py-8 text-center text-slate-500"
+              >
+                No jobs for this filter. Historical session logs and new runs will appear here.
+              </td>
+            </tr>
+          )}
+          {jobs.map((j) => (
+            <tr
+              key={j.job_id}
+              className={`cursor-pointer hover:bg-slate-800/40 ${
+                selectedJobId === j.job_id ? 'bg-indigo-950/40 ring-1 ring-inset ring-indigo-700/40' : ''
+              }`}
+              onClick={() => onOpenIssue(j.issue_key, j.job_id)}
+            >
+              <td className="px-4 py-3">
+                <div className="font-mono text-[11px] text-slate-400" title={j.job_id}>
+                  {j.job_id}
+                </div>
+                {j.live && (
+                  <span className="text-[10px] font-semibold uppercase text-amber-300">
+                    live
+                  </span>
+                )}
+              </td>
+              <td className="px-4 py-3">
+                <div className="font-mono text-indigo-300">{j.issue_key}</div>
+                <div className="max-w-xs truncate text-xs text-slate-400">{j.summary}</div>
+              </td>
+              <td className="px-4 py-3">
+                <div
+                  className="max-w-md whitespace-pre-wrap break-words text-xs text-slate-200"
+                  title={j.description || undefined}
+                >
+                  {j.description?.trim() ? j.description : '—'}
+                </div>
+              </td>
+              <td className="px-4 py-3">
+                <StatusBadge status={j.status} />
+                {j.error_message && (
+                  <div className="mt-1 max-w-xs truncate text-xs text-rose-300/90">
+                    {j.error_message}
+                  </div>
+                )}
+              </td>
+              <td className="px-4 py-3">
+                <div
+                  className="max-w-[9rem] truncate font-mono text-[11px] text-amber-200/90"
+                  title={j.task_id || undefined}
+                >
+                  {j.task_id || '—'}
+                </div>
+              </td>
+              {!compact && (
+                <td className="px-4 py-3 text-slate-300">
+                  {j.workflow_type}
+                  {j.agent ? (
+                    <div className="text-[10px] text-slate-500">{j.agent}</div>
+                  ) : null}
+                </td>
+              )}
+              <td className="px-4 py-3">
+                {j.opencode_session_id ? (
+                  <div
+                    className="max-w-[11rem] truncate font-mono text-[11px] text-cyan-300"
+                    title={j.opencode_session_id}
+                  >
+                    {j.opencode_session_id}
+                  </div>
+                ) : (
+                  <span className="text-xs text-slate-500">—</span>
+                )}
+              </td>
+              <td className="px-4 py-3 font-mono text-[11px] text-slate-400">
+                {j.started_at ?? '—'}
+              </td>
+              {!compact && (
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-800">
+                      <div
+                        className="h-full rounded-full bg-indigo-500"
+                        style={{ width: `${Math.min(100, j.progress_percentage)}%` }}
+                      />
+                    </div>
+                    <span className="font-mono text-xs text-slate-400">
+                      {j.progress_percentage}%
+                    </span>
+                  </div>
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

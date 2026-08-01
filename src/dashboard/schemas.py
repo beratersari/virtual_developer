@@ -26,11 +26,45 @@ class TaskItem(BaseModel):
     feature_branch: Optional[str] = None
     merge_request_url: Optional[str] = None
     live: bool = False
+    task_id: Optional[str] = None
+    opencode_session_id: Optional[str] = None
+    opencode_session_ids: List[str] = Field(default_factory=list)
 
 
 class TasksResponse(BaseModel):
     tasks: List[TaskItem]
     total: int
+    server_time: str
+
+
+class JobItem(BaseModel):
+    """One processing run (job) for a Jira issue."""
+
+    job_id: str
+    issue_key: str
+    summary: str = ""
+    description: str = ""
+    workflow_type: str = "direct"
+    agent: str = ""
+    status: str = "running"
+    task_id: Optional[str] = None
+    task_ids: List[str] = Field(default_factory=list)
+    opencode_session_id: Optional[str] = None
+    opencode_session_ids: List[str] = Field(default_factory=list)
+    session_log_path: Optional[str] = None
+    prompt_path: Optional[str] = None
+    progress_percentage: int = 0
+    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    live: bool = False
+
+
+class JobsResponse(BaseModel):
+    jobs: List[JobItem]
+    total: int
+    issue_key_filter: Optional[str] = None
     server_time: str
 
 

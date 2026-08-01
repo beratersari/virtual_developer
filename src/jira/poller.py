@@ -289,8 +289,36 @@ class JiraPoller:
                 continue
 
             prev_before = getattr(self, "_status_before_poll", {}).get(issue_key)
-            # Treat all To Do-like names the same (open, backlog, Turkish, …)
-            if prev_before is None or self._is_todo_status_name(prev_before):
+            fields = issue.get("fields") or {}
+            curr_name = ((fields.get("status") or {}).get("name") or "").strip().lower()
+            meta = state.metadata or {}
+            requeue_eligible = bool(meta.get("requeue_eligible"))
+
+            # Normal path: observed leave non-To-Do and return to To Do
+            entered_todo_from_elsewhere = (
+                prev_before is not None
+                and not self._is_todo_status_name(prev_before)
+            )
+            # Cancel/error path: any Jira status change that ends in To Do
+            # (covers cancelled while still "to do" in our tracker after bad tracking)
+            status_changed_into_todo = (
+                requeue_eligible
+                and prev_before is not None
+                and prev_before != curr_name
+                and self._is_todo_status(fields)
+            )
+            # Explicit marker after local cancel (see process_issue / cancel_job)
+            force_after_cancel = (
+                requeue_eligible
+                and prev_before in ("__cancelled__", "__terminal_local__", "in progress")
+                and self._is_todo_status(fields)
+            )
+
+            if not (
+                entered_todo_from_elsewhere
+                or status_changed_into_todo
+                or force_after_cancel
+            ):
                 # Still To Do-like since last poll (or first sighting) — do not loop
                 continue
 
@@ -319,6 +347,10 @@ class JiraPoller:
 
         if self.client.transition_to_in_progress(issue_key):
             logger.info(f"{issue_key} transitioned to In Progress")
+            # Critical: poll_board already stored "to do" before this transition.
+            # Without updating, cancel → move back to To Do never looks like a
+            # status *change* (prev is still "to do") and reprocess is skipped.
+            self._last_jira_status[issue_key] = "in progress"
 
     def start(self, handler: Callable[[dict], None]):
         self._running = True
