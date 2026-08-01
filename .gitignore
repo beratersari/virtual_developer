@@ -21,12 +21,12 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-sample_project/
+
 # Virtual environments
 venv/
 ENV/
 env/
-.venv
+.venv/
 
 # IDE
 .vscode/
@@ -35,30 +35,29 @@ env/
 *.swo
 *~
 
-# Environment variables
+# Environment / secrets (never commit)
 .env
 .env.local
 .env.*.local
 
 # JIRA Virtual Developer runtime (sessions, state, logs)
 .jira-agent/
-.jira-agent/sessions/
-.jira-agent/state/
 logs/
 *.log
 
 # Per-issue temp git clones
 .temp/
 
-# OpenCode / oh-my-openagent local run artifacts (must not pollute repo)
+# OpenCode / oh-my-openagent local run artifacts
 .omo/
 .codegraph/
+.sisyphus/
 
-# Sample project - local fixture / generated test files
-sample_project/
+# Sample project is a tracked fixture; only ignore its local runtime
 sample_project/.jira-agent/
 sample_project/.venv/
 sample_project/**/__pycache__/
+sample_project/.pytest_cache/
 
 # OS
 .DS_Store
@@ -73,8 +72,8 @@ coverage.xml
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
 
-# Env secrets (never commit)
-.env
-.env.local
-.env.*.local
+# Packaging build output (local only)
+packaging/windows/_downloads/
