@@ -25,7 +25,6 @@ from src.dashboard.schemas import (
 from src.opencode_models import list_available_models
 from src.dashboard.snapshot import PollSnapshotStore, poll_snapshot_store
 from src.opencode_sessions import find_sessions_for_issue
-from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowType
 from src.state.job_store import (
     JobStore,
@@ -506,7 +505,13 @@ def build_dashboard_payload(
 
 
 def _sessions_dir() -> Path:
-    return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+    """Session logs root (same default as AgentRunner; tests may patch)."""
+    try:
+        from src.orchestrator.agent_runner import _default_sessions_dir
+
+        return _default_sessions_dir()
+    except Exception:
+        return (Path.cwd() / ".jira-agent" / "sessions").resolve()
 
 
 def _path_under(root: Path, path: Path) -> bool:
@@ -587,81 +592,33 @@ def _collect_session_artifacts(issue_key: str) -> Dict[str, Any]:
 
 
 def _reconstruct_prompts(state) -> Dict[str, Any]:
-    """Rebuild system rules + full agent prompt from current state / config."""
+    """Metadata for the prompts tab (agent/workflow only).
+
+    The UI shows captured ``*.prompt.txt`` files — the exact text sent to the
+    agent. We do not rebuild a live “assembled” prompt for display.
+    """
     workflow = (state.metadata or {}).get("workflow_type") or "direct"
-    system_rules = ""
     agent_name = settings.default_agent
-    full_prompt = ""
-
-    try:
-        if workflow == WorkflowType.PLANNING.value or workflow == "planning":
-            agent_name = settings.planning_agent
-            system_rules = settings.prompt_planning
-            full_prompt = PromptBuilder.build_prometheus_prompt(
-                issue_key=state.issue_key,
-                summary=state.issue_summary or "",
-                description=state.description or "",
-            )
-        elif workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
-            agent_name = "oracle"
-            system_rules = settings.prompt_oracle
-            full_prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=state.description or state.issue_summary or "",
-            )
-        elif workflow == "execution" or (
-            state.status == TaskStatus.EXECUTING
-            and state.plan_path
-            and workflow == WorkflowType.PLANNING.value
-        ):
-            agent_name = settings.orchestrator_agent
-            system_rules = settings.prompt_execution
-            full_prompt = PromptBuilder.build_atlas_prompt(
-                issue_key=state.issue_key,
-                plan_path=state.plan_path or "",
-            )
-        else:
-            # direct execution default
-            agent_name = settings.default_agent
-            system_rules = settings.prompt_direct_execution
-            full_prompt = PromptBuilder.build_sisyphus_prompt(
-                issue_key=state.issue_key,
-                task_description=state.description or state.issue_summary or "",
-            )
-            # Prefer atlas if plan exists and status executing after plan_ready
-            if state.plan_path and state.status in (
-                TaskStatus.EXECUTING,
-                TaskStatus.PLAN_READY,
-                TaskStatus.COMPLETED,
-            ):
-                # Also expose execution prompt when a plan was produced
-                pass
-    except Exception as e:
-        return {
-            "workflow_type": workflow,
-            "agent": agent_name,
-            "system_rules": system_rules,
-            "reconstructed_agent_prompt": "",
-            "error": str(e),
-        }
-
-    # If we have plan_path and planning workflow completed, show both planning + execution rules
-    extra = {}
-    if state.plan_path:
-        try:
-            extra["execution_system_rules"] = settings.prompt_execution
-            extra["execution_agent_prompt"] = PromptBuilder.build_atlas_prompt(
-                issue_key=state.issue_key,
-                plan_path=state.plan_path,
-            )
-        except Exception:
-            pass
+    if workflow == WorkflowType.PLANNING.value or workflow == "planning":
+        agent_name = settings.planning_agent
+    elif workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
+        agent_name = "oracle"
+    elif workflow == "execution" or (
+        state.status == TaskStatus.EXECUTING
+        and state.plan_path
+        and workflow == WorkflowType.PLANNING.value
+    ):
+        agent_name = settings.orchestrator_agent
+    elif state.plan_path and state.status in (
+        TaskStatus.EXECUTING,
+        TaskStatus.PLAN_READY,
+        TaskStatus.COMPLETED,
+    ):
+        agent_name = settings.orchestrator_agent
 
     return {
         "workflow_type": workflow,
         "agent": agent_name,
-        "system_rules": system_rules,
-        "reconstructed_agent_prompt": full_prompt,
-        **extra,
     }
 
 

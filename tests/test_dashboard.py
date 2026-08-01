@@ -188,7 +188,7 @@ def test_read_app_version():
     assert len(v) > 0
 
 
-def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
+def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts):
     from src.processor import JobProcessor
     from src.dashboard.issue_logs import issue_log_ring
 
@@ -202,8 +202,7 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
         current_task_id="task-abc",
     )
     issue_log_ring.append("Working on DET-1 something")
-    sessions = tmp_path / ".jira-agent" / "sessions"
-    sessions.mkdir(parents=True)
+    sessions = isolate_jira_agent_artifacts["sessions_dir"]
     (sessions / "DET-1_20260101_120000_0.log").write_text("opencode output line\n")
     (sessions / "DET-1_20260101_120000_0.prompt.txt").write_text("full prompt body")
 
@@ -243,7 +242,9 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
     assert body["summary"] == "summary from jira live"
     assert body["jira_status"] == "In Progress"
     assert body["jira_live"] is True
-    assert body["prompts"]["system_rules"]
+    assert "agent" in body["prompts"]
+    assert "assembled_prompt" not in body["prompts"]
+    assert "system_rules" not in body["prompts"]
     assert any("opencode output" in (s.get("content") or "") for s in body["session_logs"])
     assert any("DET-1" in (line.get("message") or "") for line in body["system_logs"])
 
@@ -268,7 +269,9 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
     assert c2.status_code == 400
 
 
-def test_api_jobs_filter_and_legacy_sessions(tmp_path, monkeypatch):
+def test_api_jobs_filter_and_legacy_sessions(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
     """Jobs list supports issue_key filter; session logs become legacy jobs."""
     from src.state.job_store import JobStore
 
@@ -276,8 +279,7 @@ def test_api_jobs_filter_and_legacy_sessions(tmp_path, monkeypatch):
     sm.create_state("JOB-1", "first issue", "desc live latest")
     sm.create_state("JOB-2", "second", "d")
 
-    sessions = tmp_path / ".jira-agent" / "sessions"
-    sessions.mkdir(parents=True)
+    sessions = isolate_jira_agent_artifacts["sessions_dir"]
     (sessions / "JOB-1_20260101_100000_0.log").write_text("run a\n")
     (sessions / "JOB-1_20260101_100000_0.log.session_id").write_text("ses_aaa")
     (sessions / "JOB-1_20260101_100000_0.prompt.txt").write_text(
@@ -291,8 +293,7 @@ def test_api_jobs_filter_and_legacy_sessions(tmp_path, monkeypatch):
     )
     (sessions / "JOB-2_20260101_120000_0.log").write_text("other\n")
 
-    jobs_dir = tmp_path / ".jira-agent" / "jobs"
-    store = JobStore(jobs_dir=jobs_dir)
+    store = isolate_jira_agent_artifacts["job_store"]
     stored = store.create_job(
         issue_key="JOB-1",
         summary="first issue",
