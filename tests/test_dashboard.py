@@ -133,6 +133,42 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
             assert "version" in d.json()["meta"]
 
 
+def test_task_detail_without_local_state(tmp_path):
+    """Poll-opened issues with no agent state still get a detail payload."""
+    from src.dashboard.service import build_task_detail
+    from src.dashboard.snapshot import PollSnapshotStore
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = PollSnapshotStore()
+    store.end_poll(
+        source="board",
+        issues=[
+            {
+                "key": "BARE-1",
+                "summary": "from poll",
+                "jira_status": "To Do",
+                "labels": ["ai-assist"],
+                "matched_label": True,
+                "matched_assignee": False,
+                "is_todo": True,
+                "will_process": False,
+                "matched_labels": ["ai-assist"],
+            }
+        ],
+        interval_seconds=30,
+    )
+    with patch("src.dashboard.service.poll_snapshot_store", store):
+        with patch(
+            "src.dashboard.service._fetch_live_jira_fields",
+            return_value={},
+        ):
+            detail = build_task_detail("BARE-1", state_manager=sm, processor=None)
+    assert detail is not None
+    assert detail["issue_key"] == "BARE-1"
+    assert detail["summary"] == "from poll"
+    assert detail["can_cancel"] is False
+
+
 def test_build_jobs_pagination(tmp_path):
     from src.dashboard.service import build_jobs
     from src.state.job_store import JobStore
@@ -431,11 +467,21 @@ def test_api_jobs_filter_and_legacy_sessions(
             assert len(descs) >= 2, descs
 
 
-def test_task_detail_404(tmp_path):
+def test_task_detail_without_state_is_stub_not_404(tmp_path):
+    """Unknown keys still return 200 so Poll monitor can open any key."""
     sm = JiraStateManager(state_dir=tmp_path / "state")
     app = create_dashboard_app(processor=None, state_manager=sm)
     client = TestClient(app)
-    assert client.get("/api/tasks/NOPE-1").status_code == 404
+    with patch(
+        "src.dashboard.service._fetch_live_jira_fields",
+        return_value={},
+    ):
+        r = client.get("/api/tasks/NOPE-1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["issue_key"] == "NOPE-1"
+    assert body["can_cancel"] is False
+    assert body.get("jobs") == []
 
 
 def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):

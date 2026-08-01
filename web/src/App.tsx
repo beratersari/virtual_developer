@@ -76,6 +76,8 @@ export default function App() {
   const [jobsPageSize] = useState(25)
   const jobsPageRef = useRef(1)
   jobsPageRef.current = jobsPage
+  /** Tab to return to when closing detail (e.g. poll → detail → back to poll). */
+  const detailReturnTab = useRef<Tab>('tasks')
   /** When opening detail from a job row, highlight that job's ids */
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [settingsDirty, setSettingsDirty] = useState(false)
@@ -158,20 +160,27 @@ export default function App() {
     setDetailLoading(false)
     setSelectedJobId(null)
     if (!opts?.skipNavigate) {
-      navigateTo(pathForTab('tasks'))
-      setTab('tasks')
+      const back = detailReturnTab.current
+      navigateTo(pathForTab(back))
+      setTab(back)
     }
   }, [])
 
   const openTaskDetail = async (
     issueKey: string,
     jobId?: string | null,
-    opts?: { skipNavigate?: boolean; replace?: boolean },
+    opts?: { skipNavigate?: boolean; replace?: boolean; fromTab?: Tab },
   ) => {
     const key = issueKey.trim().toUpperCase()
+    if (!key) return
     const req = ++detailRequestId.current
     openIssueKeyRef.current = key
-    setTab('tasks')
+    if (opts?.fromTab) {
+      detailReturnTab.current = opts.fromTab
+    } else if (!opts?.skipNavigate) {
+      // Remember current tab so Back returns to Poll / Jobs correctly
+      detailReturnTab.current = tab
+    }
     setDetailLoading(true)
     setDetailError(null)
     setDetailTab('overview')
@@ -528,7 +537,12 @@ export default function App() {
                   }}
                   className="mb-2 text-sm text-indigo-400 hover:text-indigo-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
                 >
-                  ← Back to jobs
+                  ← Back to{' '}
+                  {detailReturnTab.current === 'poll'
+                    ? 'poll monitor'
+                    : detailReturnTab.current === 'settings'
+                      ? 'settings'
+                      : 'jobs'}
                 </button>
                 <h2 className="font-mono text-xl text-indigo-300">
                   {detail?.issue_key ?? (detailLoading ? 'Loading…' : '—')}
@@ -1067,21 +1081,27 @@ export default function App() {
                   {data.poll.issues.map((i) => (
                     <tr
                       key={i.key}
+                      role="button"
+                      tabIndex={0}
                       className={
-                        i.will_process
+                        (i.will_process
                           ? 'bg-indigo-950/20 hover:bg-indigo-950/30'
-                          : 'hover:bg-slate-800/30'
+                          : 'hover:bg-slate-800/40') + ' cursor-pointer'
                       }
+                      onClick={() =>
+                        void openTaskDetail(i.key, null, { fromTab: 'poll' })
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          void openTaskDetail(i.key, null, { fromTab: 'poll' })
+                        }
+                      }}
                     >
                       <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          className="font-mono text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
-                          onClick={() => void openTaskDetail(i.key)}
-                          title="Open issue detail"
-                        >
+                        <div className="font-mono text-indigo-300 underline-offset-2 group-hover:underline">
                           {i.key}
-                        </button>
+                        </div>
                         <div className="max-w-sm truncate text-slate-300">{i.summary}</div>
                         {i.labels.length > 0 && (
                           <div className="mt-1 flex flex-wrap gap-1">

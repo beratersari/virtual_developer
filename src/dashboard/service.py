@@ -714,24 +714,103 @@ def _fetch_live_jira_fields(
     }
 
 
+def _build_task_detail_without_state(
+    issue_key: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+) -> Dict[str, Any]:
+    """Detail for board issues that have never been processed (no local state).
+
+    Used when opening from Poll monitor — still show Jira/poll summary so
+    operators can inspect the ticket without a 404.
+    """
+    key = (issue_key or "").strip().upper()
+    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    poll_row: Dict[str, Any] = {}
+    try:
+        snap = poll_snapshot_store.snapshot()
+        for row in snap.get("issues") or []:
+            if (row.get("key") or "").strip().upper() == key:
+                poll_row = row
+                break
+    except Exception:
+        pass
+
+    summary = (
+        (jira_live.get("summary") or "").strip()
+        or (poll_row.get("summary") or "").strip()
+        or ""
+    )
+    description = (jira_live.get("description") or "").strip()
+    jira_status = (
+        (jira_live.get("jira_status") or "").strip()
+        or (poll_row.get("jira_status") or "").strip()
+        or None
+    )
+    local_status = poll_row.get("local_status") or "pending"
+
+    return {
+        "issue_key": key,
+        "summary": summary,
+        "description": description,
+        "jira_status": jira_status,
+        "jira_live": bool(jira_live),
+        "status": str(local_status),
+        "progress_percentage": 0,
+        "live": False,
+        "can_cancel": False,
+        "can_start": False,
+        "workflow_type": None,
+        "plan_path": None,
+        "current_task_id": None,
+        "current_opencode_session_id": None,
+        "task_ids": [],
+        "job_ids": [],
+        "current_job_id": None,
+        "opencode_session_ids": [],
+        "opencode_sessions": [],
+        "error_message": None,
+        "started_at": None,
+        "completed_at": None,
+        "feature_branch": None,
+        "merge_request_url": None,
+        "retry_history": [],
+        "prompts": {
+            "workflow_type": None,
+            "agent": None,
+            "captured_prompt_files": [],
+        },
+        "session_logs": [],
+        "system_logs": issue_log_ring.for_issue(key, limit=500),
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 def build_task_detail(
     issue_key: str,
     *,
     state_manager: Optional[JiraStateManager] = None,
     processor: Optional["JobProcessor"] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility)."""
+    """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility).
+
+    Returns a read-only stub when the issue is on the board but has no local
+    agent state yet (so Poll monitor can open any eligible key).
+    """
     sm = state_manager or JiraStateManager()
-    state = sm.get_state(issue_key)
+    key = (issue_key or "").strip().upper()
+    state = sm.get_state(key) if key else None
     if not state:
-        return None
+        if not key:
+            return None
+        return _build_task_detail_without_state(key, processor=processor)
 
     live = False
     if processor is not None:
-        live = processor._is_live_processing(issue_key)
+        live = processor._is_live_processing(key)
 
     # Live fields from Jira (not frozen local state / job snapshot)
-    jira_live = _fetch_live_jira_fields(issue_key, processor=processor)
+    jira_live = _fetch_live_jira_fields(key, processor=processor)
     if jira_live:
         live_summary = jira_live.get("summary") or state.issue_summary or ""
         live_description = jira_live.get("description", "")
@@ -739,7 +818,7 @@ def build_task_detail(
         live_summary = state.issue_summary or ""
         live_description = state.description or ""
 
-    artifacts = _collect_session_artifacts(issue_key)
+    artifacts = _collect_session_artifacts(key)
     prompts = _reconstruct_prompts(state)
     # Prefer on-disk prompt captures when present (actual text sent to agent)
     if artifacts["prompt_files"]:
@@ -787,7 +866,7 @@ def build_task_detail(
                     current_sid = sid
             except OSError:
                 pass
-    db_sessions = find_sessions_for_issue(issue_key, limit=20)
+    db_sessions = find_sessions_for_issue(key, limit=20)
     for s in db_sessions:
         sid = s.get("id")
         if sid and sid not in session_ids:
@@ -825,6 +904,6 @@ def build_task_detail(
         "retry_history": retry_history,
         "prompts": prompts,
         "session_logs": artifacts["session_logs"],
-        "system_logs": issue_log_ring.for_issue(issue_key, limit=500),
+        "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
