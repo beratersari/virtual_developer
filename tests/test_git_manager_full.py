@@ -186,7 +186,7 @@ def test_ensure_feature_branch(gm):
 
 
 def test_format_commit_message(gm):
-    # EXECUTION.md format: [KEY] type: description
+    # §policy.commit format: [KEY] type: description
     msg = gm._format_commit_message("GM-1", "fix: short", "body")
     assert msg.startswith("[GM-1] fix: short")
     assert "body" in msg

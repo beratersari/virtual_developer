@@ -417,7 +417,7 @@ async def test_oracle_sets_current_task_id_before_run(processor, state_manager):
     state = state_manager.create_state("OR-TID", "how to design", "architecture question")
     seen = {}
 
-    async def _run(task):
+    async def _run(task, **_kwargs):
         st = state_manager.get_state("OR-TID")
         seen["task_id"] = task.task_id
         seen["state_task_id"] = st.current_task_id if st else None

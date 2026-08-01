@@ -410,6 +410,7 @@ Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. T
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
-| `commitMsgFormat.md` | Agent commit/branch rules in **target** project clones |
+| `agent/AGENT_PROMPT.md` | Unified agent prompt kit (`§policy.commit`, `§role.*`) for target clones |
+| `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |

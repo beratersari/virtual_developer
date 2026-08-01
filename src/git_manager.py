@@ -377,7 +377,7 @@ class GitManager:
         return self._checkout_or_create_branch(branch_name)
 
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
-        """Format a commit message per agent/rules/EXECUTION.md.
+        """Format a commit message per agent/AGENT_PROMPT.md §policy.commit.
 
         Required subject: ``[ISSUE-KEY] type: description``
         ``summary`` should already include the type prefix (e.g. ``fix: foo``).

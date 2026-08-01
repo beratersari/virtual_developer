@@ -1523,7 +1523,8 @@ class JobProcessor:
             description=f"Direct: {state.issue_key}",
             prompt=PromptBuilder.build_sisyphus_prompt(
                 issue_key=state.issue_key,
-                task_description=state.description,
+                task_description=state.description or "",
+                summary=state.issue_summary or "",
             ),
             agent=settings.default_agent,
             category=settings.execution_category,
@@ -1937,7 +1938,9 @@ class JobProcessor:
             runner = self._ensure_agent_runner(state.issue_key)
 
             prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=state.description,
+                question=state.description or state.issue_summary or "",
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
             )
 
             task = AgentTask(
@@ -2017,14 +2020,17 @@ class JobProcessor:
             else:
                 created_context = issue_key in self._contexts
 
-            prompt = PromptBuilder.build_comment_response_prompt(
+            # Free-form @mention text uses the same direct (Sisyphus) kit path —
+            # no separate comment prompt template.
+            summary = (state.issue_summary if state else "") or ""
+            prompt = PromptBuilder.build_sisyphus_prompt(
                 issue_key=issue_key,
-                comment_text=request,
-                current_state=state.status.value if state else None,
+                task_description=request,
+                summary=summary,
             )
 
             task = AgentTask(
-                description=f"Comment response: {issue_key}",
+                description=f"Direct request: {issue_key}",
                 prompt=prompt,
                 agent=settings.default_agent,
                 issue_key=issue_key,
@@ -2035,11 +2041,11 @@ class JobProcessor:
             if result["returncode"] == 0:
                 self.reporter.post_comment_response(issue_key, result["stdout"])
             else:
-                err = result.get("stderr") or "Comment response agent failed"
+                err = result.get("stderr") or "Agent failed for free-form request"
                 self.reporter.post_comment_response(
                     issue_key,
-                    f"Could not complete comment request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
-                    "Retry the @mention or check agent logs.",
+                    f"Could not complete request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
+                    "Retry or check agent logs.",
                 )
         finally:
             if created_context:
