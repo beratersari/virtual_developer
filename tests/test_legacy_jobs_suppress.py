@@ -10,10 +10,11 @@ from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
 
 
-def test_open_job_suppresses_matching_session_legacy(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    sessions = tmp_path / ".jira-agent" / "sessions"
-    sessions.mkdir(parents=True)
+def test_open_job_suppresses_matching_session_legacy(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
+    sessions = isolate_jira_agent_artifacts["sessions_dir"]
+    jobs = isolate_jira_agent_artifacts["job_store"]
     # Session log created while agent runs (no link on job yet)
     log = sessions / "KAN-1_20260801_184430_0.log"
     log.write_text("partial output\n")
@@ -21,8 +22,7 @@ def test_open_job_suppresses_matching_session_legacy(tmp_path, monkeypatch):
         "# Direct\n\n## Task\nhello\n\n# X\n"
     )
 
-    jobs = JobStore(jobs_dir=tmp_path / ".jira-agent" / "jobs")
-    sm = JiraStateManager(state_dir=tmp_path / ".jira-agent" / "state")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("KAN-1", "test", "hello")
     sm.update_state("KAN-1", status=TaskStatus.EXECUTING)
     job = jobs.create_job(
@@ -54,15 +54,15 @@ def test_open_job_suppresses_matching_session_legacy(tmp_path, monkeypatch):
     assert not any(i.startswith("legacy_") for i in ids), ids
 
 
-def test_legacy_still_shown_for_old_unlinked_logs(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    sessions = tmp_path / ".jira-agent" / "sessions"
-    sessions.mkdir(parents=True)
+def test_legacy_still_shown_for_old_unlinked_logs(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
+    sessions = isolate_jira_agent_artifacts["sessions_dir"]
+    jobs = isolate_jira_agent_artifacts["job_store"]
     old = sessions / "KAN-1_20260701_100000_0.log"
     old.write_text("old run\n")
 
-    jobs = JobStore(jobs_dir=tmp_path / ".jira-agent" / "jobs")
-    sm = JiraStateManager(state_dir=tmp_path / ".jira-agent" / "state")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("KAN-1", "test", "hello")
     # completed job with different log path (covered)
     j = jobs.create_job(
@@ -74,7 +74,7 @@ def test_legacy_still_shown_for_old_unlinked_logs(tmp_path, monkeypatch):
     )
     jobs.update_job(
         j["job_id"],
-        session_log_path=str(tmp_path / ".jira-agent" / "sessions" / "other.log"),
+        session_log_path=str(sessions / "other.log"),
         started_at="2026-08-01T12:00:00",
     )
 

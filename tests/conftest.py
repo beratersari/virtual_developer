@@ -2,13 +2,79 @@
 
 from __future__ import annotations
 
-import json
+import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, Dict, List, Optional, Set
+from unittest.mock import MagicMock
 
 import pytest
 
+
+def _snapshot_paths(root: Path) -> Set[str]:
+    if not root.is_dir():
+        return set()
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.fixture(autouse=True)
+def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Route job/session writes into tmp and scrub any real-tree leaks.
+
+    Production uses ``Path.cwd()/.jira-agent/...`` and a module-level
+    ``job_store`` singleton. Without isolation, tests leave files in the repo
+    after assertions. Isolated paths live under ``tmp_path/_vd_runtime`` (auto-
+    deleted by pytest); any *new* files under the real project ``.jira-agent``
+    are removed on teardown as a safety net.
+    """
+    project_root = Path.cwd()
+    real_agent = (project_root / ".jira-agent").resolve()
+    before = _snapshot_paths(real_agent)
+
+    # Separate from tests that mkdir tmp_path/.jira-agent themselves
+    runtime = tmp_path / "_vd_runtime"
+    jobs_dir = runtime / "jobs"
+    sessions_dir = runtime / "sessions"
+    jobs_dir.mkdir(parents=True)
+    sessions_dir.mkdir(parents=True)
+
+    from src.state.job_store import JobStore
+    import src.processor as processor_mod
+    import src.state.job_store as job_store_mod
+
+    isolated_store = JobStore(jobs_dir=jobs_dir)
+    monkeypatch.setattr(job_store_mod, "job_store", isolated_store)
+    monkeypatch.setattr(job_store_mod, "_default_jobs_dir", lambda: jobs_dir)
+    monkeypatch.setattr(processor_mod, "job_store", isolated_store)
+
+    monkeypatch.setattr(
+        "src.orchestrator.agent_runner._default_sessions_dir",
+        lambda: sessions_dir,
+    )
+    monkeypatch.setattr(
+        "src.dashboard.service._sessions_dir",
+        lambda: sessions_dir,
+        raising=False,
+    )
+
+    yield {
+        "runtime": runtime,
+        "jobs_dir": jobs_dir,
+        "sessions_dir": sessions_dir,
+        "job_store": isolated_store,
+    }
+
+    shutil.rmtree(runtime, ignore_errors=True)
+
+    # Safety net: only remove files created under the real tree during this test
+    if real_agent.is_dir():
+        after = _snapshot_paths(real_agent)
+        for rel in after - before:
+            path = real_agent / rel
+            try:
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 @pytest.fixture
 def tmp_state_dir(tmp_path: Path) -> Path:

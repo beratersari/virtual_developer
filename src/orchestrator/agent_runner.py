@@ -36,6 +36,11 @@ OPENCODE_AGENT_ALIASES: Dict[str, str] = {
 }
 
 
+def _default_sessions_dir() -> Path:
+    """Session logs root. Tests patch this so nothing lands in the real repo tree."""
+    return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+
+
 def resolve_opencode_agent_name(agent: str) -> str:
     """Map short agent keys to OpenCode agent IDs registered by oh-my-openagent."""
     if not agent:
@@ -496,11 +501,14 @@ class AgentRunner:
             - Code review: PROJ-123_review_20240327_143052_0.log
             - Retry 1: PROJ-123_20240327_143052_1.log
         """
-        # Ensure directory exists
-        sessions_dir = (Path.cwd() / ".jira-agent" / "sessions").resolve()
+        # Ensure directory exists (tests patch _default_sessions_dir to isolate)
+        sessions_dir = _default_sessions_dir()
         sessions_dir.mkdir(parents=True, exist_ok=True)
-        
-        logger.debug(f"Generating session file path: task_id={task_id}, issue_key={issue_key}, attempt={attempt_number}, task_type={task_type}")
+
+        logger.debug(
+            f"Generating session file path: task_id={task_id}, issue_key={issue_key}, "
+            f"attempt={attempt_number}, task_type={task_type}"
+        )
 
         def _safe_token(s: str) -> str:
             cleaned = "".join(
