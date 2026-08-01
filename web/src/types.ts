@@ -60,6 +60,25 @@ export type PollPayload = {
   server_time: string
 }
 
+/** DTO from GET /api/models — inventory is backend-only. */
+export type ModelOption = {
+  id: string
+  name: string
+  provider: string
+  source: string
+  /** Pre-formatted display string from the server */
+  label: string
+}
+
+export type ModelsPayload = {
+  default_model: string
+  models: ModelOption[]
+  opencode_config_model?: string | null
+  opencode_config_path?: string | null
+  error?: string | null
+  server_time?: string
+}
+
 export type SettingsPayload = {
   jira_host: string
   jira_board_id: string
@@ -75,6 +94,8 @@ export type SettingsPayload = {
   jira_token_configured: boolean
   gitlab_pat_configured: boolean
   jira_email_configured: boolean
+  /** Runtime DEFAULT_MODEL — inventory list is GET /api/models, not settings */
+  default_model: string
 }
 
 export type JobItem = {
@@ -134,6 +155,10 @@ export type TaskDetail = {
   issue_key: string
   summary: string
   description: string
+  /** Jira board column name when live fetch succeeded */
+  jira_status?: string | null
+  /** True when description/summary came from Jira REST this request */
+  jira_live?: boolean
   status: string
   progress_percentage: number
   live: boolean

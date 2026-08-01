@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Set
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +18,7 @@ from src.dashboard.service import (
     build_dashboard_payload,
     build_jobs,
     build_meta,
+    build_models_response,
     build_poll_status,
     build_settings_view,
     build_task_detail,
@@ -39,6 +40,25 @@ def _static_dir() -> Optional[Path]:
     return None
 
 
+def _safe_under_static(static: Path, full_path: str) -> Optional[Path]:
+    """Resolve a path under ``static`` or return None (blocks traversal)."""
+    if not full_path or full_path.startswith(("/", "\\")):
+        return None
+    # Reject empty segments / parent references before resolve
+    parts = Path(full_path).parts
+    if any(p in ("..", "") for p in parts):
+        return None
+    static_root = static.resolve()
+    try:
+        candidate = (static_root / full_path).resolve()
+        candidate.relative_to(static_root)
+    except (ValueError, OSError):
+        return None
+    if candidate.is_file():
+        return candidate
+    return None
+
+
 def create_dashboard_app(
     *,
     processor: Optional["JobProcessor"] = None,
@@ -46,15 +66,27 @@ def create_dashboard_app(
 ) -> FastAPI:
     """Create dashboard FastAPI application bound to daemon services."""
     sm = state_manager or JiraStateManager()
-    app = FastAPI(title="JIRA Virtual Developer Dashboard", version="1.0.0")
+    # No OpenAPI UI in production path — dashboard has no auth
+    app = FastAPI(
+        title="JIRA Virtual Developer Dashboard",
+        version="1.0.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.processor = processor
     app.state.state_manager = sm
 
+    # Same-origin SPA in production; Vite dev proxy only (never wildcard + credentials)
+    dev_origins = [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_origins=dev_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -78,7 +110,10 @@ def create_dashboard_app(
         return build_tasks(app.state.state_manager, app.state.processor).model_dump()
 
     @app.get("/api/jobs")
-    def jobs(issue_key: Optional[str] = None, limit: int = 200) -> dict:
+    def jobs(
+        issue_key: Optional[str] = None,
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> dict:
         return build_jobs(
             issue_key=issue_key,
             limit=limit,
@@ -97,7 +132,6 @@ def create_dashboard_app(
             state_manager=app.state.state_manager,
             processor=app.state.processor,
         )
-        # Attach this job record; detail may still be current issue state
         return {
             "job": job,
             "issue": detail,
@@ -113,7 +147,6 @@ def create_dashboard_app(
         )
         if detail is None:
             raise HTTPException(status_code=404, detail=f"No state for {issue_key}")
-        # Include all historical jobs for this Jira issue
         detail["jobs"] = build_jobs(
             issue_key=issue_key,
             limit=100,
@@ -143,10 +176,14 @@ def create_dashboard_app(
     def get_settings() -> dict:
         return build_settings_view().model_dump()
 
+    @app.get("/api/models")
+    def get_models(refresh: bool = False) -> dict:
+        """List OpenCode models (CLI + opencode.json). Sole inventory endpoint for the UI."""
+        return build_models_response(refresh=refresh).model_dump()
+
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
         view = apply_settings_update(body)
-        # Live-update poller interval if daemon poller is attached
         poller = getattr(app.state, "poller", None)
         if poller is not None and body.poll_interval_seconds is not None:
             try:
@@ -158,6 +195,17 @@ def create_dashboard_app(
                 poller.board_id = str(body.jira_board_id).strip()
             except Exception as e:
                 logger.warning(f"Could not update poller board_id: {e}")
+        # Resize live job semaphore when concurrency setting changes
+        proc = app.state.processor
+        if (
+            proc is not None
+            and body.max_concurrent_jobs is not None
+            and hasattr(proc, "resize_job_semaphore")
+        ):
+            try:
+                proc.resize_job_semaphore(int(body.max_concurrent_jobs))
+            except Exception as e:
+                logger.warning(f"Could not resize job semaphore: {e}")
         return view.model_dump()
 
     @app.get("/api/dashboard")
@@ -173,7 +221,6 @@ def create_dashboard_app(
         loop = asyncio.get_event_loop()
 
         def _on_snapshot(_snap: dict) -> None:
-            # Called from poller thread — schedule send on event loop
             try:
                 asyncio.run_coroutine_threadsafe(_broadcast(_payload()), loop)
             except Exception:
@@ -183,7 +230,6 @@ def create_dashboard_app(
         try:
             await ws.send_json(_payload())
             while True:
-                # Keepalive / client pings; ignore payload
                 try:
                     await asyncio.wait_for(ws.receive_text(), timeout=15.0)
                 except asyncio.TimeoutError:
@@ -212,17 +258,41 @@ def create_dashboard_app(
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
+        def _spa_index() -> FileResponse:
+            # Always revalidate HTML so browsers pick up new hashed asset names
+            return FileResponse(
+                static / "index.html",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            )
+
         @app.get("/")
         def index() -> FileResponse:
-            return FileResponse(static / "index.html")
+            return _spa_index()
 
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Any:
-            # SPA client routes
-            candidate = static / full_path
-            if candidate.is_file():
-                return FileResponse(candidate)
-            return FileResponse(static / "index.html")
+            # Never serve files outside web/dist (blocks ../ path traversal)
+            # Do not SPA-fallback reserved API/docs paths (docs are disabled)
+            reserved = (
+                "api/",
+                "docs",
+                "redoc",
+                "openapi.json",
+                "ws",
+            )
+            low = (full_path or "").lstrip("/").lower()
+            if low == "docs" or low.startswith("docs/") or low in (
+                "redoc",
+                "openapi.json",
+            ) or low.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
+            safe = _safe_under_static(static, full_path)
+            if safe is not None:
+                return FileResponse(safe)
+            return _spa_index()
     else:
 
         @app.get("/")
@@ -236,6 +306,7 @@ def create_dashboard_app(
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
+                    "models": "/api/models",
                     "dashboard": "/api/dashboard",
                     "ws": "/ws",
                 },

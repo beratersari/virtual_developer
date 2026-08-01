@@ -60,6 +60,10 @@ def test_settings_view_hides_secrets(monkeypatch):
     assert "pat-secret" not in str(dumped)
     assert view.jira_token_configured is True
     assert view.gitlab_pat_configured is True
+    assert "default_model" in dumped
+    # Inventory is GET /api/models only — not embedded in settings/WS
+    assert "available_models" not in dumped
+    assert "models" not in dumped
 
 
 def test_apply_settings_update_runtime(monkeypatch):
@@ -67,12 +71,19 @@ def test_apply_settings_update_runtime(monkeypatch):
 
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
     monkeypatch.setattr(settings, "jira_board_id", "1")
+    monkeypatch.setattr(settings, "default_model", "old/m")
     view = apply_settings_update(
-        SettingsUpdate(poll_interval_seconds=45, jira_board_id="99")
+        SettingsUpdate(
+            poll_interval_seconds=45,
+            jira_board_id="99",
+            default_model="opencode/new-model",
+        )
     )
     assert view.poll_interval_seconds == 45
     assert view.jira_board_id == "99"
     assert settings.poll_interval_seconds == 45
+    assert settings.default_model == "opencode/new-model"
+    assert view.default_model == "opencode/new-model"
 
 
 def test_api_tasks_and_poll(tmp_path, monkeypatch):
@@ -126,12 +137,49 @@ def test_api_settings_patch(tmp_path, monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
+    monkeypatch.setattr(settings, "default_model", "before/m")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     app = create_dashboard_app(processor=None, state_manager=sm)
     client = TestClient(app)
-    r = client.patch("/api/settings", json={"poll_interval_seconds": 60})
+    r = client.patch(
+        "/api/settings",
+        json={
+            "poll_interval_seconds": 60,
+            "default_model": "opencode/deepseek-v4-flash-free",
+        },
+    )
     assert r.status_code == 200
     assert r.json()["poll_interval_seconds"] == 60
+    assert r.json()["default_model"] == "opencode/deepseek-v4-flash-free"
+    assert "models" not in r.json()
+    assert settings.default_model == "opencode/deepseek-v4-flash-free"
+
+    from src.opencode_models import ModelInfo
+
+    with patch(
+        "src.dashboard.service.list_available_models",
+        return_value=(
+            [
+                ModelInfo(
+                    id="opencode/deepseek-v4-flash-free",
+                    name="DeepSeek",
+                    provider="opencode",
+                    source="cli",
+                )
+            ],
+            None,
+            "/tmp/oc.json",
+            "oc/m",
+        ),
+    ):
+        m = client.get("/api/models")
+    assert m.status_code == 200
+    body = m.json()
+    assert "models" in body
+    assert body["default_model"] == "opencode/deepseek-v4-flash-free"
+    assert body["models"][0]["id"] == "opencode/deepseek-v4-flash-free"
+    assert body["models"][0]["label"]
+    assert body["opencode_config_path"] == "/tmp/oc.json"
 
 
 def test_read_app_version():
@@ -159,11 +207,24 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
     (sessions / "DET-1_20260101_120000_0.log").write_text("opencode output line\n")
     (sessions / "DET-1_20260101_120000_0.prompt.txt").write_text("full prompt body")
 
+    # Live Jira returns updated description/status (not frozen local state)
+    fake_jira.get_issue = MagicMock(
+        return_value={
+            "key": "DET-1",
+            "fields": {
+                "summary": "summary from jira live",
+                "description": "description updated in jira",
+                "status": {"name": "In Progress"},
+            },
+        }
+    )
+
     monkeypatch.chdir(tmp_path)
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
     proc.state_manager = sm
     proc.reporter = MagicMock()
+    proc.jira_client = fake_jira
     runner = MagicMock()
     runner.cancel_task = MagicMock(return_value=True)
     runner.cancel_all_tasks = MagicMock(return_value=1)
@@ -178,6 +239,10 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira):
     assert body["issue_key"] == "DET-1"
     assert body["can_cancel"] is True
     assert body["live"] is True
+    assert body["description"] == "description updated in jira"
+    assert body["summary"] == "summary from jira live"
+    assert body["jira_status"] == "In Progress"
+    assert body["jira_live"] is True
     assert body["prompts"]["system_rules"]
     assert any("opencode output" in (s.get("content") or "") for s in body["session_logs"])
     assert any("DET-1" in (line.get("message") or "") for line in body["system_logs"])

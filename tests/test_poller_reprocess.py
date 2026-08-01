@@ -95,15 +95,16 @@ def test_check_status_changes_skips_turkish_still_todo(poller, state_manager):
     assert poller.check_status_changes(issues) == []
 
 
-def test_check_status_changes_reprocesses_cancelled_after_marker(poller, state_manager):
-    """Cancel sets __cancelled__ marker so return to To Do re-queues."""
+def test_check_status_changes_reprocesses_cancelled_after_in_progress(poller, state_manager):
+    """Cancel while In Progress keeps tracker as in progress; return to To Do re-queues."""
     state_manager.create_state("P-7", "cancelled job", "")
     state_manager.update_state(
         "P-7",
         status=TaskStatus.CANCELLED,
         metadata={"requeue_eligible": True},
     )
-    poller._status_before_poll = {"P-7": "__cancelled__"}
+    # After cancel from In Progress we leave last status as "in progress"
+    poller._status_before_poll = {"P-7": "in progress"}
     issues = [
         {
             "key": "P-7",
@@ -116,6 +117,26 @@ def test_check_status_changes_reprocesses_cancelled_after_marker(poller, state_m
     result = poller.check_status_changes(issues)
     assert len(result) == 1
     assert result[0]["key"] == "P-7"
+
+
+def test_check_status_changes_skips_cancel_while_still_todo(poller, state_manager):
+    """Cancel while Jira stayed To Do must not auto-requeue next poll."""
+    state_manager.create_state("P-9", "cancelled still todo", "")
+    state_manager.update_state(
+        "P-9",
+        status=TaskStatus.CANCELLED,
+        metadata={"requeue_eligible": True},
+    )
+    poller._status_before_poll = {"P-9": "to do"}
+    issues = [
+        {
+            "key": "P-9",
+            "fields": {
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            },
+        }
+    ]
+    assert poller.check_status_changes(issues) == []
 
 
 def test_process_issue_updates_last_status_after_in_progress(poller, fake_jira):

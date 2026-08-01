@@ -18,6 +18,48 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 
+class _JobSlotLimiter:
+    """Async concurrency limiter that supports live resize without over-admit.
+
+    Unlike replacing ``asyncio.Semaphore``, shrinking the limit only blocks
+    *new* acquires; in-flight holders are tracked and must release.
+    """
+
+    def __init__(self, limit: int, *, active: int = 0) -> None:
+        self._limit = max(1, int(limit))
+        self._active = max(0, int(active))
+        self._cond = asyncio.Condition()
+
+    def resize(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    async def __aenter__(self) -> "_JobSlotLimiter":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.release()
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while self._active >= self._limit:
+                await self._cond.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
 
@@ -33,6 +75,8 @@ class JobProcessor:
         self.job_store: JobStore = job_store
         # issue_key -> active job_id for this process
         self._active_jobs: Dict[str, str] = {}
+        # Per-issue locks prevent double-start races under concurrent events
+        self._issue_locks: Dict[str, asyncio.Lock] = {}
         
         logger.info("Initializing JobProcessor")
         
@@ -93,21 +137,27 @@ class JobProcessor:
         *,
         suggestion: Optional[str] = None,
     ) -> None:
-        """Mark issue ERROR and always attempt to notify the user via Jira."""
+        """Mark issue ERROR, finish job record, allow re-queue, notify Jira."""
         error_text = (error_message or "Unknown error")[:2000]
         try:
+            meta_patch = self._archive_run_identifiers(issue_key)
+            meta_patch["requeue_eligible"] = True
             updated = self.state_manager.update_state(
                 issue_key,
                 status=TaskStatus.ERROR,
                 error_message=error_text,
                 completed_at=datetime.now(),
+                current_task_id=None,
+                metadata=meta_patch,
             )
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
+            # Poller: do not force auto-requeue while Jira stayed To Do.
+            # Keep last observed status; requeue_eligible gates leave→return.
+            self._nudge_poller_after_terminal(issue_key, marker="__terminal_local__")
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
-                # State missing — still try a bare comment so the user is not blind
                 self.reporter.post_comment_response(
                     issue_key,
                     f"An error occurred while processing this issue:\n\n{{code}}\n{error_text}\n{{code}}",
@@ -241,6 +291,92 @@ class JobProcessor:
         """Issue keys currently held in the in-memory processing cache."""
         return list(self._contexts.keys())
 
+    def _get_issue_lock(self, issue_key: str) -> asyncio.Lock:
+        """Return (and create) a per-issue asyncio lock."""
+        lock = self._issue_locks.get(issue_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._issue_locks[issue_key] = lock
+        return lock
+
+    def resize_job_semaphore(self, new_limit: int) -> None:
+        """Update concurrency cap without over-admitting mid-flight jobs.
+
+        Uses an adaptive limiter so shrinking the limit only affects *new*
+        admits; in-flight jobs keep their slots until they finish.
+        """
+        limit = max(1, int(new_limit or 1))
+        settings.max_concurrent_jobs = limit
+        if isinstance(self._job_semaphore, _JobSlotLimiter):
+            self._job_semaphore.resize(limit)
+        else:
+            # First resize or cold path — install adaptive limiter
+            active = len(self._contexts)
+            self._job_semaphore = _JobSlotLimiter(limit, active=active)
+        logger.info(f"Job concurrency limit set to {limit}")
+
+    def _nudge_poller_after_terminal(
+        self, issue_key: str, *, marker: str = "__cancelled__"
+    ) -> None:
+        """Update poller status tracker after local cancel/error.
+
+        - If Jira was already To Do-like: keep/set ``to do`` so cancel does
+          **not** auto-requeue on the next poll.
+        - If Jira was non-todo (e.g. ``in progress``): **leave that value**
+          so a later real return to To Do is detected via
+          ``entered_todo_from_elsewhere`` / ``force_after_in_progress``.
+        - Never use synthetic markers that look like “left To Do” while the
+          board column never moved.
+        """
+        try:
+            poller = getattr(self, "_poller", None)
+            if poller is None or not hasattr(poller, "_last_jira_status"):
+                return
+            prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
+            todo_names = {
+                "to do",
+                "todo",
+                "open",
+                "backlog",
+                "selected for development",
+                "yapılacak",
+                "yapilacak",
+                "yeni",
+            }
+            synthetic = {"__cancelled__", "__terminal_local__"}
+            if prev in synthetic or prev == "" or prev in todo_names:
+                # Normalize unknown/synthetic/todo to plain "to do" (no auto-requeue)
+                if prev not in todo_names or prev in synthetic or prev == "":
+                    poller._last_jira_status[issue_key] = "to do"
+            # else: keep non-todo (e.g. "in progress") so To Do return requeues
+            _ = marker  # retained for call-site compatibility
+        except Exception:
+            pass
+
+    def seed_poller_requeue_markers(self) -> int:
+        """After poller attaches: seed trackers for requeue-eligible terminals.
+
+        Avoids auto-requeue while still To Do; only ensures leave→return works
+        when the last known board status was non-todo.
+        """
+        poller = getattr(self, "_poller", None)
+        if poller is None or not hasattr(poller, "_last_jira_status"):
+            return 0
+        n = 0
+        for st in self.state_manager.get_all_states():
+            if st.status not in self.TERMINAL_STATUSES:
+                continue
+            meta = st.metadata or {}
+            if not meta.get("requeue_eligible"):
+                continue
+            key = st.issue_key
+            prev = (poller._last_jira_status.get(key) or "").strip().lower()
+            if not prev:
+                # Unknown board status: assume still To Do (safe, no auto-requeue)
+                poller._last_jira_status[key] = "to do"
+                n += 1
+        return n
+
     def _record_opencode_session(
         self,
         issue_key: str,
@@ -276,6 +412,28 @@ class JobProcessor:
             },
         )
         logger.info(f"{issue_key} OpenCode session: {session_id}")
+
+    def _link_job_session_paths(
+        self,
+        issue_key: str,
+        session_path: Optional[str] = None,
+        prompt_path: Optional[str] = None,
+    ) -> None:
+        """Attach session/prompt paths to the active job as soon as files exist."""
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id:
+            return
+        patch: Dict[str, Any] = {}
+        if session_path:
+            patch["session_log_path"] = session_path
+        if prompt_path:
+            patch["prompt_path"] = prompt_path
+        if not patch:
+            return
+        try:
+            self.job_store.update_job(job_id, **patch)
+        except Exception:
+            pass
 
     def _apply_agent_result_session(self, issue_key: str, result: Dict[str, Any]) -> None:
         """Pull session id from agent result (and retry_info) into state."""
@@ -423,17 +581,23 @@ class JobProcessor:
         if not job_id:
             return
         # Do not overwrite a terminal status with another terminal on the same job
-        existing = self.job_store.get_job(job_id)
-        if existing and (existing.get("status") or "") in (
+        _TERMINAL_JOB = (
             "completed",
             "error",
             "cancelled",
             "superseded",
-        ):
-            # Still allow progress/session fill-in if missing
+            "plan_ready",
+        )
+        existing = self.job_store.get_job(job_id)
+        if existing and (existing.get("status") or "") in _TERMINAL_JOB:
+            # Still allow progress/session fill-in if missing — never overwrite ids
             fill: Dict[str, Any] = {}
             st = self.state_manager.get_state(issue_key)
-            if st and st.current_opencode_session_id and not existing.get("opencode_session_id"):
+            if (
+                st
+                and st.current_opencode_session_id
+                and not existing.get("opencode_session_id")
+            ):
                 fill["opencode_session_id"] = st.current_opencode_session_id
             if st and st.current_task_id and not existing.get("task_id"):
                 fill["task_id"] = st.current_task_id
@@ -450,16 +614,19 @@ class JobProcessor:
         if progress_percentage is not None:
             fields["progress_percentage"] = progress_percentage
         st = self.state_manager.get_state(issue_key)
-        if st and st.current_opencode_session_id:
+        # Prefer ids already on the job (supersede must not stamp the new run's ids)
+        if st and st.current_opencode_session_id and not (
+            existing and existing.get("opencode_session_id")
+        ):
             fields["opencode_session_id"] = st.current_opencode_session_id
-        if st and st.current_task_id:
+        if st and st.current_task_id and not (existing and existing.get("task_id")):
             fields["task_id"] = st.current_task_id
         self.job_store.update_job(job_id, **fields)
-        # Keep job_id in history lists
-        self.state_manager.update_state(
-            issue_key,
-            metadata=self._archive_run_identifiers(issue_key, job_id=job_id),
-        )
+        # Keep job_id in history; clear live pointer when this finish is terminal
+        meta = self._archive_run_identifiers(issue_key, job_id=job_id)
+        if status in _TERMINAL_JOB:
+            meta["current_job_id"] = None
+        self.state_manager.update_state(issue_key, metadata=meta)
 
     def cancel_job(self, issue_key: str, *, reason: str = "Cancelled from dashboard") -> dict:
         """Cancel a job: kill agent children, set CANCELLED, notify Jira.
@@ -484,8 +651,9 @@ class JobProcessor:
             if runner and state.current_task_id:
                 killed = bool(runner.cancel_task(state.current_task_id))
             if runner and hasattr(runner, "cancel_all_tasks"):
-                runner.cancel_all_tasks()
-                killed = True
+                n = runner.cancel_all_tasks()
+                if n:
+                    killed = True
         except Exception as e:
             logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
@@ -560,13 +728,7 @@ class JobProcessor:
                 error_message=text,
             )
 
-            # Nudge poller status history so next "To Do" sighting is a real change
-            try:
-                poller = getattr(self, "_poller", None)
-                if poller is not None and hasattr(poller, "_last_jira_status"):
-                    poller._last_jira_status[issue_key] = "__cancelled__"
-            except Exception:
-                pass
+            self._nudge_poller_after_terminal(issue_key, marker="__cancelled__")
 
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
@@ -687,22 +849,23 @@ class JobProcessor:
 
         if self._job_semaphore is None:
             limit = max(1, int(settings.max_concurrent_jobs or 1))
-            self._job_semaphore = asyncio.Semaphore(limit)
+            self._job_semaphore = _JobSlotLimiter(limit)
         
         try:
             async with self._job_semaphore:
-                # Accept both on-prem/cloud comment event names
-                if event_type == "jira:issue_created":
-                    logger.info(f"Handling issue created event for {issue_key}")
-                    await self._handle_issue_created(event)
-                elif event_type == "jira:issue_updated":
-                    logger.info(f"Handling issue updated event for {issue_key}")
-                    await self._handle_issue_updated(event)
-                elif event_type in ("comment_created", "jira:issue_commented"):
-                    logger.info(f"Handling comment created event for {issue_key}")
-                    await self._handle_comment_created(event)
-                else:
-                    logger.debug(f"Unknown event type: {event_type}, ignoring")
+                async with self._get_issue_lock(issue_key):
+                    # Accept both on-prem/cloud comment event names
+                    if event_type == "jira:issue_created":
+                        logger.info(f"Handling issue created event for {issue_key}")
+                        await self._handle_issue_created(event)
+                    elif event_type == "jira:issue_updated":
+                        logger.info(f"Handling issue updated event for {issue_key}")
+                        await self._handle_issue_updated(event)
+                    elif event_type in ("comment_created", "jira:issue_commented"):
+                        logger.info(f"Handling comment created event for {issue_key}")
+                        await self._handle_comment_created(event)
+                    else:
+                        logger.debug(f"Unknown event type: {event_type}, ignoring")
         except Exception as e:
             logger.exception(f"Unhandled error processing event for {issue_key}: {e}", e)
             if issue_key and issue_key != "unknown":
@@ -711,6 +874,7 @@ class JobProcessor:
                     f"Unhandled error while processing event: {e}",
                     suggestion="Check daemon logs and re-queue the issue if needed.",
                 )
+                self._release_context(issue_key, success=False)
     
     async def _handle_issue_created(self, event: Dict[str, Any]):
         issue = event.get("issue", {})
@@ -797,6 +961,7 @@ class JobProcessor:
                 f"Workflow failed: {e}",
                 suggestion="Check agent/session logs, then move the issue back to TO DO to retry.",
             )
+            self._release_context(issue_key, success=False)
     
     async def _handle_issue_updated(self, event: Dict[str, Any]):
         issue = event.get("issue") or {}
@@ -832,12 +997,23 @@ class JobProcessor:
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        # Terminal → reprocess only when Jira is To Do (user reopened / left in todo)
+        # Terminal → reprocess only when Jira is To Do.
+        # ERROR/CANCELLED require requeue_eligible (set by cancel/fail).
+        # COMPLETED may reprocess when poller already detected a real reopen.
         if state.status in self.TERMINAL_STATUSES:
             if is_todo:
+                meta = state.metadata or {}
+                if state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED):
+                    if not meta.get("requeue_eligible"):
+                        logger.debug(
+                            f"{issue_key} is {state.status.value} without "
+                            f"requeue_eligible; ignoring update event"
+                        )
+                        return
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
-                    f"(Jira status '{status_name}' is To Do)"
+                    f"(Jira status '{status_name}' is To Do, requeue_eligible="
+                    f"{bool(meta.get('requeue_eligible'))})"
                 )
                 self._reset_for_reprocess(issue_key)
                 await self._handle_issue_created(event)
@@ -1058,6 +1234,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1070,6 +1260,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1129,18 +1322,15 @@ class JobProcessor:
                     self.state_manager.get_state(state.issue_key)
                 )
         else:
-            # Planning failed
+            # Planning failed — finish job + requeue_eligible via _fail_issue
             self.state_manager.update_state(
                 state.issue_key,
-                status=TaskStatus.ERROR,
-                error_message=result["stderr"],
-                completed_at=completed_at,
                 execution_duration_seconds=duration,
-                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
-            self.reporter.post_error(
-                self.state_manager.get_state(state.issue_key),
-                result["stderr"],
+            self._fail_issue(
+                state.issue_key,
+                result.get("stderr") or "Planning agent failed",
+                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
             )
             self._release_context(state.issue_key, success=False)
     
@@ -1237,6 +1427,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1249,6 +1453,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1296,15 +1503,12 @@ class JobProcessor:
         else:
             self.state_manager.update_state(
                 state.issue_key,
-                status=TaskStatus.ERROR,
-                error_message=result["stderr"],
-                completed_at=completed_at,
                 execution_duration_seconds=duration,
-                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
-            self.reporter.post_error(
-                self.state_manager.get_state(state.issue_key),
-                result["stderr"],
+            self._fail_issue(
+                state.issue_key,
+                result.get("stderr") or "Execution agent failed",
+                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
             )
             self._release_context(state.issue_key, success=False)
     
@@ -1404,6 +1608,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1416,6 +1634,9 @@ class JobProcessor:
             on_output=on_output,
             on_progress=on_progress,
             on_retry=on_retry,
+            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                state.issue_key, sp, pp
+            ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
         )
@@ -1476,23 +1697,17 @@ class JobProcessor:
                 execution_summary=result["stdout"][:1000],
             )
         else:
-            updated_state = self.state_manager.update_state(
+            self.state_manager.update_state(
                 state.issue_key,
-                status=TaskStatus.ERROR,
-                error_message=result["stderr"],
-                completed_at=completed_at,
                 execution_duration_seconds=duration,
                 token_usage_input=cost_data["input_tokens"],
                 token_usage_output=cost_data["output_tokens"],
                 estimated_cost=cost_data["estimated_cost"],
-                # current_opencode_session_id keeps the last retry's session ID (even on failure)
             )
-
-            # Use updated state or fall back to original state
-            state_to_use = updated_state or state
-            self.reporter.post_error(
-                state_to_use,
-                result["stderr"],
+            self._fail_issue(
+                state.issue_key,
+                result.get("stderr") or "Direct execution agent failed",
+                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
             )
             self._release_context(state.issue_key, success=False)
     
@@ -1671,8 +1886,8 @@ class JobProcessor:
         """Ensure an AgentRunner exists for lightweight paths (oracle/comments).
 
         Always binds to the given issue_key (never reuses another issue's runner).
-        Prefers a full git workspace when possible; falls back to project_root
-        so comment/oracle paths never crash with agent_runner is None.
+        Prefers a full git workspace when possible; falls back to an empty
+        sandbox under ``.temp/`` — never the daemon project_root.
         """
         existing = self._contexts.get(issue_key)
         if existing and existing.get("runner") is not None:
@@ -1697,10 +1912,18 @@ class JobProcessor:
         except Exception as e:
             logger.warning(
                 f"Git workspace init failed for {issue_key}, "
-                f"using project_root for agent: {e}"
+                f"using isolated sandbox (not project_root): {e}"
             )
-            # Lightweight comment/oracle path — do not use another issue's temp clone
-            runner = AgentRunner(working_directory=settings.project_root)
+            safe = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
+            )[:80]
+            sandbox = (
+                Path.cwd()
+                / settings.temp_dir_base
+                / f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            sandbox.mkdir(parents=True, exist_ok=True)
+            runner = AgentRunner(working_directory=sandbox)
             self._contexts[issue_key] = {"git": None, "runner": runner}
             self.agent_runner = runner
         assert self.agent_runner is not None
@@ -1709,98 +1932,115 @@ class JobProcessor:
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""
         logger.info(f"Starting Oracle consultation for {state.issue_key}")
+        success: Optional[bool] = False
+        try:
+            runner = self._ensure_agent_runner(state.issue_key)
 
-        runner = self._ensure_agent_runner(state.issue_key)
-
-        prompt = PromptBuilder.build_oracle_consult_prompt(
-            question=state.description,
-        )
-
-        task = AgentTask(
-            description=f"Consult: {state.issue_key}",
-            prompt=prompt,
-            agent="oracle",
-            issue_key=state.issue_key,
-        )
-
-        # Same in-flight fields as plan/execute so /cancel and stuck watchdog
-        # can resolve and kill the live agent via current_task_id.
-        self._begin_workflow_run(
-            state,
-            status=TaskStatus.EXECUTING,
-            task=task,
-            workflow_type="oracle",
-            agent="oracle",
-            job_status="executing",
-        )
-        self._mark_jira_in_progress(state.issue_key)
-
-        result = await runner.run_agent(task)
-        self._apply_agent_result_session(state.issue_key, result)
-
-        if self._is_aborted(state.issue_key):
-            logger.info(f"Oracle aborted for {state.issue_key}")
-            return
-
-        if result["returncode"] == 0:
-            self.reporter.post_oracle_response(
-                state.issue_key,
+            prompt = PromptBuilder.build_oracle_consult_prompt(
                 question=state.description,
-                answer=result["stdout"],
             )
-            self.state_manager.update_state(
-                state.issue_key,
-                status=TaskStatus.COMPLETED,
-                completed_at=datetime.now(),
-                progress_percentage=100,
-                current_task_id=None,
+
+            task = AgentTask(
+                description=f"Consult: {state.issue_key}",
+                prompt=prompt,
+                agent="oracle",
+                issue_key=state.issue_key,
             )
-            self._finish_job_record(
-                state.issue_key, status="completed", progress_percentage=100
+
+            self._begin_workflow_run(
+                state,
+                status=TaskStatus.EXECUTING,
+                task=task,
+                workflow_type="oracle",
+                agent="oracle",
+                job_status="executing",
             )
-        else:
-            self._fail_issue(
-                state.issue_key,
-                result.get("stderr") or "Oracle consultation failed",
-                suggestion="Rephrase the architecture question or check agent logs.",
+            self._mark_jira_in_progress(state.issue_key)
+
+            result = await runner.run_agent(
+                task,
+                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                    state.issue_key, sp, pp
+                ),
             )
+            self._apply_agent_result_session(state.issue_key, result)
+
+            if self._is_aborted(state.issue_key):
+                logger.info(f"Oracle aborted for {state.issue_key}")
+                return
+
+            if result["returncode"] == 0:
+                self.reporter.post_oracle_response(
+                    state.issue_key,
+                    question=state.description,
+                    answer=result["stdout"],
+                )
+                self.state_manager.update_state(
+                    state.issue_key,
+                    status=TaskStatus.COMPLETED,
+                    completed_at=datetime.now(),
+                    progress_percentage=100,
+                    current_task_id=None,
+                )
+                self._finish_job_record(
+                    state.issue_key, status="completed", progress_percentage=100
+                )
+                success = True
+            else:
+                self._fail_issue(
+                    state.issue_key,
+                    result.get("stderr") or "Oracle consultation failed",
+                    suggestion="Rephrase the architecture question or check agent logs.",
+                )
+        finally:
+            self._release_context(state.issue_key, success=success)
     
     async def _handle_direct_request(self, issue_key: str, request: str):
         """Handle a direct request from comment (does not flip whole-issue ERROR)."""
         state = self.state_manager.get_state(issue_key)
+        # Only release a context we create here (do not drop an in-flight workflow)
+        created_context = issue_key not in self._contexts
 
         try:
-            runner = self._ensure_agent_runner(issue_key)
-        except Exception as e:
-            # Soft failure — do not wipe COMPLETED / PLAN_READY / in-flight
-            self.reporter.post_comment_response(
-                issue_key,
-                f"Could not start agent for comment: {e}",
+            try:
+                runner = self._ensure_agent_runner(issue_key)
+            except Exception as e:
+                self.reporter.post_comment_response(
+                    issue_key,
+                    f"Could not start agent for comment: {e}",
+                )
+                return
+
+            # If runner was adopted into an existing live context, do not release it
+            if not created_context:
+                created_context = False
+            else:
+                created_context = issue_key in self._contexts
+
+            prompt = PromptBuilder.build_comment_response_prompt(
+                issue_key=issue_key,
+                comment_text=request,
+                current_state=state.status.value if state else None,
             )
-            return
-        
-        prompt = PromptBuilder.build_comment_response_prompt(
-            issue_key=issue_key,
-            comment_text=request,
-            current_state=state.status.value if state else None,
-        )
-        
-        task = AgentTask(
-            description=f"Comment response: {issue_key}",
-            prompt=prompt,
-            agent=settings.default_agent,
-            issue_key=issue_key,
-        )
-        
-        result = await runner.run_agent(task)
-        
-        if result["returncode"] == 0:
-            self.reporter.post_comment_response(issue_key, result["stdout"])
-        else:
-            # Soft failure: leave issue status unchanged; only reply on the ticket
-            err = result.get("stderr") or "Comment response agent failed"
-            self.reporter.post_comment_response(
-                issue_key,
-                f"Could not complete comment request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
-                "Retry the @mention or check agent logs.",
+
+            task = AgentTask(
+                description=f"Comment response: {issue_key}",
+                prompt=prompt,
+                agent=settings.default_agent,
+                issue_key=issue_key,
             )
+
+            result = await runner.run_agent(task)
+
+            if result["returncode"] == 0:
+                self.reporter.post_comment_response(issue_key, result["stdout"])
+            else:
+                err = result.get("stderr") or "Comment response agent failed"
+                self.reporter.post_comment_response(
+                    issue_key,
+                    f"Could not complete comment request:\n{{code}}\n{err[:1500]}\n{{code}}\n"
+                    "Retry the @mention or check agent logs.",
+                )
+        finally:
+            if created_context:
+                self._release_context(issue_key, success=None)

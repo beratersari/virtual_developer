@@ -56,7 +56,9 @@ _AGENT_ENV_DENYLIST = (
     "JIRA_PASSWORD",
     "GITLAB_PAT",
     "GITLAB_TOKEN",
-
+    "GITLAB_ACCESS_TOKEN",
+    "GL_TOKEN",
+    "PRIVATE_TOKEN",
 )
 
 
@@ -113,6 +115,7 @@ class AgentRunner:
         on_output: Optional[callable] = None,
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
+        on_session_file: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         attempt_number: int = 0,
     ) -> Dict[str, Any]:
@@ -123,6 +126,7 @@ class AgentRunner:
             on_output: Callback for output lines (stream, line)
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
+            on_session_file: Callback (session_path, prompt_path) when log/prompt files are created
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
@@ -149,13 +153,25 @@ class AgentRunner:
         logger.info(f"Session file created: {session_file}")
 
         # Persist full agent prompt for dashboard task detail
+        prompt_path: Optional[Path] = None
         try:
             prompt_path = session_file.with_suffix(".prompt.txt")
             prompt_path.write_text(task.prompt or "", encoding="utf-8")
             logger.debug(f"Prompt file written: {prompt_path}")
         except Exception as e:
             logger.warning(f"Could not write prompt file for {task.task_id}: {e}")
-        
+            prompt_path = None
+
+        # Link JobStore immediately so dashboard does not invent a legacy_* twin
+        if on_session_file is not None:
+            try:
+                on_session_file(
+                    str(session_file),
+                    str(prompt_path) if prompt_path is not None else None,
+                )
+            except Exception as e:
+                logger.debug(f"on_session_file callback failed: {e}")
+
         # Build the command as a list (cross-platform)
         cmd_list = self._build_command(task, session_file)
         logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
@@ -246,11 +262,7 @@ class AgentRunner:
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.error(f"Agent task timed out after {elapsed:.2f}s (limit={effective_timeout}s)")
-                self._kill_process_tree(process)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Process wait timed out after kill: {task.task_id}")
+                await self._kill_process_tree_escalating(process, task.task_id)
                 logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far
                 all_output_lines = stdout_lines + stderr_lines
@@ -337,26 +349,27 @@ class AgentRunner:
     def _parse_session_id(self, lines: List[str]) -> Optional[str]:
         """Parse opencode session ID from output lines.
 
-        Looks for patterns like:
-        - "Session: ses_abc123"
-        - bare ``ses_…`` tokens (JSON / UI variants)
+        Prefers labeled patterns; takes the **last** match so early noise
+        (parent session echoes) does not win over the real session.
         """
         import re
 
-        patterns = [
+        labeled = [
             r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
             r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
             r'"sessionID"\s*:\s*"(ses_[a-zA-Z0-9_-]+)"',
-            r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
         ]
+        bare = r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)'
 
+        last_labeled: Optional[str] = None
+        last_bare: Optional[str] = None
         for line in lines:
-            for pattern in patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    return match.group(1)
-
-        return None
+            for pattern in labeled:
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    last_labeled = match.group(1)
+            for match in re.finditer(bare, line, re.IGNORECASE):
+                last_bare = match.group(1)
+        return last_labeled or last_bare
     
     def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
         """Build the opencode CLI command as a list (cross-platform).
@@ -489,20 +502,29 @@ class AgentRunner:
         
         logger.debug(f"Generating session file path: task_id={task_id}, issue_key={issue_key}, attempt={attempt_number}, task_type={task_type}")
 
+        def _safe_token(s: str) -> str:
+            cleaned = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in (s or "")
+            )
+            return (cleaned.strip("._-") or "unknown")[:80]
+
         if issue_key:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_key = _safe_token(issue_key)
             if task_type:
-                # Format: JIRAID_TYPE_DATETIME_RETRYCOUNT.log
-                filename = f"{issue_key}_{task_type}_{timestamp}_{attempt_number}.log"
+                filename = (
+                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}_{attempt_number}.log"
+                )
             else:
-                # Format: JIRAID_DATETIME_RETRYCOUNT.log
-                filename = f"{issue_key}_{timestamp}_{attempt_number}.log"
+                filename = f"{safe_key}_{timestamp}_{attempt_number}.log"
         else:
-            # Fallback to task_id if no issue_key provided
-            filename = f"{task_id}.log"
+            filename = f"{_safe_token(task_id or 'task')}.log"
 
         path = sessions_dir / filename
-        # Register so read_session_output can resolve issue-keyed filenames
+        try:
+            path.resolve().relative_to(sessions_dir)
+        except ValueError:
+            path = sessions_dir / f"{_safe_token(task_id or 'task')}.log"
         if task_id:
             self._session_files[task_id] = path
         logger.debug(f"Generated session file path: {path}")
@@ -591,14 +613,20 @@ class AgentRunner:
         logger.debug(f"Session file not found: {session_file}")
         return ""
     
-    def _kill_process_tree(self, process: Any) -> None:
-        """Terminate process and, on Unix, its process group."""
+    def _kill_process_tree(self, process: Any, *, force: bool = False) -> None:
+        """Terminate process and, on Unix, its process group.
+
+        ``force=True`` sends SIGKILL (Unix) / kill() (Windows) immediately.
+        """
         if process is None:
             return
         try:
             if IS_WINDOWS:
                 try:
-                    process.terminate()
+                    if force:
+                        process.kill()
+                    else:
+                        process.terminate()
                 except Exception:
                     try:
                         process.kill()
@@ -610,13 +638,16 @@ class AgentRunner:
             if pid is not None:
                 try:
                     import signal
-                    os.killpg(pid, signal.SIGTERM)
+                    sig = signal.SIGKILL if force else signal.SIGTERM
+                    os.killpg(pid, sig)
                     return
                 except (ProcessLookupError, PermissionError, OSError, AttributeError):
                     pass
-            # Fallback: terminate/kill the direct child (mocks, non-group procs)
             try:
-                process.terminate()
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
             except Exception:
                 try:
                     process.kill()
@@ -625,19 +656,49 @@ class AgentRunner:
         except ProcessLookupError:
             pass
 
+    async def _kill_process_tree_escalating(
+        self, process: Any, task_id: str, *, soft_wait: float = 10.0
+    ) -> None:
+        """SIGTERM, wait, then SIGKILL if the process is still alive."""
+        self._kill_process_tree(process, force=False)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=soft_wait)
+            return
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Process still alive after SIGTERM, escalating to SIGKILL: {task_id}"
+            )
+        self._kill_process_tree(process, force=True)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Process wait timed out after SIGKILL: {task_id}")
+
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
         if process and process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
-            self._kill_process_tree(process)
+            self._kill_process_tree(process, force=False)
+            # Escalate if still running (sync path — best effort)
+            if process.returncode is None:
+                try:
+                    import time
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                if process.returncode is None:
+                    self._kill_process_tree(process, force=True)
             logger.info(f"Task cancel signal sent: task_id={task_id}")
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False
 
     def cancel_all_tasks(self) -> int:
-        """Kill every live child process tracked by this runner. Returns count signalled."""
+        """Kill every live child process tracked by this runner. Returns count signalled.
+
+        SIGTERM then brief wait then SIGKILL (same escalation as cancel_task).
+        """
         killed = 0
         for task_id, process in list(self._running_tasks.items()):
             if process is None:
@@ -645,7 +706,15 @@ class AgentRunner:
             if getattr(process, "returncode", None) is not None:
                 continue
             logger.info(f"Cancelling task on shutdown: task_id={task_id}")
-            self._kill_process_tree(process)
+            self._kill_process_tree(process, force=False)
+            if getattr(process, "returncode", None) is None:
+                try:
+                    import time
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                if getattr(process, "returncode", None) is None:
+                    self._kill_process_tree(process, force=True)
             killed += 1
         return killed
 
@@ -656,6 +725,7 @@ class AgentRunner:
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
         on_retry: Optional[callable] = None,
+        on_session_file: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -671,6 +741,7 @@ class AgentRunner:
                 error_message, return_code, session_id, new_task_id)``.
                 ``new_task_id`` is the id of the upcoming attempt (must be
                 stored as ``current_task_id`` for cancel/watchdog).
+            on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
 
@@ -704,6 +775,7 @@ class AgentRunner:
                 on_output=on_output,
                 on_complete=on_complete,
                 on_progress=on_progress,
+                on_session_file=on_session_file,
                 timeout_seconds=timeout_seconds,
                 attempt_number=attempt,
             )

@@ -316,8 +316,14 @@ def test_agent_runner_cancel_all_tasks():
     proc_c = MagicMock()
     proc_c.returncode = None
     runner._running_tasks = {"a": proc_a, "b": proc_b, "c": proc_c}
-    with patch.object(runner, "_kill_process_tree") as kill:
-        n = runner.cancel_all_tasks()
+
+    def _kill(process, force=False):
+        # Soft kill succeeds — no escalate needed
+        process.returncode = -15
+
+    with patch.object(runner, "_kill_process_tree", side_effect=_kill) as kill:
+        with patch("time.sleep"):  # cancel_all may sleep before escalate
+            n = runner.cancel_all_tasks()
     assert n == 2
     assert kill.call_count == 2
 

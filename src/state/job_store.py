@@ -56,12 +56,43 @@ def extract_task_description_from_prompt(text: str) -> str:
 
 
 def description_from_prompt_path(prompt_path: Optional[str]) -> str:
-    """Read a prompt file and extract the task description, or ''."""
+    """Read a prompt file and extract the task description, or ''.
+
+    Only reads agent session/job artifacts — not arbitrary filesystem paths
+    that might appear in a compromised job JSON record.
+    """
     if not prompt_path:
         return ""
     try:
-        path = Path(prompt_path)
+        path = Path(prompt_path).resolve()
         if not path.is_file():
+            return ""
+
+        def _under(root: Path) -> bool:
+            try:
+                path.relative_to(root.resolve())
+                return True
+            except ValueError:
+                return False
+
+        allowed = (
+            _under(Path.cwd() / ".jira-agent")
+            or _under(_default_jobs_dir())
+            or ".jira-agent" in path.parts
+            or (
+                path.parent.name == "sessions"
+                and (
+                    path.name.endswith(".prompt.txt")
+                    or path.suffix == ".log"
+                )
+            )
+        )
+        if not allowed:
+            logger.debug(f"Refusing prompt path outside agent dirs: {path}")
+            return ""
+        # Block obvious system locations even if named sessions/
+        blocked = {"etc", "proc", "sys", "windows", "system32"}
+        if blocked & {p.lower() for p in path.parts}:
             return ""
         text = path.read_text(encoding="utf-8", errors="replace")
         return extract_task_description_from_prompt(text)

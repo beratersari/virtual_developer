@@ -184,56 +184,51 @@ def show(issue_key: str):
 @cli.command()
 @click.argument("issue_key")
 def cancel(issue_key: str):
-    """Cancel processing for an issue."""
-    from src.state.models import TaskStatus
-    
-    manager = JiraStateManager()
-    state = manager.get_state(issue_key)
-    
-    if not state:
-        console.print(f"[red]No state found for {issue_key}[/red]")
+    """Cancel processing for an issue via the shared JobProcessor path.
+
+    Marks state CANCELLED and sets requeue markers. A standalone CLI process
+    cannot signal another daemon's live agent subprocesses — stop the agent
+    from the ops dashboard (same process) or restart the daemon if needed.
+    """
+    from src.processor import JobProcessor
+
+    proc = JobProcessor()
+    result = proc.cancel_job(issue_key, reason="Cancelled from CLI")
+    if not result.get("ok"):
+        console.print(f"[red]{result.get('error') or 'Cancel failed'}[/red]")
         return
-    
-    # Cancel running task
-    if state.current_task_id:
-        from src.orchestrator.agent_runner import AgentRunner
-        runner = AgentRunner()
-        runner.cancel_task(state.current_task_id)
-    
-    # Update state
-    manager.update_state(issue_key, status=TaskStatus.CANCELLED)
+    if not result.get("process_signalled"):
+        console.print(
+            "[yellow]State set to cancelled; if a daemon is running, use the "
+            "ops dashboard cancel so the live agent process is killed.[/yellow]"
+        )
     console.print(f"[green]Cancelled {issue_key}[/green]")
 
 
 @cli.command()
 def costs():
     """Show cost summary across all issues."""
-    from pathlib import Path
-    import json
-    
-    state_dir = Path("state")
+    from src.config import settings
+
+    state_dir = settings.state_dir
     if not state_dir.exists():
         console.print("[yellow]No state directory found[/yellow]")
         return
-    
+
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
     total_duration = 0.0
     issue_count = 0
-    
-    for state_file in state_dir.glob("*.json"):
-        try:
-            with open(state_file) as f:
-                data = json.load(f)
-                total_input_tokens += data.get("token_usage_input", 0)
-                total_output_tokens += data.get("token_usage_output", 0)
-                total_cost += data.get("estimated_cost", 0.0)
-                total_duration += data.get("execution_duration_seconds", 0.0)
-                issue_count += 1
-        except (json.JSONDecodeError, KeyError):
-            continue
-    
+
+    manager = JiraStateManager(state_dir=state_dir)
+    for state in manager.get_all_states():
+        total_input_tokens += int(state.token_usage_input or 0)
+        total_output_tokens += int(state.token_usage_output or 0)
+        total_cost += float(state.estimated_cost or 0.0)
+        total_duration += float(state.execution_duration_seconds or 0.0)
+        issue_count += 1
+
     if issue_count == 0:
         console.print("[yellow]No completed issues with cost data found[/yellow]")
         return
@@ -477,6 +472,96 @@ def test_issue(
     asyncio.run(run_agent())
     
     console.print(f"\n[dim]State saved in: {settings.state_dir}[/dim]")
+
+
+@cli.command("models")
+@click.option("--refresh", is_flag=True, help="Bypass short in-process cache")
+@click.option(
+    "--set",
+    "set_model",
+    default=None,
+    help="Set runtime DEFAULT_MODEL (process memory only; also set DEFAULT_MODEL in .env for persistence)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON")
+def models_cmd(refresh: bool, set_model: Optional[str], as_json: bool):
+    """List available OpenCode models and optionally set the default.
+
+    Sources: ``opencode models`` CLI + models declared in opencode.json(c)
+    (including custom provider hosts you configure there).
+
+    Examples:
+        python cli.py models
+        python cli.py models --set opencode/deepseek-v4-flash-free
+        python cli.py models --refresh --json
+    """
+    from src.opencode_models import clear_models_cache, list_available_models
+
+    if set_model is not None:
+        model = set_model.strip()
+        if not model:
+            console.print("[red]Model id must not be empty[/red]")
+            sys.exit(1)
+        settings.default_model = model
+        console.print(f"[green]Runtime default_model set to:[/green] {model}")
+        console.print(
+            "[dim]Persists only for this process. For the daemon, use dashboard Settings "
+            "or set DEFAULT_MODEL in .env and restart.[/dim]"
+        )
+
+    if refresh:
+        clear_models_cache()
+
+    items, err, cfg_path, cfg_model = list_available_models(refresh=refresh)
+    current = (settings.default_model or "").strip()
+
+    if as_json:
+        import json as _json
+
+        console.print(
+            _json.dumps(
+                {
+                    "default_model": current,
+                    "opencode_config_path": cfg_path,
+                    "opencode_config_model": cfg_model,
+                    "models_error": err,
+                    "models": [
+                        {
+                            "id": m.id,
+                            "name": m.name,
+                            "provider": m.provider,
+                            "source": m.source,
+                        }
+                        for m in items
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    console.print(f"\n[bold]Current DEFAULT_MODEL:[/bold] {current or '(unset)'}")
+    if cfg_path:
+        console.print(f"[dim]OpenCode config:[/dim] {cfg_path}")
+        if cfg_model:
+            console.print(f"[dim]Config model key:[/dim] {cfg_model}")
+    else:
+        console.print("[dim]No opencode.json / opencode.jsonc found[/dim]")
+    if err:
+        console.print(f"[yellow]CLI list warning:[/yellow] {err}")
+
+    table = Table(title=f"Available models ({len(items)})")
+    table.add_column("ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Source", style="dim")
+    table.add_column("", style="green")
+    for m in items:
+        mark = "← active" if m.id == current else ""
+        table.add_row(m.id, m.name or "", m.source, mark)
+    console.print(table)
+    console.print(
+        "\n[dim]Set via: python cli.py models --set provider/model  |  "
+        "dashboard Settings  |  DEFAULT_MODEL in .env[/dim]\n"
+    )
 
 
 @cli.group()

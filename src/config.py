@@ -87,14 +87,27 @@ class Settings(BaseSettings):
     
     # Feature Flags
     auto_start_plans: bool = Field(default=False)
-    max_concurrent_jobs: int = Field(default=3)
+    # How many agent jobs run at once (raise for large boards / many subtasks)
+    max_concurrent_jobs: int = Field(
+        default=6,
+        description="Max concurrent agent jobs (1–32; also writable on dashboard)",
+    )
+    # Parallel Jira transitions / dispatch inside one poll cycle
+    poll_dispatch_workers: int = Field(
+        default=8,
+        description="Thread pool size for dispatching issues after a poll",
+    )
     # Board poller is always on (sole intake path)
     poll_interval_seconds: int = Field(default=30)
 
-    # Ops dashboard (FastAPI UI; no auth in v1)
+    # Ops dashboard (FastAPI UI; no auth in v1 — keep loopback unless explicitly opened)
     dashboard_host: str = Field(default="127.0.0.1", description="Dashboard bind host")
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
     dashboard_enabled: bool = Field(default=True, description="Serve ops dashboard with the daemon")
+    dashboard_allow_remote: bool = Field(
+        default=False,
+        description="If false, non-loopback dashboard_host is forced back to 127.0.0.1",
+    )
 
     # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(
