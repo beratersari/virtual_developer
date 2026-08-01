@@ -6,7 +6,10 @@ import signal
 import sys
 from typing import Optional
 
+import uvicorn
+
 from src.config import settings
+from src.dashboard.api import create_dashboard_app
 from src.jira.poller import JiraPoller
 from src.logger import logger
 from src.processor import JobProcessor
@@ -25,6 +28,7 @@ class JiraAgentDaemon:
         self._running = False
         self._stopping = False
         self._poller: Optional[JiraPoller] = None
+        self._dashboard_server: Optional[uvicorn.Server] = None
 
     async def start(self):
         """Start the daemon."""
@@ -48,6 +52,14 @@ class JiraAgentDaemon:
         self._running = True
         self._stopping = False
 
+        # Build dashboard app once so poller can attach for live settings
+        self._dashboard_app = None
+        if getattr(settings, "dashboard_enabled", True):
+            self._dashboard_app = create_dashboard_app(
+                processor=self.processor,
+                state_manager=self.state_manager,
+            )
+
         # Set up signal handlers (cross-platform)
         if IS_WINDOWS:
             # Windows: use signal.signal (synchronous handler)
@@ -67,6 +79,14 @@ class JiraAgentDaemon:
                 )
 
         tasks = []
+
+        # Ops dashboard (REST + WebSocket)
+        if getattr(settings, "dashboard_enabled", True):
+            logger.info(
+                f"Starting dashboard on "
+                f"http://{settings.dashboard_host}:{settings.dashboard_port}"
+            )
+            tasks.append(asyncio.create_task(self._start_dashboard()))
 
         # Board/sprint poller is the sole issue intake path
         logger.info("Starting JIRA poller...")
@@ -100,6 +120,9 @@ class JiraAgentDaemon:
             except Exception as e:
                 logger.warning(f"Poller stop failed: {e}")
 
+        if self._dashboard_server:
+            self._dashboard_server.should_exit = True
+
         # Kill agent subprocesses and write CANCELLED before tearing down asyncio
         try:
             self.processor.shutdown_processing(reason="Daemon stopped (interrupt or shutdown)")
@@ -115,9 +138,30 @@ class JiraAgentDaemon:
         logger.info("Daemon stopped.")
         sys.exit(0)
 
+    async def _start_dashboard(self):
+        """Serve FastAPI dashboard (same process as poller/jobs)."""
+        app = self._dashboard_app or create_dashboard_app(
+            processor=self.processor,
+            state_manager=self.state_manager,
+        )
+        self._dashboard_app = app
+        config = uvicorn.Config(
+            app,
+            host=settings.dashboard_host,
+            port=int(settings.dashboard_port),
+            log_level="warning",
+            loop="asyncio",
+        )
+        self._dashboard_server = uvicorn.Server(config)
+        await self._dashboard_server.serve()
+
     async def _start_poller(self):
         """Start the JIRA poller."""
         self._poller = JiraPoller(board_id=settings.jira_board_id)
+        # Link live poller to dashboard settings updates
+        app = getattr(self, "_dashboard_app", None)
+        if app is not None:
+            app.state.poller = self._poller
 
         # Run poller in executor since it's blocking
         loop = asyncio.get_event_loop()
