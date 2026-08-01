@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 # Cap large payloads for API safety
 _MAX_SESSION_CHARS = 400_000
 _MAX_PROMPT_CHARS = 200_000
+_MAX_SESSION_LOG_FILES = 5
+_MAX_PROMPT_FILES = 5
 
 
 def read_app_version() -> str:
@@ -431,8 +433,34 @@ def _sessions_dir() -> Path:
     return (Path.cwd() / ".jira-agent" / "sessions").resolve()
 
 
-def _read_text_capped(path: Path, max_chars: int) -> Dict[str, Any]:
+def _path_under(root: Path, path: Path) -> bool:
+    """True if path resolves under root (blocks symlink escape)."""
     try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _read_text_capped(path: Path, max_chars: int, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    if root is not None and not _path_under(root, path):
+        return {
+            "path": str(path),
+            "error": "path outside allowed directory",
+            "content": "",
+            "truncated": False,
+        }
+    # Refuse to follow symlinks outside root: open only regular files after resolve check
+    try:
+        if path.is_symlink():
+            resolved = path.resolve()
+            if root is not None and not _path_under(root, resolved):
+                return {
+                    "path": str(path),
+                    "error": "symlink escape blocked",
+                    "content": "",
+                    "truncated": False,
+                }
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         return {"path": str(path), "error": str(e), "content": "", "truncated": False}
@@ -457,19 +485,27 @@ def _collect_session_artifacts(issue_key: str) -> Dict[str, Any]:
     if not sessions_dir.is_dir():
         return {"session_logs": logs, "prompt_files": prompts}
 
-    # Match KAN-1_*.log and KAN-1_*.prompt.txt
-    for path in sorted(sessions_dir.glob(f"{issue_key}_*"), key=lambda p: p.stat().st_mtime):
-        if path.suffix == ".log":
-            logs.append(_read_text_capped(path, _MAX_SESSION_CHARS))
-        elif path.name.endswith(".prompt.txt") or path.suffixes[-2:] == [".prompt", ".txt"]:
-            prompts.append(_read_text_capped(path, _MAX_PROMPT_CHARS))
-        elif path.suffix == ".txt" and ".prompt" in path.name:
-            prompts.append(_read_text_capped(path, _MAX_PROMPT_CHARS))
+    # Escape glob metacharacters in issue_key (never use raw user key as glob)
+    safe_key = re.sub(r"[^A-Za-z0-9._-]", "_", (issue_key or "").strip())
+    if not safe_key:
+        return {"session_logs": logs, "prompt_files": prompts}
 
-    # Also match prompt files named like session.with_suffix('.prompt.txt')
-    for path in sorted(sessions_dir.glob(f"{issue_key}_*.prompt.txt"), key=lambda p: p.stat().st_mtime):
-        if not any(p.get("path") == str(path) for p in prompts):
-            prompts.append(_read_text_capped(path, _MAX_PROMPT_CHARS))
+    candidates = sorted(
+        sessions_dir.glob(f"{safe_key}_*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        if not _path_under(sessions_dir, path):
+            continue
+        if path.suffix == ".log" and len(logs) < _MAX_SESSION_LOG_FILES:
+            logs.append(_read_text_capped(path, _MAX_SESSION_CHARS, root=sessions_dir))
+        elif (
+            path.name.endswith(".prompt.txt")
+            or (len(path.suffixes) >= 2 and path.suffixes[-2:] == [".prompt", ".txt"])
+            or (path.suffix == ".txt" and ".prompt" in path.name)
+        ) and len(prompts) < _MAX_PROMPT_FILES:
+            prompts.append(_read_text_capped(path, _MAX_PROMPT_CHARS, root=sessions_dir))
 
     return {"session_logs": logs, "prompt_files": prompts}
 

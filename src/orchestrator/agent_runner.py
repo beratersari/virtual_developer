@@ -56,7 +56,9 @@ _AGENT_ENV_DENYLIST = (
     "JIRA_PASSWORD",
     "GITLAB_PAT",
     "GITLAB_TOKEN",
-
+    "GITLAB_ACCESS_TOKEN",
+    "GL_TOKEN",
+    "PRIVATE_TOKEN",
 )
 
 
@@ -246,11 +248,7 @@ class AgentRunner:
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 logger.error(f"Agent task timed out after {elapsed:.2f}s (limit={effective_timeout}s)")
-                self._kill_process_tree(process)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Process wait timed out after kill: {task.task_id}")
+                await self._kill_process_tree_escalating(process, task.task_id)
                 logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far
                 all_output_lines = stdout_lines + stderr_lines
@@ -489,20 +487,29 @@ class AgentRunner:
         
         logger.debug(f"Generating session file path: task_id={task_id}, issue_key={issue_key}, attempt={attempt_number}, task_type={task_type}")
 
+        def _safe_token(s: str) -> str:
+            cleaned = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in (s or "")
+            )
+            return (cleaned.strip("._-") or "unknown")[:80]
+
         if issue_key:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_key = _safe_token(issue_key)
             if task_type:
-                # Format: JIRAID_TYPE_DATETIME_RETRYCOUNT.log
-                filename = f"{issue_key}_{task_type}_{timestamp}_{attempt_number}.log"
+                filename = (
+                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}_{attempt_number}.log"
+                )
             else:
-                # Format: JIRAID_DATETIME_RETRYCOUNT.log
-                filename = f"{issue_key}_{timestamp}_{attempt_number}.log"
+                filename = f"{safe_key}_{timestamp}_{attempt_number}.log"
         else:
-            # Fallback to task_id if no issue_key provided
-            filename = f"{task_id}.log"
+            filename = f"{_safe_token(task_id or 'task')}.log"
 
         path = sessions_dir / filename
-        # Register so read_session_output can resolve issue-keyed filenames
+        try:
+            path.resolve().relative_to(sessions_dir)
+        except ValueError:
+            path = sessions_dir / f"{_safe_token(task_id or 'task')}.log"
         if task_id:
             self._session_files[task_id] = path
         logger.debug(f"Generated session file path: {path}")
@@ -591,14 +598,20 @@ class AgentRunner:
         logger.debug(f"Session file not found: {session_file}")
         return ""
     
-    def _kill_process_tree(self, process: Any) -> None:
-        """Terminate process and, on Unix, its process group."""
+    def _kill_process_tree(self, process: Any, *, force: bool = False) -> None:
+        """Terminate process and, on Unix, its process group.
+
+        ``force=True`` sends SIGKILL (Unix) / kill() (Windows) immediately.
+        """
         if process is None:
             return
         try:
             if IS_WINDOWS:
                 try:
-                    process.terminate()
+                    if force:
+                        process.kill()
+                    else:
+                        process.terminate()
                 except Exception:
                     try:
                         process.kill()
@@ -610,13 +623,16 @@ class AgentRunner:
             if pid is not None:
                 try:
                     import signal
-                    os.killpg(pid, signal.SIGTERM)
+                    sig = signal.SIGKILL if force else signal.SIGTERM
+                    os.killpg(pid, sig)
                     return
                 except (ProcessLookupError, PermissionError, OSError, AttributeError):
                     pass
-            # Fallback: terminate/kill the direct child (mocks, non-group procs)
             try:
-                process.terminate()
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
             except Exception:
                 try:
                     process.kill()
@@ -625,12 +641,39 @@ class AgentRunner:
         except ProcessLookupError:
             pass
 
+    async def _kill_process_tree_escalating(
+        self, process: Any, task_id: str, *, soft_wait: float = 10.0
+    ) -> None:
+        """SIGTERM, wait, then SIGKILL if the process is still alive."""
+        self._kill_process_tree(process, force=False)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=soft_wait)
+            return
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Process still alive after SIGTERM, escalating to SIGKILL: {task_id}"
+            )
+        self._kill_process_tree(process, force=True)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Process wait timed out after SIGKILL: {task_id}")
+
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
         if process and process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
-            self._kill_process_tree(process)
+            self._kill_process_tree(process, force=False)
+            # Escalate if still running (sync path — best effort)
+            if process.returncode is None:
+                try:
+                    import time
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                if process.returncode is None:
+                    self._kill_process_tree(process, force=True)
             logger.info(f"Task cancel signal sent: task_id={task_id}")
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")

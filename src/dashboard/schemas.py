@@ -121,9 +121,9 @@ class SettingsView(BaseModel):
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only; no secrets)."""
 
-    jira_board_id: Optional[str] = None
+    jira_board_id: Optional[str] = Field(default=None, max_length=64)
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
-    trigger_labels: Optional[str] = None
+    trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     auto_start_plans: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=32)
@@ -135,5 +135,6 @@ class DashboardEnvelope(BaseModel):
     type: str = "dashboard"
     meta: MetaResponse
     tasks: TasksResponse
+    jobs: Optional[JobsResponse] = None
     poll: PollStatusResponse
     settings: SettingsView

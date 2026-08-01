@@ -184,56 +184,51 @@ def show(issue_key: str):
 @cli.command()
 @click.argument("issue_key")
 def cancel(issue_key: str):
-    """Cancel processing for an issue."""
-    from src.state.models import TaskStatus
-    
-    manager = JiraStateManager()
-    state = manager.get_state(issue_key)
-    
-    if not state:
-        console.print(f"[red]No state found for {issue_key}[/red]")
+    """Cancel processing for an issue via the shared JobProcessor path.
+
+    Marks state CANCELLED and sets requeue markers. A standalone CLI process
+    cannot signal another daemon's live agent subprocesses — stop the agent
+    from the ops dashboard (same process) or restart the daemon if needed.
+    """
+    from src.processor import JobProcessor
+
+    proc = JobProcessor()
+    result = proc.cancel_job(issue_key, reason="Cancelled from CLI")
+    if not result.get("ok"):
+        console.print(f"[red]{result.get('error') or 'Cancel failed'}[/red]")
         return
-    
-    # Cancel running task
-    if state.current_task_id:
-        from src.orchestrator.agent_runner import AgentRunner
-        runner = AgentRunner()
-        runner.cancel_task(state.current_task_id)
-    
-    # Update state
-    manager.update_state(issue_key, status=TaskStatus.CANCELLED)
+    if not result.get("process_signalled"):
+        console.print(
+            "[yellow]State set to cancelled; if a daemon is running, use the "
+            "ops dashboard cancel so the live agent process is killed.[/yellow]"
+        )
     console.print(f"[green]Cancelled {issue_key}[/green]")
 
 
 @cli.command()
 def costs():
     """Show cost summary across all issues."""
-    from pathlib import Path
-    import json
-    
-    state_dir = Path("state")
+    from src.config import settings
+
+    state_dir = settings.state_dir
     if not state_dir.exists():
         console.print("[yellow]No state directory found[/yellow]")
         return
-    
+
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
     total_duration = 0.0
     issue_count = 0
-    
-    for state_file in state_dir.glob("*.json"):
-        try:
-            with open(state_file) as f:
-                data = json.load(f)
-                total_input_tokens += data.get("token_usage_input", 0)
-                total_output_tokens += data.get("token_usage_output", 0)
-                total_cost += data.get("estimated_cost", 0.0)
-                total_duration += data.get("execution_duration_seconds", 0.0)
-                issue_count += 1
-        except (json.JSONDecodeError, KeyError):
-            continue
-    
+
+    manager = JiraStateManager(state_dir=state_dir)
+    for state in manager.get_all_states():
+        total_input_tokens += int(state.token_usage_input or 0)
+        total_output_tokens += int(state.token_usage_output or 0)
+        total_cost += float(state.estimated_cost or 0.0)
+        total_duration += float(state.execution_duration_seconds or 0.0)
+        issue_count += 1
+
     if issue_count == 0:
         console.print("[yellow]No completed issues with cost data found[/yellow]")
         return

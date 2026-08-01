@@ -222,8 +222,28 @@ class JiraPoller:
 
             if should_process and is_todo:
                 if not seen:
-                    new_issues.append(issue)
-                    logger.info(f"New issue to process: {issue_key}")
+                    # Cold start: do NOT re-fire terminal/in-flight/plan_ready work
+                    # as "new" — only true first sightings (no local state) or
+                    # PENDING-like states. Terminal rework requires a real To Do
+                    # transition via check_status_changes.
+                    local_st = local.status if local else None
+                    skip_as_new = local_st in {
+                        TaskStatus.COMPLETED,
+                        TaskStatus.ERROR,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.PLANNING,
+                        TaskStatus.EXECUTING,
+                        TaskStatus.PLAN_READY,
+                    }
+                    if skip_as_new:
+                        self._seen_issues.add(issue_key)
+                        logger.debug(
+                            f"Skip cold-start requeue for {issue_key} "
+                            f"(local status={local_st.value if local_st else None})"
+                        )
+                    else:
+                        new_issues.append(issue)
+                        logger.info(f"New issue to process: {issue_key}")
                 todo_issues.append(issue)
 
         reprocess_issues = self.check_status_changes(todo_issues)

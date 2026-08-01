@@ -88,13 +88,25 @@ class GitManager:
         """Create temp directory with format: {remote_name}_{jira_issue_id}_{timestamp}"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        folder_name = f"{self.remote_name}_{self.issue_key}_{timestamp}"
+        def _safe(token: str) -> str:
+            cleaned = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in (token or "unknown")
+            )
+            cleaned = cleaned.strip("._-") or "unknown"
+            return cleaned[:80]
 
-        base_temp = Path.cwd() / settings.temp_dir_base
+        folder_name = f"{_safe(self.remote_name)}_{_safe(self.issue_key)}_{timestamp}"
+
+        base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
         base_temp.mkdir(parents=True, exist_ok=True)
         logger.debug(f"Base temp directory: {base_temp}")
 
         temp_path = base_temp / folder_name
+        # Ensure path stays under base_temp (no traversal via issue_key)
+        try:
+            temp_path.resolve().relative_to(base_temp)
+        except ValueError as e:
+            raise RuntimeError(f"Unsafe temp path rejected: {temp_path}") from e
 
         counter = 1
         original_path = temp_path
@@ -174,7 +186,11 @@ class GitManager:
         logger.info("Syncing remote branches...")
         try:
             logger.debug("Running git fetch --all")
-            self._run_git(["fetch", "--all"], check=False)
+            self._with_auth_remote()
+            try:
+                self._run_git(["fetch", "--all"], check=False)
+            finally:
+                self._scrub_remote_credentials()
 
             result = self._run_git(["branch", "-r"], check=False)
 
@@ -302,15 +318,26 @@ class GitManager:
     def _checkout_or_create_branch(self, branch_name: str) -> str:
         logger.info(f"Checking out or creating branch: {branch_name}")
         self._delete_local_branch(branch_name)
-        
+
         logger.info("Fetching all remote refs...")
-        self._run_git(["fetch", "origin", "--prune"], check=False)
-        
-        result = self._run_git(["ls-remote", "--heads", "origin", branch_name], check=False)
-        remote_exists = branch_name in result.stdout
-        
+        self._with_auth_remote()
+        try:
+            self._run_git(["fetch", "origin", "--prune"], check=False)
+            result = self._run_git(
+                ["ls-remote", "--heads", "origin", branch_name], check=False
+            )
+            # Exact ref match — avoid substring hits like feature/A vs feature/A-ext
+            remote_exists = False
+            needle = f"refs/heads/{branch_name}"
+            for line in (result.stdout or "").splitlines():
+                if line.rstrip().endswith(needle):
+                    remote_exists = True
+                    break
+        finally:
+            self._scrub_remote_credentials()
+
         logger.info(f"Remote branch '{branch_name}' exists: {remote_exists}")
-        
+
         if remote_exists:
             logger.info(f"Checking out origin/{branch_name}...")
             self._run_git(["checkout", "-b", branch_name, f"origin/{branch_name}"])
@@ -321,7 +348,7 @@ class GitManager:
                 raise RuntimeError("No default branch available to create new branch from")
             self._run_git(["checkout", "-b", branch_name])
             logger.info(f"Created new branch: {branch_name}")
-        
+
         return branch_name
 
     def _checkout_default_branch(self) -> bool:

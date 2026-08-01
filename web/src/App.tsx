@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelTask,
   dashboardWsUrl,
@@ -64,16 +64,22 @@ export default function App() {
   const [jobsView, setJobsView] = useState<JobsPayload | null>(null)
   /** When opening detail from a job row, highlight that job's ids */
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
+  const [settingsDirty, setSettingsDirty] = useState(false)
+  const issueFilterRef = useRef(issueFilter)
+  issueFilterRef.current = issueFilter
+  const detailRequestId = useRef(0)
+  const lastPollCycle = useRef<number | null>(null)
 
   const applyPayload = useCallback((payload: DashboardPayload) => {
     setData(payload)
     setError(null)
-    // Keep filtered jobs if user has a filter; otherwise use WS jobs
-    setJobsView((prev) => {
-      if (issueFilter.trim()) return prev
-      return payload.jobs ?? prev
-    })
-  }, [issueFilter])
+    const filter = issueFilterRef.current.trim()
+    // Unfiltered: take WS jobs. Filtered: keep list until REST reload
+    // (caller refetches when filter or poll cycle changes).
+    if (!filter) {
+      setJobsView(payload.jobs ?? null)
+    }
+  }, [])
 
   const reloadJobs = useCallback(async (filter?: string) => {
     try {
@@ -84,23 +90,33 @@ export default function App() {
     }
   }, [])
 
+  const loadDashboard = useCallback(() => {
+    fetchDashboard()
+      .then(applyPayload)
+      .catch((e: Error) => setError(e.message))
+  }, [applyPayload])
+
   const openTaskDetail = async (issueKey: string, jobId?: string | null) => {
+    const req = ++detailRequestId.current
     setDetailLoading(true)
     setDetailError(null)
     setDetailTab('overview')
     setSelectedJobId(jobId ?? null)
     try {
       const d = await fetchTaskDetail(issueKey)
+      if (req !== detailRequestId.current) return
       setDetail(d)
-      // If no explicit job, select the newest for this issue
       if (!jobId && d.jobs?.length) {
         setSelectedJobId(d.jobs[0].job_id)
       }
     } catch (e) {
+      if (req !== detailRequestId.current) return
       setDetail(null)
       setDetailError(e instanceof Error ? e.message : 'Failed to load task')
     } finally {
-      setDetailLoading(false)
+      if (req === detailRequestId.current) {
+        setDetailLoading(false)
+      }
     }
   }
 
@@ -145,6 +161,17 @@ export default function App() {
     return () => window.clearTimeout(t)
   }, [issueFilter, reloadJobs])
 
+  // When filtered, refresh jobs list on each poll cycle from WS
+  useEffect(() => {
+    const cycle = data?.poll?.cycle
+    if (cycle == null) return
+    if (lastPollCycle.current === cycle) return
+    lastPollCycle.current = cycle
+    if (issueFilterRef.current.trim()) {
+      void reloadJobs(issueFilterRef.current.trim())
+    }
+  }, [data?.poll?.cycle, reloadJobs])
+
   useEffect(() => {
     let ws: WebSocket | null = null
     let closed = false
@@ -175,30 +202,26 @@ export default function App() {
       }
     }
 
-    fetchDashboard()
-      .then(applyPayload)
-      .catch((e: Error) => setError(e.message))
-
+    loadDashboard()
     connect()
     return () => {
       closed = true
       if (retry) window.clearTimeout(retry)
       ws?.close()
     }
-  }, [applyPayload])
+  }, [applyPayload, loadDashboard])
 
   useEffect(() => {
-    if (data?.settings) {
-      setSettingsDraft({
-        jira_board_id: data.settings.jira_board_id,
-        poll_interval_seconds: data.settings.poll_interval_seconds,
-        trigger_labels: data.settings.trigger_labels,
-        trigger_on_assignment: data.settings.trigger_on_assignment,
-        auto_start_plans: data.settings.auto_start_plans,
-        max_concurrent_jobs: data.settings.max_concurrent_jobs,
-      })
-    }
-  }, [data?.settings])
+    if (!data?.settings || settingsDirty) return
+    setSettingsDraft({
+      jira_board_id: data.settings.jira_board_id,
+      poll_interval_seconds: data.settings.poll_interval_seconds,
+      trigger_labels: data.settings.trigger_labels,
+      trigger_on_assignment: data.settings.trigger_on_assignment,
+      auto_start_plans: data.settings.auto_start_plans,
+      max_concurrent_jobs: data.settings.max_concurrent_jobs,
+    })
+  }, [data?.settings, settingsDirty])
 
   const displayTime = useMemo(() => {
     // Smooth local clock; server_time is still exposed in meta for API consumers
@@ -227,7 +250,22 @@ export default function App() {
   const onSaveSettings = async () => {
     setSaving(true)
     try {
-      const updated = await patchSettings(settingsDraft)
+      const body = {
+        jira_board_id: settingsDraft.jira_board_id,
+        poll_interval_seconds: Number(settingsDraft.poll_interval_seconds),
+        trigger_labels: settingsDraft.trigger_labels,
+        trigger_on_assignment: settingsDraft.trigger_on_assignment,
+        auto_start_plans: settingsDraft.auto_start_plans,
+        max_concurrent_jobs: Number(settingsDraft.max_concurrent_jobs),
+      }
+      if (
+        !Number.isFinite(body.poll_interval_seconds) ||
+        !Number.isFinite(body.max_concurrent_jobs)
+      ) {
+        throw new Error('Poll interval and max concurrent jobs must be numbers')
+      }
+      const updated = await patchSettings(body)
+      setSettingsDirty(false)
       setData((prev) =>
         prev
           ? {
@@ -303,13 +341,28 @@ export default function App() {
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6">
         {error && (
-          <div className="rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100">
-            {error}
+          <div
+            role="alert"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
+          >
+            <span>{error}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setError(null)
+                loadDashboard()
+              }}
+              className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800"
+            >
+              Retry
+            </button>
           </div>
         )}
 
         {!data && !error && (
-          <div className="text-sm text-slate-400">Loading dashboard…</div>
+          <div className="text-sm text-slate-400" aria-busy="true">
+            Loading dashboard…
+          </div>
         )}
 
         {/* Full-page task detail (replaces list while open) */}
@@ -978,9 +1031,10 @@ export default function App() {
                 <input
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-indigo-500"
                   value={settingsDraft.jira_board_id ?? ''}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({ ...s, jira_board_id: e.target.value }))
-                  }
+                  }}
                 />
               </label>
               <label className="block text-sm">
@@ -991,12 +1045,13 @@ export default function App() {
                   max={3600}
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-indigo-500"
                   value={settingsDraft.poll_interval_seconds ?? 30}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({
                       ...s,
                       poll_interval_seconds: Number(e.target.value),
                     }))
-                  }
+                  }}
                 />
               </label>
               <label className="block text-sm">
@@ -1004,21 +1059,23 @@ export default function App() {
                 <input
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-indigo-500"
                   value={settingsDraft.trigger_labels ?? ''}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({ ...s, trigger_labels: e.target.value }))
-                  }
+                  }}
                 />
               </label>
               <label className="flex items-center gap-2 text-sm text-slate-300">
                 <input
                   type="checkbox"
                   checked={Boolean(settingsDraft.trigger_on_assignment)}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({
                       ...s,
                       trigger_on_assignment: e.target.checked,
                     }))
-                  }
+                  }}
                 />
                 Trigger on bot assignment
               </label>
@@ -1026,9 +1083,10 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={Boolean(settingsDraft.auto_start_plans)}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({ ...s, auto_start_plans: e.target.checked }))
-                  }
+                  }}
                 />
                 Auto-start plans
               </label>
@@ -1040,12 +1098,13 @@ export default function App() {
                   max={32}
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 outline-none focus:border-indigo-500"
                   value={settingsDraft.max_concurrent_jobs ?? 3}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    setSettingsDirty(true)
                     setSettingsDraft((s) => ({
                       ...s,
                       max_concurrent_jobs: Number(e.target.value),
                     }))
-                  }
+                  }}
                 />
               </label>
 
@@ -1113,7 +1172,7 @@ function IssuesTable({
   onOpenIssue: (issueKey: string) => void
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
+    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
       <table className="min-w-full text-left text-sm">
         <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
           <tr>
@@ -1134,14 +1193,18 @@ function IssuesTable({
             </tr>
           )}
           {tasks.map((t) => (
-            <tr
-              key={t.issue_key}
-              className="cursor-pointer hover:bg-slate-800/40"
-              onClick={() => onOpenIssue(t.issue_key)}
-            >
+            <tr key={t.issue_key} className="hover:bg-slate-800/40">
               <td className="px-4 py-3">
-                <div className="font-mono text-indigo-300">{t.issue_key}</div>
-                <div className="max-w-xs truncate text-xs text-slate-400">{t.summary}</div>
+                <button
+                  type="button"
+                  className="text-left font-mono text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+                  onClick={() => onOpenIssue(t.issue_key)}
+                >
+                  {t.issue_key}
+                </button>
+                <div className="max-w-xs truncate text-xs text-slate-400" title={t.summary}>
+                  {t.summary}
+                </div>
               </td>
               <td className="px-4 py-3">
                 <StatusBadge status={t.status} />
@@ -1193,7 +1256,7 @@ function JobsTable({
   selectedJobId?: string | null
 }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
+    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 shadow-xl shadow-black/20">
       <table className="min-w-full text-left text-sm">
         <thead className="bg-slate-900/80 text-xs uppercase tracking-wide text-slate-400">
           <tr>
@@ -1222,24 +1285,36 @@ function JobsTable({
           {jobs.map((j) => (
             <tr
               key={j.job_id}
-              className={`cursor-pointer hover:bg-slate-800/40 ${
+              className={`hover:bg-slate-800/40 ${
                 selectedJobId === j.job_id ? 'bg-indigo-950/40 ring-1 ring-inset ring-indigo-700/40' : ''
               }`}
-              onClick={() => onOpenIssue(j.issue_key, j.job_id)}
             >
               <td className="px-4 py-3">
-                <div className="font-mono text-[11px] text-slate-400" title={j.job_id}>
+                <button
+                  type="button"
+                  className="font-mono text-[11px] text-slate-300 hover:text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+                  title={j.job_id}
+                  onClick={() => onOpenIssue(j.issue_key, j.job_id)}
+                >
                   {j.job_id}
-                </div>
+                </button>
                 {j.live && (
-                  <span className="text-[10px] font-semibold uppercase text-amber-300">
+                  <span className="ml-1 text-[10px] font-semibold uppercase text-amber-300">
                     live
                   </span>
                 )}
               </td>
               <td className="px-4 py-3">
-                <div className="font-mono text-indigo-300">{j.issue_key}</div>
-                <div className="max-w-xs truncate text-xs text-slate-400">{j.summary}</div>
+                <button
+                  type="button"
+                  className="font-mono text-indigo-300 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
+                  onClick={() => onOpenIssue(j.issue_key, j.job_id)}
+                >
+                  {j.issue_key}
+                </button>
+                <div className="max-w-xs truncate text-xs text-slate-400" title={j.summary}>
+                  {j.summary}
+                </div>
               </td>
               <td className="px-4 py-3">
                 <div

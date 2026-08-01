@@ -22,9 +22,10 @@ def find_sessions_for_issue(
 ) -> List[Dict[str, Any]]:
     """Return OpenCode sessions related to an issue (newest first).
 
-    Matching:
-    - ``directory`` path contains the issue key (temp clones include it)
-    - or ``title`` contains the issue key
+    Matching priority:
+    1. Exact ``directory`` = working_directory (when provided)
+    2. ``title`` starts with ``{issue_key}:`` (agent_runner --title format)
+    3. ``title`` or ``directory`` contains the issue key as a path segment
     """
     key = (issue_key or "").strip()
     if not key:
@@ -34,24 +35,34 @@ def find_sessions_for_issue(
     if not path.is_file():
         return []
 
-    like = f"%{key}%"
     wd = str(working_directory.resolve()) if working_directory else None
     rows: List[Dict[str, Any]] = []
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
+        # Prefer exact directory, then title prefix (from --title "{KEY}: ...")
+        title_prefix = f"{key}:%"
+        dir_segment = f"%/{key}%"
+        dir_segment_win = f"%\\{key}%"
         if wd:
             cur.execute(
                 """
                 SELECT id, title, directory, agent, time_created, time_updated, cost,
                        tokens_input, tokens_output
                 FROM session
-                WHERE directory = ? OR directory LIKE ? OR IFNULL(title, '') LIKE ?
-                ORDER BY time_updated DESC
+                WHERE directory = ?
+                   OR IFNULL(title, '') LIKE ?
+                   OR directory LIKE ?
+                   OR directory LIKE ?
+                ORDER BY
+                  CASE WHEN directory = ? THEN 0
+                       WHEN IFNULL(title, '') LIKE ? THEN 1
+                       ELSE 2 END,
+                  time_updated DESC
                 LIMIT ?
                 """,
-                (wd, like, like, limit),
+                (wd, title_prefix, dir_segment, dir_segment_win, wd, title_prefix, limit),
             )
         else:
             cur.execute(
@@ -59,11 +70,15 @@ def find_sessions_for_issue(
                 SELECT id, title, directory, agent, time_created, time_updated, cost,
                        tokens_input, tokens_output
                 FROM session
-                WHERE directory LIKE ? OR IFNULL(title, '') LIKE ?
-                ORDER BY time_updated DESC
+                WHERE IFNULL(title, '') LIKE ?
+                   OR directory LIKE ?
+                   OR directory LIKE ?
+                ORDER BY
+                  CASE WHEN IFNULL(title, '') LIKE ? THEN 0 ELSE 1 END,
+                  time_updated DESC
                 LIMIT ?
                 """,
-                (like, like, limit),
+                (title_prefix, dir_segment, dir_segment_win, title_prefix, limit),
             )
         for r in cur.fetchall():
             rows.append(
