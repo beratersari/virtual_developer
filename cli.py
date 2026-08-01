@@ -13,6 +13,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from src import __version__
 from src.config import settings
 from src.daemon import JiraAgentDaemon
 from src.state.manager import JiraStateManager
@@ -34,7 +35,7 @@ def validate_config():
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version=__version__)
 def cli():
     """JIRA Virtual Developer - AI Agent Integration for JIRA."""
     pass

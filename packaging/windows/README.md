@@ -2,11 +2,29 @@
 
 This folder drives the **Windows-only** offline installer shipped as a zip from CI.
 
+## Versioning (SemVer)
+
+| Source of truth | File |
+|-----------------|------|
+| Product base version | repo root `VERSION` (`MAJOR.MINOR.PATCH`) |
+
+| Trigger | Dist name example |
+|---------|-------------------|
+| Tag `v0.2.0` | `virtual_developer-windows-x64-0.2.0` (+ GitHub Release) |
+| Push `develop` | `virtual_developer-windows-x64-0.2.0-dev.20260801.42.gb99d2d9` |
+| Push `main` | `virtual_developer-windows-x64-0.2.0.gb99d2d9` |
+| Manual dispatch | same as branch + optional suffix |
+
+Resolver: `resolve-version.ps1` (used by `.github/workflows/windows-dist.yml`).
+
+Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tagging `vX.Y.Z` for a formal Release zip.
+
 ## User flow
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
 2. Extract.
 3. Run `install.bat`.
+4. Open the TUI with **`start-opencode.bat`** (never from your user home folder).
 
 OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.

@@ -249,6 +249,7 @@ $copyItems = @(
     "requirements.txt",
     ".env.example",
     "install.bat",
+    "VERSION",
     "README.md",
     "AGENTS.md",
     "Agents.md",
@@ -277,17 +278,25 @@ foreach ($item in $copyItems) {
     Write-Host "  + $item"
 }
 
+$productVersion = if ($env:VD_PRODUCT_VERSION) { $env:VD_PRODUCT_VERSION } else {
+    $vf = Join-Path $root "VERSION"
+    if (Test-Path -LiteralPath $vf) { (Get-Content -LiteralPath $vf -Raw).Trim() } else { "0.0.0-dev" }
+}
 $marker = @"
 virtual_developer Windows offline distribution
+ProductVersion=$productVersion
+DistName=$DistName
 Built: $(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
 OpenCode=$OPENCODE_VERSION
 oh-my-opencode=$OH_MY_OPENCODE_VERSION
+oh-my-openagent=$OH_MY_OPENCODE_VERSION
 glab=$GLAB_VERSION
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
 OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install.bat)
 "@
 Set-Content -Path (Join-Path $payload "DIST_VERSION.txt") -Value $marker -Encoding UTF8
+Set-Content -Path (Join-Path $payload "VERSION") -Value $productVersion -Encoding UTF8
 
 # ---------------------------------------------------------------------------
 # 2) Fetch OpenCode Windows CLI (pinned)

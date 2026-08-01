@@ -258,8 +258,17 @@ If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary
 **From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
 set `VD_ALLOW_ONLINE=1` and it will download OpenCode/glab and use npm for the plugin if available.
 
-Pinned versions live in `packaging/windows/versions.env` and are refreshed by
-`.github/workflows/windows-dist.yml` on pushes to `main`/`develop` and on `v*` tags.
+**Product version** lives in the repo root `VERSION` file (SemVer `MAJOR.MINOR.PATCH`).
+CI names Windows zips from that file:
+
+| Trigger | Artifact name pattern |
+|---------|------------------------|
+| Tag `vX.Y.Z` | `virtual_developer-windows-x64-X.Y.Z` (+ GitHub Release) |
+| Push `develop` | `…-X.Y.Z-dev.YYYYMMDD.N.gSHA` |
+| Push `main` | `…-X.Y.Z.gSHA` |
+
+Dependency pins (OpenCode, oh-my-openagent, glab, Python) live in
+`packaging/windows/versions.env`. Workflow: `.github/workflows/windows-dist.yml`.
 
 ### 2. Configuration
 
