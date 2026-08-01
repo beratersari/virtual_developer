@@ -531,7 +531,8 @@ JIRA Virtual Developer — Windows offline package
 1. Extract the GitHub Actions download ONCE (you should see install.bat here).
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
-4. Run install.bat
+4. Run install.bat  (it removes old C:\vd\opencode, %USERPROFILE%\.opencode,
+   and a bad %USERPROFILE%\.config\opencode\opencode.json automatically)
 5. OpenCode is installed only under: %USERPROFILE%\.opencode
    (bin\opencode.exe, config, oh-my-opencode plugin)
    Config is also mirrored to: %USERPROFILE%\.config\opencode\

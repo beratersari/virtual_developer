@@ -188,17 +188,12 @@ REM ---------------------------------------------------------------------------
 echo.
 echo Step 3: Installing OpenCode under %OPENCODE_HOME% ...
 
-REM If %%USERPROFILE%%\.opencode is a leftover junction to C:\vd\opencode, break it
-REM so we install into a real directory under the user profile (single install root).
-if /i "%OPENCODE_HOME%"=="%USER_OC_HOME%" (
-    if exist "%USER_OC_HOME%" (
-        fsutil reparsepoint query "%USER_OC_HOME%" >nul 2>&1
-        if not errorlevel 1 (
-            echo   Removing junction at %%USERPROFILE%%\.opencode ^(legacy short-path link^)...
-            rmdir "%USER_OC_HOME%" 2>nul
-        )
-    )
-)
+REM Full cleanup so re-running install.bat is enough (no manual rmdir/del needed):
+REM   - legacy C:\vd\opencode / LocalAppData\vd\opencode
+REM   - %%USERPROFILE%%\.opencode (junction or real tree)
+REM   - bad global config at %%USERPROFILE%%\.config\opencode\opencode.json
+REM   - stale PATH entries pointing at old bin dirs
+call :clean_previous_opencode
 
 if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%"
 if not exist "%OPENCODE_BIN%" mkdir "%OPENCODE_BIN%"
@@ -333,14 +328,6 @@ call :ensure_user_path "%OPENCODE_BIN%"
 set "PATH=%OPENCODE_BIN%;%PATH%"
 echo [OK] PATH includes %OPENCODE_BIN% ^(this session + user env^)
 
-if exist "%LEGACY_OC_HOME%\bin\opencode.exe" (
-    if /i not "%OPENCODE_HOME%"=="%LEGACY_OC_HOME%" (
-        echo [INFO] Legacy install still present at %LEGACY_OC_HOME%
-        echo        It was removed from PATH. Safe to delete later:
-        echo          rmdir /s /q "%LEGACY_OC_HOME%"
-    )
-)
-
 REM ---------------------------------------------------------------------------
 REM Step 6: .env + project init
 REM ---------------------------------------------------------------------------
@@ -433,6 +420,74 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if errorlevel 1 exit /b 1
 exit /b 0
 
+:clean_previous_opencode
+REM Idempotent wipe of previous OpenCode installs + bad global config.
+REM Safe to re-run; does not touch this dist's .venv or project files.
+echo   Cleaning previous OpenCode installs and stale config...
+
+REM Drop legacy / dual PATH entries first (OPENCODE_BIN is re-added in Step 5)
+call :remove_user_path_entry "%LEGACY_OC_HOME%\bin"
+call :remove_user_path_entry "%LEGACY_OC_HOME2%\bin"
+call :remove_user_path_entry "%USER_OC_HOME%\bin"
+if defined OPENCODE_BIN (
+    call :remove_user_path_entry "%OPENCODE_BIN%"
+)
+
+REM Remove managed global config files (do not wipe entire .config — auth may live there)
+set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
+if exist "%OC_CONFIG_DIR%\opencode.json" (
+    echo   Removing %OC_CONFIG_DIR%\opencode.json
+    del /f /q "%OC_CONFIG_DIR%\opencode.json" >nul 2>&1
+)
+if exist "%OC_CONFIG_DIR%\oh-my-opencode.json" (
+    del /f /q "%OC_CONFIG_DIR%\oh-my-opencode.json" >nul 2>&1
+)
+if exist "%OC_CONFIG_DIR%\package.json" (
+    del /f /q "%OC_CONFIG_DIR%\package.json" >nul 2>&1
+)
+
+REM Remove install roots (junction or real tree). Order: user home, target, legacy.
+call :force_remove_dir "%USER_OC_HOME%"
+if /i not "%OPENCODE_HOME%"=="%USER_OC_HOME%" call :force_remove_dir "%OPENCODE_HOME%"
+if /i not "%LEGACY_OC_HOME%"=="%OPENCODE_HOME%" if /i not "%LEGACY_OC_HOME%"=="%USER_OC_HOME%" (
+    call :force_remove_dir "%LEGACY_OC_HOME%"
+)
+if /i not "%LEGACY_OC_HOME2%"=="%OPENCODE_HOME%" if /i not "%LEGACY_OC_HOME2%"=="%USER_OC_HOME%" (
+    call :force_remove_dir "%LEGACY_OC_HOME2%"
+)
+REM Drop empty C:\vd shell left by legacy short-path installs
+if exist "%SystemDrive%\vd" (
+    dir /a /b "%SystemDrive%\vd" 2>nul | findstr /r "." >nul
+    if errorlevel 1 (
+        call :force_remove_dir "%SystemDrive%\vd"
+    )
+)
+
+echo   [OK] Previous OpenCode locations cleaned
+exit /b 0
+
+:force_remove_dir
+REM Remove a directory tree or junction. Arg1 = full path.
+set "RM_TARGET=%~1"
+if not defined RM_TARGET exit /b 0
+if not exist "%RM_TARGET%" exit /b 0
+echo   Removing %RM_TARGET%
+REM Junction/symlink: rmdir without /s unlinks; real tree needs /s /q
+fsutil reparsepoint query "%RM_TARGET%" >nul 2>&1
+if not errorlevel 1 (
+    rmdir "%RM_TARGET%" 2>nul
+) else (
+    rmdir /s /q "%RM_TARGET%" 2>nul
+)
+if exist "%RM_TARGET%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "Remove-Item -LiteralPath $env:RM_TARGET -Recurse -Force -ErrorAction SilentlyContinue"
+)
+if exist "%RM_TARGET%" (
+    echo   [WARNING] Could not fully remove %RM_TARGET% — close programs using it and re-run
+)
+exit /b 0
+
 :link_user_opencode_home
 REM Only when OPENCODE_HOME is NOT already %%USERPROFILE%%\.opencode (VD_OPENCODE_ROOT).
 set "USER_OC=%USERPROFILE%\.opencode"
@@ -518,13 +573,10 @@ exit /b 0
 
 :extract_opencode_home_zip
 REM Extract vendor\opencode-home.zip into %OPENCODE_HOME% with long-path support.
+REM Caller already ran :clean_previous_opencode (fresh dest dir).
 set "OC_ZIP=%VENDOR_DIR%\opencode-home.zip"
 if not exist "%OC_ZIP%" exit /b 1
-
-if exist "%OPENCODE_HOME%\node_modules" (
-    echo   Removing previous node_modules under OpenCode home ...
-    rmdir /s /q "%OPENCODE_HOME%\node_modules" 2>nul
-)
+if not exist "%OPENCODE_HOME%" mkdir "%OPENCODE_HOME%"
 
 set "EXTRACT_PS1=%SCRIPT_DIR%\packaging\windows\extract-opencode-home.ps1"
 if exist "%EXTRACT_PS1%" (

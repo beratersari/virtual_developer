@@ -243,15 +243,15 @@ OpenCode layout after install:
 - Git for Windows (recommended)
 - **No Node.js/npm required** when using the CI zip
 
-If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
-**corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Delete
-`%USERPROFILE%\.opencode`, remove any leftover `C:\vd\opencode`, re-install from a fresh
-package, open a **new** terminal, then run `where opencode` (expect a single path under
-`%USERPROFILE%\.opencode\bin`).
+`install.bat` is **idempotent**: each run wipes previous OpenCode roots
+(`%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`), removes stale PATH entries, and
+replaces a broken `%USERPROFILE%\.config\opencode\opencode.json` before extracting a
+fresh install. You only need to re-run `install.bat` (from a current package).
 
-If `opencode` reports **invalid JSON** for `.config\opencode\opencode.json`, delete that
-file and re-run `install.bat` (older installer builds could overwrite the config via a
-cmd `echo` redirect bug).
+If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
+**corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Re-run
+`install.bat` from a fresh package, open a **new** terminal, then run `where opencode`
+(expect a single path under `%USERPROFILE%\.opencode\bin`).
 
 **From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
 set `VD_ALLOW_ONLINE=1` and it will download OpenCode/glab and use npm for the plugin if available.
