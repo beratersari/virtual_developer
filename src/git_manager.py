@@ -1,7 +1,8 @@
 """Git manager for JIRA Virtual Developer.
 
 Handles branch creation, commits, and git operations within temp working directories.
-Each JIRA issue gets its own isolated temp folder cloned from remote.
+Each JIRA issue gets its own isolated temp folder cloned from the repository URL
+declared on the issue (see ``src.issue_git_spec``).
 """
 
 import json
@@ -18,33 +19,81 @@ from src.config import settings, set_current_temp_dir
 from src.logger import logger
 
 
+class GitCloneError(RuntimeError):
+    """Clone failed — ``user_message`` is safe for a Jira comment."""
+
+    def __init__(self, user_message: str, *, technical: str = ""):
+        self.user_message = user_message
+        self.technical = technical
+        super().__init__(user_message)
+
+
+class GitSourceBranchError(RuntimeError):
+    """Work/source branch cannot be prepared — safe for Jira."""
+
+    def __init__(self, user_message: str, *, technical: str = ""):
+        self.user_message = user_message
+        self.technical = technical
+        super().__init__(user_message)
+
+
+class GitTargetBranchError(RuntimeError):
+    """Target (MR destination / base) missing on remote — safe for Jira."""
+
+    def __init__(self, user_message: str, *, technical: str = ""):
+        self.user_message = user_message
+        self.technical = technical
+        super().__init__(user_message)
+
+
+# Primary integration bases — never used as the agent work branch
+_PRIMARY_BASES = frozenset({"main", "master", "develop", "trunk", "dev"})
+
+
 class GitManager:
     """Manages git operations in isolated temp directories per JIRA issue.
 
-    Flow:
-    1. Validate remote URL (PROJECT_GITLAB_URL)
-    2. If valid: Create temp folder as {remote_name}_{jira_issue_id}_{timestamp}
-    3. Clone remote repo into temp folder
-    4. All git operations happen in temp folder
-    5. Temp folder preserved after work (cleanup_policy = 'never')
+    Flow (GitLab MR: source → target):
+    1. Repository URL + source/target from the Jira ``{params}`` block
+    2. Temp folder ``{remote_name}_{jira_issue_id}_{timestamp}``
+    3. Clone remote repo
+    4. **Require** ``origin/{target}`` exists
+    5. Resolve work branch (params source, or ``feature/{KEY}`` when source is a
+       primary base / equals target)
+    6. Create/reset work branch **from** ``origin/{target}``
+    7. Agent works on that branch; push + MR **source → target**
     """
 
-    def __init__(self, issue_key: Optional[str] = None):
+    def __init__(
+        self,
+        issue_key: Optional[str] = None,
+        *,
+        remote_url: Optional[str] = None,
+        source_branch: Optional[str] = None,
+        target_branch: Optional[str] = None,
+    ):
         self.issue_key = issue_key
         self.temp_dir: Optional[Path] = None
         self.remote_enabled: bool = False
-        self.remote_url: Optional[str] = None
+        self.remote_url: Optional[str] = (remote_url or "").strip() or None
         self.remote_name: str = "unknown"
+        # Params "source" = intended MR source / work branch name
+        self.source_branch: str = (source_branch or "").strip()
+        # Params "target" = MR destination; work branches are created from it
+        self.target_branch: str = (target_branch or source_branch or "").strip()
+        # Actual branch checked out for agent work (set by ensure_feature_branch)
+        self.work_branch: Optional[str] = None
 
         logger.info(f"Initializing GitManager for issue: {issue_key}")
         logger.debug(
-            f"Settings - project_gitlab_url: "
-            f"{'configured' if settings.project_gitlab_url else 'not configured'}"
+            f"remote_url={'set' if self.remote_url else 'missing'} "
+            f"source_branch={self.source_branch or '(missing)'} "
+            f"target_branch={self.target_branch or '(missing)'}"
         )
-        
+
         if issue_key:
             self._setup_temp_working_dir()
-        
+
         if self.temp_dir:
             set_current_temp_dir(self.temp_dir)
             logger.info(f"Temp directory set: {self.temp_dir}")
@@ -53,29 +102,38 @@ class GitManager:
         """Setup isolated temp clone for this JIRA issue (always required)."""
         logger.info(f"Setting up temp working directory for issue: {self.issue_key}")
 
-        # Validate remote URL
-        gitlab_url = settings.project_gitlab_url.strip()
+        gitlab_url = (self.remote_url or "").strip()
         if not gitlab_url:
-            logger.error("PROJECT_GITLAB_URL not configured")
-            raise RuntimeError(
-                "PROJECT_GITLAB_URL not configured. "
-                "Temp working directories are mandatory; cannot run without a remote to clone."
+            raise GitCloneError(
+                "*Virtual Developer* could not clone: no repository URL was provided on the issue.\n\n"
+                "Add `Repository: https://gitlab.example.com/group/repo.git` to the description."
             )
+        if not self.target_branch:
+            raise GitTargetBranchError(
+                "*Virtual Developer* could not prepare the workspace: no target branch on the issue.\n\n"
+                "Add `Target branch: develop` (the branch that must exist and receive the MR) "
+                "to the `{params}` block."
+            )
+        if not self.source_branch:
+            # Default work-branch name intent to feature/KEY later
+            self.source_branch = self.target_branch
 
         self.remote_url = gitlab_url
         self.remote_name = self._extract_remote_name(gitlab_url)
         self.remote_enabled = True
-        logger.info(f"Remote configured - name: {self.remote_name}, enabled: {self.remote_enabled}")
+        logger.info(
+            f"Remote configured - name: {self.remote_name}, "
+            f"source_branch: {self.source_branch}, "
+            f"target_branch: {self.target_branch} "
+            f"(MR will be source → target; work branch created from target)"
+        )
 
-        # Create temp directory
         self.temp_dir = self._create_temp_directory()
         logger.info(f"Temp working directory created: {self.temp_dir}")
 
-        # Clone remote into temp directory
-        logger.info(f"Starting repository clone...")
+        logger.info("Starting repository clone...")
         self._clone_into_temp()
         logger.info(f"Setup complete for issue: {self.issue_key}")
-
     def _extract_remote_name(self, url: str) -> str:
         """Extract a short name from remote URL."""
         url = url.rstrip('/').replace('.git', '')
@@ -139,16 +197,28 @@ class GitManager:
 
         if result.returncode != 0:
             # Never surface PAT-bearing URLs from git stderr to callers/logs
-            safe_err = (result.stderr or "").replace(gitlab_pat, "***") if gitlab_pat else result.stderr
+            safe_err = (result.stderr or "").replace(gitlab_pat, "***") if gitlab_pat else (
+                result.stderr or ""
+            )
+            safe_err = self._redact_secret_text(safe_err)
             logger.error(f"Clone failed: {safe_err}")
-            raise RuntimeError(f"Failed to clone repository: {safe_err}")
+            repo_display = self.remote_url or "(unknown)"
+            raise GitCloneError(
+                (
+                    f"*Virtual Developer* could not **clone** the repository.\n\n"
+                    f"*Repository:* `{repo_display}`\n"
+                    f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
+                    "Check that the URL is correct, the project is reachable, and "
+                    "`GITLAB_PAT` has read access. Then move the issue back to *To Do*."
+                ),
+                technical=safe_err,
+            )
 
         logger.info("Clone completed successfully")
         # Scrub credentials from origin so PAT is not left on disk in .git/config
         self._scrub_remote_credentials()
 
         self._sync_remote_branches()
-
     def _build_clone_url(self, base_url: str, pat: str) -> str:
         """Build HTTPS clone URL with PAT for authentication."""
         if pat:
@@ -315,67 +385,225 @@ class GitManager:
             logger.warning(f"Could not delete branch {branch_name}: {e}")
             return False
 
-    def _checkout_or_create_branch(self, branch_name: str) -> str:
-        logger.info(f"Checking out or creating branch: {branch_name}")
-        self._delete_local_branch(branch_name)
+    def _remote_head_exists(self, branch: str) -> bool:
+        """True if origin has refs/heads/{branch} (uses ls-remote)."""
+        branch = (branch or "").strip()
+        if not branch:
+            return False
+        self._with_auth_remote()
+        try:
+            result = self._run_git(
+                ["ls-remote", "--heads", "origin", branch], check=False
+            )
+        finally:
+            self._scrub_remote_credentials()
+        needle = f"refs/heads/{branch}"
+        for line in (result.stdout or "").splitlines():
+            if line.rstrip().endswith(needle):
+                return True
+        return False
 
-        logger.info("Fetching all remote refs...")
+    @staticmethod
+    def _is_primary_base(branch: str) -> bool:
+        name = (branch or "").strip().lower()
+        if not name:
+            return False
+        if name in _PRIMARY_BASES:
+            return True
+        return name.startswith("release/")
+
+    def _resolve_work_branch_name(self, issue_key: Optional[str] = None) -> str:
+        """Pick the branch agents commit on (MR source side).
+
+        * Prefer params ``source_branch`` when it is a real work name.
+        * If source equals target, or source is a primary base (develop/main/…),
+          use ``feature/{ISSUE_KEY}`` so we never push/MR from a protected base.
+        """
+        safe_key = re.sub(
+            r"[^A-Za-z0-9\-]", "-", issue_key or self.issue_key or "issue"
+        )
+        feature = f"feature/{safe_key}"
+        source = (self.source_branch or "").strip()
+        target = (self.target_branch or "").strip()
+
+        if not source:
+            logger.info(f"No source branch on params; using work branch {feature}")
+            return feature
+
+        if source == target:
+            logger.info(
+                f"Source equals target ('{source}'); "
+                f"using work branch {feature} (MR will be {feature} → {target})"
+            )
+            return feature
+
+        if self._is_primary_base(source):
+            logger.info(
+                f"Source '{source}' is a primary base; "
+                f"using work branch {feature} (MR will be {feature} → {target or source})"
+            )
+            return feature
+
+        logger.info(
+            f"Using params source as work branch: {source} "
+            f"(MR will be {source} → {target})"
+        )
+        return source
+
+    def _require_target_on_remote(self) -> str:
+        """Target must exist on origin before any work. Returns target name."""
+        target = (self.target_branch or "").strip()
+        if not target:
+            raise GitTargetBranchError(
+                "*Virtual Developer* could not start: no **target branch** on the issue.\n\n"
+                "Add `Target branch: develop` (or your integration branch) inside `{params}`.\n"
+                "The target must already exist on GitLab; the MR merges **into** it."
+            )
+
+        logger.info(f"Validating target branch on remote: origin/{target}")
         self._with_auth_remote()
         try:
             self._run_git(["fetch", "origin", "--prune"], check=False)
-            result = self._run_git(
-                ["ls-remote", "--heads", "origin", branch_name], check=False
-            )
-            # Exact ref match — avoid substring hits like feature/A vs feature/A-ext
-            remote_exists = False
-            needle = f"refs/heads/{branch_name}"
-            for line in (result.stdout or "").splitlines():
-                if line.rstrip().endswith(needle):
-                    remote_exists = True
-                    break
         finally:
             self._scrub_remote_credentials()
 
-        logger.info(f"Remote branch '{branch_name}' exists: {remote_exists}")
+        if not self._remote_head_exists(target):
+            raise GitTargetBranchError(
+                (
+                    f"*Virtual Developer* could not start: **target branch** missing on GitLab.\n\n"
+                    f"*Target branch:* `{target}`\n"
+                    f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
+                    f"*Detail:* `origin/{target}` not found (ls-remote)\n\n"
+                    "The target must already exist. Fix `Target branch` in the issue "
+                    "`{params}` block (e.g. `Target branch: develop`), then move the "
+                    "issue back to *To Do*."
+                ),
+                technical=f"ls-remote origin/{target} empty",
+            )
 
-        if remote_exists:
-            logger.info(f"Checking out origin/{branch_name}...")
-            self._run_git(["checkout", "-b", branch_name, f"origin/{branch_name}"])
-            logger.info(f"Checked out remote branch: {branch_name}")
-        else:
-            logger.info("No remote branch found, creating new from default...")
-            if not self._checkout_default_branch():
-                raise RuntimeError("No default branch available to create new branch from")
-            self._run_git(["checkout", "-b", branch_name])
-            logger.info(f"Created new branch: {branch_name}")
+        # Materialize local tracking ref for checkout -B
+        self._with_auth_remote()
+        try:
+            self._run_git(["fetch", "origin", target], check=False)
+        finally:
+            self._scrub_remote_credentials()
 
-        return branch_name
+        logger.info(f"Target branch confirmed on remote: origin/{target}")
+        return target
+
+    def _checkout_work_branch_from_target(self, work_branch: str, target: str) -> str:
+        """Create or reset *work_branch* from origin/target tip, then checkout it.
+
+        Always bases the work branch on target so agent changes land on a clean
+        tip of the MR destination. Does not push yet (push happens after work).
+        """
+        work_branch = (work_branch or "").strip()
+        target = (target or "").strip()
+        if not work_branch:
+            raise GitSourceBranchError(
+                "*Virtual Developer* could not create a work branch: empty name."
+            )
+        if work_branch == target:
+            raise GitSourceBranchError(
+                (
+                    f"*Virtual Developer* refused to use target `{target}` as the work branch.\n\n"
+                    "Source and target resolved to the same name. Set "
+                    "`Source branch: feature/YOUR-KEY` or leave source as a primary "
+                    "base so the agent uses `feature/{KEY}`."
+                )
+            )
+
+        logger.info(
+            f"Preparing work branch '{work_branch}' from target origin/{target} "
+            f"(MR will be {work_branch} → {target})"
+        )
+        self._delete_local_branch(work_branch)
+
+        start_point = f"origin/{target}"
+        if not self._branch_exists(target, check_remote=True):
+            # Fallback after fetch failure edge cases
+            if self._branch_exists(target, check_remote=False):
+                start_point = target
+            else:
+                raise GitTargetBranchError(
+                    (
+                        f"*Virtual Developer* could not base work on target `{target}`: "
+                        f"local ref `origin/{target}` missing after fetch.\n\n"
+                        f"*Repository:* `{self.remote_url or '(unknown)'}`"
+                    ),
+                    technical=f"origin/{target} missing after fetch",
+                )
+
+        self._run_git(["checkout", "-B", work_branch, start_point])
+        logger.info(
+            f"Checked out work branch '{work_branch}' from '{start_point}' "
+            f"(new branch from target for agent work)"
+        )
+        self.work_branch = work_branch
+        # Keep source_branch aligned with actual MR source for logging/MR create
+        self.source_branch = work_branch
+        return work_branch
+
+    def _checkout_or_create_branch(self, branch_name: str) -> str:
+        """Ensure target exists, then create/reset *branch_name* from target.
+
+        Kept for tests/callers that pass an explicit work branch name.
+        """
+        target = self._require_target_on_remote()
+        return self._checkout_work_branch_from_target(branch_name, target)
+
+    def _checkout_source_branch(self) -> None:
+        """Legacy helper: require target, checkout work branch from it."""
+        target = self._require_target_on_remote()
+        work = self._resolve_work_branch_name(self.issue_key)
+        self._checkout_work_branch_from_target(work, target)
+
+    def _create_source_from_target(self, source: str, target: str) -> bool:
+        """Create local work branch *source* from *target* tip.
+
+        Returns True if checked out afterward. Used by tests and internal paths.
+        """
+        source = (source or "").strip()
+        target = (target or "").strip()
+        if not source or not target or source == target:
+            return False
+        try:
+            # Trust caller that target exists; still try to fetch
+            if not self._remote_head_exists(target) and not self._branch_exists(
+                target, check_remote=True
+            ) and not self._branch_exists(target, check_remote=False):
+                return False
+            self._checkout_work_branch_from_target(source, target)
+            return True
+        except (GitSourceBranchError, GitTargetBranchError, RuntimeError) as e:
+            logger.warning(f"Could not create source '{source}' from '{target}': {e}")
+            return False
 
     def _checkout_default_branch(self) -> bool:
-        """Checkout the default branch before creating a feature branch."""
-        default_branch = settings.default_branch.strip() if settings.default_branch else ""
-
-        branches_to_try = []
-        if default_branch:
-            branches_to_try.append(default_branch)
-        branches_to_try.append("main")
-
-        for branch in branches_to_try:
-            if self._branch_exists(branch):
-                self._run_git(["checkout", branch])
-                logger.info(f"Checked out default branch: {branch}")
+        """Checkout target tip (read-only base) for cleanup helpers."""
+        try:
+            target = self._require_target_on_remote()
+            self._run_git(["checkout", "-B", target, f"origin/{target}"], check=False)
+            if self._branch_exists(target, check_remote=False):
                 return True
-
-        logger.error(f"No default branch found. Tried: {branches_to_try}")
-        return False
+            return False
+        except (GitTargetBranchError, RuntimeError) as e:
+            logger.error(str(e))
+            return False
 
     def ensure_feature_branch(self, issue_key: Optional[str] = None) -> Optional[str]:
-        """Create or checkout a feature branch for the given JIRA issue."""
-        safe_key = re.sub(r'[^A-Za-z0-9\-]', '-', issue_key or self.issue_key or "issue")
-        branch_name = f"feature/{safe_key}"
+        """Validate target, create work branch from target, return work branch name.
 
-        return self._checkout_or_create_branch(branch_name)
-
+        This is the single entrypoint used by the processor before agent work.
+        """
+        key = issue_key or self.issue_key
+        logger.info(
+            f"ensure_feature_branch for {key}: "
+            f"params source={self.source_branch!r} target={self.target_branch!r}"
+        )
+        target = self._require_target_on_remote()
+        work = self._resolve_work_branch_name(key)
+        return self._checkout_work_branch_from_target(work, target)
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
         """Format a commit message per agent/AGENT_PROMPT.md §policy.commit.
 
@@ -502,8 +730,8 @@ class GitManager:
             self._scrub_remote_credentials()
 
     def _gitlab_host_and_project(self) -> tuple[str, str]:
-        """Return (api_host, path_with_namespace) from PROJECT_GITLAB_URL."""
-        raw = self.remote_url or getattr(settings, "project_gitlab_url", "") or ""
+        """Return (api_host, path_with_namespace) from the issue repository URL."""
+        raw = self.remote_url or ""
         if not isinstance(raw, str):
             raw = str(raw) if raw else ""
         raw = raw.strip()
@@ -557,7 +785,7 @@ class GitManager:
             return None
         host, project = self._gitlab_host_and_project()
         if not project:
-            logger.error("Cannot create MR via API: project path missing from PROJECT_GITLAB_URL")
+            logger.error("Cannot create MR via API: project path missing from repository URL")
             return None
         enc = quote(project, safe="")
         url = f"https://{host}/api/v4/projects/{enc}/merge_requests"
@@ -648,14 +876,13 @@ class GitManager:
             return existing_mr
 
         if not target_branch:
-            target_branch = settings.default_branch.strip() if settings.default_branch else "main"
+            target_branch = (self.target_branch or self.source_branch or "").strip()
+        if not target_branch:
+            logger.error("Cannot create MR: no target branch on GitManager")
+            return None
 
-        # Prefer configured default, then common fallbacks when remote lacks the branch
-        candidates = []
-        for b in (target_branch, "main", "master", "develop"):
-            if b and b not in candidates:
-                candidates.append(b)
-
+        # Issue target branch only (no silent fall back to main/develop)
+        candidates = [target_branch]
         last_err = ""
         try:
             for target in candidates:

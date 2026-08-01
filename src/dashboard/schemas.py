@@ -131,7 +131,7 @@ class SettingsView(BaseModel):
     trigger_on_assignment: bool = True
     auto_start_plans: bool = False
     max_concurrent_jobs: int = 3
-    default_branch: str = "develop"
+    default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
     # Presence flags only

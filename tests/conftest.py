@@ -117,7 +117,7 @@ class FakeJiraClient:
     def transition_to_in_progress(self, issue_key: str) -> bool:
         return True
 
-    def get_issue(self, issue_key: str):
+    def get_issue(self, issue_key: str, fields=None, **kwargs):
         return None
 
     def get_active_sprint(self, board_id: str):

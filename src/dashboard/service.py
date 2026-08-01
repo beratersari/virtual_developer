@@ -195,7 +195,7 @@ def build_settings_view() -> SettingsView:
         trigger_on_assignment=bool(settings.trigger_on_assignment),
         auto_start_plans=bool(settings.auto_start_plans),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
-        default_branch=settings.default_branch or "develop",
+        default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
         dashboard_port=int(getattr(settings, "dashboard_port", 8080) or 8080),
         jira_token_configured=bool(settings.jira_api_token),

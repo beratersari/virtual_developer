@@ -30,6 +30,7 @@ _DEFAULT_SECTIONS: Dict[str, str] = {
         "Types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
         'Example: `git commit -m "[{ISSUE_KEY}] fix: short description"`'
     ),
+
     "role.planning": (
         "You are Prometheus. Create a work plan for this Jira issue: "
         "clarify requirements, research the codebase, write a checkbox plan "

@@ -125,18 +125,31 @@ async def test_push_failure_does_not_complete(processor, state_manager, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_concurrent_init_keeps_per_issue_context(processor, tmp_path):
+async def test_concurrent_init_keeps_per_issue_context(processor, state_manager, tmp_path):
     """Second issue must not erase first issue's git/agent context."""
+    params = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: develop\n"
+        "{params}\n"
+    )
+    state_manager.create_state("A-1", "a", params)
+    state_manager.create_state("B-2", "b", params)
+
     class FakeGM:
-        def __init__(self, issue_key):
+        def __init__(self, issue_key=None, **kwargs):
             self.issue_key = issue_key
-            self.temp_dir = tmp_path / issue_key
+            self.temp_dir = tmp_path / str(issue_key)
             self.temp_dir.mkdir(exist_ok=True)
+            self.source_branch = kwargs.get("source_branch")
+            self.target_branch = kwargs.get("target_branch")
+            self.remote_url = kwargs.get("remote_url")
 
         def get_working_directory(self):
             return self.temp_dir
 
-    with patch("src.processor.GitManager", side_effect=lambda issue_key: FakeGM(issue_key)):
+    with patch("src.processor.GitManager", side_effect=lambda **kw: FakeGM(**kw)):
         with patch("src.processor.AgentRunner") as AR:
             AR.side_effect = lambda working_directory=None: MagicMock(
                 working_directory=working_directory

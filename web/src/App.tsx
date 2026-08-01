@@ -1322,7 +1322,7 @@ export default function App() {
                   GitLab PAT:{' '}
                   {data.settings.gitlab_pat_configured ? 'configured' : 'missing'}
                 </div>
-                <div>Default branch: {data.settings.default_branch}</div>
+                <div>Base branch: {data.settings.default_branch}</div>
                 <div>
                   Dashboard: {data.settings.dashboard_host}:{data.settings.dashboard_port}
                 </div>

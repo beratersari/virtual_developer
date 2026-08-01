@@ -47,12 +47,8 @@ class Settings(BaseSettings):
     git_user_name: str = Field(default="DevBot", description="Git user name for commits")
     git_user_email: str = Field(default="devbot@example.com", description="Git user email for commits")
     
-    # Default branch to checkout before creating feature branches (optional)
-    # If not set, falls back to 'main', then logs a message if neither exists
-    default_branch: str = Field(default="develop", description="Default branch to checkout before creating feature branches")
-    
-    # Remote GitLab repository (optional)
-    project_gitlab_url: str = Field(default="", description="GitLab repo URL to clone into PROJECT_ROOT")
+    # GitLab PAT only — repository URL and source branch come from each Jira issue
+    # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
     gitlab_pat: str = Field(default="", description="GitLab Personal Access Token for push/merge-request")
     
     # Agent Configuration

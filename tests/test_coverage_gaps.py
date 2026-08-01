@@ -146,13 +146,16 @@ def test_git_manager_full_setup(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 
     with patch("src.git_manager.settings") as s:
-        s.project_gitlab_url = "https://gitlab.example.com/g/repo.git"
         s.gitlab_pat = "pat"
         s.temp_dir_base = Path(".temp")
         with patch.object(GitManager, "_clone_into_temp") as clone:
             with patch.object(GitManager, "_sync_remote_branches"):
                 with patch("src.git_manager.set_current_temp_dir"):
-                    g = GitManager(issue_key="GS-1")
+                    g = GitManager(
+                        issue_key="GS-1",
+                        remote_url="https://gitlab.example.com/g/repo.git",
+                        source_branch="develop",
+                    )
                     assert g.temp_dir is not None
                     clone.assert_called()
 
@@ -204,6 +207,8 @@ def test_git_mr_already_exists_stderr(tmp_path):
     g.temp_dir = tmp_path
     g.remote_enabled = True
     g.remote_url = "https://gitlab.example.com/group/repo.git"
+    g.source_branch = "feature/x"
+    g.target_branch = "main"
     with patch.object(g, "get_current_branch", return_value="feature/x"):
         with patch.object(g, "_get_existing_mr_url", side_effect=[None, "http://mr/9"]):
             with patch.object(
@@ -214,9 +219,7 @@ def test_git_mr_already_exists_stderr(tmp_path):
                 ),
             ):
                 with patch("src.git_manager.settings") as s:
-                    s.default_branch = "main"
                     s.gitlab_pat = "token"
-                    s.project_gitlab_url = "https://gitlab.example.com/group/repo.git"
                     assert g.create_merge_request("t") == "http://mr/9"
 
 # ---------------------------------------------------------------------------
@@ -467,7 +470,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
             s.orchestrator_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
-            s.default_branch = "main"
             await proc._start_execution_workflow(state)
 
     # direct with retry callbacks
@@ -478,7 +480,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
             s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
-            s.default_branch = "main"
             await proc._start_direct_execution(state2)
 
 
@@ -490,7 +491,6 @@ async def test_push_progress_exceptions(proc, state_manager):
     proc.git_manager = git
     proc.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))
     with patch("src.processor.settings") as s:
-        s.default_branch = "main"
         await proc._push_and_create_mr(state)
 
     git.get_current_branch.return_value = "feature/x"
