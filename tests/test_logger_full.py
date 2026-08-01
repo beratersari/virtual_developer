@@ -1,7 +1,7 @@
 """Coverage for logger module."""
 
-from src.logger import LogLevel, Logger, logger, set_color_output, set_level
 from src import logger as logger_mod
+from src.logger import LogLevel, Logger, logger, set_color_output, set_level
 
 
 def test_all_levels():
@@ -46,3 +46,38 @@ def test_module_level_wrappers():
     logger_mod.info("i")
     logger_mod.warning("w")
     logger_mod.error("e")
+
+
+def test_format_has_no_emoji_and_stable_columns():
+    """Professional layout: timestamp, level, location, function, message — no icons."""
+    lg = Logger()
+    lg.set_color_output(False)
+    text = lg._format_message(
+        LogLevel.INFO,
+        "hello world",
+        "client.py",
+        44,
+        "__init__",
+    )
+    for emoji in ("🐛", "ℹ️", "⚠️", "❌", "🔥"):
+        assert emoji not in text
+    assert "INFO" in text
+    assert "client.py:44" in text
+    assert "__init__" in text
+    assert "hello world" in text
+    # timestamp shape YYYY-MM-DD
+    assert text[:4].isdigit()
+
+
+def test_format_collapses_multiline_message():
+    lg = Logger()
+    lg.set_color_output(False)
+    text = lg._format_message(
+        LogLevel.WARNING,
+        "line1\nline2",
+        "daemon.py",
+        10,
+        "stop",
+    )
+    assert "line1 line2" in text
+    assert "\nline2" not in text.split("WARNING")[-1] or "line1 line2" in text

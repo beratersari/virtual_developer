@@ -1,7 +1,6 @@
 """State manager for persisting JIRA agent state."""
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -9,44 +8,11 @@ from src.config import settings
 from src.logger import logger
 from src.state.models import JiraAgentState, TaskStatus
 
-# ANSI color codes for state transition logging
-_COLORS = {
-    "reset": "\033[0m",
-    "bold": "\033[1m",
-    "dim": "\033[2m",
-    "cyan": "\033[36m",
-    "green": "\033[32m",
-    "yellow": "\033[33m",
-    "red": "\033[31m",
-    "magenta": "\033[35m",
-    "blue": "\033[34m",
-    "white": "\033[37m",
-}
-
-# Color map for each task status
-_STATUS_COLORS = {
-    TaskStatus.PENDING: _COLORS["dim"],
-    TaskStatus.PLANNING: _COLORS["blue"],
-    TaskStatus.PLAN_READY: _COLORS["cyan"],
-    TaskStatus.EXECUTING: _COLORS["yellow"],
-
-    TaskStatus.COMPLETED: _COLORS["green"],
-    TaskStatus.ERROR: _COLORS["red"],
-    TaskStatus.CANCELLED: _COLORS["red"],
-}
-
 
 def _log_state_transition(issue_key: str, old_status: TaskStatus, new_status: TaskStatus) -> None:
-    """Print a colored state transition message to the terminal."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    old_color = _STATUS_COLORS.get(old_status, _COLORS["white"])
-    new_color = _STATUS_COLORS.get(new_status, _COLORS["white"])
-    reset = _COLORS["reset"]
-    bold = _COLORS["bold"]
-    dim = _COLORS["dim"]
-
+    """Log a status change using the standard application logger format."""
     logger.info(
-        f"[StateTransition] {issue_key}: {old_status.value} -> {new_status.value}"
+        f"state {issue_key}: {old_status.value} -> {new_status.value}"
     )
 
 
@@ -107,14 +73,7 @@ class JiraStateManager:
         jira_assignee: Optional[str] = None,
     ) -> JiraAgentState:
         """Create a new state for an issue."""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        dim = _COLORS["dim"]
-        bold = _COLORS["bold"]
-        reset = _COLORS["reset"]
-        green = _COLORS["green"]
-        logger.info(
-            f"[StateTransition] {issue_key}: created -> {TaskStatus.PENDING.value}"
-        )
+        logger.info(f"state {issue_key}: created -> {TaskStatus.PENDING.value}")
 
         state = JiraAgentState(
             issue_key=issue_key,
