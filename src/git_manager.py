@@ -181,18 +181,23 @@ class GitManager:
         """Clone the remote repository into the temp directory."""
         if not self.temp_dir:
             raise RuntimeError("Temp directory not initialized")
-        
-        gitlab_pat = settings.gitlab_pat.strip()
-        clone_url = self._build_clone_url(self.remote_url or "", gitlab_pat)
-        
+
+        # Fail closed: never inject PAT for untrusted/unknown hosts
+        self._assert_remote_host_allowed(self.remote_url or "")
+
+        gitlab_pat = (settings.gitlab_pat or "").strip()
+        # Clean URL only — PAT never appears in argv (use GIT_ASKPASS instead)
+        clone_url = (self.remote_url or "").strip()
+
         logger.info(f"Cloning repository into {self.temp_dir}...")
         logger.debug(f"Remote URL: {self.remote_url}")
-        logger.debug(f"Clone URL has PAT: {bool(gitlab_pat)}")
+        logger.debug(f"Clone will use askpass auth: {bool(gitlab_pat)}")
 
         result = subprocess.run(
             ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
             capture_output=True,
-            text=True
+            text=True,
+            env=self._git_auth_env() if gitlab_pat else None,
         )
 
         if result.returncode != 0:
@@ -208,27 +213,128 @@ class GitManager:
                     f"*Virtual Developer* could not **clone** the repository.\n\n"
                     f"*Repository:* `{repo_display}`\n"
                     f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
-                    "Check that the URL is correct, the project is reachable, and "
+                    "Check that the URL is correct, the project is reachable, "
+                    "`GITLAB_ALLOWED_HOSTS` includes this host, and "
                     "`GITLAB_PAT` has read access. Then move the issue back to *To Do*."
                 ),
                 technical=safe_err,
             )
 
         logger.info("Clone completed successfully")
-        # Scrub credentials from origin so PAT is not left on disk in .git/config
+        # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
 
         self._sync_remote_branches()
+
+    @staticmethod
+    def _host_from_url(url: str) -> str:
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        if not raw.startswith("http"):
+            raw = "https://" + raw
+        return (urlparse(raw).hostname or "").lower()
+
+    def _assert_remote_host_allowed(self, url: str) -> None:
+        """Refuse to use GITLAB_PAT against hosts not on the allowlist.
+
+        When no PAT is configured, any host is allowed (no secret to leak).
+        When PAT is set, ``GITLAB_ALLOWED_HOSTS`` must list the repository host.
+        """
+        pat = (settings.gitlab_pat or "").strip()
+        if not pat:
+            return
+        host = self._host_from_url(url)
+        if not host:
+            raise GitCloneError(
+                "*Virtual Developer* could not clone: repository URL has no host.\n\n"
+                "Set `Repository: https://gitlab.example.com/group/repo.git` in `{params}`."
+            )
+        allowed = list(settings.gitlab_allowed_hosts_list)
+        if not allowed:
+            raise GitCloneError(
+                "*Virtual Developer* refused to authenticate: "
+                "`GITLAB_ALLOWED_HOSTS` is empty while `GITLAB_PAT` is set.\n\n"
+                "Set e.g. `GITLAB_ALLOWED_HOSTS=gitlab.example.com` so the PAT is only "
+                "sent to trusted GitLab hosts."
+            )
+        ok = any(host == a or host.endswith("." + a) for a in allowed)
+        if not ok:
+            raise GitCloneError(
+                (
+                    f"*Virtual Developer* refused to send credentials to host "
+                    f"`{host}`.\n\n"
+                    f"Allowed hosts: `{', '.join(allowed)}`.\n"
+                    "Update the issue Repository URL or add the host to "
+                    "`GITLAB_ALLOWED_HOSTS`."
+                )
+            )
+
+    def _git_auth_env(self) -> Dict[str, str]:
+        """Build env for git so credentials come from askpass, not argv.
+
+        PAT is placed in a process environment variable consumed by a short
+        askpass helper — it never appears in the ``git`` command line.
+        """
+        env = dict(os.environ)
+        pat = (settings.gitlab_pat or "").strip()
+        if not pat:
+            return env
+        askpass = self._ensure_askpass_script()
+        env["GIT_ASKPASS"] = str(askpass)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GCM_INTERACTIVE"] = "never"
+        # Username for HTTPS; password comes from VD_GIT_PASSWORD via askpass
+        env["VD_GIT_PASSWORD"] = pat
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "credential.helper"
+        env["GIT_CONFIG_VALUE_0"] = ""
+        return env
+
+    @staticmethod
+    def _ensure_askpass_script() -> Path:
+        """Create (once) a small cross-platform askpass helper under temp."""
+        # Prefer a stable path under the agent runtime so we do not rewrite each call
+        base = Path.cwd() / ".jira-agent" / "bin"
+        base.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            path = base / "vd-git-askpass.cmd"
+            content = (
+                "@echo off\r\n"
+                "set \"PROMPT=%~1\"\r\n"
+                "echo %PROMPT% | findstr /I \"Username username\" >nul\r\n"
+                "if not errorlevel 1 (\r\n"
+                "  echo oauth2\r\n"
+                "  exit /b 0\r\n"
+                ")\r\n"
+                "echo %VD_GIT_PASSWORD%\r\n"
+            )
+        else:
+            path = base / "vd-git-askpass.sh"
+            content = (
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  *[Uu]sername*) echo oauth2 ;;\n"
+                "  *) printf '%s\\n' \"$VD_GIT_PASSWORD\" ;;\n"
+                "esac\n"
+            )
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            path.write_text(content, encoding="utf-8")
+            if os.name != "nt":
+                try:
+                    path.chmod(0o700)
+                except OSError:
+                    pass
+        return path
+
     def _build_clone_url(self, base_url: str, pat: str) -> str:
-        """Build HTTPS clone URL with PAT for authentication."""
-        if pat:
-            if base_url.startswith("https://"):
-                logger.debug("Building HTTPS clone URL with PAT")
-                return base_url.replace("https://", f"https://oauth2:{pat}@")
-            if base_url.startswith("http://"):
-                logger.debug("Building HTTP clone URL with PAT")
-                return base_url.replace("http://", f"http://oauth2:{pat}@")
-        logger.debug("Building clone URL without PAT")
+        """Return a clean remote URL.
+
+        Historical helper used to embed ``oauth2:PAT@`` in the URL. That leaked
+        the token via process argv. Auth is now via ``_git_auth_env`` / askpass;
+        ``pat`` is ignored and never embedded.
+        """
+        _ = pat  # intentionally unused — keep signature for callers/tests
         return base_url
 
     def _scrub_remote_credentials(self) -> None:
@@ -242,14 +348,14 @@ class GitManager:
             logger.warning(f"Could not scrub origin credentials: {e}")
 
     def _with_auth_remote(self) -> None:
-        """Temporarily re-embed PAT in origin for push/fetch operations."""
+        """Ensure origin uses the clean URL; auth is supplied via env/askpass.
+
+        Kept for call-site compatibility. Never embeds PAT into the remote URL.
+        """
         if not self.remote_url:
             return
-        pat = (settings.gitlab_pat or "").strip()
-        if not pat:
-            return
-        auth_url = self._build_clone_url(self.remote_url, pat)
-        self._run_git(["remote", "set-url", "origin", auth_url], check=False)
+        self._assert_remote_host_allowed(self.remote_url)
+        self._run_git(["remote", "set-url", "origin", self.remote_url], check=False)
 
     def _sync_remote_branches(self) -> None:
         """Sync all remote branches locally."""
@@ -258,7 +364,7 @@ class GitManager:
             logger.debug("Running git fetch --all")
             self._with_auth_remote()
             try:
-                self._run_git(["fetch", "--all"], check=False)
+                self._run_git(["fetch", "--all"], check=False, auth=True)
             finally:
                 self._scrub_remote_credentials()
 
@@ -292,8 +398,19 @@ class GitManager:
         except Exception as e:
             logger.warning(f"Could not sync remote branches: {e}")
 
-    def _run_git(self, args: list, cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
-        """Run a git command in the temp working directory."""
+    def _run_git(
+        self,
+        args: list,
+        cwd: Optional[Path] = None,
+        check: bool = True,
+        *,
+        auth: bool = False,
+    ) -> subprocess.CompletedProcess:
+        """Run a git command in the temp working directory.
+
+        When ``auth=True``, inject askpass env so push/fetch can authenticate
+        without putting the PAT on the command line.
+        """
         cwd = cwd or self.temp_dir
 
         if cwd is None or not cwd.exists() or not cwd.is_dir():
@@ -303,12 +420,14 @@ class GitManager:
         cmd = ["git"] + args
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
-        
+
+        env = self._git_auth_env() if auth and (settings.gitlab_pat or "").strip() else None
         result = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
+            env=env,
         )
         
         if result.returncode != 0:
@@ -393,7 +512,7 @@ class GitManager:
         self._with_auth_remote()
         try:
             result = self._run_git(
-                ["ls-remote", "--heads", "origin", branch], check=False
+                ["ls-remote", "--heads", "origin", branch], check=False, auth=True
             )
         finally:
             self._scrub_remote_credentials()
@@ -463,7 +582,7 @@ class GitManager:
         logger.info(f"Validating target branch on remote: origin/{target}")
         self._with_auth_remote()
         try:
-            self._run_git(["fetch", "origin", "--prune"], check=False)
+            self._run_git(["fetch", "origin", "--prune"], check=False, auth=True)
         finally:
             self._scrub_remote_credentials()
 
@@ -484,7 +603,7 @@ class GitManager:
         # Materialize local tracking ref for checkout -B
         self._with_auth_remote()
         try:
-            self._run_git(["fetch", "origin", target], check=False)
+            self._run_git(["fetch", "origin", target], check=False, auth=True)
         finally:
             self._scrub_remote_credentials()
 
@@ -709,18 +828,18 @@ class GitManager:
         try:
             self._with_auth_remote()
             try:
-                self._run_git(["push", "-u", "origin", branch])
+                self._run_git(["push", "-u", "origin", branch], auth=True)
                 logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
             except RuntimeError:
                 logger.warning(f"Push failed, attempting to pull and merge...")
                 try:
-                    self._run_git(["fetch", "origin", branch], check=False)
+                    self._run_git(["fetch", "origin", branch], check=False, auth=True)
                     self._run_git(
                         ["merge", f"origin/{branch}", "-m", f"Merge remote branch {branch}"],
                         check=False,
                     )
-                    self._run_git(["push", "-u", "origin", branch])
+                    self._run_git(["push", "-u", "origin", branch], auth=True)
                     logger.info(f"Pushed branch '{branch}' after merge.")
                     return True
                 except RuntimeError as e2:
@@ -750,6 +869,16 @@ class GitManager:
         pat = (settings.gitlab_pat or "").strip()
         host, _ = self._gitlab_host_and_project()
         if pat:
+            try:
+                self._assert_remote_host_allowed(self.remote_url or f"https://{host}")
+            except GitCloneError:
+                logger.error(
+                    f"Refusing to pass GITLAB_PAT to glab for unallowed host {host}"
+                )
+                # Do not inject token for untrusted hosts
+                env["GITLAB_HOST"] = host
+                env.setdefault("GITLAB_PROTOCOL", "https")
+                return env
             env["GITLAB_TOKEN"] = pat
             # Common aliases used by different glab versions
             env.setdefault("GITLAB_ACCESS_TOKEN", pat)
@@ -782,6 +911,11 @@ class GitManager:
         pat = (settings.gitlab_pat or "").strip()
         if not pat:
             logger.error("Cannot create MR via API: GITLAB_PAT is empty")
+            return None
+        try:
+            self._assert_remote_host_allowed(self.remote_url or "")
+        except GitCloneError as e:
+            logger.error(f"Cannot create MR via API: host not allowed: {e}")
             return None
         host, project = self._gitlab_host_and_project()
         if not project:

@@ -7,6 +7,7 @@ import {
   fetchModels,
   fetchTaskDetail,
   patchSettings,
+  startTask,
 } from './api'
 import {
   navigateTo,
@@ -69,6 +70,7 @@ export default function App() {
     'overview',
   )
   const [cancelling, setCancelling] = useState(false)
+  const [starting, setStarting] = useState(false)
   const [issueFilter, setIssueFilter] = useState('')
   const [jobsView, setJobsView] = useState<JobsPayload | null>(null)
   /** When opening detail from a job row, highlight that job's ids */
@@ -245,6 +247,22 @@ export default function App() {
       setDetailError(e instanceof Error ? e.message : 'Cancel failed')
     } finally {
       setCancelling(false)
+    }
+  }
+
+  const onStartPlan = async () => {
+    if (!detail?.issue_key || !detail.can_start) return
+    if (!window.confirm(`Start plan execution for ${detail.issue_key}?`)) return
+    setStarting(true)
+    try {
+      await startTask(detail.issue_key)
+      await refreshDetail()
+      const dash = await fetchDashboard()
+      applyPayload(dash)
+    } catch (e) {
+      setDetailError(e instanceof Error ? e.message : 'Start failed')
+    } finally {
+      setStarting(false)
     }
   }
 
@@ -551,6 +569,16 @@ export default function App() {
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                {detail?.can_start && (
+                  <button
+                    type="button"
+                    disabled={starting}
+                    onClick={onStartPlan}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {starting ? 'Starting…' : 'Start plan'}
+                  </button>
+                )}
                 {detail?.can_cancel && (
                   <button
                     type="button"

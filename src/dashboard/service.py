@@ -729,6 +729,9 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
+    # plan_ready needs an operator kick when auto_start_plans is false
+    # (comments are not polled — AGENTS.md)
+    can_start = state.status == TaskStatus.PLAN_READY and not live
 
     meta = state.metadata or {}
     session_ids = list(meta.get("opencode_session_ids") or [])
@@ -775,6 +778,7 @@ def build_task_detail(
         "progress_percentage": int(state.progress_percentage or 0),
         "live": live,
         "can_cancel": can_cancel,
+        "can_start": can_start,
         "workflow_type": meta.get("workflow_type"),
         "plan_path": state.plan_path,
         "current_task_id": display_task_id,

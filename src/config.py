@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     # GitLab PAT only — repository URL and source branch come from each Jira issue
     # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
     gitlab_pat: str = Field(default="", description="GitLab Personal Access Token for push/merge-request")
+    # Hosts that may receive GITLAB_PAT (clone/push/MR). Required when PAT is set.
+    # Comma-separated hostnames, e.g. "gitlab.example.com,gitlab.com"
+    gitlab_allowed_hosts: str = Field(
+        default="",
+        description="Comma-separated GitLab hosts allowed for GITLAB_PAT (fail-closed when PAT is set)",
+    )
     
     # Agent Configuration
     default_agent: str = Field(default="sisyphus")
@@ -161,6 +167,17 @@ class Settings(BaseSettings):
         if not self.trigger_labels:
             return ["ai-assist", "bot"]
         return [item.strip() for item in self.trigger_labels.split(",") if item.strip()]
+
+    @property
+    def gitlab_allowed_hosts_list(self) -> List[str]:
+        """Hosts allowed to receive GITLAB_PAT (lowercase, no empty entries)."""
+        if not self.gitlab_allowed_hosts:
+            return []
+        return [
+            h.strip().lower()
+            for h in self.gitlab_allowed_hosts.split(",")
+            if h.strip()
+        ]
     
     def _kit_section(self, section_id: str) -> str:
         from src.orchestrator.prompt_kit import get_section

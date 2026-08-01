@@ -17,6 +17,12 @@ def _cp(stdout="", stderr="", returncode=0):
 def gm(tmp_path, monkeypatch):
     """GitManager without real clone — inject temp_dir and remote flags."""
     monkeypatch.chdir(tmp_path)
+    # Allowlist must include fixture host when a real .env sets GITLAB_PAT
+    from src.config import settings as real_settings
+
+    monkeypatch.setattr(
+        real_settings, "gitlab_allowed_hosts", "gitlab.example.com"
+    )
     with patch.object(GitManager, "_setup_temp_working_dir"):
         g = GitManager(issue_key="GM-1")
     g.temp_dir = tmp_path / "repo"
@@ -55,8 +61,9 @@ def test_extract_remote_name(gm):
 
 
 def test_build_clone_url(gm):
-    assert "oauth2:pat@" in gm._build_clone_url("https://h/r.git", "pat")
-    assert "oauth2:pat@" in gm._build_clone_url("http://h/r.git", "pat")
+    # PAT must never be embedded in the URL (argv leak); clean URL only
+    assert gm._build_clone_url("https://h/r.git", "pat") == "https://h/r.git"
+    assert gm._build_clone_url("http://h/r.git", "pat") == "http://h/r.git"
     assert gm._build_clone_url("https://h/r.git", "") == "https://h/r.git"
 
 
@@ -79,16 +86,22 @@ def test_create_temp_directory_collision(tmp_path, monkeypatch):
 
 
 def test_clone_into_temp_success_and_fail(gm, tmp_path):
+    host = "gitlab.example.com"
+    gm.remote_url = f"https://{host}/group/repo.git"
     with patch("src.git_manager.subprocess.run") as run:
         run.return_value = _cp(returncode=0)
         with patch.object(gm, "_sync_remote_branches"):
             with patch("src.git_manager.settings") as s:
                 s.gitlab_pat = "pat"
+                s.gitlab_allowed_hosts = host
+                s.gitlab_allowed_hosts_list = [host]
                 gm._clone_into_temp()
     with patch("src.git_manager.subprocess.run") as run:
         run.return_value = _cp(returncode=1, stderr="fail")
         with patch("src.git_manager.settings") as s:
             s.gitlab_pat = ""
+            s.gitlab_allowed_hosts = ""
+            s.gitlab_allowed_hosts_list = []
             from src.git_manager import GitCloneError
 
             with pytest.raises(GitCloneError) as ei:

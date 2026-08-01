@@ -126,6 +126,41 @@ class JiraStateManager:
             self.set_state(state)
             return state
 
+    def record_retry_attempt(
+        self,
+        issue_key: str,
+        attempt: Any,
+        *,
+        abort_statuses: Optional[set] = None,
+        current_task_id: Optional[str] = None,
+        current_opencode_session_id: Optional[str] = None,
+    ) -> Optional[JiraAgentState]:
+        """Append a retry attempt under the lock without clobbering terminal status.
+
+        Re-reads state under the RLock, skips if status is already aborted
+        (cancelled/error), then appends the attempt and optional live ids.
+        Returns the updated state, the unchanged aborted state, or None.
+        """
+        aborted = abort_statuses or {TaskStatus.CANCELLED, TaskStatus.ERROR}
+        with self._lock:
+            state = self.get_state(issue_key)
+            if not state:
+                logger.warning(f"No state found for {issue_key} (record_retry)")
+                return None
+            if state.status in aborted:
+                logger.info(
+                    f"Skipping retry record for {issue_key}: "
+                    f"already {state.status.value}"
+                )
+                return state
+            state.add_retry_attempt(attempt)
+            if current_task_id is not None:
+                state.current_task_id = current_task_id
+            if current_opencode_session_id is not None:
+                state.current_opencode_session_id = current_opencode_session_id
+            self.set_state(state)
+            return state
+
     def get_all_states(self) -> List[JiraAgentState]:
         """Load every persisted issue state (all statuses)."""
         states: List[JiraAgentState] = []

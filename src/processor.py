@@ -35,9 +35,30 @@ class _JobSlotLimiter:
         self._limit = max(1, int(limit))
         self._active = max(0, int(active))
         self._cond = asyncio.Condition()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def resize(self, limit: int) -> None:
+        """Update the admit cap and wake waiters (so raising limit unblocks them)."""
         self._limit = max(1, int(limit))
+        self._schedule_wake()
+
+    def _schedule_wake(self) -> None:
+        """Notify condition waiters on the owning event loop."""
+
+        async def _wake() -> None:
+            async with self._cond:
+                self._cond.notify_all()
+
+        try:
+            running = asyncio.get_running_loop()
+            self._loop = running
+            running.create_task(_wake())
+            return
+        except RuntimeError:
+            pass
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(_wake(), loop)
 
     @property
     def limit(self) -> int:
@@ -55,6 +76,7 @@ class _JobSlotLimiter:
         await self.release()
 
     async def acquire(self) -> None:
+        self._loop = asyncio.get_running_loop()
         async with self._cond:
             while self._active >= self._limit:
                 await self._cond.wait()
@@ -261,23 +283,113 @@ class JobProcessor:
         )
 
     def _runner_for(self, issue_key: str) -> Optional[AgentRunner]:
-        """Return the agent runner bound to this issue (isolation-safe)."""
+        """Return the agent runner bound to this issue (isolation-safe).
+
+        Never falls back to another issue's runner under multi-job concurrency.
+        Legacy ``self.agent_runner`` is used only when no other contexts exist.
+        """
         ctx = self._contexts.get(issue_key)
         if ctx and ctx.get("runner") is not None:
             return ctx["runner"]
-        return self.agent_runner
+        # Legacy single-slot: only when no foreign live contexts
+        if self.agent_runner is not None and (
+            not self._contexts or set(self._contexts.keys()) <= {issue_key}
+        ):
+            return self.agent_runner
+        return None
 
     def _git_for(self, issue_key: str) -> Optional[GitManager]:
-        """Return the git manager bound to this issue (isolation-safe)."""
+        """Return the git manager bound to this issue (isolation-safe).
+
+        Never returns another issue's git manager when ``ctx["git"]`` is None
+        (oracle/sandbox paths) or missing under multi-job concurrency.
+        """
         ctx = self._contexts.get(issue_key)
-        if ctx and ctx.get("git") is not None:
-            return ctx["git"]
-        return self.git_manager
+        if ctx is not None:
+            # Explicit None means sandbox/oracle — do not fall back to foreign git
+            return ctx.get("git")
+        if self.git_manager is not None and (
+            not self._contexts or set(self._contexts.keys()) <= {issue_key}
+        ):
+            gm = self.git_manager
+            gm_key = getattr(gm, "issue_key", None)
+            # Real GitManager: only if unbound or same issue. Tests often use
+            # MagicMock without a string issue_key — treat as single-slot.
+            if gm_key is None or gm_key == issue_key or not isinstance(gm_key, str):
+                return gm
+        return None
 
     def _is_aborted(self, issue_key: str) -> bool:
         """True if issue was cancelled/errored while work was still running."""
         state = self.state_manager.get_state(issue_key)
         return bool(state and state.status in self.ABORTED_STATUSES)
+
+    def _record_agent_retry(
+        self,
+        issue_key: str,
+        *,
+        attempt_number: int,
+        delay_seconds: float,
+        reason: str,
+        session_file: Optional[str] = None,
+        error_message: Optional[str] = None,
+        return_code: Optional[int] = None,
+        session_id: Optional[str] = None,
+        new_task_id: Optional[str] = None,
+        progress_percentage: int = 0,
+    ) -> None:
+        """Record a retry attempt without overwriting CANCELLED/ERROR status.
+
+        Uses locked ``record_retry_attempt`` (re-read under RLock) so a concurrent
+        cancel/watchdog cannot be clobbered by a stale full ``set_state``.
+        """
+        if self._is_aborted(issue_key):
+            logger.info(f"Skipping retry bookkeeping for aborted {issue_key}")
+            return
+
+        retry_attempt = RetryAttempt(
+            attempt_number=attempt_number,
+            timestamp=datetime.now(),
+            reason=reason,
+            delay_seconds=delay_seconds,
+            session_log_path=session_file,
+            error_message=error_message,
+            return_code=return_code,
+            opencode_session_id=session_id,
+        )
+        updated = self.state_manager.record_retry_attempt(
+            issue_key,
+            retry_attempt,
+            abort_statuses=self.ABORTED_STATUSES,
+            current_task_id=new_task_id,
+            current_opencode_session_id=session_id,
+        )
+        if updated is None or updated.status in self.ABORTED_STATUSES:
+            return
+
+        if session_id:
+            self._record_opencode_session(
+                issue_key, session_id, session_file=session_file
+            )
+        jid = self._active_jobs.get(issue_key)
+        if jid and (new_task_id or session_id or session_file):
+            patch: Dict[str, Any] = {}
+            if new_task_id:
+                patch["task_id"] = new_task_id
+            if session_id:
+                patch["opencode_session_id"] = session_id
+            if session_file:
+                patch["session_log_path"] = session_file
+            try:
+                self.job_store.update_job(jid, **patch)
+            except Exception:
+                pass
+
+        self.reporter.post_progress_update(
+            updated,
+            f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+            progress_percentage=progress_percentage,
+        )
 
     def _release_context(self, issue_key: str, *, success: Optional[bool] = None) -> None:
         """Drop per-issue context; optionally cleanup temp dir."""
@@ -653,9 +765,11 @@ class JobProcessor:
 
         killed = False
         try:
+            # Prefer the per-issue runner only — never cancel_all on a foreign runner
             runner = self._runner_for(issue_key)
             if runner and state.current_task_id:
                 killed = bool(runner.cancel_task(state.current_task_id))
+            # cancel_all only on this issue's runner (safe: one runner per issue)
             if runner and hasattr(runner, "cancel_all_tasks"):
                 n = runner.cancel_all_tasks()
                 if n:
@@ -682,6 +796,60 @@ class JobProcessor:
             "process_signalled": killed,
             "message": reason,
         }
+
+    async def start_plan_execution(
+        self, issue_key: str, *, reason: str = "Started from ops dashboard"
+    ) -> dict:
+        """Start execution for a plan_ready issue (poller-only alternative to /start-work).
+
+        Comments are not ingested by the board poller; operators use this API,
+        the dashboard Start button, ``auto_start_plans``, or the ``ai-start-work``
+        label instead of Jira comment commands.
+        """
+        state = self.state_manager.get_state(issue_key)
+        if not state:
+            return {
+                "ok": False,
+                "error": "No local state for this issue",
+                "issue_key": issue_key,
+            }
+        if state.status != TaskStatus.PLAN_READY:
+            return {
+                "ok": False,
+                "error": f"Issue is not plan_ready (status={state.status.value})",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+        if self._is_live_processing(issue_key):
+            return {
+                "ok": False,
+                "error": "Issue is already being processed",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+        try:
+            logger.info(f"{issue_key}: starting plan execution ({reason})")
+            await self._start_execution_workflow(state)
+            refreshed = self.state_manager.get_state(issue_key)
+            return {
+                "ok": True,
+                "issue_key": issue_key,
+                "status": refreshed.status.value if refreshed else "executing",
+                "message": reason,
+            }
+        except Exception as e:
+            logger.exception(f"start_plan_execution failed for {issue_key}: {e}", e)
+            self._fail_issue(
+                issue_key,
+                f"Failed to start plan execution: {e}",
+                suggestion="Check logs, then retry Start from the dashboard.",
+            )
+            self._release_context(issue_key, success=False)
+            return {
+                "ok": False,
+                "error": str(e),
+                "issue_key": issue_key,
+            }
 
     def _kill_children_for_issue(self, issue_key: str) -> None:
         """Best-effort kill of agent subprocesses for one issue."""
@@ -1034,6 +1202,32 @@ class JobProcessor:
         if is_todo and state.status == TaskStatus.PENDING:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
             await self._handle_issue_created(event)
+            return
+
+        # plan_ready under poller-only intake: start execution when operator
+        # adds the ai-start-work label (comments are not polled — AGENTS.md).
+        if state.status == TaskStatus.PLAN_READY:
+            labels = list(fields.get("labels") or [])
+            label_set = {str(x).strip().lower() for x in labels}
+            if "ai-start-work" in label_set or "ai-execute" in label_set:
+                if self._is_live_processing(issue_key):
+                    logger.info(f"{issue_key} plan_ready but already live; skip start")
+                    return
+                logger.info(
+                    f"{issue_key} plan_ready + start label; beginning execution"
+                )
+                try:
+                    await self._start_execution_workflow(state)
+                except Exception as e:
+                    logger.exception(
+                        f"Plan start from label failed for {issue_key}: {e}", e
+                    )
+                    self._fail_issue(
+                        issue_key,
+                        f"Failed to start plan execution: {e}",
+                        suggestion="Retry from the ops dashboard or re-add ai-start-work.",
+                    )
+                    self._release_context(issue_key, success=False)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -1359,54 +1553,16 @@ class JobProcessor:
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
         ):
-            """Handle retry notification - AgentRunner already prints this."""
-            # AgentRunner prints retry messages, we just update state here
-
-            # Create retry attempt record with error details and opencode session ID
-            retry_attempt = RetryAttempt(
+            self._record_agent_retry(
+                state.issue_key,
                 attempt_number=attempt_number,
-                timestamp=datetime.now(),
-                reason=reason,
                 delay_seconds=delay_seconds,
-                session_log_path=session_file,
+                reason=reason,
+                session_file=session_file,
                 error_message=error_message,
                 return_code=return_code,
-                opencode_session_id=session_id,  # Store opencode session ID
-            )
-
-            # Get current state and add retry attempt
-            current_state = self.state_manager.get_state(state.issue_key)
-            if current_state:
-                current_state.add_retry_attempt(retry_attempt)
-                # Update current_opencode_session_id to the opencode session ID from this retry
-                if session_id:
-                    current_state.current_opencode_session_id = session_id
-                # Keep cancel/watchdog pointed at the live retry process
-                if new_task_id:
-                    current_state.current_task_id = new_task_id
-                self.state_manager.set_state(current_state)
-            if session_id:
-                self._record_opencode_session(
-                    state.issue_key, session_id, session_file=session_file
-                )
-            # Keep job record in sync with live retry ids
-            jid = self._active_jobs.get(state.issue_key)
-            if jid and (new_task_id or session_id or session_file):
-                patch: Dict[str, Any] = {}
-                if new_task_id:
-                    patch["task_id"] = new_task_id
-                if session_id:
-                    patch["opencode_session_id"] = session_id
-                if session_file:
-                    patch["session_log_path"] = session_file
-                try:
-                    self.job_store.update_job(jid, **patch)
-                except Exception:
-                    pass
-
-            self.reporter.post_progress_update(
-                self.state_manager.get_state(state.issue_key),
-                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                session_id=session_id,
+                new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
             )
 
@@ -1420,11 +1576,12 @@ class JobProcessor:
             ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
+            should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
 
         # Aborted while agent ran (cancel / stuck watchdog) — do not overwrite
-        if self._is_aborted(state.issue_key):
+        if self._is_aborted(state.issue_key) or result.get("aborted"):
             logger.info(f"Planning aborted for {state.issue_key}; skipping success path")
             self._release_context(state.issue_key, success=False)
             return
@@ -1446,6 +1603,15 @@ class JobProcessor:
             # Agent should have already committed the plan
             # Push branch to remote and create merge request for the plan
             await self._push_and_create_mr(state)
+
+            # Re-check after await: cancel during push must not become plan_ready
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"Planning aborted after push for {state.issue_key}; "
+                    f"skipping plan_ready"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
 
             plan_path = self._resolve_plan_path(state.issue_key)
             plan_content = ""
@@ -1552,54 +1718,16 @@ class JobProcessor:
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
         ):
-            """Handle retry notification - AgentRunner already prints this."""
-            # AgentRunner prints retry messages, we just update state here
-
-            # Create retry attempt record with error details and opencode session ID
-            retry_attempt = RetryAttempt(
+            self._record_agent_retry(
+                state.issue_key,
                 attempt_number=attempt_number,
-                timestamp=datetime.now(),
-                reason=reason,
                 delay_seconds=delay_seconds,
-                session_log_path=session_file,
+                reason=reason,
+                session_file=session_file,
                 error_message=error_message,
                 return_code=return_code,
-                opencode_session_id=session_id,  # Store opencode session ID
-            )
-
-            # Get current state and add retry attempt
-            current_state = self.state_manager.get_state(state.issue_key)
-            if current_state:
-                current_state.add_retry_attempt(retry_attempt)
-                # Update current_opencode_session_id to the opencode session ID from this retry
-                if session_id:
-                    current_state.current_opencode_session_id = session_id
-                # Keep cancel/watchdog pointed at the live retry process
-                if new_task_id:
-                    current_state.current_task_id = new_task_id
-                self.state_manager.set_state(current_state)
-            if session_id:
-                self._record_opencode_session(
-                    state.issue_key, session_id, session_file=session_file
-                )
-            # Keep job record in sync with live retry ids
-            jid = self._active_jobs.get(state.issue_key)
-            if jid and (new_task_id or session_id or session_file):
-                patch: Dict[str, Any] = {}
-                if new_task_id:
-                    patch["task_id"] = new_task_id
-                if session_id:
-                    patch["opencode_session_id"] = session_id
-                if session_file:
-                    patch["session_log_path"] = session_file
-                try:
-                    self.job_store.update_job(jid, **patch)
-                except Exception:
-                    pass
-
-            self.reporter.post_progress_update(
-                self.state_manager.get_state(state.issue_key),
-                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                session_id=session_id,
+                new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
             )
 
@@ -1613,10 +1741,11 @@ class JobProcessor:
             ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
+            should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
 
-        if self._is_aborted(state.issue_key):
+        if self._is_aborted(state.issue_key) or result.get("aborted"):
             logger.info(f"Execution aborted for {state.issue_key}; skipping success path")
             self._release_context(state.issue_key, success=False)
             return
@@ -1734,54 +1863,16 @@ class JobProcessor:
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
         ):
-            """Handle retry notification - AgentRunner already prints this."""
-            # AgentRunner prints retry messages, we just update state here
-
-            # Create retry attempt record with error details and opencode session ID
-            retry_attempt = RetryAttempt(
+            self._record_agent_retry(
+                state.issue_key,
                 attempt_number=attempt_number,
-                timestamp=datetime.now(),
-                reason=reason,
                 delay_seconds=delay_seconds,
-                session_log_path=session_file,
+                reason=reason,
+                session_file=session_file,
                 error_message=error_message,
                 return_code=return_code,
-                opencode_session_id=session_id,  # Store opencode session ID
-            )
-
-            # Get current state and add retry attempt
-            current_state = self.state_manager.get_state(state.issue_key)
-            if current_state:
-                current_state.add_retry_attempt(retry_attempt)
-                # Update current_opencode_session_id to the opencode session ID from this retry
-                if session_id:
-                    current_state.current_opencode_session_id = session_id
-                # Keep cancel/watchdog pointed at the live retry process
-                if new_task_id:
-                    current_state.current_task_id = new_task_id
-                self.state_manager.set_state(current_state)
-            if session_id:
-                self._record_opencode_session(
-                    state.issue_key, session_id, session_file=session_file
-                )
-            # Keep job record in sync with live retry ids
-            jid = self._active_jobs.get(state.issue_key)
-            if jid and (new_task_id or session_id or session_file):
-                patch: Dict[str, Any] = {}
-                if new_task_id:
-                    patch["task_id"] = new_task_id
-                if session_id:
-                    patch["opencode_session_id"] = session_id
-                if session_file:
-                    patch["session_log_path"] = session_file
-                try:
-                    self.job_store.update_job(jid, **patch)
-                except Exception:
-                    pass
-
-            self.reporter.post_progress_update(
-                self.state_manager.get_state(state.issue_key),
-                f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+                session_id=session_id,
+                new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
             )
 
@@ -1795,10 +1886,11 @@ class JobProcessor:
             ),
             timeout_seconds=settings.agent_task_timeout_seconds,
             max_retries=settings.agent_task_max_retries,
+            should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
 
-        if self._is_aborted(state.issue_key):
+        if self._is_aborted(state.issue_key) or result.get("aborted"):
             logger.info(f"Direct execution aborted for {state.issue_key}; skipping success path")
             self._release_context(state.issue_key, success=False)
             return

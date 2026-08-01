@@ -163,6 +163,8 @@ export type TaskDetail = {
   progress_percentage: number
   live: boolean
   can_cancel: boolean
+  /** True when status is plan_ready and work can be started from the dashboard. */
+  can_start?: boolean
   workflow_type?: string | null
   plan_path?: string | null
   current_task_id?: string | null

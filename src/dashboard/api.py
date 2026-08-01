@@ -168,6 +168,22 @@ def create_dashboard_app(
             raise HTTPException(status_code=400, detail=result.get("error") or "Cancel failed")
         return result
 
+    @app.post("/api/tasks/{issue_key}/start")
+    async def task_start(issue_key: str) -> dict:
+        """Start plan execution for a plan_ready issue (poller-only alternative to /start-work)."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        if not hasattr(proc, "start_plan_execution"):
+            raise HTTPException(status_code=503, detail="Start not available")
+        result = await proc.start_plan_execution(
+            issue_key,
+            reason="Started from ops dashboard",
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Start failed")
+        return result
+
     @app.get("/api/poll")
     def poll() -> dict:
         return build_poll_status(poll_snapshot_store, app.state.state_manager).model_dump()
