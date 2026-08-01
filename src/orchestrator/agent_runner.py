@@ -77,7 +77,12 @@ def _agent_subprocess_env() -> Dict[str, str]:
 
 @dataclass
 class AgentTask:
-    """Represents an agent task to be executed."""
+    """Represents an agent task to be executed.
+
+    On construction, any Jira ``{params}`` git template is stripped from
+    ``prompt`` so the model never sees repository/branch metadata (even if a
+    caller forgets to sanitize). Git clone still uses the raw issue text.
+    """
     description: str
     prompt: str
     agent: str
@@ -88,6 +93,11 @@ class AgentTask:
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
     task_type: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        from src.issue_git_spec import strip_params_block
+
+        object.__setattr__(self, "prompt", strip_params_block(self.prompt or ""))
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -157,11 +167,15 @@ class AgentRunner:
         self._session_files[task.task_id] = session_file
         logger.info(f"Session file created: {session_file}")
 
-        # Persist full agent prompt for dashboard task detail
+        # Persist full agent prompt for dashboard task detail (params already stripped)
         prompt_path: Optional[Path] = None
         try:
+            from src.issue_git_spec import strip_params_block
+
             prompt_path = session_file.with_suffix(".prompt.txt")
-            prompt_path.write_text(task.prompt or "", encoding="utf-8")
+            prompt_path.write_text(
+                strip_params_block(task.prompt or ""), encoding="utf-8"
+            )
             logger.debug(f"Prompt file written: {prompt_path}")
         except Exception as e:
             logger.warning(f"Could not write prompt file for {task.task_id}: {e}")
@@ -417,8 +431,10 @@ class AgentRunner:
             title = f"{task.issue_key}: {(task.description or '')[:80]}"
             cmd_parts.extend(["--title", title])
         
-        # Add the prompt as the final argument
-        cmd_parts.append(task.prompt)
+        # Final gate: never pass {params} git blocks to the agent CLI
+        from src.issue_git_spec import strip_params_block
+
+        cmd_parts.append(strip_params_block(task.prompt or ""))
         
         return cmd_parts
 
@@ -736,6 +752,7 @@ class AgentRunner:
         on_session_file: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
+        should_abort: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """Run an agent task with automatic retry on failure.
 
@@ -752,6 +769,9 @@ class AgentRunner:
             on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
+            should_abort: Optional zero-arg callable; when true, stop retrying
+                immediately (cancel / stuck watchdog). Result includes
+                ``aborted=True``.
 
         Returns:
             Dict with task result including retry information and all session files
@@ -769,12 +789,46 @@ class AgentRunner:
         
         logger.info(f"Starting agent with retry: task_id={task.task_id}, max_retries={effective_max_retries}")
 
+        def _aborted() -> bool:
+            try:
+                return bool(should_abort and should_abort())
+            except Exception:
+                return False
+
+        def _abort_result(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            base = {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "Aborted (cancelled or errored while running)",
+                "session_file": all_session_files[-1] if all_session_files else None,
+                "opencode_session_id": last_session_id,
+                "aborted": True,
+                "retry_info": {
+                    "attempts": attempt + 1,
+                    "max_retries": effective_max_retries,
+                    "retried": attempt > 0,
+                    "aborted": True,
+                    "all_session_files": all_session_files,
+                    "last_opencode_session_id": last_session_id,
+                },
+            }
+            if extra:
+                base.update(extra)
+            return base
+
         last_result = None
         last_session_id = None
         attempt = 0
         all_session_files = []
 
         while attempt <= effective_max_retries:
+            if _aborted():
+                logger.info(
+                    f"Abort before attempt {attempt + 1}: task_id={task.task_id}"
+                )
+                return _abort_result()
+
             logger.info(f"Agent attempt {attempt + 1}/{effective_max_retries + 1}: task_id={task.task_id}")
             
             # Run the task with attempt number (0 = first attempt, 1+ = retries)
@@ -794,6 +848,23 @@ class AgentRunner:
                 logger.debug(f"Added session file to tracking: {result['session_file']}")
             if result.get("opencode_session_id"):
                 last_session_id = result["opencode_session_id"]
+
+            # Cancel/watchdog during the run — do not retry or treat as success
+            if _aborted():
+                logger.info(
+                    f"Abort after attempt {attempt + 1}: task_id={task.task_id}"
+                )
+                result = dict(result)
+                result["aborted"] = True
+                result["retry_info"] = {
+                    "attempts": attempt + 1,
+                    "max_retries": effective_max_retries,
+                    "retried": attempt > 0,
+                    "aborted": True,
+                    "all_session_files": all_session_files,
+                    "last_opencode_session_id": last_session_id,
+                }
+                return result
 
             # Check if successful
             if result.get("returncode") == 0:
@@ -824,6 +895,18 @@ class AgentRunner:
                 logger.error(f"Agent failed and no more retries allowed: task_id={task.task_id}, attempt={attempt + 1}")
 
             if should_retry:
+                if _aborted():
+                    logger.info(
+                        f"Abort before scheduling retry: task_id={task.task_id}"
+                    )
+                    return _abort_result(
+                        {
+                            "stderr": result.get("stderr")
+                            or "Aborted before retry",
+                            "session_file": result.get("session_file"),
+                        }
+                    )
+
                 attempt += 1
 
                 # Calculate delay with exponential backoff
@@ -860,8 +943,13 @@ class AgentRunner:
                     f"for {task.task_id}, retrying in {delay:.1f}s..."
                 )
 
-                # Wait before retry
+                # Wait before retry; re-check abort so cancel during backoff sticks
                 await asyncio.sleep(delay)
+                if _aborted():
+                    logger.info(
+                        f"Abort during retry backoff: task_id={task.task_id}"
+                    )
+                    return _abort_result()
 
                 last_result = result
             else:

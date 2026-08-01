@@ -146,6 +146,13 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
+        # Ops list: only issues the Virtual Developer can act on (trigger
+        # label and/or bot assignee). Full board rows stay in the raw
+        # snapshot for counts / debug; UI must not show noise.
+        matched_label = bool(row.get("matched_label"))
+        matched_assignee = bool(row.get("matched_assignee"))
+        if not (matched_label or matched_assignee):
+            continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
         issues.append(
@@ -155,8 +162,8 @@ def build_poll_status(
                 jira_status=row.get("jira_status") or "",
                 labels=list(row.get("labels") or []),
                 assignee=row.get("assignee"),
-                matched_label=bool(row.get("matched_label")),
-                matched_assignee=bool(row.get("matched_assignee")),
+                matched_label=matched_label,
+                matched_assignee=matched_assignee,
                 is_todo=bool(row.get("is_todo")),
                 will_process=bool(row.get("will_process")),
                 local_status=local.status.value if local else row.get("local_status"),
@@ -375,11 +382,18 @@ def _legacy_jobs_from_sessions(
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
-    limit: int = 200,
+    limit: int = 25,
+    page: int = 1,
+    page_size: Optional[int] = None,
     processor: Optional["JobProcessor"] = None,
     store: Optional[JobStore] = None,
     state_manager: Optional[JiraStateManager] = None,
 ) -> JobsResponse:
+    """List agent jobs with server-side pagination.
+
+    ``page`` / ``page_size`` are preferred. ``limit`` alone is treated as page_size
+    on page 1 (backward compatible for callers that only pass limit).
+    """
     js = store or default_job_store
     live_keys = set()
     active_job_ids = set()
@@ -392,7 +406,14 @@ def build_jobs(
         for st in state_manager.get_all_states():
             summaries[st.issue_key] = st.issue_summary or ""
 
-    raw = js.list_jobs(issue_key=issue_key, limit=limit)
+    size = int(page_size if page_size is not None else limit or 25)
+    size = max(1, min(size, 100))
+    page_n = max(1, int(page or 1))
+    offset = (page_n - 1) * size
+
+    # Load a wide window so we can merge legacy session rows then paginate
+    fetch_cap = 2000
+    raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
     covered_paths: set = set()
     # Open JobStore runs without session_log_path yet — suppress matching session logs
     suppress_logs_after: Dict[str, str] = {}
@@ -420,7 +441,7 @@ def build_jobs(
                 suppress_logs_after[ik] = started
 
     # Merge stored jobs with legacy session-derived rows (newest first after merge)
-    remaining = max(1, limit) - len(raw)
+    remaining = max(0, fetch_cap - len(raw))
     if remaining > 0:
         legacy = _legacy_jobs_from_sessions(
             issue_key=issue_key,
@@ -434,10 +455,12 @@ def build_jobs(
             key=lambda j: j.get("started_at") or j.get("updated_at") or "",
             reverse=True,
         )
-        raw = raw[: max(1, limit)]
+
+    total = len(raw)
+    page_raw = raw[offset : offset + size]
 
     items: List[JobItem] = []
-    for j in raw:
+    for j in page_raw:
         jid = j.get("job_id") or ""
         ik = j.get("issue_key") or ""
         if not j.get("summary") and ik in summaries:
@@ -477,7 +500,9 @@ def build_jobs(
         )
     return JobsResponse(
         jobs=items,
-        total=len(items),
+        total=total,
+        page=page_n,
+        page_size=size,
         issue_key_filter=(issue_key or None),
         server_time=datetime.now().isoformat(timespec="seconds"),
     )
@@ -496,6 +521,8 @@ def build_dashboard_payload(
         "tasks": build_tasks(state_manager, processor).model_dump(),
         "jobs": build_jobs(
             issue_key=issue_key_filter,
+            page=1,
+            page_size=25,
             processor=processor,
             state_manager=state_manager,
         ).model_dump(),
@@ -687,24 +714,103 @@ def _fetch_live_jira_fields(
     }
 
 
+def _build_task_detail_without_state(
+    issue_key: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+) -> Dict[str, Any]:
+    """Detail for board issues that have never been processed (no local state).
+
+    Used when opening from Poll monitor — still show Jira/poll summary so
+    operators can inspect the ticket without a 404.
+    """
+    key = (issue_key or "").strip().upper()
+    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    poll_row: Dict[str, Any] = {}
+    try:
+        snap = poll_snapshot_store.snapshot()
+        for row in snap.get("issues") or []:
+            if (row.get("key") or "").strip().upper() == key:
+                poll_row = row
+                break
+    except Exception:
+        pass
+
+    summary = (
+        (jira_live.get("summary") or "").strip()
+        or (poll_row.get("summary") or "").strip()
+        or ""
+    )
+    description = (jira_live.get("description") or "").strip()
+    jira_status = (
+        (jira_live.get("jira_status") or "").strip()
+        or (poll_row.get("jira_status") or "").strip()
+        or None
+    )
+    local_status = poll_row.get("local_status") or "pending"
+
+    return {
+        "issue_key": key,
+        "summary": summary,
+        "description": description,
+        "jira_status": jira_status,
+        "jira_live": bool(jira_live),
+        "status": str(local_status),
+        "progress_percentage": 0,
+        "live": False,
+        "can_cancel": False,
+        "can_start": False,
+        "workflow_type": None,
+        "plan_path": None,
+        "current_task_id": None,
+        "current_opencode_session_id": None,
+        "task_ids": [],
+        "job_ids": [],
+        "current_job_id": None,
+        "opencode_session_ids": [],
+        "opencode_sessions": [],
+        "error_message": None,
+        "started_at": None,
+        "completed_at": None,
+        "feature_branch": None,
+        "merge_request_url": None,
+        "retry_history": [],
+        "prompts": {
+            "workflow_type": None,
+            "agent": None,
+            "captured_prompt_files": [],
+        },
+        "session_logs": [],
+        "system_logs": issue_log_ring.for_issue(key, limit=500),
+        "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 def build_task_detail(
     issue_key: str,
     *,
     state_manager: Optional[JiraStateManager] = None,
     processor: Optional["JobProcessor"] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility)."""
+    """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility).
+
+    Returns a read-only stub when the issue is on the board but has no local
+    agent state yet (so Poll monitor can open any eligible key).
+    """
     sm = state_manager or JiraStateManager()
-    state = sm.get_state(issue_key)
+    key = (issue_key or "").strip().upper()
+    state = sm.get_state(key) if key else None
     if not state:
-        return None
+        if not key:
+            return None
+        return _build_task_detail_without_state(key, processor=processor)
 
     live = False
     if processor is not None:
-        live = processor._is_live_processing(issue_key)
+        live = processor._is_live_processing(key)
 
     # Live fields from Jira (not frozen local state / job snapshot)
-    jira_live = _fetch_live_jira_fields(issue_key, processor=processor)
+    jira_live = _fetch_live_jira_fields(key, processor=processor)
     if jira_live:
         live_summary = jira_live.get("summary") or state.issue_summary or ""
         live_description = jira_live.get("description", "")
@@ -712,7 +818,7 @@ def build_task_detail(
         live_summary = state.issue_summary or ""
         live_description = state.description or ""
 
-    artifacts = _collect_session_artifacts(issue_key)
+    artifacts = _collect_session_artifacts(key)
     prompts = _reconstruct_prompts(state)
     # Prefer on-disk prompt captures when present (actual text sent to agent)
     if artifacts["prompt_files"]:
@@ -729,6 +835,9 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
+    # plan_ready needs an operator kick when auto_start_plans is false
+    # (comments are not polled — AGENTS.md)
+    can_start = state.status == TaskStatus.PLAN_READY and not live
 
     meta = state.metadata or {}
     session_ids = list(meta.get("opencode_session_ids") or [])
@@ -757,7 +866,7 @@ def build_task_detail(
                     current_sid = sid
             except OSError:
                 pass
-    db_sessions = find_sessions_for_issue(issue_key, limit=20)
+    db_sessions = find_sessions_for_issue(key, limit=20)
     for s in db_sessions:
         sid = s.get("id")
         if sid and sid not in session_ids:
@@ -775,6 +884,7 @@ def build_task_detail(
         "progress_percentage": int(state.progress_percentage or 0),
         "live": live,
         "can_cancel": can_cancel,
+        "can_start": can_start,
         "workflow_type": meta.get("workflow_type"),
         "plan_path": state.plan_path,
         "current_task_id": display_task_id,
@@ -794,6 +904,6 @@ def build_task_detail(
         "retry_history": retry_history,
         "prompts": prompts,
         "session_logs": artifacts["session_logs"],
-        "system_logs": issue_log_ring.for_issue(issue_key, limit=500),
+        "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }

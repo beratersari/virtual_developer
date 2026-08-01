@@ -64,6 +64,8 @@ class JobItem(BaseModel):
 class JobsResponse(BaseModel):
     jobs: List[JobItem]
     total: int
+    page: int = 1
+    page_size: int = 25
     issue_key_filter: Optional[str] = None
     server_time: str
 

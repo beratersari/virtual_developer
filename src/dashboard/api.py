@@ -112,11 +112,20 @@ def create_dashboard_app(
     @app.get("/api/jobs")
     def jobs(
         issue_key: Optional[str] = None,
-        limit: int = Query(default=200, ge=1, le=500),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        limit: Optional[int] = Query(
+            default=None,
+            ge=1,
+            le=100,
+            description="Deprecated alias for page_size (page forced to 1 if set alone)",
+        ),
     ) -> dict:
+        size = page_size if limit is None else limit
         return build_jobs(
             issue_key=issue_key,
-            limit=limit,
+            page=page,
+            page_size=size,
             processor=app.state.processor,
             state_manager=app.state.state_manager,
         ).model_dump()
@@ -166,6 +175,22 @@ def create_dashboard_app(
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "Cancel failed")
+        return result
+
+    @app.post("/api/tasks/{issue_key}/start")
+    async def task_start(issue_key: str) -> dict:
+        """Start plan execution for a plan_ready issue (poller-only alternative to /start-work)."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        if not hasattr(proc, "start_plan_execution"):
+            raise HTTPException(status_code=503, detail="Start not available")
+        result = await proc.start_plan_execution(
+            issue_key,
+            reason="Started from ops dashboard",
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Start failed")
         return result
 
     @app.get("/api/poll")

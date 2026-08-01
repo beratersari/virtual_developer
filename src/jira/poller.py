@@ -166,9 +166,11 @@ class JiraPoller:
 
         new_issues = []
         todo_issues = []
+        plan_start_issues = []  # plan_ready + ai-start-work label (poller-only start)
         checked_count = 0
         assigned_to_bot_count = 0
         snapshot_rows: List[Dict[str, Any]] = []
+        _START_LABELS = frozenset({"ai-start-work", "ai-execute"})
 
         for issue in issues:
             issue_key = issue["key"]
@@ -247,12 +249,31 @@ class JiraPoller:
                         logger.info(f"New issue to process: {issue_key}")
                 todo_issues.append(issue)
 
+                # plan_ready is not terminal — start via label without comment poll
+                if (
+                    local
+                    and local.status == TaskStatus.PLAN_READY
+                    and (_START_LABELS & {str(x).strip().lower() for x in labels})
+                ):
+                    plan_start_issues.append(issue)
+                    logger.info(
+                        f"Plan-ready start signal for {issue_key} "
+                        f"(label ai-start-work / ai-execute)"
+                    )
+
         reprocess_issues = self.check_status_changes(todo_issues)
 
         # Deduplicate: prefer create over update when both would fire
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
-        reprocess_keys = {i["key"] for i in reprocess_issues}
+        plan_start_issues = [
+            i
+            for i in plan_start_issues
+            if i["key"] not in new_keys and i["key"] not in {x["key"] for x in reprocess_issues}
+        ]
+        reprocess_keys = {i["key"] for i in reprocess_issues} | {
+            i["key"] for i in plan_start_issues
+        }
         will_keys = new_keys | reprocess_keys
 
         for row in snapshot_rows:
@@ -263,7 +284,8 @@ class JiraPoller:
                 f"Checked {checked_count} issues from {source}, "
                 f"{assigned_to_bot_count} assigned to bot, "
                 f"{len(new_issues)} new to process, "
-                f"{len(reprocess_issues)} to reprocess"
+                f"{len(reprocess_issues)} to reprocess, "
+                f"{len(plan_start_issues)} plan_ready starts"
             )
 
         poll_snapshot_store.end_poll(
@@ -272,7 +294,8 @@ class JiraPoller:
             interval_seconds=self.interval,
         )
         self._last_check = datetime.now()
-        return new_issues + reprocess_issues
+        # plan_start goes as is_update so processor uses issue_updated path
+        return new_issues + reprocess_issues + plan_start_issues
 
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
         """Re-queue only when an issue *transitions back* into To Do after leaving it.

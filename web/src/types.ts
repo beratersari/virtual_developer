@@ -124,6 +124,8 @@ export type JobItem = {
 export type JobsPayload = {
   jobs: JobItem[]
   total: number
+  page?: number
+  page_size?: number
   issue_key_filter?: string | null
   server_time: string
 }
@@ -163,6 +165,8 @@ export type TaskDetail = {
   progress_percentage: number
   live: boolean
   can_cancel: boolean
+  /** True when status is plan_ready and work can be started from the dashboard. */
+  can_start?: boolean
   workflow_type?: string | null
   plan_path?: string | null
   current_task_id?: string | null

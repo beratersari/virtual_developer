@@ -16,10 +16,17 @@ export async function fetchDashboard(): Promise<DashboardPayload> {
   return res.json()
 }
 
-export async function fetchJobs(issueKey?: string): Promise<JobsPayload> {
-  const q = issueKey?.trim()
-    ? `?issue_key=${encodeURIComponent(issueKey.trim())}`
-    : ''
+export async function fetchJobs(opts?: {
+  issueKey?: string
+  page?: number
+  pageSize?: number
+}): Promise<JobsPayload> {
+  const params = new URLSearchParams()
+  const key = opts?.issueKey?.trim()
+  if (key) params.set('issue_key', key)
+  if (opts?.page != null) params.set('page', String(opts.page))
+  if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
+  const q = params.toString() ? `?${params.toString()}` : ''
   const res = await fetch(`/api/jobs${q}`)
   if (!res.ok) {
     throw new Error(`Jobs API error: ${res.status}`)
@@ -43,6 +50,17 @@ export async function cancelTask(issueKey: string): Promise<{ ok: boolean; messa
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new Error(body.detail || `Cancel failed: ${res.status}`)
+  }
+  return body
+}
+
+export async function startTask(issueKey: string): Promise<{ ok: boolean; message?: string }> {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}/start`, {
+    method: 'POST',
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(body.detail || `Start failed: ${res.status}`)
   }
   return body
 }

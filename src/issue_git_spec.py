@@ -162,6 +162,20 @@ def _extract_params_block(text: str) -> Optional[str]:
     return (m.group(1) or "").strip()
 
 
+def strip_params_block(text: str) -> str:
+    """Remove all ``{params}`` … ``{params}`` blocks from issue text.
+
+    Used when building agent prompts so git template metadata is not sent to
+    the model. Parsing for clone/push still uses the raw description.
+    """
+    if not text:
+        return ""
+    cleaned = _PARAMS_BLOCK.sub("", text)
+    # Collapse leftover blank runs from block removal
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _extract_repo(text: str) -> str:
     """Repository URL from field value and/or following lines inside params."""
     m = _REPO_FIELD.search(text)

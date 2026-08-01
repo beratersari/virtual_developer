@@ -4,6 +4,7 @@ from src.issue_git_spec import (
     IssueGitConfigError,
     parse_issue_git_spec,
     require_issue_git_spec,
+    strip_params_block,
 )
 
 
@@ -37,6 +38,26 @@ def test_params_required():
     assert spec is None
     assert err is not None
     assert "{params}" in err
+
+
+def test_strip_params_block_keeps_task_text():
+    desc = (
+        "Do the calculator work.\n\n"
+        "{params}\n"
+        "Repository: https://gitlab.com/u/r.git\n"
+        "Source branch: feature/X\n"
+        "Target branch: main\n"
+        "{params}\n\n"
+        "More acceptance notes."
+    )
+    out = strip_params_block(desc)
+    assert "Do the calculator work." in out
+    assert "More acceptance notes." in out
+    assert "{params}" not in out
+    assert "Repository:" not in out
+    # Still parseable from original (strip does not mutate source)
+    spec, err = parse_issue_git_spec("s", desc)
+    assert err is None and spec is not None
 
 
 def test_target_defaults_to_source_when_omitted():

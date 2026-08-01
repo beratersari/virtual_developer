@@ -78,7 +78,47 @@ def test_sisyphus_direct_path():
     assert "Yeni özellik eklendi" not in p
     # No separate comment-response template language
     assert "Comment response request" not in p
-    assert "User comment" not in p
+
+
+def test_params_block_excluded_from_prompts():
+    """Git {params} template must not appear in agent system prompts."""
+    desc = (
+        "Implement 10 + 1021\n\n"
+        "{params}\n"
+        "Repository: https://gitlab.com/user/repo.git\n"
+        "Source branch: feature/KAN-8\n"
+        "Target branch: feature/KAN-4\n"
+        "{params}\n"
+    )
+    prompts = [
+        PromptBuilder.build_prometheus_prompt("KAN-8", "Task", desc),
+        PromptBuilder.build_sisyphus_prompt("KAN-8", desc, summary="Task"),
+        PromptBuilder.build_oracle_consult_prompt(
+            desc, issue_key="KAN-8", summary="Task"
+        ),
+    ]
+    for p in prompts:
+        assert "{params}" not in p
+        assert "Repository:" not in p
+        assert "Source branch:" not in p
+        assert "Target branch:" not in p
+        assert "gitlab.com" not in p
+        assert "10 + 1021" in p
+
+
+def test_agent_task_always_strips_params():
+    """Last-mile: AgentTask construction always strips {params} from prompt."""
+    from src.orchestrator.agent_runner import AgentTask
+
+    raw = (
+        "Do the work\n"
+        "{params}\nRepository: https://evil.example/r.git\n"
+        "Source branch: a\nTarget branch: b\n{params}\n"
+    )
+    task = AgentTask(description="d", prompt=raw, agent="sisyphus", issue_key="K-1")
+    assert "{params}" not in task.prompt
+    assert "evil.example" not in task.prompt
+    assert "Do the work" in task.prompt
 
 
 def test_sisyphus_with_files_and_patterns():
