@@ -88,19 +88,30 @@ if exist "%LOGDIR%" (
 )
 
 echo [6/8] non-TUI debug commands ^(may take up to 60s each^) ...
-REM These often print errors even when the TUI is black.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference='Continue';" ^
-  "$oc=(Get-Command opencode -ErrorAction SilentlyContinue).Source;" ^
-  "if (-not $oc) { $oc=Join-Path $env:USERPROFILE '.opencode\bin\opencode.exe' };" ^
-  "if (-not (Test-Path -LiteralPath $oc)) { 'opencode.exe not found' | Set-Content '%OUT%\07-debug-config.txt'; exit 0 };" ^
-  "function Run-Cap($args,$out,$sec=45) {" ^
-  "  $p=Start-Process -FilePath $oc -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError ($out+'.err');" ^
-  "  if (-not $p.WaitForExit($sec*1000)) { try{$p.Kill()}catch{}; 'TIMEOUT after '+$sec+'s' | Add-Content $out }" ^
-  "};" ^
-  "Run-Cap @('--print-logs','--log-level','DEBUG','debug','config') '%OUT%\07-debug-config.txt' 60;" ^
-  "Run-Cap @('--print-logs','--log-level','DEBUG','models') '%OUT%\08-models.txt' 45;" ^
-  "Run-Cap @('run','--help') '%OUT%\09-run-help.txt' 20;"
+REM $args is reserved in PowerShell — use a different parameter name.
+set "OC_EXE="
+for /f "delims=" %%A in ('where opencode 2^>nul') do (
+  if not defined OC_EXE set "OC_EXE=%%A"
+)
+if not defined OC_EXE if exist "%USERPROFILE%\.opencode\bin\opencode.exe" set "OC_EXE=%USERPROFILE%\.opencode\bin\opencode.exe"
+if not defined OC_EXE (
+  echo opencode.exe not found > "%OUT%\07-debug-config.txt"
+) else (
+  echo Using: %OC_EXE% > "%OUT%\07-debug-config.txt"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$ErrorActionPreference='Continue';" ^
+    "$oc = $env:OC_EXE;" ^
+    "if (-not $oc -or -not (Test-Path -LiteralPath $oc)) { $oc = '%OC_EXE%' };" ^
+    "function Invoke-Cap([string[]]$ArgList, [string]$OutFile, [int]$Sec = 45) {" ^
+    "  $errFile = $OutFile + '.err';" ^
+    "  $p = Start-Process -FilePath $oc -ArgumentList $ArgList -NoNewWindow -PassThru -RedirectStandardOutput $OutFile -RedirectStandardError $errFile;" ^
+    "  if (-not $p.WaitForExit($Sec * 1000)) { try { $p.Kill() } catch {}; Add-Content -LiteralPath $OutFile -Value ('TIMEOUT after ' + $Sec + 's') };" ^
+    "  if (Test-Path -LiteralPath $errFile) { Add-Content -LiteralPath $OutFile -Value '--- stderr ---'; Get-Content -LiteralPath $errFile | Add-Content -LiteralPath $OutFile }" ^
+    "};" ^
+    "Invoke-Cap @('--print-logs','--log-level','DEBUG','debug','config') '%OUT%\07-debug-config.txt' 60;" ^
+    "Invoke-Cap @('--print-logs','--log-level','DEBUG','models') '%OUT%\08-models.txt' 45;" ^
+    "Invoke-Cap @('run','--help') '%OUT%\09-run-help.txt' 20;"
+)
 
 echo [7/8] env PATH snippet ...
 echo %PATH% > "%OUT%\10-path.txt"
