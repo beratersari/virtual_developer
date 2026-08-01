@@ -68,6 +68,7 @@ export default function App() {
   const issueFilterRef = useRef(issueFilter)
   issueFilterRef.current = issueFilter
   const detailRequestId = useRef(0)
+  const jobsRequestId = useRef(0)
   const lastPollCycle = useRef<number | null>(null)
 
   const applyPayload = useCallback((payload: DashboardPayload) => {
@@ -82,19 +83,36 @@ export default function App() {
   }, [])
 
   const reloadJobs = useCallback(async (filter?: string) => {
+    const req = ++jobsRequestId.current
     try {
       const j = await fetchJobs(filter)
+      if (req !== jobsRequestId.current) return
       setJobsView(j)
     } catch (e) {
+      if (req !== jobsRequestId.current) return
       setError(e instanceof Error ? e.message : 'Failed to load jobs')
     }
   }, [])
 
   const loadDashboard = useCallback(() => {
     fetchDashboard()
-      .then(applyPayload)
+      .then((payload) => {
+        applyPayload(payload)
+        const filter = issueFilterRef.current.trim()
+        if (filter) {
+          void reloadJobs(filter)
+        }
+      })
       .catch((e: Error) => setError(e.message))
-  }, [applyPayload])
+  }, [applyPayload, reloadJobs])
+
+  const closeDetail = useCallback(() => {
+    detailRequestId.current += 1
+    setDetail(null)
+    setDetailError(null)
+    setDetailLoading(false)
+    setSelectedJobId(null)
+  }, [])
 
   const openTaskDetail = async (issueKey: string, jobId?: string | null) => {
     const req = ++detailRequestId.current
@@ -287,10 +305,9 @@ export default function App() {
       type="button"
       onClick={() => {
         setTab(id)
-        setDetail(null)
-        setDetailError(null)
+        closeDetail()
       }}
-      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+      className={`rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 ${
         tab === id && !detail && !detailLoading
           ? 'bg-indigo-600 text-white shadow'
           : 'text-slate-300 hover:bg-slate-800 hover:text-white'
@@ -352,7 +369,7 @@ export default function App() {
                 setError(null)
                 loadDashboard()
               }}
-              className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800"
+              className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300"
             >
               Retry
             </button>
@@ -373,12 +390,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
-                    setDetail(null)
-                    setDetailError(null)
-                    setSelectedJobId(null)
+                    closeDetail()
                     setTab('tasks')
                   }}
-                  className="mb-2 text-sm text-indigo-400 hover:text-indigo-300"
+                  className="mb-2 text-sm text-indigo-400 hover:text-indigo-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400"
                 >
                   ← Back to jobs
                 </button>
@@ -828,7 +843,11 @@ export default function App() {
             </div>
 
             <div className="text-xs text-slate-500">
-              Showing {jobsView?.total ?? data.jobs?.total ?? 0} job(s)
+              Showing{' '}
+              {issueFilter.trim()
+                ? (jobsView?.total ?? 0)
+                : (jobsView?.total ?? data.jobs?.total ?? 0)}{' '}
+              job(s)
               {issueFilter.trim() ? ` for ${issueFilter.trim().toUpperCase()}` : ''}
               {' · '}
               Issues in store:{' '}
@@ -846,7 +865,11 @@ export default function App() {
             <div>
               <h3 className="mb-2 text-sm font-medium text-slate-300">Jobs (runs)</h3>
               <JobsTable
-                jobs={jobsView?.jobs ?? data.jobs?.jobs ?? []}
+                jobs={
+                  issueFilter.trim()
+                    ? (jobsView?.jobs ?? [])
+                    : (jobsView?.jobs ?? data.jobs?.jobs ?? [])
+                }
                 onOpenIssue={(key, jobId) => void openTaskDetail(key, jobId)}
               />
             </div>

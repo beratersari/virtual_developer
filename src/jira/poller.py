@@ -313,31 +313,36 @@ class JiraPoller:
             curr_name = ((fields.get("status") or {}).get("name") or "").strip().lower()
             meta = state.metadata or {}
             requeue_eligible = bool(meta.get("requeue_eligible"))
+            # Local-only markers — never treat as "left To Do" or auto-requeue
+            # while Jira stayed on To Do after cancel/fail.
+            synthetic = frozenset({"__cancelled__", "__terminal_local__"})
 
-            # Normal path: observed leave non-To-Do and return to To Do
+            # Real board leave non-To-Do → return to To Do
             entered_todo_from_elsewhere = (
                 prev_before is not None
+                and prev_before not in synthetic
                 and not self._is_todo_status_name(prev_before)
             )
-            # Cancel/error path: any Jira status change that ends in To Do
-            # (covers cancelled while still "to do" in our tracker after bad tracking)
+            # Cancel/error: only when Jira status *string* changed into To Do
+            # (user actually moved the ticket). Synthetic markers alone do NOT count.
             status_changed_into_todo = (
                 requeue_eligible
                 and prev_before is not None
+                and prev_before not in synthetic
                 and prev_before != curr_name
                 and self._is_todo_status(fields)
             )
-            # Explicit marker after local cancel (see process_issue / cancel_job)
-            force_after_cancel = (
-                requeue_eligible
-                and prev_before in ("__cancelled__", "__terminal_local__", "in progress")
+            # After process_issue moved tracker to "in progress", returning to To Do
+            # is a real reopen even if requeue_eligible was cleared mid-flight.
+            force_after_in_progress = (
+                prev_before == "in progress"
                 and self._is_todo_status(fields)
             )
 
             if not (
                 entered_todo_from_elsewhere
                 or status_changed_into_todo
-                or force_after_cancel
+                or force_after_in_progress
             ):
                 # Still To Do-like since last poll (or first sighting) — do not loop
                 continue

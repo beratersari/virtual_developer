@@ -335,26 +335,27 @@ class AgentRunner:
     def _parse_session_id(self, lines: List[str]) -> Optional[str]:
         """Parse opencode session ID from output lines.
 
-        Looks for patterns like:
-        - "Session: ses_abc123"
-        - bare ``ses_…`` tokens (JSON / UI variants)
+        Prefers labeled patterns; takes the **last** match so early noise
+        (parent session echoes) does not win over the real session.
         """
         import re
 
-        patterns = [
+        labeled = [
             r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
             r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
             r'"sessionID"\s*:\s*"(ses_[a-zA-Z0-9_-]+)"',
-            r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
         ]
+        bare = r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)'
 
+        last_labeled: Optional[str] = None
+        last_bare: Optional[str] = None
         for line in lines:
-            for pattern in patterns:
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    return match.group(1)
-
-        return None
+            for pattern in labeled:
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    last_labeled = match.group(1)
+            for match in re.finditer(bare, line, re.IGNORECASE):
+                last_bare = match.group(1)
+        return last_labeled or last_bare
     
     def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
         """Build the opencode CLI command as a list (cross-platform).
@@ -680,7 +681,10 @@ class AgentRunner:
         return False
 
     def cancel_all_tasks(self) -> int:
-        """Kill every live child process tracked by this runner. Returns count signalled."""
+        """Kill every live child process tracked by this runner. Returns count signalled.
+
+        SIGTERM then brief wait then SIGKILL (same escalation as cancel_task).
+        """
         killed = 0
         for task_id, process in list(self._running_tasks.items()):
             if process is None:
@@ -688,7 +692,15 @@ class AgentRunner:
             if getattr(process, "returncode", None) is not None:
                 continue
             logger.info(f"Cancelling task on shutdown: task_id={task_id}")
-            self._kill_process_tree(process)
+            self._kill_process_tree(process, force=False)
+            if getattr(process, "returncode", None) is None:
+                try:
+                    import time
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                if getattr(process, "returncode", None) is None:
+                    self._kill_process_tree(process, force=True)
             killed += 1
         return killed
 

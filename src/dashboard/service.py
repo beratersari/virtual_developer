@@ -77,20 +77,23 @@ def build_tasks(
     for st in sm.get_all_states():
         meta = st.metadata or {}
         session_ids = list(meta.get("opencode_session_ids") or [])
-        current_sid = (
-            st.current_opencode_session_id
-            or meta.get("last_opencode_session_id")
-        )
+        current_sid = st.current_opencode_session_id
+        # While in-flight, do not fall back to previous run's session (stale UI)
+        in_flight = st.status in (TaskStatus.PLANNING, TaskStatus.EXECUTING)
+        if not current_sid and not in_flight:
+            current_sid = meta.get("last_opencode_session_id")
         if current_sid and current_sid not in session_ids:
             session_ids = [*session_ids, current_sid]
-        # Backfill from OpenCode DB when state has no id yet
-        if not current_sid:
+        # Backfill from OpenCode DB only when not mid-run
+        if not current_sid and not in_flight:
             found = find_sessions_for_issue(st.issue_key, limit=1)
             if found:
                 current_sid = found[0]["id"]
                 if current_sid not in session_ids:
                     session_ids.append(current_sid)
-        task_id = st.current_task_id or meta.get("last_task_id")
+        task_id = st.current_task_id
+        if not task_id and not in_flight:
+            task_id = meta.get("last_task_id")
         items.append(
             TaskItem(
                 issue_key=st.issue_key,

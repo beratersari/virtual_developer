@@ -141,24 +141,35 @@ class JiraClient:
         max_results: int = 50,
         start_at: int = 0,
     ) -> List[Dict[str, Any]]:
-        """Get all issues from a Jira board."""
-        params = {
-            "maxResults": max_results,
-            "startAt": start_at,
-        }
-        if fields:
-            params["fields"] = ",".join(fields)
-        
+        """Get all issues from a Jira board (paginated)."""
+        all_issues: List[Dict[str, Any]] = []
+        page_start = start_at
         try:
-            # Agile API is at /rest/agile/1.0, not /rest/api/2
             url = f"{self.host}/rest/agile/1.0/board/{board_id}/issue"
-            response = self.client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            return data.get("issues", [])
+            while True:
+                params: Dict[str, Any] = {
+                    "maxResults": max_results,
+                    "startAt": page_start,
+                }
+                if fields:
+                    params["fields"] = ",".join(fields)
+                response = self.client.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                batch = data.get("issues") or []
+                all_issues.extend(batch)
+                total = int(data.get("total") or 0)
+                if not batch:
+                    break
+                page_start += len(batch)
+                if total and page_start >= total:
+                    break
+                if len(batch) < max_results:
+                    break
+            return all_issues
         except httpx.HTTPError as e:
             logger.error(f"Error getting board issues: {e}")
-            return []
+            return all_issues
     
     def get_active_sprint(self, board_id: str) -> Optional[Dict[str, Any]]:
         """Get the active sprint for a board.

@@ -169,6 +169,12 @@ class JiraAgentDaemon:
         self._poller = JiraPoller(board_id=settings.jira_board_id)
         # Link live poller for dashboard settings + cancel re-queue status markers
         self.processor._poller = self._poller
+        try:
+            n = self.processor.seed_poller_requeue_markers()
+            if n:
+                logger.info(f"Seeded poller status trackers for {n} requeue-eligible issue(s)")
+        except Exception as e:
+            logger.warning(f"Could not seed poller requeue markers: {e}")
         app = getattr(self, "_dashboard_app", None)
         if app is not None:
             app.state.poller = self._poller
@@ -192,24 +198,25 @@ class JiraAgentDaemon:
         )
 
     def _abort_stuck_issue(self, state, message: str) -> None:
-        """Fail issue, notify Jira, and best-effort kill the agent process."""
-        # Try to stop the live agent before marking ERROR so success path cannot
-        # overwrite after the watchdog fires.
+        """Fail issue, notify Jira, kill agent children, and release live context."""
+        issue_key = state.issue_key
         try:
-            runner = self.processor._runner_for(state.issue_key)
-            if runner and state.current_task_id:
-                runner.cancel_task(state.current_task_id)
+            self.processor._kill_children_for_issue(issue_key)
         except Exception as e:
-            logger.warning(f"Could not cancel agent for stuck {state.issue_key}: {e}")
+            logger.warning(f"Could not cancel agent for stuck {issue_key}: {e}")
 
         self.processor._fail_issue(
-            state.issue_key,
+            issue_key,
             message,
             suggestion=(
                 "Check session logs under .jira-agent/sessions/, then "
                 "move the issue back to TO DO to re-queue."
             ),
         )
+        try:
+            self.processor._release_context(issue_key, success=False)
+        except Exception as e:
+            logger.warning(f"Could not release context for stuck {issue_key}: {e}")
 
     async def _monitor_active_issues(self):
         """Watch for stuck in-flight issues and report them to Jira.

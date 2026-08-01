@@ -18,6 +18,48 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 
+class _JobSlotLimiter:
+    """Async concurrency limiter that supports live resize without over-admit.
+
+    Unlike replacing ``asyncio.Semaphore``, shrinking the limit only blocks
+    *new* acquires; in-flight holders are tracked and must release.
+    """
+
+    def __init__(self, limit: int, *, active: int = 0) -> None:
+        self._limit = max(1, int(limit))
+        self._active = max(0, int(active))
+        self._cond = asyncio.Condition()
+
+    def resize(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    async def __aenter__(self) -> "_JobSlotLimiter":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.release()
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while self._active >= self._limit:
+                await self._cond.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
 
@@ -111,13 +153,9 @@ class JobProcessor:
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
-            # Poller status marker so To Do re-entry after fail is a real change
-            try:
-                poller = getattr(self, "_poller", None)
-                if poller is not None and hasattr(poller, "_last_jira_status"):
-                    poller._last_jira_status[issue_key] = "__terminal_local__"
-            except Exception:
-                pass
+            # Poller: do not force auto-requeue while Jira stayed To Do.
+            # Keep last observed status; requeue_eligible gates leave→return.
+            self._nudge_poller_after_terminal(issue_key, marker="__terminal_local__")
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
                 self.reporter.post_comment_response(
@@ -262,11 +300,82 @@ class JobProcessor:
         return lock
 
     def resize_job_semaphore(self, new_limit: int) -> None:
-        """Best-effort replace of the concurrency semaphore (ops dashboard)."""
+        """Update concurrency cap without over-admitting mid-flight jobs.
+
+        Uses an adaptive limiter so shrinking the limit only affects *new*
+        admits; in-flight jobs keep their slots until they finish.
+        """
         limit = max(1, int(new_limit or 1))
         settings.max_concurrent_jobs = limit
-        self._job_semaphore = asyncio.Semaphore(limit)
-        logger.info(f"Job semaphore resized to {limit}")
+        if isinstance(self._job_semaphore, _JobSlotLimiter):
+            self._job_semaphore.resize(limit)
+        else:
+            # First resize or cold path — install adaptive limiter
+            active = len(self._contexts)
+            self._job_semaphore = _JobSlotLimiter(limit, active=active)
+        logger.info(f"Job concurrency limit set to {limit}")
+
+    def _nudge_poller_after_terminal(
+        self, issue_key: str, *, marker: str = "__cancelled__"
+    ) -> None:
+        """Update poller status tracker after local cancel/error.
+
+        - If Jira was already To Do-like: keep/set ``to do`` so cancel does
+          **not** auto-requeue on the next poll.
+        - If Jira was non-todo (e.g. ``in progress``): **leave that value**
+          so a later real return to To Do is detected via
+          ``entered_todo_from_elsewhere`` / ``force_after_in_progress``.
+        - Never use synthetic markers that look like “left To Do” while the
+          board column never moved.
+        """
+        try:
+            poller = getattr(self, "_poller", None)
+            if poller is None or not hasattr(poller, "_last_jira_status"):
+                return
+            prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
+            todo_names = {
+                "to do",
+                "todo",
+                "open",
+                "backlog",
+                "selected for development",
+                "yapılacak",
+                "yapilacak",
+                "yeni",
+            }
+            synthetic = {"__cancelled__", "__terminal_local__"}
+            if prev in synthetic or prev == "" or prev in todo_names:
+                # Normalize unknown/synthetic/todo to plain "to do" (no auto-requeue)
+                if prev not in todo_names or prev in synthetic or prev == "":
+                    poller._last_jira_status[issue_key] = "to do"
+            # else: keep non-todo (e.g. "in progress") so To Do return requeues
+            _ = marker  # retained for call-site compatibility
+        except Exception:
+            pass
+
+    def seed_poller_requeue_markers(self) -> int:
+        """After poller attaches: seed trackers for requeue-eligible terminals.
+
+        Avoids auto-requeue while still To Do; only ensures leave→return works
+        when the last known board status was non-todo.
+        """
+        poller = getattr(self, "_poller", None)
+        if poller is None or not hasattr(poller, "_last_jira_status"):
+            return 0
+        n = 0
+        for st in self.state_manager.get_all_states():
+            if st.status not in self.TERMINAL_STATUSES:
+                continue
+            meta = st.metadata or {}
+            if not meta.get("requeue_eligible"):
+                continue
+            key = st.issue_key
+            prev = (poller._last_jira_status.get(key) or "").strip().lower()
+            if not prev:
+                # Unknown board status: assume still To Do (safe, no auto-requeue)
+                poller._last_jira_status[key] = "to do"
+                n += 1
+        return n
 
     def _record_opencode_session(
         self,
@@ -450,17 +559,23 @@ class JobProcessor:
         if not job_id:
             return
         # Do not overwrite a terminal status with another terminal on the same job
-        existing = self.job_store.get_job(job_id)
-        if existing and (existing.get("status") or "") in (
+        _TERMINAL_JOB = (
             "completed",
             "error",
             "cancelled",
             "superseded",
-        ):
-            # Still allow progress/session fill-in if missing
+            "plan_ready",
+        )
+        existing = self.job_store.get_job(job_id)
+        if existing and (existing.get("status") or "") in _TERMINAL_JOB:
+            # Still allow progress/session fill-in if missing — never overwrite ids
             fill: Dict[str, Any] = {}
             st = self.state_manager.get_state(issue_key)
-            if st and st.current_opencode_session_id and not existing.get("opencode_session_id"):
+            if (
+                st
+                and st.current_opencode_session_id
+                and not existing.get("opencode_session_id")
+            ):
                 fill["opencode_session_id"] = st.current_opencode_session_id
             if st and st.current_task_id and not existing.get("task_id"):
                 fill["task_id"] = st.current_task_id
@@ -477,16 +592,19 @@ class JobProcessor:
         if progress_percentage is not None:
             fields["progress_percentage"] = progress_percentage
         st = self.state_manager.get_state(issue_key)
-        if st and st.current_opencode_session_id:
+        # Prefer ids already on the job (supersede must not stamp the new run's ids)
+        if st and st.current_opencode_session_id and not (
+            existing and existing.get("opencode_session_id")
+        ):
             fields["opencode_session_id"] = st.current_opencode_session_id
-        if st and st.current_task_id:
+        if st and st.current_task_id and not (existing and existing.get("task_id")):
             fields["task_id"] = st.current_task_id
         self.job_store.update_job(job_id, **fields)
-        # Keep job_id in history lists
-        self.state_manager.update_state(
-            issue_key,
-            metadata=self._archive_run_identifiers(issue_key, job_id=job_id),
-        )
+        # Keep job_id in history; clear live pointer when this finish is terminal
+        meta = self._archive_run_identifiers(issue_key, job_id=job_id)
+        if status in _TERMINAL_JOB:
+            meta["current_job_id"] = None
+        self.state_manager.update_state(issue_key, metadata=meta)
 
     def cancel_job(self, issue_key: str, *, reason: str = "Cancelled from dashboard") -> dict:
         """Cancel a job: kill agent children, set CANCELLED, notify Jira.
@@ -511,8 +629,9 @@ class JobProcessor:
             if runner and state.current_task_id:
                 killed = bool(runner.cancel_task(state.current_task_id))
             if runner and hasattr(runner, "cancel_all_tasks"):
-                runner.cancel_all_tasks()
-                killed = True
+                n = runner.cancel_all_tasks()
+                if n:
+                    killed = True
         except Exception as e:
             logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
@@ -587,13 +706,7 @@ class JobProcessor:
                 error_message=text,
             )
 
-            # Nudge poller status history so next "To Do" sighting is a real change
-            try:
-                poller = getattr(self, "_poller", None)
-                if poller is not None and hasattr(poller, "_last_jira_status"):
-                    poller._last_jira_status[issue_key] = "__cancelled__"
-            except Exception:
-                pass
+            self._nudge_poller_after_terminal(issue_key, marker="__cancelled__")
 
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
@@ -714,7 +827,7 @@ class JobProcessor:
 
         if self._job_semaphore is None:
             limit = max(1, int(settings.max_concurrent_jobs or 1))
-            self._job_semaphore = asyncio.Semaphore(limit)
+            self._job_semaphore = _JobSlotLimiter(limit)
         
         try:
             async with self._job_semaphore:
@@ -862,15 +975,19 @@ class JobProcessor:
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        # Terminal → reprocess only when Jira is To Do *and* poller/cancel marked eligible
-        # (or completed work that left To Do and returned — requeue_eligible optional).
+        # Terminal → reprocess only when Jira is To Do.
+        # ERROR/CANCELLED require requeue_eligible (set by cancel/fail).
+        # COMPLETED may reprocess when poller already detected a real reopen.
         if state.status in self.TERMINAL_STATUSES:
             if is_todo:
                 meta = state.metadata or {}
-                # Cancel/error always set requeue_eligible. Completed may reprocess when
-                # the poller detected a real transition (issue_updated only then).
-                # Require either requeue_eligible or that this is not a cold "still todo" loop:
-                # poller check_status_changes is the gate; still require To Do here.
+                if state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED):
+                    if not meta.get("requeue_eligible"):
+                        logger.debug(
+                            f"{issue_key} is {state.status.value} without "
+                            f"requeue_eligible; ignoring update event"
+                        )
+                        return
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
                     f"(Jira status '{status_name}' is To Do, requeue_eligible="
@@ -1095,6 +1212,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1271,6 +1402,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),
@@ -1435,6 +1580,20 @@ class JobProcessor:
                 self._record_opencode_session(
                     state.issue_key, session_id, session_file=session_file
                 )
+            # Keep job record in sync with live retry ids
+            jid = self._active_jobs.get(state.issue_key)
+            if jid and (new_task_id or session_id or session_file):
+                patch: Dict[str, Any] = {}
+                if new_task_id:
+                    patch["task_id"] = new_task_id
+                if session_id:
+                    patch["opencode_session_id"] = session_id
+                if session_file:
+                    patch["session_log_path"] = session_file
+                try:
+                    self.job_store.update_job(jid, **patch)
+                except Exception:
+                    pass
 
             self.reporter.post_progress_update(
                 self.state_manager.get_state(state.issue_key),

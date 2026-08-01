@@ -65,7 +65,14 @@ def create_dashboard_app(
 ) -> FastAPI:
     """Create dashboard FastAPI application bound to daemon services."""
     sm = state_manager or JiraStateManager()
-    app = FastAPI(title="JIRA Virtual Developer Dashboard", version="1.0.0")
+    # No OpenAPI UI in production path — dashboard has no auth
+    app = FastAPI(
+        title="JIRA Virtual Developer Dashboard",
+        version="1.0.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.processor = processor
     app.state.state_manager = sm
 
@@ -252,6 +259,20 @@ def create_dashboard_app(
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Any:
             # Never serve files outside web/dist (blocks ../ path traversal)
+            # Do not SPA-fallback reserved API/docs paths (docs are disabled)
+            reserved = (
+                "api/",
+                "docs",
+                "redoc",
+                "openapi.json",
+                "ws",
+            )
+            low = (full_path or "").lstrip("/").lower()
+            if low == "docs" or low.startswith("docs/") or low in (
+                "redoc",
+                "openapi.json",
+            ) or low.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
             safe = _safe_under_static(static, full_path)
             if safe is not None:
                 return FileResponse(safe)
