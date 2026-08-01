@@ -308,16 +308,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Non-interactive smoke (TUI not launched). Ensures plugin/config resolve without hang.
-echo Smoke-testing opencode debug config ...
-"%OPENCODE_BIN%\opencode.exe" debug config >nul 2>&1
-if errorlevel 1 (
-    echo [WARNING] opencode debug config failed — try: opencode --print-logs --log-level DEBUG
-    echo           Logs: %%USERPROFILE%%\.local\share\opencode\log
-) else (
-    echo [OK] opencode debug config
-)
-
 REM ---------------------------------------------------------------------------
 REM Step 4: glab
 REM ---------------------------------------------------------------------------
@@ -580,26 +570,10 @@ if errorlevel 1 (
     )
 )
 REM Ensure plugin entry is version-pinned (unversioned npm plugins hang/black-screen on Windows)
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$p='%OPENCODE_HOME%\opencode.json'; $v='!OH_MY_OPENCODE_VERSION!';" ^
-  "if (-not (Test-Path -LiteralPath $p)) { exit 1 };" ^
-  "$wantOmo = 'oh-my-opencode@' + $v; $wantOma = 'oh-my-openagent@' + $v;" ^
-  "$d = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json;" ^
-  "$plugs = @(); if ($null -ne $d.plugin) { $plugs = @($d.plugin) };" ^
-  "$fixed = New-Object System.Collections.Generic.List[object]; $seen=$false; $ch=$false;" ^
-  "foreach ($x in $plugs) {" ^
-  "  $s = [string]$x;" ^
-  "  if ($s -eq 'oh-my-opencode' -or $s -eq 'oh-my-openagent' -or $s -match '^oh-my-opencod(e|agent)(@|$)') {" ^
-  "    $pinnedOk = ($s -eq $wantOmo -or $s -eq $wantOma);" ^
-  "    if (-not $pinnedOk) { $ch = $true };" ^
-  "    if (-not $seen) { [void]$fixed.Add($(if ($s -like 'oh-my-openagent*') { $wantOma } else { $wantOmo })); $seen = $true }" ^
-  "  } else { [void]$fixed.Add($x) }" ^
-  "};" ^
-  "if (-not $seen) { [void]$fixed.Add($wantOmo); $ch = $true };" ^
-  "if ($d.PSObject.Properties.Name -notcontains 'autoupdate' -or $d.autoupdate -ne $false) { $d | Add-Member -NotePropertyName autoupdate -NotePropertyValue $false -Force; $ch = $true };" ^
-  "if ($ch) { $d.plugin = $fixed.ToArray(); ($d | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $p -Encoding UTF8; Write-Host ('  pinned plugin ' + ($fixed -join ',')) }"
-if errorlevel 1 (
-    echo [WARNING] Could not pin plugin version in opencode.json
+set "PIN_PS1=%SCRIPT_DIR%\packaging\windows\Pin-OpencodePlugin.ps1"
+if exist "%PIN_PS1%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%PIN_PS1%" -ConfigPath "%OPENCODE_HOME%\opencode.json" -Version "!OH_MY_OPENCODE_VERSION!"
+    if errorlevel 1 echo [WARNING] Could not pin plugin version in opencode.json
 )
 exit /b 0
 
@@ -629,70 +603,47 @@ echo [OK] Mirrored valid config to %OC_CONFIG_DIR%
 exit /b 0
 
 :seed_opencode_plugin_cache
-REM OpenCode installs npm plugins with Bun into %%USERPROFILE%%\.cache\opencode\node_modules
-REM at startup. Offline / slow installs freeze the TUI (black screen). Pre-seed from vendor.
+REM OpenCode loads npm plugins from %%USERPROFILE%%\.cache\opencode\node_modules at TUI start.
+REM Pre-seed with a junction to the offline tree (fast; no double robocopy).
 if not exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
     echo [WARNING] No node_modules\oh-my-opencode under %OPENCODE_HOME% — cannot seed cache
     exit /b 1
 )
 
+REM Rename compat: OpenCode may ask for oh-my-openagent@X
+if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
+    mklink /J "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OPENCODE_HOME%\node_modules\oh-my-opencode" >nul 2>&1
+)
+
 set "OC_CACHE=%USERPROFILE%\.cache\opencode"
-set "OC_CONFIG_DIR=%USERPROFILE%\.config\opencode"
 if not exist "%OC_CACHE%" mkdir "%OC_CACHE%"
-if not exist "%OC_CONFIG_DIR%" mkdir "%OC_CONFIG_DIR%"
 
 echo   Seeding plugin cache: %OC_CACHE%\node_modules
-if exist "%OC_CACHE%\node_modules" rmdir /s /q "%OC_CACHE%\node_modules" 2>nul
-robocopy "%OPENCODE_HOME%\node_modules" "%OC_CACHE%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:2 /W:1 >nul
-if errorlevel 8 (
-    echo [ERROR] robocopy to plugin cache failed
-    exit /b 1
+if exist "%OC_CACHE%\node_modules" (
+    rmdir "%OC_CACHE%\node_modules" 2>nul
+    if exist "%OC_CACHE%\node_modules" rmdir /s /q "%OC_CACHE%\node_modules" 2>nul
+)
+mklink /J "%OC_CACHE%\node_modules" "%OPENCODE_HOME%\node_modules" >nul 2>&1
+if errorlevel 1 (
+    echo   Junction failed — copying node_modules once ^(slower^)...
+    robocopy "%OPENCODE_HOME%\node_modules" "%OC_CACHE%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:1 /W:1 >nul
+    if errorlevel 8 (
+        echo [ERROR] Could not seed plugin cache
+        exit /b 1
+    )
+    if not exist "%OC_CACHE%\node_modules\oh-my-openagent" (
+        mklink /J "%OC_CACHE%\node_modules\oh-my-openagent" "%OC_CACHE%\node_modules\oh-my-opencode" >nul 2>&1
+    )
 )
 if exist "%OPENCODE_HOME%\package.json" (
     copy /Y "%OPENCODE_HOME%\package.json" "%OC_CACHE%\package.json" >nul
-)
-
-REM Also place deps under global config dir (OpenCode may bun-install package.json deps here)
-echo   Seeding config node_modules: %OC_CONFIG_DIR%\node_modules
-if exist "%OC_CONFIG_DIR%\node_modules" rmdir /s /q "%OC_CONFIG_DIR%\node_modules" 2>nul
-robocopy "%OPENCODE_HOME%\node_modules" "%OC_CONFIG_DIR%\node_modules" /E /NFL /NDL /NJH /NJS /nc /ns /np /R:2 /W:1 >nul
-if errorlevel 8 (
-    echo [ERROR] robocopy to config node_modules failed
-    exit /b 1
-)
-
-REM Optional Windows APPDATA prefix (oh-my-openagent docs)
-if defined APPDATA (
-    if not exist "%APPDATA%\opencode" mkdir "%APPDATA%\opencode"
-    if exist "%OPENCODE_HOME%\oh-my-opencode.json" (
-        copy /Y "%OPENCODE_HOME%\oh-my-opencode.json" "%APPDATA%\opencode\oh-my-opencode.json" >nul
-    )
-    if exist "%OPENCODE_HOME%\package.json" (
-        copy /Y "%OPENCODE_HOME%\package.json" "%APPDATA%\opencode\package.json" >nul
-    )
 )
 
 if not exist "%OC_CACHE%\node_modules\oh-my-opencode" (
     echo [ERROR] Plugin missing after cache seed: %OC_CACHE%\node_modules\oh-my-opencode
     exit /b 1
 )
-REM Ensure oh-my-openagent alias exists (OpenCode may rewrite plugin id during rename)
-if not exist "%OC_CACHE%\node_modules\oh-my-openagent" (
-    mklink /J "%OC_CACHE%\node_modules\oh-my-openagent" "%OC_CACHE%\node_modules\oh-my-opencode" >nul 2>&1
-    if errorlevel 1 (
-        robocopy "%OC_CACHE%\node_modules\oh-my-opencode" "%OC_CACHE%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
-    )
-)
-if exist "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" if not exist "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" (
-    mklink /J "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" >nul 2>&1
-    if errorlevel 1 (
-        robocopy "%OC_CONFIG_DIR%\node_modules\oh-my-opencode" "%OC_CONFIG_DIR%\node_modules\oh-my-openagent" /E /NFL /NDL /NJH /NJS /nc /ns /np >nul
-    )
-)
-if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" if not exist "%OPENCODE_HOME%\node_modules\oh-my-openagent" (
-    mklink /J "%OPENCODE_HOME%\node_modules\oh-my-openagent" "%OPENCODE_HOME%\node_modules\oh-my-opencode" >nul 2>&1
-)
-echo [OK] Plugin cache seeded ^(avoids black-screen npm/Bun download at TUI start^)
+echo [OK] Plugin cache seeded ^(junction to %OPENCODE_HOME%\node_modules^)
 exit /b 0
 
 :extract_opencode_home_zip
