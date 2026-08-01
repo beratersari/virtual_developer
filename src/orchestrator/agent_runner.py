@@ -77,7 +77,12 @@ def _agent_subprocess_env() -> Dict[str, str]:
 
 @dataclass
 class AgentTask:
-    """Represents an agent task to be executed."""
+    """Represents an agent task to be executed.
+
+    On construction, any Jira ``{params}`` git template is stripped from
+    ``prompt`` so the model never sees repository/branch metadata (even if a
+    caller forgets to sanitize). Git clone still uses the raw issue text.
+    """
     description: str
     prompt: str
     agent: str
@@ -88,6 +93,11 @@ class AgentTask:
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
     task_type: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        from src.issue_git_spec import strip_params_block
+
+        object.__setattr__(self, "prompt", strip_params_block(self.prompt or ""))
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -157,11 +167,15 @@ class AgentRunner:
         self._session_files[task.task_id] = session_file
         logger.info(f"Session file created: {session_file}")
 
-        # Persist full agent prompt for dashboard task detail
+        # Persist full agent prompt for dashboard task detail (params already stripped)
         prompt_path: Optional[Path] = None
         try:
+            from src.issue_git_spec import strip_params_block
+
             prompt_path = session_file.with_suffix(".prompt.txt")
-            prompt_path.write_text(task.prompt or "", encoding="utf-8")
+            prompt_path.write_text(
+                strip_params_block(task.prompt or ""), encoding="utf-8"
+            )
             logger.debug(f"Prompt file written: {prompt_path}")
         except Exception as e:
             logger.warning(f"Could not write prompt file for {task.task_id}: {e}")
@@ -417,8 +431,10 @@ class AgentRunner:
             title = f"{task.issue_key}: {(task.description or '')[:80]}"
             cmd_parts.extend(["--title", title])
         
-        # Add the prompt as the final argument
-        cmd_parts.append(task.prompt)
+        # Final gate: never pass {params} git blocks to the agent CLI
+        from src.issue_git_spec import strip_params_block
+
+        cmd_parts.append(strip_params_block(task.prompt or ""))
         
         return cmd_parts
 

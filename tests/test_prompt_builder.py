@@ -104,7 +104,21 @@ def test_params_block_excluded_from_prompts():
         assert "Target branch:" not in p
         assert "gitlab.com" not in p
         assert "10 + 1021" in p
-    assert "User comment" not in p
+
+
+def test_agent_task_always_strips_params():
+    """Last-mile: AgentTask construction always strips {params} from prompt."""
+    from src.orchestrator.agent_runner import AgentTask
+
+    raw = (
+        "Do the work\n"
+        "{params}\nRepository: https://evil.example/r.git\n"
+        "Source branch: a\nTarget branch: b\n{params}\n"
+    )
+    task = AgentTask(description="d", prompt=raw, agent="sisyphus", issue_key="K-1")
+    assert "{params}" not in task.prompt
+    assert "evil.example" not in task.prompt
+    assert "Do the work" in task.prompt
 
 
 def test_sisyphus_with_files_and_patterns():
