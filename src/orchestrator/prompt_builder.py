@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
+from src.issue_git_spec import strip_params_block
 from src.orchestrator.prompt_kit import get_section, substitute_issue_key
 
 
@@ -17,6 +18,9 @@ class PromptBuilder:
     * **direct** — ``§role.direct`` + ``§policy.commit`` + summary/description
     * **execution** — ``§role.execution`` + ``§policy.commit`` + plan path
     * **oracle** — ``§role.oracle`` + question (no git policy)
+
+    Jira ``{params}`` git blocks are stripped from prompt text (still used by
+    GitManager for clone/push).
     """
 
     @staticmethod
@@ -51,8 +55,8 @@ class PromptBuilder:
         *,
         extra_heading: str = "### Description",
     ) -> str:
-        summary = (summary or "").strip()
-        description = (description or "").strip()
+        summary = strip_params_block(summary or "")
+        description = strip_params_block(description or "")
         parts = [f"## Jira issue: {issue_key}"]
         if summary:
             parts.append(f"**Summary:** {summary}")
