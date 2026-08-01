@@ -233,7 +233,7 @@ class JiraPoller:
                 continue
 
             logger.info(
-                f"[Status Change] {issue_key}: Jira {prev_before} -> to do "
+                f"status change {issue_key}: jira {prev_before} -> to do "
                 f"(local {state.status.value}); reprocessing"
             )
             reprocess_issues.append(issue)
@@ -270,14 +270,13 @@ class JiraPoller:
                 self._status_before_poll = dict(self._last_jira_status)
                 issues = self.poll_board()
                 if issues:
-                    logger.info(f"=== Found {len(issues)} issue(s) to process ===")
+                    logger.info(f"Poll cycle: {len(issues)} issue(s) to process")
                     for issue in issues:
                         issue_key = issue["key"]
                         # is_update only if we already processed this key in a prior cycle
                         is_update = issue_key in self._seen_issues
                         self.process_issue(issue, is_update)
                         self._seen_issues.add(issue_key)
-                    logger.info("========================")
 
             except Exception as e:
                 logger.error(f"Error during poll: {e}")

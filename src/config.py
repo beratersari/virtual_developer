@@ -230,39 +230,34 @@ class Settings(BaseSettings):
         paths_to_try.append(("agent_rules", cwd / "agent" / "rules" / prompt_file.name))
         paths_to_try.append(("agent_prompts_legacy", cwd / "agent" / "prompts" / prompt_file.name))
         
-        logger.debug(f"Will try {len(paths_to_try)} paths in order:")
-        for i, (source, path) in enumerate(paths_to_try, 1):
-            exists = "✓ EXISTS" if path.exists() else "✗ NOT FOUND"
-            is_file = " (file)" if path.exists() and path.is_file() else ""
-            is_dir = " (dir)" if path.exists() and path.is_dir() else ""
-            logger.debug(f"  {i}. [{source}] {path} {exists}{is_file}{is_dir}")
-        
-        loaded_from = None
+        logger.debug(
+            f"Resolving {prompt_name} prompt; {len(paths_to_try)} candidate path(s)"
+        )
         for source, path in paths_to_try:
-            logger.debug(f"Trying prompt path: {path} (source: {source})")
-            
-            if not path.exists():
-                logger.debug(f"  Path does not exist: {path}")
+            kind = (
+                "file"
+                if path.exists() and path.is_file()
+                else ("dir" if path.exists() else "missing")
+            )
+            logger.debug(f"Prompt candidate source={source} path={path} status={kind}")
+
+            if not path.exists() or not path.is_file():
                 continue
-            
-            if not path.is_file():
-                logger.debug(f"  Path exists but is not a file (is_dir={path.is_dir()}): {path}")
-                continue
-            
+
             try:
                 content = path.read_text(encoding="utf-8")
-                file_size = len(content)
-                line_count = len(content.splitlines())
-                logger.info(f"Successfully loaded {prompt_name} prompt: {file_size} bytes, {line_count} lines from {source}")
-                loaded_from = path
+                logger.info(
+                    f"Loaded {prompt_name} prompt from {source}: "
+                    f"{len(content)} bytes, {len(content.splitlines())} lines"
+                )
                 return content
             except Exception as e:
-                logger.error(f"Error reading {prompt_name} prompt from {path}: {e}")
+                logger.error(f"Failed reading {prompt_name} prompt from {path}: {e}")
                 continue
-        
+
         logger.warning(
-            f"{prompt_name.capitalize()} prompt file not found in any location. "
-            f"Using default inline prompt ({len(default_prompt)} chars)."
+            f"{prompt_name.capitalize()} prompt file not found; "
+            f"using default inline prompt ({len(default_prompt)} chars)"
         )
         return default_prompt
     
