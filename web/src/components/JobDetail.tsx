@@ -14,6 +14,8 @@ type DetailTab = 'overview' | 'prompt' | 'opencode'
  * Job (single run) page — only fields and artifacts for this job.
  * Issue-level state, other runs, system logs live on TaskDetailPage.
  */
+const LIVE_STATUSES = new Set(['running', 'planning', 'executing', 'pending'])
+
 export function JobDetail({
   job,
   artifacts,
@@ -26,6 +28,8 @@ export function JobDetail({
   onBack,
   onRefresh,
   onOpenTask,
+  onDelete,
+  deleting = false,
 }: {
   job: JobItem | null
   /** Prompt/session files from the issue sessions dir — filtered to this job only. */
@@ -42,7 +46,13 @@ export function JobDetail({
   onBack: () => void
   onRefresh: () => void
   onOpenTask: (issueKey: string) => void
+  onDelete?: () => void
+  deleting?: boolean
 }) {
+  const canDelete =
+    Boolean(job) &&
+    !job!.live &&
+    !LIVE_STATUSES.has((job!.status || '').toLowerCase())
   const promptMatch = useMemo(() => {
     const match = findPromptForJobPath(
       artifacts.prompts,
@@ -122,6 +132,21 @@ export function JobDetail({
           <button type="button" onClick={onRefresh} className="ops-btn ops-btn-secondary">
             Refresh
           </button>
+          {onDelete && (
+            <button
+              type="button"
+              className="ops-btn ops-btn-danger"
+              disabled={!canDelete || deleting}
+              title={
+                canDelete
+                  ? 'Permanently delete this job record and linked session files'
+                  : 'Cannot delete a live or in-flight job'
+              }
+              onClick={onDelete}
+            >
+              {deleting ? 'Deleting…' : 'Delete job'}
+            </button>
+          )}
         </div>
       </div>
 

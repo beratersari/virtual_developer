@@ -193,6 +193,26 @@ class JobStore:
             logger.error(f"Error loading job {job_id}: {e}")
             return None
 
+    def delete_job(self, job_id: str) -> bool:
+        """Remove the job JSON file. Returns True if a file was deleted.
+
+        Does not delete session logs or prompt files — callers handle artifacts.
+        """
+        jid = (job_id or "").strip()
+        if not jid or not jid.startswith("job_"):
+            return False
+        path = self._path(jid)
+        with self._lock:
+            if not path.is_file():
+                return False
+            try:
+                path.unlink()
+                logger.info(f"Job deleted: {jid}")
+                return True
+            except OSError as e:
+                logger.error(f"Error deleting job {jid}: {e}")
+                return False
+
     def list_jobs(
         self,
         *,

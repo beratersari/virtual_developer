@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelTask,
   dashboardWsUrl,
+  deleteJob,
   fetchDashboard,
   fetchJobById,
   fetchJobs,
@@ -93,6 +94,7 @@ export default function App() {
   const [taskTab, setTaskTab] = useState<TaskTab>('overview')
 
   const [cancelling, setCancelling] = useState(false)
+  const [deletingJob, setDeletingJob] = useState(false)
   const [issueFilter, setIssueFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable')
@@ -402,6 +404,31 @@ export default function App() {
     }
   }
 
+  const onDeleteJob = async () => {
+    if (!jobView?.job_id) return
+    const jid = jobView.job_id
+    if (
+      !window.confirm(
+        `Permanently delete job ${jid}?\n\n` +
+          'Removes the job history record and linked session/prompt files under .jira-agent. ' +
+          'Does not change the Jira issue.',
+      )
+    ) {
+      return
+    }
+    setDeletingJob(true)
+    setDetailError(null)
+    try {
+      await deleteJob(jid, { deleteArtifacts: true })
+      closeDetail()
+      void reloadJobs()
+    } catch (e) {
+      setDetailError(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setDeletingJob(false)
+    }
+  }
+
   useEffect(() => {
     const id = window.setInterval(() => setLocalClock(new Date()), 1000)
     return () => window.clearInterval(id)
@@ -691,6 +718,8 @@ export default function App() {
             onBack={() => closeDetail()}
             onRefresh={() => void refreshDetail()}
             onOpenTask={(key) => void openTaskDetail(key)}
+            onDelete={() => void onDeleteJob()}
+            deleting={deletingJob}
           />
         )}
 

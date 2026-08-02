@@ -55,6 +55,33 @@ export async function fetchJobById(
   return res.json()
 }
 
+/** Permanently delete a historical job (and optional session/prompt artifacts). */
+export async function deleteJob(
+  jobId: string,
+  opts?: { deleteArtifacts?: boolean },
+): Promise<{
+  ok: boolean
+  job_id: string
+  issue_key?: string
+  store_deleted?: boolean
+  artifacts_deleted?: string[]
+  message?: string
+}> {
+  const params = new URLSearchParams()
+  if (opts?.deleteArtifacts === false) {
+    params.set('delete_artifacts', 'false')
+  }
+  const q = params.toString() ? `?${params.toString()}` : ''
+  const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}${q}`, {
+    method: 'DELETE',
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(body.detail || `Delete failed: ${res.status}`)
+  }
+  return body
+}
+
 export async function cancelTask(issueKey: string): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}/cancel`, {
     method: 'POST',

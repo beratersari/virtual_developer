@@ -529,6 +529,203 @@ def build_dashboard_payload(
     }
 
 
+_LIVE_JOB_STATUSES = frozenset({"running", "planning", "executing", "pending"})
+
+
+def _resolve_job_dict(
+    job_id: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[JobStore] = None,
+    state_manager: Optional[JiraStateManager] = None,
+) -> Optional[Dict[str, Any]]:
+    """Load a job by id from JobStore or merged list (legacy session rows)."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return None
+    js = store or default_job_store
+    job = js.get_job(jid)
+    if job:
+        return job
+    merged = build_jobs(
+        limit=500,
+        page=1,
+        page_size=500,
+        processor=processor,
+        store=js,
+        state_manager=state_manager,
+    )
+    for item in merged.jobs:
+        if item.job_id == jid:
+            return item.model_dump()
+    return None
+
+
+def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
+    """Delete a session log / prompt under .jira-agent only. Returns path if deleted."""
+    if not path_str:
+        return None
+    try:
+        path = Path(str(path_str)).resolve()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+
+    def _under(root: Path) -> bool:
+        try:
+            path.relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    allowed = (
+        _under(Path.cwd() / ".jira-agent")
+        or _under(Path.cwd() / ".jira-agent" / "sessions")
+        or ".jira-agent" in path.parts
+    )
+    if not allowed:
+        return None
+    blocked = {"etc", "proc", "sys", "windows", "system32"}
+    if blocked & {p.lower() for p in path.parts}:
+        return None
+    try:
+        path.unlink()
+        # Sibling session_id marker next to log
+        sid = Path(str(path) + ".session_id")
+        if sid.is_file() and (
+            _under(Path.cwd() / ".jira-agent") or ".jira-agent" in sid.parts
+        ):
+            try:
+                sid.unlink()
+            except OSError:
+                pass
+        return str(path)
+    except OSError:
+        return None
+
+
+def delete_job_record(
+    job_id: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[JobStore] = None,
+    state_manager: Optional[JiraStateManager] = None,
+    delete_artifacts: bool = True,
+) -> Dict[str, Any]:
+    """Delete a historical job record and optional linked session/prompt files.
+
+    Refuses in-flight / live jobs. Does not change Jira issues or issue state
+    beyond scrubbing this job_id from metadata.job_ids when present.
+    """
+    jid = (job_id or "").strip()
+    js = store or default_job_store
+    job = _resolve_job_dict(
+        jid, processor=processor, store=js, state_manager=state_manager
+    )
+    if not job:
+        return {"ok": False, "error": f"No job {jid}", "job_id": jid}
+
+    status = (job.get("status") or "").lower()
+    active_ids: set = set()
+    if processor is not None:
+        active_ids = set((getattr(processor, "_active_jobs", None) or {}).values())
+        if jid in active_ids:
+            return {
+                "ok": False,
+                "error": "Cannot delete a live job; cancel issue work first",
+                "job_id": jid,
+                "status": status,
+            }
+
+    if status in _LIVE_JOB_STATUSES:
+        return {
+            "ok": False,
+            "error": (
+                f"Cannot delete job in status {status}; "
+                "wait until finished or cancel issue work first"
+            ),
+            "job_id": jid,
+            "status": status,
+        }
+
+    deleted_paths: List[str] = []
+    store_deleted = False
+    if jid.startswith("job_"):
+        store_deleted = js.delete_job(jid)
+    elif jid.startswith("legacy_"):
+        # No store file — artifacts-only cleanup still useful
+        store_deleted = False
+    else:
+        # Unknown id shape: try store path once
+        store_deleted = js.delete_job(jid) if jid.startswith("job_") else False
+
+    if delete_artifacts:
+        for key in ("session_log_path", "prompt_path"):
+            gone = _safe_delete_agent_artifact(job.get(key))
+            if gone:
+                deleted_paths.append(gone)
+        # Common sibling prompt next to log
+        log_path = job.get("session_log_path")
+        if log_path and not job.get("prompt_path"):
+            try:
+                log = Path(str(log_path))
+                sibling = log.parent / f"{log.stem}.prompt.txt"
+                gone = _safe_delete_agent_artifact(str(sibling))
+                if gone:
+                    deleted_paths.append(gone)
+            except Exception:
+                pass
+
+    # Scrub job_id from issue metadata history (does not change issue status)
+    issue_key = (job.get("issue_key") or "").strip().upper()
+    if issue_key and state_manager is not None:
+        try:
+            st = state_manager.get_state(issue_key)
+            if st:
+                meta = dict(st.metadata or {})
+                job_ids = [x for x in (meta.get("job_ids") or []) if x != jid]
+                patch: Dict[str, Any] = {}
+                if job_ids != list(meta.get("job_ids") or []):
+                    patch["job_ids"] = job_ids
+                if meta.get("current_job_id") == jid:
+                    patch["current_job_id"] = job_ids[-1] if job_ids else None
+                if patch:
+                    state_manager.update_state(issue_key, metadata=patch)
+        except Exception as e:
+            from src.logger import logger
+
+            logger.debug(f"Could not scrub job_id from issue metadata: {e}")
+
+    # Legacy-only with no store file and no artifacts deleted → still ok if we
+    # intended to remove history (nothing left on disk)
+    if not store_deleted and not deleted_paths and jid.startswith("legacy_"):
+        return {
+            "ok": True,
+            "job_id": jid,
+            "issue_key": issue_key,
+            "store_deleted": False,
+            "artifacts_deleted": [],
+            "message": "Legacy job had no store file; nothing left to delete on disk",
+        }
+
+    if not store_deleted and not deleted_paths and jid.startswith("job_"):
+        return {
+            "ok": False,
+            "error": f"Job file not found for {jid}",
+            "job_id": jid,
+        }
+
+    return {
+        "ok": True,
+        "job_id": jid,
+        "issue_key": issue_key,
+        "store_deleted": store_deleted,
+        "artifacts_deleted": deleted_paths,
+        "message": "Job deleted",
+    }
+
+
 def _sessions_dir() -> Path:
     """Session logs root (same default as AgentRunner; tests may patch)."""
     try:

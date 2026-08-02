@@ -23,6 +23,7 @@ from src.dashboard.service import (
     build_settings_view,
     build_task_detail,
     build_tasks,
+    delete_job_record,
 )
 from src.state.job_store import job_store
 from src.dashboard.snapshot import poll_snapshot_store
@@ -86,7 +87,7 @@ def create_dashboard_app(
         CORSMiddleware,
         allow_origins=dev_origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -170,6 +171,33 @@ def create_dashboard_app(
             "issue": detail,
             "server_time": build_meta().server_time,
         }
+
+    @app.delete("/api/jobs/{job_id}")
+    def job_delete(
+        job_id: str,
+        delete_artifacts: bool = Query(
+            default=True,
+            description="Also delete linked session log / prompt under .jira-agent",
+        ),
+    ) -> dict:
+        """Permanently delete a historical job record.
+
+        Refuses live / in-flight jobs. Does not delete the Jira issue.
+        """
+        result = delete_job_record(
+            job_id,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+            delete_artifacts=delete_artifacts,
+        )
+        if not result.get("ok"):
+            err = result.get("error") or "Delete failed"
+            # 404 if missing; 409 if still running
+            if "No job" in err or "not found" in err.lower():
+                raise HTTPException(status_code=404, detail=err)
+            raise HTTPException(status_code=409, detail=err)
+        result["server_time"] = build_meta().server_time
+        return result
 
     @app.get("/api/tasks/{issue_key}")
     def task_detail(issue_key: str) -> dict:
@@ -363,6 +391,7 @@ def create_dashboard_app(
                     "tasks": "/api/tasks",
                     "task_detail": "/api/tasks/{issue_key}",
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
+                    "job_delete": "DELETE /api/jobs/{job_id}",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
                     "models": "/api/models",
