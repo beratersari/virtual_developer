@@ -36,6 +36,15 @@ def _resp(status=200, json_data=None, text=""):
 
 def test_create_issue_success(client):
     c, http = client
+    # resolve_issuetype_ref calls GET project types first
+    http.get.return_value = _resp(
+        200,
+        {
+            "issueTypes": [
+                {"id": "10003", "name": "Task", "subtask": False},
+            ]
+        },
+    )
     http.post.return_value = _resp(201, {"key": "P-1", "id": "1"})
     result = c.create_issue("PROJ", "sum", "desc", assignee="bob", labels=["a"])
     assert result["key"] == "P-1"
@@ -43,12 +52,37 @@ def test_create_issue_success(client):
     assert "fields" in payload
     assert payload["fields"]["project"]["key"] == "PROJ"
     assert payload["fields"]["assignee"] == {"name": "bob"}
+    assert payload["fields"]["issuetype"] == {"id": "10003"}
+
+
+def test_create_issue_resolves_localized_task(client):
+    c, http = client
+    http.get.return_value = _resp(
+        200,
+        {
+            "issueTypes": [
+                {"id": "10001", "name": "Epik", "subtask": False},
+                {"id": "10003", "name": "Görev", "subtask": False},
+                {"id": "10004", "name": "Hikaye", "subtask": False},
+            ]
+        },
+    )
+    http.post.return_value = _resp(201, {"key": "KAN-1", "id": "9"})
+    result = c.create_issue("KAN", "sum", "desc", issue_type="Task")
+    assert result["key"] == "KAN-1"
+    assert http.post.call_args.kwargs["json"]["fields"]["issuetype"] == {
+        "id": "10003"
+    }
 
 
 def test_create_issue_error(client):
     c, http = client
-    http.post.return_value = _resp(400, text="bad")
+    http.get.return_value = _resp(200, {"issueTypes": []})
+    http.post.return_value = _resp(
+        400, {"errorMessages": [], "errors": {"issuetype": "Specify a valid issue type"}}
+    )
     assert c.create_issue("PROJ", "s", "d") is None
+    assert c.last_error and "issuetype" in c.last_error
 
 
 def test_get_issue_success_and_fail(client):

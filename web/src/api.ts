@@ -3,7 +3,11 @@
 import type {
   DashboardPayload,
   JobsPayload,
+  JiraIssueTypesPayload,
   ModelsPayload,
+  ScheduleCreateBody,
+  ScheduleItem,
+  SchedulesPayload,
   SettingsPayload,
   TaskDetail,
 } from './types'
@@ -187,4 +191,60 @@ export async function fetchModels(refresh = false): Promise<ModelsPayload> {
 export function dashboardWsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
   return `${proto}://${window.location.host}/ws`
+}
+
+/** Creatable Jira issue types for the configured (or given) project. */
+export async function fetchIssueTypes(
+  projectKey?: string,
+): Promise<JiraIssueTypesPayload> {
+  const params = new URLSearchParams()
+  if (projectKey?.trim()) params.set('project_key', projectKey.trim())
+  const q = params.toString() ? `?${params.toString()}` : ''
+  const res = await fetch(`/api/jira/issue-types${q}`)
+  if (!res.ok) {
+    throw new Error(`Issue types API error: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function fetchSchedules(opts?: {
+  status?: string
+}): Promise<SchedulesPayload> {
+  const params = new URLSearchParams()
+  if (opts?.status) params.set('status', opts.status)
+  const q = params.toString() ? `?${params.toString()}` : ''
+  const res = await fetch(`/api/schedules${q}`)
+  if (!res.ok) {
+    throw new Error(`Schedules API error: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function createSchedule(
+  body: ScheduleCreateBody,
+): Promise<{ ok: boolean; schedule: ScheduleItem; issue_key?: string }> {
+  const res = await fetch('/api/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `Create schedule failed: ${res.status}`)
+  }
+  return data
+}
+
+export async function cancelSchedule(
+  scheduleId: string,
+): Promise<{ ok: boolean; message?: string; schedule?: ScheduleItem }> {
+  const res = await fetch(
+    `/api/schedules/${encodeURIComponent(scheduleId)}/cancel`,
+    { method: 'POST' },
+  )
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `Cancel schedule failed: ${res.status}`)
+  }
+  return data
 }

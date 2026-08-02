@@ -20,6 +20,41 @@ class BulkJobDeleteRequest(BaseModel):
     delete_artifacts: bool = True
 
 
+class ScheduleCreateRequest(BaseModel):
+    """Body for POST /api/schedules."""
+
+    title: str
+    description: str = ""
+    repository_url: str
+    source_branch: str
+    target_branch: str
+    mode: str  # plan | build
+    scheduled_at: str
+    project_key: Optional[str] = None
+    # Jira issue type name (Task, Story, ExtBug, Görev, …). Resolved per project.
+    issue_type: str = "Task"
+
+
+class ScheduleItem(BaseModel):
+    schedule_id: str
+    title: str = ""
+    description: str = ""
+    repository_url: str = ""
+    source_branch: str = ""
+    target_branch: str = ""
+    mode: str = ""
+    issue_type: str = "Task"
+    scheduled_at: str = ""
+    status: str = "scheduled"
+    issue_key: str = ""
+    project_key: str = ""
+    label: str = "SCHEDULED_AI_JOB"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    dispatched_at: Optional[str] = None
+    error_message: Optional[str] = None
+
+
 class TaskItem(BaseModel):
     issue_key: str
     summary: str

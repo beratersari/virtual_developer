@@ -106,6 +106,11 @@ class JiraAgentDaemon:
         monitor_task = asyncio.create_task(self._monitor_active_issues())
         tasks.append(monitor_task)
 
+        # Fire local scheduled jobs when due (Jira issue already created at schedule time)
+        logger.info("Starting schedule dispatcher...")
+        schedule_task = asyncio.create_task(self._run_schedule_dispatcher())
+        tasks.append(schedule_task)
+
         logger.info("Daemon started. Press Ctrl+C to stop.")
 
         # Wait for all tasks
@@ -216,6 +221,24 @@ class JiraAgentDaemon:
             self.processor._release_context(issue_key, success=False)
         except Exception as e:
             logger.warning(f"Could not release context for stuck {issue_key}: {e}")
+
+    async def _run_schedule_dispatcher(self):
+        """Poll local schedule store and dispatch due jobs via process_event."""
+        from src.scheduler.service import dispatch_due_schedules
+
+        # Slightly faster than board poll so near-term schedules fire promptly
+        interval = 15
+        while self._running:
+            try:
+                result = await dispatch_due_schedules(processor=self.processor)
+                if result.get("claimed"):
+                    logger.info(
+                        f"Schedule dispatch: due={result.get('due')} "
+                        f"started={result.get('started')} failed={result.get('failed')}"
+                    )
+            except Exception as e:
+                logger.exception(f"Schedule dispatcher tick failed: {e}", e)
+            await asyncio.sleep(interval)
 
     async def _monitor_active_issues(self):
         """Watch for stuck in-flight issues and report them to Jira.
