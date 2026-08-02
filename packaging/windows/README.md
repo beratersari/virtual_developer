@@ -29,33 +29,33 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
    - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
 5. Edit **`.env`** (Jira / GitLab).
-6. Run **`start.bat`**:
-   - Stops any previous instance (port 8080 / old `python -m src.daemon`)
-   - Starts the daemon (poller + API + **ops dashboard UI** on http://127.0.0.1:8080)
+6. Start (pick one):
+   - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
+   - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
+   - **`start.bat`** — both (backend first, then frontend)
 7. Optional OpenCode TUI: **`start-opencode.bat`** (never from your user home folder).
 
 ### Frontend + backend model (offline)
 
-| Piece | How it is shipped / started |
-|-------|-----------------------------|
-| **Backend** | Python daemon (`python -m src.daemon`) via `start.bat` |
-| **Frontend** | React SPA built in CI (`npm run build` in `web/`), copied to **`web\dist`**, served by FastAPI on the **same port** as the API |
-| **Node at runtime** | **Not required** on the user machine (only CI builds the SPA) |
-
-**Do not split into separate start-frontend / start-backend scripts for the offline zip.**  
-A second “frontend” process would be Vite (port 5173) and needs Node + `web/node_modules`, which we deliberately do **not** ship. The product model is:
+| Launcher | Port | Role |
+|----------|------|------|
+| **start-backend.bat** | **8080** | Daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
+| **start-frontend.bat** | **5173** | SPA only + reverse proxy to backend (so you can use :5173 without Node) |
+| **start.bat** | both | Calls backend, then frontend |
 
 ```text
-start.bat  →  one process on http://127.0.0.1:8080
-              ├── REST + WebSocket  (/api/*, /ws)
-              └── SPA UI            (web\dist → /, /assets/*)
+start-backend.bat  →  http://0.0.0.0:8080/   (open http://127.0.0.1:8080/)
+start-frontend.bat →  http://0.0.0.0:5173/   (open http://127.0.0.1:5173/)
+                         └── proxies /api and /ws → http://127.0.0.1:8080
 ```
 
-If the browser shows **JSON** at `/` (“Dashboard API is running…”), `web\dist` is missing from the install folder — re-download a CI package that includes the SPA build (or run `npm run build` in `web/` on a machine with Node).
+- **Node is not required at runtime.** Frontend is a small Python server (`serve_frontend.py`) over prebuilt `web\dist`.
+- Default bind is **0.0.0.0** (LAN). Set `DASHBOARD_HOST=127.0.0.1` in `.env` to lock down.
+- If `/` on :8080 returns **JSON**, `web\dist` is missing — use a CI zip that includes the SPA.
 
-Do **not** ship `web\node_modules` in the zip (path-length bomb). Only `web\dist`.
+Do **not** ship `web\node_modules` in the zip. Only `web\dist`.
 
-**CI note:** full `e2e-smoke.ps1` (deep-path install.bat) is **not** run on every push (too slow). Build still asserts payload layout (SPA + launchers + vendor).
+**CI note:** full `e2e-smoke.ps1` is not run on every push (too slow). Build asserts payload layout.
 
 OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.

@@ -17,6 +17,7 @@ param(
 $ErrorActionPreference = "Continue"
 
 function Stop-ListenersOnPort([int]$Port) {
+    # Port 0 means "skip this port" (start-backend / start-frontend call selectively)
     if ($Port -le 0) { return }
     $conns = @()
     try {

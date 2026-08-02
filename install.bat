@@ -320,15 +320,13 @@ echo [OK] OPENCODE_DISABLE_MODELS_FETCH=1 ^(user env + this session^)
 REM Project launchers at payload root (overwrite so re-install picks up CI updates)
 if exist "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" (
     copy /Y "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" "%SCRIPT_DIR%\start-opencode.bat" >nul
-    echo [OK] start-opencode.bat in project root — use this to open OpenCode TUI
+    echo [OK] start-opencode.bat — OpenCode TUI
 )
-if exist "%SCRIPT_DIR%\packaging\windows\start.bat" (
-    copy /Y "%SCRIPT_DIR%\packaging\windows\start.bat" "%SCRIPT_DIR%\start.bat" >nul
-    echo [OK] start.bat in project root — starts backend + ops dashboard
-) else if exist "%SCRIPT_DIR%\start.bat" (
-    echo [OK] start.bat already at project root
-) else (
-    echo [WARNING] start.bat missing — rebuild the Windows dist package
+for %%F in (start.bat start-backend.bat start-frontend.bat) do (
+    if exist "%SCRIPT_DIR%\packaging\windows\%%F" (
+        copy /Y "%SCRIPT_DIR%\packaging\windows\%%F" "%SCRIPT_DIR%\%%F" >nul
+        echo [OK] %%F
+    )
 )
 
 if exist "%SCRIPT_DIR%\web\dist\index.html" (
@@ -416,13 +414,13 @@ echo   2. Open a NEW terminal ^(so PATH updates apply^)
 echo   3. Verify a single OpenCode install:
 echo        where opencode
 echo        ^(should show only %OPENCODE_BIN%\opencode.exe^)
-echo   4. Start backend + ops dashboard ^(kills old instance first^):
-echo        cd /d "%SCRIPT_DIR%"
-echo        start.bat
-echo      Dashboard: http://127.0.0.1:8080
-echo   5. Optional — OpenCode TUI ^(ALWAYS use project launcher^):
+echo   4. Start the product:
+echo        start-backend.bat    API + SPA on http://127.0.0.1:8080/
+echo        start-frontend.bat   UI on http://127.0.0.1:5173/ ^(proxies /api to backend^)
+echo        start.bat            both ^(backend then frontend^)
+echo   5. Optional — OpenCode TUI:
 echo        start-opencode.bat
-echo      NEVER run "opencode" from C:\Users\... ^(indexes entire home = black screen^)
+echo      NEVER run "opencode" from C:\Users\... ^(black screen^)
 echo.
 echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%

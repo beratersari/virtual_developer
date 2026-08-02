@@ -98,12 +98,16 @@ jobs:
           foreach ($rel in @(
             "install.bat",
             "start.bat",
+            "start-backend.bat",
+            "start-frontend.bat",
             "cli.py",
             "src/daemon.py",
             "web/dist/index.html",
             "vendor/opencode-home.zip",
             "vendor/python-wheels",
-            "packaging/windows/Stop-VdProcesses.ps1"
+            "packaging/windows/Stop-VdProcesses.ps1",
+            "packaging/windows/Wait-Http.ps1",
+            "packaging/windows/serve_frontend.py"
           )) {
             $path = Join-Path $p $rel
             if (-not (Test-Path -LiteralPath $path)) {

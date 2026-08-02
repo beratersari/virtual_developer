@@ -278,13 +278,21 @@ foreach ($item in $copyItems) {
     Write-Host "  + $item"
 }
 
-# Root launcher: stop old processes + start daemon (API + SPA dashboard)
-$startBatSrc = Join-Path $root "packaging\windows\start.bat"
-if (-not (Test-Path -LiteralPath $startBatSrc)) {
-    throw "packaging\windows\start.bat missing"
+# Root launchers (backend / frontend / both)
+foreach ($launcher in @("start.bat", "start-backend.bat", "start-frontend.bat")) {
+    $srcLauncher = Join-Path $root "packaging\windows\$launcher"
+    if (-not (Test-Path -LiteralPath $srcLauncher)) {
+        throw "packaging\windows\$launcher missing"
+    }
+    Copy-Item -LiteralPath $srcLauncher -Destination (Join-Path $payload $launcher) -Force
+    Write-Host "  + $launcher"
 }
-Copy-Item -LiteralPath $startBatSrc -Destination (Join-Path $payload "start.bat") -Force
-Write-Host "  + start.bat (root launcher)"
+foreach ($helper in @("Wait-Http.ps1", "Stop-VdProcesses.ps1", "serve_frontend.py")) {
+    $hp = Join-Path $root "packaging\windows\$helper"
+    if (-not (Test-Path -LiteralPath $hp)) {
+        throw "packaging\windows\$helper missing"
+    }
+}
 
 # ---------------------------------------------------------------------------
 # 1b) Build ops dashboard SPA and stage web/dist only (no node_modules)
@@ -685,14 +693,13 @@ JIRA Virtual Developer — Windows offline package
    - Installs OpenCode under %USERPROFILE%\.opencode
    - Ships prebuilt ops dashboard SPA in web\dist (no Node needed at runtime)
 5. Edit .env with Jira / GitLab settings
-6. Start backend + dashboard UI:
-      start.bat
-   - Stops any previous instance on port 8080 first
-   - Opens http://127.0.0.1:8080 (API + React SPA in one process)
-7. OpenCode TUI (optional, separate from the daemon):
+6. Start:
+      start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
+      start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
+      start.bat           → both (backend then frontend)
+7. OpenCode TUI (optional):
       start-opencode.bat
-   NEVER run "opencode" from C:\Users\<you> — that indexes your entire
-   profile and freezes on a black screen for minutes.
+   NEVER run "opencode" from C:\Users\<you> — black-screen hang.
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
