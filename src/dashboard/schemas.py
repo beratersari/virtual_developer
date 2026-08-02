@@ -199,17 +199,76 @@ class SettingsView(BaseModel):
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
-    # Presence flags only
+    # Presence flags only — never return token/PAT values
     jira_token_configured: bool = False
     gitlab_pat_configured: bool = False
     jira_email_configured: bool = False
+    # Cloud Basic auth username (email); not secret but useful for ops
+    jira_email: str = ""
+    # Legacy flat list of hosts (derived from credential map)
+    gitlab_allowed_hosts: str = ""
+    # Per-host GitLab credentials (hosts only + configured flag; no PAT values)
+    gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
 
 
-class SettingsUpdate(BaseModel):
-    """Writable settings (runtime only; no secrets)."""
+class GitlabHostCredentialView(BaseModel):
+    """Safe projection of one GitLab host credential (no PAT value)."""
 
+    host: str
+    pat_configured: bool = False
+
+
+class GitlabHostCredentialUpdate(BaseModel):
+    """One host row from the Settings UI.
+
+    * ``pat`` omit/empty → keep existing PAT for that host (if any)
+    * ``pat`` non-empty → set/replace PAT for host
+    * Hosts omitted from the list on full replace are removed
+    """
+
+    host: str = Field(..., min_length=1, max_length=253)
+    pat: Optional[str] = Field(default=None, max_length=4000)
+
+
+class GitlabConnectionTestRequest(BaseModel):
+    """Body for POST /api/settings/gitlab/test."""
+
+    host: str = Field(..., min_length=1, max_length=253)
+    # Write-only optional PAT; if empty, use stored PAT for host
+    pat: Optional[str] = Field(default=None, max_length=4000)
+    max_projects: int = Field(default=25, ge=1, le=50)
+
+
+class SettingsUpdate(BaseModel):
+    """Writable settings (runtime only).
+
+    Secret fields (``jira_api_token``, per-host ``gitlab_credentials[].pat``)
+    are write-only: omit/empty to leave unchanged. They are never echoed in
+    SettingsView.
+    """
+
+    jira_host: Optional[str] = Field(default=None, max_length=500)
+    jira_email: Optional[str] = Field(default=None, max_length=320)
+    jira_api_token: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only Jira PAT / API token (omit to keep current)",
+    )
+    # Full replace list of host credentials (preferred)
+    gitlab_credentials: Optional[List[GitlabHostCredentialUpdate]] = None
+    # Legacy single PAT + hosts (still accepted; merged into map)
+    gitlab_pat: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Legacy write-only single GitLab PAT",
+    )
+    gitlab_allowed_hosts: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Legacy comma-separated hosts for single GITLAB_PAT",
+    )
     jira_board_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     trigger_labels: Optional[str] = Field(default=None, max_length=500)

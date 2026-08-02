@@ -187,7 +187,7 @@ class GitManager:
         # Fail closed: never inject PAT for untrusted/unknown hosts
         self._assert_remote_host_allowed(self.remote_url or "")
 
-        gitlab_pat = (settings.gitlab_pat or "").strip()
+        gitlab_pat = self._pat_for_remote(self.remote_url or "")
         # Clean URL only — PAT never appears in argv (use GIT_ASKPASS instead)
         clone_url = (self.remote_url or "").strip()
 
@@ -231,8 +231,8 @@ class GitManager:
                     f"*Repository:* `{repo_display}`\n"
                     f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
                     "Check that the URL is correct, the project is reachable, "
-                    "`GITLAB_ALLOWED_HOSTS` includes this host, and "
-                    "`GITLAB_PAT` has read access. Then move the issue back to *To Do*."
+                    "and a GitLab PAT is configured for this host in dashboard "
+                    "Settings (or `GITLAB_HOST_PATS`). Then move the issue back to *To Do*."
                 ),
                 technical=safe_err,
             )
@@ -252,14 +252,28 @@ class GitManager:
             raw = "https://" + raw
         return (urlparse(raw).hostname or "").lower()
 
-    def _assert_remote_host_allowed(self, url: str) -> None:
-        """Refuse to use GITLAB_PAT against hosts not on the allowlist.
+    def _pat_for_remote(self, url: str = "") -> str:
+        """Resolve GitLab PAT for this remote URL (per-host map)."""
+        host = self._host_from_url(url or self.remote_url or "")
+        if not host:
+            return ""
+        if hasattr(settings, "gitlab_pat_for_host"):
+            return (settings.gitlab_pat_for_host(host) or "").strip()
+        # Legacy fallback
+        return (settings.gitlab_pat or "").strip()
 
-        When no PAT is configured, any host is allowed (no secret to leak).
-        When PAT is set, ``GITLAB_ALLOWED_HOSTS`` must list the repository host.
+    def _assert_remote_host_allowed(self, url: str) -> None:
+        """Refuse to use a PAT against hosts without a configured credential.
+
+        When no PATs are configured at all, any host is allowed (public clone).
+        When any host PAT exists, the repository host must match one of them.
         """
-        pat = (settings.gitlab_pat or "").strip()
-        if not pat:
+        mapping = (
+            settings.gitlab_host_pat_map()
+            if hasattr(settings, "gitlab_host_pat_map")
+            else {}
+        )
+        if not mapping and not (settings.gitlab_pat or "").strip():
             return
         host = self._host_from_url(url)
         if not host:
@@ -267,34 +281,38 @@ class GitManager:
                 "*Virtual Developer* could not clone: repository URL has no host.\n\n"
                 "Set `Repository: https://gitlab.example.com/group/repo.git` in `{params}`."
             )
-        allowed = list(settings.gitlab_allowed_hosts_list)
-        if not allowed:
+        pat = self._pat_for_remote(url)
+        if pat:
+            return
+        allowed = sorted(mapping.keys()) if mapping else list(
+            settings.gitlab_allowed_hosts_list
+        )
+        if not allowed and (settings.gitlab_pat or "").strip():
             raise GitCloneError(
                 "*Virtual Developer* refused to authenticate: "
-                "`GITLAB_ALLOWED_HOSTS` is empty while `GITLAB_PAT` is set.\n\n"
-                "Set e.g. `GITLAB_ALLOWED_HOSTS=gitlab.example.com` so the PAT is only "
-                "sent to trusted GitLab hosts."
+                "no GitLab host→PAT mapping is configured while a PAT is set.\n\n"
+                "Add hosts in dashboard Settings (GitLab credentials), set "
+                "`GITLAB_HOST_PATS={\"gitlab.example.com\":\"glpat-…\"}`, "
+                "or set `GITLAB_ALLOWED_HOSTS` with legacy `GITLAB_PAT`."
             )
-        ok = any(host == a or host.endswith("." + a) for a in allowed)
-        if not ok:
-            raise GitCloneError(
-                (
-                    f"*Virtual Developer* refused to send credentials to host "
-                    f"`{host}`.\n\n"
-                    f"Allowed hosts: `{', '.join(allowed)}`.\n"
-                    "Update the issue Repository URL or add the host to "
-                    "`GITLAB_ALLOWED_HOSTS`."
-                )
+        raise GitCloneError(
+            (
+                f"*Virtual Developer* refused to send credentials to host "
+                f"`{host}`.\n\n"
+                f"Configured hosts: `{', '.join(allowed) or '(none)'}`.\n"
+                "Add this host with a PAT in dashboard Settings, or update the "
+                "issue Repository URL."
             )
+        )
 
-    def _git_auth_env(self) -> Dict[str, str]:
+    def _git_auth_env(self, *, url: str = "") -> Dict[str, str]:
         """Build env for git so credentials come from askpass, not argv.
 
-        PAT is placed in a process environment variable consumed by a short
-        askpass helper — it never appears in the ``git`` command line.
+        PAT is chosen for the remote host and placed in a process environment
+        variable consumed by a short askpass helper — never in argv.
         """
         env = dict(os.environ)
-        pat = (settings.gitlab_pat or "").strip()
+        pat = self._pat_for_remote(url or self.remote_url or "")
         if not pat:
             return env
         askpass = self._ensure_askpass_script()
@@ -438,7 +456,8 @@ class GitManager:
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
 
-        env = self._git_auth_env() if auth and (settings.gitlab_pat or "").strip() else None
+        use_auth = auth and bool(self._pat_for_remote(self.remote_url or ""))
+        env = self._git_auth_env() if use_auth else None
         result = subprocess.run(
             cmd,
             cwd=cwd,
@@ -468,9 +487,18 @@ class GitManager:
             r"\1\2:***@",
             text,
         )
-        pat = (settings.gitlab_pat or "").strip()
-        if pat:
-            text = text.replace(pat, "***")
+        pats = (
+            settings.all_gitlab_pats()
+            if hasattr(settings, "all_gitlab_pats")
+            else []
+        )
+        if not pats:
+            single = (settings.gitlab_pat or "").strip()
+            if single:
+                pats = [single]
+        for pat in pats:
+            if pat:
+                text = text.replace(pat, "***")
         return text
 
     @classmethod
@@ -1032,16 +1060,16 @@ class GitManager:
         return host, path
 
     def _glab_env(self) -> Dict[str, str]:
-        """Env for glab subprocesses: inject GITLAB_TOKEN from .env settings."""
+        """Env for glab subprocesses: inject host-specific GITLAB_TOKEN."""
         env = dict(os.environ)
-        pat = (settings.gitlab_pat or "").strip()
         host, _ = self._gitlab_host_and_project()
+        pat = self._pat_for_remote(self.remote_url or f"https://{host}")
         if pat:
             try:
                 self._assert_remote_host_allowed(self.remote_url or f"https://{host}")
             except GitCloneError:
                 logger.error(
-                    f"Refusing to pass GITLAB_PAT to glab for unallowed host {host}"
+                    f"Refusing to pass GitLab PAT to glab for unallowed host {host}"
                 )
                 # Do not inject token for untrusted hosts
                 env["GITLAB_HOST"] = host
@@ -1075,17 +1103,17 @@ class GitManager:
         source_branch: str,
         target_branch: str,
     ) -> Optional[str]:
-        """Create MR via GitLab REST API using GITLAB_PAT (fallback if glab fails)."""
-        pat = (settings.gitlab_pat or "").strip()
+        """Create MR via GitLab REST API using host-specific PAT (fallback if glab fails)."""
+        host, project = self._gitlab_host_and_project()
+        pat = self._pat_for_remote(self.remote_url or f"https://{host}")
         if not pat:
-            logger.error("Cannot create MR via API: GITLAB_PAT is empty")
+            logger.error("Cannot create MR via API: no GitLab PAT for this host")
             return None
         try:
-            self._assert_remote_host_allowed(self.remote_url or "")
+            self._assert_remote_host_allowed(self.remote_url or f"https://{host}")
         except GitCloneError as e:
             logger.error(f"Cannot create MR via API: host not allowed: {e}")
             return None
-        host, project = self._gitlab_host_and_project()
         if not project:
             logger.error("Cannot create MR via API: project path missing from repository URL")
             return None
@@ -1138,11 +1166,9 @@ class GitManager:
             pass
 
         # 2) REST API fallback
-        pat = (settings.gitlab_pat or "").strip()
-        if not pat:
-            return None
         host, project = self._gitlab_host_and_project()
-        if not project:
+        pat = self._pat_for_remote(self.remote_url or f"https://{host}")
+        if not pat or not project:
             return None
         try:
             import httpx

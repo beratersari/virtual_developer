@@ -79,6 +79,12 @@ export type ModelsPayload = {
   server_time?: string
 }
 
+export type GitlabHostCredential = {
+  host: string
+  /** True when a PAT is stored for this host (value never returned). */
+  pat_configured: boolean
+}
+
 export type SettingsPayload = {
   jira_host: string
   jira_board_id: string
@@ -93,8 +99,28 @@ export type SettingsPayload = {
   jira_token_configured: boolean
   gitlab_pat_configured: boolean
   jira_email_configured: boolean
+  /** Cloud Basic auth email (not a secret). Empty for on-prem Bearer PAT. */
+  jira_email?: string
+  /** Derived host list (legacy / summary). */
+  gitlab_allowed_hosts?: string
+  /** Per-host GitLab credentials (hosts + flags only). */
+  gitlab_credentials?: GitlabHostCredential[]
   /** Runtime DEFAULT_MODEL — inventory list is GET /api/models, not settings */
   default_model: string
+}
+
+/** One editable GitLab host row (PAT write-only). */
+export type GitlabHostCredentialDraft = {
+  host: string
+  /** Leave empty to keep existing PAT for this host. */
+  pat: string
+  pat_configured: boolean
+}
+
+/** Write-only secrets for PATCH /api/settings — never returned by GET. */
+export type SettingsWriteSecrets = {
+  jira_api_token?: string
+  gitlab_pat?: string
 }
 
 /** One push/commit/MR delivery from a job run (tasks may have many). */

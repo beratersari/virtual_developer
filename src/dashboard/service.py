@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.config import settings
 from src.dashboard.issue_logs import issue_log_ring
+from src.logger import logger
 from src.dashboard.schemas import (
     GitDeliveryItem,
+    GitlabHostCredentialView,
     JobItem,
     JobsResponse,
     MetaResponse,
@@ -193,7 +195,10 @@ def build_poll_status(
 
 
 def build_settings_view() -> SettingsView:
-    """Safe settings projection. Does not inventory OpenCode models (see build_models_response)."""
+    """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
+
+    Never includes ``jira_api_token`` or ``gitlab_pat`` values — only booleans.
+    """
     return SettingsView(
         jira_host=settings.jira_host or "",
         jira_board_id=settings.jira_board_id or "",
@@ -205,9 +210,19 @@ def build_settings_view() -> SettingsView:
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
         dashboard_port=int(getattr(settings, "dashboard_port", 8080) or 8080),
-        jira_token_configured=bool(settings.jira_api_token),
-        gitlab_pat_configured=bool(settings.gitlab_pat),
-        jira_email_configured=bool(getattr(settings, "jira_email", "") or ""),
+        jira_token_configured=bool((settings.jira_api_token or "").strip()),
+        gitlab_pat_configured=bool(
+            settings.gitlab_has_any_pat()
+            if hasattr(settings, "gitlab_has_any_pat")
+            else (settings.gitlab_pat or "").strip()
+        ),
+        jira_email_configured=bool((getattr(settings, "jira_email", "") or "").strip()),
+        jira_email=(getattr(settings, "jira_email", "") or "").strip(),
+        gitlab_allowed_hosts=",".join(settings.gitlab_allowed_hosts_list),
+        gitlab_credentials=[
+            GitlabHostCredentialView(host=h, pat_configured=True)
+            for h in settings.gitlab_allowed_hosts_list
+        ],
         default_model=(settings.default_model or "").strip(),
     )
 
@@ -246,8 +261,82 @@ def build_models_response(*, refresh: bool = False) -> ModelsResponse:
 
 
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
-    """Apply non-secret runtime settings. Does not rewrite .env."""
+    """Apply runtime settings (including write-only secrets). Does not rewrite .env.
+
+    Returns a safe projection (no token values). Callers should refresh live
+    Jira clients when host/token/email change (see ``refresh_runtime_jira_clients``).
+    """
     data = body.model_dump(exclude_unset=True)
+
+    if "jira_host" in data and data["jira_host"] is not None:
+        host = str(data["jira_host"]).strip().rstrip("/")
+        settings.jira_host = host
+    if "jira_email" in data and data["jira_email"] is not None:
+        # Empty string clears Cloud email (switch to Bearer / on-prem style)
+        settings.jira_email = str(data["jira_email"]).strip()
+    if "jira_api_token" in data and data["jira_api_token"] is not None:
+        # Write-only: only apply non-empty values so blank UI fields keep current
+        tok = str(data["jira_api_token"])
+        if tok.strip():
+            settings.jira_api_token = tok.strip()
+
+    # Preferred: full list of per-host credentials from the dashboard
+    if "gitlab_credentials" in data and data["gitlab_credentials"] is not None:
+        current = (
+            settings.gitlab_host_pat_map()
+            if hasattr(settings, "gitlab_host_pat_map")
+            else {}
+        )
+        new_map: Dict[str, str] = {}
+        for item in data["gitlab_credentials"] or []:
+            if isinstance(item, dict):
+                host = str(item.get("host") or "").strip().lower()
+                pat_raw = item.get("pat")
+            else:
+                host = str(getattr(item, "host", "") or "").strip().lower()
+                pat_raw = getattr(item, "pat", None)
+            if not host:
+                continue
+            # Strip scheme if operator pasted a URL
+            if "://" in host:
+                try:
+                    from urllib.parse import urlparse
+
+                    host = (urlparse(host if "://" in host else f"https://{host}").hostname or host)
+                    host = host.lower()
+                except Exception:
+                    pass
+            pat = str(pat_raw or "").strip()
+            if pat:
+                new_map[host] = pat
+            elif host in current:
+                new_map[host] = current[host]
+            # else: new host without PAT — skip (cannot auth)
+        if hasattr(settings, "set_gitlab_host_pat_map"):
+            settings.set_gitlab_host_pat_map(new_map)
+        else:
+            settings.gitlab_allowed_hosts = ",".join(sorted(new_map.keys()))
+            settings.gitlab_pat = next(iter(new_map.values()), "") if new_map else ""
+    else:
+        # Legacy single PAT + host list (still supported)
+        if "gitlab_pat" in data and data["gitlab_pat"] is not None:
+            pat = str(data["gitlab_pat"])
+            if pat.strip():
+                settings.gitlab_pat = pat.strip()
+        if "gitlab_allowed_hosts" in data and data["gitlab_allowed_hosts"] is not None:
+            raw = str(data["gitlab_allowed_hosts"])
+            hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
+            settings.gitlab_allowed_hosts = ",".join(hosts)
+            # If we have a single legacy PAT, expand into host map for runtime use
+            if (
+                hasattr(settings, "set_gitlab_host_pat_map")
+                and (settings.gitlab_pat or "").strip()
+                and hosts
+            ):
+                settings.set_gitlab_host_pat_map(
+                    {h: settings.gitlab_pat.strip() for h in hosts}
+                )
+
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
@@ -263,6 +352,61 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         if model:
             settings.default_model = model
     return build_settings_view()
+
+
+def refresh_runtime_jira_clients(
+    *,
+    processor: Any = None,
+    poller: Any = None,
+) -> None:
+    """Rebuild live Jira clients after host/token/email settings change.
+
+    Best-effort: logs and continues if a client cannot be closed/recreated.
+    GitLab PAT is read from ``settings`` on each git operation — no refresh needed.
+    """
+    from src.jira.client import create_jira_client
+
+    use_simulated = (
+        not settings.is_configured()
+        or (settings.jira_host or "").strip()
+        in ("", "a", "https://yourcompany.atlassian.net")
+    )
+
+    if processor is not None:
+        try:
+            old = getattr(processor, "jira_client", None)
+            if old is not None and hasattr(old, "close"):
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            new_client = create_jira_client(simulated=use_simulated)
+            processor.jira_client = new_client
+            reporter = getattr(processor, "reporter", None)
+            if reporter is not None:
+                reporter.client = new_client
+            logger.info(
+                "Refreshed processor Jira client "
+                f"(simulated={use_simulated}, host={settings.jira_host!r})"
+            )
+        except Exception as e:
+            logger.warning(f"Could not refresh processor Jira client: {e}")
+
+    if poller is not None:
+        try:
+            old = getattr(poller, "client", None)
+            if old is not None and hasattr(old, "close"):
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            poller.client = create_jira_client(simulated=use_simulated)
+            logger.info(
+                "Refreshed poller Jira client "
+                f"(simulated={use_simulated}, host={settings.jira_host!r})"
+            )
+        except Exception as e:
+            logger.warning(f"Could not refresh poller Jira client: {e}")
 
 
 def _parse_session_log_name(name: str) -> Optional[tuple]:

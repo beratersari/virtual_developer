@@ -1,8 +1,9 @@
 """Configuration management for JIRA Virtual Developer."""
 
+import json
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,14 +48,25 @@ class Settings(BaseSettings):
     git_user_name: str = Field(default="DevBot", description="Git user name for commits")
     git_user_email: str = Field(default="devbot@example.com", description="Git user email for commits")
     
-    # GitLab PAT only — repository URL and source branch come from each Jira issue
+    # GitLab credentials — repository URL and source branch come from each Jira issue
     # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
-    gitlab_pat: str = Field(default="", description="GitLab Personal Access Token for push/merge-request")
-    # Hosts that may receive GITLAB_PAT (clone/push/MR). Required when PAT is set.
+    #
+    # Preferred: per-host PATs as JSON object:
+    #   GITLAB_HOST_PATS={"gitlab.com":"glpat-…","gitlab.internal.com":"glpat-…"}
+    # Legacy (still supported): single GITLAB_PAT + GITLAB_ALLOWED_HOSTS (same PAT for each host)
+    gitlab_host_pats: str = Field(
+        default="",
+        description='JSON object mapping hostname → PAT, e.g. {"gitlab.com":"glpat-…"}',
+    )
+    gitlab_pat: str = Field(
+        default="",
+        description="Legacy single GitLab PAT (used with GITLAB_ALLOWED_HOSTS when map empty)",
+    )
+    # Hosts that may receive GITLAB_PAT (clone/push/MR). Required when legacy PAT is set.
     # Comma-separated hostnames, e.g. "gitlab.example.com,gitlab.com"
     gitlab_allowed_hosts: str = Field(
         default="",
-        description="Comma-separated GitLab hosts allowed for GITLAB_PAT (fail-closed when PAT is set)",
+        description="Legacy comma-separated hosts for single GITLAB_PAT (fail-closed when PAT is set)",
     )
     
     # Agent Configuration
@@ -173,14 +185,83 @@ class Settings(BaseSettings):
 
     @property
     def gitlab_allowed_hosts_list(self) -> List[str]:
-        """Hosts allowed to receive GITLAB_PAT (lowercase, no empty entries)."""
-        if not self.gitlab_allowed_hosts:
-            return []
-        return [
+        """Hosts that have (or are allowed) a GitLab PAT (lowercase)."""
+        return sorted(self.gitlab_host_pat_map().keys())
+
+    def gitlab_host_pat_map(self) -> Dict[str, str]:
+        """Resolved hostname → PAT map (prefer ``gitlab_host_pats`` JSON).
+
+        Legacy fallback: if the JSON map is empty and ``gitlab_pat`` is set,
+        each host in ``gitlab_allowed_hosts`` gets that same PAT.
+        """
+        out: Dict[str, str] = {}
+        raw = (self.gitlab_host_pats or "").strip()
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        host = str(k or "").strip().lower()
+                        pat = str(v or "").strip()
+                        if host and pat:
+                            out[host] = pat
+            except json.JSONDecodeError:
+                logger.warning("GITLAB_HOST_PATS is not valid JSON; ignoring map")
+
+        if out:
+            return out
+
+        # Legacy single PAT + host list
+        pat = (self.gitlab_pat or "").strip()
+        if not pat:
+            return {}
+        hosts = [
             h.strip().lower()
-            for h in self.gitlab_allowed_hosts.split(",")
+            for h in (self.gitlab_allowed_hosts or "").split(",")
             if h.strip()
         ]
+        return {h: pat for h in hosts}
+
+    def gitlab_pat_for_host(self, host: str) -> str:
+        """Return the PAT for ``host`` (exact or parent-domain match), or ''."""
+        h = (host or "").strip().lower()
+        if not h:
+            return ""
+        mapping = self.gitlab_host_pat_map()
+        if not mapping:
+            return ""
+        if h in mapping:
+            return mapping[h]
+        # subdomain: api.gitlab.example.com → gitlab.example.com
+        for allowed, pat in mapping.items():
+            if h == allowed or h.endswith("." + allowed):
+                return pat
+        return ""
+
+    def gitlab_has_any_pat(self) -> bool:
+        """True if at least one host has a configured PAT."""
+        return bool(self.gitlab_host_pat_map())
+
+    def set_gitlab_host_pat_map(self, mapping: Dict[str, str]) -> None:
+        """Persist host→PAT map into runtime settings (JSON + legacy mirrors)."""
+        cleaned: Dict[str, str] = {}
+        for k, v in (mapping or {}).items():
+            host = str(k or "").strip().lower()
+            pat = str(v or "").strip()
+            if host and pat:
+                cleaned[host] = pat
+        self.gitlab_host_pats = json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
+        # Mirror for older code paths / display
+        self.gitlab_allowed_hosts = ",".join(sorted(cleaned.keys()))
+        # Legacy single PAT: keep only when exactly one host (avoids wrong-host use)
+        if len(cleaned) == 1:
+            self.gitlab_pat = next(iter(cleaned.values()))
+        else:
+            self.gitlab_pat = ""
+
+    def all_gitlab_pats(self) -> List[str]:
+        """All configured PAT values (for log redaction)."""
+        return list(dict.fromkeys(self.gitlab_host_pat_map().values()))
     
     def _kit_section(self, section_id: str) -> str:
         from src.orchestrator.prompt_kit import get_section
