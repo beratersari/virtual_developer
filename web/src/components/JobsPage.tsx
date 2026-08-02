@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
+  jobIsDeletable,
   jobMatchesFilter,
   type JobStatusFilter,
 } from '../util/status'
@@ -29,6 +30,8 @@ export function JobsPage({
   connected,
   onOpenJob,
   onOpenIssue,
+  onBulkDelete,
+  bulkDeleting = false,
 }: {
   jobsView: JobsPayload | null
   jobsPage: number
@@ -43,6 +46,9 @@ export function JobsPage({
   connected: boolean
   onOpenJob: (issueKey: string, jobId: string) => void
   onOpenIssue: (issueKey: string) => void
+  /** Delete selected historical jobs; returns when done so selection can clear. */
+  onBulkDelete?: (jobIds: string[]) => Promise<void>
+  bulkDeleting?: boolean
 }) {
   const rawJobs: JobItem[] = jobsView?.jobs ?? []
   const filteredJobs = useMemo(
@@ -52,6 +58,76 @@ export function JobsPage({
       ),
     [rawJobs, statusFilter],
   )
+
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  // Drop selection when the page of rows changes (filter / page / reload).
+  const visibleIdKey = filteredJobs.map((j) => j.job_id).join('|')
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev
+      const visible = new Set(filteredJobs.map((j) => j.job_id))
+      const next = new Set([...prev].filter((id) => visible.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+    // Only re-prune when the visible id set changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleIdKey])
+
+  const deletableOnPage = useMemo(
+    () =>
+      filteredJobs.filter((j) => jobIsDeletable(j.status, Boolean(j.live))),
+    [filteredJobs],
+  )
+
+  const selectedCount = selectedIds.size
+
+  const toggleSelect = (jobId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(jobId)) next.delete(jobId)
+      else next.add(jobId)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      const deletableIds = deletableOnPage.map((j) => j.job_id)
+      const allSelected =
+        deletableIds.length > 0 && deletableIds.every((id) => prev.has(id))
+      if (allSelected) {
+        const next = new Set(prev)
+        for (const id of deletableIds) next.delete(id)
+        return next
+      }
+      const next = new Set(prev)
+      for (const id of deletableIds) next.add(id)
+      return next
+    })
+  }
+
+  const onDeleteSelected = async () => {
+    if (!onBulkDelete || selectedCount === 0 || bulkDeleting) return
+    const ids = [...selectedIds]
+    if (
+      !window.confirm(
+        `Permanently delete ${ids.length} selected job(s)?\n\n` +
+          'Removes job history records and linked session/prompt files under .jira-agent. ' +
+          'Does not change Jira issues. Live / in-flight jobs are skipped.',
+      )
+    ) {
+      return
+    }
+    setActionError(null)
+    try {
+      await onBulkDelete(ids)
+      setSelectedIds(new Set())
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Delete failed')
+    }
+  }
 
   const total = jobsView?.total ?? 0
   const page = jobsView?.page ?? jobsPage
@@ -67,7 +143,7 @@ export function JobsPage({
           <h2 className="text-base font-semibold text-text">Jobs</h2>
           <p className="text-xs text-text-muted">
             Each agent run is a job. Click a job id for that run only; click the
-            issue key for the issue page. Board issues live under Poll monitor.
+            issue key for the issue page. Select rows to delete finished runs.
             {!connected && ' · WebSocket disconnected (list may be stale)'}
           </p>
         </div>
@@ -173,11 +249,60 @@ export function JobsPage({
         </div>
       </div>
 
+      {onBulkDelete && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-border bg-surface px-3 py-2">
+          <span className="text-xs text-text-muted">
+            {selectedCount === 0
+              ? `Select finished jobs to delete (${deletableOnPage.length} deletable on this page)`
+              : `${selectedCount} job(s) selected`}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedCount > 0 && (
+              <button
+                type="button"
+                className="ops-btn ops-btn-secondary px-2 py-1 text-xs"
+                disabled={bulkDeleting}
+                onClick={() => setSelectedIds(new Set())}
+              >
+                Clear selection
+              </button>
+            )}
+            <button
+              type="button"
+              className="ops-btn ops-btn-danger px-2.5 py-1 text-xs"
+              disabled={selectedCount === 0 || bulkDeleting}
+              onClick={() => void onDeleteSelected()}
+              title={
+                selectedCount === 0
+                  ? 'Select one or more finished jobs'
+                  : 'Permanently delete selected job records'
+              }
+            >
+              {bulkDeleting
+                ? 'Deleting…'
+                : selectedCount > 0
+                  ? `Delete selected (${selectedCount})`
+                  : 'Delete selected'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {actionError && (
+        <div role="alert" className="ops-alert ops-alert-danger text-xs">
+          {actionError}
+        </div>
+      )}
+
       <JobsTable
         jobs={filteredJobs}
         density={density}
         onOpenJob={onOpenJob}
         onOpenIssue={onOpenIssue}
+        selectable={Boolean(onBulkDelete)}
+        selectedIds={selectedIds}
+        onToggleSelect={toggleSelect}
+        onToggleSelectAll={toggleSelectAll}
       />
     </section>
   )

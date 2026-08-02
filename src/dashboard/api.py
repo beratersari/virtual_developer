@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
-from src.dashboard.schemas import SettingsUpdate
+from src.dashboard.schemas import BulkJobDeleteRequest, SettingsUpdate
 from src.dashboard.service import (
     apply_settings_update,
     build_dashboard_payload,
@@ -24,6 +24,7 @@ from src.dashboard.service import (
     build_task_detail,
     build_tasks,
     delete_job_record,
+    delete_job_records,
 )
 from src.state.job_store import job_store
 from src.dashboard.snapshot import poll_snapshot_store
@@ -130,6 +131,26 @@ def create_dashboard_app(
             processor=app.state.processor,
             state_manager=app.state.state_manager,
         ).model_dump()
+
+    @app.post("/api/jobs/bulk-delete")
+    def jobs_bulk_delete(body: BulkJobDeleteRequest) -> dict:
+        """Permanently delete multiple historical job records.
+
+        Refuses live / in-flight jobs per id. Always returns 200 with per-id
+        results when ``job_ids`` is non-empty so partial success is visible.
+        Does not delete Jira issues.
+        """
+        ids = [jid.strip() for jid in (body.job_ids or []) if (jid or "").strip()]
+        if not ids:
+            raise HTTPException(status_code=400, detail="job_ids is required")
+        result = delete_job_records(
+            ids,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+            delete_artifacts=body.delete_artifacts,
+        )
+        result["server_time"] = build_meta().server_time
+        return result
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str) -> dict:
@@ -397,6 +418,7 @@ def create_dashboard_app(
                     "task_detail": "/api/tasks/{issue_key}",
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "job_delete": "DELETE /api/jobs/{job_id}",
+                    "jobs_bulk_delete": "POST /api/jobs/bulk-delete",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
                     "models": "/api/models",

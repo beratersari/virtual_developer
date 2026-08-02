@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
-from src.dashboard.service import delete_job_record
+from src.dashboard.service import delete_job_record, delete_job_records
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -121,3 +120,70 @@ def test_api_delete_job(tmp_path, monkeypatch):
         )
         r409 = client.delete(f"/api/jobs/{live['job_id']}")
         assert r409.status_code == 409
+
+
+def test_delete_job_records_bulk(tmp_path):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    a = store.create_job(
+        issue_key="BULK-1", summary="s", description="d", status="completed"
+    )
+    b = store.create_job(
+        issue_key="BULK-2", summary="s", description="d", status="error"
+    )
+    live = store.create_job(
+        issue_key="BULK-3", summary="s", description="d", status="running"
+    )
+
+    out = delete_job_records(
+        [a["job_id"], b["job_id"], live["job_id"], a["job_id"], ""],
+        store=store,
+    )
+    assert out["deleted_count"] == 2
+    assert out["failed_count"] == 1
+    assert a["job_id"] in out["deleted"]
+    assert b["job_id"] in out["deleted"]
+    assert out["failed"][0]["job_id"] == live["job_id"]
+    assert store.get_job(a["job_id"]) is None
+    assert store.get_job(live["job_id"]) is not None
+
+
+def test_api_bulk_delete_jobs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    done = store.create_job(
+        issue_key="API-BULK",
+        summary="s",
+        description="d",
+        status="completed",
+    )
+    live = store.create_job(
+        issue_key="API-BULK-LIVE",
+        summary="s",
+        description="d",
+        status="executing",
+    )
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+
+    with monkeypatch.context() as m:
+        m.setattr("src.dashboard.api.job_store", store)
+        m.setattr("src.dashboard.service.default_job_store", store)
+        app = create_dashboard_app(processor=None, state_manager=sm)
+        client = TestClient(app)
+
+        r_empty = client.post("/api/jobs/bulk-delete", json={"job_ids": []})
+        assert r_empty.status_code == 400
+
+        r = client.post(
+            "/api/jobs/bulk-delete",
+            json={
+                "job_ids": [done["job_id"], live["job_id"]],
+                "delete_artifacts": True,
+            },
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["deleted_count"] == 1
+        assert body["failed_count"] == 1
+        assert done["job_id"] in body["deleted"]
+        assert store.get_job(done["job_id"]) is None
+        assert store.get_job(live["job_id"]) is not None
