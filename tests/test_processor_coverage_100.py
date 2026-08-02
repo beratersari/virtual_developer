@@ -906,7 +906,6 @@ async def test_planning_missing_plan_and_durable_fail(
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             s.default_branch = "main"
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PLM-1").status == TaskStatus.ERROR
@@ -925,7 +924,6 @@ async def test_planning_missing_plan_and_durable_fail(
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
-                s.auto_start_plans = False
                 s.default_branch = "main"
                 await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PLM-2").status == TaskStatus.ERROR
@@ -962,7 +960,6 @@ async def test_planning_aborted_and_cas_race(
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             s.default_branch = "main"
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PLA-1").status == TaskStatus.CANCELLED
@@ -1002,7 +999,6 @@ async def test_planning_aborted_and_cas_race(
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
-                s.auto_start_plans = False
                 s.default_branch = "main"
                 await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PLA-2").status == TaskStatus.CANCELLED
@@ -1346,7 +1342,7 @@ async def test_execution_prepare_git_none_returns(
 
 
 @pytest.mark.asyncio
-async def test_planning_success_with_retry_info_and_auto_start(
+async def test_planning_success_with_retry_info_no_auto_start(
     processor, state_manager, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -1385,13 +1381,12 @@ async def test_planning_success_with_retry_info_and_auto_start(
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = True
             s.default_branch = "main"
             with patch.object(
                 processor, "start_plan_execution", new_callable=AsyncMock
             ) as ex:
                 await processor._start_planning_workflow(state)
-                ex.assert_awaited()
+                ex.assert_not_awaited()
     st = state_manager.get_state("PLS-1")
     assert st.status == TaskStatus.PLAN_READY
     assert st.timed_out is True

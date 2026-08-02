@@ -262,7 +262,6 @@ def config():
     table.add_row("Default Agent", settings.default_agent)
     table.add_row("Planning Agent", settings.planning_agent)
     table.add_row("Orchestrator Agent", settings.orchestrator_agent)
-    table.add_row("Auto-start Plans", str(settings.auto_start_plans))
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Poll Interval (s)", str(settings.poll_interval_seconds))
     table.add_row("Board ID", settings.jira_board_id or "(not set)")

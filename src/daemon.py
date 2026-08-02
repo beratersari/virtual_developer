@@ -38,7 +38,6 @@ class JiraAgentDaemon:
         logger.info("Starting JIRA Virtual Developer daemon")
         logger.info(f"project_root={settings.project_root}")
         logger.info(f"jira_host={settings.jira_host}")
-        logger.info(f"auto_start_plans={settings.auto_start_plans}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
 
         # Disk PLANNING/EXECUTING after crash is not a live job — finalise first

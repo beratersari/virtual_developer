@@ -85,7 +85,6 @@ export async function patchSettings(
       | 'poll_interval_seconds'
       | 'trigger_labels'
       | 'trigger_on_assignment'
-      | 'auto_start_plans'
       | 'max_concurrent_jobs'
       | 'default_model'
     >

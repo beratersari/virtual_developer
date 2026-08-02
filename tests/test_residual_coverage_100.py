@@ -129,7 +129,6 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
-                s.auto_start_plans = False
                 await processor._start_planning_workflow(state)
     # empty content after read fail → ERROR
     assert state_manager.get_state("PL-RD").status == TaskStatus.ERROR
@@ -167,7 +166,6 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
-                s.auto_start_plans = False
                 await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PL-CAS").status == TaskStatus.CANCELLED
 
@@ -191,7 +189,6 @@ async def test_planning_reporter_exceptions_still_plan_ready(
             s.agent_task_max_retries = 0
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PL-REP").status == TaskStatus.PLAN_READY
 

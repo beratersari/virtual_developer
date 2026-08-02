@@ -69,8 +69,6 @@ class Settings(BaseSettings):
         description="Unified agent prompt kit",
     )
     
-    # Feature Flags
-    auto_start_plans: bool = Field(default=False)
     # How many agent jobs run at once (raise for large boards / many subtasks)
     max_concurrent_jobs: int = Field(
         default=6,

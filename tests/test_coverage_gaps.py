@@ -40,7 +40,6 @@ async def test_daemon_windows_signal_setup():
         s.validate_or_raise = MagicMock()
         s.project_root = "/tmp"
         s.jira_host = "h"
-        s.auto_start_plans = False
         with patch("src.daemon.IS_WINDOWS", True):
             with patch("signal.signal") as sig:
                 with patch("asyncio.gather", new_callable=AsyncMock) as g:
@@ -67,7 +66,6 @@ async def test_daemon_gather_cancelled():
         s.validate_or_raise = MagicMock()
         s.project_root = "/tmp"
         s.jira_host = "h"
-        s.auto_start_plans = False
         with patch("src.daemon.IS_WINDOWS", False):
             with patch("asyncio.get_event_loop") as gel:
                 gel.return_value = MagicMock()

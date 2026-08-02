@@ -1156,7 +1156,6 @@ async def test_daemon_recover_and_remote_bind(fake_jira, state_manager, monkeypa
     monkeypatch.setattr(settings, "dashboard_port", 18080)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "poll_interval_seconds", 60)
-    monkeypatch.setattr(settings, "auto_start_plans", False)
     monkeypatch.setattr(settings, "project_root", ".")
     monkeypatch.setattr(settings, "jira_host", "https://j")
 

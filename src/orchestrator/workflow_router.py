@@ -99,11 +99,13 @@ class WorkflowRouter:
 
     @classmethod
     def should_auto_start(cls, workflow_type: WorkflowType) -> bool:
-        """Check if workflow should auto-start without human confirmation."""
-        if workflow_type == WorkflowType.EXECUTION:
-            return True
-        # Planning and Oracle typically need human confirmation (or auto_start_plans)
-        return settings.auto_start_plans
+        """Whether work can start immediately when this workflow is routed.
+
+        Execution starts when the issue is processed with ``Mode: build``.
+        Planning always stops at plan_ready; operators set ``Mode: build`` and
+        move the issue to To Do (no auto-start of plans).
+        """
+        return workflow_type == WorkflowType.EXECUTION
 
     @classmethod
     def get_agent_for_workflow(cls, workflow_type: WorkflowType) -> str:

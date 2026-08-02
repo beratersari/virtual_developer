@@ -3,7 +3,7 @@ import {
   findLogForJobPath,
   findPromptForJobPath,
   pathBasename,
-} from '../lib/paths'
+} from '../util/paths'
 import type { JobItem, TextArtifact } from '../types'
 import { PromptBlock } from './PromptBlock'
 import { StatusBadge } from './StatusBadge'

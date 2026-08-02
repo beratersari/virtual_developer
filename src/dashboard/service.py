@@ -200,7 +200,6 @@ def build_settings_view() -> SettingsView:
         poll_interval_seconds=int(settings.poll_interval_seconds or 30),
         trigger_labels=settings.trigger_labels or "",
         trigger_on_assignment=bool(settings.trigger_on_assignment),
-        auto_start_plans=bool(settings.auto_start_plans),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
@@ -256,8 +255,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.trigger_labels = str(data["trigger_labels"])
     if "trigger_on_assignment" in data and data["trigger_on_assignment"] is not None:
         settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
-    if "auto_start_plans" in data and data["auto_start_plans"] is not None:
-        settings.auto_start_plans = bool(data["auto_start_plans"])
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
     if "default_model" in data and data["default_model"] is not None:

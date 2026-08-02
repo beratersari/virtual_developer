@@ -86,7 +86,6 @@ export type SettingsPayload = {
   poll_interval_seconds: number
   trigger_labels: string
   trigger_on_assignment: boolean
-  auto_start_plans: boolean
   max_concurrent_jobs: number
   default_branch: string
   dashboard_host: string

@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import {
   jobMatchesFilter,
   type JobStatusFilter,
-} from '../lib/status'
+} from '../util/status'
 import type { JobItem, JobsPayload, TaskItem } from '../types'
 import { JobsTable } from './JobsTable'
 import { StatusBadge } from './StatusBadge'

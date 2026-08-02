@@ -54,13 +54,10 @@ def test_should_auto_start_execution():
     assert WorkflowRouter.should_auto_start(WorkflowType.EXECUTION) is True
 
 
-def test_should_auto_start_planning_follows_setting():
-    with patch("src.orchestrator.workflow_router.settings") as s:
-        s.auto_start_plans = False
-        assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is False
-        s.auto_start_plans = True
-        assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is True
-        assert WorkflowRouter.should_auto_start(WorkflowType.ORACLE_CONSULT) is True
+def test_should_auto_start_planning_never():
+    """Plans never auto-start; operators use Mode: build + To Do."""
+    assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is False
+    assert WorkflowRouter.should_auto_start(WorkflowType.ORACLE_CONSULT) is False
 
 
 def test_get_agent_for_workflow_all_types():

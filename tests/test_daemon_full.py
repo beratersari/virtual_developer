@@ -14,7 +14,6 @@ async def test_start_and_stop_unix():
         s.validate_or_raise = MagicMock()
         s.project_root = "/tmp"
         s.jira_host = "http://j"
-        s.auto_start_plans = False
         s.jira_board_id = "1"
         s.poll_interval_seconds = 30
 

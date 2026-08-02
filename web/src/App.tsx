@@ -14,7 +14,7 @@ import { JobsPage } from './components/JobsPage'
 import { PollMonitor } from './components/PollMonitor'
 import { SettingsPage } from './components/SettingsPage'
 import { TaskDetailPage } from './components/TaskDetailPage'
-import type { JobStatusFilter } from './lib/status'
+import type { JobStatusFilter } from './util/status'
 import {
   navigateTo,
   parseLocation,

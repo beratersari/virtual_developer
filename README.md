@@ -550,7 +550,6 @@ The retry mechanism uses exponential backoff. For example, with default settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTO_START_PLANS` | Auto-start after planning | `false` |
 | `MAX_CONCURRENT_JOBS` | Max parallel jobs | `3` |
 | `TRIGGER_LABELS` | Labels that trigger bot (comma-separated) | `ai-assist,bot` |
 | `TRIGGER_ON_ASSIGNMENT` | Trigger when issue is assigned | `true` |
@@ -618,8 +617,7 @@ DEFAULT_AGENT=sisyphus
 PLANNING_AGENT=prometheus
 ORCHESTRATOR_AGENT=atlas
 
-# Behavior
-AUTO_START_PLANS=false
+# Behavior (plans never auto-start — set Mode: build and move to To Do)
 EXECUTION_CATEGORY=deep
 MAX_CONCURRENT_JOBS=3
 

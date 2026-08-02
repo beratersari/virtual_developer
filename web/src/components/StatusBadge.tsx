@@ -1,4 +1,4 @@
-import { statusMeta, type StatusTone } from '../lib/status'
+import { statusMeta, type StatusTone } from '../util/status'
 
 const TONE_DOT: Record<StatusTone, string> = {
   neutral: 'bg-text-muted',

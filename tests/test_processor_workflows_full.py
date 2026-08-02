@@ -229,7 +229,6 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             s.default_branch = "main"
             # on_retry callback path during planning — success no retry
             await processor._start_planning_workflow(state)
@@ -246,11 +245,10 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PL-2").status == TaskStatus.ERROR
 
-    # success + auto start
+    # success never auto-starts (Mode: build + To Do only)
     state3 = state_manager.create_state("PL-3", "s", "d")
     (plans / "PL-3.md").write_text("# plan\n- [ ] step")
     git3, runner3 = _mock_git_and_agent(processor, tmp_path, returncode=0)
@@ -261,13 +259,13 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = True
             s.default_branch = "main"
             with patch.object(
                 processor, "start_plan_execution", new_callable=AsyncMock
             ) as ex:
                 await processor._start_planning_workflow(state3)
-                ex.assert_awaited()
+                ex.assert_not_awaited()
+    assert state_manager.get_state("PL-3").status == TaskStatus.PLAN_READY
 
 
 @pytest.mark.asyncio
@@ -306,7 +304,6 @@ async def test_planning_retry_callback(processor, state_manager, tmp_path):
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
-            s.auto_start_plans = False
             s.default_branch = "main"
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PLR-1").retry_count >= 1

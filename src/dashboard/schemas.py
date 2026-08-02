@@ -131,7 +131,6 @@ class SettingsView(BaseModel):
     poll_interval_seconds: int = 30
     trigger_labels: str = ""
     trigger_on_assignment: bool = True
-    auto_start_plans: bool = False
     max_concurrent_jobs: int = 3
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
@@ -151,7 +150,6 @@ class SettingsUpdate(BaseModel):
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
-    auto_start_plans: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
     default_model: Optional[str] = Field(default=None, max_length=200)
 

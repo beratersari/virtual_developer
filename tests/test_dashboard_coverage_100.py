@@ -287,19 +287,16 @@ def test_apply_settings_all_fields(monkeypatch):
 
     monkeypatch.setattr(settings, "trigger_labels", "a")
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
-    monkeypatch.setattr(settings, "auto_start_plans", False)
     monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
     view = apply_settings_update(
         SettingsUpdate(
             trigger_labels="ai-assist,bot",
             trigger_on_assignment=True,
-            auto_start_plans=True,
             max_concurrent_jobs=3,
             default_model="",  # empty ignored
         )
     )
     assert view.trigger_on_assignment is True
-    assert view.auto_start_plans is True
     assert view.max_concurrent_jobs == 3
 
 
