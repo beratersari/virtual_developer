@@ -8,6 +8,8 @@ from src.scheduler.service import (
     list_project_issue_types,
     list_scheduled_jobs,
     parse_schedule_at,
+    preview_existing_issue,
+    schedule_existing_issue,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "list_project_issue_types",
     "list_scheduled_jobs",
     "parse_schedule_at",
+    "preview_existing_issue",
+    "schedule_existing_issue",
 ]

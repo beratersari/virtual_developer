@@ -7,6 +7,7 @@ import type {
   ModelsPayload,
   ScheduleCreateBody,
   ScheduleItem,
+  SchedulePreview,
   SchedulesPayload,
   SettingsPayload,
   TaskDetail,
@@ -296,6 +297,36 @@ export async function cancelSchedule(
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new Error(data.detail || `Cancel schedule failed: ${res.status}`)
+  }
+  return data
+}
+
+/** Load existing issue + validate {params} template (hard-fail on invalid). */
+export async function previewScheduleIssue(
+  issueKey: string,
+): Promise<SchedulePreview> {
+  const params = new URLSearchParams({ issue_key: issueKey.trim() })
+  const res = await fetch(`/api/schedules/preview?${params.toString()}`)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `Preview failed: ${res.status}`)
+  }
+  return data as SchedulePreview
+}
+
+/** Schedule an existing Jira issue for later dispatch. */
+export async function scheduleExistingIssue(body: {
+  issue_key: string
+  scheduled_at: string
+}): Promise<{ ok: boolean; schedule: ScheduleItem; issue_key?: string }> {
+  const res = await fetch('/api/schedules/from-issue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `Schedule existing failed: ${res.status}`)
   }
   return data
 }

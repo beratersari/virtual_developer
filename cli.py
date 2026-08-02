@@ -360,6 +360,39 @@ def schedule_create(
     )
 
 
+@schedule.command("from-issue")
+@click.argument("issue_key")
+@click.option(
+    "--at",
+    "scheduled_at",
+    required=True,
+    help="When to start work (ISO datetime, e.g. 2026-08-03T15:00:00)",
+)
+def schedule_from_issue(issue_key: str, scheduled_at: str):
+    """Schedule an existing Jira issue (must have a valid {params} template).
+
+    Does not create a new issue. Soft-fails In Progress + SCHEDULED_AI_JOB label.
+
+    Examples:
+        python cli.py schedule from-issue KAN-12 --at 2026-08-03T15:00:00
+    """
+    validate_config()
+    from src.scheduler.service import schedule_existing_issue
+
+    result = schedule_existing_issue(issue_key, scheduled_at=scheduled_at)
+    if not result.get("ok"):
+        console.print(f"[red]Failed:[/red] {result.get('error') or 'unknown error'}")
+        sys.exit(1)
+
+    rec = result["schedule"]
+    console.print("[green]Existing issue scheduled[/green]")
+    console.print(f"  Schedule ID: {rec.get('schedule_id')}")
+    console.print(f"  Jira issue:  {rec.get('issue_key')}")
+    console.print(f"  Mode:        {rec.get('mode')}")
+    console.print(f"  Run at:      {rec.get('scheduled_at')}")
+    console.print(f"  Status:      {rec.get('status')}")
+
+
 @schedule.command("list")
 @click.option("--status", "-s", default=None, help="Filter by status (scheduled, dispatched, …)")
 def schedule_list(status: Optional[str]):

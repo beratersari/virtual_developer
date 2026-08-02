@@ -35,6 +35,13 @@ class ScheduleCreateRequest(BaseModel):
     issue_type: str = "Task"
 
 
+class ScheduleExistingRequest(BaseModel):
+    """Body for POST /api/schedules/from-issue — schedule an existing Jira issue."""
+
+    issue_key: str
+    scheduled_at: str
+
+
 class ScheduleItem(BaseModel):
     schedule_id: str
     title: str = ""
@@ -49,6 +56,7 @@ class ScheduleItem(BaseModel):
     issue_key: str = ""
     project_key: str = ""
     label: str = "SCHEDULED_AI_JOB"
+    source: str = "new"  # new | existing
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     dispatched_at: Optional[str] = None
