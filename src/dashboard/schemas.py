@@ -37,6 +37,19 @@ class TasksResponse(BaseModel):
     server_time: str
 
 
+class GitDeliveryItem(BaseModel):
+    """One push / commit / MR delivery from a job run (task may have many)."""
+
+    job_id: Optional[str] = None
+    feature_branch: Optional[str] = None
+    merge_request_url: Optional[str] = None
+    commit_sha: Optional[str] = None
+    commit_subject: Optional[str] = None
+    commit_url: Optional[str] = None
+    created_at: Optional[str] = None
+    status: Optional[str] = None
+
+
 class JobItem(BaseModel):
     """One processing run (job) for a Jira issue."""
 
@@ -59,6 +72,12 @@ class JobItem(BaseModel):
     completed_at: Optional[str] = None
     updated_at: Optional[str] = None
     live: bool = False
+    # Git delivery for this run (set after successful push / MR)
+    feature_branch: Optional[str] = None
+    merge_request_url: Optional[str] = None
+    commit_sha: Optional[str] = None
+    commit_subject: Optional[str] = None
+    commit_url: Optional[str] = None
 
 
 class JobsResponse(BaseModel):

@@ -217,6 +217,77 @@ export function JobDetail({
               )}
             </div>
 
+            {/* Git delivery for this run */}
+            {(job.merge_request_url ||
+              job.commit_url ||
+              job.commit_sha ||
+              job.feature_branch) && (
+              <div className="border-t border-border pt-4">
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                  Git delivery
+                </h3>
+                <p className="mb-3 text-xs text-text-muted">
+                  Branch, commit, and merge request produced by this job run.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {job.feature_branch && (
+                    <MetaCard label="Branch" mono value={job.feature_branch} />
+                  )}
+                  {(job.commit_url || job.commit_sha) && (
+                    <MetaCard
+                      label="Commit"
+                      mono
+                      className="sm:col-span-2 lg:col-span-2"
+                      valueNode={
+                        job.commit_url ? (
+                          <div className="space-y-1">
+                            <a
+                              href={job.commit_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="break-all text-sm text-accent-text hover:underline"
+                            >
+                              {job.commit_sha
+                                ? job.commit_sha.slice(0, 12)
+                                : 'Open commit'}
+                            </a>
+                            {job.commit_subject && (
+                              <div className="break-words text-xs text-text-secondary">
+                                {job.commit_subject}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="break-all font-mono text-xs text-text">
+                            {job.commit_sha}
+                            {job.commit_subject
+                              ? ` — ${job.commit_subject}`
+                              : ''}
+                          </span>
+                        )
+                      }
+                    />
+                  )}
+                  {job.merge_request_url && (
+                    <MetaCard
+                      label="Merge request"
+                      className="sm:col-span-2 lg:col-span-3"
+                      valueNode={
+                        <a
+                          href={job.merge_request_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="break-all text-sm text-accent-text hover:underline"
+                        >
+                          {job.merge_request_url}
+                        </a>
+                      }
+                    />
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Agent attempt diagnostics — not shown on the jobs list */}
             <div className="border-t border-border pt-4">
               <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">

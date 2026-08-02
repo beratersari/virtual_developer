@@ -71,6 +71,25 @@ export function JobsTable({
                       live
                     </span>
                   )}
+                  {j.merge_request_url && (
+                    <div className="mt-0.5">
+                      <a
+                        href={j.merge_request_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] text-accent-text hover:underline"
+                        title={j.merge_request_url}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        MR
+                      </a>
+                      {j.commit_sha && (
+                        <span className="ml-1.5 font-mono text-[10px] text-text-muted">
+                          {j.commit_sha.slice(0, 7)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <button

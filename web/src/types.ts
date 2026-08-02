@@ -97,6 +97,18 @@ export type SettingsPayload = {
   default_model: string
 }
 
+/** One push/commit/MR delivery from a job run (tasks may have many). */
+export type GitDelivery = {
+  job_id?: string | null
+  feature_branch?: string | null
+  merge_request_url?: string | null
+  commit_sha?: string | null
+  commit_subject?: string | null
+  commit_url?: string | null
+  created_at?: string | null
+  status?: string | null
+}
+
 export type JobItem = {
   job_id: string
   issue_key: string
@@ -118,6 +130,12 @@ export type JobItem = {
   completed_at?: string | null
   updated_at?: string | null
   live: boolean
+  /** Git delivery for this run (set after successful push / MR). */
+  feature_branch?: string | null
+  merge_request_url?: string | null
+  commit_sha?: string | null
+  commit_subject?: string | null
+  commit_url?: string | null
 }
 
 export type JobsPayload = {
@@ -180,6 +198,8 @@ export type TaskDetail = {
   completed_at?: string | null
   feature_branch?: string | null
   merge_request_url?: string | null
+  /** All commit/MR deliveries across runs for this issue. */
+  git_deliveries?: GitDelivery[]
   retry_history: Array<Record<string, unknown>>
   prompts: {
     workflow_type?: string

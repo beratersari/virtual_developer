@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from src.config import settings
 from src.dashboard.issue_logs import issue_log_ring
 from src.dashboard.schemas import (
+    GitDeliveryItem,
     JobItem,
     JobsResponse,
     MetaResponse,
@@ -494,6 +495,11 @@ def build_jobs(
                 completed_at=j.get("completed_at"),
                 updated_at=j.get("updated_at"),
                 live=live,
+                feature_branch=j.get("feature_branch") or None,
+                merge_request_url=j.get("merge_request_url") or None,
+                commit_sha=j.get("commit_sha") or None,
+                commit_subject=j.get("commit_subject") or None,
+                commit_url=j.get("commit_url") or None,
             )
         )
     return JobsResponse(
@@ -909,6 +915,114 @@ def _fetch_live_jira_fields(
     }
 
 
+def _collect_git_deliveries(
+    *,
+    issue_key: str,
+    meta: Optional[Dict[str, Any]] = None,
+    jobs: Optional[List[Any]] = None,
+    store: Optional[JobStore] = None,
+) -> List[Dict[str, Any]]:
+    """All commit/MR deliveries for an issue across runs (jobs + metadata history).
+
+    Prefer per-job fields (one entry per processing run). Fall back to
+    ``metadata.git_deliveries`` and the latest top-level MR/branch keys for
+    older records that predate job-level storage.
+    """
+    meta = meta or {}
+    items: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _key(d: Dict[str, Any]) -> str:
+        return "|".join(
+            [
+                str(d.get("job_id") or ""),
+                str(d.get("merge_request_url") or ""),
+                str(d.get("commit_sha") or ""),
+                str(d.get("feature_branch") or ""),
+                str(d.get("created_at") or ""),
+            ]
+        )
+
+    def _add(raw: Dict[str, Any]) -> None:
+        if not any(
+            [
+                raw.get("merge_request_url"),
+                raw.get("commit_sha"),
+                raw.get("commit_url"),
+                raw.get("feature_branch"),
+            ]
+        ):
+            return
+        k = _key(raw)
+        if k in seen:
+            return
+        seen.add(k)
+        items.append(
+            {
+                "job_id": raw.get("job_id"),
+                "feature_branch": raw.get("feature_branch") or None,
+                "merge_request_url": raw.get("merge_request_url") or None,
+                "commit_sha": raw.get("commit_sha") or None,
+                "commit_subject": raw.get("commit_subject") or None,
+                "commit_url": raw.get("commit_url") or None,
+                "created_at": raw.get("created_at") or None,
+                "status": raw.get("status") or None,
+            }
+        )
+
+    # 1) Jobs (source of truth per run)
+    job_rows: List[Any] = list(jobs or [])
+    if not job_rows:
+        try:
+            js = store or default_job_store
+            job_rows = js.list_jobs(issue_key=issue_key, limit=100, offset=0)
+        except Exception:
+            job_rows = []
+    for j in job_rows:
+        if hasattr(j, "model_dump"):
+            j = j.model_dump()
+        if not isinstance(j, dict):
+            continue
+        _add(
+            {
+                "job_id": j.get("job_id"),
+                "feature_branch": j.get("feature_branch"),
+                "merge_request_url": j.get("merge_request_url"),
+                "commit_sha": j.get("commit_sha"),
+                "commit_subject": j.get("commit_subject"),
+                "commit_url": j.get("commit_url"),
+                "created_at": j.get("completed_at") or j.get("updated_at") or j.get("started_at"),
+                "status": j.get("status"),
+            }
+        )
+
+    # 2) Explicit history on issue metadata
+    hist = meta.get("git_deliveries")
+    if isinstance(hist, list):
+        for entry in hist:
+            if isinstance(entry, dict):
+                _add(entry)
+
+    # 3) Latest top-level keys (legacy single-MR storage)
+    if meta.get("merge_request_url") or meta.get("last_commit_sha") or meta.get("feature_branch"):
+        _add(
+            {
+                "job_id": meta.get("current_job_id"),
+                "feature_branch": meta.get("feature_branch"),
+                "merge_request_url": meta.get("merge_request_url"),
+                "commit_sha": meta.get("last_commit_sha"),
+                "commit_subject": meta.get("last_commit_subject"),
+                "commit_url": meta.get("last_commit_url"),
+                "created_at": None,
+                "status": None,
+            }
+        )
+
+    # Newest first for UI
+    items.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+    return items
+
+
 def _build_task_detail_without_state(
     issue_key: str,
     *,
@@ -969,6 +1083,7 @@ def _build_task_detail_without_state(
         "completed_at": None,
         "feature_branch": None,
         "merge_request_url": None,
+        "git_deliveries": _collect_git_deliveries(issue_key=key, meta={}),
         "retry_history": [],
         "prompts": {
             "workflow_type": None,
@@ -1096,6 +1211,10 @@ def build_task_detail(
         ),
         "feature_branch": meta.get("feature_branch"),
         "merge_request_url": meta.get("merge_request_url"),
+        "git_deliveries": _collect_git_deliveries(
+            issue_key=key,
+            meta=meta,
+        ),
         "retry_history": retry_history,
         "prompts": prompts,
         "session_logs": artifacts["session_logs"],
