@@ -1,7 +1,9 @@
 import { useState, type Dispatch, type SetStateAction } from 'react'
 import {
   testGitlabConnection,
+  testJiraConnection,
   type GitlabConnectionTestResult,
+  type JiraConnectionTestResult,
 } from '../api'
 import type {
   DashboardPayload,
@@ -50,6 +52,52 @@ export function SettingsPage({
   const [testResults, setTestResults] = useState<
     Record<number, GitlabConnectionTestResult | { loading: true }>
   >({})
+  const [jiraTesting, setJiraTesting] = useState(false)
+  const [jiraTestResult, setJiraTestResult] = useState<
+    JiraConnectionTestResult | { loading: true } | null
+  >(null)
+
+  const onTestJira = async () => {
+    const host = (
+      settingsDraft.jira_host ??
+      data.settings.jira_host ??
+      ''
+    ).trim()
+    const email = (
+      settingsDraft.jira_email ??
+      data.settings.jira_email ??
+      ''
+    ).trim()
+    const token = (settingsDraft.jira_api_token ?? '').trim()
+    if (!host) {
+      setJiraTestResult({ ok: false, error: 'Jira host is required' })
+      return
+    }
+    if (!token && !data.settings.jira_token_configured) {
+      setJiraTestResult({
+        ok: false,
+        error: 'Paste an API token or save settings first',
+      })
+      return
+    }
+    setJiraTesting(true)
+    setJiraTestResult({ loading: true })
+    try {
+      const result = await testJiraConnection({
+        host,
+        email: email || undefined,
+        api_token: token || undefined,
+      })
+      setJiraTestResult(result)
+    } catch (e) {
+      setJiraTestResult({
+        ok: false,
+        error: e instanceof Error ? e.message : 'Test failed',
+      })
+    } finally {
+      setJiraTesting(false)
+    }
+  }
 
   const onTestGitlabRow = async (idx: number) => {
     const row = (settingsDraft.gitlab_cred_rows || [])[idx]
@@ -194,18 +242,36 @@ export function SettingsPage({
         </div>
 
         <div className="space-y-3 rounded border border-border bg-bg p-4">
-          <div className="text-sm font-semibold text-text">Jira connection</div>
-          <p className="text-xs text-text-muted">
-            On-prem: host + PAT (Bearer). Cloud: host + email + API token (Basic).
-            Saving host/token rebuilds live Jira clients in this process.
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-sm font-semibold text-text">Jira connection</div>
+              <p className="mt-1 text-xs text-text-muted">
+                On-prem: host + PAT (Bearer). Cloud: host + email + API token
+                (Basic). Saving host/token rebuilds live Jira clients in this
+                process. Use <strong>Test</strong> to call{' '}
+                <code className="text-text-secondary">/myself</code> and list
+                projects the token can browse.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="ops-btn ops-btn-secondary shrink-0 px-2.5 py-1 text-xs"
+              disabled={jiraTesting}
+              onClick={() => void onTestJira()}
+            >
+              {jiraTesting ? 'Testing…' : 'Test connection'}
+            </button>
+          </div>
           <label className="block text-sm">
             <span className="text-text-secondary">Jira host</span>
             <input
               className="ops-input mt-1 font-mono text-xs"
               value={settingsDraft.jira_host ?? data.settings.jira_host ?? ''}
               placeholder="https://jira.example.com"
-              onChange={(e) => mark('jira_host', e.target.value)}
+              onChange={(e) => {
+                mark('jira_host', e.target.value)
+                setJiraTestResult(null)
+              }}
               autoComplete="off"
             />
           </label>
@@ -219,7 +285,10 @@ export function SettingsPage({
               className="ops-input mt-1"
               value={settingsDraft.jira_email ?? data.settings.jira_email ?? ''}
               placeholder="you@company.com"
-              onChange={(e) => mark('jira_email', e.target.value)}
+              onChange={(e) => {
+                mark('jira_email', e.target.value)
+                setJiraTestResult(null)
+              }}
               autoComplete="off"
             />
           </label>
@@ -243,10 +312,78 @@ export function SettingsPage({
                   ? '•••••••• (unchanged if empty)'
                   : 'Paste token'
               }
-              onChange={(e) => mark('jira_api_token', e.target.value)}
+              onChange={(e) => {
+                mark('jira_api_token', e.target.value)
+                setJiraTestResult(null)
+              }}
               autoComplete="new-password"
             />
           </label>
+
+          {jiraTestResult && 'loading' in jiraTestResult && jiraTestResult.loading && (
+            <p className="text-xs text-text-muted">Contacting Jira API…</p>
+          )}
+          {jiraTestResult && !('loading' in jiraTestResult) && !jiraTestResult.ok && (
+            <div role="alert" className="ops-alert ops-alert-danger text-xs">
+              {jiraTestResult.error || 'Connection failed'}
+            </div>
+          )}
+          {jiraTestResult && !('loading' in jiraTestResult) && jiraTestResult.ok && (
+            <div className="space-y-2 rounded border border-border bg-bg p-3 text-xs">
+              <div className="font-medium text-success-text">
+                {jiraTestResult.message || 'Connection OK'}
+              </div>
+              <div className="text-text-secondary">
+                Auth:{' '}
+                <span className="font-mono text-text">
+                  {jiraTestResult.auth_mode || '—'}
+                </span>
+                {jiraTestResult.is_cloud ? ' · Cloud' : ' · Server/DC'}
+              </div>
+              {jiraTestResult.user?.display_name && (
+                <div className="text-text-secondary">
+                  User:{' '}
+                  <span className="text-text">
+                    {jiraTestResult.user.display_name}
+                  </span>
+                  {jiraTestResult.user.email
+                    ? ` · ${jiraTestResult.user.email}`
+                    : ''}
+                </div>
+              )}
+              {jiraTestResult.projects_error && (
+                <div className="text-warning-text">
+                  {jiraTestResult.projects_error}
+                </div>
+              )}
+              {(jiraTestResult.projects || []).length > 0 && (
+                <div>
+                  <div className="mb-1 text-text-muted">
+                    Projects this token can browse:
+                  </div>
+                  <ul className="max-h-40 space-y-0.5 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                    {(jiraTestResult.projects || []).map((p) => (
+                      <li key={String(p.id ?? p.key)}>
+                        <span className="text-text">{p.key}</span>
+                        {p.name ? ` — ${p.name}` : ''}
+                        {p.project_type ? (
+                          <span className="ml-1 text-text-muted">
+                            · {p.project_type}
+                          </span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(jiraTestResult.projects || []).length === 0 &&
+                !jiraTestResult.projects_error && (
+                  <div className="text-text-muted">
+                    Auth OK, but no projects returned (permissions may be limited).
+                  </div>
+                )}
+            </div>
+          )}
         </div>
 
         <div className="space-y-3 rounded border border-border bg-bg p-4">

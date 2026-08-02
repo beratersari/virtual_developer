@@ -29,6 +29,21 @@ JIRA Virtual Developer is a Python daemon that:
 - Prefer small, focused modules; avoid shared mutable singletons across concurrent issues (`JobProcessor.git_manager` / `agent_runner` must not be overwritten mid-flight for parallel jobs when you touch concurrency).
 - Do not log secrets (Jira tokens, GitLab PATs). Never commit `.env`.
 
+### HTTP / TLS (mandatory)
+
+- **All outbound HTTP(S) clients must use `verify=False`** (httpx, requests, etc.).
+  Applies to Jira, GitLab, connection probes, MR API fallbacks, and any new
+  external HTTPS call — including Cloud (`*.atlassian.net`) and on-prem.
+- Rationale: on-prem / enterprise TLS interception and self-signed certs are
+  common; fail-open TLS verification is a product requirement until a secure
+  custom-CA path is designed.
+- When constructing `httpx.Client(...)` / `httpx.AsyncClient(...)`, always pass
+  **`verify=False` explicitly** (do not rely on defaults).
+- Do **not** “fix” TLS verification back on without an explicit product decision
+  and a supported CA-bundle configuration path.
+- Prefer silencing urllib3 `InsecureRequestWarning` at the client boundary (as
+  `JiraClient` already does) rather than leaving noisy logs.
+
 ### State & workflows
 
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
@@ -61,9 +76,10 @@ JIRA_API_TOKEN=your-api-token-here
 ```
 
 - REST **API v2** (`/rest/api/2/...`), Agile at `/rest/agile/1.0/...`.
-- Auth header: **`Authorization: Bearer {JIRA_API_TOKEN}`** only.
-- No username/password, no Basic auth, no Cloud-only `accountId` assumptions for core bot auth.
-- TLS verify is currently off for on-prem certs; do not “fix” that without an explicit secure path.
+- Auth header: **`Authorization: Bearer {JIRA_API_TOKEN}`** only for on-prem PAT.
+  Cloud may use Basic (email + API token) when `JIRA_EMAIL` is set.
+- No username/password and no Cloud-only `accountId` assumptions for core bot auth.
+- TLS: **`verify=False` on all Jira HTTP** (see §2 HTTP / TLS).
 
 ### Behaviour expectations
 
@@ -295,7 +311,8 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Keep changes scoped; add tests for behaviour you change.
 - Use conventional `type(scope): summary` for every commit and MR.
 - Keep Jira user-visible on failure/stuck states.
-- Preserve on-prem Bearer auth only.
+- Preserve on-prem Bearer auth only (Cloud may use email+token Basic).
+- Use **`verify=False`** on every outbound HTTP(S) client (Jira, GitLab, probes).
 - For Windows dist changes: run/extend `packaging/windows/e2e-smoke.ps1` expectations (plugin tree size, `rg.exe`, pinned `oh-my-openagent@`, launcher).
 
 **Don’t**
@@ -305,6 +322,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Leave jobs stuck without Jira notification.
 - Use merge titles like “Merged from feature/…”.
 - Reintroduce Jira username/basic auth without an explicit product decision.
+- Enable TLS certificate verification on outbound HTTP without an explicit secure-path decision.
 - Ship Windows packaging that prunes plugin `*.md`, uses junctions for Bun cache, or registers legacy `oh-my-opencode` without the openagent id (see §9).
 
 ---
