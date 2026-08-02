@@ -63,10 +63,14 @@ class ScheduleStore:
         issue_description: str,
         project_key: str = "",
         issue_type: str = "Task",
+        source: str = "new",
     ) -> Dict[str, Any]:
-        """Persist a new schedule after the Jira issue was created successfully."""
+        """Persist a schedule after the Jira issue is known (created or existing)."""
         schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
         now = _now_iso()
+        src = (source or "new").strip().lower()
+        if src not in ("new", "existing"):
+            src = "new"
         rec: Dict[str, Any] = {
             "schedule_id": schedule_id,
             "title": title or "",
@@ -82,6 +86,8 @@ class ScheduleStore:
             "issue_description": issue_description or "",
             "project_key": project_key or "",
             "label": SCHEDULE_LABEL,
+            # new = we created the Jira issue; existing = schedule an issue that already exists
+            "source": src,
             "created_at": now,
             "updated_at": now,
             "dispatched_at": None,

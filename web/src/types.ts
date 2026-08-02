@@ -164,10 +164,30 @@ export type ScheduleItem = {
   issue_key: string
   project_key?: string
   label?: string
+  /** new = created via form; existing = scheduled from issue key */
+  source?: string
   created_at?: string | null
   updated_at?: string | null
   dispatched_at?: string | null
   error_message?: string | null
+}
+
+/** Response from GET /api/schedules/preview */
+export type SchedulePreview = {
+  ok: boolean
+  issue_key: string
+  title: string
+  description?: string
+  jira_status?: string
+  issue_type?: string
+  labels?: string[]
+  template_valid: boolean
+  repository_url: string
+  source_branch: string
+  target_branch: string
+  mode: string
+  message?: string
+  error?: string
 }
 
 export type SchedulesPayload = {
