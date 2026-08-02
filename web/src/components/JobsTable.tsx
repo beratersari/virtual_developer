@@ -90,6 +90,15 @@ export function JobsTable({
                       )}
                     </div>
                   )}
+                  {!j.merge_request_url &&
+                    j.delivery_status === 'no_new_commits' && (
+                      <div
+                        className="mt-0.5 text-[10px] text-text-muted"
+                        title={j.delivery_note || 'No new commits this run'}
+                      >
+                        no new commits
+                      </div>
+                    )}
                 </td>
                 <td>
                   <button

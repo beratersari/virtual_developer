@@ -58,10 +58,12 @@ class GitManager:
     2. Temp folder ``{remote_name}_{jira_issue_id}_{timestamp}``
     3. Clone remote repo
     4. **Require** ``origin/{target}`` exists
-    5. Resolve work branch (params source, or ``feature/{KEY}`` when source is a
-       primary base / equals target)
-    6. Create/reset work branch **from** ``origin/{target}``
+    5. Resolve work branch: params **Source** (unless Source is a primary base
+       / equals target → then ``feature/{KEY}``)
+    6. If ``origin/{source}`` exists → checkout that tip; else create work
+       branch **from** ``origin/{target}``
     7. Agent works on that branch; push + MR **source → target**
+       (commit subjects always use the Jira issue key, not the branch name)
     """
 
     def __init__(
@@ -549,10 +551,17 @@ class GitManager:
     def _resolve_work_branch_name(self, issue_key: Optional[str] = None) -> str:
         """Pick the branch agents commit on (MR source side).
 
-        Always ``feature/{ISSUE_KEY}`` so we never push/MR from a shared base
-        (staging, release/*, long-lived team branches, or primary bases).
-        Params ``Source branch`` is only used as a hint when it already matches
-        ``feature/*`` for this issue; otherwise it is ignored for push identity.
+        Rules (params ``Source branch`` is authoritative when it is a real work
+        branch):
+
+        * Source empty, equals target, or is a primary base (``main`` /
+          ``develop`` / ``release/*`` / …) → ``feature/{ISSUE_KEY}``
+        * Otherwise → use Source as-is (may differ from the Jira key, e.g.
+          ``feature/legacy-name`` or ``fix/hotfix-login``)
+
+        Existence on the remote is checked later in ``ensure_feature_branch``:
+        existing remote source is checked out; missing source is created from
+        target.
         """
         safe_key = re.sub(
             r"[^A-Za-z0-9\-]", "-", issue_key or self.issue_key or "issue"
@@ -561,18 +570,13 @@ class GitManager:
         source = (self.source_branch or "").strip()
         target = (self.target_branch or "").strip()
 
-        if source and source == feature:
-            logger.info(f"Using work branch {feature} (matches params source)")
-            return feature
-
         if source and source != target and not self._is_primary_base(source):
-            # Allow explicit feature/* style only (not staging/shared names)
-            if source.startswith("feature/") or source.startswith("fix/"):
-                logger.info(
-                    f"Using params source as work branch: {source} "
-                    f"(MR will be {source} → {target})"
-                )
-                return source
+            logger.info(
+                f"Using params source as work branch: {source} "
+                f"(MR will be {source} → {target or '(target)'}; "
+                f"issue key for commits is {issue_key or self.issue_key})"
+            )
+            return source
 
         logger.info(
             f"Using isolated work branch {feature} "
@@ -624,8 +628,8 @@ class GitManager:
     def _checkout_work_branch_from_target(self, work_branch: str, target: str) -> str:
         """Create or reset *work_branch* from origin/target tip, then checkout it.
 
-        Always bases the work branch on target so agent changes land on a clean
-        tip of the MR destination. Does not push yet (push happens after work).
+        Used when the source branch does **not** exist on the remote yet.
+        Does not push (push happens after agent work).
         """
         work_branch = (work_branch or "").strip()
         target = (target or "").strip()
@@ -644,8 +648,8 @@ class GitManager:
             )
 
         logger.info(
-            f"Preparing work branch '{work_branch}' from target origin/{target} "
-            f"(MR will be {work_branch} → {target})"
+            f"Source branch '{work_branch}' not on remote — creating from "
+            f"origin/{target} (MR will be {work_branch} → {target})"
         )
         self._delete_local_branch(work_branch)
 
@@ -674,19 +678,105 @@ class GitManager:
         self.source_branch = work_branch
         return work_branch
 
+    def _checkout_existing_remote_branch(self, work_branch: str) -> str:
+        """Checkout an existing remote source tip (do **not** re-base onto target).
+
+        Preserves commits already on the source branch so multi-run / shared
+        source names that differ from the Jira key still deliver work.
+        """
+        work_branch = (work_branch or "").strip()
+        if not work_branch:
+            raise GitSourceBranchError(
+                "*Virtual Developer* could not checkout work branch: empty name."
+            )
+
+        logger.info(
+            f"Source branch '{work_branch}' exists on remote — checking out "
+            f"origin/{work_branch} (not re-creating from target)"
+        )
+        self._with_auth_remote()
+        try:
+            self._run_git(["fetch", "origin", work_branch], check=False, auth=True)
+        finally:
+            self._scrub_remote_credentials()
+
+        start_point = f"origin/{work_branch}"
+        if not self._branch_exists(work_branch, check_remote=True):
+            # ls-remote said yes but no tracking ref — last-chance fetch
+            self._with_auth_remote()
+            try:
+                self._run_git(
+                    ["fetch", "origin", f"+refs/heads/{work_branch}:refs/remotes/origin/{work_branch}"],
+                    check=False,
+                    auth=True,
+                )
+            finally:
+                self._scrub_remote_credentials()
+        if not self._branch_exists(work_branch, check_remote=True):
+            raise GitSourceBranchError(
+                (
+                    f"*Virtual Developer* could not checkout source branch `{work_branch}`: "
+                    f"`origin/{work_branch}` missing after fetch even though ls-remote "
+                    f"reported it.\n\n"
+                    f"*Repository:* `{self.remote_url or '(unknown)'}`"
+                )
+            )
+
+        self._delete_local_branch(work_branch)
+        self._run_git(["checkout", "-B", work_branch, start_point])
+        logger.info(
+            f"Checked out existing work branch '{work_branch}' from '{start_point}'"
+        )
+        self.work_branch = work_branch
+        self.source_branch = work_branch
+        return work_branch
+
+    def _prepare_work_branch(self, work_branch: str, target: str) -> str:
+        """Use remote source if present; otherwise create source from target.
+
+        This is the required operator contract for ``Source branch`` in
+        ``{params}`` when the name differs from the Jira issue key.
+        """
+        work_branch = (work_branch or "").strip()
+        target = (target or "").strip()
+        if not work_branch:
+            raise GitSourceBranchError(
+                "*Virtual Developer* could not prepare a work branch: empty name."
+            )
+        if work_branch == target:
+            raise GitSourceBranchError(
+                (
+                    f"*Virtual Developer* refused to use target `{target}` as the work branch.\n\n"
+                    "Source and target resolved to the same name. Set a dedicated "
+                    "`Source branch` (or a primary base so the agent uses "
+                    "`feature/{KEY}`)."
+                )
+            )
+
+        # 1) Prefer existing remote source tip
+        if self._remote_head_exists(work_branch):
+            return self._checkout_existing_remote_branch(work_branch)
+
+        # 2) After target fetch, origin/{work} may already be present
+        if self._branch_exists(work_branch, check_remote=True):
+            return self._checkout_existing_remote_branch(work_branch)
+
+        # 3) Missing on remote → create from target
+        return self._checkout_work_branch_from_target(work_branch, target)
+
     def _checkout_or_create_branch(self, branch_name: str) -> str:
-        """Ensure target exists, then create/reset *branch_name* from target.
+        """Ensure target exists, then prepare *branch_name* (remote or from target).
 
         Kept for tests/callers that pass an explicit work branch name.
         """
         target = self._require_target_on_remote()
-        return self._checkout_work_branch_from_target(branch_name, target)
+        return self._prepare_work_branch(branch_name, target)
 
     def _checkout_source_branch(self) -> None:
-        """Legacy helper: require target, checkout work branch from it."""
+        """Legacy helper: require target, prepare resolved work branch."""
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(self.issue_key)
-        self._checkout_work_branch_from_target(work, target)
+        self._prepare_work_branch(work, target)
 
     def _create_source_from_target(self, source: str, target: str) -> bool:
         """Create local work branch *source* from *target* tip.
@@ -722,9 +812,15 @@ class GitManager:
             return False
 
     def ensure_feature_branch(self, issue_key: Optional[str] = None) -> Optional[str]:
-        """Validate target, create work branch from target, return work branch name.
+        """Validate target, prepare work branch (remote source or from target).
 
         This is the single entrypoint used by the processor before agent work.
+
+        * Params ``Source branch`` is used when it is not a primary base.
+        * If that branch exists on the remote → checkout it.
+        * If not → create it from the target tip.
+        * Commit messages still use the Jira issue key (prompt kit), not the
+          branch name.
         """
         key = issue_key or self.issue_key
         logger.info(
@@ -733,7 +829,7 @@ class GitManager:
         )
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(key)
-        return self._checkout_work_branch_from_target(work, target)
+        return self._prepare_work_branch(work, target)
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
         """Format a commit message per agent/AGENT_PROMPT.md §policy.commit.
 

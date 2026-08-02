@@ -43,6 +43,14 @@ def _git_agent(processor, key, tmp_path, **kw):
     git.push.return_value = kw.get("push_ok", True)
     git.get_last_commit_subject.return_value = kw.get("subject", "feat: x")
     git.get_last_commit_message.return_value = "body"
+    _sha_calls = {"n": 0}
+
+    def _sha(*_a, **_k):
+        _sha_calls["n"] += 1
+        return "baseline000001" if _sha_calls["n"] == 1 else "delivered000002"
+
+    git.get_last_commit_sha.side_effect = _sha
+    git.build_commit_url.return_value = "http://git/commit/delivered000002"
     git.create_merge_request.return_value = kw.get("mr", "http://mr/1")
     git.cleanup.return_value = True
     runner = MagicMock()
@@ -443,8 +451,9 @@ def test_dashboard_start_cancel_503_and_ws(state_manager):
     client = TestClient(app)
     r = client.post("/api/tasks/X-1/cancel")
     assert r.status_code == 503
+    # Start from dashboard is intentionally disabled (Jira Mode: build + To Do)
     r = client.post("/api/tasks/X-1/start")
-    assert r.status_code == 503
+    assert r.status_code == 410
 
     proc = MagicMock()
     proc.list_live_processing_keys.return_value = []

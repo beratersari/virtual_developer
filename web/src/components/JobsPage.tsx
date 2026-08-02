@@ -3,9 +3,8 @@ import {
   jobMatchesFilter,
   type JobStatusFilter,
 } from '../util/status'
-import type { JobItem, JobsPayload, TaskItem } from '../types'
+import type { JobItem, JobsPayload } from '../types'
 import { JobsTable } from './JobsTable'
-import { StatusBadge } from './StatusBadge'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -27,7 +26,6 @@ export function JobsPage({
   density,
   setDensity,
   setJobsPage,
-  problemTasks,
   connected,
   onOpenJob,
   onOpenIssue,
@@ -42,7 +40,6 @@ export function JobsPage({
   density: 'comfortable' | 'compact'
   setDensity: (v: 'comfortable' | 'compact') => void
   setJobsPage: (fn: (p: number) => number) => void
-  problemTasks: TaskItem[]
   connected: boolean
   onOpenJob: (issueKey: string, jobId: string) => void
   onOpenIssue: (issueKey: string) => void
@@ -65,40 +62,6 @@ export function JobsPage({
 
   return (
     <section className="space-y-6">
-      {problemTasks.length > 0 && (
-        <div className="ops-alert ops-alert-danger">
-          <h3 className="text-sm font-semibold text-danger-text">
-            Attention ({problemTasks.length})
-          </h3>
-          <p className="mb-2 text-xs text-danger-text/80">
-            Issue-level ERROR / in-flight / pending from the state store.
-          </p>
-          <ul className="space-y-1 text-sm">
-            {problemTasks.slice(0, 12).map((t) => (
-              <li key={t.issue_key} className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="font-mono text-accent-text hover:underline"
-                  title="Open issue / task page"
-                  onClick={() => onOpenIssue(t.issue_key)}
-                >
-                  {t.issue_key}
-                </button>
-                <StatusBadge status={t.status} size="sm" />
-                {t.live && (
-                  <span className="text-[10px] uppercase text-warning-text">live</span>
-                )}
-                {t.error_message && (
-                  <span className="truncate text-xs text-text-muted">
-                    {t.error_message.slice(0, 120)}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-text">Jobs</h2>

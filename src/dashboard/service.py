@@ -500,6 +500,8 @@ def build_jobs(
                 commit_sha=j.get("commit_sha") or None,
                 commit_subject=j.get("commit_subject") or None,
                 commit_url=j.get("commit_url") or None,
+                delivery_status=j.get("delivery_status") or None,
+                delivery_note=j.get("delivery_note") or None,
             )
         )
     return JobsResponse(
@@ -682,6 +684,17 @@ def delete_job_record(
                     deleted_paths.append(gone)
             except Exception:
                 pass
+        # Durable per-job system log (daemon lines tagged with job_id)
+        try:
+            from src.dashboard.issue_logs import job_system_log_path
+
+            slog = job_system_log_path(jid)
+            if slog is not None and slog.is_file():
+                gone = _safe_delete_agent_artifact(str(slog))
+                if gone:
+                    deleted_paths.append(gone)
+        except Exception:
+            pass
 
     # Scrub job_id from issue metadata history (does not change issue status)
     issue_key = (job.get("issue_key") or "").strip().upper()

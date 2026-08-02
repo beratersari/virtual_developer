@@ -207,7 +207,12 @@ class Settings(BaseSettings):
         """Oracle consultation rules (kit §role.oracle)."""
         return self._kit_section("role.oracle")
 
-    def prompt_commit_policy(self, issue_key: str) -> str:
+    def prompt_commit_policy(
+        self,
+        issue_key: str,
+        *,
+        work_branch: Optional[str] = None,
+    ) -> str:
         """Issue-keyed git policy from kit §policy.commit."""
         from src.orchestrator.prompt_kit import get_section
 
@@ -215,6 +220,7 @@ class Settings(BaseSettings):
             "policy.commit",
             kit_path=self.prompt_kit_file,
             issue_key=issue_key,
+            work_branch=work_branch,
         )
 
     @property

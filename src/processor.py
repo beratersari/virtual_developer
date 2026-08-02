@@ -192,7 +192,11 @@ class JobProcessor:
         Config errors (missing Mode / {params}) never start a workflow, so they
         used to leave no Jobs-tab entry while Jira still got an error comment.
         """
+        from src.log_context import set_issue_key, set_job_id
+
+        set_issue_key(issue_key)
         if self._active_jobs.get(issue_key):
+            set_job_id(self._active_jobs[issue_key])
             return
         st = self.state_manager.get_state(issue_key)
         if st is None:
@@ -208,6 +212,7 @@ class JobProcessor:
                 "plan_ready",
             }:
                 self._active_jobs[issue_key] = cur
+                set_job_id(cur)
                 return
         wf = (st.metadata or {}).get("workflow_type") or "unknown"
         self._start_job_record(
@@ -756,6 +761,13 @@ class JobProcessor:
         )
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id
+        try:
+            from src.log_context import set_issue_key, set_job_id
+
+            set_issue_key(state.issue_key)
+            set_job_id(job_id)
+        except Exception:
+            pass
 
         st = self.state_manager.get_state(state.issue_key)
         meta = dict((st.metadata if st else None) or {})
@@ -1127,7 +1139,17 @@ class JobProcessor:
         """
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
-        
+
+        from src.log_context import clear_log_context, set_issue_key, set_job_id
+
+        # Tag all logs for this event with the issue (job_id set when a job starts)
+        if issue_key and issue_key != "unknown":
+            set_issue_key(issue_key)
+            # Resume active job tag if we already hold one (retry / nested)
+            active = self._active_jobs.get(issue_key)
+            if active:
+                set_job_id(active)
+
         logger.info(f"Processing event: {event_type} for issue: {issue_key}")
         logger.debug(f"Event data keys: {list(event.keys())}")
 
@@ -1159,6 +1181,8 @@ class JobProcessor:
                     suggestion="Check daemon logs and re-queue the issue if needed.",
                 )
                 self._release_context(issue_key, success=False)
+        finally:
+            clear_log_context()
     
     async def _handle_issue_created(self, event: Dict[str, Any]):
         issue = event.get("issue", {})
@@ -1942,15 +1966,33 @@ class JobProcessor:
             return
         # Materialize durable plan into the fresh clone for Atlas
         in_workspace = self._materialize_plan_into_workspace(state.issue_key)
+        plan_path_for_agent = (
+            str(in_workspace) if in_workspace else plan_for_prompt
+        )
         if in_workspace:
-            task.prompt = PromptBuilder.build_atlas_prompt(
-                issue_key=state.issue_key,
-                plan_path=str(in_workspace),
-            )
             self.state_manager.update_state(
                 state.issue_key,
                 plan_path=str(in_workspace),
             )
+        # Rebuild prompt after workspace prep so work_branch (may differ from
+        # issue key) and commit policy use the real checked-out source.
+        work_branch = (getattr(git, "work_branch", None) or "").strip() or None
+        task.prompt = PromptBuilder.build_atlas_prompt(
+            issue_key=state.issue_key,
+            plan_path=plan_path_for_agent,
+            work_branch=work_branch,
+        )
+        if work_branch:
+            try:
+                self.state_manager.update_state(
+                    state.issue_key,
+                    metadata={"feature_branch": work_branch},
+                )
+            except Exception:
+                pass
+        # Snapshot HEAD before the agent runs so re-queues on an existing
+        # source branch cannot claim older commits / an old MR as this job's delivery.
+        self._snapshot_delivery_baseline(state.issue_key, git)
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
 
@@ -2028,10 +2070,53 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result — B4: exit 0 alone is not enough
+        # Check result — B4: exit 0 alone is not enough for a *new* delivery
         if result["returncode"] == 0:
             delivery_err = self._assert_build_delivery(state.issue_key)
             if delivery_err:
+                # Soft success: agent OK but no new commits this run (e.g. re-queue
+                # on an already-delivered branch). Complete with note, do not ERROR
+                # and do not attribute prior MR/commits to this job.
+                if self._is_noop_delivery_message(delivery_err):
+                    logger.info(
+                        f"{state.issue_key}: completing without new delivery — "
+                        f"{delivery_err[:160]}"
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        execution_duration_seconds=duration,
+                        metadata={
+                            "delivery_status": "no_new_commits",
+                            "delivery_note": delivery_err[:2000],
+                        },
+                    )
+                    jid = self._active_jobs.get(state.issue_key)
+                    if jid:
+                        try:
+                            self.job_store.update_job(
+                                jid,
+                                delivery_status="no_new_commits",
+                                delivery_note=delivery_err[:2000],
+                                # Explicitly clear any stale MR/commit attribution
+                                merge_request_url=None,
+                                commit_sha=None,
+                                commit_subject=None,
+                                commit_url=None,
+                            )
+                        except Exception:
+                            pass
+                    await self._complete_work(
+                        self.state_manager.get_state(state.issue_key),
+                        execution_summary=(
+                            "Agent finished successfully with **no new git delivery** "
+                            "for this run.\n\n"
+                            f"{delivery_err}\n\n"
+                            "Prior branch commits / an existing merge request were "
+                            "*not* re-attributed to this job."
+                        ),
+                    )
+                    return
+
                 self._fail_issue(
                     state.issue_key,
                     delivery_err,
@@ -2056,6 +2141,10 @@ class JobProcessor:
             self.state_manager.update_state(
                 state.issue_key,
                 execution_duration_seconds=duration,
+                metadata={
+                    "delivery_status": "delivered",
+                    "delivery_note": None,
+                },
             )
 
             await self._complete_work(
@@ -2122,10 +2211,93 @@ class JobProcessor:
         self._release_context(state.issue_key, success=True)
         logger.info(f"Work completed for {state.issue_key}")
 
-    def _assert_build_delivery(self, issue_key: str) -> Optional[str]:
-        """B4/B5: require commits on prepared work_branch before push/complete.
+    def _snapshot_delivery_baseline(self, issue_key: str, git: Any) -> Optional[str]:
+        """Record HEAD SHA at job start (before agent) for delivery attribution.
 
-        Returns an error message, or None when delivery looks valid.
+        Stored on the git manager, active job JSON, and issue metadata so a
+        re-run on an existing source branch cannot attribute prior commits/MR
+        to the new job.
+        """
+        sha: Optional[str] = None
+        try:
+            if hasattr(git, "get_last_commit_sha"):
+                raw = git.get_last_commit_sha()
+                if raw is not None:
+                    sha = str(raw).strip() or None
+        except Exception:
+            sha = None
+        try:
+            git.delivery_baseline_sha = sha
+        except Exception:
+            pass
+        jid = self._active_jobs.get(issue_key)
+        if jid:
+            try:
+                self.job_store.update_job(jid, delivery_baseline_sha=sha)
+            except Exception:
+                pass
+        try:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={"delivery_baseline_sha": sha},
+            )
+        except Exception:
+            pass
+        if sha:
+            logger.info(
+                f"{issue_key} delivery baseline HEAD={sha[:12]} "
+                f"(job will only count newer commits)"
+            )
+        else:
+            logger.warning(f"{issue_key} could not snapshot delivery baseline SHA")
+        return sha
+
+    def _resolve_delivery_baseline(self, issue_key: str, git: Any) -> Optional[str]:
+        """Best-effort baseline SHA from git object, job, or issue metadata."""
+        for candidate in (
+            getattr(git, "delivery_baseline_sha", None),
+            None,
+        ):
+            if candidate:
+                return str(candidate).strip() or None
+        jid = self._active_jobs.get(issue_key)
+        if jid:
+            try:
+                job = self.job_store.get_job(jid) or {}
+                b = job.get("delivery_baseline_sha")
+                if b:
+                    return str(b).strip() or None
+            except Exception:
+                pass
+        try:
+            st = self.state_manager.get_state(issue_key)
+            b = (st.metadata or {}).get("delivery_baseline_sha") if st else None
+            if b:
+                return str(b).strip() or None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _is_noop_delivery_message(message: str) -> bool:
+        """True when delivery failed only because HEAD did not move this job."""
+        text = (message or "").lower()
+        return (
+            "no new commits" in text
+            and ("unchanged since job start" in text or "for this job" in text)
+        )
+
+    def _assert_build_delivery(self, issue_key: str) -> Optional[str]:
+        """Require *new* commits on the work branch for this job before push/complete.
+
+        Returns a message if delivery is not ready, or None when valid.
+
+        ``commits_ahead_of_target`` alone is not enough: a re-queue on an
+        existing source branch may already be ahead from a *previous* job.
+        We require HEAD to differ from the job-start baseline snapshot.
+
+        Callers treat the “no new commits this job” message as a *soft*
+        completion (status completed + note), not an ERROR.
         """
         git = self._git_for(issue_key)
         if not git:
@@ -2139,6 +2311,32 @@ class JobProcessor:
                 f"Agent left HEAD on `{current}` instead of work branch `{work}`. "
                 "Refusing to push a drifted branch."
             )
+
+        head: Optional[str] = None
+        try:
+            if hasattr(git, "get_last_commit_sha"):
+                raw = git.get_last_commit_sha()
+                if raw is not None:
+                    head = str(raw).strip() or None
+        except Exception:
+            head = None
+        if not head:
+            return (
+                f"Could not read HEAD on `{work}` after the agent run; "
+                "refusing to treat the run as successful."
+            )
+
+        baseline = self._resolve_delivery_baseline(issue_key, git)
+        if baseline and head == baseline:
+            short = head[:12]
+            return (
+                f"No new commits on `{work}` for this job "
+                f"(HEAD still `{short}`, unchanged since job start). "
+                "Agent exit code was 0 but nothing was delivered for this run. "
+                "Prior branch commits / an existing merge request are not "
+                "attributed to this job."
+            )
+
         ahead = 0
         if hasattr(git, "commits_ahead_of_target"):
             try:
@@ -2315,6 +2513,15 @@ class JobProcessor:
             body=mr_body,
             target_branch=target_branch,
         )
+
+        # Only attribute MR/commit to *this* job when HEAD moved past baseline
+        baseline = self._resolve_delivery_baseline(state.issue_key, git)
+        if baseline and commit_sha and commit_sha == baseline:
+            logger.warning(
+                f"{state.issue_key}: refusing to record git delivery — "
+                f"commit {commit_sha[:12]} is the job-start baseline (no new work)"
+            )
+            return False
 
         # Persist delivery on this job + issue metadata history (multi-run safe)
         self._record_git_delivery(
@@ -2641,10 +2848,18 @@ class JobProcessor:
 
             # Free-form @mention: execution kit (direct workflow removed)
             summary = (state.issue_summary if state else "") or ""
+            git = self._git_for(issue_key)
+            work_branch = (
+                (getattr(git, "work_branch", None) or "").strip() if git else ""
+            ) or None
             prompt = PromptBuilder.build_atlas_prompt(
                 issue_key=issue_key,
                 plan_path="",
-                previous_learnings=[f"Free-form request: {request}", f"Summary: {summary}"],
+                previous_learnings=[
+                    f"Free-form request: {request}",
+                    f"Summary: {summary}",
+                ],
+                work_branch=work_branch,
             )
 
             task = AgentTask(

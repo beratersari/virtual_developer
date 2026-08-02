@@ -4,21 +4,22 @@ import {
   findPromptForJobPath,
   pathBasename,
 } from '../util/paths'
-import type { JobItem, TextArtifact } from '../types'
+import type { JobItem, SystemLogLine, TextArtifact } from '../types'
 import { PromptBlock } from './PromptBlock'
 import { StatusBadge } from './StatusBadge'
 
-type DetailTab = 'overview' | 'prompt' | 'opencode'
+type DetailTab = 'overview' | 'prompt' | 'opencode' | 'logs'
 
 /**
  * Job (single run) page — only fields and artifacts for this job.
- * Issue-level state, other runs, system logs live on TaskDetailPage.
+ * Issue-level state and other runs live on TaskDetailPage.
  */
 const LIVE_STATUSES = new Set(['running', 'planning', 'executing', 'pending'])
 
 export function JobDetail({
   job,
   artifacts,
+  systemLogs = [],
   loading,
   error,
   stale,
@@ -37,6 +38,8 @@ export function JobDetail({
     prompts: TextArtifact[]
     sessionLogs: TextArtifact[]
   }
+  /** Daemon log lines tagged with this job_id (in-memory since process start). */
+  systemLogs?: SystemLogLine[]
   loading: boolean
   error: string | null
   stale: boolean
@@ -167,6 +170,7 @@ export function JobDetail({
             ['overview', 'Overview'],
             ['prompt', 'Prompt'],
             ['opencode', 'OpenCode output'],
+            ['logs', 'System logs'],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -180,6 +184,11 @@ export function JobDetail({
             }`}
           >
             {label}
+            {id === 'logs' && systemLogs.length > 0 ? (
+              <span className="ml-1.5 text-[10px] text-text-muted">
+                ({systemLogs.length})
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -217,11 +226,29 @@ export function JobDetail({
               )}
             </div>
 
+            {/* Soft delivery note (agent OK, no new commits this run) */}
+            {job.delivery_status === 'no_new_commits' && (
+              <div className="border-t border-border pt-4">
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                  Git delivery
+                </h3>
+                <div className="ops-alert ops-alert-warning">
+                  <p className="text-sm font-medium text-warning-text">
+                    Completed with no new commits
+                  </p>
+                  <p className="mt-1 text-xs text-text-secondary">
+                    {job.delivery_note ||
+                      'Agent finished successfully; HEAD did not change for this job. Prior branch commits / an existing MR were not attributed to this run.'}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Git delivery for this run */}
             {(job.merge_request_url ||
               job.commit_url ||
               job.commit_sha ||
-              job.feature_branch) && (
+              (job.feature_branch && job.delivery_status !== 'no_new_commits')) && (
               <div className="border-t border-border pt-4">
                 <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">
                   Git delivery
@@ -427,6 +454,38 @@ export function JobDetail({
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {job && detailTab === 'logs' && (
+          <div className="space-y-2 text-sm">
+            <p className="text-xs text-text-muted">
+              Daemon log lines for{' '}
+              <span className="font-mono text-text-secondary">{job.job_id}</span>
+              . Stored on disk under{' '}
+              <span className="font-mono text-text-secondary">
+                .jira-agent/jobs/{job.job_id}.system.log
+              </span>{' '}
+              (survives daemon restarts). Lines include{' '}
+              <span className="font-mono text-text-secondary">[job_id=…]</span>.
+            </p>
+            {systemLogs.length === 0 && (
+              <p className="text-text-muted">
+                No system log lines for this job. Only runs after durable logging
+                was enabled (or after a re-queue) will appear here.
+              </p>
+            )}
+            <div className="max-h-[70vh] overflow-auto rounded border border-border bg-bg p-4 font-mono text-[11px] leading-relaxed text-text-secondary">
+              {systemLogs.map((line, i) => (
+                <div
+                  key={`${line.timestamp}-${i}`}
+                  className="border-b border-border/50 py-0.5"
+                >
+                  <span className="text-text-muted">{line.timestamp} </span>
+                  {line.message}
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

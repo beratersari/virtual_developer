@@ -43,10 +43,15 @@ export async function fetchTaskDetail(issueKey: string): Promise<TaskDetail> {
   return res.json()
 }
 
-/** Single job from store + optional issue payload. Prefer issue_key from list for legacy jobs. */
+/** Single job from store + optional issue payload + job-scoped system logs. */
 export async function fetchJobById(
   jobId: string,
-): Promise<{ job: Record<string, unknown>; issue: TaskDetail | null; server_time?: string }> {
+): Promise<{
+  job: Record<string, unknown>
+  issue: TaskDetail | null
+  system_logs?: import('./types').SystemLogLine[]
+  server_time?: string
+}> {
   const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`)
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))

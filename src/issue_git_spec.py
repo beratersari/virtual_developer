@@ -11,12 +11,15 @@ description). Example::
 
 GitLab MR semantics (source → target):
 
-* **Target branch** — must already exist on the remote. Work is based on this
-  tip; the merge request merges **into** this branch.
-* **Source branch** — the work branch (MR *source*). If it does not exist on
-  the remote, it is created **from target**. When source equals target, or
-  source is a primary base name (``main`` / ``master`` / ``develop`` / …),
-  the agent uses ``feature/{ISSUE_KEY}`` as the work branch instead.
+* **Target branch** — must already exist on the remote. The merge request
+  merges **into** this branch.
+* **Source branch** — the work branch (MR *source*). May differ from the Jira
+  issue key. If it **exists on the remote**, it is checked out and used. If
+  it does **not** exist, it is created **from target**. When source equals
+  target, or source is a primary base (``main`` / ``master`` / ``develop`` /
+  …), the agent uses ``feature/{ISSUE_KEY}`` as the work branch instead.
+* Commit subjects always use the **Jira issue key**, not the source branch
+  name.
 
 Only text inside the first ``{params}`` … ``{params}`` pair is scanned
 (so free-form acceptance criteria cannot confuse the parser).

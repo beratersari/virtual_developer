@@ -250,12 +250,12 @@ def test_checkout_work_branch_from_target(gm):
 
 
 def test_ensure_feature_branch_from_target(gm):
-    """ensure_feature_branch: require target, resolve work name, create from target."""
+    """ensure_feature_branch: require target, resolve work name, prepare branch."""
     gm.source_branch = "develop"
     gm.target_branch = "develop"
     with patch.object(gm, "_require_target_on_remote", return_value="develop"):
         with patch.object(
-            gm, "_checkout_work_branch_from_target", return_value="feature/GM-1"
+            gm, "_prepare_work_branch", return_value="feature/GM-1"
         ) as work:
             assert gm.ensure_feature_branch("GM-1") == "feature/GM-1"
             work.assert_called_once_with("feature/GM-1", "develop")
@@ -266,7 +266,7 @@ def test_ensure_feature_branch_custom_source(gm):
     gm.target_branch = "main"
     with patch.object(gm, "_require_target_on_remote", return_value="main"):
         with patch.object(
-            gm, "_checkout_work_branch_from_target", return_value="feature/custom"
+            gm, "_prepare_work_branch", return_value="feature/custom"
         ) as work:
             assert gm.ensure_feature_branch("GM-1") == "feature/custom"
             work.assert_called_once_with("feature/custom", "main")

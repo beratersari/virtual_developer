@@ -166,9 +166,14 @@ def create_dashboard_app(
                     processor=app.state.processor,
                     state_manager=app.state.state_manager,
                 ).model_dump()["jobs"]
+        # Daemon log lines for this job: durable file + live ring (survives restart)
+        from src.dashboard.issue_logs import issue_log_ring
+
+        system_logs = issue_log_ring.for_job(jid, limit=2000)
         return {
             "job": job,
             "issue": detail,
+            "system_logs": system_logs,
             "server_time": build_meta().server_time,
         }
 

@@ -82,7 +82,7 @@ def test_update_state_if_missing_and_delete_errors(tmp_path):
 
 
 def test_issue_log_ring_filter_and_overflow():
-    ring = IssueLogRing(maxlen=3)
+    ring = IssueLogRing(maxlen=3, persist=False)
     ring.append("KAN-1 hello")
     ring.append("other")
     ring.append("KAN-1 world")
@@ -91,6 +91,55 @@ def test_issue_log_ring_filter_and_overflow():
     lines = ring.for_issue("KAN-1")
     assert lines
     assert all("KAN-1" in (x.get("message") or "") for x in lines)
+
+
+def test_issue_log_ring_for_job():
+    ring = IssueLogRing(maxlen=50, persist=False)
+    ring.append("untagged", issue_key="KAN-1")
+    ring.append(
+        "[job_id=job_aaa] started planning",
+        job_id="job_aaa",
+        issue_key="KAN-1",
+    )
+    ring.append(
+        "[job_id=job_bbb] other run",
+        job_id="job_bbb",
+        issue_key="KAN-1",
+    )
+    ring.append("still job_aaa work", job_id="job_aaa", issue_key="KAN-1")
+    assert ring.for_job("") == []
+    a = ring.for_job("job_aaa")
+    assert len(a) == 2
+    assert all(x.get("job_id") == "job_aaa" for x in a)
+    b = ring.for_job("job_bbb")
+    assert len(b) == 1
+    assert "job_bbb" in (b[0].get("message") or "")
+
+
+def test_issue_log_ring_persists_job_file(tmp_path):
+    from src.dashboard.issue_logs import IssueLogRing, job_system_log_path
+
+    ring = IssueLogRing(maxlen=50, jobs_dir=tmp_path, persist=True)
+    ring.append(
+        "2026-08-02 15:00:00  INFO      [p.py:1]  f  [job_id=job_persist1] hello",
+        job_id="job_persist1",
+        issue_key="KAN-1",
+    )
+    ring.append(
+        "2026-08-02 15:00:01  INFO      [p.py:2]  f  [job_id=job_persist1] world",
+        job_id="job_persist1",
+    )
+    path = job_system_log_path("job_persist1", jobs_dir=tmp_path)
+    assert path is not None and path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "hello" in text and "world" in text
+
+    # Fresh ring (simulates daemon restart) still loads from disk
+    ring2 = IssueLogRing(maxlen=10, jobs_dir=tmp_path, persist=True)
+    rows = ring2.for_job("job_persist1")
+    assert len(rows) >= 2
+    assert all(r.get("job_id") == "job_persist1" for r in rows)
+    assert any("hello" in (r.get("message") or "") for r in rows)
 
 
 def test_poll_snapshot_listener_and_idle():

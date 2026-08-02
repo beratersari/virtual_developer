@@ -45,6 +45,14 @@ def _mock_git_and_agent(processor, tmp_path, returncode=0, stdout="done", stderr
     git.push.return_value = True
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
+    _sha_calls = {"n": 0}
+
+    def _sha(*_a, **_k):
+        _sha_calls["n"] += 1
+        return "baseline000001" if _sha_calls["n"] == 1 else "delivered000002"
+
+    git.get_last_commit_sha.side_effect = _sha
+    git.build_commit_url.return_value = "http://git/commit/delivered000002"
     git.create_merge_request.return_value = "http://mr/1"
     git.get_mr_url.return_value = "http://mr/1"
     git.add_mr_comment.return_value = True
@@ -754,6 +762,8 @@ def test_assert_build_delivery_failures(processor, tmp_path):
 
     git = MagicMock()
     git.work_branch = ""
+    git.delivery_baseline_sha = None
+    git.get_last_commit_sha.return_value = "aaa111"
     processor._contexts["BD-1"] = {"git": git, "runner": None}
     assert "Work branch" in processor._assert_build_delivery("BD-1")
 
@@ -765,6 +775,8 @@ def test_assert_build_delivery_failures(processor, tmp_path):
 
     git.ensure_on_work_branch.return_value = True
     git.commits_ahead_of_target.return_value = 0
+    git.get_last_commit_sha.return_value = "aaa111"
+    git.delivery_baseline_sha = None
     err = processor._assert_build_delivery("BD-1")
     assert "No commits" in err
 
@@ -773,12 +785,37 @@ def test_assert_build_delivery_failures(processor, tmp_path):
     assert "No commits" in err
 
     git.commits_ahead_of_target = MagicMock(return_value=2)
+    git.get_last_commit_sha.return_value = "bbb222"
+    git.delivery_baseline_sha = "aaa111"  # new commits since start
     assert processor._assert_build_delivery("BD-1") is None
 
-    # no commits_ahead attribute
+    # Re-queue on existing source: ahead of target but HEAD unchanged → fail
+    git.delivery_baseline_sha = "bbb222"
+    git.get_last_commit_sha.return_value = "bbb222"
+    git.commits_ahead_of_target.return_value = 5
+    err = processor._assert_build_delivery("BD-1")
+    assert err is not None
+    assert "No new commits" in err
+    assert "this job" in err.lower() or "job start" in err.lower()
+
+    # no commits_ahead attribute, but HEAD moved → still require ahead count
+    git.delivery_baseline_sha = "aaa111"
+    git.get_last_commit_sha.return_value = "ccc333"
     del git.commits_ahead_of_target
     err = processor._assert_build_delivery("BD-1")
     assert err is not None
+
+
+def test_assert_build_delivery_requires_head_sha(processor):
+    git = MagicMock()
+    git.work_branch = "feature/X"
+    git.ensure_on_work_branch.return_value = True
+    git.get_last_commit_sha.return_value = None
+    git.delivery_baseline_sha = None
+    processor._contexts["BD-2"] = {"git": git, "runner": None}
+    err = processor._assert_build_delivery("BD-2")
+    assert err is not None
+    assert "HEAD" in err or "read" in err.lower()
 
 
 def test_persist_and_materialize_plan(processor, tmp_path):
