@@ -169,6 +169,63 @@ def test_task_detail_without_local_state(tmp_path):
     assert detail["can_cancel"] is False
 
 
+def test_git_deliveries_aggregate_from_jobs_and_meta(tmp_path, monkeypatch):
+    """Task detail exposes all commits/MRs across re-triggered runs."""
+    from src.dashboard.service import _collect_git_deliveries, build_jobs
+    from src.state.job_store import JobStore
+    from src.state.manager import JiraStateManager
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    j1 = jobs.create_job(issue_key="GIT-1", summary="run1", workflow_type="execution")
+    jobs.update_job(
+        j1["job_id"],
+        status="completed",
+        feature_branch="feature/GIT-1",
+        merge_request_url="https://gitlab.example.com/g/r/-/merge_requests/1",
+        commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        commit_subject="feat(GIT-1): first",
+        commit_url="https://gitlab.example.com/g/r/-/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    j2 = jobs.create_job(issue_key="GIT-1", summary="run2", workflow_type="execution")
+    jobs.update_job(
+        j2["job_id"],
+        status="completed",
+        feature_branch="feature/GIT-1",
+        merge_request_url="https://gitlab.example.com/g/r/-/merge_requests/2",
+        commit_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        commit_subject="feat(GIT-1): second",
+        commit_url="https://gitlab.example.com/g/r/-/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("GIT-1", "s", description="d", triggered_by="t")
+    sm.update_state(
+        "GIT-1",
+        status=TaskStatus.COMPLETED,
+        metadata={
+            "merge_request_url": "https://gitlab.example.com/g/r/-/merge_requests/2",
+            "feature_branch": "feature/GIT-1",
+        },
+    )
+
+    deliveries = _collect_git_deliveries(
+        issue_key="GIT-1",
+        meta=sm.get_state("GIT-1").metadata or {},
+        store=jobs,
+    )
+    assert len(deliveries) >= 2
+    mrs = {d["merge_request_url"] for d in deliveries if d.get("merge_request_url")}
+    assert "https://gitlab.example.com/g/r/-/merge_requests/1" in mrs
+    assert "https://gitlab.example.com/g/r/-/merge_requests/2" in mrs
+
+    listed = build_jobs(issue_key="GIT-1", page=1, page_size=10, store=jobs, state_manager=sm)
+    by_id = {j.job_id: j for j in listed.jobs}
+    assert by_id[j1["job_id"]].merge_request_url.endswith("/merge_requests/1")
+    assert by_id[j2["job_id"]].commit_sha.startswith("bbbb")
+
+
 def test_build_jobs_pagination(tmp_path):
     from src.dashboard.service import build_jobs
     from src.state.job_store import JobStore

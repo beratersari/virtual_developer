@@ -1,7 +1,42 @@
 import type { ReactNode } from 'react'
-import type { TaskDetail } from '../types'
+import type { GitDelivery, JobItem, TaskDetail } from '../types'
 import { JobsTable } from './JobsTable'
 import { StatusBadge } from './StatusBadge'
+
+/** Prefer API git_deliveries; fall back to scanning jobs for older payloads. */
+function collectDeliveries(detail: TaskDetail): GitDelivery[] {
+  if (detail.git_deliveries && detail.git_deliveries.length > 0) {
+    return detail.git_deliveries
+  }
+  const fromJobs: GitDelivery[] = (detail.jobs ?? [])
+    .filter(
+      (j: JobItem) =>
+        j.merge_request_url || j.commit_sha || j.commit_url || j.feature_branch,
+    )
+    .map((j) => ({
+      job_id: j.job_id,
+      feature_branch: j.feature_branch,
+      merge_request_url: j.merge_request_url,
+      commit_sha: j.commit_sha,
+      commit_subject: j.commit_subject,
+      commit_url: j.commit_url,
+      created_at: j.completed_at ?? j.started_at,
+      status: j.status,
+    }))
+  if (fromJobs.length > 0) return fromJobs
+  if (
+    detail.merge_request_url ||
+    detail.feature_branch
+  ) {
+    return [
+      {
+        feature_branch: detail.feature_branch,
+        merge_request_url: detail.merge_request_url,
+      },
+    ]
+  }
+  return []
+}
 
 type TaskTab = 'overview' | 'logs'
 
@@ -186,6 +221,105 @@ export function TaskDetailPage({
                 </pre>
               </div>
             )}
+
+            {(() => {
+              const deliveries = collectDeliveries(detail)
+              if (deliveries.length === 0) return null
+              return (
+                <div className="border-t border-border pt-4">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">
+                    Commits &amp; merge requests ({deliveries.length})
+                  </div>
+                  <p className="mb-3 text-xs text-text-muted">
+                    Every push/MR from each run of this issue (re-triggers keep
+                    prior links).
+                  </p>
+                  <ul className="space-y-3">
+                    {deliveries.map((d, i) => (
+                      <li
+                        key={`${d.job_id || 'd'}-${d.merge_request_url || ''}-${d.commit_sha || ''}-${i}`}
+                        className="rounded border border-border bg-bg p-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-muted">
+                          {d.job_id && (
+                            <button
+                              type="button"
+                              className="font-mono text-accent-text hover:underline"
+                              onClick={() => onOpenJob(detail.issue_key, d.job_id!)}
+                              title="Open job"
+                            >
+                              {d.job_id}
+                            </button>
+                          )}
+                          {d.status && <StatusBadge status={d.status} size="sm" />}
+                          {d.created_at && (
+                            <span className="font-mono">{d.created_at}</span>
+                          )}
+                          {d.feature_branch && (
+                            <span className="font-mono text-text-secondary">
+                              {d.feature_branch}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-2 space-y-1.5 text-sm">
+                          {(d.commit_url || d.commit_sha) && (
+                            <div>
+                              <span className="text-[10px] uppercase text-text-muted">
+                                Commit{' '}
+                              </span>
+                              {d.commit_url ? (
+                                <a
+                                  href={d.commit_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="break-all font-mono text-accent-text hover:underline"
+                                >
+                                  {d.commit_sha
+                                    ? d.commit_sha.slice(0, 12)
+                                    : d.commit_url}
+                                </a>
+                              ) : (
+                                <span className="font-mono text-text-secondary">
+                                  {d.commit_sha}
+                                </span>
+                              )}
+                              {d.commit_subject && (
+                                <span className="ml-2 text-text-secondary">
+                                  {d.commit_subject}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {d.merge_request_url && (
+                            <div>
+                              <span className="text-[10px] uppercase text-text-muted">
+                                MR{' '}
+                              </span>
+                              <a
+                                href={d.merge_request_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="break-all text-accent-text hover:underline"
+                              >
+                                {d.merge_request_url}
+                              </a>
+                            </div>
+                          )}
+                          {!d.merge_request_url &&
+                            !d.commit_url &&
+                            !d.commit_sha &&
+                            d.feature_branch && (
+                              <div className="text-text-muted">
+                                Branch only (no commit/MR URL recorded)
+                              </div>
+                            )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )
+            })()}
 
             {(detail.task_ids?.length ?? 0) > 0 && (
               <div>

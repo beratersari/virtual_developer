@@ -39,6 +39,8 @@ def _bind_git_agent(processor, issue_key: str, tmp_path: Path, *, push_ok: bool 
     git.push.return_value = push_ok
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
+    git.get_last_commit_sha.return_value = "abc123def456"
+    git.build_commit_url.return_value = "http://git/commit/abc123def456"
     git.create_merge_request.return_value = "http://mr/1" if push_ok else None
     git.get_mr_url.return_value = "http://mr/1" if push_ok else None
     git.add_mr_comment.return_value = True

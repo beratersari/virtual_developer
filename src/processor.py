@@ -3,7 +3,7 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.config import settings
 from src.git_manager import (
@@ -225,9 +225,18 @@ class JobProcessor:
         *,
         suggestion: Optional[str] = None,
     ) -> None:
-        """Mark issue ERROR, finish job record, allow re-queue, notify Jira."""
+        """Mark issue ERROR, finish job record, allow re-queue, notify Jira.
+
+        Always moves the Jira issue to *In Progress* (best-effort) so a
+        template/config failure does not leave the ticket in *To Do*. Operators
+        fix the description and move the issue back to *To Do* to re-queue.
+        """
         error_text = (error_message or "Unknown error")[:2000]
         try:
+            # Leave To Do even when work never started (missing Mode / {params}).
+            # Poller + workflow also try this; fail path is the last guarantee.
+            self._mark_jira_in_progress(issue_key)
+
             # Always surface a job on the dashboard (incl. template/Mode failures)
             self._ensure_job_for_failure(issue_key)
             meta_patch = self._archive_run_identifiers(issue_key)
@@ -253,9 +262,9 @@ class JobProcessor:
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
-            # Poller: do not force auto-requeue while Jira stayed To Do.
-            # Keep last observed status; requeue_eligible gates leave→return.
-            self._nudge_poller_after_terminal(issue_key, marker="__terminal_local__")
+            # Prefer "in progress" on the poller tracker after a failure so a
+            # later real move back to To Do is detected as reprocess (not skipped).
+            self._nudge_poller_after_terminal(issue_key, marker="in progress")
             state = updated or self.state_manager.get_state(issue_key)
             if state is None:
                 self.reporter.post_comment_response(
@@ -263,8 +272,15 @@ class JobProcessor:
                     f"An error occurred while processing this issue:\n\n{{code}}\n{error_text}\n{{code}}",
                 )
                 return
+            # Default suggestion for config errors if caller did not pass one
+            effective_suggestion = suggestion
+            if not effective_suggestion:
+                effective_suggestion = (
+                    "Fix the issue description, then move the issue back to "
+                    "*To Do* to re-queue."
+                )
             comment_id = self.reporter.post_error(
-                state, error_text, suggestion=suggestion
+                state, error_text, suggestion=effective_suggestion
             )
             if not comment_id:
                 logger.error(f"Jira post_error returned no comment for {issue_key}")
@@ -510,6 +526,8 @@ class JobProcessor:
     ) -> None:
         """Update poller status tracker after local cancel/error.
 
+        - ``marker="in progress"`` (fail path): force tracker to In Progress so
+          a later real return to To Do requeues (template/config errors).
         - If Jira was already To Do-like: keep/set ``to do`` so cancel does
           **not** auto-requeue on the next poll.
         - If Jira was non-todo (e.g. ``in progress``): **leave that value**
@@ -521,6 +539,12 @@ class JobProcessor:
         try:
             poller = getattr(self, "_poller", None)
             if poller is None or not hasattr(poller, "_last_jira_status"):
+                return
+            marker_l = (marker or "").strip().lower()
+            # Explicit: failures must not leave the tracker stuck on "to do"
+            # after we moved (or intended to move) Jira to In Progress.
+            if marker_l in {"in progress", "in_progress", "doing", "wip"}:
+                poller._last_jira_status[issue_key] = "in progress"
                 return
             prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
             todo_names = {
@@ -539,7 +563,6 @@ class JobProcessor:
                 if prev not in todo_names or prev in synthetic or prev == "":
                     poller._last_jira_status[issue_key] = "to do"
             # else: keep non-todo (e.g. "in progress") so To Do return requeues
-            _ = marker  # retained for call-site compatibility
         except Exception:
             pass
 
@@ -1221,6 +1244,11 @@ class JobProcessor:
                 f"Created new state for {issue_key} with workflow type: {workflow_type.value}"
             )
 
+        # Claim the board column as soon as we accept the issue — before
+        # acknowledgment / git template validation — so incomplete {params}
+        # still leave the ticket In Progress for the operator to fix.
+        self._mark_jira_in_progress(issue_key)
+
         try:
             logger.debug(f"Posting initial acknowledgment for {issue_key}")
             self.reporter.post_initial_acknowledgment(state)
@@ -1600,7 +1628,9 @@ class JobProcessor:
                 e.user_message,
                 suggestion=(
                     "Update the issue `{params}` block with Repository, "
-                    "Source branch, and Target branch, then move back to To Do."
+                    "Source branch, Target branch, and Mode (plan or build). "
+                    "The issue was moved to *In Progress* — after fixing the "
+                    "description, move it back to *To Do* to re-queue."
                 ),
             )
             self._release_context(state.issue_key, success=False)
@@ -2252,6 +2282,21 @@ class JobProcessor:
 
         commit_subject = git.get_last_commit_subject()
         commit_body = git.get_last_commit_message()
+        if commit_subject is not None:
+            commit_subject = str(commit_subject).strip() or None
+        commit_sha = None
+        commit_url = None
+        try:
+            raw_sha = git.get_last_commit_sha()
+            if raw_sha is not None:
+                commit_sha = str(raw_sha).strip() or None
+            if commit_sha and hasattr(git, "build_commit_url"):
+                raw_url = git.build_commit_url(commit_sha)
+                if raw_url is not None:
+                    commit_url = str(raw_url).strip() or None
+        except Exception:
+            commit_sha = None
+            commit_url = None
 
         if commit_subject:
             mr_title = commit_subject
@@ -2271,16 +2316,18 @@ class JobProcessor:
             target_branch=target_branch,
         )
 
+        # Persist delivery on this job + issue metadata history (multi-run safe)
+        self._record_git_delivery(
+            state,
+            feature_branch=branch_name,
+            merge_request_url=mr_url,
+            commit_sha=commit_sha,
+            commit_subject=commit_subject,
+            commit_url=commit_url,
+        )
+
         if mr_url:
             logger.info(f"Merge request created: {mr_url}")
-            # Merge into existing metadata (do not wipe workflow_type, etc.)
-            self.state_manager.update_state(
-                state.issue_key,
-                metadata={
-                    "merge_request_url": mr_url,
-                    "feature_branch": branch_name,
-                },
-            )
             try:
                 self.reporter.post_progress_update(
                     state,
@@ -2294,6 +2341,11 @@ class JobProcessor:
         else:
             logger.warning(f"Could not create merge request for {state.issue_key}")
             try:
+                commit_line = (
+                    f"\nCommit: `{commit_sha[:12]}`" if commit_sha else ""
+                )
+                if commit_url:
+                    commit_line = f"\nCommit: {commit_url}"
                 self.reporter.post_progress_update(
                     state,
                     (
@@ -2301,12 +2353,90 @@ class JobProcessor:
                         f"request could not be created (target branch may be "
                         f"`{target_branch}`, or `glab` may be missing/misconfigured). "
                         "Open an MR manually in GitLab if needed."
+                        f"{commit_line}"
                     ),
                 )
             except Exception:
                 pass
         # Push succeeded; MR is best-effort
         return True
+
+    def _record_git_delivery(
+        self,
+        state: JiraAgentState,
+        *,
+        feature_branch: Optional[str] = None,
+        merge_request_url: Optional[str] = None,
+        commit_sha: Optional[str] = None,
+        commit_subject: Optional[str] = None,
+        commit_url: Optional[str] = None,
+    ) -> None:
+        """Store push/MR/commit on the active job and append issue delivery history.
+
+        Latest ``merge_request_url`` / ``feature_branch`` remain on issue metadata
+        for reporters; full history lives in ``metadata.git_deliveries`` and each
+        job JSON so the dashboard can show every run for a re-triggered task.
+        """
+        job_id = self._active_jobs.get(state.issue_key)
+        now = datetime.now().isoformat(timespec="seconds")
+        delivery = {
+            "job_id": job_id,
+            "feature_branch": feature_branch or None,
+            "merge_request_url": merge_request_url or None,
+            "commit_sha": commit_sha or None,
+            "commit_subject": commit_subject or None,
+            "commit_url": commit_url or None,
+            "created_at": now,
+        }
+
+        if job_id:
+            try:
+                self.job_store.update_job(
+                    job_id,
+                    feature_branch=feature_branch or None,
+                    merge_request_url=merge_request_url or None,
+                    commit_sha=commit_sha or None,
+                    commit_subject=commit_subject or None,
+                    commit_url=commit_url or None,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not persist git delivery on job {job_id}: {e}"
+                )
+
+        # Append history (newest last); keep latest MR/branch as top-level keys
+        history: List[Any] = []
+        try:
+            st = self.state_manager.get_state(state.issue_key)
+            prev = (st.metadata or {}).get("git_deliveries") if st else None
+            if isinstance(prev, list):
+                history = list(prev)
+        except Exception:
+            history = []
+        history.append(delivery)
+        # Cap history to avoid unbounded metadata growth
+        if len(history) > 50:
+            history = history[-50:]
+
+        meta_patch: Dict[str, Any] = {
+            "feature_branch": feature_branch or None,
+            "git_deliveries": history,
+        }
+        if merge_request_url:
+            meta_patch["merge_request_url"] = merge_request_url
+        if commit_sha:
+            meta_patch["last_commit_sha"] = commit_sha
+        if commit_url:
+            meta_patch["last_commit_url"] = commit_url
+        if commit_subject:
+            meta_patch["last_commit_subject"] = commit_subject
+
+        try:
+            self.state_manager.update_state(state.issue_key, metadata=meta_patch)
+        except Exception as e:
+            logger.warning(
+                f"Could not persist git delivery metadata for {state.issue_key}: {e}"
+            )
 
     def _resolve_plan_path(
         self, issue_key: str, *, require_exists: bool = False

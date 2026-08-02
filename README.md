@@ -1,852 +1,450 @@
 # JIRA Virtual Developer
 
-A Python-based integration between **JIRA** and **Oh My OpenAgent** that enables AI agents to work on JIRA issues automatically.
+**Version:** see root [`VERSION`](VERSION) (currently `0.2.0`)
 
-## Overview
+A Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
 
-This daemon **polls** a JIRA board for issues and triggers Oh My OpenAgent workflows to:
+---
 
-1. **Plan** complex tasks using Prometheus
-2. **Execute** plans using Atlas orchestration
-3. **Respond** to bot commands when processed via CLI (comment polling is not built-in)
-4. **Consult** on architecture using Oracle
+## What it does
 
-## Table of Contents
+1. **Polls** a Jira board for To Do issues that match trigger labels and/or bot assignee  
+2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`)  
+3. **Runs** OpenCode agents (Prometheus planning, Atlas build, Oracle consult) in temp clones  
+4. **Reports** plans, progress, errors, and completion as Jira comments  
+5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
+6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
 
-- [How It Works with Real JIRA](#how-it-works-with-real-jira)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [Real JIRA Server Setup](#real-jira-server-setup)
-- [Testing Without JIRA](#testing-without-jira)
-- [CLI Commands](#cli-commands)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
+There is **no HTTP webhook intake**. Discovery is board polling only. Comment-driven bot commands are not a primary path (legacy plan-start labels still exist; see [Workflows](#workflows)).
 
-## How It Works with Real JIRA
-
-When integrated with your actual JIRA server, the system works as follows:
-
-### Workflow
-
-1. **Issue lands in To Do** on the configured board (label and/or bot assignee)
-2. **Board poller** discovers the issue on the next poll interval
-3. **Workflow Detection** → Bot determines if issue needs planning or direct execution
-4. **Agent Execution** → Oh My OpenAgent runs with the appropriate agent in a temp clone
-5. **Progress Updates** → Bot posts comments to JIRA with status and progress
-6. **Completion** → Results posted to JIRA; feature branch pushed and MR opened when configured
-
-### Real JIRA Integration Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           YOUR JIRA SERVER                               │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────────────┐  │
-│  │   Issue     │    │  To Do +    │    │     Board / Sprint          │  │
-│  │  Created    │───▶│  label/bot  │───▶│     (Agile REST API)        │  │
-│  └─────────────┘    └─────────────┘    └─────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-                                          │ poll every N seconds
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     JIRA VIRTUAL DEVELOPER (daemon)                      │
-│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐   │
-│  │  Board Poller    │───▶│  Job Processor   │───▶│  Agent Runner    │   │
-│  │  (thread)        │    │  (Workflow)      │    │  (OpenCode)      │   │
-│  └──────────────────┘    └──────────────────┘    └──────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                          │
-                                          ▼
-                              ┌─────────────────────┐
-                              │  TEMP GIT CLONE     │
-                              │  feature/{ISSUE}    │
-                              └─────────────────────┘
-```
-
-### What Happens When You Plug Into Your JIRA Server
-
-**Yes, it will work with your JIRA server** when properly configured:
-
-1. **Board polling**: Daemon polls the board (active sprint or board issues) for To Do work
-2. **Authentication**: Uses JIRA API token (Bearer PAT on-prem; optional Cloud Basic with email)
-3. **Board scope**: Configure `JIRA_BOARD_ID` for the board to poll
-4. **Label / assignee activation**: Processes issues with trigger labels and/or assigned to the bot
-
-### Data Flow with Real JIRA
-
-```
-JIRA Issue in To Do (label or bot assignee)
-        │
-        ▼
-┌─────────────────┐
-│  Board Poller   │  GET /rest/agile/1.0/...
-│  finds issue    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Job Processor  │────▶│  Execute Agent  │
-│  (Plan/Direct)  │     │  (Sisyphus/     │
-│                 │     │  Prometheus)    │
-└─────────────────┘     └────────┬────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    │            │            │
-                    ▼            ▼            ▼
-            ┌──────────┐  ┌──────────┐  ┌──────────┐
-            │ Progress │  │  Output  │  │  Errors  │
-            │  Updates │  │  Files   │  │          │
-            └────┬─────┘  └────┬─────┘  └────┬─────┘
-                 │             │             │
-                 └─────────────┴─────────────┘
-                               │
-                               ▼
-                    ┌─────────────────┐
-                    │  Post Comments  │  POST /rest/api/2/issue/{key}/comment
-                    │  to JIRA Issue  │  Auth: Bearer {API_TOKEN}
-                    └─────────────────┘
-```
+---
 
 ## Architecture
 
-The JIRA Virtual Developer consists of these main components:
+```text
+┌─────────────────────────── Jira (REST v2 + Agile) ───────────────────────────┐
+│  Board / sprint  →  To Do + label or bot assignee  →  poll every N seconds     │
+└───────────────────────────────────────┬───────────────────────────────────────┘
+                                        │
+                                        ▼
+┌──────────────────────── JIRA Virtual Developer (one process) ────────────────┐
+│  Board Poller  →  Job Processor  →  Agent Runner (opencode run --dir …)       │
+│        │                  │                                                   │
+│        │                  ├─ temp clone: feature/{ISSUE} from issue {params}  │
+│        │                  ├─ Jira comments (progress / plan / error / done)   │
+│        │                  └─ GitLab push + MR (build mode)                    │
+│        │                                                                      │
+│  Ops dashboard (FastAPI + React SPA)  ·  stuck-job monitor  ·  JSON state     │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
 
-### Component Overview
+| Component | Role |
+|-----------|------|
+| **Board poller** | Sole intake. Reads board/sprint issues; writes a poll snapshot for the UI |
+| **Job processor** | State machine, concurrency limits, plan vs build routing, fail + Jira notify |
+| **Agent runner** | Spawns OpenCode with prompt kit sections; streams session logs |
+| **Jira client** | REST API v2 + Agile; Bearer (on-prem PAT) or Basic (Cloud email+token) |
+| **Git manager** | Clone, branch, commit identity, push, MR via `glab` / GitLab API |
+| **State store** | Per-issue JSON under `.jira-agent/state/`; job records for the dashboard |
+| **Ops dashboard** | REST + WebSocket + static SPA from `web/dist` |
 
-| Component | Purpose | Technology |
-|-----------|---------|------------|
-| **Board Poller** | Discovers To Do issues on board/sprint | JIRA Agile REST |
-| **Job Processor** | Routes issues to workflows | Python asyncio |
-| **Agent Runner** | Executes Oh My OpenAgent | Bun subprocess |
-| **JIRA Client** | API communication | Requests + JIRA REST API |
-| **State Manager** | Tracks issue progress | JSON files |
-| **Reporter** | Posts updates to JIRA | JIRA REST API |
+### Agents (Oh My OpenAgent)
 
-### Agent Types
+| Agent | Role | When |
+|-------|------|------|
+| **Prometheus** | Planning | `Mode: plan` |
+| **Atlas** | Orchestrated implementation | `Mode: build` |
+| **Oracle** | Architecture Q&A | Consultative wording, not implementation |
+| **Sisyphus** | Direct implementation helper | CLI `test-issue` / legacy paths; production board work uses **Mode** |
 
-| Agent | Purpose | When Used |
-|-------|---------|-----------|
-| **Sisyphus** | Direct task execution | Simple issues (bugs, typos, fixes) |
-| **Prometheus** | Planning and analysis | Complex issues requiring multi-step plans |
-| **Atlas** | Orchestration | Executing plans with multiple sub-tasks |
-| **Oracle** | Architecture consultation | When user asks questions with @mention |
+---
 
-### Workflow Types
+## Requirements
 
-The system automatically detects the appropriate workflow:
+- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels)  
+- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) with **oh-my-openagent** plugin  
+- **Git**  
+- **glab** (GitLab CLI) when push/MR is enabled  
+- Jira access (board browse, comment, optional transitions)  
+- GitLab PAT with clone/push/MR rights when using remote workspaces  
 
-**1. Direct Execution (Sisyphus)**
-- Triggered by: Simple issues with keywords like "fix", "typo", "bug", "error"
-- Process: Sisyphus analyzes → fixes → commits changes
-- Duration: Typically 30 seconds to 5 minutes
+---
 
-**2. Planning → Execution (Prometheus → Atlas)**
-- Triggered by: Complex issues with keywords like "implement", "add feature", "refactor"
-- Process: 
-  - Prometheus creates detailed plan (.sisyphus/plans/)
-  - Plan posted to JIRA for review
-  - User comments `/start-work`
-  - Atlas orchestrates execution
-- Duration: 5 minutes to 30+ minutes depending on complexity
+## Quick start
 
-**3. Oracle Consultation**
-- Triggered by: Comments with @BotName asking questions
-- Process: Oracle analyzes codebase → provides architecture advice
-- Duration: 1-2 minutes
-
-## Quick Start
-
-### 1. Installation
-
-#### Linux/Mac
+### Linux / macOS
 
 ```bash
-# Clone or copy the project
-cd jira_virtual_developer
+# From repo root
+cp .env.example .env
+# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID, GITLAB_* as needed
 
-# Run the automated install script
-./install.sh
-
-# Or install manually:
-python -m venv venv
-source venv/bin/activate
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# Install OpenCode CLI
-npm install -g opencode
+# Optional installer (deps + OpenCode + glab heuristics)
+./install.sh
 
-# Install oh-my-opencode plugin
-bunx oh-my-opencode install
-
-# Initialize project structure
 python cli.py init
+python cli.py start
 ```
 
-#### Windows (recommended: offline zip)
+Ops dashboard (default): **http://127.0.0.1:8080**  
+Stop the daemon with **Ctrl+C**.
 
-CI builds a self-contained Windows zip (`virtual_developer-windows-x64-*.zip`) that
-already includes pinned **OpenCode**, **oh-my-opencode**, **glab**, and **Python wheels**.
+### Windows (offline zip)
+
+CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.md](packaging/windows/README.md)).
 
 ```cmd
-:: 1) Download the artifact from GitHub Actions (or the Release zip)
-:: 2) Extract ONCE — you should see install.bat next to vendor\ and src\
-::    (no "zip inside zip"; do not re-extract vendor files)
-:: 3) Use a supported Python (see vendor\SUPPORTED_PYTHON.txt — usually 3.10–3.13)
-:: 4) Install
+:: Extract zip so install.bat sits next to vendor\ and src\
 install.bat
+:: Edit .env, then:
+.venv\Scripts\python.exe cli.py start
 ```
 
-**Important:** Python **3.14** is often **not** supported yet (packages like `pydantic-core`
-may lack wheels). Prefer **Python 3.12 x64** for the smoothest offline install.
+Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
 
-What `install.bat` does:
+### Docker
 
-| Step | Result |
-|------|--------|
-| Python venv | Creates `.venv` and installs deps from `vendor\python-wheels` (offline; **3.10–3.13**) |
-| OpenCode | Extracts `vendor\opencode-home.zip` → **`%USERPROFILE%\.opencode`** |
-| glab | Places `glab.exe` in `%USERPROFILE%\.opencode\bin` |
-| PATH | Adds `%USERPROFILE%\.opencode\bin` to the **user** PATH |
-| Project | Creates `.env` from `.env.example` if missing; runs `cli.py init` |
+See [Dockerfile](Dockerfile) and [`.github/workflows/docker.yml`](.github/workflows/docker.yml) if you run containerized builds.
 
-The outer zip does **not** expand `node_modules` (avoids Windows path-too-long and slow
-Explorer extract). OpenCode + plugin ship as one file: `vendor\opencode-home.zip`,
-which `install.bat` unpacks into **`%USERPROFILE%\.opencode` only** (no second copy under `C:\vd`).
+---
 
-OpenCode layout after install:
+## Jira issue template (`{params}`)
+
+Every issue the bot should work on needs a **`{params}` … `{params}`** block in the description (or summary fields scanned by the parser). Repository URL is **per issue**, not a global env var.
 
 ```text
-%USERPROFILE%\.opencode\
-  bin\opencode.exe
-  bin\glab.exe
-  opencode.json          # plugin registration (valid JSON)
-  oh-my-opencode.json
-  package.json
-  node_modules\...       # extracted by install.bat from opencode-home.zip
-
-%USERPROFILE%\.config\opencode\
-  opencode.json          # mirrored for OpenCode global config discovery
+{params}
+Repository: https://gitlab.example.com/group/your-repo.git
+Source branch: feature/PROJ-123
+Target branch: develop
+Mode: plan
+{params}
 ```
 
-**Windows requirements (zip install):**
+| Field | Meaning |
+|-------|---------|
+| **Repository** | GitLab clone URL (aliases: Repo, GitLab, Project URL) |
+| **Source branch** | Work / MR source branch. If missing or equal to a base name (`main`/`develop`/…), work branch becomes `feature/{ISSUE_KEY}` |
+| **Target branch** | Must exist on remote; work is based on it; MR merges **into** it |
+| **Mode** | **`plan`** — plan only, append plan to Jira, no push. **`build`** — implement, push, open MR |
 
-- **Windows 10/11 64-bit (x64 / AMD64)** — OpenCode is the official `opencode-windows-x64` build (not 32-bit, not ARM)
-- **Python 3.10+** (64-bit; see `vendor\SUPPORTED_PYTHON.txt`) from https://www.python.org — enable “Add to PATH”
-- Git for Windows (recommended)
-- **No Node.js/npm required** when using the CI zip
+Mode aliases: `planning`/`prometheus` → plan; `execute`/`execution`/`atlas`/`implement` → build.
 
-`install.bat` is **idempotent**: each run wipes previous OpenCode roots
-(`%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`), removes stale PATH entries,
-replaces broken config, and **seeds** `%USERPROFILE%\.cache\opencode` with the
-bundled `oh-my-opencode` plugin so the TUI does not hang on a black screen while
-Bun tries to download packages. You only need to re-run `install.bat` (from a
-current package).
+Incomplete templates cause a **user-visible Jira comment** with the format help (see `src/issue_git_spec.py`).
 
-If Windows says OpenCode is “not compatible with 64-bit Windows”, the binary is almost always
-**corrupt/incomplete** (bad extract) or an older `opencode` is earlier on PATH. Re-run
-`install.bat` from a fresh package, open a **new** terminal, then run `where opencode`
-(expect a single path under `%USERPROFILE%\.opencode\bin`).
+### When the poller picks up an issue
 
-**From a git clone (online fallback):** the same `install.bat` works without `vendor\`;
-set `VD_ALLOW_ONLINE=1` and it will download OpenCode/glab and use npm for the plugin if available.
+All of the following roughly apply:
 
-**Product version** lives in the repo root `VERSION` file (SemVer `MAJOR.MINOR.PATCH`).
-CI names Windows zips from that file:
+- Issue is on the configured **board**  
+- Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
+- Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and/or** assignee name looks like the bot (when `TRIGGER_ON_ASSIGNMENT=true`)  
+- Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-| Trigger | Artifact name pattern |
-|---------|------------------------|
-| Tag `vX.Y.Z` | `virtual_developer-windows-x64-X.Y.Z` (+ GitHub Release) |
-| Push `develop` | `…-X.Y.Z-dev.YYYYMMDD.N.gSHA` |
-| Push `main` | `…-X.Y.Z.gSHA` |
+Terminal issues reprocess only when moved back to **To Do** (or equivalent rework signal).
 
-Dependency pins (OpenCode, oh-my-openagent, glab, Python) live in
-`packaging/windows/versions.env`. Workflow: `.github/workflows/windows-dist.yml`.
+---
 
-### 2. Configuration
+## Workflows
+
+### Plan (`Mode: plan`)
+
+1. Poller accepts issue → state `planning`  
+2. Prometheus runs in a temp clone  
+3. Plan posted to Jira → state **`plan_ready`**  
+4. **Plans never auto-start.** To implement: set `Mode: build` in `{params}`, move the issue to **To Do** again (or add legacy labels `ai-start-work` / `ai-execute`)  
+
+### Build (`Mode: build`)
+
+1. Poller accepts issue → prepare git workspace from `{params}`  
+2. Atlas (orchestrator) implements against the plan / description  
+3. On success: push branch, open MR, comment completion → `completed`  
+4. On failure: state `error` **and** Jira error comment (`_fail_issue` / `post_error`)  
+
+### Oracle
+
+Consultative questions without implementation keywords may route to Oracle (read-only style advice). Implementation language forces plan/build paths instead.
+
+### Task statuses
+
+```text
+pending → planning | executing → (plan_ready) → completed | error | cancelled
+```
+
+Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned disk `planning`/`executing` states to `error`.
+
+---
+
+## Ops dashboard
+
+Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
+
+| | |
+|--|--|
+| URL | `http://127.0.0.1:8080` |
+| Stack | FastAPI in-daemon + WebSocket `/ws` + React SPA (`web/`) |
+| Auth | **None in v1** — keep bind host localhost unless you put a proxy/auth in front |
+
+**Frontend is display-only.** Filtering, poll math, and settings rules live on the backend.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Liveness + version |
+| GET | `/api/meta` | Version + server time |
+| GET | `/api/tasks` | Agent task list |
+| GET | `/api/jobs` | Paginated job history |
+| GET | `/api/jobs/{id}` | Job detail |
+| DELETE | `/api/jobs/{id}` | Delete job record |
+| GET | `/api/tasks/{key}` | Task detail for issue |
+| POST | `/api/tasks/{key}/cancel` | Cancel live work (preferred over CLI when daemon runs) |
+| GET | `/api/poll` | Last poll snapshot + countdown |
+| GET/PATCH | `/api/settings` | Safe settings (no token values) |
+| GET | `/api/models` | Available OpenCode models |
+| GET | `/api/dashboard` | Full envelope |
+| WS | `/ws` | Live pushes |
+
+Writable runtime settings (examples): board id, poll interval, trigger labels, `trigger_on_assignment`, `max_concurrent_jobs`, default model.  
+`DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
+
+### Building the UI
 
 ```bash
-# Copy example configuration
-cp .env.example .env
-
-# Edit with your settings (see Configuration section below)
-nano .env
+cd web && npm install && npm run build
+# dist/ is served by the daemon; Vite dev: npm run dev (proxies to :8080)
 ```
 
-### 3. Test Without JIRA (Recommended First Step)
+---
 
-The project includes a **sample calculator with intentional bugs** for testing:
+## Configuration
+
+Copy [`.env.example`](.env.example) → `.env`. Secrets must never be committed.
+
+### Jira connection
+
+| Variable | Description |
+|----------|-------------|
+| `JIRA_HOST` | Base URL (no trailing slash preferred) |
+| `JIRA_API_TOKEN` | Cloud API token **or** on-prem personal access token |
+| `JIRA_EMAIL` | **Cloud only** — with token uses HTTP Basic. Leave empty for on-prem Bearer |
+| `JIRA_PROJECTS` | Comma-separated project keys (reference / allow-list style) |
+| `JIRA_BOARD_ID` | Agile board id to poll (**required** for discovery) |
+
+Auth summary:
+
+- **On-prem Server/DC:** `JIRA_HOST` + `JIRA_API_TOKEN` → `Authorization: Bearer …`  
+- **Jira Cloud:** `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` → Basic email:token  
+
+TLS verify is currently off for typical on-prem certs; do not “fix” that without a deliberate secure path.
+
+### Intake & dashboard
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLL_INTERVAL_SECONDS` | `30` | Board poll interval |
+| `MAX_CONCURRENT_JOBS` | `6` | Parallel agent jobs |
+| `POLL_DISPATCH_WORKERS` | `8` | Parallel dispatch/transitions per poll cycle |
+| `DASHBOARD_ENABLED` | `true` | Serve ops UI with daemon |
+| `DASHBOARD_HOST` | `127.0.0.1` | Bind host |
+| `DASHBOARD_PORT` | `8080` | HTTP port |
+| `DASHBOARD_ALLOW_REMOTE` | `false` | Allow non-loopback bind |
+
+### Triggers
+
+| Variable | Default |
+|----------|---------|
+| `TRIGGER_LABELS` | `ai-assist,bot` |
+| `TRIGGER_ON_ASSIGNMENT` | `true` |
+| `TRIGGER_MENTIONS` | `@DevBot,@AI` |
+
+### GitLab
+
+| Variable | Description |
+|----------|-------------|
+| `GITLAB_PAT` | Clone / push / MR token |
+| `GITLAB_ALLOWED_HOSTS` | **Required when PAT is set** — comma-separated hosts that may receive the PAT (fail-closed) |
+| `GIT_USER_NAME` / `GIT_USER_EMAIL` | Commit identity in temp clones |
+
+Repo URL and branches always come from the issue `{params}` block.
+
+### Agent / OpenCode
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCODE_CLI` | `opencode` | CLI binary/command |
+| `DEFAULT_MODEL` | (see `.env.example`) | Passed to `opencode run --model` |
+| `DEFAULT_AGENT` | `sisyphus` | Defaults for agent names |
+| `PLANNING_AGENT` | `prometheus` | |
+| `ORCHESTRATOR_AGENT` | `atlas` | |
+| `EXECUTION_CATEGORY` | `deep` | Category for deep work |
+| `PROMPT_KIT_FILE` | `agent/AGENT_PROMPT.md` | Unified prompt kit (`§policy.commit`, `§role.*`) |
+| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
+| `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
+| `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
+| `TEMP_DIR_BASE` | `.temp` | Temp clone root |
+| `TEMP_CLEANUP_POLICY` | `age` / `never` | Cleanup policy (see `.env.example`) |
+
+List or set models:
 
 ```bash
-# View the sample project
-cd sample_project
-cat src/calculator/calc.py  # See the bugs
-
-# Run tests to see failures
-pip install -e ".[test]"
-pytest  # Some tests will fail
-
-# Go back to agent directory
-cd ..
-
-# Test the agent - fix calculator bugs
-python cli.py test-issue \
-  --project sample_project \
-  --title "Fix calculator bugs" \
-  --description "Fix all bugs in src/calculator/calc.py. The divide method doesn't handle division by zero, power uses wrong operator, average doesn't check for empty list, and factorial has wrong base case."
-
-# Test with specific agent/category
-python cli.py test-issue \
-  --title "Refactor calculator" \
-  --description "Refactor the Calculator class to use type hints properly" \
-  --agent sisyphus \
-  --category deep
-
-# Create a plan only (no execution)
-python cli.py test-issue \
-  --title "Add new features" \
-  --description "Add modulo, square root, and trigonometric functions" \
-  --plan-only
-
-# Dry run to see what would happen
-python cli.py test-issue \
-  --title "Test dry run" \
-  --description "This won't actually run" \
-  --dry-run
+python cli.py models
+python cli.py models --set provider/model-id
 ```
 
-**Sample Project Bugs:**
-1. `divide()` - No division by zero check
-2. `power()` - Uses `*` instead of `**`
-3. `average()` - No empty list check
-4. `factorial()` - Wrong base case (returns 0 instead of 1)
+---
 
-### 4. Simulated JIRA Server (PoC Mode)
-
-For local experiments, use the **Simulated JIRA Server** — an in-memory issue store. It does **not** push work to the daemon; use the board poller against real Jira or `cli.py process`.
-
-**Architecture:**
-```
-┌─────────────────┐
-│  Simulated      │  In-memory REST only
-│  JIRA Server    │  (no push to daemon)
-│  (Port 7001)    │
-└─────────────────┘
-```
-
-**Quick Start:**
+## CLI
 
 ```bash
-# Terminal 1: Start the simulated JIRA server
-python cli.py simulate start-server
+python cli.py --help
+python cli.py --version
 
-# Terminal 2: Create an issue in the simulated store (does not start the agent)
-python cli.py simulate create-issue \
-  --summary "Fix calculator bugs" \
-  --description "Fix all bugs in calculator/calc.py" \
-  --assignee "DevBot" \
-  --labels "ai-assist,bug"
+# Lifecycle
+python cli.py init              # dirs + .env from example
+python cli.py start             # daemon: poller + dashboard + monitor
+python cli.py config            # safe config dump
+python cli.py models            # list OpenCode models
 
-# To run work against a real issue key:
-python cli.py process PROJ-123
-```
-
-**Available Commands:**
-
-```bash
-# Start the simulated JIRA server (runs on port 7001)
-python cli.py simulate start-server
-python cli.py simulate start-server --port 7001
-
-# Create a new issue and notify the bot
-python cli.py simulate create-issue \
-  --summary "Task title" \
-  --description "Create a main.py file add "2+3" then open a pr" \
-  --assignee "DevBot" \
-  --labels "ai-assist"
-
-
-python cli.py simulate create-issue --summary "Task title"  --description "Create a main.py file add '2+3' "  --assignee "DevBot"  --labels "ai-assist"
-
-set NODE_EXTRA_CA_CERTS=
-
-# List all issues in the simulated JIRA
-python cli.py simulate list-issues
-
-# Show details for a specific issue
-python cli.py simulate show-issue SIM-1001
-```
-
-**API Endpoints (for custom integrations):**
-
-The simulated JIRA server provides these REST API endpoints:
-
-- `GET  /api/issues` - List all issues
-- `POST /api/issues` - Create new issue
-- `GET  /api/issues/<key>` - Get issue details
-- `PUT  /api/issues/<key>` - Update issue
-- `POST /api/issues/<key>/comments` - Add comment
-- `POST /api/issues/<key>/assign` - Assign issue
-
-**Example using curl:**
-
-```bash
-# Create an issue
-curl -X POST http://localhost:7001/api/issues \
-  -H "Content-Type: application/json" \
-  -d '{
-    "summary": "Fix bugs",
-    "description": "Fix calculator bugs",
-    "assignee": "DevBot",
-    "labels": ["ai-assist"]
-  }'
-
-```
-
-### 5. Run the Daemon (With JIRA)
-
-```bash
-# Start the daemon (board poller + stuck monitor)
-python cli.py start
-```
-
-## Usage
-
-### Automatic Workflows
-
-**Complex Issues** (Planning → Execution):
-1. Create JIRA issue with label `ai-assist`
-2. Bot acknowledges and starts Prometheus planning
-3. Plan is posted to JIRA as comment
-4. User reviews and comments `/start-work`
-5. Atlas orchestrates execution
-6. Results posted to JIRA
-
-**Simple Issues** (Direct execution):
-1. Create issue labeled `ai-assist` with keywords like "fix", "typo"
-2. Bot routes to direct execution
-3. Sisyphus completes work
-4. Results posted
-
-### Bot Commands
-
-Mention the bot in a JIRA comment:
-
-```
-@DevBot /start-work     # Start plan execution
-@DevBot /status         # Check current status
-@DevBot /cancel         # Cancel current work
-@DevBot fix the typo in line 42  # Direct request
-```
-
-### CLI Commands
-
-**Setup & Configuration:**
-```bash
-# Initialize project structure
-python cli.py init
-
-# Show configuration
-python cli.py config
-
-# Run installation script
-./install.sh
-```
-
-**Testing Without JIRA:**
-```bash
-# Test agent with a task (no JIRA required)
-python cli.py test-issue --title "Task title" --description "Task description"
-
-# Options:
-#   --project PATH       Project directory (default: sample_project)
-#   --agent NAME         Agent: sisyphus, prometheus, atlas, oracle
-#   --category NAME      Category: quick, deep, visual-engineering, etc.
-#   --plan-only          Only create plan (Prometheus)
-#   --dry-run            Show what would happen without running
-```
-
-**Simulated JIRA Server (PoC Mode):**
-```bash
-# Start the simulated JIRA server
-python cli.py simulate start-server
-python cli.py simulate start-server --port 7001
-
-# Create an issue and notify the bot
-python cli.py simulate create-issue \
-  --summary "Task title" \
-  --description "Task description" \
-  --assignee "DevBot" \
-  --labels "ai-assist"
-
-# Manually notify the bot
-python cli.py simulate notify \
-  --summary "Task title" \
-  --description "Task description"
-
-# List all issues
-python cli.py simulate list-issues
-
-# Show issue details
-python cli.py simulate show-issue SIM-1001
-```
-
-**JIRA Commands (requires JIRA config):**
-```bash
-# Show active issues
-python cli.py status
-
-# Show issue details
+# Issue ops (need Jira config)
+python cli.py process PROJ-123  # force-process one issue
+python cli.py process PROJ-123 --dry-run
+python cli.py status            # active issues table
 python cli.py show PROJ-123
+python cli.py cancel PROJ-123   # state cancel; kill live agent via dashboard if daemon is up
+python cli.py costs             # token/cost rollup from state files
 
-# Manually process an issue
-python cli.py process PROJ-123
+# Local agent smoke (no Jira)
+python cli.py test-issue -t "Fix bugs" -d "Fix calculator divide by zero" -p sample_project
+python cli.py test-issue -t "Plan feature" -d "..." --plan-only --model provider/id
 
-# Cancel an issue
-python cli.py cancel PROJ-123
+# Simulated Jira (in-memory REST only; does not push to the daemon)
+python cli.py simulate start-server --port 7001
+python cli.py simulate create-issue -s "Title" -d "..." -a DevBot -l ai-assist
+python cli.py simulate list-issues
+python cli.py simulate show-issue SIM-1001
 ```
 
-## Configuration Options
+---
 
-### JIRA Connection
+## Project layout
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `JIRA_HOST` | JIRA instance URL | Required |
-| `JIRA_API_TOKEN` | API token (Bearer) for authentication | Required |
-| `JIRA_PROJECTS` | Comma-separated project keys | `PROJ` |
-
-### Intake (board poller)
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `JIRA_BOARD_ID` | Board id to poll | Required for discovery |
-| `POLL_INTERVAL_SECONDS` | Polling interval in seconds | `30` |
-
-### Agent Selection
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DEFAULT_AGENT` | Default agent for direct tasks | `sisyphus` |
-| `PLANNING_AGENT` | Agent for planning | `prometheus` |
-| `ORCHESTRATOR_AGENT` | Agent for execution | `atlas` |
-| `EXECUTION_CATEGORY` | Category for task execution | `deep` |
-
-### Agent Task Configuration (Timeout & Retry)
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AGENT_TASK_TIMEOUT_SECONDS` | Maximum time for agent task to complete | `1800` (30 min) |
-| `AGENT_TASK_MAX_RETRIES` | Maximum retry attempts for failed tasks | `3` |
-| `AGENT_TASK_RETRY_DELAY_SECONDS` | Initial delay between retries | `5` |
-| `AGENT_TASK_RETRY_BACKOFF_MULTIPLIER` | Exponential backoff multiplier | `2.0` |
-| `AGENT_TASK_RETRY_ON_TIMEOUT` | Retry tasks that timeout | `true` |
-| `AGENT_TASK_RETRY_ON_ERROR` | Retry tasks that fail with errors | `true` |
-
-The retry mechanism uses exponential backoff. For example, with default settings:
-- Retry 1: 5 seconds delay
-- Retry 2: 10 seconds delay (5 × 2)
-- Retry 3: 20 seconds delay (5 × 2²)
-
-### Behavior & Features
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MAX_CONCURRENT_JOBS` | Max parallel jobs | `3` |
-| `TRIGGER_LABELS` | Labels that trigger bot (comma-separated) | `ai-assist,bot` |
-| `TRIGGER_ON_ASSIGNMENT` | Trigger when issue is assigned | `true` |
-| `TRIGGER_MENTIONS` | @mentions that trigger bot (comma-separated) | `@DevBot,@AI` |
-
-### Git Configuration
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PROJECT_ROOT` | Target project directory | Current directory |
-| `PROJECT_GITLAB_URL` | GitLab repo URL for cloning | None |
-| `GITLAB_PAT` | GitLab Personal Access Token | None |
-| `GIT_USER_NAME` | Git user name for commits | `DevBot` |
-| `GIT_USER_EMAIL` | Git user email for commits | `devbot@example.com` |
-
-## Real JIRA Server Setup
-
-This section explains how to connect the JIRA Virtual Developer to your actual JIRA instance (Cloud or Server/Data Center).
-
-### Prerequisites
-
-1. **JIRA Instance**: Access to JIRA Cloud or JIRA Server/Data Center
-2. **API Token**: For JIRA Cloud, generate at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-api-tokens)
-3. **Network Access**: Daemon must reach JIRA REST/Agile APIs (outbound)
-4. **Project Permissions**: Your JIRA user needs:
-   - Browse Projects
-   - Create Issues
-   - Edit Issues
-   - Add Comments
-   - Transition Issues (optional)
-
-### Step 1: Get JIRA API Token
-
-**For JIRA Cloud:**
-1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
-2. Click "Create API token"
-3. Give it a name like "JIRA Virtual Developer"
-4. Copy the token (you won't see it again!)
-
-**For JIRA Server/Data Center:**
-1. Go to your profile → Account Settings → Security
-2. Generate a Personal Access Token
-3. Or use username + password (not recommended for production)
-
-### Step 2: Configure Environment
-
-Edit your `.env` file:
-
-```env
-# JIRA Connection (Required for real JIRA)
-JIRA_HOST=https://your-jira.example.com
-JIRA_API_TOKEN=your-api-token-from-step-1
-JIRA_PROJECTS=PROJ,DEV,ENG  # Comma-separated project keys
-
-# Board poller (always on)
-JIRA_BOARD_ID=1
-POLL_INTERVAL_SECONDS=30
-
-# Oh My OpenAgent Configuration
-OPENCODE_CLI=bunx oh-my-opencode
-PROJECT_ROOT=/path/to/your/codebase
-
-# Agent Selection
-DEFAULT_AGENT=sisyphus
-PLANNING_AGENT=prometheus
-ORCHESTRATOR_AGENT=atlas
-
-# Behavior (plans never auto-start — set Mode: build and move to To Do)
-EXECUTION_CATEGORY=deep
-MAX_CONCURRENT_JOBS=3
-
+```text
+virtual_developer/
+├── cli.py                 # Click CLI entry
+├── VERSION                # SemVer product version
+├── .env.example           # Config template
+├── requirements.txt
+├── agent/AGENT_PROMPT.md  # Prompt kit sections
+├── src/
+│   ├── daemon.py          # Process entry: poller + dashboard + monitor
+│   ├── config.py
+│   ├── processor.py       # Job lifecycle
+│   ├── git_manager.py
+│   ├── issue_git_spec.py  # {params} parser
+│   ├── jira/              # client, poller, simulated client
+│   ├── orchestrator/      # agent_runner, prompts, workflow_router
+│   ├── reporter/          # Jira comments
+│   ├── state/             # models, manager, job_store
+│   └── dashboard/         # FastAPI API, schemas, poll snapshot
+├── web/                   # React + Vite + Tailwind SPA → web/dist
+├── packaging/windows/     # Offline Windows dist
+├── sample_project/        # Calculator with intentional bugs for test-issue
+├── tests/                 # Pytest suite
+└── AGENTS.md              # Contributor / AI agent rules for this repo
 ```
 
-### Step 3: Start the Daemon
+---
+
+## Testing
 
 ```bash
-# Start the JIRA Virtual Developer
-python cli.py start
-
-# Run in background (Linux/Mac)
-nohup python cli.py start > jira-agent.log 2>&1 &
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest pytest-asyncio pytest-cov
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py -q
 ```
 
-### Step 4: Verify Connection
+- Prefer unit tests with mocks (no live Jira in CI).  
+- **`tests/test_logical_issues.py`** is excluded from the default green suite: it documents desired behaviour that is still incorrect until fixed.  
+- Do not commit `.coverage`, `htmlcov/`, or `.pytest_cache/`.
 
-```bash
-# Check configuration
-python cli.py config
+---
 
-# Test with a specific issue
-python cli.py process PROJ-123
+## Git flow (this repository)
 
-# View status
-python cli.py status
+Default development branch is **`develop`** (not `main`).
+
+```text
+feature/*  →  MR into develop  →  (release) develop → main
 ```
 
-## State Management
+Commits and MR titles use [Conventional Commits](https://www.conventionalcommits.org/):
 
-State is stored in `.jira-agent/state/` as JSON files:
-
+```text
+feat(dashboard): show poll countdown
+fix(poller): do not requeue in-flight issues
 ```
+
+Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/AGENT_PROMPT.md` / `commitMsgFormat.md`.
+
+---
+
+## State on disk
+
+```text
 .jira-agent/
-├── state/
-│   ├── PROJ_123.json         # Issue state
-│   ├── PROJ_124.json
-│   └── TEST_20240327.json
-├── sessions/
-│   ├── session_abc123.log    # Agent output logs
-│   └── session_def456.log
-└── plans/
-    └── plan_ghi789.md        # Generated plans
+  state/          # per-issue JSON (status, tokens, plan path, metadata)
+  sessions/       # agent stdout/stderr session logs (not auto-deleted by temp cleanup)
+.temp/            # per-issue git clones (cleanup policy from env)
+.sisyphus/plans/  # plan markdown when using local plans dir
+logs/             # optional log file (LOG_FILE)
 ```
 
-### State File Structure
-
-Each issue state file contains:
-
-```json
-{
-  "issue_key": "PROJ-123",
-  "issue_summary": "Fix calculator bugs",
-  "status": "completed",
-  "progress_percentage": 100,
-  "workflow_type": "direct_execution",
-  "current_agent": "sisyphus",
-  "started_at": "2024-03-27T10:00:00",
-  "completed_at": "2024-03-27T10:05:30",
-  "execution_duration_seconds": 330.5,
-  "token_usage_input": 1500,
-  "token_usage_output": 2500,
-  "estimated_cost": 0.045,
-  "plan_path": ".sisyphus/plans/PROJ-123_plan.md",
-  "error_message": null,
-  "retry_count": 2,
-  "max_retries": 3,
-  "last_retry_at": "2024-03-27T10:02:15",
-  "retry_reason": "timeout",
-  "timed_out": false,
-  "timeout_seconds": 1800
-}
-```
-
-### Timeout and Retry Tracking
-
-The system tracks timeout and retry information for each issue:
-
-- **`timed_out`**: Set to `true` if the task exceeded the configured timeout
-- **`retry_count`**: Number of retry attempts made
-- **`max_retries`**: Maximum retry attempts configured
-- **`last_retry_at`**: Timestamp of the last retry attempt
-- **`retry_reason`**: Reason for the last retry (`timeout` or `error`)
-- **`timeout_seconds`**: Timeout configuration used for this task
-
-### Cost Tracking
-
-The system tracks API usage costs:
-
-```bash
-# View cost summary across all issues
-python cli.py costs
-```
-
-Example output:
-```
-💰 Cost Summary
-┌──────────────────┬──────────┐
-│ Metric           │ Value    │
-├──────────────────┼──────────┤
-│ Total Issues     │ 12       │
-│ Total Duration   │ 1856.3s  │
-│ Input Tokens     │ 45,230   │
-│ Output Tokens    │ 78,450   │
-│ Total Tokens     │ 123,680  │
-│ Estimated Cost   │ $2.3456  │
-│ Avg Cost/Issue   │ $0.1955  │
-└──────────────────┴──────────┘
-```
-
-Cost calculation uses approximate token pricing:
-- Input: $0.00001 per token
-- Output: $0.00003 per token
+---
 
 ## Troubleshooting
 
-### Connection Issues
-
-**Cannot connect to JIRA:**
-```bash
-# Test JIRA API access
-curl -u your-email@example.com:your-api-token \
-  https://yourcompany.atlassian.net/rest/api/2/myself
-
-# Should return your user info
-```
-
-**Poller not picking up issues:**
-- Confirm `JIRA_BOARD_ID` and that the issue is in **To Do** (or statusCategory `new`)
-- Confirm trigger label and/or bot assignee match
-- Check daemon logs for poll cycle messages
-- Use `python cli.py process KEY` to force one issue
-
-### Agent Issues
-
-**Agent not starting:**
-```bash
-# Verify OpenCode CLI works
-bunx oh-my-opencode --version
-
-# Check project root exists
-ls $PROJECT_ROOT
-
-# Ensure .sisyphus directory exists
-mkdir -p $PROJECT_ROOT/.sisyphus/plans
-```
-
-**Agent fails immediately:**
-- Check session logs: `cat .jira-agent/sessions/session_*.log`
-- Verify oh-my-opencode plugin is installed: `bunx oh-my-opencode install`
-- Check for syntax errors in your codebase
-
-**Task timeouts:**
-- Check if task is genuinely taking too long: `python cli.py show PROJ-123`
-- Increase timeout: `AGENT_TASK_TIMEOUT_SECONDS=3600 python cli.py start`
-- Check for infinite loops or hanging processes in agent output
-
-**Excessive retries:**
-- Check retry configuration: `python cli.py config`
-- View retry history: `python cli.py show PROJ-123`
-- Disable retries for testing: `AGENT_TASK_MAX_RETRIES=0 python cli.py start`
-
-### JIRA API Errors
-
-**401 Unauthorized:**
-- API token expired or revoked
-- User doesn't have project permissions
-- Wrong JIRA_HOST format (should be full URL)
-
-**403 Forbidden:**
-- User lacks permissions on project
-- API token doesn't have required scopes
-
-**404 Not Found:**
-- Issue key doesn't exist
-- Project key is wrong
-
-### Debug Mode
-
-Enable verbose logging:
+| Symptom | What to check |
+|---------|----------------|
+| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
+| 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL`, host URL, project permissions |
+| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
+| Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
+| Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
+| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install.bat`; see `packaging/windows/` diag notes |
+| Stuck `planning`/`executing` | Restart daemon (orphan recovery) or cancel from dashboard; check watchdog logs |
 
 ```bash
-# Set debug environment variable
-DEBUG=true python cli.py start
-
-# Or for specific commands
-DEBUG=true python cli.py process PROJ-123
+python cli.py config
+python cli.py show PROJ-123
+# DEBUG=true python cli.py start
 ```
 
-### Getting Help
+---
 
-1. Check logs: `tail -f jira-agent.log` (Linux/Mac) or `type jira-agent.log` (Windows)
-2. Verify config: `python cli.py config`
-3. Test without JIRA: `python cli.py test-issue --title "Test" --description "Test"`
-4. Check agent output: `python cli.py show PROJ-123`
+## Security notes
 
-### Windows-Specific Issues
+1. Keep **`.env`** out of git (tokens, PATs).  
+2. Dashboard has **no auth** — localhost only unless you knowingly expose it.  
+3. `GITLAB_ALLOWED_HOSTS` prevents sending the PAT to arbitrary hosts from issue text.  
+4. Prefer a dedicated Jira bot account with least privilege.  
+5. Never log raw API tokens or PATs.
 
-**'python' is not recognized:**
-- Make sure Python is added to your PATH during installation
-- Or use `py` instead of `python`
+---
 
-**'npm' is not recognized:**
-- Restart your terminal after installing Node.js
-- Ensure Node.js is added to your PATH
+## Related documentation
 
-**Agent fails with "file not found" errors:**
-- Check that paths in `.env` use Windows format: `PROJECT_ROOT=C:\Users\name\project`
-- Or use forward slashes: `PROJECT_ROOT=C:/Users/name/project`
+| Doc | Purpose |
+|-----|---------|
+| [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
+| [agent/AGENT_PROMPT.md](agent/AGENT_PROMPT.md) | Unified agent prompt kit for target clones |
+| [packaging/windows/README.md](packaging/windows/README.md) | Offline zip design and versioning |
+| [`.env.example`](.env.example) | Full environment template with comments |
+| [web/README.md](web/README.md) | Frontend notes (if present) |
 
-**Port already in use:**
-```cmd
-:: Find process using port 7000
-netstat -ano | findstr :7000
-:: Kill the process (replace PID with actual number)
-taskkill /PID <PID> /F
-```
-
-**Unicode/character encoding issues:**
-- Ensure your terminal supports UTF-8 (Windows Terminal recommended)
-- Or set environment variable: `chcp 65001`
-
-## Security Considerations
-
-1. **API Tokens**: Store in `.env`, never commit to git
-2. **JIRA_API_TOKEN / GITLAB_PAT**: Store only in `.env`, never commit
-3. **Network**: Use HTTPS in production (reverse proxy recommended)
-4. **Permissions**: Use dedicated JIRA user with minimal permissions
-5. **Rate Limiting**: JIRA has API rate limits (check your plan)
+---
 
 ## License
 

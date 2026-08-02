@@ -824,6 +824,25 @@ class GitManager:
             return None
         return result.stdout.strip()
 
+    def get_last_commit_sha(self, *, short: bool = False) -> Optional[str]:
+        """Return HEAD commit SHA (full or short), or None if unavailable."""
+        fmt = "%h" if short else "%H"
+        result = self._run_git(["log", "-1", f"--format={fmt}"], check=False)
+        if result.returncode != 0:
+            return None
+        sha = (result.stdout or "").strip()
+        return sha or None
+
+    def build_commit_url(self, commit_sha: Optional[str] = None) -> Optional[str]:
+        """Best-effort GitLab web URL for a commit (https://host/group/repo/-/commit/SHA)."""
+        sha = (commit_sha or self.get_last_commit_sha() or "").strip()
+        if not sha:
+            return None
+        host, project = self._gitlab_host_and_project()
+        if not host or not project:
+            return None
+        return f"https://{host}/{project}/-/commit/{sha}"
+
     def status(self) -> str:
         """Get git status output."""
         result = self._run_git(["status"])
