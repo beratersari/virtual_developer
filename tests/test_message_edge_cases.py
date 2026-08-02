@@ -65,7 +65,8 @@ def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     body = client.comments[-1]["body"]
     assert "Plan Ready" in body
     assert "No plan content" in body or "not found" in body.lower()
-    assert "Start plan" in body or "ai-start-work" in body or "Mode: build" in body
+    assert "Mode: build" in body
+    assert "To Do" in body
 
 
 def test_plan_summary_whitespace_only(reporter, client):

@@ -43,6 +43,18 @@ export async function fetchTaskDetail(issueKey: string): Promise<TaskDetail> {
   return res.json()
 }
 
+/** Single job from store + optional issue payload. Prefer issue_key from list for legacy jobs. */
+export async function fetchJobById(
+  jobId: string,
+): Promise<{ job: Record<string, unknown>; issue: TaskDetail | null; server_time?: string }> {
+  const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`)
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `Job detail failed: ${res.status}`)
+  }
+  return res.json()
+}
+
 export async function cancelTask(issueKey: string): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}/cancel`, {
     method: 'POST',

@@ -132,15 +132,39 @@ def create_dashboard_app(
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str) -> dict:
-        job = job_store.get_job(job_id)
+        """Single job document. Falls back to merged jobs list (incl. legacy session rows)."""
+        jid = (job_id or "").strip()
+        job = job_store.get_job(jid) if jid else None
+        if not job and jid:
+            # Legacy session-derived jobs are not in JobStore files
+            merged = build_jobs(
+                limit=500,
+                page=1,
+                page_size=500,
+                processor=app.state.processor,
+                state_manager=app.state.state_manager,
+            )
+            for item in merged.jobs:
+                if item.job_id == jid:
+                    job = item.model_dump()
+                    break
         if not job:
             raise HTTPException(status_code=404, detail=f"No job {job_id}")
         issue_key = job.get("issue_key") or ""
-        detail = build_task_detail(
-            issue_key,
-            state_manager=app.state.state_manager,
-            processor=app.state.processor,
-        )
+        detail = None
+        if issue_key:
+            detail = build_task_detail(
+                issue_key,
+                state_manager=app.state.state_manager,
+                processor=app.state.processor,
+            )
+            if detail is not None:
+                detail["jobs"] = build_jobs(
+                    issue_key=issue_key,
+                    limit=100,
+                    processor=app.state.processor,
+                    state_manager=app.state.state_manager,
+                ).model_dump()["jobs"]
         return {
             "job": job,
             "issue": detail,
@@ -180,19 +204,19 @@ def create_dashboard_app(
 
     @app.post("/api/tasks/{issue_key}/start")
     async def task_start(issue_key: str) -> dict:
-        """Start plan execution for a plan_ready issue (poller-only alternative to /start-work)."""
-        proc = app.state.processor
-        if proc is None:
-            raise HTTPException(status_code=503, detail="Processor not available")
-        if not hasattr(proc, "start_plan_execution"):
-            raise HTTPException(status_code=503, detail="Start not available")
-        result = await proc.start_plan_execution(
-            issue_key,
-            reason="Started from ops dashboard",
+        """Deprecated: plan execution is started from Jira only.
+
+        Set ``Mode: build`` in the issue description and move the issue back
+        to To Do so the board poller picks it up.
+        """
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "Starting work from the dashboard is disabled. "
+                "Set Mode: build in the issue description and move the issue "
+                "back to To Do."
+            ),
         )
-        if not result.get("ok"):
-            raise HTTPException(status_code=400, detail=result.get("error") or "Start failed")
-        return result
 
     @app.get("/api/poll")
     def poll() -> dict:

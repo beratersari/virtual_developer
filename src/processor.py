@@ -878,11 +878,10 @@ class JobProcessor:
     async def start_plan_execution(
         self, issue_key: str, *, reason: str = "Started from ops dashboard"
     ) -> dict:
-        """Start execution for a plan_ready issue (poller-only alternative to /start-work).
+        """Start execution for a plan_ready issue (internal / label path).
 
-        Comments are not ingested by the board poller; operators use this API,
-        the dashboard Start button, ``auto_start_plans``, or the ``ai-start-work``
-        label instead of Jira comment commands.
+        Preferred operator path: set ``Mode: build`` and move the issue to To Do
+        (board poller). Dashboard HTTP Start is disabled (410).
 
         Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
@@ -1161,9 +1160,13 @@ class JobProcessor:
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
             return
-        # Also skip PLAN_READY — waiting for /start-work or auto-start; do not re-plan
+        # PLAN_READY: do not re-plan from a create event. Execution starts when
+        # the operator sets Mode: build and moves the issue to To Do (issue_updated).
         if existing and existing.status == TaskStatus.PLAN_READY:
-            logger.info(f"Issue {issue_key} has plan ready, skipping re-create")
+            logger.info(
+                f"Issue {issue_key} has plan ready; "
+                f"set Mode: build and move to To Do to execute (skip re-create)"
+            )
             return
         
         if existing:
@@ -1302,36 +1305,84 @@ class JobProcessor:
                 )
             return
 
-        # Non-terminal waiting states (PENDING, PLAN_READY): re-kick PENDING if still To Do
+        # Non-terminal waiting: re-kick PENDING if still To Do
         if is_todo and state.status == TaskStatus.PENDING:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
             await self._handle_issue_created(event)
             return
 
-        # plan_ready under poller-only intake: start execution when operator
-        # adds the ai-start-work label (comments are not polled — AGENTS.md).
+        # plan_ready → execute only when operator sets Mode: build and moves to To Do
+        # (or legacy ai-start-work / ai-execute label). No dashboard Start button.
         if state.status == TaskStatus.PLAN_READY:
+            if self._is_live_processing(issue_key):
+                logger.info(f"{issue_key} plan_ready but already live; skip start")
+                return
+
             labels = list(fields.get("labels") or [])
             label_set = {str(x).strip().lower() for x in labels}
-            if "ai-start-work" in label_set or "ai-execute" in label_set:
-                if self._is_live_processing(issue_key):
-                    logger.info(f"{issue_key} plan_ready but already live; skip start")
-                    return
+            has_start_label = (
+                "ai-start-work" in label_set or "ai-execute" in label_set
+            )
+
+            summary = fields.get("summary", "") or state.issue_summary or ""
+            description = fields.get("description", "") or ""
+            if not isinstance(description, str):
+                description = str(description)
+            if not description:
+                description = state.description or ""
+
+            # Prefer fresh Jira text so Mode: build is visible to the router
+            if summary:
+                state.issue_summary = summary
+            if description:
+                state.description = description
+
+            workflow_type = self._resolve_workflow(
+                issue_key, state.issue_summary, state.description
+            )
+            want_build = (
+                workflow_type == WorkflowType.EXECUTION
+                or has_start_label
+            )
+
+            if is_todo and want_build:
+                self.state_manager.update_state(
+                    issue_key,
+                    issue_summary=state.issue_summary,
+                    description=state.description,
+                    metadata={"workflow_type": workflow_type.value},
+                )
+                state = self.state_manager.get_state(issue_key) or state
                 logger.info(
-                    f"{issue_key} plan_ready + start label; beginning execution"
+                    f"{issue_key} plan_ready + To Do + Mode: build "
+                    f"(or start label); beginning execution"
                 )
                 try:
                     await self._start_execution_workflow(state)
                 except Exception as e:
                     logger.exception(
-                        f"Plan start from label failed for {issue_key}: {e}", e
+                        f"Plan start from To Do failed for {issue_key}: {e}", e
                     )
                     self._fail_issue(
                         issue_key,
                         f"Failed to start plan execution: {e}",
-                        suggestion="Retry from the ops dashboard or re-add ai-start-work.",
+                        suggestion=(
+                            "Check logs, set Mode: build in the description, "
+                            "and move the issue back to To Do."
+                        ),
                     )
                     self._release_context(issue_key, success=False)
+            elif is_todo and not want_build:
+                logger.info(
+                    f"{issue_key} plan_ready and To Do but Mode is not build; "
+                    f"set Mode: build in the description to start execution "
+                    f"(workflow={workflow_type.value})"
+                )
+            elif not is_todo:
+                logger.debug(
+                    f"{issue_key} plan_ready; waiting for To Do + Mode: build "
+                    f"(jira status '{status_name}')"
+                )
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -1805,12 +1856,9 @@ class JobProcessor:
                         f"Could not post plan summary for {state.issue_key}: {e}"
                     )
 
-            # Auto-start build if configured (uses lock+semaphore via start_plan_execution)
-            if settings.auto_start_plans:
-                await self.start_plan_execution(
-                    state.issue_key,
-                    reason="auto_start_plans after plan mode",
-                )
+            # Do not auto-start build: operator must set Mode: build and move
+            # the issue back to To Do (board poller). Dashboard Start is disabled.
+
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue
             self.state_manager.update_state(

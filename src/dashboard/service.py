@@ -836,9 +836,9 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
-    # plan_ready needs an operator kick when auto_start_plans is false
-    # (comments are not polled — AGENTS.md)
-    can_start = state.status == TaskStatus.PLAN_READY and not live
+    # Plan execution is started from Jira only: set Mode: build and move to To Do.
+    # Dashboard does not offer a Start button.
+    can_start = False
 
     meta = state.metadata or {}
     session_ids = list(meta.get("opencode_session_ids") or [])

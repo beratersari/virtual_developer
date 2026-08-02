@@ -96,7 +96,7 @@ JIRA_API_TOKEN=your-api-token-here
 | API | FastAPI in the **daemon process** (with poller + jobs) |
 | Live updates | WebSocket `/ws` |
 | Frontend | Vite + React + TypeScript + Tailwind (`web/`) — **display only** |
-| Palette | Slate base, indigo accent; status colors: green completed, amber executing, sky planning, rose error |
+| Palette | Neutral ops console (`web/src/index.css` tokens): flat zinc surfaces, single blue accent for actions; status via small tone dots (not rainbow chips). Job detail is run-scoped (prompts/logs for selected job only; other runs collapsed). |
 
 ### Rules
 

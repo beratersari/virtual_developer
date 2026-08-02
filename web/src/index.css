@@ -1,17 +1,267 @@
 @import "tailwindcss";
 
+/*
+  Ops console design tokens — neutral chrome, single accent, sparse semantics.
+  Dark-first; no gradient page backgrounds or glassmorphism.
+*/
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --bg: #0a0a0b;
+  --bg-elevated: #111113;
+  --surface: #141416;
+  --surface-hover: #1a1a1d;
+  --border: #27272a;
+  --border-strong: #3f3f46;
+
+  --text: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-muted: rgba(37, 99, 235, 0.15);
+  --accent-text: #93c5fd;
+
+  --danger: #dc2626;
+  --danger-muted: rgba(220, 38, 38, 0.12);
+  --danger-text: #fca5a5;
+
+  --warning: #d97706;
+  --warning-muted: rgba(217, 119, 6, 0.12);
+  --warning-text: #fcd34d;
+
+  --success: #059669;
+  --success-muted: rgba(5, 150, 105, 0.12);
+  --success-text: #6ee7b7;
+
+  --info: #0284c7;
+  --info-muted: rgba(2, 132, 199, 0.12);
+  --info-text: #7dd3fc;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+
+  --radius: 6px;
+  --radius-lg: 8px;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-muted: var(--accent-muted);
+  --color-accent-text: var(--accent-text);
+  --color-danger: var(--danger);
+  --color-danger-muted: var(--danger-muted);
+  --color-danger-text: var(--danger-text);
+  --color-warning: var(--warning);
+  --color-warning-muted: var(--warning-muted);
+  --color-warning-text: var(--warning-text);
+  --color-success: var(--success);
+  --color-success-muted: var(--success-muted);
+  --color-success-text: var(--success-text);
+  --color-info: var(--info);
+  --color-info-muted: var(--info-muted);
+  --color-info-text: var(--info-text);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: #020617;
-  color: #e2e8f0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Shared focus ring for interactive controls */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Utility primitives used across the ops UI */
+.ops-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.ops-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  outline: none;
+}
+
+.ops-input:focus {
+  border-color: var(--accent);
+}
+
+.ops-input:disabled {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+.ops-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: var(--radius);
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.ops-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ops-btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ops-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.ops-btn-secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.ops-btn-secondary:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.ops-btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.ops-btn-danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ops-btn-ghost {
+  background: transparent;
+  color: var(--accent-text);
+  padding: 0.25rem 0;
+}
+
+.ops-btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.ops-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.ops-table {
+  width: 100%;
+  min-width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.875rem;
+}
+
+.ops-table thead {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ops-table th {
+  padding: 0.625rem 1rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ops-table td {
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.ops-table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.ops-table tbody tr.ops-row-selected {
+  background: var(--accent-muted);
+}
+
+.ops-table tbody tr.ops-row-selected:hover {
+  background: var(--accent-muted);
+}
+
+.ops-table.ops-table-compact th,
+.ops-table.ops-table-compact td {
+  padding: 0.4rem 0.75rem;
+}
+
+.ops-pre {
+  max-height: min(70vh, 40rem);
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 1rem;
+  font-size: 0.75rem;
+  line-height: 1.55;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.ops-alert {
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+}
+
+.ops-alert-danger {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  background: var(--danger-muted);
+  color: var(--danger-text);
+}
+
+.ops-alert-warning {
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  background: var(--warning-muted);
+  color: var(--warning-text);
 }
