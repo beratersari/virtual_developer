@@ -56,16 +56,23 @@ function Stop-ListenersOnPort([int]$Port) {
 }
 
 function Stop-DaemonPythons {
+    # Use single-quoted patterns only (double-quoted \" breaks PowerShell parsing).
     $patterns = @(
-        "src\.daemon",
-        "src/daemon",
-        "cli\.py\s+start",
-        "cli\.py\"\s+start",
-        "uvicorn.*src\.dashboard",
-        "virtual_developer.*daemon"
+        'src\.daemon',
+        'src/daemon',
+        'cli\.py(\s+|").*start',
+        'uvicorn.*dashboard',
+        'virtual_developer.*daemon',
+        '-m\s+src\.daemon'
     )
     try {
-        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'" -ErrorAction SilentlyContinue)
+        # WMI filter: one name at a time (OR with quotes is fragile across PS versions)
+        $procs = @()
+        foreach ($exe in @('python.exe', 'pythonw.exe')) {
+            $procs += @(
+                Get-CimInstance Win32_Process -Filter "Name = '$exe'" -ErrorAction SilentlyContinue
+            )
+        }
     } catch {
         return
     }
