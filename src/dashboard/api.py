@@ -15,6 +15,7 @@ from src.config import settings
 from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     ScheduleCreateRequest,
+    ScheduleExistingRequest,
     SettingsUpdate,
 )
 from src.dashboard.service import (
@@ -35,6 +36,8 @@ from src.scheduler.service import (
     create_scheduled_job,
     list_project_issue_types,
     list_scheduled_jobs,
+    preview_existing_issue,
+    schedule_existing_issue,
 )
 from src.state.schedule_store import schedule_store
 from src.state.job_store import job_store
@@ -194,6 +197,49 @@ def create_dashboard_app(
             "ok": True,
             "schedule": result.get("schedule"),
             "issue_key": result.get("issue_key"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/schedules/preview")
+    def schedules_preview(
+        issue_key: str = Query(..., description="Existing Jira issue key"),
+    ) -> dict:
+        """Load an existing issue and validate the ``{params}`` template.
+
+        Used by the Scheduled tab before showing the run-at picker.
+        Hard-fails (400) if issue missing or template invalid.
+        """
+        result = preview_existing_issue(issue_key)
+        result["server_time"] = build_meta().server_time
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Issue preview failed",
+            )
+        return result
+
+    @app.post("/api/schedules/from-issue")
+    def schedules_from_issue(body: ScheduleExistingRequest) -> dict:
+        """Schedule an existing Jira issue (no new issue created).
+
+        Hard-fails if issue cannot be loaded or template is invalid.
+        Soft: In Progress transition + SCHEDULED_AI_JOB label.
+        """
+        result = schedule_existing_issue(
+            body.issue_key,
+            scheduled_at=body.scheduled_at,
+            store=schedule_store,
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Failed to schedule existing issue",
+            )
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "message": result.get("message"),
             "server_time": build_meta().server_time,
         }
 

@@ -14,7 +14,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.config import settings
-from src.issue_git_spec import _normalize_branch, _normalize_repo_url
+from src.issue_git_spec import (
+    _normalize_branch,
+    _normalize_repo_url,
+    parse_issue_git_spec,
+)
 from src.logger import logger
 from src.state.schedule_store import SCHEDULE_LABEL, ScheduleStore, schedule_store
 
@@ -134,6 +138,226 @@ def list_project_issue_types(
             "error": str(e),
             "project_key": project,
             "issue_types": [],
+        }
+    finally:
+        if close_client and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _description_to_text(description: Any) -> str:
+    """Normalize Jira description (plain string or Cloud ADF-ish) to text."""
+    if description is None:
+        return ""
+    if isinstance(description, str):
+        return description
+    # ADF document: best-effort plain extraction
+    try:
+        if isinstance(description, dict):
+            parts: List[str] = []
+
+            def walk(node: Any) -> None:
+                if isinstance(node, dict):
+                    if node.get("type") == "text" and node.get("text"):
+                        parts.append(str(node["text"]))
+                    for child in node.get("content") or []:
+                        walk(child)
+                elif isinstance(node, list):
+                    for child in node:
+                        walk(child)
+
+            walk(description)
+            return "\n".join(parts)
+    except Exception:
+        pass
+    return str(description)
+
+
+def _plain_template_error(jira_wiki_msg: str) -> str:
+    """Turn Jira-wiki style template errors into a short UI message."""
+    text = (jira_wiki_msg or "").replace("{code}", "").replace("*", "")
+    # First meaningful line after header
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return "Issue template is invalid"
+    # Prefer the "could not start" / Missing line
+    for ln in lines:
+        if "Missing" in ln or "could not start" in ln or "invalid" in ln.lower():
+            return ln[:400]
+    return lines[0][:400]
+
+
+def preview_existing_issue(
+    issue_key: str,
+    *,
+    jira_client: Any = None,
+) -> Dict[str, Any]:
+    """Fetch an existing Jira issue and validate the ``{params}`` template.
+
+    Hard-fails if the issue cannot be loaded or the template is invalid.
+    Does not write a schedule record.
+    """
+    key = (issue_key or "").strip().upper()
+    if not key:
+        return {"ok": False, "error": "issue_key is required"}
+
+    client = jira_client
+    close_client = False
+    if client is None:
+        from src.jira.client import create_jira_client
+
+        client = create_jira_client()
+        close_client = True
+
+    try:
+        issue = client.get_issue(key)
+        if not issue or not issue.get("key"):
+            detail = getattr(client, "last_error", None) or "issue not found or Jira unavailable"
+            return {
+                "ok": False,
+                "error": f"Could not load issue {key}: {detail}",
+                "issue_key": key,
+            }
+        fields = issue.get("fields") or {}
+        summary = (fields.get("summary") or "").strip()
+        description = _description_to_text(fields.get("description"))
+        status_name = ""
+        st = fields.get("status") or {}
+        if isinstance(st, dict):
+            status_name = (st.get("name") or "").strip()
+        itype_name = ""
+        it = fields.get("issuetype") or {}
+        if isinstance(it, dict):
+            itype_name = (it.get("name") or "").strip()
+        labels = fields.get("labels") or []
+        if not isinstance(labels, list):
+            labels = []
+
+        spec, err = parse_issue_git_spec(summary, description)
+        if err or spec is None:
+            return {
+                "ok": False,
+                "error": _plain_template_error(err or "Invalid {params} template"),
+                "issue_key": key,
+                "title": summary,
+                "jira_status": status_name,
+                "template_valid": False,
+            }
+
+        return {
+            "ok": True,
+            "issue_key": str(issue.get("key") or key).upper(),
+            "title": summary,
+            "description": description,
+            "jira_status": status_name,
+            "issue_type": itype_name,
+            "labels": [str(x) for x in labels],
+            "template_valid": True,
+            "repository_url": spec.repository_url,
+            "source_branch": spec.source_branch,
+            "target_branch": spec.target_branch,
+            "mode": spec.mode or "",
+            "message": "Issue found and template is valid. Choose a run time to schedule.",
+        }
+    finally:
+        if close_client and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def schedule_existing_issue(
+    issue_key: str,
+    *,
+    scheduled_at: str,
+    jira_client: Any = None,
+    store: Optional[ScheduleStore] = None,
+) -> Dict[str, Any]:
+    """Schedule an existing Jira issue for later dispatch (no new issue create).
+
+    Hard-fails if the issue cannot be loaded or the template is invalid.
+    Soft-fails: In Progress transition and SCHEDULED_AI_JOB label.
+    """
+    key = (issue_key or "").strip().upper()
+    if not key:
+        return {"ok": False, "error": "issue_key is required"}
+
+    try:
+        at_dt = parse_schedule_at(scheduled_at)
+    except ValueError as e:
+        return {"ok": False, "error": f"invalid scheduled_at: {e}"}
+    scheduled_iso = at_dt.isoformat(timespec="seconds")
+
+    client = jira_client
+    close_client = False
+    if client is None:
+        from src.jira.client import create_jira_client
+
+        client = create_jira_client()
+        close_client = True
+
+    try:
+        # Re-validate at schedule time (issue may have changed since preview)
+        preview = preview_existing_issue(key, jira_client=client)
+        if not preview.get("ok"):
+            return preview
+
+        # Soft: In Progress
+        try:
+            if hasattr(client, "transition_to_in_progress"):
+                ok = client.transition_to_in_progress(key)
+                if ok:
+                    logger.info(f"{key} moved to In Progress (schedule existing)")
+                else:
+                    logger.warning(
+                        f"{key}: could not transition to In Progress "
+                        f"(schedule still saved)"
+                    )
+        except Exception as e:
+            logger.warning(f"{key}: In Progress soft-failed: {e}")
+
+        # Soft: ensure schedule label
+        try:
+            if hasattr(client, "add_labels"):
+                client.add_labels(key, [SCHEDULE_LABEL])
+        except Exception as e:
+            logger.warning(f"{key}: add_labels soft-failed: {e}")
+
+        ss = store or schedule_store
+        # Avoid duplicate pending schedules for the same issue
+        for existing in ss.list_schedules(status="scheduled", limit=500):
+            if (existing.get("issue_key") or "").upper() == key:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Issue {key} already has a pending schedule "
+                        f"({existing.get('schedule_id')}). Cancel it first or wait."
+                    ),
+                    "schedule": existing,
+                }
+
+        rec = ss.create(
+            title=preview.get("title") or key,
+            description=(preview.get("description") or "")[:4000],
+            repository_url=preview.get("repository_url") or "",
+            source_branch=preview.get("source_branch") or "",
+            target_branch=preview.get("target_branch") or "",
+            mode=preview.get("mode") or "",
+            scheduled_at=scheduled_iso,
+            issue_key=key,
+            issue_description=preview.get("description") or "",
+            project_key=key.split("-")[0] if "-" in key else "",
+            issue_type=preview.get("issue_type") or "Task",
+            source="existing",
+        )
+        return {
+            "ok": True,
+            "schedule": rec,
+            "issue_key": key,
+            "message": f"Scheduled existing issue {key}",
         }
     finally:
         if close_client and hasattr(client, "close"):
@@ -267,6 +491,7 @@ def create_scheduled_job(
             issue_description=issue_description,
             project_key=project,
             issue_type=itype,
+            source="new",
         )
         return {"ok": True, "schedule": rec, "issue_key": issue_key}
     finally:

@@ -188,6 +188,106 @@ def test_cancel_scheduled_job(tmp_path):
     assert store.get(rec["schedule_id"])["status"] == "cancelled"
 
 
+def test_preview_existing_issue_valid_template():
+    client = MagicMock()
+    client.get_issue.return_value = {
+        "key": "KAN-20",
+        "fields": {
+            "summary": "Existing feature",
+            "description": (
+                "Do work\n\n"
+                "{params}\n"
+                "Repository: https://gitlab.com/a/b.git\n"
+                "Source branch: develop\n"
+                "Target branch: main\n"
+                "Mode: build\n"
+                "{params}"
+            ),
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Story"},
+            "labels": [],
+        },
+    }
+    from src.scheduler.service import preview_existing_issue
+
+    out = preview_existing_issue("kan-20", jira_client=client)
+    assert out["ok"] is True
+    assert out["template_valid"] is True
+    assert out["mode"] == "build"
+    assert out["repository_url"].endswith("b.git")
+    assert out["issue_type"] == "Story"
+
+
+def test_preview_existing_issue_invalid_template():
+    client = MagicMock()
+    client.get_issue.return_value = {
+        "key": "KAN-21",
+        "fields": {
+            "summary": "No params",
+            "description": "just text",
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Task"},
+            "labels": [],
+        },
+    }
+    from src.scheduler.service import preview_existing_issue
+
+    out = preview_existing_issue("KAN-21", jira_client=client)
+    assert out["ok"] is False
+    assert "params" in out["error"].lower() or "template" in out["error"].lower() or "could not" in out["error"].lower()
+
+
+def test_schedule_existing_issue(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = {
+        "key": "KAN-22",
+        "fields": {
+            "summary": "Existing",
+            "description": (
+                "{params}\n"
+                "Repository: https://gitlab.com/a/b.git\n"
+                "Source branch: develop\n"
+                "Target branch: develop\n"
+                "Mode: plan\n"
+                "{params}"
+            ),
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Task"},
+            "labels": ["ai-assist"],
+        },
+    }
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+
+    from src.scheduler.service import schedule_existing_issue
+
+    out = schedule_existing_issue(
+        "KAN-22",
+        scheduled_at="2026-12-01T10:00:00",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    rec = out["schedule"]
+    assert rec["source"] == "existing"
+    assert rec["issue_key"] == "KAN-22"
+    assert rec["mode"] == "plan"
+    client.create_issue.assert_not_called()
+    client.transition_to_in_progress.assert_called()
+    client.add_labels.assert_called()
+
+    # Duplicate pending rejected
+    out2 = schedule_existing_issue(
+        "KAN-22",
+        scheduled_at="2026-12-02T10:00:00",
+        jira_client=client,
+        store=store,
+    )
+    assert out2["ok"] is False
+    assert "already has a pending schedule" in out2["error"]
+
+
 def test_create_with_custom_issue_type(tmp_path):
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     client = MagicMock()
@@ -290,3 +390,49 @@ def test_api_schedules(tmp_path, monkeypatch):
         r3 = tc.post(f"/api/schedules/{sid}/cancel")
         assert r3.status_code == 200
         assert r3.json()["schedule"]["status"] == "cancelled"
+
+        # Preview + schedule existing
+        client_mock.get_issue.return_value = {
+            "key": "KAN-88",
+            "fields": {
+                "summary": "From board",
+                "description": (
+                    "{params}\n"
+                    "Repository: https://gitlab.com/org/repo.git\n"
+                    "Source branch: develop\n"
+                    "Target branch: develop\n"
+                    "Mode: build\n"
+                    "{params}"
+                ),
+                "status": {"name": "To Do"},
+                "issuetype": {"name": "ExtBug"},
+                "labels": [],
+            },
+        }
+        m.setattr(
+            "src.dashboard.api.preview_existing_issue",
+            lambda issue_key: __import__(
+                "src.scheduler.service", fromlist=["preview_existing_issue"]
+            ).preview_existing_issue(issue_key, jira_client=client_mock),
+        )
+        m.setattr(
+            "src.dashboard.api.schedule_existing_issue",
+            lambda issue_key, scheduled_at, store=None: __import__(
+                "src.scheduler.service", fromlist=["schedule_existing_issue"]
+            ).schedule_existing_issue(
+                issue_key,
+                scheduled_at=scheduled_at,
+                jira_client=client_mock,
+                store=store,
+            ),
+        )
+        r_prev = tc.get("/api/schedules/preview", params={"issue_key": "KAN-88"})
+        assert r_prev.status_code == 200, r_prev.text
+        assert r_prev.json()["template_valid"] is True
+
+        r_ex = tc.post(
+            "/api/schedules/from-issue",
+            json={"issue_key": "KAN-88", "scheduled_at": "2026-12-26T08:00:00"},
+        )
+        assert r_ex.status_code == 200, r_ex.text
+        assert r_ex.json()["schedule"]["source"] == "existing"
