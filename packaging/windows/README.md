@@ -22,9 +22,27 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 ## User flow
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
-2. Extract.
-3. Run `install.bat`.
-4. Open the TUI with **`start-opencode.bat`** (never from your user home folder).
+2. Extract once (you should see `install.bat` and `start.bat` at the top level).
+3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
+4. Run **`install.bat`**:
+   - Creates `.venv` and installs Python deps from **`vendor\python-wheels`** (offline)
+   - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
+   - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+5. Edit **`.env`** (Jira / GitLab).
+6. Run **`start.bat`**:
+   - Stops any previous instance (port 8080 / old `python -m src.daemon`)
+   - Starts the daemon (poller + API + **ops dashboard UI** on http://127.0.0.1:8080)
+7. Optional OpenCode TUI: **`start-opencode.bat`** (never from your user home folder).
+
+### Frontend + backend model (offline)
+
+| Piece | How it is shipped / started |
+|-------|-----------------------------|
+| **Backend** | Python daemon (`python -m src.daemon`) via `start.bat` |
+| **Frontend** | React SPA built in CI (`npm run build` in `web/`), copied to **`web\dist`**, served by FastAPI on the **same port** as the API |
+| **Node at runtime** | **Not required** on the user machine (only CI builds the SPA) |
+
+Do **not** ship `web\node_modules` in the zip (path-length bomb). Only `web\dist`.
 
 OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
@@ -51,7 +69,10 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
 | `opencode.json` | Registers `oh-my-opencode` plugin |
 | `oh-my-opencode.json` | Default plugin config stub |
-| `build-dist.ps1` | Fetches pinned artifacts from the web and builds the zip |
+| `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
+| `start.bat` | User launcher: kill old processes → start daemon + dashboard |
+| `Stop-VdProcesses.ps1` | Helper used by `start.bat` to free ports / kill old daemons |
+| `e2e-smoke.ps1` | CI: deep-path install + assert SPA + launchers + OpenCode |
 | `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
 
 ## Bumping versions

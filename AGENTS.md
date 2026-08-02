@@ -419,6 +419,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Global config | Mirror valid JSON to **`%USERPROFILE%\.config\opencode\`** (OpenCode’s real discovery path). |
 | Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
+| Product launcher | Ship **`start.bat`**: kill prior daemon/ports → start `python -m src.daemon` (API + ops dashboard). SPA is prebuilt **`web/dist`** in the zip (CI `npm run build`); **no Node at runtime**. Never ship `web/node_modules` in the offline payload. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
 ### 9.2 cmd.exe / install.bat landmines
@@ -476,7 +477,8 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
    - `rg.exe` present under cache `bin`
    - `start-opencode.bat` present at payload root
 3. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
-4. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
+4. **Dashboard SPA:** `build-dist.ps1` must `npm ci` / `npm run build` in `web/` and stage only `web/dist` (+ assert `index.html` / no `web/node_modules`). E2E smoke must require `start.bat` and `web\dist\index.html`.
+5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 
 ### 9.6 Debugging a black screen (shareable evidence)
 

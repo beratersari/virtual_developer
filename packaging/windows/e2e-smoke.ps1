@@ -24,6 +24,28 @@ if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install.bat"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "vendor\opencode-home.zip"))) {
     throw "vendor\opencode-home.zip missing — outer package must not expand node_modules"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "start.bat"))) {
+    throw "start.bat missing at payload root (backend + dashboard launcher)"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "packaging\windows\Stop-VdProcesses.ps1"))) {
+    throw "packaging\windows\Stop-VdProcesses.ps1 missing (required by start.bat)"
+}
+
+# Ops dashboard SPA must be prebuilt into the offline zip (no Node at runtime)
+$spaIndex = Join-Path $PayloadDir "web\dist\index.html"
+if (-not (Test-Path -LiteralPath $spaIndex)) {
+    throw "web\dist\index.html missing — build-dist must run npm run build and stage SPA"
+}
+$spaAssets = Join-Path $PayloadDir "web\dist\assets"
+if (-not (Test-Path -LiteralPath $spaAssets)) {
+    throw "web\dist\assets missing — incomplete dashboard SPA in payload"
+}
+$badWebNm = Join-Path $PayloadDir "web\node_modules"
+if (Test-Path -LiteralPath $badWebNm) {
+    throw "FAIL: web\node_modules present in payload (must ship dist only)"
+}
+Write-Host "OK web\dist SPA present (offline dashboard UI)"
+Write-Host "OK start.bat present"
 
 # Fail if someone reintroduced expanded node_modules into the payload
 $badNm = Join-Path $PayloadDir "vendor\opencode-home\node_modules"
@@ -239,12 +261,32 @@ if (-not (Test-Path -LiteralPath $rg)) {
 }
 Write-Host "OK ripgrep: $rg"
 
-# Project launcher exists
+# Project launchers exist after install
 $launcher = Join-Path $deepRoot "start-opencode.bat"
 if (-not (Test-Path -LiteralPath $launcher)) {
     throw "start-opencode.bat missing at project root after install"
 }
 Write-Host "OK launcher: $launcher"
+
+$startBat = Join-Path $deepRoot "start.bat"
+if (-not (Test-Path -LiteralPath $startBat)) {
+    throw "start.bat missing at project root after install"
+}
+Write-Host "OK start.bat: $startBat"
+
+$spaAfter = Join-Path $deepRoot "web\dist\index.html"
+if (-not (Test-Path -LiteralPath $spaAfter)) {
+    throw "web\dist\index.html missing after install copy — dashboard will not load"
+}
+Write-Host "OK dashboard SPA after install: $spaAfter"
+
+# Non-interactive dry check: stop helper must run without error
+$stopPs1 = Join-Path $deepRoot "packaging\windows\Stop-VdProcesses.ps1"
+& $stopPs1 -DashboardPort 8080 -VitePort 5173
+if ($LASTEXITCODE -ne 0) {
+    throw "Stop-VdProcesses.ps1 failed (exit $LASTEXITCODE)"
+}
+Write-Host "OK Stop-VdProcesses.ps1"
 
 # Env for models.dev skip (set by install.bat via setx; process may not see it)
 if ($env:OPENCODE_DISABLE_MODELS_FETCH -ne "1") {

@@ -278,6 +278,93 @@ foreach ($item in $copyItems) {
     Write-Host "  + $item"
 }
 
+# Root launcher: stop old processes + start daemon (API + SPA dashboard)
+$startBatSrc = Join-Path $root "packaging\windows\start.bat"
+if (-not (Test-Path -LiteralPath $startBatSrc)) {
+    throw "packaging\windows\start.bat missing"
+}
+Copy-Item -LiteralPath $startBatSrc -Destination (Join-Path $payload "start.bat") -Force
+Write-Host "  + start.bat (root launcher)"
+
+# ---------------------------------------------------------------------------
+# 1b) Build ops dashboard SPA and stage web/dist only (no node_modules)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 1b: Building ops dashboard frontend (web/)..."
+
+$webDir = Join-Path $root "web"
+if (-not (Test-Path -LiteralPath (Join-Path $webDir "package.json"))) {
+    throw "web/package.json missing — cannot build dashboard SPA"
+}
+
+$node = Get-Command node -ErrorAction SilentlyContinue
+$npm = Get-Command npm -ErrorAction SilentlyContinue
+if (-not $node -or -not $npm) {
+    throw "Node.js + npm required on PATH to build web/ (CI: setup-node)"
+}
+Write-Host "  node: $(& node --version 2>$null)"
+Write-Host "  npm : $(& npm --version 2>$null)"
+
+Push-Location $webDir
+try {
+    if (Test-Path -LiteralPath (Join-Path $webDir "package-lock.json")) {
+        Write-Host "  npm ci..."
+        npm ci --no-fund --no-audit
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  npm ci failed — retrying with npm install..."
+            npm install --no-fund --no-audit
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed for web/ (exit $LASTEXITCODE)" }
+        }
+    } else {
+        Write-Host "  npm install (no package-lock)..."
+        npm install --no-fund --no-audit
+        if ($LASTEXITCODE -ne 0) { throw "npm install failed for web/ (exit $LASTEXITCODE)" }
+    }
+
+    Write-Host "  npm run build..."
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm run build failed for web/ (exit $LASTEXITCODE)"
+    }
+} finally {
+    Pop-Location
+}
+
+$webDist = Join-Path $webDir "dist"
+$webIndex = Join-Path $webDist "index.html"
+if (-not (Test-Path -LiteralPath $webIndex)) {
+    throw "web/dist/index.html missing after build"
+}
+$webAssets = Join-Path $webDist "assets"
+if (-not (Test-Path -LiteralPath $webAssets)) {
+    throw "web/dist/assets missing after build"
+}
+
+$payloadWeb = Join-Path $payload "web"
+Ensure-Dir $payloadWeb
+# Only ship production assets — never web/node_modules (path-length bomb)
+$payloadWebDist = Join-Path $payloadWeb "dist"
+if (Test-Path -LiteralPath $payloadWebDist) {
+    Remove-Item -LiteralPath $payloadWebDist -Recurse -Force
+}
+Copy-Item -LiteralPath $webDist -Destination $payloadWebDist -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $webDir "package.json") -Destination (Join-Path $payloadWeb "package.json") -Force
+# Marker so install/start can prove SPA was packaged
+$spaMarker = @"
+virtual_developer ops dashboard SPA (production build)
+Built: $(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
+Served by the daemon at http://127.0.0.1:8080 (FastAPI StaticFiles)
+No Node required at runtime on the user machine.
+"@
+Set-Content -Path (Join-Path $payloadWeb "DIST_SPA.txt") -Value $spaMarker -Encoding UTF8
+$spaFiles = @(Get-ChildItem -LiteralPath $payloadWebDist -Recurse -File -ErrorAction SilentlyContinue)
+Write-Host "  + web/dist ($($spaFiles.Count) files) — dashboard SPA for offline install"
+
+# Guard: never ship web/node_modules in the payload
+if (Test-Path -LiteralPath (Join-Path $payloadWeb "node_modules")) {
+    throw "FAIL: web/node_modules must not be staged in the offline zip"
+}
+
 $productVersion = if ($env:VD_PRODUCT_VERSION) { $env:VD_PRODUCT_VERSION } else {
     $vf = Join-Path $root "VERSION"
     if (Test-Path -LiteralPath $vf) { (Get-Content -LiteralPath $vf -Raw).Trim() } else { "0.0.0-dev" }
@@ -594,12 +681,18 @@ JIRA Virtual Developer — Windows offline package
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
 4. Run install.bat
-5. OpenCode is under: %USERPROFILE%\.opencode
-6. To open the OpenCode TUI use ONLY:
+   - Creates .venv and installs Python deps from vendor\python-wheels
+   - Installs OpenCode under %USERPROFILE%\.opencode
+   - Ships prebuilt ops dashboard SPA in web\dist (no Node needed at runtime)
+5. Edit .env with Jira / GitLab settings
+6. Start backend + dashboard UI:
+      start.bat
+   - Stops any previous instance on port 8080 first
+   - Opens http://127.0.0.1:8080 (API + React SPA in one process)
+7. OpenCode TUI (optional, separate from the daemon):
       start-opencode.bat
    NEVER run "opencode" from C:\Users\<you> — that indexes your entire
    profile and freezes on a black screen for minutes.
-7. Edit .env, then:  .venv\Scripts\activate  &&  python cli.py start
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
