@@ -18,7 +18,7 @@ import { JobDetail } from './components/JobDetail'
 import { JobsPage } from './components/JobsPage'
 import { PollMonitor } from './components/PollMonitor'
 import { ScheduledPage } from './components/ScheduledPage'
-import { SettingsPage } from './components/SettingsPage'
+import { SettingsPage, type SettingsDraft } from './components/SettingsPage'
 import { TaskDetailPage } from './components/TaskDetailPage'
 import type { JobStatusFilter } from './util/status'
 import {
@@ -89,7 +89,7 @@ export default function App() {
   const [connected, setConnected] = useState(false)
   const [localClock, setLocalClock] = useState(() => new Date())
   const [saving, setSaving] = useState(false)
-  const [settingsDraft, setSettingsDraft] = useState<Partial<SettingsPayload>>({})
+  const [settingsDraft, setSettingsDraft] = useState<SettingsDraft>({})
 
   // Shared detail load state
   const [detailLoading, setDetailLoading] = useState(false)
@@ -572,13 +572,25 @@ export default function App() {
 
   useEffect(() => {
     if (!data?.settings || settingsDirty) return
+    const creds = data.settings.gitlab_credentials ?? []
     setSettingsDraft({
+      jira_host: data.settings.jira_host,
+      jira_email: data.settings.jira_email ?? '',
       jira_board_id: data.settings.jira_board_id,
       poll_interval_seconds: data.settings.poll_interval_seconds,
       trigger_labels: data.settings.trigger_labels,
       trigger_on_assignment: data.settings.trigger_on_assignment,
       max_concurrent_jobs: data.settings.max_concurrent_jobs,
       default_model: data.settings.default_model,
+      gitlab_allowed_hosts: data.settings.gitlab_allowed_hosts ?? '',
+      // Secrets are write-only — never hydrate from server
+      jira_api_token: '',
+      gitlab_pat: '',
+      gitlab_cred_rows: creds.map((c) => ({
+        host: c.host,
+        pat: '',
+        pat_configured: Boolean(c.pat_configured),
+      })),
     })
   }, [data?.settings, settingsDirty])
 
@@ -626,7 +638,9 @@ export default function App() {
       if (!Number.isFinite(maxJobs) || maxJobs < 1 || maxJobs > 64) {
         throw new Error('Max concurrent jobs must be between 1 and 64')
       }
-      const body = {
+      const body: Parameters<typeof patchSettings>[0] = {
+        jira_host: (settingsDraft.jira_host ?? '').trim(),
+        jira_email: (settingsDraft.jira_email ?? '').trim(),
         jira_board_id: board,
         poll_interval_seconds: poll,
         trigger_labels: settingsDraft.trigger_labels,
@@ -634,10 +648,53 @@ export default function App() {
         max_concurrent_jobs: maxJobs,
         default_model: (settingsDraft.default_model ?? '').trim(),
       }
+      // Write-only Jira token: only send when the operator typed a new value
+      const jiraTok = (settingsDraft.jira_api_token ?? '').trim()
+      if (jiraTok) body.jira_api_token = jiraTok
+
+      // Per-host GitLab credentials (full replace list)
+      const rows = settingsDraft.gitlab_cred_rows || []
+      body.gitlab_credentials = rows
+        .map((r) => ({
+          host: (r.host || '').trim(),
+          pat: (r.pat || '').trim() || undefined,
+        }))
+        .filter((r) => r.host)
+
+      // Validate: new hosts need a PAT
+      for (const r of rows) {
+        const h = (r.host || '').trim()
+        if (!h) continue
+        if (!r.pat_configured && !(r.pat || '').trim()) {
+          throw new Error(
+            `GitLab host "${h}" needs a PAT (or remove the row)`,
+          )
+        }
+      }
+
       const updated = await patchSettings(body)
       setSettingsDirty(false)
       setSettingsError(null)
       setData((prev) => (prev ? { ...prev, settings: updated } : prev))
+      // Clear secret fields after successful save
+      setSettingsDraft({
+        jira_host: updated.jira_host,
+        jira_email: updated.jira_email ?? '',
+        jira_api_token: '',
+        gitlab_pat: '',
+        jira_board_id: updated.jira_board_id,
+        poll_interval_seconds: updated.poll_interval_seconds,
+        trigger_labels: updated.trigger_labels,
+        trigger_on_assignment: updated.trigger_on_assignment,
+        max_concurrent_jobs: updated.max_concurrent_jobs,
+        default_model: updated.default_model,
+        gitlab_allowed_hosts: updated.gitlab_allowed_hosts ?? '',
+        gitlab_cred_rows: (updated.gitlab_credentials || []).map((c) => ({
+          host: c.host,
+          pat: '',
+          pat_configured: Boolean(c.pat_configured),
+        })),
+      })
       setModelsPayload((prev) =>
         prev ? { ...prev, default_model: updated.default_model } : prev,
       )

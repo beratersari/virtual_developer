@@ -1,5 +1,22 @@
-import type { Dispatch, SetStateAction } from 'react'
-import type { DashboardPayload, ModelsPayload, SettingsPayload } from '../types'
+import { useState, type Dispatch, type SetStateAction } from 'react'
+import {
+  testGitlabConnection,
+  type GitlabConnectionTestResult,
+} from '../api'
+import type {
+  DashboardPayload,
+  GitlabHostCredentialDraft,
+  ModelsPayload,
+  SettingsPayload,
+} from '../types'
+
+/** Draft may include write-only secret fields not present on GET payload. */
+export type SettingsDraft = Partial<SettingsPayload> & {
+  jira_api_token?: string
+  gitlab_pat?: string
+  /** Editable GitLab host→PAT rows */
+  gitlab_cred_rows?: GitlabHostCredentialDraft[]
+}
 
 export function SettingsPage({
   data,
@@ -14,8 +31,8 @@ export function SettingsPage({
   onSave,
 }: {
   data: DashboardPayload
-  settingsDraft: Partial<SettingsPayload>
-  setSettingsDraft: Dispatch<SetStateAction<Partial<SettingsPayload>>>
+  settingsDraft: SettingsDraft
+  setSettingsDraft: Dispatch<SetStateAction<SettingsDraft>>
   setSettingsDirty: (v: boolean) => void
   modelsPayload: ModelsPayload | null
   modelsLoading: boolean
@@ -24,9 +41,56 @@ export function SettingsPage({
   saving: boolean
   onSave: () => void
 }) {
-  const mark = <K extends keyof SettingsPayload>(key: K, value: SettingsPayload[K]) => {
+  const mark = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => {
     setSettingsDirty(true)
     setSettingsDraft((s) => ({ ...s, [key]: value }))
+  }
+
+  const [testingIdx, setTestingIdx] = useState<number | null>(null)
+  const [testResults, setTestResults] = useState<
+    Record<number, GitlabConnectionTestResult | { loading: true }>
+  >({})
+
+  const onTestGitlabRow = async (idx: number) => {
+    const row = (settingsDraft.gitlab_cred_rows || [])[idx]
+    if (!row) return
+    const host = (row.host || '').trim()
+    if (!host) {
+      setTestResults((r) => ({
+        ...r,
+        [idx]: { ok: false, error: 'Enter a host first' },
+      }))
+      return
+    }
+    if (!(row.pat || '').trim() && !row.pat_configured) {
+      setTestResults((r) => ({
+        ...r,
+        [idx]: {
+          ok: false,
+          error: 'Paste a PAT or save credentials before testing',
+        },
+      }))
+      return
+    }
+    setTestingIdx(idx)
+    setTestResults((r) => ({ ...r, [idx]: { loading: true } }))
+    try {
+      const result = await testGitlabConnection({
+        host,
+        pat: (row.pat || '').trim() || undefined,
+      })
+      setTestResults((r) => ({ ...r, [idx]: result }))
+    } catch (e) {
+      setTestResults((r) => ({
+        ...r,
+        [idx]: {
+          ok: false,
+          error: e instanceof Error ? e.message : 'Test failed',
+        },
+      }))
+    } finally {
+      setTestingIdx(null)
+    }
   }
 
   return (
@@ -34,8 +98,9 @@ export function SettingsPage({
       <div>
         <h2 className="text-base font-semibold text-text">Settings</h2>
         <p className="text-xs text-text-muted">
-          Runtime values only. Secrets are never shown. Changes apply until process
-          restart (unless also set in .env).
+          Runtime values only — not written to <code className="text-text-secondary">.env</code>.
+          Token fields are write-only (leave blank to keep the current value). Secrets are
+          never returned by the API.
         </p>
       </div>
 
@@ -128,14 +193,275 @@ export function SettingsPage({
           </div>
         </div>
 
-        <label className="block text-sm">
-          <span className="text-text-muted">Jira host (read-only)</span>
-          <input
-            disabled
-            className="ops-input mt-1"
-            value={data.settings.jira_host}
-          />
-        </label>
+        <div className="space-y-3 rounded border border-border bg-bg p-4">
+          <div className="text-sm font-semibold text-text">Jira connection</div>
+          <p className="text-xs text-text-muted">
+            On-prem: host + PAT (Bearer). Cloud: host + email + API token (Basic).
+            Saving host/token rebuilds live Jira clients in this process.
+          </p>
+          <label className="block text-sm">
+            <span className="text-text-secondary">Jira host</span>
+            <input
+              className="ops-input mt-1 font-mono text-xs"
+              value={settingsDraft.jira_host ?? data.settings.jira_host ?? ''}
+              placeholder="https://jira.example.com"
+              onChange={(e) => mark('jira_host', e.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-text-secondary">
+              Jira email{' '}
+              <span className="text-text-muted">(Cloud only; empty for on-prem)</span>
+            </span>
+            <input
+              type="email"
+              className="ops-input mt-1"
+              value={settingsDraft.jira_email ?? data.settings.jira_email ?? ''}
+              placeholder="you@company.com"
+              onChange={(e) => mark('jira_email', e.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-text-secondary">
+              Jira API token / PAT{' '}
+              <span className="text-text-muted">
+                (
+                {data.settings.jira_token_configured
+                  ? 'configured — leave blank to keep'
+                  : 'not set'}
+                )
+              </span>
+            </span>
+            <input
+              type="password"
+              className="ops-input mt-1 font-mono text-xs"
+              value={settingsDraft.jira_api_token ?? ''}
+              placeholder={
+                data.settings.jira_token_configured
+                  ? '•••••••• (unchanged if empty)'
+                  : 'Paste token'
+              }
+              onChange={(e) => mark('jira_api_token', e.target.value)}
+              autoComplete="new-password"
+            />
+          </label>
+        </div>
+
+        <div className="space-y-3 rounded border border-border bg-bg p-4">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-sm font-semibold text-text">
+                GitLab credentials
+              </div>
+              <p className="mt-1 text-xs text-text-muted">
+                Add one row per GitLab host. Clone/push/MR uses the PAT that matches
+                the repository hostname (fail-closed). Leave PAT blank to keep the
+                existing token for that host.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="ops-btn ops-btn-secondary shrink-0 px-2.5 py-1 text-xs"
+              onClick={() => {
+                setSettingsDirty(true)
+                setSettingsDraft((s) => ({
+                  ...s,
+                  gitlab_cred_rows: [
+                    ...(s.gitlab_cred_rows || []),
+                    { host: '', pat: '', pat_configured: false },
+                  ],
+                }))
+              }}
+            >
+              Add host
+            </button>
+          </div>
+
+          {(settingsDraft.gitlab_cred_rows || []).length === 0 && (
+            <p className="text-xs text-warning-text">
+              No GitLab hosts configured. Add a host and PAT to enable authenticated
+              clone/push.
+            </p>
+          )}
+
+          <div className="space-y-3">
+            {(settingsDraft.gitlab_cred_rows || []).map((row, idx) => {
+              const tr = testResults[idx]
+              const testing = testingIdx === idx
+              return (
+                <div
+                  key={idx}
+                  className="space-y-2 rounded border border-border bg-surface p-3"
+                >
+                  <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto_auto]">
+                    <label className="block text-sm">
+                      <span className="text-text-secondary">Host</span>
+                      <input
+                        className="ops-input mt-1 font-mono text-xs"
+                        value={row.host}
+                        placeholder="gitlab.com"
+                        onChange={(e) => {
+                          const v = e.target.value
+                          setSettingsDirty(true)
+                          setSettingsDraft((s) => {
+                            const rows = [...(s.gitlab_cred_rows || [])]
+                            rows[idx] = { ...rows[idx], host: v }
+                            return { ...s, gitlab_cred_rows: rows }
+                          })
+                          setTestResults((r) => {
+                            const next = { ...r }
+                            delete next[idx]
+                            return next
+                          })
+                        }}
+                        autoComplete="off"
+                      />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="text-text-secondary">
+                        PAT{' '}
+                        <span className="text-text-muted">
+                          (
+                          {row.pat_configured
+                            ? 'configured — blank keeps it'
+                            : 'required for new host'}
+                          )
+                        </span>
+                      </span>
+                      <input
+                        type="password"
+                        className="ops-input mt-1 font-mono text-xs"
+                        value={row.pat}
+                        placeholder={
+                          row.pat_configured
+                            ? '•••••••• (unchanged if empty)'
+                            : 'glpat-…'
+                        }
+                        onChange={(e) => {
+                          const v = e.target.value
+                          setSettingsDirty(true)
+                          setSettingsDraft((s) => {
+                            const rows = [...(s.gitlab_cred_rows || [])]
+                            rows[idx] = { ...rows[idx], pat: v }
+                            return { ...s, gitlab_cred_rows: rows }
+                          })
+                        }}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <div className="flex items-end">
+                      <button
+                        type="button"
+                        className="ops-btn ops-btn-secondary px-2.5 py-1 text-xs"
+                        disabled={testing}
+                        onClick={() => void onTestGitlabRow(idx)}
+                        title="Call GitLab API as this token and list reachable projects"
+                      >
+                        {testing ? 'Testing…' : 'Test'}
+                      </button>
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        type="button"
+                        className="ops-btn ops-btn-secondary px-2 py-1 text-xs text-danger-text"
+                        onClick={() => {
+                          setSettingsDirty(true)
+                          setSettingsDraft((s) => ({
+                            ...s,
+                            gitlab_cred_rows: (s.gitlab_cred_rows || []).filter(
+                              (_, i) => i !== idx,
+                            ),
+                          }))
+                          setTestResults((r) => {
+                            const next = { ...r }
+                            delete next[idx]
+                            return next
+                          })
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+
+                  {tr && 'loading' in tr && tr.loading && (
+                    <p className="text-xs text-text-muted">
+                      Contacting GitLab API…
+                    </p>
+                  )}
+                  {tr && !('loading' in tr) && !tr.ok && (
+                    <div
+                      role="alert"
+                      className="ops-alert ops-alert-danger text-xs"
+                    >
+                      {tr.error || 'Connection failed'}
+                    </div>
+                  )}
+                  {tr && !('loading' in tr) && tr.ok && (
+                    <div className="rounded border border-border bg-bg p-3 text-xs space-y-2">
+                      <div className="text-success-text font-medium">
+                        {tr.message || 'Connection OK'}
+                      </div>
+                      {tr.user?.username && (
+                        <div className="text-text-secondary">
+                          User:{' '}
+                          <span className="font-mono text-text">
+                            @{tr.user.username}
+                          </span>
+                          {tr.user.name ? ` (${tr.user.name})` : ''}
+                        </div>
+                      )}
+                      {tr.projects_error && (
+                        <div className="text-warning-text">
+                          {tr.projects_error}
+                        </div>
+                      )}
+                      {(tr.projects || []).length > 0 && (
+                        <div>
+                          <div className="mb-1 text-text-muted">
+                            Reachable projects (membership, recent):
+                          </div>
+                          <ul className="max-h-40 space-y-0.5 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                            {(tr.projects || []).map((p) => (
+                              <li key={String(p.id ?? p.path_with_namespace)}>
+                                {p.web_url ? (
+                                  <a
+                                    href={p.web_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-accent-text hover:underline"
+                                  >
+                                    {p.path_with_namespace || p.name}
+                                  </a>
+                                ) : (
+                                  p.path_with_namespace || p.name
+                                )}
+                                {p.visibility ? (
+                                  <span className="ml-1 text-text-muted">
+                                    · {p.visibility}
+                                  </span>
+                                ) : null}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {(tr.projects || []).length === 0 && !tr.projects_error && (
+                        <div className="text-text-muted">
+                          Auth OK, but no membership projects returned (token may
+                          still work for direct clone URLs).
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
         <label className="block text-sm">
           <span className="text-text-secondary">Board ID</span>
           <input
@@ -186,11 +512,27 @@ export function SettingsPage({
         <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs text-text-muted">
           <div>
             Jira token:{' '}
-            {data.settings.jira_token_configured ? 'configured' : 'missing'}
+            <span
+              className={
+                data.settings.jira_token_configured
+                  ? 'text-success-text'
+                  : 'text-warning-text'
+              }
+            >
+              {data.settings.jira_token_configured ? 'configured' : 'missing'}
+            </span>
           </div>
           <div>
             GitLab PAT:{' '}
-            {data.settings.gitlab_pat_configured ? 'configured' : 'missing'}
+            <span
+              className={
+                data.settings.gitlab_pat_configured
+                  ? 'text-success-text'
+                  : 'text-warning-text'
+              }
+            >
+              {data.settings.gitlab_pat_configured ? 'configured' : 'missing'}
+            </span>
           </div>
           <div>Base branch: {data.settings.default_branch}</div>
           <div>

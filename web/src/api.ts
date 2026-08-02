@@ -144,18 +144,69 @@ export async function startTask(issueKey: string): Promise<{ ok: boolean; messag
   return body
 }
 
+export type GitlabConnectionTestResult = {
+  ok: boolean
+  host?: string
+  error?: string
+  message?: string
+  user?: { id?: number | null; username?: string; name?: string | null }
+  projects?: {
+    id?: number
+    name?: string
+    path_with_namespace?: string
+    web_url?: string
+    visibility?: string
+  }[]
+  project_count?: number
+  projects_error?: string | null
+  http_status?: number
+  server_time?: string
+}
+
+/** Test GitLab host PAT — lists user + projects the token can see. */
+export async function testGitlabConnection(body: {
+  host: string
+  pat?: string
+  max_projects?: number
+}): Promise<GitlabConnectionTestResult> {
+  const res = await fetch('/api/settings/gitlab/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: body.host,
+      pat: body.pat?.trim() || undefined,
+      max_projects: body.max_projects ?? 25,
+    }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `GitLab test failed: ${res.status}`)
+  }
+  return data as GitlabConnectionTestResult
+}
+
 export async function patchSettings(
   body: Partial<
     Pick<
       SettingsPayload,
+      | 'jira_host'
+      | 'jira_email'
       | 'jira_board_id'
       | 'poll_interval_seconds'
       | 'trigger_labels'
       | 'trigger_on_assignment'
       | 'max_concurrent_jobs'
       | 'default_model'
+      | 'gitlab_allowed_hosts'
     >
-  >,
+  > & {
+    /** Write-only; omit to keep current token */
+    jira_api_token?: string
+    /** Write-only legacy single PAT */
+    gitlab_pat?: string
+    /** Full list of host credentials (preferred). Empty pat keeps existing. */
+    gitlab_credentials?: { host: string; pat?: string }[]
+  },
 ): Promise<SettingsPayload> {
   const res = await fetch('/api/settings', {
     method: 'PATCH',

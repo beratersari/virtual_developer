@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from src.config import settings
 from src.dashboard.schemas import (
     BulkJobDeleteRequest,
+    GitlabConnectionTestRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     SettingsUpdate,
@@ -30,7 +31,9 @@ from src.dashboard.service import (
     build_tasks,
     delete_job_record,
     delete_job_records,
+    refresh_runtime_jira_clients,
 )
+from src.gitlab_connection import probe_gitlab_connection
 from src.scheduler.service import (
     cancel_scheduled_job,
     create_scheduled_job,
@@ -406,6 +409,22 @@ def create_dashboard_app(
     def get_settings() -> dict:
         return build_settings_view().model_dump()
 
+    @app.post("/api/settings/gitlab/test")
+    def settings_gitlab_test(body: GitlabConnectionTestRequest) -> dict:
+        """Verify a GitLab host PAT (list user + reachable projects).
+
+        PAT is optional in the body: when omitted/empty, uses the stored PAT
+        for that host. Never echoes the PAT back.
+        """
+        result = probe_gitlab_connection(
+            body.host,
+            pat=body.pat,
+            max_projects=int(body.max_projects or 25),
+        )
+        result["server_time"] = build_meta().server_time
+        # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
     @app.get("/api/models")
     def get_models(refresh: bool = False) -> dict:
         """List OpenCode models (CLI + opencode.json). Sole inventory endpoint for the UI."""
@@ -413,8 +432,14 @@ def create_dashboard_app(
 
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
+        # Detect auth/connection changes before apply (for client refresh)
+        auth_keys = ("jira_host", "jira_email", "jira_api_token")
+        dumped = body.model_dump(exclude_unset=True)
+        auth_changed = any(k in dumped for k in auth_keys)
+
         view = apply_settings_update(body)
         poller = getattr(app.state, "poller", None)
+        proc = app.state.processor
         if poller is not None and body.poll_interval_seconds is not None:
             try:
                 poller.interval = int(body.poll_interval_seconds)
@@ -426,7 +451,6 @@ def create_dashboard_app(
             except Exception as e:
                 logger.warning(f"Could not update poller board_id: {e}")
         # Resize live job semaphore when concurrency setting changes
-        proc = app.state.processor
         if (
             proc is not None
             and body.max_concurrent_jobs is not None
@@ -436,6 +460,12 @@ def create_dashboard_app(
                 proc.resize_job_semaphore(int(body.max_concurrent_jobs))
             except Exception as e:
                 logger.warning(f"Could not resize job semaphore: {e}")
+        # Rebuild Jira clients so new host/token/email take effect immediately
+        if auth_changed:
+            try:
+                refresh_runtime_jira_clients(processor=proc, poller=poller)
+            except Exception as e:
+                logger.warning(f"Jira client refresh after settings update failed: {e}")
         return view.model_dump()
 
     @app.get("/api/dashboard")

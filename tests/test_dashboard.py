@@ -9,6 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
+from unittest.mock import MagicMock
+
 from src.dashboard.schemas import SettingsUpdate
 from src.dashboard.service import apply_settings_update, build_settings_view, read_app_version
 from src.dashboard.snapshot import PollSnapshotStore
@@ -54,12 +56,18 @@ def test_settings_view_hides_secrets(monkeypatch):
 
     monkeypatch.setattr(settings, "jira_api_token", "super-secret")
     monkeypatch.setattr(settings, "gitlab_pat", "pat-secret")
+    monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "gitlab.com")
     view = build_settings_view()
     dumped = view.model_dump()
     assert "super-secret" not in str(dumped)
     assert "pat-secret" not in str(dumped)
+    assert "jira_api_token" not in dumped
+    assert "gitlab_pat" not in dumped or dumped.get("gitlab_pat") in (None, "", False)
     assert view.jira_token_configured is True
     assert view.gitlab_pat_configured is True
+    assert view.jira_host == "https://jira.example.com"
+    assert view.gitlab_allowed_hosts == "gitlab.com"
     assert "default_model" in dumped
     # Inventory is GET /api/models only — not embedded in settings/WS
     assert "available_models" not in dumped
@@ -84,6 +92,92 @@ def test_apply_settings_update_runtime(monkeypatch):
     assert settings.poll_interval_seconds == 45
     assert settings.default_model == "opencode/new-model"
     assert view.default_model == "opencode/new-model"
+
+
+def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_host", "https://old.example.com")
+    monkeypatch.setattr(settings, "jira_email", "old@ex.com")
+    monkeypatch.setattr(settings, "jira_api_token", "old-token")
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "old-pat")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "old.gitlab")
+
+    view = apply_settings_update(
+        SettingsUpdate(
+            jira_host="https://new.example.com/",
+            jira_email="new@ex.com",
+            jira_api_token="new-secret-token",
+            gitlab_credentials=[
+                {"host": "gitlab.com", "pat": "pat-cloud"},
+                {"host": "GitLab.Example.COM", "pat": "pat-onprem"},
+            ],
+        )
+    )
+    assert settings.jira_host == "https://new.example.com"
+    assert settings.jira_email == "new@ex.com"
+    assert settings.jira_api_token == "new-secret-token"
+    assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
+    assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
+    assert settings.gitlab_pat_for_host("api.gitlab.com") == "pat-cloud"
+    assert view.jira_token_configured is True
+    assert view.gitlab_pat_configured is True
+    assert {c.host for c in view.gitlab_credentials} == {
+        "gitlab.com",
+        "gitlab.example.com",
+    }
+    # Secrets never in view dump
+    dumped = view.model_dump()
+    assert "new-secret-token" not in str(dumped)
+    assert "pat-cloud" not in str(dumped)
+    assert "pat-onprem" not in str(dumped)
+
+    # Empty PAT keeps existing; omit host removes it
+    apply_settings_update(
+        SettingsUpdate(
+            jira_api_token="",
+            gitlab_credentials=[
+                {"host": "gitlab.com", "pat": ""},  # keep
+            ],
+        )
+    )
+    assert settings.jira_api_token == "new-secret-token"
+    assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
+    assert settings.gitlab_pat_for_host("gitlab.example.com") == ""
+
+
+def test_refresh_runtime_jira_clients(monkeypatch):
+    from src.dashboard.service import refresh_runtime_jira_clients
+
+    proc = MagicMock()
+    old_client = MagicMock()
+    proc.jira_client = old_client
+    proc.reporter = MagicMock()
+    poller = MagicMock()
+    poller.client = MagicMock()
+
+    new_client = MagicMock()
+    monkeypatch.setattr(
+        "src.dashboard.service.create_jira_client",
+        lambda simulated=False: new_client,
+        raising=False,
+    )
+    # create is imported inside function from src.jira.client
+    monkeypatch.setattr(
+        "src.jira.client.create_jira_client",
+        lambda simulated=False: new_client,
+    )
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "jira_api_token", "tok")
+
+    refresh_runtime_jira_clients(processor=proc, poller=poller)
+    old_client.close.assert_called()
+    assert proc.jira_client is new_client
+    assert proc.reporter.client is new_client
+    assert poller.client is new_client
 
 
 def test_api_tasks_and_poll(tmp_path, monkeypatch):
