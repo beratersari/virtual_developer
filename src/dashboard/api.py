@@ -55,9 +55,35 @@ if TYPE_CHECKING:
 
 
 def _static_dir() -> Optional[Path]:
-    root = Path(__file__).resolve().parents[2] / "web" / "dist"
-    if root.is_dir() and (root / "index.html").is_file():
-        return root
+    """Locate prebuilt ops SPA (``web/dist``).
+
+    Offline Windows packages ship ``web/dist`` next to ``src/``. Prefer that
+    layout; also honor ``VD_WEB_DIST`` / cwd so start.bat from project root works
+    even if import paths differ.
+    """
+    import os
+
+    candidates: list[Path] = []
+    for env_key in ("VD_WEB_DIST", "DASHBOARD_STATIC_DIR"):
+        raw = (os.environ.get(env_key) or "").strip()
+        if raw:
+            candidates.append(Path(raw))
+    # src/dashboard/api.py → parents[2] = package / repo root
+    candidates.append(Path(__file__).resolve().parents[2] / "web" / "dist")
+    candidates.append(Path.cwd() / "web" / "dist")
+
+    seen: set[str] = set()
+    for root in candidates:
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.is_dir() and (resolved / "index.html").is_file():
+            return resolved
     return None
 
 
@@ -531,9 +557,19 @@ def create_dashboard_app(
 
     static = _static_dir()
     if static:
+        logger.info(f"Dashboard SPA static root: {static}")
         assets = static / "assets"
         if assets.is_dir():
-            app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+            # Mount assets first so hashed JS/CSS are not swallowed by SPA fallback
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets)),
+                name="assets",
+            )
+        else:
+            logger.warning(
+                f"Dashboard SPA missing assets/ under {static} — UI will be blank"
+            )
 
         def _spa_index() -> FileResponse:
             # Always revalidate HTML so browsers pick up new hashed asset names
@@ -568,23 +604,38 @@ def create_dashboard_app(
         @app.get("/{full_path:path}")
         def spa_fallback(full_path: str) -> Any:
             # Never serve files outside web/dist (blocks ../ path traversal)
-            # Do not SPA-fallback reserved API/docs paths (docs are disabled)
+            # Do not SPA-fallback reserved API/docs/asset paths
             low = (full_path or "").lstrip("/").lower()
             if low == "docs" or low.startswith("docs/") or low in (
                 "redoc",
                 "openapi.json",
-            ) or low.startswith("api/"):
+            ) or low.startswith("api/") or low == "ws" or low.startswith("ws/"):
                 raise HTTPException(status_code=404, detail="Not found")
+            # If /assets mount missed a file, 404 rather than returning index.html
+            # (wrong MIME breaks the SPA with a blank page).
+            if low == "assets" or low.startswith("assets/"):
+                raise HTTPException(status_code=404, detail="Asset not found")
             safe = _safe_under_static(static, full_path)
             if safe is not None:
                 return _static_file(safe)
             return _spa_index()
     else:
+        logger.warning(
+            "Dashboard SPA not found (web/dist/index.html). "
+            "API still runs; browser will show JSON at /. "
+            "Offline zip must include web/dist from CI npm run build."
+        )
 
         @app.get("/")
         def index_fallback() -> dict:
             return {
-                "message": "Dashboard API is running. Build the UI with: cd web && npm install && npm run build",
+                "message": (
+                    "Dashboard API is running but the UI SPA is missing. "
+                    "Expected web/dist/index.html next to src/. "
+                    "Rebuild the Windows dist (CI builds web/) or run: "
+                    "cd web && npm install && npm run build"
+                ),
+                "hint": "Open http://127.0.0.1:8080/ — not :5173 (no Vite in offline mode)",
                 "api": {
                     "meta": "/api/meta",
                     "tasks": "/api/tasks",

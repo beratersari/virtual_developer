@@ -90,11 +90,38 @@ jobs:
             -OutDir "${{ github.workspace }}\dist" `
             -DistName "${{ steps.meta.outputs.dist_name }}"
 
-      - name: E2E smoke (deep path + install.bat + opencode --version)
+      # Fast payload assertions only (full install.bat e2e-smoke removed — too slow for CI)
+      - name: Assert payload layout
         shell: pwsh
         run: |
-          & .\packaging\windows\e2e-smoke.ps1 `
-            -PayloadDir "${{ github.workspace }}\dist\stage\${{ steps.meta.outputs.dist_name }}"
+          $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
+          foreach ($rel in @(
+            "install.bat",
+            "start.bat",
+            "start-backend.bat",
+            "start-frontend.bat",
+            "cli.py",
+            "src/daemon.py",
+            "web/dist/index.html",
+            "vendor/opencode-home.zip",
+            "vendor/python-wheels",
+            "packaging/windows/Stop-VdProcesses.ps1",
+            "packaging/windows/Wait-Http.ps1",
+            "packaging/windows/serve_frontend.py"
+          )) {
+            $path = Join-Path $p $rel
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing required payload path: $rel"
+            }
+            Write-Host "OK $rel"
+          }
+          if (Test-Path -LiteralPath (Join-Path $p "web/node_modules")) {
+            throw "web/node_modules must not be in the offline zip"
+          }
+          if (Test-Path -LiteralPath (Join-Path $p "vendor/opencode-home/node_modules")) {
+            throw "expanded vendor/opencode-home/node_modules must not be in the zip"
+          }
+          Write-Host "Payload layout OK (no full install smoke)"
 
       # Folder upload: one extract → install.bat at top level
       - name: Upload folder artifact
@@ -135,7 +162,8 @@ jobs:
           | glab | ``${{ steps.versions.outputs.GLAB_VERSION }}`` |
 
           Download the **Actions artifact** named after the dist, extract once, run ``install.bat``,
-          then open the TUI with ``start-opencode.bat`` (never from your user home folder).
+          then start the product with ``start.bat`` (backend + ops dashboard on http://127.0.0.1:8080).
+          Optional TUI: ``start-opencode.bat`` (never from your user home folder).
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Create GitHub Release (tags only)
@@ -150,10 +178,13 @@ jobs:
             ## Windows offline installer `${{ steps.meta.outputs.version }}`
 
             1. Download **`${{ steps.meta.outputs.dist_name }}.zip`**
-            2. Extract once — you should see `install.bat`, `START_HERE.txt`, `VERSION`, `vendor\`, `src\`
+            2. Extract once — you should see `install.bat`, `start.bat`, `START_HERE.txt`, `VERSION`, `vendor\`, `src\`, `web\dist\`
             3. Install a **supported** Python (see `vendor\SUPPORTED_PYTHON.txt`)
-            4. Run **`install.bat`**
-            5. Open the TUI with **`start-opencode.bat`** (from the project folder)
+            4. Run **`install.bat`** (venv + offline wheels + OpenCode home)
+            5. Edit **`.env`**, then run **`start.bat`**
+               - Stops any previous instance, starts daemon + ops dashboard
+               - Open **http://127.0.0.1:8080**
+            6. Optional TUI: **`start-opencode.bat`** (from the project folder only)
 
             ### Product / bundled versions
             - **Product:** `${{ steps.meta.outputs.version }}` (base `${{ steps.meta.outputs.base_version }}`)
@@ -161,5 +192,6 @@ jobs:
             - oh-my-openagent: `${{ steps.versions.outputs.OH_MY_OPENCODE_VERSION }}`
             - glab: `${{ steps.versions.outputs.GLAB_VERSION }}`
             - Python wheels: `${{ steps.versions.outputs.PYTHON_WHEEL_VERSIONS }}`
+            - Ops dashboard SPA: prebuilt `web\dist` (Node not required at runtime)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

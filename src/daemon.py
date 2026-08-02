@@ -91,19 +91,23 @@ class JiraAgentDaemon:
 
         # Ops dashboard (REST + WebSocket)
         if getattr(settings, "dashboard_enabled", True):
-            host = (settings.dashboard_host or "127.0.0.1").strip()
+            host = (settings.dashboard_host or "0.0.0.0").strip()
             loopback = host in ("127.0.0.1", "localhost", "::1")
-            if not loopback and not getattr(settings, "dashboard_allow_remote", False):
+            if not loopback and not getattr(settings, "dashboard_allow_remote", True):
                 logger.warning(
                     f"dashboard_host={host!r} is not loopback and "
                     f"DASHBOARD_ALLOW_REMOTE is false — binding 127.0.0.1 "
                     f"(dashboard has no auth)"
                 )
                 settings.dashboard_host = "127.0.0.1"
-            logger.info(
-                f"Starting dashboard on "
-                f"http://{settings.dashboard_host}:{settings.dashboard_port}"
-            )
+                host = "127.0.0.1"
+            port = int(settings.dashboard_port)
+            logger.info(f"Starting dashboard on http://{host}:{port}")
+            if host in ("0.0.0.0", "::"):
+                logger.info(
+                    f"Dashboard reachable at http://127.0.0.1:{port}/ "
+                    f"(and this machine's LAN IP on port {port})"
+                )
             tasks.append(asyncio.create_task(self._start_dashboard()))
 
         # Board/sprint poller is the sole issue intake path

@@ -22,9 +22,40 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 ## User flow
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
-2. Extract.
-3. Run `install.bat`.
-4. Open the TUI with **`start-opencode.bat`** (never from your user home folder).
+2. Extract once (you should see `install.bat` and `start.bat` at the top level).
+3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
+4. Run **`install.bat`**:
+   - Creates `.venv` and installs Python deps from **`vendor\python-wheels`** (offline)
+   - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
+   - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+5. Edit **`.env`** (Jira / GitLab).
+6. Start (pick one):
+   - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
+   - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
+   - **`start.bat`** — both (backend first, then frontend)
+7. Optional OpenCode TUI: **`start-opencode.bat`** (never from your user home folder).
+
+### Frontend + backend model (offline)
+
+| Launcher | Port | Role |
+|----------|------|------|
+| **start-backend.bat** | **8080** | Daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
+| **start-frontend.bat** | **5173** | SPA only + reverse proxy to backend (so you can use :5173 without Node) |
+| **start.bat** | both | Calls backend, then frontend |
+
+```text
+start-backend.bat  →  http://0.0.0.0:8080/   (open http://127.0.0.1:8080/)
+start-frontend.bat →  http://0.0.0.0:5173/   (open http://127.0.0.1:5173/)
+                         └── proxies /api and /ws → http://127.0.0.1:8080
+```
+
+- **Node is not required at runtime.** Frontend is a small Python server (`serve_frontend.py`) over prebuilt `web\dist`.
+- Default bind is **0.0.0.0** (LAN). Set `DASHBOARD_HOST=127.0.0.1` in `.env` to lock down.
+- If `/` on :8080 returns **JSON**, `web\dist` is missing — use a CI zip that includes the SPA.
+
+Do **not** ship `web\node_modules` in the zip. Only `web\dist`.
+
+**CI note:** full `e2e-smoke.ps1` is not run on every push (too slow). Build asserts payload layout.
 
 OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
@@ -51,7 +82,10 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
 | `opencode.json` | Registers `oh-my-opencode` plugin |
 | `oh-my-opencode.json` | Default plugin config stub |
-| `build-dist.ps1` | Fetches pinned artifacts from the web and builds the zip |
+| `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
+| `start.bat` | User launcher: kill old processes → start daemon + dashboard |
+| `Stop-VdProcesses.ps1` | Helper used by `start.bat` to free ports / kill old daemons |
+| `e2e-smoke.ps1` | CI: deep-path install + assert SPA + launchers + OpenCode |
 | `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
 
 ## Bumping versions

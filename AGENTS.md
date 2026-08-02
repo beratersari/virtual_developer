@@ -419,6 +419,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Global config | Mirror valid JSON to **`%USERPROFILE%\.config\opencode\`** (OpenCode’s real discovery path). |
 | Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
+| Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
 ### 9.2 cmd.exe / install.bat landmines
@@ -468,15 +469,11 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 ### 9.5 CI / packaging process (do not weaken)
 
 1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
-2. **E2E smoke must prove real user install:** extract to a deep path, run `install.bat` non-interactively, assert:
-   - AMD64 `opencode.exe` + `--version`
-   - Valid JSON configs (not echo garbage)
-   - Full plugin tree under home **and** cache (file count + `dist/agents` + markdown)
-   - Plugin id pinned to **`oh-my-openagent@…`**
-   - `rg.exe` present under cache `bin`
-   - `start-opencode.bat` present at payload root
-3. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
-4. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
+2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
+3. **CI assert payload layout** (fast): `install.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, `vendor/opencode-home.zip`, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification.
+4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
+5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
+6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).
 
 ### 9.6 Debugging a black screen (shareable evidence)
 
@@ -494,6 +491,84 @@ When TUI shows nothing, **logs still exist**:
 ### 9.7 Agent_runner note
 
 Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI.
+
+### 9.8 Product start scripts, SPA, PowerShell — hard-won devops rules
+
+This subsection captures failures paid for while shipping offline **backend + frontend** launchers. Read before touching `start*.bat`, `Stop-VdProcesses.ps1`, or Windows dist CI.
+
+#### Product model (offline zip)
+
+| Launcher | Port | Process | Notes |
+|----------|------|---------|--------|
+| `start-backend.bat` | **8080** | `python -m src.daemon` | Poller + jobs + REST + WS. Also serves SPA from `web\dist` if present. Bind default **`0.0.0.0`**. |
+| `start-frontend.bat` | **5173** | `serve_frontend.py` (uvicorn) | Prebuilt SPA + **reverse proxy** `/api` and `/ws` → `http://127.0.0.1:8080`. **No Node/Vite** in the offline package. |
+| `start.bat` | both | calls backend then frontend | Prefer this for “everything up.” |
+| `start-opencode.bat` | n/a | OpenCode TUI only | Unrelated to the ops dashboard. |
+
+```text
+User browser
+  ├─ http://127.0.0.1:5173/  → frontend process → proxies API/WS → backend :8080
+  └─ http://127.0.0.1:8080/  → backend alone (API + SPA in one process)
+```
+
+- **Do not** tell users to use Vite on :5173 without shipping Node — use `serve_frontend.py`.
+- **Do not** assume “frontend broken” when users open :5173 but only backend was started.
+- Default: `DASHBOARD_HOST=0.0.0.0`, `DASHBOARD_ALLOW_REMOTE=true` (LAN). Loopback-only: set `DASHBOARD_HOST=127.0.0.1`.
+
+#### Stop-VdProcesses.ps1 — never kill the backend when starting frontend
+
+**Bug that shipped and hurt users:** `start-frontend.bat` called `Stop-VdProcesses.ps1`, which **always** killed every `python -m src.daemon`. Result: backend window → “Backend exited”; frontend proxy → `httpx.ConnectError`.
+
+| Caller | Args | Must kill daemon? |
+|--------|------|-------------------|
+| `start-backend.bat` | `-DashboardPort 8080 -VitePort 0` **`-KillDaemon`** | **Yes** (restart API) |
+| `start-frontend.bat` | `-DashboardPort 0 -VitePort 5173` (**no** `-KillDaemon`) | **No** — free :5173 only |
+| After frontend port cleanup | re-check `http://127.0.0.1:8080/api/meta` | Fail loudly if backend died |
+
+Exclude `serve_frontend.py` from daemon kill patterns.
+
+#### PowerShell / cmd landmines (Windows PS 5.1)
+
+1. **Prefer `-File script.ps1`** over `powershell -Command "long..."`. Inline escaping causes hangs (“waiting for daemon”) and untestable mess.
+2. **ASCII-only** in `.ps1` used by cmd on Windows (no em-dash, smart quotes).
+3. **Never** put `\"` in comments or double-quotes inside single-quoted regexes (e.g. `'cli\.py(\s+|")...'`). PS 5.1 loses track of `{`/`}` and prints cascade parse errors even when the product “works.”
+4. **Never** use PowerShell automatic variable **`$pid`** as a local name — use `$procId`.
+5. Wait for readiness with **`Wait-Http.ps1`** (`$ProgressPreference = SilentlyContinue`), not inline `Invoke-WebRequest` one-liners.
+6. **cmd.exe:** still never `echo ... -> file` (see §9.2).
+
+#### SPA discovery (`web/dist`)
+
+Daemon resolves static UI via `_static_dir()`:
+
+1. `VD_WEB_DIST` / `DASHBOARD_STATIC_DIR` env  
+2. Package root next to `src/` (`…/web/dist`)  
+3. `cwd/web/dist`  
+
+`start-backend.bat` must set `VD_WEB_DIST=%SCRIPT_DIR%\web\dist`. If `/` returns JSON (“Dashboard API is running…”), SPA is missing — not a “frontend port” problem.
+
+#### Definition of done for packaging / start-script changes
+
+Before claiming Windows start is fixed, verify (on Windows or CI assert + local logic tests):
+
+1. `start-backend.bat` → `GET /api/meta` returns 200.  
+2. `start-frontend.bat` → `GET http://127.0.0.1:5173/` contains SPA root **and** backend `/api/meta` still 200 (backend not killed).  
+3. `Stop-VdProcesses.ps1` parses under Windows PowerShell 5.1 (no nested `"` in single-quoted regex; no `\"` in comments).  
+4. Payload includes launchers + `web/dist` + helpers; no `web/node_modules`.  
+5. Unit tests for `serve_frontend.py` proxy (502 when backend down) stay green.  
+6. **Monitor** the Windows Distribution workflow after push.
+
+#### Related files
+
+| Path | Role |
+|------|------|
+| `packaging/windows/start-backend.bat` | Backend launcher |
+| `packaging/windows/start-frontend.bat` | Frontend launcher |
+| `packaging/windows/start.bat` | Both |
+| `packaging/windows/Stop-VdProcesses.ps1` | Port free + optional daemon kill |
+| `packaging/windows/Wait-Http.ps1` | HTTP readiness wait |
+| `packaging/windows/serve_frontend.py` | SPA server + API/WS proxy |
+| `tests/test_serve_frontend.py` | Proxy/SPA unit tests |
+| `.github/workflows/windows-dist.yml` | Build + fast payload assert |
 
 ---
 

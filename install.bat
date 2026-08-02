@@ -317,10 +317,30 @@ setx OPENCODE_DISABLE_MODELS_FETCH 1 >nul 2>&1
 set "OPENCODE_DISABLE_MODELS_FETCH=1"
 echo [OK] OPENCODE_DISABLE_MODELS_FETCH=1 ^(user env + this session^)
 
-REM Project launcher: always starts OpenCode from this folder ^(not user home^)
+REM Project launchers at payload root (overwrite so re-install picks up CI updates)
 if exist "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" (
     copy /Y "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" "%SCRIPT_DIR%\start-opencode.bat" >nul
-    echo [OK] start-opencode.bat in project root — use this to open OpenCode
+    echo [OK] start-opencode.bat — OpenCode TUI
+)
+for %%F in (start.bat start-backend.bat start-frontend.bat) do (
+    if exist "%SCRIPT_DIR%\packaging\windows\%%F" (
+        copy /Y "%SCRIPT_DIR%\packaging\windows\%%F" "%SCRIPT_DIR%\%%F" >nul
+        echo [OK] %%F
+    )
+)
+
+if exist "%SCRIPT_DIR%\web\dist\index.html" (
+    echo [OK] ops dashboard SPA present: web\dist
+) else (
+    echo [WARNING] web\dist\index.html missing — dashboard UI will not load
+    echo          Rebuild the CI zip after npm run build in web\
+)
+
+if not exist "%SCRIPT_DIR%\.env" (
+    if exist "%SCRIPT_DIR%\.env.example" (
+        copy /Y "%SCRIPT_DIR%\.env.example" "%SCRIPT_DIR%\.env" >nul
+        echo [OK] Created .env from .env.example — edit credentials before start.bat
+    )
 )
 
 REM ---------------------------------------------------------------------------
@@ -394,14 +414,13 @@ echo   2. Open a NEW terminal ^(so PATH updates apply^)
 echo   3. Verify a single OpenCode install:
 echo        where opencode
 echo        ^(should show only %OPENCODE_BIN%\opencode.exe^)
-echo   4. To open OpenCode TUI, ALWAYS use the project launcher:
-echo        cd /d "%SCRIPT_DIR%"
+echo   4. Start the product:
+echo        start-backend.bat    API + SPA on http://127.0.0.1:8080/
+echo        start-frontend.bat   UI on http://127.0.0.1:5173/ ^(proxies /api to backend^)
+echo        start.bat            both ^(backend then frontend^)
+echo   5. Optional — OpenCode TUI:
 echo        start-opencode.bat
-echo      NEVER run "opencode" from C:\Users\... ^(indexes entire home = black screen^)
-echo   5. Activate venv and start the daemon:
-echo        cd /d "%SCRIPT_DIR%"
-echo        .venv\Scripts\activate
-echo        python cli.py start
+echo      NEVER run "opencode" from C:\Users\... ^(black screen^)
 echo.
 echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%
