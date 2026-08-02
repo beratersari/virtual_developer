@@ -44,7 +44,7 @@ class JobItem(BaseModel):
     issue_key: str
     summary: str = ""
     description: str = ""
-    workflow_type: str = "direct"
+    workflow_type: str = "execution"
     agent: str = ""
     status: str = "running"
     task_id: Optional[str] = None
@@ -147,7 +147,7 @@ class SettingsView(BaseModel):
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only; no secrets)."""
 
-    jira_board_id: Optional[str] = Field(default=None, max_length=64)
+    jira_board_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None

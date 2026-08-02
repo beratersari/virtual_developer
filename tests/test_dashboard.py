@@ -180,7 +180,7 @@ def test_build_jobs_pagination(tmp_path):
             issue_key="PAG-1",
             summary=f"run {i}",
             description="d",
-            workflow_type="direct",
+            workflow_type="execution",
             agent="sisyphus",
         )
     page1 = build_jobs(issue_key="PAG-1", page=1, page_size=3, store=jobs, state_manager=sm)
@@ -318,7 +318,7 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
         "DET-1",
         status=TaskStatus.EXECUTING,
         progress_percentage=10,
-        metadata={"workflow_type": "direct"},
+        metadata={"workflow_type": "execution"},
         current_task_id="task-abc",
     )
     issue_log_ring.append("Working on DET-1 something")
@@ -418,7 +418,7 @@ def test_api_jobs_filter_and_legacy_sessions(
         issue_key="JOB-1",
         summary="first issue",
         description="desc frozen on job store",
-        workflow_type="direct",
+        workflow_type="execution",
         agent="sisyphus",
         status="completed",
     )

@@ -78,9 +78,22 @@ class PromptBuilder:
         if acceptance_criteria and str(acceptance_criteria).strip():
             jira += f"\n\n### Acceptance criteria\n{acceptance_criteria.strip()}"
 
+        plan_rel = f".sisyphus/plans/{issue_key}.md"
+        plan_instr = (
+            f"## Required plan file (mandatory)\n\n"
+            f"This is an **unattended** Jira agent run — **do not wait** for human "
+            f"approval, \"okay\", or chat confirmation.\n\n"
+            f"Before you finish, write the **full** plan (markdown with task checkboxes) to:\n\n"
+            f"`{plan_rel}`\n\n"
+            f"Also acceptable: `.omo/plans/{issue_key}.md` "
+            f"(drafts under `.omo/drafts/` alone are **not** enough).\n\n"
+            f"Exit with success only after that file exists and is non-empty."
+        )
+
         return PromptBuilder._join_blocks(
             "# Task planning request",
             f"## Role\n\n{PromptBuilder.role_section('planning')}",
+            plan_instr,
             jira,
         )
 

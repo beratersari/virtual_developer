@@ -15,7 +15,7 @@ def test_create_list_filter_update(tmp_path: Path):
         issue_key="KAN-1",
         summary="first",
         description="do the thing v1",
-        workflow_type="direct",
+        workflow_type="execution",
         agent="sisyphus",
         task_id="t1",
     )
@@ -43,7 +43,7 @@ def test_create_list_filter_update(tmp_path: Path):
         issue_key="KAN-1",
         summary="first",
         description="do the thing v2",
-        workflow_type="direct",
+        workflow_type="execution",
         agent="sisyphus",
         task_id="t1b",
         status="completed",
@@ -92,7 +92,7 @@ def test_ensure_description_from_prompt_file(tmp_path: Path):
         issue_key="KAN-1",
         summary="s",
         description="",  # missing snapshot
-        workflow_type="direct",
+        workflow_type="execution",
         status="completed",
     )
     store.update_job(job["job_id"], prompt_path=str(prompt))

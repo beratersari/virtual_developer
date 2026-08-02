@@ -29,8 +29,12 @@ def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
 def _mock_git_and_agent(processor, tmp_path, returncode=0, stdout="done", stderr=""):
     git = MagicMock()
     git.ensure_feature_branch.return_value = "feature/X-1"
+    git.work_branch = "feature/X-1"
+    git.target_branch = "develop"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/X-1"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = True
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
@@ -94,7 +98,7 @@ async def test_process_event_unhandled_sets_error(processor, state_manager, fake
 async def test_handle_created_skips_in_flight(processor, state_manager):
     state_manager.create_state("IF-1", "s", "d")
     state_manager.update_state("IF-1", status=TaskStatus.EXECUTING)
-    with patch.object(processor, "_start_direct_execution", new_callable=AsyncMock) as m:
+    with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as m:
         await processor._handle_issue_created(make_issue_event(key="IF-1"))
         m.assert_not_called()
 
@@ -105,7 +109,7 @@ async def test_handle_created_non_string_description(processor, state_manager, t
     event = make_issue_event(key="NS-1", description={"type": "doc"})  # type: ignore
     # description may be dict in event — we coerce
     event["issue"]["fields"]["description"] = {"type": "doc"}
-    with patch("src.processor.WorkflowRouter.route_issue", return_value=WorkflowType.DIRECT_EXECUTION):
+    with patch("src.processor.WorkflowRouter.route_issue", return_value=WorkflowType.EXECUTION):
         with patch.object(processor, "_init_git_manager", return_value=processor.git_manager):
             await processor._handle_issue_created(event)
     assert state_manager.get_state("NS-1") is not None
@@ -116,9 +120,9 @@ async def test_handle_created_existing_terminal_reset(processor, state_manager, 
     state_manager.create_state("TR-1", "old", "old")
     state_manager.update_state("TR-1", status=TaskStatus.ERROR)
     _mock_git_and_agent(processor, tmp_path)
-    with patch("src.processor.WorkflowRouter.route_issue", return_value=WorkflowType.DIRECT_EXECUTION):
+    with patch("src.processor.WorkflowRouter.route_issue", return_value=WorkflowType.EXECUTION):
         with patch.object(processor, "_init_git_manager", return_value=processor.git_manager):
-            with patch.object(processor, "_start_direct_execution", new_callable=AsyncMock) as m:
+            with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as m:
                 await processor._handle_issue_created(
                     make_issue_event(key="TR-1", summary="new sum", description="new desc")
                 )
@@ -224,6 +228,7 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
             s.auto_start_plans = False
             s.default_branch = "main"
             # on_retry callback path during planning — success no retry
@@ -240,12 +245,14 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
             s.auto_start_plans = False
             await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PL-2").status == TaskStatus.ERROR
 
     # success + auto start
     state3 = state_manager.create_state("PL-3", "s", "d")
+    (plans / "PL-3.md").write_text("# plan\n- [ ] step")
     git3, runner3 = _mock_git_and_agent(processor, tmp_path, returncode=0)
     with patch.object(processor, "_init_git_manager", return_value=git3):
         with patch("src.processor.settings") as s:
@@ -253,9 +260,12 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
             s.auto_start_plans = True
             s.default_branch = "main"
-            with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as ex:
+            with patch.object(
+                processor, "start_plan_execution", new_callable=AsyncMock
+            ) as ex:
                 await processor._start_planning_workflow(state3)
                 ex.assert_awaited()
 
@@ -288,12 +298,14 @@ async def test_planning_retry_callback(processor, state_manager, tmp_path):
     runner.run_agent_with_retry = with_retry
     plans = tmp_path / "plans"
     plans.mkdir()
+    (plans / "PLR-1.md").write_text("# plan\n- [ ] a\n")
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.planning_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
             s.auto_start_plans = False
             s.default_branch = "main"
             await processor._start_planning_workflow(state)
@@ -344,7 +356,7 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            await processor._start_direct_execution(state_d)
+            await processor._start_execution_workflow(state_d)
     assert state_manager.get_state("DX-1").status == TaskStatus.COMPLETED
 
     # direct fail
@@ -356,7 +368,7 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             s.execution_category = "deep"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
-            await processor._start_direct_execution(state_df)
+            await processor._start_execution_workflow(state_df)
     assert state_manager.get_state("DX-F").status == TaskStatus.ERROR
 
 
@@ -370,11 +382,16 @@ async def test_push_and_create_mr_branches(processor, state_manager, tmp_path, f
 
     git = MagicMock()
     processor.git_manager = git
+    processor._contexts[state.issue_key] = {"git": git, "runner": None}
+    git.work_branch = "main"
+    git.target_branch = "main"
+    git.ensure_on_work_branch.return_value = True
     git.get_current_branch.return_value = "main"
     with patch("src.processor.settings") as s:
         s.default_branch = "main"
         await processor._push_and_create_mr(state)
 
+    git.work_branch = "feature/MR-1"
     git.get_current_branch.return_value = "feature/MR-1"
     git.push.return_value = False
     await processor._push_and_create_mr(state)
@@ -474,6 +491,7 @@ async def test_init_git_manager(processor, tmp_path, state_manager):
         "Repository: https://gitlab.example.com/group/repo.git\n"
         "Source branch: develop\n"
         "Target branch: main\n"
+        "Mode: plan\n"
         "{params}\n"
     )
     state_manager.create_state("IG-1", "task", desc)

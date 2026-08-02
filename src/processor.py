@@ -12,7 +12,11 @@ from src.git_manager import (
     GitSourceBranchError,
     GitTargetBranchError,
 )
-from src.issue_git_spec import IssueGitConfigError, require_issue_git_spec
+from src.issue_git_spec import (
+    IssueGitConfigError,
+    parse_issue_mode,
+    require_issue_git_spec,
+)
 from src.jira.client import JiraClient, create_jira_client
 from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
@@ -135,12 +139,33 @@ class JobProcessor:
         TaskStatus.CANCELLED,
     }
 
+    def _resolve_workflow(
+        self,
+        issue_key: str,
+        summary: str,
+        description: str,
+    ) -> WorkflowType:
+        """Pick plan vs build vs oracle from the issue text.
+
+        * Explicit ``Mode: plan|build`` selects the workflow.
+        * Otherwise ``WorkflowRouter.route_issue`` (keyword / oracle heuristics).
+        * Template validity (Repository, Source, Target, **Mode**) is **not**
+          checked here — same path as always: ``require_issue_git_spec`` inside
+          ``_prepare_git_workspace`` after a job is opened.
+        """
+        mode = parse_issue_mode(summary, description)
+        if mode == "plan":
+            return WorkflowType.PLANNING
+        if mode == "build":
+            return WorkflowType.EXECUTION
+        return WorkflowRouter.route_issue(issue_key, summary, description)
+
     def _mark_jira_in_progress(self, issue_key: str) -> None:
         """Move the Jira issue to an In Progress-like status when work starts.
 
-        Called from the processor (not only the poller) so ``cli.py process``
-        also transitions the board column.
-        Soft-fails: a missing transition must not block agent work.
+        Soft-fails: a missing transition must not block agent work. Also updates
+        the poller status tracker so leave→return To Do still requeues.
+        (Poller may also transition when dispatching; both paths are safe.)
         """
         try:
             client = self.jira_client
@@ -150,6 +175,9 @@ class JobProcessor:
                 ok = client.transition_to_in_progress(issue_key)
                 if ok:
                     logger.info(f"{issue_key} transitioned to In Progress on Jira")
+                    poller = getattr(self, "_poller", None)
+                    if poller is not None and hasattr(poller, "_last_jira_status"):
+                        poller._last_jira_status[issue_key] = "in progress"
                 else:
                     logger.warning(
                         f"{issue_key}: could not transition to In Progress "
@@ -157,6 +185,38 @@ class JobProcessor:
                     )
         except Exception as e:
             logger.warning(f"{issue_key}: In Progress transition failed: {e}")
+
+    def _ensure_job_for_failure(self, issue_key: str) -> None:
+        """Create a job row if validation failed before ``_begin_workflow_run``.
+
+        Config errors (missing Mode / {params}) never start a workflow, so they
+        used to leave no Jobs-tab entry while Jira still got an error comment.
+        """
+        if self._active_jobs.get(issue_key):
+            return
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return
+        cur = (st.metadata or {}).get("current_job_id")
+        if cur:
+            existing = self.job_store.get_job(cur)
+            if existing and (existing.get("status") or "") not in {
+                "completed",
+                "error",
+                "cancelled",
+                "superseded",
+                "plan_ready",
+            }:
+                self._active_jobs[issue_key] = cur
+                return
+        wf = (st.metadata or {}).get("workflow_type") or "unknown"
+        self._start_job_record(
+            st,
+            workflow_type=str(wf),
+            agent="(validation)",
+            task_id=None,
+            status="running",
+        )
 
     def _fail_issue(
         self,
@@ -168,8 +228,20 @@ class JobProcessor:
         """Mark issue ERROR, finish job record, allow re-queue, notify Jira."""
         error_text = (error_message or "Unknown error")[:2000]
         try:
+            # Always surface a job on the dashboard (incl. template/Mode failures)
+            self._ensure_job_for_failure(issue_key)
             meta_patch = self._archive_run_identifiers(issue_key)
             meta_patch["requeue_eligible"] = True
+            # Fingerprint current text so poller only reprocesses when user edits
+            # the description (e.g. adds Mode) while staying on To Do.
+            st0 = self.state_manager.get_state(issue_key)
+            if st0 is not None:
+                raw = f"{st0.issue_summary or ''}\n{st0.description or ''}"
+                import hashlib
+
+                meta_patch["last_intake_fingerprint"] = hashlib.sha256(
+                    raw.encode("utf-8", errors="replace")
+                ).hexdigest()[:20]
             updated = self.state_manager.update_state(
                 issue_key,
                 status=TaskStatus.ERROR,
@@ -746,56 +818,62 @@ class JobProcessor:
             meta["current_job_id"] = None
         self.state_manager.update_state(issue_key, metadata=meta)
 
-    def cancel_job(self, issue_key: str, *, reason: str = "Cancelled from dashboard") -> dict:
+    async def cancel_job(
+        self, issue_key: str, *, reason: str = "Cancelled from dashboard"
+    ) -> dict:
         """Cancel a job: kill agent children, set CANCELLED, notify Jira.
 
-        Returns a status dict for the dashboard API.
+        Runs under the per-issue asyncio lock so cancel cannot race success paths
+        or double-start (B6/B7). Returns a status dict for the dashboard API.
         """
-        state = self.state_manager.get_state(issue_key)
-        if not state:
-            return {"ok": False, "error": "No local state for this issue", "issue_key": issue_key}
+        async with self._get_issue_lock(issue_key):
+            state = self.state_manager.get_state(issue_key)
+            if not state:
+                return {
+                    "ok": False,
+                    "error": "No local state for this issue",
+                    "issue_key": issue_key,
+                }
 
-        if state.status in self.TERMINAL_STATUSES:
+            if state.status in self.TERMINAL_STATUSES:
+                return {
+                    "ok": False,
+                    "error": f"Issue is already terminal ({state.status.value})",
+                    "issue_key": issue_key,
+                    "status": state.status.value,
+                }
+
+            killed = False
+            try:
+                runner = self._runner_for(issue_key)
+                if runner and state.current_task_id:
+                    killed = bool(runner.cancel_task(state.current_task_id))
+                if runner and hasattr(runner, "cancel_all_tasks"):
+                    n = runner.cancel_all_tasks()
+                    if n:
+                        killed = True
+            except Exception as e:
+                logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
+
+            self._cancel_issue_state(
+                issue_key,
+                message=reason,
+                status=TaskStatus.CANCELLED,
+            )
+            try:
+                self._release_context(issue_key, success=False)
+            except Exception as e:
+                logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
+
+            logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
+            refreshed = self.state_manager.get_state(issue_key)
             return {
-                "ok": False,
-                "error": f"Issue is already terminal ({state.status.value})",
+                "ok": True,
                 "issue_key": issue_key,
-                "status": state.status.value,
+                "status": refreshed.status.value if refreshed else "cancelled",
+                "process_signalled": killed,
+                "message": reason,
             }
-
-        killed = False
-        try:
-            # Prefer the per-issue runner only — never cancel_all on a foreign runner
-            runner = self._runner_for(issue_key)
-            if runner and state.current_task_id:
-                killed = bool(runner.cancel_task(state.current_task_id))
-            # cancel_all only on this issue's runner (safe: one runner per issue)
-            if runner and hasattr(runner, "cancel_all_tasks"):
-                n = runner.cancel_all_tasks()
-                if n:
-                    killed = True
-        except Exception as e:
-            logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
-
-        self._cancel_issue_state(
-            issue_key,
-            message=reason,
-            status=TaskStatus.CANCELLED,
-        )
-        try:
-            self._release_context(issue_key, success=False)
-        except Exception as e:
-            logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
-
-        logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
-        refreshed = self.state_manager.get_state(issue_key)
-        return {
-            "ok": True,
-            "issue_key": issue_key,
-            "status": refreshed.status.value if refreshed else "cancelled",
-            "process_signalled": killed,
-            "message": reason,
-        }
 
     async def start_plan_execution(
         self, issue_key: str, *, reason: str = "Started from ops dashboard"
@@ -805,51 +883,61 @@ class JobProcessor:
         Comments are not ingested by the board poller; operators use this API,
         the dashboard Start button, ``auto_start_plans``, or the ``ai-start-work``
         label instead of Jira comment commands.
+
+        Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
-        state = self.state_manager.get_state(issue_key)
-        if not state:
-            return {
-                "ok": False,
-                "error": "No local state for this issue",
-                "issue_key": issue_key,
-            }
-        if state.status != TaskStatus.PLAN_READY:
-            return {
-                "ok": False,
-                "error": f"Issue is not plan_ready (status={state.status.value})",
-                "issue_key": issue_key,
-                "status": state.status.value,
-            }
-        if self._is_live_processing(issue_key):
-            return {
-                "ok": False,
-                "error": "Issue is already being processed",
-                "issue_key": issue_key,
-                "status": state.status.value,
-            }
-        try:
-            logger.info(f"{issue_key}: starting plan execution ({reason})")
-            await self._start_execution_workflow(state)
-            refreshed = self.state_manager.get_state(issue_key)
-            return {
-                "ok": True,
-                "issue_key": issue_key,
-                "status": refreshed.status.value if refreshed else "executing",
-                "message": reason,
-            }
-        except Exception as e:
-            logger.exception(f"start_plan_execution failed for {issue_key}: {e}", e)
-            self._fail_issue(
-                issue_key,
-                f"Failed to start plan execution: {e}",
-                suggestion="Check logs, then retry Start from the dashboard.",
-            )
-            self._release_context(issue_key, success=False)
-            return {
-                "ok": False,
-                "error": str(e),
-                "issue_key": issue_key,
-            }
+        if self._job_semaphore is None:
+            limit = max(1, int(settings.max_concurrent_jobs or 1))
+            self._job_semaphore = _JobSlotLimiter(limit)
+
+        async with self._job_semaphore:
+            async with self._get_issue_lock(issue_key):
+                state = self.state_manager.get_state(issue_key)
+                if not state:
+                    return {
+                        "ok": False,
+                        "error": "No local state for this issue",
+                        "issue_key": issue_key,
+                    }
+                if state.status != TaskStatus.PLAN_READY:
+                    return {
+                        "ok": False,
+                        "error": f"Issue is not plan_ready (status={state.status.value})",
+                        "issue_key": issue_key,
+                        "status": state.status.value,
+                    }
+                if self._is_live_processing(issue_key):
+                    return {
+                        "ok": False,
+                        "error": "Issue is already being processed",
+                        "issue_key": issue_key,
+                        "status": state.status.value,
+                    }
+                try:
+                    logger.info(f"{issue_key}: starting plan execution ({reason})")
+                    await self._start_execution_workflow(state)
+                    refreshed = self.state_manager.get_state(issue_key)
+                    return {
+                        "ok": True,
+                        "issue_key": issue_key,
+                        "status": refreshed.status.value if refreshed else "executing",
+                        "message": reason,
+                    }
+                except Exception as e:
+                    logger.exception(
+                        f"start_plan_execution failed for {issue_key}: {e}", e
+                    )
+                    self._fail_issue(
+                        issue_key,
+                        f"Failed to start plan execution: {e}",
+                        suggestion="Check logs, then retry Start from the dashboard.",
+                    )
+                    self._release_context(issue_key, success=False)
+                    return {
+                        "ok": False,
+                        "error": str(e),
+                        "issue_key": issue_key,
+                    }
 
     def _kill_children_for_issue(self, issue_key: str) -> None:
         """Best-effort kill of agent subprocesses for one issue."""
@@ -1092,17 +1180,28 @@ class JobProcessor:
                 state.issue_summary = summary
             if description:
                 state.description = description
-            workflow_type = WorkflowRouter.route_issue(issue_key, state.issue_summary, state.description)
-            state.metadata["workflow_type"] = workflow_type.value
-            self.state_manager.set_state(state)
-            logger.info(f"Determined workflow type: {workflow_type.value} for existing issue {issue_key}")
+            workflow_type = self._resolve_workflow(
+                issue_key, state.issue_summary, state.description
+            )
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": workflow_type.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            logger.info(
+                f"Determined workflow type: {workflow_type.value} for existing issue {issue_key}"
+            )
         else:
             assignee_data = fields.get("assignee")
             assignee = assignee_data.get("displayName") if assignee_data else None
-            
-            workflow_type = WorkflowRouter.route_issue(issue_key, summary, description)
-            logger.info(f"Determined workflow type: {workflow_type.value} for new issue {issue_key}")
-            
+
+            workflow_type = self._resolve_workflow(issue_key, summary, description)
+            logger.info(
+                f"Determined workflow type: {workflow_type.value} for new issue {issue_key}"
+            )
+
             state = self.state_manager.create_state(
                 issue_key=issue_key,
                 issue_summary=summary,
@@ -1110,22 +1209,27 @@ class JobProcessor:
                 triggered_by="poller",
                 jira_assignee=assignee,
             )
-            state.metadata["workflow_type"] = workflow_type.value
-            self.state_manager.set_state(state)
-            logger.info(f"Created new state for {issue_key} with workflow type: {workflow_type.value}")
-        
+            self.state_manager.update_state(
+                issue_key,
+                metadata={"workflow_type": workflow_type.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            logger.info(
+                f"Created new state for {issue_key} with workflow type: {workflow_type.value}"
+            )
+
         try:
             logger.debug(f"Posting initial acknowledgment for {issue_key}")
             self.reporter.post_initial_acknowledgment(state)
         except Exception as e:
             logger.warning(f"Failed to post initial acknowledgment for {issue_key}: {e}")
-        
+
         logger.info(f"Starting {workflow_type.value} workflow for {issue_key}")
         try:
             if workflow_type == WorkflowType.PLANNING:
                 await self._start_planning_workflow(state)
-            elif workflow_type == WorkflowType.DIRECT_EXECUTION:
-                await self._start_direct_execution(state)
+            elif workflow_type == WorkflowType.EXECUTION:
+                await self._start_execution_workflow(state)
             elif workflow_type == WorkflowType.ORACLE_CONSULT:
                 await self._start_oracle_consultation(state)
         except Exception as e:
@@ -1598,49 +1702,114 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result
+        # Check result — plan mode: no GitLab push; durable plan + Jira description
         if result["returncode"] == 0:
-            # Agent should have already committed the plan
-            # Push branch to remote and create merge request for the plan
-            await self._push_and_create_mr(state)
-
-            # Re-check after await: cancel during push must not become plan_ready
             if self._is_aborted(state.issue_key):
                 logger.info(
-                    f"Planning aborted after push for {state.issue_key}; "
-                    f"skipping plan_ready"
+                    f"Planning aborted for {state.issue_key}; skipping plan_ready"
                 )
                 self._release_context(state.issue_key, success=False)
                 return
 
-            plan_path = self._resolve_plan_path(state.issue_key)
+            plan_path = self._resolve_plan_path(state.issue_key, require_exists=True)
             plan_content = ""
             if plan_path and plan_path.exists():
-                plan_content = plan_path.read_text()
+                try:
+                    plan_content = plan_path.read_text(encoding="utf-8", errors="replace")
+                except Exception as e:
+                    logger.warning(f"Could not read plan file {plan_path}: {e}")
 
-            self.state_manager.update_state(
+            # If agent only left a draft, still accept non-empty markdown as the plan
+            if not plan_content.strip():
+                self.state_manager.update_state(
+                    state.issue_key,
+                    execution_duration_seconds=duration,
+                )
+                self._fail_issue(
+                    state.issue_key,
+                    "Planning agent exited 0 but no plan file with content was found.",
+                    suggestion=(
+                        "The planner must write a non-empty plan to "
+                        f"`.sisyphus/plans/{state.issue_key}.md` (or `.omo/plans/`) "
+                        "without waiting for chat approval. Check session logs, then "
+                        "re-queue from To Do."
+                    ),
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            # Normalize into preferred sisyphus path in the workspace when we only
+            # found an .omo draft/plan so durable + build paths stay consistent
+            git = self._git_for(state.issue_key)
+            working = git.get_working_directory() if git else None
+            if working and plan_path:
+                preferred = Path(working) / settings.sisyphus_plans_dir / f"{state.issue_key}.md"
+                try:
+                    if plan_path.resolve() != preferred.resolve():
+                        preferred.parent.mkdir(parents=True, exist_ok=True)
+                        preferred.write_text(plan_content, encoding="utf-8")
+                        plan_path = preferred
+                except Exception as e:
+                    logger.warning(f"Could not normalize plan to {preferred}: {e}")
+
+            # B3: durable copy before releasing temp clone
+            durable = self._persist_plan(state.issue_key, plan_content)
+            if durable is None:
+                self._fail_issue(
+                    state.issue_key,
+                    "Plan was generated but could not be saved to the durable plans directory.",
+                    suggestion="Check disk permissions on the plans dir, then re-queue.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            if self._is_aborted(state.issue_key):
+                self._release_context(state.issue_key, success=False)
+                return
+
+            # B6: CAS — do not overwrite CANCELLED/ERROR
+            updated = self.state_manager.update_state_if(
                 state.issue_key,
+                expected_statuses={TaskStatus.PLANNING},
                 status=TaskStatus.PLAN_READY,
-                plan_path=str(plan_path) if plan_path else None,
+                plan_path=str(durable),
                 completed_at=completed_at,
                 execution_duration_seconds=duration,
-                # current_opencode_session_id keeps the last retry's session ID
             )
+            if updated is None:
+                logger.info(
+                    f"Planning success ignored for {state.issue_key} "
+                    f"(status no longer PLANNING)"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
             self._finish_job_record(
                 state.issue_key, status="plan_ready", progress_percentage=100
             )
+            # Release clone after durable plan is saved (plan mode never pushes)
             self._release_context(state.issue_key, success=True)
 
-            # Post plan summary
-            self.reporter.post_plan_summary(
-                self.state_manager.get_state(state.issue_key),
-                plan_content,
-            )
+            ready_state = self.state_manager.get_state(state.issue_key)
+            if ready_state:
+                try:
+                    self.reporter.append_plan_to_description(ready_state, plan_content)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not append plan to description for {state.issue_key}: {e}"
+                    )
+                try:
+                    self.reporter.post_plan_summary(ready_state, plan_content)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not post plan summary for {state.issue_key}: {e}"
+                    )
 
-            # Auto-start if configured
+            # Auto-start build if configured (uses lock+semaphore via start_plan_execution)
             if settings.auto_start_plans:
-                await self._start_execution_workflow(
-                    self.state_manager.get_state(state.issue_key)
+                await self.start_plan_execution(
+                    state.issue_key,
+                    reason="auto_start_plans after plan mode",
                 )
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue
@@ -1654,17 +1823,25 @@ class JobProcessor:
                 suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
             )
             self._release_context(state.issue_key, success=False)
-    
+
     async def _start_execution_workflow(self, state: JiraAgentState):
-        logger.info(f"Starting execution workflow for {state.issue_key}")
+        logger.info(f"Starting execution (build) workflow for {state.issue_key}")
         workflow_start_time = datetime.now()
+
+        # Resolve durable plan path before clone so we can materialize into workspace
+        durable_plan = self._durable_plan_path(state.issue_key)
+        plan_for_prompt = (
+            str(durable_plan)
+            if durable_plan and durable_plan.exists()
+            else (state.plan_path or "")
+        )
 
         # Create task first
         task = AgentTask(
             description=f"Execute: {state.issue_key}",
             prompt=PromptBuilder.build_atlas_prompt(
                 issue_key=state.issue_key,
-                plan_path=state.plan_path or "",
+                plan_path=plan_for_prompt,
             ),
             agent=settings.orchestrator_agent,
             issue_key=state.issue_key,
@@ -1685,6 +1862,17 @@ class JobProcessor:
         git = self._prepare_git_workspace(state)
         if git is None:
             return
+        # Materialize durable plan into the fresh clone for Atlas
+        in_workspace = self._materialize_plan_into_workspace(state.issue_key)
+        if in_workspace:
+            task.prompt = PromptBuilder.build_atlas_prompt(
+                issue_key=state.issue_key,
+                plan_path=str(in_workspace),
+            )
+            self.state_manager.update_state(
+                state.issue_key,
+                plan_path=str(in_workspace),
+            )
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
 
@@ -1762,9 +1950,21 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result
+        # Check result — B4: exit 0 alone is not enough
         if result["returncode"] == 0:
-            # Agent should have already committed changes
+            delivery_err = self._assert_build_delivery(state.issue_key)
+            if delivery_err:
+                self._fail_issue(
+                    state.issue_key,
+                    delivery_err,
+                    suggestion=(
+                        "Ensure the agent commits on the work branch and leaves "
+                        "commits ahead of the target, then re-queue from To Do."
+                    ),
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
             push_ok = await self._push_and_create_mr(state)
             if not push_ok:
                 self._fail_issue(
@@ -1795,170 +1995,7 @@ class JobProcessor:
                 suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
             )
             self._release_context(state.issue_key, success=False)
-    
-    async def _start_direct_execution(self, state: JiraAgentState):
-        logger.info(f"Starting direct execution workflow for {state.issue_key}")
-        logger.debug(f"Using agent: {settings.default_agent}, category: {settings.execution_category}")
 
-        workflow_start_time = datetime.now()
-
-        # Create task with category
-        task = AgentTask(
-            description=f"Direct: {state.issue_key}",
-            prompt=PromptBuilder.build_sisyphus_prompt(
-                issue_key=state.issue_key,
-                task_description=state.description or "",
-                summary=state.issue_summary or "",
-            ),
-            agent=settings.default_agent,
-            category=settings.execution_category,
-            issue_key=state.issue_key,
-        )
-
-        # Claim in-flight before git clone (archives prior task/session/job ids)
-        self._begin_workflow_run(
-            state,
-            status=TaskStatus.EXECUTING,
-            task=task,
-            workflow_type="direct",
-            agent=settings.default_agent,
-            job_status="executing",
-            started_at=workflow_start_time,
-        )
-        self._mark_jira_in_progress(state.issue_key)
-
-        git = self._prepare_git_workspace(state)
-        if git is None:
-            return
-        runner = self._runner_for(state.issue_key)
-        assert runner is not None, "AgentRunner not initialized"
-
-        # Run agent with progress tracking and retry logic
-        def on_progress(percentage: int, message: str):
-            """Update progress in state - suppress from console."""
-            # Progress is tracked in state file, don't print to console
-            self.state_manager.update_state(
-                state.issue_key,
-                progress_percentage=percentage,
-            )
-            jid = self._active_jobs.get(state.issue_key)
-            if jid:
-                self.job_store.update_job(jid, progress_percentage=percentage)
-
-        def on_output(stream: str, line: str):
-            """Handle output from agent - suppress all output to console.
-            
-            All output is already logged to session file by agent_runner.
-            """
-            # Suppress all agent output from console - logs go to file only
-            pass
-
-        def on_retry(
-            attempt_number: int,
-            delay_seconds: float,
-            reason: str,
-            session_file: Optional[str] = None,
-            error_message: Optional[str] = None,
-            return_code: Optional[int] = None,
-            session_id: Optional[str] = None,
-            new_task_id: Optional[str] = None,
-        ):
-            self._record_agent_retry(
-                state.issue_key,
-                attempt_number=attempt_number,
-                delay_seconds=delay_seconds,
-                reason=reason,
-                session_file=session_file,
-                error_message=error_message,
-                return_code=return_code,
-                session_id=session_id,
-                new_task_id=new_task_id,
-                progress_percentage=state.progress_percentage,
-            )
-
-        result = await runner.run_agent_with_retry(
-            task,
-            on_output=on_output,
-            on_progress=on_progress,
-            on_retry=on_retry,
-            on_session_file=lambda sp, pp=None: self._link_job_session_paths(
-                state.issue_key, sp, pp
-            ),
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
-            should_abort=lambda: self._is_aborted(state.issue_key),
-        )
-        self._apply_agent_result_session(state.issue_key, result)
-
-        if self._is_aborted(state.issue_key) or result.get("aborted"):
-            logger.info(f"Direct execution aborted for {state.issue_key}; skipping success path")
-            self._release_context(state.issue_key, success=False)
-            return
-
-        # Update state with retry info
-        if result.get("retry_info"):
-            retry_info = result["retry_info"]
-            update_data = {"retry_count": retry_info.get("attempts", 0) - 1}
-            if result.get("timed_out"):
-                update_data["timed_out"] = True
-            self.state_manager.update_state(state.issue_key, **update_data)
-
-        # Calculate duration from workflow start to final completion (including all retries)
-        completed_at = datetime.now()
-        duration = (completed_at - workflow_start_time).total_seconds()
-
-        # Calculate cost and timing
-        from src.shared.cost_calculator import calculate_cost, format_cost_report
-
-        cost_data = calculate_cost(
-            input_text=task.prompt,
-            output_text=result.get("stdout", ""),
-            model=settings.execution_category,
-        )
-
-        # Timing and cost info is in state file, suppress from console
-        
-        # Handle result
-        if result["returncode"] == 0:
-            # Agent has already committed changes
-            # Now push to remote and create merge request
-            push_ok = await self._push_and_create_mr(state)
-            if not push_ok:
-                self._fail_issue(
-                    state.issue_key,
-                    "Agent finished but git push failed; work was not delivered to remote.",
-                    suggestion="Check GitLab remote/credentials, then re-queue from To Do.",
-                )
-                self._release_context(state.issue_key, success=False)
-                return
-
-            self.state_manager.update_state(
-                state.issue_key,
-                execution_duration_seconds=duration,
-                token_usage_input=cost_data["input_tokens"],
-                token_usage_output=cost_data["output_tokens"],
-                estimated_cost=cost_data["estimated_cost"],
-            )
-
-            await self._complete_work(
-                self.state_manager.get_state(state.issue_key),
-                execution_summary=result["stdout"][:1000],
-            )
-        else:
-            self.state_manager.update_state(
-                state.issue_key,
-                execution_duration_seconds=duration,
-                token_usage_input=cost_data["input_tokens"],
-                token_usage_output=cost_data["output_tokens"],
-                estimated_cost=cost_data["estimated_cost"],
-            )
-            self._fail_issue(
-                state.issue_key,
-                result.get("stderr") or "Direct execution agent failed",
-                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
-            )
-            self._release_context(state.issue_key, success=False)
-    
     async def _complete_work(
         self, state: JiraAgentState, execution_summary: str = ""
     ) -> None:
@@ -1971,12 +2008,23 @@ class JobProcessor:
             return
 
         completed_at = datetime.now()
-        self.state_manager.update_state(
+        # B6: CAS — cancel/watchdog terminal must win over late success
+        updated = self.state_manager.update_state_if(
             state.issue_key,
+            expected_statuses={TaskStatus.EXECUTING},
+            reject_statuses=self.ABORTED_STATUSES,
             status=TaskStatus.COMPLETED,
             completed_at=completed_at,
             progress_percentage=100,
         )
+        if updated is None:
+            logger.info(
+                f"Skipping completion for {state.issue_key}: "
+                f"status no longer EXECUTING (aborted or raced)"
+            )
+            self._release_context(state.issue_key, success=False)
+            return
+
         self._finish_job_record(
             state.issue_key, status="completed", progress_percentage=100
         )
@@ -1996,11 +2044,92 @@ class JobProcessor:
         self._release_context(state.issue_key, success=True)
         logger.info(f"Work completed for {state.issue_key}")
 
+    def _assert_build_delivery(self, issue_key: str) -> Optional[str]:
+        """B4/B5: require commits on prepared work_branch before push/complete.
+
+        Returns an error message, or None when delivery looks valid.
+        """
+        git = self._git_for(issue_key)
+        if not git:
+            return "No git workspace available after agent run."
+        work = (getattr(git, "work_branch", None) or "").strip()
+        if not work:
+            return "Work branch was not prepared; refusing to treat the run as successful."
+        if not git.ensure_on_work_branch():
+            current = git.get_current_branch()
+            return (
+                f"Agent left HEAD on `{current}` instead of work branch `{work}`. "
+                "Refusing to push a drifted branch."
+            )
+        ahead = 0
+        if hasattr(git, "commits_ahead_of_target"):
+            try:
+                ahead = int(git.commits_ahead_of_target(work))
+            except Exception:
+                ahead = 0
+        if ahead < 1:
+            return (
+                f"No commits on `{work}` ahead of the target branch. "
+                "Agent exit code was 0 but nothing was delivered."
+            )
+        return None
+
+    def _durable_plan_path(self, issue_key: str) -> Path:
+        """Host-side plan path that survives temp-clone cleanup."""
+        return settings.full_plans_dir / f"{issue_key}.md"
+
+    def _persist_plan(self, issue_key: str, content: str) -> Optional[Path]:
+        """Write plan to durable plans dir. Returns path or None on failure."""
+        text = (content or "").strip()
+        if not text:
+            return None
+        dest = self._durable_plan_path(issue_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+            logger.info(f"Persisted durable plan for {issue_key} at {dest}")
+            return dest
+        except Exception as e:
+            logger.error(f"Failed to persist plan for {issue_key}: {e}")
+            return None
+
+    def _materialize_plan_into_workspace(self, issue_key: str) -> Optional[Path]:
+        """Copy durable plan into the issue temp clone for Atlas. Returns in-workspace path."""
+        durable = self._durable_plan_path(issue_key)
+        if not durable.exists():
+            # Fall back to any resolved existing plan (e.g. still in old path)
+            existing = self._resolve_plan_path(issue_key, require_exists=True)
+            if existing and existing.exists():
+                try:
+                    content = existing.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    return existing if existing.exists() else None
+                self._persist_plan(issue_key, content)
+                durable = self._durable_plan_path(issue_key)
+            else:
+                return None
+        git = self._git_for(issue_key)
+        working = git.get_working_directory() if git else None
+        if not working:
+            return durable if durable.exists() else None
+        try:
+            content = durable.read_text(encoding="utf-8", errors="replace")
+            rel = Path(settings.sisyphus_plans_dir) / f"{issue_key}.md"
+            dest = Path(working) / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+            logger.info(f"Materialized plan into workspace: {dest}")
+            return dest
+        except Exception as e:
+            logger.warning(f"Could not materialize plan into workspace for {issue_key}: {e}")
+            return durable if durable.exists() else None
+
     async def _push_and_create_mr(self, state: JiraAgentState) -> bool:
-        """Push feature branch and open MR.
+        """Push prepared work_branch and open MR.
 
         Returns True if the branch was pushed (MR is best-effort after push).
         Returns False on missing git manager, protected branch, or push failure.
+        Always pushes ``git.work_branch`` (not drifted HEAD) — B5.
         """
         git = self._git_for(state.issue_key)
         if not git:
@@ -2016,14 +2145,28 @@ class JobProcessor:
 
         logger.info(f"Starting push and MR creation for {state.issue_key}")
 
-        branch_name = git.get_current_branch()
+        # B5: force work_branch, never drift HEAD
+        if not git.ensure_on_work_branch():
+            msg = (
+                f"Refusing to push: could not checkout prepared work branch "
+                f"`{getattr(git, 'work_branch', None)}`."
+            )
+            logger.error(msg)
+            try:
+                self.reporter.post_progress_update(state, msg)
+            except Exception:
+                pass
+            return False
 
-        # Refuse to push protected bases / MR target (agent must use work branch)
+        branch_name = (getattr(git, "work_branch", None) or "").strip() or git.get_current_branch()
+
+        # Refuse to push protected bases / MR target / release/*
         target = (getattr(git, "target_branch", None) or "").strip().lower()
         protected = {"main", "master", "develop", "trunk", "dev"}
         if target:
             protected.add(target)
-        if branch_name and branch_name.lower() in protected:
+        bl = (branch_name or "").lower()
+        if not branch_name or bl in protected or bl.startswith("release/"):
             msg = (
                 f"Refusing to push protected branch '{branch_name}'. "
                 f"Agent must work on a feature/work branch "
@@ -2037,11 +2180,10 @@ class JobProcessor:
             return False
 
         # Always record branch for completion messages (even if push fails later)
-        if branch_name:
-            self.state_manager.update_state(
-                state.issue_key,
-                metadata={"feature_branch": branch_name},
-            )
+        self.state_manager.update_state(
+            state.issue_key,
+            metadata={"feature_branch": branch_name},
+        )
 
         push_success = git.push(branch_name)
         if not push_success:
@@ -2118,20 +2260,60 @@ class JobProcessor:
         # Push succeeded; MR is best-effort
         return True
 
-    def _resolve_plan_path(self, issue_key: str) -> Optional[Path]:
-        """Locate plan file in agent workspace first, then daemon CWD."""
+    def _resolve_plan_path(
+        self, issue_key: str, *, require_exists: bool = False
+    ) -> Optional[Path]:
+        """Locate plan file: durable dir, workspace sisyphus/omo paths.
+
+        When ``require_exists`` is True, never return a missing path (B2).
+        Preference order: durable host → ``.sisyphus/plans`` → ``.omo/plans``
+        → non-empty ``.omo/drafts`` (Prometheus ULW draft fallback).
+        """
         candidates: list[Path] = []
+        # Prefer durable host path (survives temp cleanup)
+        candidates.append(settings.full_plans_dir / f"{issue_key}.md")
         git = self._git_for(issue_key)
         working = git.get_working_directory() if git else None
         if working:
             base = Path(working)
             candidates.append(base / settings.sisyphus_plans_dir / f"{issue_key}.md")
             candidates.append(base / ".sisyphus" / "plans" / f"{issue_key}.md")
-        candidates.append(settings.full_plans_dir / f"{issue_key}.md")
+            candidates.append(base / ".omo" / "plans" / f"{issue_key}.md")
+            candidates.append(base / ".omo" / "drafts" / f"{issue_key}.md")
         for path in candidates:
-            if path.exists():
-                return path
-        # Prefer workspace path even if missing (executor looks relative to clone)
+            if path.is_file():
+                try:
+                    if path.read_text(encoding="utf-8", errors="replace").strip():
+                        return path
+                except Exception:
+                    continue
+        if require_exists:
+            # Last resort: any non-empty markdown under workspace plans/omo
+            if working:
+                base = Path(working)
+                for sub in (
+                    base / ".sisyphus" / "plans",
+                    base / ".omo" / "plans",
+                    base / ".omo" / "drafts",
+                ):
+                    if not sub.is_dir():
+                        continue
+                    try:
+                        for path in sorted(sub.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+                            try:
+                                if path.read_text(encoding="utf-8", errors="replace").strip():
+                                    logger.info(
+                                        f"Resolved plan for {issue_key} via scan: {path}"
+                                    )
+                                    return path
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+            return None
+        # Prefer durable / sisyphus path even if missing (executor materializes later)
+        if working:
+            return Path(working) / settings.sisyphus_plans_dir / f"{issue_key}.md"
         return candidates[0] if candidates else None
 
     def _ensure_agent_runner(self, issue_key: str) -> AgentRunner:
@@ -2229,17 +2411,25 @@ class JobProcessor:
                     question=state.description,
                     answer=result["stdout"],
                 )
-                self.state_manager.update_state(
+                updated = self.state_manager.update_state_if(
                     state.issue_key,
+                    expected_statuses={TaskStatus.EXECUTING},
+                    reject_statuses=self.ABORTED_STATUSES,
                     status=TaskStatus.COMPLETED,
                     completed_at=datetime.now(),
                     progress_percentage=100,
                     current_task_id=None,
                 )
-                self._finish_job_record(
-                    state.issue_key, status="completed", progress_percentage=100
-                )
-                success = True
+                if updated is None:
+                    logger.info(
+                        f"Oracle completion ignored for {state.issue_key} (aborted)"
+                    )
+                    success = False
+                else:
+                    self._finish_job_record(
+                        state.issue_key, status="completed", progress_percentage=100
+                    )
+                    success = True
             else:
                 self._fail_issue(
                     state.issue_key,
@@ -2271,19 +2461,18 @@ class JobProcessor:
             else:
                 created_context = issue_key in self._contexts
 
-            # Free-form @mention text uses the same direct (Sisyphus) kit path —
-            # no separate comment prompt template.
+            # Free-form @mention: execution kit (direct workflow removed)
             summary = (state.issue_summary if state else "") or ""
-            prompt = PromptBuilder.build_sisyphus_prompt(
+            prompt = PromptBuilder.build_atlas_prompt(
                 issue_key=issue_key,
-                task_description=request,
-                summary=summary,
+                plan_path="",
+                previous_learnings=[f"Free-form request: {request}", f"Summary: {summary}"],
             )
 
             task = AgentTask(
-                description=f"Direct request: {issue_key}",
+                description=f"Comment request: {issue_key}",
                 prompt=prompt,
-                agent=settings.default_agent,
+                agent=settings.orchestrator_agent,
                 issue_key=issue_key,
             )
 

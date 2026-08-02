@@ -43,8 +43,12 @@ async def test_direct_execution_transitions_in_progress(
 
     git = MagicMock()
     git.ensure_feature_branch.return_value = "feature/KAN-IP"
+    git.work_branch = "feature/KAN-IP"
+    git.target_branch = "develop"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/KAN-IP"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = True
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x"
@@ -79,7 +83,7 @@ async def test_direct_execution_transitions_in_progress(
     processor.agent_runner = runner
 
     with patch.object(processor, "_init_git_manager", return_value=git):
-        await processor._start_direct_execution(state)
+        await processor._start_execution_workflow(state)
 
     fake_jira.transition_to_in_progress.assert_called_with("KAN-IP")
     assert state_manager.get_state("KAN-IP").status == TaskStatus.COMPLETED

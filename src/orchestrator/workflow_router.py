@@ -1,47 +1,22 @@
 """Route issues to appropriate workflows."""
 
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 from src.config import settings
+from src.issue_git_spec import parse_issue_mode
 
 
 class WorkflowType(Enum):
     """Types of workflows available."""
 
-    PLANNING = "planning"  # Prometheus → Atlas → Done
-    DIRECT_EXECUTION = "direct"  # Sisyphus direct
-    ORACLE_CONSULT = "oracle"  # Architecture consultation
+    PLANNING = "planning"  # Mode: plan — Prometheus → plan on Jira (no GitLab push)
+    EXECUTION = "execution"  # Mode: build — Atlas execute → push + MR
+    ORACLE_CONSULT = "oracle"  # Architecture consultation (no Mode required)
 
 
 class WorkflowRouter:
-    """Routes JIRA issues to appropriate workflows."""
-
-    # Keywords that indicate planning is needed
-    PLANNING_KEYWORDS = [
-        "epic",
-        "feature",
-        "implement",
-        "create",
-        "build",
-        "design",
-        "architecture",
-        "refactor",
-        "migrate",
-    ]
-
-    # Keywords for direct execution
-    DIRECT_KEYWORDS = [
-        "fix",
-        "bug",
-        "typo",
-        "update",
-        "change",
-        "add",
-        "remove",
-        "delete",
-        "rename",
-    ]
+    """Routes JIRA issues to appropriate workflows via ``Mode:`` in ``{params}``."""
 
     # Keywords indicating Oracle consultation (pure Q&A, not implementation)
     ORACLE_KEYWORDS = [
@@ -70,6 +45,8 @@ class WorkflowRouter:
         "change",
         "feature",
         "epic",
+        "mode: plan",
+        "mode: build",
     ]
 
     @classmethod
@@ -79,47 +56,51 @@ class WorkflowRouter:
         summary: str,
         description: str,
     ) -> WorkflowType:
-        """Determine workflow type for an issue (board poller intake only)."""
+        """Determine workflow type for an issue (board poller intake only).
+
+        Primary signal: ``Mode: plan|build`` inside the Jira ``{params}`` block.
+        Direct execution is removed — use ``Mode: build`` for implementation.
+        """
         del issue_key  # reserved for future per-key rules
+        mode = parse_issue_mode(summary, description)
+        if mode == "plan":
+            return WorkflowType.PLANNING
+        if mode == "build":
+            return WorkflowType.EXECUTION
+
         combined_text = f"{summary} {description}".lower()
         has_implementation = any(
             kw in combined_text for kw in cls.IMPLEMENTATION_KEYWORDS
         )
         has_oracle_phrase = any(kw in combined_text for kw in cls.ORACLE_KEYWORDS)
 
-        # Oracle only when consultative and not asking for code/implementation work
+        # Oracle only when consultative and not asking for implementation work
         if has_oracle_phrase and not has_implementation:
             return WorkflowType.ORACLE_CONSULT
 
-        complexity_score = cls._calculate_complexity(summary, description)
-        if complexity_score >= 3:
-            return WorkflowType.PLANNING
-        return WorkflowType.DIRECT_EXECUTION
+        # Mode missing: prefer planning so git prepare posts the full format help
+        # (processor also fails early via route_issue_with_reason when Mode required)
+        return WorkflowType.PLANNING
 
     @classmethod
-    def _calculate_complexity(cls, summary: str, description: str) -> int:
-        """Calculate complexity score (0-5)."""
-        score = 0
-        text = f"{summary} {description}".lower()
+    def route_issue_with_reason(
+        cls,
+        issue_key: str,
+        summary: str,
+        description: str,
+    ) -> Tuple[WorkflowType, Optional[str]]:
+        """Route only — never validates template fields.
 
-        for kw in cls.PLANNING_KEYWORDS:
-            if kw in text:
-                score += 1
-
-        if len(description) > 500:
-            score += 1
-        if len(description) > 1000:
-            score += 1
-
-        if any(ext in text for ext in [".ts", ".js", ".py", ".java", ".go"]):
-            score += 1
-
-        return min(score, 5)
+        Mode / Repository / Source / Target are validated together in
+        ``parse_issue_git_spec`` when the git workspace is prepared (same path
+        for all incomplete templates). Returns ``(workflow, None)``.
+        """
+        return cls.route_issue(issue_key, summary, description), None
 
     @classmethod
     def should_auto_start(cls, workflow_type: WorkflowType) -> bool:
         """Check if workflow should auto-start without human confirmation."""
-        if workflow_type == WorkflowType.DIRECT_EXECUTION:
+        if workflow_type == WorkflowType.EXECUTION:
             return True
         # Planning and Oracle typically need human confirmation (or auto_start_plans)
         return settings.auto_start_plans
@@ -129,7 +110,7 @@ class WorkflowRouter:
         """Get default agent for workflow type."""
         mapping = {
             WorkflowType.PLANNING: settings.planning_agent,
-            WorkflowType.DIRECT_EXECUTION: settings.default_agent,
+            WorkflowType.EXECUTION: settings.orchestrator_agent,
             WorkflowType.ORACLE_CONSULT: "oracle",
         }
         return mapping.get(workflow_type, settings.default_agent)

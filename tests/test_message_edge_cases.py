@@ -27,7 +27,7 @@ def _state(**kwargs) -> JiraAgentState:
         issue_key="MSG-1",
         issue_summary="Sample issue",
         status=TaskStatus.EXECUTING,
-        metadata={"workflow_type": "direct"},
+        metadata={"workflow_type": "execution"},
         progress_percentage=40,
         retry_count=0,
         max_retries=3,
@@ -65,7 +65,7 @@ def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     body = client.comments[-1]["body"]
     assert "Plan Ready" in body
     assert "No plan content" in body or "not found" in body.lower()
-    assert "/start-work" in body
+    assert "Start plan" in body or "ai-start-work" in body or "Mode: build" in body
 
 
 def test_plan_summary_whitespace_only(reporter, client):
@@ -109,7 +109,7 @@ def test_completion_with_mr_and_branch(reporter, client):
         completed_at=datetime(2026, 6, 1, 10, 0, 0),
         execution_duration_seconds=12.5,
         metadata={
-            "workflow_type": "direct",
+            "workflow_type": "execution",
             "merge_request_url": "https://gitlab.example/mr/1",
             "feature_branch": "feature/MSG-1",
         },

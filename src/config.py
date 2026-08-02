@@ -132,6 +132,11 @@ class Settings(BaseSettings):
         default=True,
         description="Whether to retry tasks that fail with errors"
     )
+    # Git clone hard timeout (B11) — hung clones must not hold job slots forever
+    git_clone_timeout_seconds: int = Field(
+        default=300,
+        description="Max seconds for git clone (hard kill; default 5 minutes)",
+    )
     
     # Redis / Celery
     redis_url: str = Field(default="redis://localhost:6379/0")

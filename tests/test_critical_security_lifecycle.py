@@ -175,24 +175,23 @@ async def test_on_retry_does_not_clobber_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_planning_cancel_during_push_stays_cancelled(
+async def test_planning_cancel_during_agent_stays_cancelled(
     processor, state_manager, tmp_path
 ):
+    """Cancel mid-plan (no GitLab push in plan mode) must not flip to PLAN_READY."""
     state = state_manager.create_state("PL-C1", "plan something", "d")
     git = MagicMock()
     git.ensure_feature_branch.return_value = "feature/PL-C1"
+    git.work_branch = "feature/PL-C1"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/PL-C1"
-    git.push.return_value = True
-    git.get_last_commit_subject.return_value = "feat: plan"
-    git.get_last_commit_message.return_value = "feat: plan"
-    git.create_merge_request.return_value = None
-    git.get_mr_url.return_value = None
     git.cleanup.return_value = True
 
     runner = MagicMock()
 
     async def agent_ok(task, **kwargs):
+        # Simulate dashboard cancel while agent runs
+        state_manager.update_state("PL-C1", status=TaskStatus.CANCELLED)
         return {
             "returncode": 0,
             "stdout": "done",
@@ -201,6 +200,7 @@ async def test_planning_cancel_during_push_stays_cancelled(
             "opencode_session_id": "s",
             "retry_info": {"attempts": 1, "max_retries": 0, "retried": False},
             "timed_out": False,
+            "aborted": True,
         }
 
     runner.run_agent_with_retry = AsyncMock(side_effect=agent_ok)
@@ -208,16 +208,8 @@ async def test_planning_cancel_during_push_stays_cancelled(
     processor.git_manager = git
     processor.agent_runner = runner
 
-    async def push_then_cancel(st):
-        state_manager.update_state("PL-C1", status=TaskStatus.CANCELLED)
-        return True
-
     with patch.object(processor, "_init_git_manager", return_value=git):
-        with patch.object(
-            processor, "_push_and_create_mr", side_effect=push_then_cancel
-        ):
-            with patch.object(processor, "_resolve_plan_path", return_value=None):
-                await processor._start_planning_workflow(state)
+        await processor._start_planning_workflow(state)
 
     assert state_manager.get_state("PL-C1").status == TaskStatus.CANCELLED
 

@@ -197,4 +197,4 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
-            await p._start_direct_execution(state2)
+            await p._start_execution_workflow(state2)

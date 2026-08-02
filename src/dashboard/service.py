@@ -359,15 +359,16 @@ def _legacy_jobs_from_sessions(
                 "issue_key": ik,
                 "summary": summaries.get(ik, ""),
                 "description": desc,
-                "workflow_type": "direct",
+                "workflow_type": "execution",
                 "agent": "",
-                "status": "completed",
+                # F6: never imply success for unparsed legacy session logs
+                "status": "unknown",
                 "task_id": None,
                 "opencode_session_id": sid,
                 "opencode_session_ids": [sid] if sid else [],
                 "session_log_path": resolved,
                 "prompt_path": prompt_path,
-                "progress_percentage": 100,
+                "progress_percentage": 0,
                 "error_message": None,
                 "started_at": started,
                 "completed_at": started,
@@ -481,7 +482,7 @@ def build_jobs(
                 summary=j.get("summary") or "",
                 # Per-job snapshot only (or recovered from that job's prompt file)
                 description=j.get("description") or "",
-                workflow_type=j.get("workflow_type") or "direct",
+                workflow_type=j.get("workflow_type") or "execution",
                 agent=j.get("agent") or "",
                 status=j.get("status") or "unknown",
                 task_id=j.get("task_id"),
@@ -624,7 +625,7 @@ def _reconstruct_prompts(state) -> Dict[str, Any]:
     The UI shows captured ``*.prompt.txt`` files — the exact text sent to the
     agent. We do not rebuild a live “assembled” prompt for display.
     """
-    workflow = (state.metadata or {}).get("workflow_type") or "direct"
+    workflow = (state.metadata or {}).get("workflow_type") or "execution"
     agent_name = settings.default_agent
     if workflow == WorkflowType.PLANNING.value or workflow == "planning":
         agent_name = settings.planning_agent

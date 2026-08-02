@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -40,7 +41,7 @@ def test_cancel_while_still_todo_does_not_requeue(tmp_path):
     proc._contexts["R-1"] = {"git": None, "runner": runner}
     poller._last_jira_status["R-1"] = "to do"
 
-    proc.cancel_job("R-1", reason="test")
+    asyncio.run(proc.cancel_job("R-1", reason="test"))
     assert poller._last_jira_status["R-1"] == "to do"
     poller._status_before_poll = {"R-1": "to do"}
     issue = {
@@ -75,7 +76,7 @@ def test_cancel_from_in_progress_requeues_on_todo(tmp_path):
     proc._contexts["R-2"] = {"git": None, "runner": runner}
     poller._last_jira_status["R-2"] = "in progress"
 
-    proc.cancel_job("R-2", reason="test")
+    asyncio.run(proc.cancel_job("R-2", reason="test"))
     assert poller._last_jira_status["R-2"] == "in progress"
     poller._status_before_poll = {"R-2": "in progress"}
     issue = {
@@ -103,7 +104,7 @@ def test_process_signalled_false_when_nothing_killed(tmp_path):
     runner.cancel_task.return_value = False
     runner.cancel_all_tasks.return_value = 0
     proc._contexts["R-3"] = {"git": None, "runner": runner}
-    res = proc.cancel_job("R-3")
+    res = asyncio.run(proc.cancel_job("R-3"))
     assert res["ok"] is True
     assert res["process_signalled"] is False
 
@@ -165,7 +166,7 @@ def test_supersede_keeps_old_task_id(tmp_path):
     sm.update_state("R-6", status=TaskStatus.EXECUTING, current_task_id="task_NEW")
     proc._start_job_record(
         sm.get_state("R-6"),
-        workflow_type="direct",
+        workflow_type="execution",
         agent="a",
         task_id="task_NEW",
         status="executing",

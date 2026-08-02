@@ -17,7 +17,7 @@ def state():
         issue_summary="sum",
         description="d",
         status=TaskStatus.EXECUTING,
-        metadata={"workflow_type": "direct"},
+        metadata={"workflow_type": "execution"},
         progress_percentage=50,
         retry_count=1,
         max_retries=3,

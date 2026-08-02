@@ -193,12 +193,27 @@ class GitManager:
         logger.debug(f"Remote URL: {self.remote_url}")
         logger.debug(f"Clone will use askpass auth: {bool(gitlab_pat)}")
 
-        result = subprocess.run(
-            ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
-            capture_output=True,
-            text=True,
-            env=self._git_auth_env() if gitlab_pat else None,
-        )
+        clone_timeout = max(30, int(getattr(settings, "git_clone_timeout_seconds", 300) or 300))
+        try:
+            result = subprocess.run(
+                ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
+                capture_output=True,
+                text=True,
+                env=self._git_auth_env() if gitlab_pat else None,
+                timeout=clone_timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            safe_err = f"git clone timed out after {clone_timeout}s"
+            logger.error(safe_err)
+            raise GitCloneError(
+                (
+                    f"*Virtual Developer* could not **clone** the repository "
+                    f"(timed out after {clone_timeout}s).\n\n"
+                    f"*Repository:* `{self.remote_url or '(unknown)'}`\n\n"
+                    "Check network access to GitLab, then move the issue back to *To Do*."
+                ),
+                technical=str(e),
+            ) from e
 
         if result.returncode != 0:
             # Never surface PAT-bearing URLs from git stderr to callers/logs
@@ -534,9 +549,10 @@ class GitManager:
     def _resolve_work_branch_name(self, issue_key: Optional[str] = None) -> str:
         """Pick the branch agents commit on (MR source side).
 
-        * Prefer params ``source_branch`` when it is a real work name.
-        * If source equals target, or source is a primary base (develop/main/…),
-          use ``feature/{ISSUE_KEY}`` so we never push/MR from a protected base.
+        Always ``feature/{ISSUE_KEY}`` so we never push/MR from a shared base
+        (staging, release/*, long-lived team branches, or primary bases).
+        Params ``Source branch`` is only used as a hint when it already matches
+        ``feature/*`` for this issue; otherwise it is ignored for push identity.
         """
         safe_key = re.sub(
             r"[^A-Za-z0-9\-]", "-", issue_key or self.issue_key or "issue"
@@ -545,29 +561,24 @@ class GitManager:
         source = (self.source_branch or "").strip()
         target = (self.target_branch or "").strip()
 
-        if not source:
-            logger.info(f"No source branch on params; using work branch {feature}")
+        if source and source == feature:
+            logger.info(f"Using work branch {feature} (matches params source)")
             return feature
 
-        if source == target:
-            logger.info(
-                f"Source equals target ('{source}'); "
-                f"using work branch {feature} (MR will be {feature} → {target})"
-            )
-            return feature
-
-        if self._is_primary_base(source):
-            logger.info(
-                f"Source '{source}' is a primary base; "
-                f"using work branch {feature} (MR will be {feature} → {target or source})"
-            )
-            return feature
+        if source and source != target and not self._is_primary_base(source):
+            # Allow explicit feature/* style only (not staging/shared names)
+            if source.startswith("feature/") or source.startswith("fix/"):
+                logger.info(
+                    f"Using params source as work branch: {source} "
+                    f"(MR will be {source} → {target})"
+                )
+                return source
 
         logger.info(
-            f"Using params source as work branch: {source} "
-            f"(MR will be {source} → {target})"
+            f"Using isolated work branch {feature} "
+            f"(params source was '{source or '(none)'}'; MR → {target or '(target)'})"
         )
-        return source
+        return feature
 
     def _require_target_on_remote(self) -> str:
         """Target must exist on origin before any work. Returns target name."""
@@ -818,12 +829,54 @@ class GitManager:
         result = self._run_git(["status"])
         return result.stdout
 
+    def commits_ahead_of_target(self, branch_name: Optional[str] = None) -> int:
+        """How many commits ``branch`` is ahead of ``origin/{target}`` (0 if unknown)."""
+        branch = (branch_name or self.work_branch or self.get_current_branch() or "").strip()
+        target = (self.target_branch or "").strip()
+        if not branch or not target:
+            return 0
+        result = self._run_git(
+            ["rev-list", "--count", f"origin/{target}..{branch}"],
+            check=False,
+        )
+        if result.returncode != 0:
+            result = self._run_git(
+                ["rev-list", "--count", f"{target}..{branch}"],
+                check=False,
+            )
+        if result.returncode != 0:
+            return 0
+        try:
+            return max(0, int((result.stdout or "0").strip() or "0"))
+        except ValueError:
+            return 0
+
+    def ensure_on_work_branch(self) -> bool:
+        """Checkout prepared ``work_branch`` if HEAD drifted. Returns False on failure."""
+        work = (self.work_branch or "").strip()
+        if not work:
+            return False
+        current = (self.get_current_branch() or "").strip()
+        if current == work:
+            return True
+        try:
+            self._run_git(["checkout", work], check=True)
+            return (self.get_current_branch() or "").strip() == work
+        except Exception as e:
+            logger.error(f"Could not checkout work branch '{work}': {e}")
+            return False
+
     def push(self, branch_name: Optional[str] = None) -> bool:
         if not self.remote_enabled:
             logger.info("Push not available (no remote configured).")
             return False
 
-        branch = branch_name or self.get_current_branch()
+        # Prefer prepared work_branch over drifted HEAD (B5)
+        branch = (
+            (branch_name or "").strip()
+            or (self.work_branch or "").strip()
+            or self.get_current_branch()
+        )
 
         try:
             self._with_auth_remote()
@@ -999,9 +1052,15 @@ class GitManager:
             logger.info("Merge request not available (no remote configured).")
             return None
 
-        branch = self.get_current_branch()
-        if branch in ("main", "master"):
-            logger.warning("Cannot create MR from main/master branch.")
+        # Prefer prepared work_branch (never open MR from protected bases)
+        branch = (self.work_branch or "").strip() or self.get_current_branch()
+        protected = set(_PRIMARY_BASES) | {
+            (self.target_branch or "").strip().lower(),
+        }
+        if not branch or branch.lower() in protected or branch.lower().startswith("release/"):
+            logger.warning(
+                f"Cannot create MR from protected/empty branch '{branch}'."
+            )
             return None
 
         existing_mr = self._get_existing_mr_url(branch)

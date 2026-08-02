@@ -1,8 +1,9 @@
-"""Issue git template parsing ({params} block)."""
+"""Issue git template parsing ({params} block + Mode)."""
 
 from src.issue_git_spec import (
     IssueGitConfigError,
     parse_issue_git_spec,
+    parse_issue_mode,
     require_issue_git_spec,
     strip_params_block,
 )
@@ -16,6 +17,7 @@ Some task text here.
 Repository: https://gitlab.example.com/group/repo.git
 Source branch: develop
 Target branch: main
+Mode: plan
 {params}
 
 Acceptance: do the thing
@@ -26,6 +28,7 @@ Acceptance: do the thing
     assert spec.repository_url.endswith("repo.git")
     assert spec.source_branch == "develop"
     assert spec.target_branch == "main"
+    assert spec.mode == "plan"
 
 
 def test_params_required():
@@ -33,6 +36,7 @@ def test_params_required():
     desc = (
         "Repository: https://gitlab.com/a/b.git\n"
         "Source branch: develop\n"
+        "Mode: plan\n"
     )
     spec, err = parse_issue_git_spec("sum", desc)
     assert spec is None
@@ -47,6 +51,7 @@ def test_strip_params_block_keeps_task_text():
         "Repository: https://gitlab.com/u/r.git\n"
         "Source branch: feature/X\n"
         "Target branch: main\n"
+        "Mode: build\n"
         "{params}\n\n"
         "More acceptance notes."
     )
@@ -55,9 +60,9 @@ def test_strip_params_block_keeps_task_text():
     assert "More acceptance notes." in out
     assert "{params}" not in out
     assert "Repository:" not in out
-    # Still parseable from original (strip does not mutate source)
     spec, err = parse_issue_git_spec("s", desc)
     assert err is None and spec is not None
+    assert spec.mode == "build"
 
 
 def test_target_defaults_to_source_when_omitted():
@@ -65,6 +70,7 @@ def test_target_defaults_to_source_when_omitted():
 {params}
 Repository: https://gitlab.example.com/group/repo.git
 Source branch: develop
+Mode: plan
 {params}
 """
     spec, err = parse_issue_git_spec("feat", desc)
@@ -80,6 +86,7 @@ def test_parse_aliases():
 Repo: https://gitlab.com/a/b.git
 Work branch: feature/team-base
 Base branch: main
+Mode: execute
 {params}
 """
     spec, err = parse_issue_git_spec("", desc)
@@ -88,6 +95,7 @@ Base branch: main
     assert "gitlab.com" in spec.repository_url
     assert spec.source_branch == "feature/team-base"
     assert spec.target_branch == "main"
+    assert spec.mode == "build"
 
 
 def test_jira_wiki_inside_params():
@@ -99,6 +107,7 @@ def test_jira_wiki_inside_params():
         "[https://gitlab.com/beratersari0/test_project.git|"
         "https://gitlab.com/beratersari0/test_project.git|smart-card]\n\n"
         "Source branch: develop Target branch: feature/KAN-4\n"
+        "Mode: plan\n"
         "{params}\n"
         "h3. Acceptance\n10 + 3\n"
     )
@@ -112,7 +121,10 @@ def test_jira_wiki_inside_params():
 
 def test_escaped_jira_code_braces_still_ok():
     """Wiki may store braces oddly; unescaped {params} is the contract."""
-    desc = "{params}\nRepository: https://g.com/a/b.git\nSource branch: main\n{params}"
+    desc = (
+        "{params}\nRepository: https://g.com/a/b.git\n"
+        "Source branch: main\nMode: plan\n{params}"
+    )
     spec, err = parse_issue_git_spec("", desc)
     assert err is None
     assert spec is not None
@@ -120,16 +132,43 @@ def test_escaped_jira_code_braces_still_ok():
 
 
 def test_missing_fields_inside_params():
-    desc = "{params}\nRepository: https://gitlab.example.com/g/r.git\n{params}"
+    desc = "{params}\nRepository: https://gitlab.example.com/g/r.git\nMode: plan\n{params}"
     spec, err = parse_issue_git_spec("hello", desc)
     assert spec is None
     assert err is not None
     assert "Source branch" in err
 
 
+def test_mode_required():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
+    assert spec is None
+    assert err is not None
+    assert "Mode" in err
+    assert "{params}" in err or "description" in err.lower()
+
+
+def test_parse_issue_mode_helper():
+    assert parse_issue_mode("", "no params") is None
+    assert (
+        parse_issue_mode(
+            "",
+            "{params}\nRepository: https://g.com/a/b.git\n"
+            "Source branch: develop\nMode: BUILD\n{params}",
+        )
+        == "build"
+    )
+
+
 def test_invalid_url():
     desc = (
-        "{params}\nRepository: not-a-url\nSource branch: develop\n{params}\n"
+        "{params}\nRepository: not-a-url\nSource branch: develop\nMode: plan\n{params}\n"
     )
     spec, err = parse_issue_git_spec("", desc)
     assert spec is None
@@ -142,6 +181,7 @@ def test_invalid_branch():
         "{params}\n"
         "Repository: https://gitlab.example.com/g/r.git\n"
         "Source branch: bad..name\n"
+        "Mode: plan\n"
         "{params}\n"
     )
     spec, err = parse_issue_git_spec("", desc)

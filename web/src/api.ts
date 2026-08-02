@@ -85,7 +85,18 @@ export async function patchSettings(
     body: JSON.stringify(body),
   })
   if (!res.ok) {
-    throw new Error(`Settings update failed: ${res.status}`)
+    const body = await res.json().catch(() => ({}))
+    const detail = body?.detail
+    let msg = `Settings update failed: ${res.status}`
+    if (typeof detail === 'string') msg = detail
+    else if (Array.isArray(detail)) {
+      msg = detail
+        .map((d: { msg?: string } | string) =>
+          typeof d === 'string' ? d : d?.msg || JSON.stringify(d),
+        )
+        .join('; ')
+    }
+    throw new Error(msg)
   }
   return res.json()
 }

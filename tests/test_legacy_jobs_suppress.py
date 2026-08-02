@@ -29,7 +29,7 @@ def test_open_job_suppresses_matching_session_legacy(
         issue_key="KAN-1",
         summary="test",
         description="hello",
-        workflow_type="direct",
+        workflow_type="execution",
         agent="sisyphus",
         task_id="task_x",
         status="executing",

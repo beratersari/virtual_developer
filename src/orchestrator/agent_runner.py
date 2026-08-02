@@ -55,23 +55,114 @@ def resolve_opencode_agent_name(agent: str) -> str:
     # Title-case single tokens often still fail; try lower map again
     return OPENCODE_AGENT_ALIASES.get(key.lower().replace("_", "-"), key)
 
-# Secrets the agent subprocess must not inherit (push/auth is host-side)
-_AGENT_ENV_DENYLIST = (
-    "JIRA_API_TOKEN",
-    "JIRA_PASSWORD",
-    "GITLAB_PAT",
-    "GITLAB_TOKEN",
-    "GITLAB_ACCESS_TOKEN",
-    "GL_TOKEN",
-    "PRIVATE_TOKEN",
+# B10: allowlist child env (not denylist). Host Jira/GitLab push creds stay out.
+# Model provider keys OpenCode needs are explicitly allowed.
+_AGENT_ENV_ALLOW_EXACT = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "TZ",
+        "TERM",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "PWD",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        # OpenCode / Bun / Node runtime
+        "OPENCODE_DISABLE_MODELS_FETCH",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "BUN_INSTALL",
+        "NODE_ENV",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "npm_config_cache",
+        # Model providers the agent needs to call LLMs (not Jira/GitLab)
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TOGETHER_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "OLLAMA_HOST",
+        "OLLAMA_API_KEY",
+    }
+)
+_AGENT_ENV_ALLOW_PREFIXES = (
+    "LC_",
+    "OPENCODE_",
+    "BUN_",
+    "npm_config_",
 )
 
 
 def _agent_subprocess_env() -> Dict[str, str]:
-    """Host env with high-value secrets stripped for agent children."""
-    env = dict(os.environ)
-    for key in _AGENT_ENV_DENYLIST:
-        env.pop(key, None)
+    """Minimal env for agent children: allowlist + no host git credentials.
+
+    Never pass Jira/GitLab tokens, SSH agent, or credential helpers.
+    Push/auth remains host-side via GitManager askpass only.
+    """
+    env: Dict[str, str] = {}
+    for key, value in os.environ.items():
+        if value is None:
+            continue
+        if key in _AGENT_ENV_ALLOW_EXACT:
+            env[key] = value
+            continue
+        if any(key.startswith(p) for p in _AGENT_ENV_ALLOW_PREFIXES):
+            env[key] = value
+    # Harden git so the agent cannot push with host credentials
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env.pop("SSH_AUTH_SOCK", None)
+    env.pop("SSH_AGENT_PID", None)
+    env.pop("GIT_ASKPASS", None)
+    env.pop("GIT_SSH_COMMAND", None)
+    env.pop("VD_GIT_PASSWORD", None)
+    env.pop("GITLAB_PAT", None)
+    env.pop("GITLAB_TOKEN", None)
+    env.pop("JIRA_API_TOKEN", None)
+    env.pop("JIRA_PASSWORD", None)
     return env
 
 

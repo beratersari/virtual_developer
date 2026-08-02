@@ -47,7 +47,7 @@ def test_jira_agent_state_roundtrip_full():
         description="d",
         status=TaskStatus.EXECUTING,
         progress_percentage=40,
-        metadata={"workflow_type": "direct"},
+        metadata={"workflow_type": "execution"},
         plan_path="/p.md",
         started_at=ts,
         completed_at=ts,

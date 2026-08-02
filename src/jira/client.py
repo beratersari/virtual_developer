@@ -412,6 +412,30 @@ class JiraClient:
             logger.error(f"Error updating issue {issue_key}: {e}")
             return False
 
+    def append_to_description(self, issue_key: str, suffix: str) -> bool:
+        """Append ``suffix`` to the issue description without dropping existing text.
+
+        Used by plan mode to attach the generated plan at the end of the description.
+        """
+        text = (suffix or "").strip()
+        if not text:
+            return True
+        try:
+            issue = self.get_issue(issue_key, fields="description")
+            old = ""
+            if issue and isinstance(issue, dict):
+                raw = (issue.get("fields") or {}).get("description")
+                if isinstance(raw, str):
+                    old = raw
+                elif raw is not None:
+                    old = str(raw)
+            sep = "\n\n" if old and not old.endswith("\n") else "\n" if old else ""
+            new_desc = f"{old}{sep}{text}"
+            return self.update_issue(issue_key, fields={"description": new_desc})
+        except Exception as e:
+            logger.error(f"Error appending description on {issue_key}: {e}")
+            return False
+
     def add_labels(self, issue_key: str, labels: List[str]) -> bool:
         """Merge labels into an issue without dropping existing ones (on-prem safe)."""
         if not labels:

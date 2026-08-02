@@ -106,7 +106,7 @@ def test_after_orphan_recovery_todo_can_reprocess(processor, state_manager):
         started.append(state.issue_key)
 
     async def run():
-        with patch.object(processor, "_start_direct_execution", side_effect=cap):
+        with patch.object(processor, "_start_execution_workflow", side_effect=cap):
             with patch.object(processor, "_start_planning_workflow", side_effect=cap):
                 with patch.object(processor, "_start_oracle_consultation", side_effect=cap):
                     await processor._handle_issue_updated(
@@ -136,7 +136,7 @@ def test_live_cache_blocks_create(processor, state_manager):
         started.append(state.issue_key)
 
     async def run():
-        with patch.object(processor, "_start_direct_execution", side_effect=boom):
+        with patch.object(processor, "_start_execution_workflow", side_effect=boom):
             await processor._handle_issue_created(make_issue_event(key="LIVE-1"))
 
     asyncio.run(run())
@@ -178,7 +178,7 @@ def test_disk_inflight_blocks_create_without_cache(processor, state_manager):
         started.append(state.issue_key)
 
     async def run():
-        with patch.object(processor, "_start_direct_execution", side_effect=boom):
+        with patch.object(processor, "_start_execution_workflow", side_effect=boom):
             await processor._handle_issue_created(make_issue_event(key="DISK-1"))
 
     asyncio.run(run())
@@ -203,7 +203,7 @@ def test_not_processing_pending_todo_can_start(processor, state_manager):
         started.append(state.issue_key)
 
     async def run():
-        with patch.object(processor, "_start_direct_execution", side_effect=cap):
+        with patch.object(processor, "_start_execution_workflow", side_effect=cap):
             with patch.object(processor, "_start_planning_workflow", side_effect=cap):
                 with patch.object(processor, "_start_oracle_consultation", side_effect=cap):
                     await processor._handle_issue_updated(

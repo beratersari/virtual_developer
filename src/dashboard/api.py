@@ -165,11 +165,12 @@ def create_dashboard_app(
         return detail
 
     @app.post("/api/tasks/{issue_key}/cancel")
-    def task_cancel(issue_key: str) -> dict:
+    async def task_cancel(issue_key: str) -> dict:
+        """Cancel on the event loop so it shares locks with workflows (B6)."""
         proc = app.state.processor
         if proc is None:
             raise HTTPException(status_code=503, detail="Processor not available")
-        result = proc.cancel_job(
+        result = await proc.cancel_job(
             issue_key,
             reason="Cancelled from ops dashboard",
         )

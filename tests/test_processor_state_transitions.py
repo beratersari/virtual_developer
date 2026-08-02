@@ -106,12 +106,12 @@ async def test_workflow_exception_reports_to_jira(processor, state_manager, fake
         processor.state_manager.update_state("PROJ-13", status=TaskStatus.EXECUTING)
         raise RuntimeError("opencode not found")
 
-    with patch.object(processor, "_start_direct_execution", side_effect=boom):
+    with patch.object(processor, "_start_execution_workflow", side_effect=boom):
         with patch(
             "src.processor.WorkflowRouter.route_issue",
             return_value=__import__(
                 "src.orchestrator.workflow_router", fromlist=["WorkflowType"]
-            ).WorkflowType.DIRECT_EXECUTION,
+            ).WorkflowType.EXECUTION,
         ):
             await processor.process_event(event)
 
@@ -132,7 +132,7 @@ async def test_plan_ready_not_restarted_on_create(processor, state_manager):
         processor, "_start_planning_workflow", new_callable=AsyncMock
     ) as plan:
         with patch.object(
-            processor, "_start_direct_execution", new_callable=AsyncMock
+            processor, "_start_execution_workflow", new_callable=AsyncMock
         ) as direct:
             await processor._handle_issue_created(event)
             plan.assert_not_called()

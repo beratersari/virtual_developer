@@ -50,7 +50,9 @@ _REPO_KEY = r"(?:repository|repo|gitlab(?:\s*url)?|project(?:\s*url)?)"
 _SOURCE_KEY = r"(?:source\s*branch|work\s*branch)"
 # MR destination / base that must exist — includes "base branch" alias
 _TARGET_KEY = r"(?:target\s*branch|mr\s*target|merge\s*into|merge\s*target|base\s*branch)"
-_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY})"
+# Mode / workflow decision inside {params}
+_MODE_KEY = r"(?:mode|workflow(?:\s*mode)?)"
+_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY})"
 
 _REPO_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r])\s*{_REPO_KEY}\s*:\s*(.*?)(?=\s*{_ANY_KEY}\s*:|\Z)"
@@ -60,6 +62,9 @@ _SOURCE_FIELD = re.compile(
 )
 _TARGET_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r]|[\s])\s*{_TARGET_KEY}\s*:\s*(\S+)"
+)
+_MODE_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODE_KEY}\s*:\s*(\S+)"
 )
 
 _URL_TOKEN = re.compile(
@@ -71,8 +76,25 @@ TEMPLATE_HELP = """\
 Repository: https://gitlab.example.com/group/your-repo.git
 Source branch: feature/PROJ-123
 Target branch: develop
+Mode: plan
 {params}
+
+Mode is mandatory (like Repository / Source branch):
+* plan  — generate a plan, append it to the Jira description (no GitLab push)
+* build — implement / execute (push branch + open merge request)
 """
+
+# Valid mode tokens (aliases → canonical)
+_MODE_ALIASES = {
+    "plan": "plan",
+    "planning": "plan",
+    "prometheus": "plan",
+    "build": "build",
+    "execute": "build",
+    "execution": "build",
+    "atlas": "build",
+    "implement": "build",
+}
 
 
 @dataclass(frozen=True)
@@ -82,6 +104,7 @@ class IssueGitSpec:
     repository_url: str
     source_branch: str
     target_branch: str
+    mode: Optional[str] = None  # "plan" | "build" when present
 
 
 class IssueGitConfigError(Exception):
@@ -176,6 +199,37 @@ def strip_params_block(text: str) -> str:
     return cleaned.strip()
 
 
+def _params_block_text(summary: str = "", description: str = "") -> Optional[str]:
+    """Return expanded body of the first ``{params}`` block, or None."""
+    raw = f"{summary or ''}\n{description or ''}"
+    expanded = _expand_links(raw)
+    block = _extract_params_block(expanded)
+    if block is None:
+        block = _extract_params_block(raw)
+        if block is not None:
+            block = _expand_links(block)
+    else:
+        block = _expand_links(block)
+    return block
+
+
+def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
+    """Return canonical mode (``plan`` / ``build``) from ``{params}``, or None.
+
+    Looks for ``Mode:`` / ``Workflow:`` inside the params block only.
+    """
+    block = _params_block_text(summary, description)
+    if not block:
+        return None
+    m = _MODE_FIELD.search(block)
+    if not m:
+        return None
+    token = (m.group(1) or "").strip().lower().strip("`").strip()
+    # Drop trailing punctuation
+    token = token.rstrip(".,;:")
+    return _MODE_ALIASES.get(token)
+
+
 def _extract_repo(text: str) -> str:
     """Repository URL from field value and/or following lines inside params."""
     m = _REPO_FIELD.search(text)
@@ -245,9 +299,12 @@ def parse_issue_git_spec(
     repo = _extract_repo(text)
     source_m = _SOURCE_FIELD.search(text)
     target_m = _TARGET_FIELD.search(text)
+    mode_m = _MODE_FIELD.search(text)
 
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
+    mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
+    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else None
 
     missing = []
     if not repo:
@@ -259,13 +316,20 @@ def parse_issue_git_spec(
             "Source branch (e.g. `Source branch: feature/PROJ-123` "
             "or `Source branch: develop` to auto-use feature/{KEY})"
         )
-
+    if not mode:
+        if mode_raw:
+            missing.append(
+                f"Mode (got `{mode_raw}`; must be `plan` or `build`)"
+            )
+        else:
+            missing.append("Mode (e.g. `Mode: plan` or `Mode: build`)")
 
     if missing:
         return None, (
-            "*Virtual Developer* could not start: the ``{params}`` block is incomplete.\n\n"
-            f"Missing: {', '.join(missing)}.\n\n"
-            "Use this shape inside ``{params}`` … ``{params}``:\n\n"
+            "*Virtual Developer* could not start: the issue description format is incomplete.\n\n"
+            f"*Missing / invalid:* {', '.join(missing)}.\n\n"
+            "Add a ``{params}`` block to the *description* with *all* of these fields, "
+            "then move the issue back to *To Do*:\n\n"
             "{code}\n"
             f"{TEMPLATE_HELP.strip()}\n"
             "{code}"
@@ -301,6 +365,7 @@ def parse_issue_git_spec(
             repository_url=repo,
             source_branch=source,
             target_branch=target,
+            mode=mode,
         ),
         None,
     )

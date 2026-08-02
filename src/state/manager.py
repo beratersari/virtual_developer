@@ -126,6 +126,53 @@ class JiraStateManager:
             self.set_state(state)
             return state
 
+    def update_state_if(
+        self,
+        issue_key: str,
+        *,
+        expected_statuses: Optional[set] = None,
+        reject_statuses: Optional[set] = None,
+        **kwargs: Any,
+    ) -> Optional[JiraAgentState]:
+        """Compare-and-swap style update under the RLock.
+
+        * If ``expected_statuses`` is set, current status must be in that set.
+        * If ``reject_statuses`` is set, current status must *not* be in that set.
+        * On mismatch, returns None without writing (caller treats as aborted/stale).
+
+        Metadata patches still merge. Use this for progress→terminal transitions
+        so cancel/watchdog ERROR/CANCELLED cannot be overwritten by late success.
+        """
+        with self._lock:
+            state = self.get_state(issue_key)
+            if not state:
+                logger.warning(f"No state found for {issue_key} (update_state_if)")
+                return None
+            if expected_statuses is not None and state.status not in expected_statuses:
+                logger.info(
+                    f"update_state_if skip {issue_key}: status={state.status.value} "
+                    f"not in expected {[s.value if hasattr(s, 'value') else s for s in expected_statuses]}"
+                )
+                return None
+            if reject_statuses is not None and state.status in reject_statuses:
+                logger.info(
+                    f"update_state_if skip {issue_key}: status={state.status.value} "
+                    f"is rejected"
+                )
+                return None
+
+            for key, value in kwargs.items():
+                if not hasattr(state, key):
+                    logger.warning(f"Unknown field: {key}")
+                    continue
+                if key == "metadata" and isinstance(value, dict):
+                    state.metadata = {**(state.metadata or {}), **value}
+                else:
+                    setattr(state, key, value)
+
+            self.set_state(state)
+            return state
+
     def record_retry_attempt(
         self,
         issue_key: str,

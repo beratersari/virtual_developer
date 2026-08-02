@@ -113,7 +113,7 @@ def test_fail_issue_finishes_job_and_sets_requeue(tmp_path, monkeypatch):
         issue_key="FAIL-1",
         summary="s",
         description="desc",
-        workflow_type="direct",
+        workflow_type="execution",
         agent="a",
         task_id="task_x",
         status="executing",

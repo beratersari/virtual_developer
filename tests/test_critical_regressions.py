@@ -30,8 +30,12 @@ def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
 def _bind_git_agent(processor, issue_key: str, tmp_path: Path, *, push_ok: bool = True):
     git = MagicMock()
     git.ensure_feature_branch.return_value = f"feature/{issue_key}"
+    git.work_branch = f"feature/{issue_key}"
+    git.target_branch = "develop"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = f"feature/{issue_key}"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = push_ok
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
@@ -101,7 +105,7 @@ async def test_retry_refreshes_current_task_id(processor, state_manager, tmp_pat
     runner.run_agent_with_retry = AsyncMock(side_effect=with_retry)
 
     with patch.object(processor, "_init_git_manager", return_value=git):
-        await processor._start_direct_execution(state)
+        await processor._start_execution_workflow(state)
 
     assert seen["after_retry_state"] == "task_retry_second"
     # Completed job should not leave a stale running id (may be cleared or final)
@@ -116,7 +120,7 @@ async def test_push_failure_does_not_complete(processor, state_manager, tmp_path
     git, _ = _bind_git_agent(processor, "PUSH-1", tmp_path, push_ok=False)
 
     with patch.object(processor, "_init_git_manager", return_value=git):
-        await processor._start_direct_execution(state)
+        await processor._start_execution_workflow(state)
 
     loaded = state_manager.get_state("PUSH-1")
     assert loaded.status == TaskStatus.ERROR
@@ -132,6 +136,7 @@ async def test_concurrent_init_keeps_per_issue_context(processor, state_manager,
         "Repository: https://gitlab.example.com/group/repo.git\n"
         "Source branch: develop\n"
         "Target branch: develop\n"
+        "Mode: build\n"
         "{params}\n"
     )
     state_manager.create_state("A-1", "a", params)
@@ -184,7 +189,7 @@ async def test_cancel_is_sticky_against_late_success(processor, state_manager, t
     runner.run_agent_with_retry = AsyncMock(side_effect=agent_then_cancel)
 
     with patch.object(processor, "_init_git_manager", return_value=git):
-        await processor._start_direct_execution(state)
+        await processor._start_execution_workflow(state)
 
     assert state_manager.get_state("CX-1").status == TaskStatus.CANCELLED
 

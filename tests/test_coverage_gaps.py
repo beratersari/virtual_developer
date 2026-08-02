@@ -480,7 +480,7 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
             s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
-            await proc._start_direct_execution(state2)
+            await proc._start_execution_workflow(state2)
 
 
 @pytest.mark.asyncio

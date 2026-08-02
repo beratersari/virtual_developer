@@ -1,5 +1,6 @@
 """Polling-based JIRA issue discovery."""
 
+import hashlib
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -297,13 +298,27 @@ class JiraPoller:
         # plan_start goes as is_update so processor uses issue_updated path
         return new_issues + reprocess_issues + plan_start_issues
 
+    @staticmethod
+    def issue_text_fingerprint(issue: dict) -> str:
+        """Stable hash of summary+description for reprocess-on-edit detection."""
+        fields = issue.get("fields") or {}
+        summary = fields.get("summary") or ""
+        desc = fields.get("description") or ""
+        if not isinstance(desc, str):
+            desc = str(desc)
+        raw = f"{summary}\n{desc}".encode("utf-8", errors="replace")
+        return hashlib.sha256(raw).hexdigest()[:20]
+
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
-        """Re-queue only when an issue *transitions back* into To Do after leaving it.
+        """Re-queue terminal issues that should run again.
 
         Never re-queue in-flight work (PLANNING/EXECUTING) just because
         Jira still says To Do — that caused infinite re-execution loops.
-        Terminal states (COMPLETED/ERROR/CANCELLED) are reprocessed only on a real
-        status transition into To Do (user reopened the ticket).
+
+        Reprocess when:
+        * user moves ticket back to To Do (leave → return), or
+        * ERROR/CANCELLED + requeue_eligible + still To Do + **description/summary
+          changed** (user fixed Mode/{params} without leaving the column).
         """
         reprocess_issues = []
         terminal = {
@@ -362,17 +377,41 @@ class JiraPoller:
                 prev_before == "in progress"
                 and self._is_todo_status(fields)
             )
+            # User fixed description (Mode/{params}) while staying on To Do after ERROR.
+            # CANCELLED while still To Do must NOT auto-retry (operator cancelled).
+            # When fingerprint is missing (legacy), treat as "needs one retry attempt".
+            text_changed_retry = False
+            if (
+                requeue_eligible
+                and state.status == TaskStatus.ERROR
+                and self._is_todo_status(fields)
+            ):
+                fp = self.issue_text_fingerprint(issue)
+                last_fp = meta.get("last_intake_fingerprint")
+                if last_fp is None or last_fp != fp:
+                    text_changed_retry = True
 
             if not (
                 entered_todo_from_elsewhere
                 or status_changed_into_todo
                 or force_after_in_progress
+                or text_changed_retry
             ):
                 # Still To Do-like since last poll (or first sighting) — do not loop
                 continue
 
+            reason = (
+                "issue text changed"
+                if text_changed_retry
+                and not (
+                    entered_todo_from_elsewhere
+                    or status_changed_into_todo
+                    or force_after_in_progress
+                )
+                else f"jira {prev_before} -> to do"
+            )
             logger.info(
-                f"status change {issue_key}: jira {prev_before} -> to do "
+                f"status change {issue_key}: {reason} "
                 f"(local {state.status.value}); reprocessing"
             )
             reprocess_issues.append(issue)
@@ -411,6 +450,15 @@ class JiraPoller:
 
         logger.info(f"Processing {issue_key}: {summary}")
 
+        # Move to In Progress first (same as before): board shows work was accepted.
+        # Config errors still post a Jira comment + local ERROR for the ops UI.
+        if self.client.transition_to_in_progress(issue_key):
+            logger.info(f"{issue_key} transitioned to In Progress")
+            # Critical: poll_board already stored "to do" before this transition.
+            # Without updating, cancel → move back to To Do never looks like a
+            # status *change* (prev is still "to do") and reprocess is skipped.
+            self._last_jira_status[issue_key] = "in progress"
+
         if self._handler:
             event = {
                 "webhookEvent": "jira:issue_updated" if is_update else "jira:issue_created",
@@ -418,13 +466,6 @@ class JiraPoller:
                 "timestamp": int(time.time() * 1000),
             }
             self._handler(event)
-
-        if self.client.transition_to_in_progress(issue_key):
-            logger.info(f"{issue_key} transitioned to In Progress")
-            # Critical: poll_board already stored "to do" before this transition.
-            # Without updating, cancel → move back to To Do never looks like a
-            # status *change* (prev is still "to do") and reprocess is skipped.
-            self._last_jira_status[issue_key] = "in progress"
 
     def start(self, handler: Callable[[dict], None]):
         from concurrent.futures import ThreadPoolExecutor, as_completed

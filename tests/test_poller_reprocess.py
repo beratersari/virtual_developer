@@ -139,8 +139,62 @@ def test_check_status_changes_skips_cancel_while_still_todo(poller, state_manage
     assert poller.check_status_changes(issues) == []
 
 
+def test_error_still_todo_reprocesses_when_description_changes(poller, state_manager):
+    """ERROR + To Do requeues after user edits description (e.g. adds Mode)."""
+    from src.state.models import TaskStatus
+
+    poller.state_manager = state_manager
+    state_manager.create_state("P-EDIT", "s", "old body")
+    state_manager.update_state(
+        "P-EDIT",
+        status=TaskStatus.ERROR,
+        metadata={
+            "requeue_eligible": True,
+            "last_intake_fingerprint": "deadbeef",  # old hash
+        },
+    )
+    poller._status_before_poll = {"P-EDIT": "to do"}
+    issue = {
+        "key": "P-EDIT",
+        "fields": {
+            "summary": "s",
+            "description": "new body with Mode: build",
+            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            "labels": ["bot"],
+        },
+    }
+    out = poller.check_status_changes([issue])
+    assert [i["key"] for i in out] == ["P-EDIT"]
+
+
+def test_error_still_todo_skips_when_text_unchanged(poller, state_manager):
+    """Same description after ERROR must not spam reprocess every poll."""
+    from src.state.models import TaskStatus
+
+    poller.state_manager = state_manager
+    desc = "unchanged body"
+    issue = {
+        "key": "P-SAME",
+        "fields": {
+            "summary": "s",
+            "description": desc,
+            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            "labels": ["bot"],
+        },
+    }
+    fp = poller.issue_text_fingerprint(issue)
+    state_manager.create_state("P-SAME", "s", desc)
+    state_manager.update_state(
+        "P-SAME",
+        status=TaskStatus.ERROR,
+        metadata={"requeue_eligible": True, "last_intake_fingerprint": fp},
+    )
+    poller._status_before_poll = {"P-SAME": "to do"}
+    assert poller.check_status_changes([issue]) == []
+
+
 def test_process_issue_updates_last_status_after_in_progress(poller, fake_jira):
-    """After starting work, tracker must not keep stale 'to do'."""
+    """After accepting work, tracker must not keep stale 'to do' (In Progress first)."""
     fake_jira.transition_to_in_progress = MagicMock(return_value=True)
     poller._last_jira_status = {"P-8": "to do"}
     poller._handler = None
@@ -149,3 +203,4 @@ def test_process_issue_updates_last_status_after_in_progress(poller, fake_jira):
         is_update=False,
     )
     assert poller._last_jira_status["P-8"] == "in progress"
+    fake_jira.transition_to_in_progress.assert_called_once_with("P-8")

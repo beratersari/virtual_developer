@@ -190,10 +190,12 @@ def cancel(issue_key: str):
     cannot signal another daemon's live agent subprocesses — stop the agent
     from the ops dashboard (same process) or restart the daemon if needed.
     """
+    import asyncio
+
     from src.processor import JobProcessor
 
     proc = JobProcessor()
-    result = proc.cancel_job(issue_key, reason="Cancelled from CLI")
+    result = asyncio.run(proc.cancel_job(issue_key, reason="Cancelled from CLI"))
     if not result.get("ok"):
         console.print(f"[red]{result.get('error') or 'Cancel failed'}[/red]")
         return

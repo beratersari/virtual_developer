@@ -32,9 +32,12 @@ const STATUS_STYLES: Record<string, string> = {
   planning: 'bg-sky-900/80 text-sky-200 ring-1 ring-sky-700/50',
   plan_ready: 'bg-cyan-900/70 text-cyan-100 ring-1 ring-cyan-700/40',
   executing: 'bg-amber-900/70 text-amber-100 ring-1 ring-amber-700/40',
+  running: 'bg-amber-900/70 text-amber-100 ring-1 ring-amber-700/40',
   completed: 'bg-emerald-900/70 text-emerald-100 ring-1 ring-emerald-700/40',
   error: 'bg-rose-900/70 text-rose-100 ring-1 ring-rose-700/40',
   cancelled: 'bg-slate-800 text-slate-400 ring-1 ring-slate-600/40',
+  unknown: 'bg-amber-950/50 text-amber-200 ring-1 ring-amber-800/40',
+  superseded: 'bg-slate-800 text-slate-400 ring-1 ring-slate-600/40',
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -57,7 +60,9 @@ function formatCountdown(seconds: number | null | undefined): string {
 export default function App() {
   const [tab, setTab] = useState<Tab>('tasks')
   const [data, setData] = useState<DashboardPayload | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [jobsError, setJobsError] = useState<string | null>(null)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [localClock, setLocalClock] = useState(() => new Date())
   const [saving, setSaving] = useState(false)
@@ -65,6 +70,7 @@ export default function App() {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [detailStale, setDetailStale] = useState(false)
   const [detailTab, setDetailTab] = useState<'overview' | 'prompts' | 'opencode' | 'logs'>(
     'overview',
   )
@@ -89,38 +95,16 @@ export default function App() {
   issueFilterRef.current = issueFilter
   const detailRequestId = useRef(0)
   const jobsRequestId = useRef(0)
-  const lastPollCycle = useRef<number | null>(null)
+  const payloadGeneration = useRef(0)
+  const lastAppliedServerTime = useRef<string | null>(null)
+  const lastJobsReloadAt = useRef(0)
   const openIssueKeyRef = useRef<string | null>(null)
   const selectedJobIdRef = useRef<string | null>(null)
   selectedJobIdRef.current = selectedJobId
   const lastDetailRefreshRef = useRef(0)
-
-  const applyPayload = useCallback((payload: DashboardPayload) => {
-    setData(payload)
-    setError(null)
-    // Jobs list is always loaded via paginated REST (not full WS dump)
-    // Soft-refresh open task detail so Jira description/status stay live
-    const openKey = openIssueKeyRef.current
-    if (openKey) {
-      const now = Date.now()
-      if (now - lastDetailRefreshRef.current >= 4000) {
-        lastDetailRefreshRef.current = now
-        const jobId = selectedJobIdRef.current
-        void (async () => {
-          try {
-            const d = await fetchTaskDetail(openKey)
-            if (openIssueKeyRef.current !== openKey) return
-            setDetail(d)
-            if (jobId && d.jobs?.some((j) => j.job_id === jobId)) {
-              setSelectedJobId(jobId)
-            }
-          } catch {
-            /* keep existing detail on transient failure */
-          }
-        })()
-      }
-    }
-  }, [])
+  const reloadJobsRef = useRef<(opts?: { filter?: string; page?: number }) => Promise<void>>(
+    async () => {},
+  )
 
   const reloadJobs = useCallback(
     async (opts?: { filter?: string; page?: number }) => {
@@ -135,21 +119,75 @@ export default function App() {
         })
         if (req !== jobsRequestId.current) return
         setJobsView(j)
+        setJobsError(null)
       } catch (e) {
         if (req !== jobsRequestId.current) return
-        setError(e instanceof Error ? e.message : 'Failed to load jobs')
+        setJobsError(e instanceof Error ? e.message : 'Failed to load jobs')
       }
     },
     [jobsPageSize],
   )
+  reloadJobsRef.current = reloadJobs
+
+  const applyPayload = useCallback((payload: DashboardPayload) => {
+    // F4: ignore older snapshots (REST/WS race)
+    const st =
+      payload.poll?.server_time ||
+      payload.meta?.server_time ||
+      null
+    if (st && lastAppliedServerTime.current && st < lastAppliedServerTime.current) {
+      return
+    }
+    if (st) lastAppliedServerTime.current = st
+
+    setData(payload)
+    // F2: do NOT clear jobs/settings errors on every WS frame
+
+    // F1: throttle jobs refresh so Jobs tab stays live while "Live"
+    const now = Date.now()
+    if (now - lastJobsReloadAt.current >= 1500) {
+      lastJobsReloadAt.current = now
+      void reloadJobsRef.current()
+    }
+
+    // Soft-refresh open task detail (tagged with detailRequestId — F3)
+    const openKey = openIssueKeyRef.current
+    if (openKey) {
+      if (now - lastDetailRefreshRef.current >= 4000) {
+        lastDetailRefreshRef.current = now
+        const jobId = selectedJobIdRef.current
+        const req = detailRequestId.current
+        void (async () => {
+          try {
+            const d = await fetchTaskDetail(openKey)
+            if (openIssueKeyRef.current !== openKey) return
+            if (req !== detailRequestId.current) return
+            setDetail(d)
+            setDetailStale(false)
+            if (jobId && d.jobs?.some((j) => j.job_id === jobId)) {
+              setSelectedJobId(jobId)
+            }
+          } catch {
+            setDetailStale(true)
+          }
+        })()
+      }
+    }
+  }, [])
 
   const loadDashboard = useCallback(() => {
+    const gen = ++payloadGeneration.current
     fetchDashboard()
       .then((payload) => {
+        if (gen !== payloadGeneration.current) return
         applyPayload(payload)
+        setDashboardError(null)
         void reloadJobs()
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => {
+        if (gen !== payloadGeneration.current) return
+        setDashboardError(e.message)
+      })
   }, [applyPayload, reloadJobs])
 
   const closeDetail = useCallback((opts?: { skipNavigate?: boolean }) => {
@@ -296,15 +334,6 @@ export default function App() {
     void reloadJobs({ page: jobsPage })
   }, [jobsPage, reloadJobs])
 
-  // Refresh jobs list on each poll cycle
-  useEffect(() => {
-    const cycle = data?.poll?.cycle
-    if (cycle == null) return
-    if (lastPollCycle.current === cycle) return
-    lastPollCycle.current = cycle
-    void reloadJobs()
-  }, [data?.poll?.cycle, reloadJobs])
-
   useEffect(() => {
     let ws: WebSocket | null = null
     let closed = false
@@ -314,7 +343,11 @@ export default function App() {
       if (closed) return
       try {
         ws = new WebSocket(dashboardWsUrl())
-        ws.onopen = () => setConnected(true)
+        ws.onopen = () => {
+          setConnected(true)
+          // F5: resync jobs after reconnect
+          void reloadJobsRef.current()
+        }
         ws.onclose = () => {
           setConnected(false)
           if (!closed) retry = window.setTimeout(connect, 2000)
@@ -381,45 +414,43 @@ export default function App() {
     return localClock.toLocaleString()
   }, [localClock])
 
-  const countdown = data?.poll.seconds_until_next_poll
-  // Soft local countdown tick between WS pushes
-  const [tickLeft, setTickLeft] = useState<number | null>(null)
-  useEffect(() => {
-    if (countdown == null) {
-      setTickLeft(null)
-      return
-    }
-    setTickLeft(countdown)
-  }, [countdown, data?.poll.next_poll_at, data?.poll.cycle])
-
-  useEffect(() => {
-    if (tickLeft == null) return
-    const id = window.setInterval(() => {
-      setTickLeft((v) => (v == null ? v : Math.max(0, v - 1)))
-    }, 1000)
-    return () => window.clearInterval(id)
-  }, [tickLeft == null])
+  // F6: derive countdown from next_poll_at wall clock (no free-run drift to 0)
+  const tickLeft = useMemo(() => {
+    const next = data?.poll?.next_poll_at
+    if (!next) return data?.poll?.seconds_until_next_poll ?? null
+    const ms = Date.parse(next)
+    if (Number.isNaN(ms)) return data?.poll?.seconds_until_next_poll ?? null
+    return Math.max(0, Math.floor((ms - localClock.getTime()) / 1000))
+  }, [data?.poll?.next_poll_at, data?.poll?.seconds_until_next_poll, localClock])
 
   const onSaveSettings = async () => {
     setSaving(true)
+    setSettingsError(null)
     try {
+      const board = String(settingsDraft.jira_board_id ?? '').trim()
+      if (!board) {
+        throw new Error('Board ID is required (cannot be empty)')
+      }
+      const poll = Number(settingsDraft.poll_interval_seconds)
+      const maxJobs = Number(settingsDraft.max_concurrent_jobs)
+      if (!Number.isFinite(poll) || poll < 5 || poll > 3600) {
+        throw new Error('Poll interval must be between 5 and 3600 seconds')
+      }
+      if (!Number.isFinite(maxJobs) || maxJobs < 1 || maxJobs > 64) {
+        throw new Error('Max concurrent jobs must be between 1 and 64')
+      }
       const body = {
-        jira_board_id: settingsDraft.jira_board_id,
-        poll_interval_seconds: Number(settingsDraft.poll_interval_seconds),
+        jira_board_id: board,
+        poll_interval_seconds: poll,
         trigger_labels: settingsDraft.trigger_labels,
         trigger_on_assignment: settingsDraft.trigger_on_assignment,
         auto_start_plans: settingsDraft.auto_start_plans,
-        max_concurrent_jobs: Number(settingsDraft.max_concurrent_jobs),
+        max_concurrent_jobs: maxJobs,
         default_model: (settingsDraft.default_model ?? '').trim(),
-      }
-      if (
-        !Number.isFinite(body.poll_interval_seconds) ||
-        !Number.isFinite(body.max_concurrent_jobs)
-      ) {
-        throw new Error('Poll interval and max concurrent jobs must be numbers')
       }
       const updated = await patchSettings(body)
       setSettingsDirty(false)
+      setSettingsError(null)
       setData((prev) =>
         prev
           ? {
@@ -428,18 +459,27 @@ export default function App() {
             }
           : prev,
       )
-      // Keep models panel default_model in sync after save
       setModelsPayload((prev) =>
         prev
           ? { ...prev, default_model: updated.default_model }
           : prev,
       )
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Settings save failed')
+      setSettingsError(e instanceof Error ? e.message : 'Settings save failed')
     } finally {
       setSaving(false)
     }
   }
+
+  /** F5: issue-level problems (ERROR / in-flight) from state-store tasks */
+  const problemTasks = useMemo(() => {
+    const tasks = data?.tasks?.tasks ?? []
+    return tasks.filter((t) =>
+      ['error', 'planning', 'executing', 'pending'].includes(
+        String(t.status || '').toLowerCase(),
+      ),
+    )
+  }, [data?.tasks])
 
   const navBtn = (id: Tab, label: string) => (
     <button
@@ -500,26 +540,65 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6">
-        {error && (
-          <div
-            role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
-          >
-            <span>{error}</span>
-            <button
-              type="button"
-              onClick={() => {
-                setError(null)
-                loadDashboard()
-              }}
-              className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300"
-            >
-              Retry
-            </button>
+        {(dashboardError || jobsError || settingsError || data?.poll?.error) && (
+          <div className="space-y-2">
+            {data?.poll?.error && (
+              <div
+                role="alert"
+                className="rounded-lg border border-amber-800/50 bg-amber-950/40 px-4 py-3 text-sm text-amber-100"
+              >
+                <span className="font-medium">Poller error: </span>
+                {data.poll.error}
+              </div>
+            )}
+            {dashboardError && (
+              <div
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
+              >
+                <span>{dashboardError}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDashboardError(null)
+                    loadDashboard()
+                  }}
+                  className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800"
+                >
+                  Retry dashboard
+                </button>
+              </div>
+            )}
+            {jobsError && (
+              <div
+                role="alert"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
+              >
+                <span>Jobs: {jobsError}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setJobsError(null)
+                    void reloadJobs()
+                  }}
+                  className="rounded-md bg-rose-900/60 px-3 py-1 text-xs font-medium text-rose-50 hover:bg-rose-800"
+                >
+                  Retry jobs
+                </button>
+              </div>
+            )}
+            {settingsError && (
+              <div
+                role="alert"
+                className="rounded-lg border border-rose-800/50 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
+              >
+                Settings: {settingsError}
+              </div>
+            )}
           </div>
         )}
 
-        {!data && !error && (
+        {!data && !dashboardError && (
           <div className="text-sm text-slate-400" aria-busy="true">
             Loading dashboard…
           </div>
@@ -650,6 +729,11 @@ export default function App() {
               )}
               {detailError && (
                 <p className="text-sm text-rose-300">{detailError}</p>
+              )}
+              {detailStale && !detailError && (
+                <p className="mb-2 text-sm text-amber-200/90">
+                  Detail may be stale (last soft-refresh failed). Use Refresh.
+                </p>
               )}
 
               {detail && detailTab === 'overview' && (
@@ -934,12 +1018,45 @@ export default function App() {
 
         {data && tab === 'tasks' && !detail && !detailLoading && !detailError && (
           <section className="space-y-6">
+            {problemTasks.length > 0 && (
+              <div className="rounded-xl border border-rose-900/40 bg-rose-950/20 p-4">
+                <h3 className="text-sm font-semibold text-rose-100">
+                  Attention ({problemTasks.length})
+                </h3>
+                <p className="mb-2 text-xs text-rose-200/70">
+                  Issue-level ERROR / in-flight / pending from the state store (not only job rows).
+                </p>
+                <ul className="space-y-1 text-sm">
+                  {problemTasks.slice(0, 12).map((t) => (
+                    <li key={t.issue_key} className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        className="font-mono text-indigo-300 hover:underline"
+                        onClick={() => void openTaskDetail(t.issue_key)}
+                      >
+                        {t.issue_key}
+                      </button>
+                      <StatusBadge status={t.status} />
+                      {t.live && (
+                        <span className="text-[10px] uppercase text-amber-300">live</span>
+                      )}
+                      {t.error_message && (
+                        <span className="truncate text-xs text-slate-400">
+                          {t.error_message.slice(0, 120)}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-slate-100">Jobs</h2>
                 <p className="text-xs text-slate-500">
                   Each agent run is a job. Filter by Jira key, open a row for detail.
                   Board issues live under Poll monitor — click a key there for the same detail view.
+                  {!connected && ' (stale: WebSocket disconnected)'}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
