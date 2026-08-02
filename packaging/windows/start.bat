@@ -62,30 +62,41 @@ if errorlevel 1 (
 )
 timeout /t 1 /nobreak >nul
 
-echo [2/2] Starting backend ^(daemon + poller + dashboard SPA^)...
-REM Dedicated console so logs stay visible; title used for later restarts
-start "VD-Backend" /D "%SCRIPT_DIR%" cmd /c ""%VENV_PY%" -m src.daemon ^& echo. ^& echo Daemon exited. ^& pause"
+echo [2/2] Starting product ^(backend API + ops dashboard SPA in ONE process^)...
+REM Same process serves REST/WS and web\dist — do not look for port 5173.
+REM VD_WEB_DIST makes SPA discovery reliable regardless of import path quirks.
+set "VD_WEB_DIST=%SCRIPT_DIR%\web\dist"
+REM New console; cwd = project root so relative .venv and web\dist resolve
+start "VD-Backend" /D "%SCRIPT_DIR%" cmd /c "set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& .venv\Scripts\python.exe -m src.daemon & echo. & echo Daemon exited. & pause"
 
-echo Waiting for dashboard on port %DASH_PORT% ...
+echo Waiting for http://%DASH_HOST%:%DASH_PORT%/ ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ok=$false; for ($i=0; $i -lt 90; $i++) { try { $c=New-Object Net.Sockets.TcpClient('%DASH_HOST%', %DASH_PORT%); $c.Close(); $ok=$true; break } catch { Start-Sleep -Milliseconds 500 } }; if (-not $ok) { exit 1 }"
-if errorlevel 1 (
+  "$hostPort='%DASH_HOST%'; $port=%DASH_PORT%; $ok=$false; for ($i=0; $i -lt 90; $i++) { try { $c=New-Object Net.Sockets.TcpClient($hostPort, $port); $c.Close(); $ok=$true; break } catch { Start-Sleep -Milliseconds 500 } }; if (-not $ok) { exit 1 }; try { $r=Invoke-WebRequest -Uri (\"http://${hostPort}:${port}/\") -UseBasicParsing -TimeoutSec 5; if ($r.Content -match 'id=\"root\"') { Write-Host 'OK SPA HTML (ops dashboard UI)'; exit 0 } elseif ($r.Content -match 'Dashboard API is running') { Write-Host 'WARN API only — web\\dist SPA not loaded'; exit 2 } else { Write-Host 'OK HTTP 200 (check browser)'; exit 0 } } catch { Write-Host $_.Exception.Message; exit 1 }"
+set "CHK=%ERRORLEVEL%"
+if "%CHK%"=="1" (
     echo [WARNING] Port %DASH_PORT% not open yet.
     echo Check the "VD-Backend" window for errors ^(Jira .env, stack traces^).
+) else if "%CHK%"=="2" (
+    echo [ERROR] Backend is up but the frontend SPA is missing.
+    echo Expected: %SCRIPT_DIR%\web\dist\index.html
+    echo Open http://%DASH_HOST%:%DASH_PORT%/ — if you see JSON, re-download a CI zip that includes web\dist.
+    echo Do NOT use http://%DASH_HOST%:5173 — Vite is not used in the offline package.
 ) else (
-    echo [OK] Backend + dashboard listening on http://%DASH_HOST%:%DASH_PORT%
-    start "" "http://%DASH_HOST%:%DASH_PORT%"
+    echo [OK] Open the ops dashboard at http://%DASH_HOST%:%DASH_PORT%/
+    start "" "http://%DASH_HOST%:%DASH_PORT%/"
 )
 
 echo.
 echo ========================================
 echo   Running
 echo ========================================
-echo Backend API + ops dashboard: http://%DASH_HOST%:%DASH_PORT%
-echo Console window title: VD-Backend ^(close it to stop^)
-echo Re-run start.bat anytime to kill the old instance and restart.
+echo ONE process: backend + frontend UI
+echo   URL: http://%DASH_HOST%:%DASH_PORT%/
+echo   Not: http://%DASH_HOST%:5173  ^(that is Vite dev only^)
+echo Console: VD-Backend ^(close it to stop^)
+echo Re-run start.bat to kill the old instance and restart.
 echo.
-echo OpenCode TUI ^(separate^): start-opencode.bat
+echo OpenCode TUI ^(optional, separate tool^): start-opencode.bat
 echo.
 call :maybe_pause
 exit /b 0

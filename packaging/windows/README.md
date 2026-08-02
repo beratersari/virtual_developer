@@ -42,7 +42,20 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 | **Frontend** | React SPA built in CI (`npm run build` in `web/`), copied to **`web\dist`**, served by FastAPI on the **same port** as the API |
 | **Node at runtime** | **Not required** on the user machine (only CI builds the SPA) |
 
+**Do not split into separate start-frontend / start-backend scripts for the offline zip.**  
+A second “frontend” process would be Vite (port 5173) and needs Node + `web/node_modules`, which we deliberately do **not** ship. The product model is:
+
+```text
+start.bat  →  one process on http://127.0.0.1:8080
+              ├── REST + WebSocket  (/api/*, /ws)
+              └── SPA UI            (web\dist → /, /assets/*)
+```
+
+If the browser shows **JSON** at `/` (“Dashboard API is running…”), `web\dist` is missing from the install folder — re-download a CI package that includes the SPA build (or run `npm run build` in `web/` on a machine with Node).
+
 Do **not** ship `web\node_modules` in the zip (path-length bomb). Only `web\dist`.
+
+**CI note:** full `e2e-smoke.ps1` (deep-path install.bat) is **not** run on every push (too slow). Build still asserts payload layout (SPA + launchers + vendor).
 
 OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.

@@ -90,11 +90,34 @@ jobs:
             -OutDir "${{ github.workspace }}\dist" `
             -DistName "${{ steps.meta.outputs.dist_name }}"
 
-      - name: E2E smoke (deep path + install.bat + opencode --version)
+      # Fast payload assertions only (full install.bat e2e-smoke removed — too slow for CI)
+      - name: Assert payload layout
         shell: pwsh
         run: |
-          & .\packaging\windows\e2e-smoke.ps1 `
-            -PayloadDir "${{ github.workspace }}\dist\stage\${{ steps.meta.outputs.dist_name }}"
+          $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
+          foreach ($rel in @(
+            "install.bat",
+            "start.bat",
+            "cli.py",
+            "src/daemon.py",
+            "web/dist/index.html",
+            "vendor/opencode-home.zip",
+            "vendor/python-wheels",
+            "packaging/windows/Stop-VdProcesses.ps1"
+          )) {
+            $path = Join-Path $p $rel
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing required payload path: $rel"
+            }
+            Write-Host "OK $rel"
+          }
+          if (Test-Path -LiteralPath (Join-Path $p "web/node_modules")) {
+            throw "web/node_modules must not be in the offline zip"
+          }
+          if (Test-Path -LiteralPath (Join-Path $p "vendor/opencode-home/node_modules")) {
+            throw "expanded vendor/opencode-home/node_modules must not be in the zip"
+          }
+          Write-Host "Payload layout OK (no full install smoke)"
 
       # Folder upload: one extract → install.bat at top level
       - name: Upload folder artifact

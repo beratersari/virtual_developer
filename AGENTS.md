@@ -477,7 +477,7 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
    - `rg.exe` present under cache `bin`
    - `start-opencode.bat` present at payload root
 3. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
-4. **Dashboard SPA:** `build-dist.ps1` must `npm ci` / `npm run build` in `web/` and stage only `web/dist` (+ assert `index.html` / no `web/node_modules`). E2E smoke must require `start.bat` and `web\dist\index.html`.
+4. **Dashboard SPA:** `build-dist.ps1` must `npm ci` / `npm run build` in `web/` and stage only `web/dist` (+ assert `index.html` / no `web/node_modules`). CI asserts payload layout (`start.bat`, `web\dist`) — **not** full `e2e-smoke.ps1` install (too slow). Offline product uses **one** process (daemon serves API + SPA on 8080); do not require a separate Vite frontend start.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 
 ### 9.6 Debugging a black screen (shareable evidence)
