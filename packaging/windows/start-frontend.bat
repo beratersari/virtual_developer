@@ -56,9 +56,20 @@ if errorlevel 1 (
 )
 echo [OK] Backend is reachable.
 
-echo Stopping previous frontend on port %FRONTEND_PORT% ...
+echo Stopping previous frontend on port %FRONTEND_PORT% only ^(backend stays up^)...
+REM Do NOT pass -KillDaemon — that was killing the running backend.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Stop-VdProcesses.ps1" -DashboardPort 0 -VitePort %FRONTEND_PORT%
 timeout /t 1 /nobreak >nul
+
+echo Re-checking backend still alive after cleanup...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "%BACKEND_URL%/api/meta" -TimeoutSec 10
+if errorlevel 1 (
+    echo [ERROR] Backend died or is unreachable after frontend cleanup.
+    echo This should not happen. Re-run start-backend.bat, then start-frontend.bat.
+    call :maybe_pause
+    exit /b 1
+)
+echo [OK] Backend still up.
 
 echo Starting frontend in window "VD-Frontend"...
 start "VD-Frontend" /D "%SCRIPT_DIR%" cmd /c "set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& set VD_BACKEND_URL=%BACKEND_URL%&& set VD_FRONTEND_HOST=%FRONTEND_HOST%&& set VD_FRONTEND_PORT=%FRONTEND_PORT%&& .venv\Scripts\python.exe packaging\windows\serve_frontend.py --dist web\dist --backend %BACKEND_URL% --host %FRONTEND_HOST% --port %FRONTEND_PORT% & echo. & echo Frontend exited. & pause"

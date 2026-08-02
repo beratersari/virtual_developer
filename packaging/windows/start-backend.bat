@@ -48,8 +48,8 @@ if not exist "%VD_WEB_DIST%\index.html" (
     echo           Prefer a CI zip that includes web\dist, or use start-frontend after building SPA.
 )
 
-echo Stopping previous backend on port %DASH_PORT% ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Stop-VdProcesses.ps1" -DashboardPort %DASH_PORT% -VitePort 0
+echo Stopping previous backend on port %DASH_PORT% ^(does not stop frontend on 5173^)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Stop-VdProcesses.ps1" -DashboardPort %DASH_PORT% -VitePort 0 -KillDaemon
 timeout /t 1 /nobreak >nul
 
 echo Starting daemon in window "VD-Backend"...

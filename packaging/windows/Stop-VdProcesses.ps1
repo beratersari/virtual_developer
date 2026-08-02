@@ -1,29 +1,32 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Stop previous Virtual Developer / dashboard processes on Windows.
+  Stop previous Virtual Developer processes on Windows (ports and/or daemon).
 
 .DESCRIPTION
-  Frees the ops dashboard port (default 8080) and optional Vite port (5173),
-  and kills python processes that look like this product's daemon so start.bat
-  can restart cleanly.
+  Frees dashboard (8080) and/or frontend (5173) ports.
+  Optionally kills python processes that look like the product daemon.
+
+  IMPORTANT: start-frontend.bat must NOT pass -KillDaemon, or it will stop
+  the backend that is already running.
 #>
 [CmdletBinding()]
 param(
     [int]$DashboardPort = 8080,
-    [int]$VitePort = 5173
+    [int]$VitePort = 5173,
+    # Only start-backend / full restart should kill the daemon process tree
+    [switch]$KillDaemon
 )
 
 $ErrorActionPreference = "Continue"
 
 function Stop-ListenersOnPort([int]$Port) {
-    # Port 0 means "skip this port" (start-backend / start-frontend call selectively)
+    # Port 0 means "skip this port"
     if ($Port -le 0) { return }
     $conns = @()
     try {
         $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
     } catch {
-        # Fallback: netstat parse (older shells / restricted modules)
         $lines = @(netstat -ano 2>$null | Select-String ":$Port\s")
         foreach ($line in $lines) {
             $parts = ($line.ToString() -split "\s+") | Where-Object { $_ }
@@ -48,6 +51,17 @@ function Stop-ListenersOnPort([int]$Port) {
         try {
             $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
             $name = if ($p) { $p.ProcessName } else { "?" }
+            # Never kill the backend daemon when only freeing the frontend port
+            if (-not $KillDaemon -and $Port -eq $VitePort) {
+                $cmd = ""
+                try {
+                    $cmd = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction SilentlyContinue).CommandLine
+                } catch { }
+                if ($cmd -match 'src\.daemon|cli\.py.*start|-m\s+src\.daemon') {
+                    Write-Host "  Skip PID $procId ($name) — looks like backend daemon"
+                    continue
+                }
+            }
             Stop-Process -Id $procId -Force -ErrorAction Stop
             Write-Host "  Killed PID $procId ($name) listening on $Port"
         } catch {
@@ -57,17 +71,15 @@ function Stop-ListenersOnPort([int]$Port) {
 }
 
 function Stop-DaemonPythons {
-    # Use single-quoted patterns only (double-quoted \" breaks PowerShell parsing).
+    # Single-quoted patterns only (double-quoted \" breaks PowerShell parsing).
+    # Do NOT match serve_frontend.py — that is the UI process.
     $patterns = @(
         'src\.daemon',
         'src/daemon',
         'cli\.py(\s+|").*start',
-        'uvicorn.*dashboard',
-        'virtual_developer.*daemon',
         '-m\s+src\.daemon'
     )
     try {
-        # WMI filter: one name at a time (OR with quotes is fragile across PS versions)
         $procs = @()
         foreach ($exe in @('python.exe', 'pythonw.exe')) {
             $procs += @(
@@ -80,6 +92,8 @@ function Stop-DaemonPythons {
     foreach ($proc in $procs) {
         $cmd = [string]$proc.CommandLine
         if (-not $cmd) { continue }
+        # Never treat the frontend helper as the daemon
+        if ($cmd -match 'serve_frontend\.py') { continue }
         $hit = $false
         foreach ($re in $patterns) {
             if ($cmd -match $re) { $hit = $true; break }
@@ -94,10 +108,14 @@ function Stop-DaemonPythons {
     }
 }
 
-Write-Host "Stopping listeners on ports $DashboardPort / $VitePort ..."
+Write-Host "Stopping listeners on ports Dashboard=$DashboardPort Frontend=$VitePort (KillDaemon=$KillDaemon) ..."
 Stop-ListenersOnPort -Port $DashboardPort
 Stop-ListenersOnPort -Port $VitePort
-Write-Host "Stopping prior daemon python processes..."
-Stop-DaemonPythons
+if ($KillDaemon) {
+    Write-Host "Stopping prior daemon python processes..."
+    Stop-DaemonPythons
+} else {
+    Write-Host "Leaving backend daemon running (KillDaemon not set)."
+}
 Write-Host "Cleanup done."
 exit 0

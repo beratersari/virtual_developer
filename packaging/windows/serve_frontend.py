@@ -62,12 +62,29 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
             if k.lower() not in hop_by_hop
         }
         body = await request.body()
-        async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
-            r = await client.request(
-                request.method,
-                url,
-                content=body if body else None,
-                headers=headers,
+        try:
+            async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
+                r = await client.request(
+                    request.method,
+                    url,
+                    content=body if body else None,
+                    headers=headers,
+                )
+        except httpx.ConnectError as e:
+            msg = (
+                f"Backend unreachable at {backend} ({e}). "
+                "Start start-backend.bat first and leave the VD-Backend window open."
+            )
+            return Response(
+                content=msg,
+                status_code=502,
+                media_type="text/plain; charset=utf-8",
+            )
+        except httpx.HTTPError as e:
+            return Response(
+                content=f"Proxy error talking to backend: {e}",
+                status_code=502,
+                media_type="text/plain; charset=utf-8",
             )
         out_headers = {
             k: v
