@@ -49,8 +49,11 @@ JIRA Virtual Developer is a Python daemon that:
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
 - Terminal reprocess only when the user moves the issue back to **To Do** (or an explicit rework signal).
-- Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon.
+- **Plans never auto-start** (intentional). After `plan_ready`, do **not** promote the same ticket via `Mode: build` alone. To implement: open a **new** issue with `Mode: build` (same `{params}` repo/branches), **or** add label `ai-start-work` / `ai-execute` while the plan ticket is **To Do**. Dashboard Start stays disabled.
+- Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
+- Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
+- Temp clones: default policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h); purge on daemon start and hourly.
 
 ### Error handling
 
@@ -96,6 +99,10 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys (config/reference; board scopes poller) |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
+| `TRIGGER_LABELS` | Labels that make an issue eligible (e.g. `ai-assist,bot`) |
+| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments for bot-assignment trigger (e.g. `devbot,jira ai bot`) |
+| `TEMP_CLEANUP_POLICY` | `age` (default) / `always` / `on_success` / `never` |
+| `TEMP_CLEANUP_MAX_AGE_DAYS` | Age cutoff for temp clones (default `1` = 24 hours) |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (poller always runs) |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
@@ -119,7 +126,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs. Plans never auto-start — set `Mode: build` and move to To Do.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs. Plans never auto-start (see §2).
 - **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
 - Version is read from repo root `VERSION`.
 

@@ -113,8 +113,19 @@ class Settings(BaseSettings):
         description="Temp folder naming format. Available: {remote_name}, {jira_issue_id}, {timestamp}, {uuid}"
     )
     temp_cleanup_policy: str = Field(
-        default="never",
-        description="Temp folder cleanup policy: 'always', 'on_success', 'never'"
+        default="age",
+        description=(
+            "Temp folder cleanup policy: 'always', 'on_success', 'never', 'age' "
+            "(delete this clone when older than temp_cleanup_max_age_days; also "
+            "sweep the temp base for dirs past that age)"
+        ),
+    )
+    temp_cleanup_max_age_days: float = Field(
+        default=1.0,
+        description=(
+            "When temp_cleanup_policy is 'age', delete temp clones older than "
+            "this many days (default 1.0 = 24 hours)"
+        ),
     )
     
     # Agent Task Configuration
@@ -159,6 +170,14 @@ class Settings(BaseSettings):
     trigger_on_assignment: bool = Field(default=True)
     trigger_labels: str = Field(default="ai-assist,bot")
     trigger_mentions: str = Field(default="@DevBot,@AI")
+    # Substrings matched against assignee displayName / name / key (case-insensitive)
+    trigger_assignee_names: str = Field(
+        default="jira ai bot,jira-ai-bot,jiraai,devbot",
+        description=(
+            "Comma-separated name fragments; issue is bot-assigned when any "
+            "fragment appears in assignee displayName, name, or key"
+        ),
+    )
     
     @property
     def full_plans_dir(self) -> Path:
@@ -182,6 +201,14 @@ class Settings(BaseSettings):
         if not self.trigger_labels:
             return ["ai-assist", "bot"]
         return [item.strip() for item in self.trigger_labels.split(",") if item.strip()]
+
+    @property
+    def trigger_assignee_names_list(self) -> List[str]:
+        """Assignee name fragments for bot-assignment trigger (lowercase)."""
+        raw = (self.trigger_assignee_names or "").strip()
+        if not raw:
+            return ["jira ai bot", "jira-ai-bot", "jiraai", "devbot"]
+        return [item.strip().lower() for item in raw.split(",") if item.strip()]
 
     @property
     def gitlab_allowed_hosts_list(self) -> List[str]:

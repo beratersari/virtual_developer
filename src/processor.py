@@ -232,9 +232,10 @@ class JobProcessor:
     ) -> None:
         """Mark issue ERROR, finish job record, allow re-queue, notify Jira.
 
-        Always moves the Jira issue to *In Progress* (best-effort) so a
-        template/config failure does not leave the ticket in *To Do*. Operators
-        fix the description and move the issue back to *To Do* to re-queue.
+        Uses compare-and-swap so a late fail/watchdog cannot overwrite
+        COMPLETED or CANCELLED. Always moves the Jira issue to *In Progress*
+        (best-effort) so a template/config failure does not leave the ticket
+        in *To Do*. Operators fix the description and move back to *To Do*.
         """
         error_text = (error_message or "Unknown error")[:2000]
         try:
@@ -256,27 +257,39 @@ class JobProcessor:
                 meta_patch["last_intake_fingerprint"] = hashlib.sha256(
                     raw.encode("utf-8", errors="replace")
                 ).hexdigest()[:20]
-            updated = self.state_manager.update_state(
+            # CAS: never clobber success or operator cancel
+            updated = self.state_manager.update_state_if(
                 issue_key,
+                reject_statuses={TaskStatus.COMPLETED, TaskStatus.CANCELLED},
                 status=TaskStatus.ERROR,
                 error_message=error_text,
                 completed_at=datetime.now(),
                 current_task_id=None,
                 metadata=meta_patch,
             )
+            if updated is None:
+                cur = self.state_manager.get_state(issue_key)
+                if cur is None:
+                    # No local state file — still surface the error on Jira
+                    self.reporter.post_comment_response(
+                        issue_key,
+                        f"An error occurred while processing this issue:\n\n"
+                        f"{{code}}\n{error_text}\n{{code}}",
+                    )
+                    return
+                logger.info(
+                    f"_fail_issue CAS skip for {issue_key}: "
+                    f"status={cur.status.value} "
+                    f"(not overwriting COMPLETED/CANCELLED)"
+                )
+                return
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
             # Prefer "in progress" on the poller tracker after a failure so a
             # later real move back to To Do is detected as reprocess (not skipped).
             self._nudge_poller_after_terminal(issue_key, marker="in progress")
-            state = updated or self.state_manager.get_state(issue_key)
-            if state is None:
-                self.reporter.post_comment_response(
-                    issue_key,
-                    f"An error occurred while processing this issue:\n\n{{code}}\n{error_text}\n{{code}}",
-                )
-                return
+            state = updated
             # Default suggestion for config errors if caller did not pass one
             effective_suggestion = suggestion
             if not effective_suggestion:
@@ -858,65 +871,87 @@ class JobProcessor:
     ) -> dict:
         """Cancel a job: kill agent children, set CANCELLED, notify Jira.
 
-        Runs under the per-issue asyncio lock so cancel cannot race success paths
-        or double-start (B6/B7). Returns a status dict for the dashboard API.
+        Does **not** wait on the per-issue workflow lock (which may be held for
+        the entire agent run). Kill children immediately, then CAS to CANCELLED
+        so a late success path cannot overwrite cancel (and fail/watchdog cannot
+        overwrite COMPLETED). Returns a status dict for the dashboard API.
         """
-        async with self._get_issue_lock(issue_key):
-            state = self.state_manager.get_state(issue_key)
-            if not state:
-                return {
-                    "ok": False,
-                    "error": "No local state for this issue",
-                    "issue_key": issue_key,
-                }
-
-            if state.status in self.TERMINAL_STATUSES:
-                return {
-                    "ok": False,
-                    "error": f"Issue is already terminal ({state.status.value})",
-                    "issue_key": issue_key,
-                    "status": state.status.value,
-                }
-
-            killed = False
-            try:
-                runner = self._runner_for(issue_key)
-                if runner and state.current_task_id:
-                    killed = bool(runner.cancel_task(state.current_task_id))
-                if runner and hasattr(runner, "cancel_all_tasks"):
-                    n = runner.cancel_all_tasks()
-                    if n:
-                        killed = True
-            except Exception as e:
-                logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
-
-            self._cancel_issue_state(
-                issue_key,
-                message=reason,
-                status=TaskStatus.CANCELLED,
-            )
-            try:
-                self._release_context(issue_key, success=False)
-            except Exception as e:
-                logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
-
-            logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
-            refreshed = self.state_manager.get_state(issue_key)
+        state = self.state_manager.get_state(issue_key)
+        if not state:
             return {
-                "ok": True,
+                "ok": False,
+                "error": "No local state for this issue",
                 "issue_key": issue_key,
-                "status": refreshed.status.value if refreshed else "cancelled",
-                "process_signalled": killed,
-                "message": reason,
             }
+
+        if state.status in self.TERMINAL_STATUSES:
+            return {
+                "ok": False,
+                "error": f"Issue is already terminal ({state.status.value})",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+
+        # Kill first — never block behind process_event's long-held issue lock
+        killed = False
+        try:
+            runner = self._runner_for(issue_key)
+            if runner and state.current_task_id:
+                killed = bool(runner.cancel_task(state.current_task_id))
+            if runner and hasattr(runner, "cancel_all_tasks"):
+                n = runner.cancel_all_tasks()
+                if n:
+                    killed = True
+            self._kill_children_for_issue(issue_key)
+        except Exception as e:
+            logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
+
+        cancelled = self._cancel_issue_state(
+            issue_key,
+            message=reason,
+            status=TaskStatus.CANCELLED,
+        )
+        try:
+            self._release_context(issue_key, success=False)
+        except Exception as e:
+            logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
+
+        refreshed = self.state_manager.get_state(issue_key)
+        if not cancelled and refreshed and refreshed.status in self.TERMINAL_STATUSES:
+            # CAS lost to COMPLETED (or already terminal) — report honestly
+            if refreshed.status == TaskStatus.COMPLETED:
+                return {
+                    "ok": False,
+                    "error": "Issue completed before cancel could apply",
+                    "issue_key": issue_key,
+                    "status": refreshed.status.value,
+                    "process_signalled": killed,
+                }
+            return {
+                "ok": False,
+                "error": f"Issue is already terminal ({refreshed.status.value})",
+                "issue_key": issue_key,
+                "status": refreshed.status.value,
+                "process_signalled": killed,
+            }
+
+        logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
+        return {
+            "ok": True,
+            "issue_key": issue_key,
+            "status": refreshed.status.value if refreshed else "cancelled",
+            "process_signalled": killed,
+            "message": reason,
+        }
 
     async def start_plan_execution(
         self, issue_key: str, *, reason: str = "Started from ops dashboard"
     ) -> dict:
-        """Start execution for a plan_ready issue (internal / label path).
+        """Start execution for a plan_ready issue (explicit label / internal path).
 
-        Preferred operator path: set ``Mode: build`` and move the issue to To Do
-        (board poller). Dashboard HTTP Start is disabled (410).
+        Plans never auto-start. Operators either add ``ai-start-work`` /
+        ``ai-execute`` (poller) or open a separate issue with ``Mode: build``.
+        Dashboard HTTP Start is disabled (410).
 
         Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
@@ -993,15 +1028,20 @@ class JobProcessor:
         *,
         message: str,
         status: TaskStatus = TaskStatus.CANCELLED,
-    ) -> None:
+    ) -> bool:
         """Write a terminal status and notify Jira; clear live task id only.
+
+        Compare-and-swap: never overwrites COMPLETED. When writing CANCELLED,
+        also rejects existing ERROR so a concurrent fail does not thrash.
+        When writing ERROR (orphan recovery), rejects COMPLETED and CANCELLED.
 
         Preserves OpenCode session id and records last_task_id in metadata so
         the dashboard can still show identifiers after cancel.
+
+        Returns True when the terminal write applied, False if CAS skipped.
         """
         text = (message or "Work interrupted")[:2000]
         try:
-            prior = self.state_manager.get_state(issue_key)
             meta_patch = self._archive_run_identifiers(issue_key)
             # Allow poller to re-queue when the user returns the issue to To Do
             if status in (TaskStatus.CANCELLED, TaskStatus.ERROR):
@@ -1017,7 +1057,31 @@ class JobProcessor:
             }
             # Intentionally do NOT clear current_opencode_session_id
 
-            updated = self.state_manager.update_state(issue_key, **update_kwargs)
+            if status == TaskStatus.CANCELLED:
+                reject = {TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.ERROR}
+            else:
+                # ERROR path (orphan recovery / interrupt as error)
+                reject = {TaskStatus.COMPLETED, TaskStatus.CANCELLED}
+
+            updated = self.state_manager.update_state_if(
+                issue_key,
+                reject_statuses=reject,
+                **update_kwargs,
+            )
+            if updated is None:
+                cur = self.state_manager.get_state(issue_key)
+                if cur is None:
+                    self.reporter.post_comment_response(
+                        issue_key,
+                        f"Work interrupted:\n\n{{code}}\n{text}\n{{code}}",
+                    )
+                    return False
+                logger.info(
+                    f"_cancel_issue_state CAS skip for {issue_key}: "
+                    f"wanted {status.value}, have {cur.status.value}"
+                )
+                return False
+
             self._finish_job_record(
                 issue_key,
                 status=status.value,
@@ -1026,13 +1090,7 @@ class JobProcessor:
 
             self._nudge_poller_after_terminal(issue_key, marker="__cancelled__")
 
-            state = updated or self.state_manager.get_state(issue_key)
-            if state is None:
-                self.reporter.post_comment_response(
-                    issue_key,
-                    f"Work interrupted:\n\n{{code}}\n{text}\n{{code}}",
-                )
-                return
+            state = updated
             if status == TaskStatus.ERROR:
                 self.reporter.post_error(
                     state,
@@ -1050,8 +1108,10 @@ class JobProcessor:
                         "Move the issue back to *To Do* to re-queue when ready."
                     ),
                 )
+            return True
         except Exception as e:
             logger.exception(f"Failed to finalise interrupted state for {issue_key}: {e}", e)
+            return False
 
     def recover_orphaned_in_flight(self) -> int:
         """On cold start: disk PLANNING/EXECUTING cannot be live — finalise them.
@@ -1207,12 +1267,13 @@ class JobProcessor:
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
             return
-        # PLAN_READY: do not re-plan from a create event. Execution starts when
-        # the operator sets Mode: build and moves the issue to To Do (issue_updated).
+        # PLAN_READY: do not re-plan from a create event.
+        # Plans never auto-start (intentional). Explicit start only via
+        # ai-start-work / ai-execute labels on issue_updated, or a new Mode: build issue.
         if existing and existing.status == TaskStatus.PLAN_READY:
             logger.info(
-                f"Issue {issue_key} has plan ready; "
-                f"set Mode: build and move to To Do to execute (skip re-create)"
+                f"Issue {issue_key} has plan ready; no auto-start "
+                f"(add label ai-start-work / ai-execute, or open Mode: build issue)"
             )
             return
         
@@ -1363,8 +1424,10 @@ class JobProcessor:
             await self._handle_issue_created(event)
             return
 
-        # plan_ready → execute only when operator sets Mode: build and moves to To Do
-        # (or legacy ai-start-work / ai-execute label). No dashboard Start button.
+        # plan_ready → execute only on explicit start labels (ai-start-work /
+        # ai-execute). Mode: build alone does NOT auto-start (intentional product
+        # choice — no plan→build autostart). Open a new Mode: build issue to
+        # implement, or add a start label on this ticket while it is To Do.
         if state.status == TaskStatus.PLAN_READY:
             if self._is_live_processing(issue_key):
                 logger.info(f"{issue_key} plan_ready but already live; skip start")
@@ -1383,56 +1446,46 @@ class JobProcessor:
             if not description:
                 description = state.description or ""
 
-            # Prefer fresh Jira text so Mode: build is visible to the router
             if summary:
                 state.issue_summary = summary
             if description:
                 state.description = description
 
-            workflow_type = self._resolve_workflow(
-                issue_key, state.issue_summary, state.description
-            )
-            want_build = (
-                workflow_type == WorkflowType.EXECUTION
-                or has_start_label
-            )
-
-            if is_todo and want_build:
+            if is_todo and has_start_label:
                 self.state_manager.update_state(
                     issue_key,
                     issue_summary=state.issue_summary,
                     description=state.description,
-                    metadata={"workflow_type": workflow_type.value},
+                    metadata={"workflow_type": WorkflowType.EXECUTION.value},
                 )
                 state = self.state_manager.get_state(issue_key) or state
                 logger.info(
-                    f"{issue_key} plan_ready + To Do + Mode: build "
-                    f"(or start label); beginning execution"
+                    f"{issue_key} plan_ready + To Do + start label; "
+                    f"beginning execution"
                 )
                 try:
                     await self._start_execution_workflow(state)
                 except Exception as e:
                     logger.exception(
-                        f"Plan start from To Do failed for {issue_key}: {e}", e
+                        f"Plan start from label failed for {issue_key}: {e}", e
                     )
                     self._fail_issue(
                         issue_key,
                         f"Failed to start plan execution: {e}",
                         suggestion=(
-                            "Check logs, set Mode: build in the description, "
-                            "and move the issue back to To Do."
+                            "Check logs. To run build: open a new issue with "
+                            "Mode: build, or re-queue with label ai-start-work."
                         ),
                     )
                     self._release_context(issue_key, success=False)
-            elif is_todo and not want_build:
+            elif is_todo and not has_start_label:
                 logger.info(
-                    f"{issue_key} plan_ready and To Do but Mode is not build; "
-                    f"set Mode: build in the description to start execution "
-                    f"(workflow={workflow_type.value})"
+                    f"{issue_key} plan_ready and To Do; no auto-start "
+                    f"(add ai-start-work / ai-execute, or open Mode: build issue)"
                 )
-            elif not is_todo:
+            else:
                 logger.debug(
-                    f"{issue_key} plan_ready; waiting for To Do + Mode: build "
+                    f"{issue_key} plan_ready; waiting for explicit start "
                     f"(jira status '{status_name}')"
                 )
     
@@ -1910,8 +1963,8 @@ class JobProcessor:
                         f"Could not post plan summary for {state.issue_key}: {e}"
                     )
 
-            # Do not auto-start build: operator must set Mode: build and move
-            # the issue back to To Do (board poller). Dashboard Start is disabled.
+            # Do not auto-start build (intentional). Explicit start labels or a
+            # new Mode: build issue only. Dashboard Start is disabled.
 
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue

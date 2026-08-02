@@ -55,7 +55,7 @@ def test_should_auto_start_execution():
 
 
 def test_should_auto_start_planning_never():
-    """Plans never auto-start; operators use Mode: build + To Do."""
+    """Plans never auto-start; build needs a new Mode: build issue or start label."""
     assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is False
     assert WorkflowRouter.should_auto_start(WorkflowType.ORACLE_CONSULT) is False
 

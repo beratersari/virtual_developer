@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -1346,17 +1347,38 @@ class GitManager:
         - never: keep directory
         - always: delete directory
         - on_success: delete only when success is True
+        - age: delete this directory only if older than temp_cleanup_max_age_days
+          (also call ``purge_stale_temp_dirs`` for a full base sweep)
         """
         if not self.temp_dir or not self.temp_dir.exists():
             return True
 
-        policy = (settings.temp_cleanup_policy or "never").strip().lower()
+        policy = (settings.temp_cleanup_policy or "age").strip().lower()
 
         if policy == "never":
             logger.info(f"Keeping temp directory: {self.temp_dir}")
             return True
 
-        should_delete = policy == "always" or (policy == "on_success" and success is True)
+        if policy == "age":
+            max_age = float(getattr(settings, "temp_cleanup_max_age_days", 1.0) or 1.0)
+            try:
+                mtime = self.temp_dir.stat().st_mtime
+            except OSError as e:
+                logger.warning(f"Could not stat temp dir {self.temp_dir}: {e}")
+                return False
+            age_days = (time.time() - mtime) / 86400.0
+            if age_days < max_age:
+                logger.info(
+                    f"Cleanup policy age: keeping {self.temp_dir} "
+                    f"(age {age_days:.2f}d < {max_age}d)"
+                )
+                return True
+            should_delete = True
+        else:
+            should_delete = policy == "always" or (
+                policy == "on_success" and success is True
+            )
+
         if not should_delete:
             logger.info(
                 f"Cleanup policy '{policy}' - temp directory preserved: {self.temp_dir}"
@@ -1371,3 +1393,56 @@ class GitManager:
         except Exception as e:
             logger.error(f"Failed to remove temp directory {self.temp_dir}: {e}")
             return False
+
+
+def purge_stale_temp_dirs(
+    *,
+    max_age_days: Optional[float] = None,
+    base_dir: Optional[Path] = None,
+) -> int:
+    """Delete temp clone directories older than ``max_age_days`` under the temp base.
+
+    Returns the number of directories removed. Safe to call when the base is missing.
+    Used on daemon start and periodically so ``age`` policy actually frees disk.
+    """
+    age = max_age_days
+    if age is None:
+        age = float(getattr(settings, "temp_cleanup_max_age_days", 1.0) or 1.0)
+    if age < 0:
+        age = 0.0
+
+    base = base_dir
+    if base is None:
+        base = (Path.cwd() / settings.temp_dir_base).resolve()
+    if not base.exists() or not base.is_dir():
+        return 0
+
+    cutoff = time.time() - (age * 86400.0)
+    removed = 0
+    try:
+        entries = list(base.iterdir())
+    except OSError as e:
+        logger.warning(f"Cannot list temp base {base}: {e}")
+        return 0
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        try:
+            shutil.rmtree(entry)
+            removed += 1
+            logger.info(f"Purged stale temp directory (>{age}d): {entry}")
+        except Exception as e:
+            logger.warning(f"Failed to purge stale temp dir {entry}: {e}")
+    if removed:
+        logger.info(
+            f"Stale temp purge removed {removed} "
+            f"director{'y' if removed == 1 else 'ies'}"
+        )
+    return removed

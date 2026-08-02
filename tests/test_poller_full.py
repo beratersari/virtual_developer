@@ -43,6 +43,12 @@ def test_is_assigned_to_bot_variants(poller, fake_jira):
     }
     assert poller._is_assigned_to_jira_ai_bot("X-1") is True
 
+    # Configurable fragments include "devbot" by default
+    poller.client.get_issue.return_value = {
+        "fields": {"assignee": {"displayName": "DevBot"}}
+    }
+    assert poller._is_assigned_to_jira_ai_bot("X-1") is True
+
     poller.client.get_issue.return_value = {
         "fields": {"assignee": {"displayName": "Alice"}}
     }

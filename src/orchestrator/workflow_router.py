@@ -99,11 +99,11 @@ class WorkflowRouter:
 
     @classmethod
     def should_auto_start(cls, workflow_type: WorkflowType) -> bool:
-        """Whether work can start immediately when this workflow is routed.
+        """Whether a *new* issue can start work immediately when routed.
 
-        Execution starts when the issue is processed with ``Mode: build``.
-        Planning always stops at plan_ready; operators set ``Mode: build`` and
-        move the issue to To Do (no auto-start of plans).
+        Fresh ``Mode: build`` issues run execution. Planning always stops at
+        ``plan_ready`` and **never** auto-starts build (intentional). Resume
+        from plan_ready requires an explicit start label or a new build issue.
         """
         return workflow_type == WorkflowType.EXECUTION
 

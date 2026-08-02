@@ -389,17 +389,17 @@ def create_dashboard_app(
 
     @app.post("/api/tasks/{issue_key}/start")
     async def task_start(issue_key: str) -> dict:
-        """Deprecated: plan execution is started from Jira only.
+        """Deprecated: plans never auto-start; dashboard Start is disabled.
 
-        Set ``Mode: build`` in the issue description and move the issue back
-        to To Do so the board poller picks it up.
+        Use a new issue with Mode: build, or label ai-start-work / ai-execute
+        on a plan_ready ticket while it is To Do.
         """
         raise HTTPException(
             status_code=410,
             detail=(
                 "Starting work from the dashboard is disabled. "
-                "Set Mode: build in the issue description and move the issue "
-                "back to To Do."
+                "Plans never auto-start: open a new Mode: build issue, or add "
+                "label ai-start-work / ai-execute on a plan_ready ticket in To Do."
             ),
         )
 

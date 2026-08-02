@@ -256,7 +256,7 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
             await processor._start_planning_workflow(state2)
     assert state_manager.get_state("PL-2").status == TaskStatus.ERROR
 
-    # success never auto-starts (Mode: build + To Do only)
+    # success never auto-starts (intentional; label or new Mode: build issue)
     state3 = state_manager.create_state("PL-3", "s", "d")
     (plans / "PL-3.md").write_text("# plan\n- [ ] step")
     git3, runner3 = _mock_git_and_agent(processor, tmp_path, returncode=0)

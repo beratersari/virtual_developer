@@ -156,7 +156,7 @@ Terminal issues reprocess only when moved back to **To Do** (or equivalent rewor
 1. Poller accepts issue → state `planning`  
 2. Prometheus runs in a temp clone  
 3. Plan posted to Jira → state **`plan_ready`**  
-4. **Plans never auto-start.** To implement: set `Mode: build` in `{params}`, move the issue to **To Do** again (or add legacy labels `ai-start-work` / `ai-execute`)  
+4. **Plans never auto-start** (intentional). To implement: open a **new** issue with `Mode: build` (same `{params}` repo/branches), **or** add label `ai-start-work` / `ai-execute` while the plan ticket is **To Do**.
 
 ### Build (`Mode: build`)
 

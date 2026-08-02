@@ -45,19 +45,29 @@ class JiraPoller:
 
     @staticmethod
     def _assignee_looks_like_bot(assignee: Optional[dict]) -> bool:
+        """True when assignee name matches any configured bot name fragment.
+
+        Fragments come from ``TRIGGER_ASSIGNEE_NAMES`` (see settings
+        ``trigger_assignee_names_list``). Match is case-insensitive substring
+        against displayName, name, and key.
+        """
         if not assignee:
             return False
-        name = (
-            assignee.get("displayName")
-            or assignee.get("name")
-            or assignee.get("key")
-            or ""
-        ).lower()
-        return (
-            "jira ai bot" in name
-            or "jira-ai-bot" in name
-            or "jiraai" in name
-        )
+        candidates = [
+            (assignee.get("displayName") or "").lower(),
+            (assignee.get("name") or "").lower(),
+            (assignee.get("key") or "").lower(),
+        ]
+        needles = settings.trigger_assignee_names_list
+        if not needles:
+            return False
+        for name in candidates:
+            if not name:
+                continue
+            for needle in needles:
+                if needle and needle in name:
+                    return True
+        return False
 
     def _is_assigned_to_jira_ai_bot(self, issue_key: str, fields: Optional[dict] = None) -> bool:
         # Prefer assignee already present on the board payload (avoids N+1 GET)

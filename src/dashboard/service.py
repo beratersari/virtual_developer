@@ -1365,8 +1365,8 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
-    # Plan execution is started from Jira only: set Mode: build and move to To Do.
-    # Dashboard does not offer a Start button.
+    # Plans never auto-start; dashboard does not offer a Start button.
+    # Operator: new Mode: build issue, or ai-start-work / ai-execute label.
     can_start = False
 
     meta = state.metadata or {}
