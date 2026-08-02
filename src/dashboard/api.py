@@ -15,6 +15,7 @@ from src.config import settings
 from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
+    JiraConnectionTestRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     SettingsUpdate,
@@ -34,6 +35,7 @@ from src.dashboard.service import (
     refresh_runtime_jira_clients,
 )
 from src.gitlab_connection import probe_gitlab_connection
+from src.jira_connection import probe_jira_connection
 from src.scheduler.service import (
     cancel_scheduled_job,
     create_scheduled_job,
@@ -423,6 +425,21 @@ def create_dashboard_app(
         )
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
+    @app.post("/api/settings/jira/test")
+    def settings_jira_test(body: JiraConnectionTestRequest) -> dict:
+        """Verify Jira host credentials (``/myself`` + project list).
+
+        Token is optional: empty uses stored runtime token. Never echoes secrets.
+        """
+        result = probe_jira_connection(
+            host=body.host,
+            email=body.email,
+            api_token=body.api_token,
+            max_projects=int(body.max_projects or 25),
+        )
+        result["server_time"] = build_meta().server_time
         return result
 
     @app.get("/api/models")

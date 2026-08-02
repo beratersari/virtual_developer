@@ -249,6 +249,18 @@ class GitlabConnectionTestRequest(BaseModel):
     max_projects: int = Field(default=25, ge=1, le=50)
 
 
+class JiraConnectionTestRequest(BaseModel):
+    """Body for POST /api/settings/jira/test.
+
+    Omitted/empty token uses the stored runtime token. Never echoed back.
+    """
+
+    host: Optional[str] = Field(default=None, max_length=500)
+    email: Optional[str] = Field(default=None, max_length=320)
+    api_token: Optional[str] = Field(default=None, max_length=4000)
+    max_projects: int = Field(default=25, ge=1, le=50)
+
+
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only).
 

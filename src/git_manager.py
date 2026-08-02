@@ -1132,7 +1132,7 @@ class GitManager:
                 "PRIVATE-TOKEN": pat,
                 "Content-Type": "application/json",
             }
-            with httpx.Client(timeout=30.0, verify=True) as client:
+            with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=headers, json=payload)
                 if resp.status_code in (200, 201):
                     data = resp.json()
@@ -1178,7 +1178,7 @@ class GitManager:
                 f"https://{host}/api/v4/projects/{enc}/merge_requests"
                 f"?source_branch={quote(branch)}&state=opened"
             )
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.get(url, headers={"PRIVATE-TOKEN": pat})
                 if resp.status_code == 200:
                     mrs = resp.json()

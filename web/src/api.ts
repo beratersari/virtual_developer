@@ -185,6 +185,55 @@ export async function testGitlabConnection(body: {
   return data as GitlabConnectionTestResult
 }
 
+export type JiraConnectionTestResult = {
+  ok: boolean
+  host?: string
+  error?: string
+  message?: string
+  auth_mode?: string
+  is_cloud?: boolean
+  user?: {
+    display_name?: string
+    account?: string
+    email?: string | null
+  }
+  projects?: {
+    id?: string | number
+    key?: string
+    name?: string
+    project_type?: string
+    style?: string
+  }[]
+  project_count?: number
+  projects_error?: string | null
+  http_status?: number
+  server_time?: string
+}
+
+/** Test Jira connection — /myself + browsable projects. */
+export async function testJiraConnection(body: {
+  host?: string
+  email?: string
+  api_token?: string
+  max_projects?: number
+}): Promise<JiraConnectionTestResult> {
+  const res = await fetch('/api/settings/jira/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: body.host?.trim() || undefined,
+      email: body.email?.trim() || undefined,
+      api_token: body.api_token?.trim() || undefined,
+      max_projects: body.max_projects ?? 25,
+    }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `Jira test failed: ${res.status}`)
+  }
+  return data as JiraConnectionTestResult
+}
+
 export async function patchSettings(
   body: Partial<
     Pick<

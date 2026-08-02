@@ -10,7 +10,7 @@ class SimulatedJiraClient:
 
     def __init__(self, base_url: str = "http://localhost:7001"):
         self.base_url = base_url
-        self.client = httpx.Client(base_url=base_url, timeout=30.0)
+        self.client = httpx.Client(base_url=base_url, timeout=30.0, verify=False)
 
     def create_issue(
         self,
