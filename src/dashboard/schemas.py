@@ -13,6 +13,13 @@ class MetaResponse(BaseModel):
     app_name: str = "JIRA Virtual Developer"
 
 
+class BulkJobDeleteRequest(BaseModel):
+    """Body for POST /api/jobs/bulk-delete."""
+
+    job_ids: List[str] = Field(default_factory=list, max_length=100)
+    delete_artifacts: bool = True
+
+
 class TaskItem(BaseModel):
     issue_key: str
     summary: str

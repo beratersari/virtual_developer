@@ -65,3 +65,17 @@ export function jobMatchesFilter(
       return true
   }
 }
+
+/** Statuses the dashboard refuses to delete (matches backend). */
+const LIVE_JOB_STATUSES = new Set([
+  'running',
+  'planning',
+  'executing',
+  'pending',
+])
+
+/** Whether a job row can be selected for permanent delete (UI hint only). */
+export function jobIsDeletable(status: string, live: boolean): boolean {
+  if (live) return false
+  return !LIVE_JOB_STATUSES.has((status || '').toLowerCase())
+}

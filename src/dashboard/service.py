@@ -745,6 +745,69 @@ def delete_job_record(
     }
 
 
+_MAX_BULK_JOB_DELETE = 100
+
+
+def delete_job_records(
+    job_ids: List[str],
+    *,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[JobStore] = None,
+    state_manager: Optional[JiraStateManager] = None,
+    delete_artifacts: bool = True,
+) -> Dict[str, Any]:
+    """Delete multiple historical job records. Returns per-id results.
+
+    Skips empty/duplicate ids. Caps at ``_MAX_BULK_JOB_DELETE``. Live / in-flight
+    jobs are refused per id (same rules as ``delete_job_record``).
+    """
+    seen: set = set()
+    ordered: List[str] = []
+    for raw in job_ids or []:
+        jid = (raw or "").strip()
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        ordered.append(jid)
+        if len(ordered) >= _MAX_BULK_JOB_DELETE:
+            break
+
+    results: List[Dict[str, Any]] = []
+    deleted: List[str] = []
+    failed: List[Dict[str, str]] = []
+    for jid in ordered:
+        out = delete_job_record(
+            jid,
+            processor=processor,
+            store=store,
+            state_manager=state_manager,
+            delete_artifacts=delete_artifacts,
+        )
+        results.append(out)
+        if out.get("ok"):
+            deleted.append(jid)
+        else:
+            failed.append(
+                {
+                    "job_id": jid,
+                    "error": str(out.get("error") or "Delete failed"),
+                }
+            )
+
+    return {
+        "ok": len(failed) == 0 and len(deleted) > 0,
+        "deleted": deleted,
+        "failed": failed,
+        "deleted_count": len(deleted),
+        "failed_count": len(failed),
+        "results": results,
+        "message": (
+            f"Deleted {len(deleted)} job(s)"
+            + (f"; {len(failed)} failed" if failed else "")
+        ),
+    }
+
+
 def _sessions_dir() -> Path:
     """Session logs root (same default as AgentRunner; tests may patch)."""
     try:

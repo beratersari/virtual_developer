@@ -234,6 +234,19 @@ body {
   padding: 0.4rem 0.75rem;
 }
 
+.ops-checkbox {
+  width: 0.9rem;
+  height: 0.9rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.ops-checkbox:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 .ops-pre {
   max-height: min(70vh, 40rem);
   overflow: auto;

@@ -3,6 +3,7 @@ import {
   cancelTask,
   dashboardWsUrl,
   deleteJob,
+  deleteJobs,
   fetchDashboard,
   fetchJobById,
   fetchJobs,
@@ -104,6 +105,7 @@ export default function App() {
 
   const [cancelling, setCancelling] = useState(false)
   const [deletingJob, setDeletingJob] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const [issueFilter, setIssueFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable')
@@ -430,6 +432,36 @@ export default function App() {
     }
   }
 
+  const onBulkDeleteJobs = async (jobIds: string[]) => {
+    if (jobIds.length === 0) return
+    setBulkDeleting(true)
+    setJobsError(null)
+    try {
+      const result = await deleteJobs(jobIds, { deleteArtifacts: true })
+      if (result.failed_count > 0) {
+        const sample = (result.failed || [])
+          .slice(0, 3)
+          .map((f) => `${f.job_id}: ${f.error}`)
+          .join('; ')
+        const more =
+          result.failed_count > 3
+            ? ` (+${result.failed_count - 3} more)`
+            : ''
+        if (result.deleted_count === 0) {
+          throw new Error(
+            result.message || `Could not delete jobs. ${sample}${more}`,
+          )
+        }
+        setJobsError(
+          `Deleted ${result.deleted_count}; ${result.failed_count} failed. ${sample}${more}`,
+        )
+      }
+      await reloadJobs()
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
+
   useEffect(() => {
     const id = window.setInterval(() => setLocalClock(new Date()), 1000)
     return () => window.clearInterval(id)
@@ -748,6 +780,8 @@ export default function App() {
             connected={connected}
             onOpenJob={(key, jobId) => void openJobDetail(jobId, key)}
             onOpenIssue={(key) => void openTaskDetail(key)}
+            onBulkDelete={onBulkDeleteJobs}
+            bulkDeleting={bulkDeleting}
           />
         )}
 

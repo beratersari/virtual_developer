@@ -1,4 +1,5 @@
 import type { JobItem } from '../types'
+import { jobIsDeletable } from '../util/status'
 import { StatusBadge } from './StatusBadge'
 
 export function JobsTable({
@@ -9,6 +10,10 @@ export function JobsTable({
   selectedJobId = null,
   density = 'comfortable',
   showProgress = true,
+  selectable = false,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
 }: {
   jobs: JobItem[]
   /** Open the job (single run) page. */
@@ -20,16 +25,49 @@ export function JobsTable({
   density?: 'comfortable' | 'compact'
   /** When false, hide progress column (list can still show for active jobs only). */
   showProgress?: boolean
+  /** When true, show checkboxes for multi-select delete. */
+  selectable?: boolean
+  selectedIds?: Set<string>
+  onToggleSelect?: (jobId: string) => void
+  onToggleSelectAll?: () => void
 }) {
   const dense = density === 'compact' || compact
-  // Job | Issue | Status | [Workflow] | Started | [Progress]
-  const colCount = (compact ? 4 : 5) + (!compact && showProgress ? 1 : 0)
+  // [Select] | Job | Issue | Status | [Workflow] | Started | [Progress]
+  const colCount =
+    (selectable ? 1 : 0) + (compact ? 4 : 5) + (!compact && showProgress ? 1 : 0)
+
+  const deletableIds = jobs
+    .filter((j) => jobIsDeletable(j.status, Boolean(j.live)))
+    .map((j) => j.job_id)
+  const allDeletableSelected =
+    deletableIds.length > 0 &&
+    deletableIds.every((id) => selectedIds?.has(id))
+  const someSelected = Boolean(
+    selectedIds && deletableIds.some((id) => selectedIds.has(id)),
+  )
 
   return (
     <div className="ops-table-wrap">
       <table className={`ops-table ${dense ? 'ops-table-compact' : ''}`}>
         <thead>
           <tr>
+            {selectable && (
+              <th className="w-10">
+                <input
+                  type="checkbox"
+                  className="ops-checkbox"
+                  aria-label="Select all deletable jobs on this page"
+                  checked={allDeletableSelected}
+                  ref={(el) => {
+                    if (el) {
+                      el.indeterminate = someSelected && !allDeletableSelected
+                    }
+                  }}
+                  disabled={deletableIds.length === 0}
+                  onChange={() => onToggleSelectAll?.()}
+                />
+              </th>
+            )}
             <th>Job</th>
             <th>Issue</th>
             <th>Status</th>
@@ -51,11 +89,38 @@ export function JobsTable({
               (j.status || '').toLowerCase(),
             )
             const showBar = showProgress && !compact && (!terminal || j.progress_percentage < 100)
+            const canSelect = jobIsDeletable(j.status, Boolean(j.live))
+            const isChecked = Boolean(selectedIds?.has(j.job_id))
+            const rowSelected =
+              selectedJobId === j.job_id || (selectable && isChecked)
             return (
               <tr
                 key={j.job_id}
-                className={selectedJobId === j.job_id ? 'ops-row-selected' : ''}
+                className={rowSelected ? 'ops-row-selected' : ''}
               >
+                {selectable && (
+                  <td className="w-10">
+                    <input
+                      type="checkbox"
+                      className="ops-checkbox"
+                      aria-label={
+                        canSelect
+                          ? `Select job ${j.job_id}`
+                          : `Cannot delete live or in-flight job ${j.job_id}`
+                      }
+                      checked={isChecked}
+                      disabled={!canSelect}
+                      onChange={() => {
+                        if (canSelect) onToggleSelect?.(j.job_id)
+                      }}
+                      title={
+                        canSelect
+                          ? 'Select for delete'
+                          : 'Cannot delete a live or in-flight job'
+                      }
+                    />
+                  </td>
+                )}
                 <td>
                   <button
                     type="button"

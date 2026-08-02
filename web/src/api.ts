@@ -87,6 +87,36 @@ export async function deleteJob(
   return body
 }
 
+export type BulkDeleteJobsResult = {
+  ok: boolean
+  deleted: string[]
+  failed: { job_id: string; error: string }[]
+  deleted_count: number
+  failed_count: number
+  message?: string
+  server_time?: string
+}
+
+/** Permanently delete multiple historical jobs (partial success allowed). */
+export async function deleteJobs(
+  jobIds: string[],
+  opts?: { deleteArtifacts?: boolean },
+): Promise<BulkDeleteJobsResult> {
+  const res = await fetch('/api/jobs/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      job_ids: jobIds,
+      delete_artifacts: opts?.deleteArtifacts !== false,
+    }),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(body.detail || `Bulk delete failed: ${res.status}`)
+  }
+  return body as BulkDeleteJobsResult
+}
+
 export async function cancelTask(issueKey: string): Promise<{ ok: boolean; message?: string }> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}/cancel`, {
     method: 'POST',
