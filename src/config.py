@@ -128,10 +128,14 @@ class Settings(BaseSettings):
         ),
     )
     
-    # Agent Task Configuration
+    # Agent / OpenCode Task Configuration (single wall-clock budget for both)
     agent_task_timeout_seconds: int = Field(
         default=1800,
-        description="Maximum time in seconds for an agent task to complete (default: 30 minutes)"
+        description=(
+            "Wall-clock timeout in seconds for one OpenCode/agent attempt "
+            "(orchestrator kill budget == OpenCode run lifetime; default 1800 = 30 min). "
+            "Configurable at runtime via dashboard Settings."
+        ),
     )
     agent_task_max_retries: int = Field(
         default=3,

@@ -207,6 +207,9 @@ def build_settings_view() -> SettingsView:
         trigger_labels=settings.trigger_labels or "",
         trigger_on_assignment=bool(settings.trigger_on_assignment),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
+        agent_task_timeout_seconds=int(
+            getattr(settings, "agent_task_timeout_seconds", 1800) or 1800
+        ),
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
         dashboard_port=int(getattr(settings, "dashboard_port", 8080) or 8080),
@@ -347,6 +350,12 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
+    if (
+        "agent_task_timeout_seconds" in data
+        and data["agent_task_timeout_seconds"] is not None
+    ):
+        # Single budget for agent runner + OpenCode CLI process
+        settings.agent_task_timeout_seconds = int(data["agent_task_timeout_seconds"])
     if "default_model" in data and data["default_model"] is not None:
         model = str(data["default_model"]).strip()
         if model:

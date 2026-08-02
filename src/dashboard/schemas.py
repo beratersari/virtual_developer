@@ -204,6 +204,8 @@ class SettingsView(BaseModel):
     trigger_labels: str = ""
     trigger_on_assignment: bool = True
     max_concurrent_jobs: int = 3
+    # Single wall-clock budget for agent runner + OpenCode process (same value)
+    agent_task_timeout_seconds: int = 1800
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
@@ -294,6 +296,13 @@ class SettingsUpdate(BaseModel):
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
+    # Agent and OpenCode share this one timeout (orchestrator kills the CLI at limit)
+    agent_task_timeout_seconds: Optional[int] = Field(
+        default=None,
+        ge=30,
+        le=86400,
+        description="Wall-clock seconds per OpenCode/agent attempt (30s–24h)",
+    )
     default_model: Optional[str] = Field(default=None, max_length=200)
 
 

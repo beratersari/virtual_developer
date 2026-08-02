@@ -52,6 +52,39 @@ def test_fail_issue_moves_jira_in_progress(processor, state_manager, fake_jira):
     assert poller._last_jira_status["KAN-FAIL"] == "in progress"
 
 
+def test_fail_issue_keeps_todo_tracker_when_transition_fails(
+    processor, state_manager, fake_jira
+):
+    """Do not invent In Progress on the poller when Jira never left To Do."""
+    state_manager.create_state("KAN-NOIP", "s", "bad")
+    fake_jira.transition_to_in_progress = MagicMock(return_value=False)
+    poller = MagicMock()
+    poller._last_jira_status = {"KAN-NOIP": "to do"}
+    processor._poller = poller
+
+    processor._fail_issue("KAN-NOIP", "could not start")
+
+    assert state_manager.get_state("KAN-NOIP").status == TaskStatus.ERROR
+    assert poller._last_jira_status["KAN-NOIP"] == "to do"
+
+
+def test_fail_issue_keeps_in_progress_if_process_issue_already_moved(
+    processor, state_manager, fake_jira
+):
+    """If poller already transitioned, keep IP tracker even when re-mark fails."""
+    state_manager.create_state("KAN-ALREADY", "s", "bad")
+    # Second attempt fails (already in progress / no transition) — tracker was set
+    fake_jira.transition_to_in_progress = MagicMock(return_value=False)
+    poller = MagicMock()
+    poller._last_jira_status = {"KAN-ALREADY": "in progress"}
+    processor._poller = poller
+
+    processor._fail_issue("KAN-ALREADY", "agent crashed")
+
+    assert state_manager.get_state("KAN-ALREADY").status == TaskStatus.ERROR
+    assert poller._last_jira_status["KAN-ALREADY"] == "in progress"
+
+
 @pytest.mark.asyncio
 async def test_template_error_moves_jira_in_progress(
     processor, state_manager, fake_jira

@@ -245,6 +245,7 @@ export async function patchSettings(
       | 'trigger_labels'
       | 'trigger_on_assignment'
       | 'max_concurrent_jobs'
+      | 'agent_task_timeout_seconds'
       | 'default_model'
       | 'gitlab_allowed_hosts'
     >

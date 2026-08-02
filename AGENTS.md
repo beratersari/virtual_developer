@@ -49,11 +49,84 @@ JIRA Virtual Developer is a Python daemon that:
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
 - Terminal reprocess only when the user moves the issue back to **To Do** (or an explicit rework signal).
-- **Plans never auto-start** (intentional). After `plan_ready`, do **not** promote the same ticket via `Mode: build` alone. To implement: open a **new** issue with `Mode: build` (same `{params}` repo/branches), **or** add label `ai-start-work` / `ai-execute` while the plan ticket is **To Do**. Dashboard Start stays disabled.
+- **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled.
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
 - Temp clones: default policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h); purge on daemon start and hourly.
+
+### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
+
+Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) only mean
+**“eligible for first intake”** while the issue is To Do-like. They do **not** mean
+“re-run this ticket on every poll forever.”
+
+Typical **plan** lifecycle:
+
+```text
+To Do + bot (or ai-assist)
+        │
+        ▼
+  Mode: plan  →  planning  →  plan_ready
+        │                        │
+        │                        ├─ Jira label ai-plan-ready
+        │                        ├─ plan comment / description append
+        │                        └─ local requeue_eligible = false
+        │
+        │   Still To Do + bot alone  →  poller SKIPS (by design)
+        │
+        ├─ add label ai-start-work  or  ai-execute  (while To Do)
+        │         → poller plan_start → build on same ticket
+        │
+        └─ open a NEW issue with Mode: build (same {params} repo/branches)
+                  → independent build run
+```
+
+| Situation | Poller / processor behaviour |
+|-----------|------------------------------|
+| No local state + To Do + trigger label | Accept as **new** work |
+| Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
+| Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
+| Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
+| Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
+| Local `error` / `cancelled` / `completed` | Requeue only on leave→return To Do, ERROR text change, or other rework signals — not mere label presence |
+
+**Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
+only `bot`. Operators will see “stuck on To Do with bot label” after a successful
+plan; that is the waiting state until an explicit start signal.
+
+### Fail → In Progress → fix → To Do requeue (**intentional**)
+
+When the bot **accepts** an issue (including config/template failures), the product
+UX is **not** “leave it sitting on To Do as if nothing happened”:
+
+1. **Move Jira off To Do → In Progress** (best-effort via `transition_to_in_progress`
+   on poller `process_issue` and again on `_fail_issue` / workflow start).
+2. **Post a clear error (or progress) comment** so the operator sees *why* work
+   stopped (`post_error` / suggestion text).
+3. **Record the poller tracker as `in progress` only when that move is real**
+   (transition succeeded, or the tracker already reflects a successful move from
+   step 1). This is so a later operator action **In Progress → To Do** is detected
+   as a leave→return (`force_after_in_progress` / `entered_todo_from_elsewhere`).
+4. Operator **fixes** the description (`Mode`, `{params}`, etc.), then **moves the
+   ticket back to To Do** → next poll requeues (`requeue_eligible` + status change).
+
+Secondary reprocess path while still on To Do after ERROR: user **edits**
+summary/description (fingerprint change) without leaving the column — still
+requeues once (`text_changed_retry`). Cancelled tickets while still To Do do
+**not** auto-retry.
+
+**Do not treat the following as a bug:** after a *successful* fail path that
+moved the board to In Progress, the poller remembering `in progress` and
+reprocessing when the user returns the issue to To Do. That is the designed
+recovery loop.
+
+**Do treat as a bug:** inventing tracker `in progress` when the Jira transition
+**failed** (no matching transition name, locale/workflow without “In Progress”)
+while the board is still To Do — that would re-fire every poll without a user
+move. Fail path must keep tracker aligned with reality in that case; recovery
+then uses description edit fingerprint and/or a real board status change once
+workflows allow In Progress.
 
 ### Error handling
 
@@ -126,7 +199,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs. Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget). Plans never auto-start (see §2).
 - **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
 - Version is read from repo root `VERSION`.
 
@@ -428,7 +501,7 @@ Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. T
 
 | File | Purpose |
 |------|---------|
-| `README.md` | User-facing setup and architecture |
+| `README.md` | User-facing setup, architecture, plan_ready / never auto-start |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |

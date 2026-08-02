@@ -357,21 +357,49 @@ class AgentRunner:
                         on_output(callback_name, decoded)
 
             try:
-                logger.info(f"Waiting for agent process to complete, timeout={effective_timeout}s")
-                # Wait for completion with timeout
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        read_stream(process.stdout, stdout_lines, "stdout", session_fh),
-                        read_stream(process.stderr, stderr_lines, "stderr", session_fh),
-                    ),
-                    timeout=effective_timeout
+                logger.info(
+                    f"Waiting for agent/opencode process to complete, "
+                    f"timeout={effective_timeout}s"
                 )
-                returncode = await process.wait()
+                # Wall-clock budget covers BOTH stream reads and process.wait().
+                # Previously wait() ran unguarded after stdout/stderr EOF, so a
+                # hung OpenCode child that closed pipes never timed out.
+                async def _drain_and_wait() -> int:
+                    await asyncio.gather(
+                        read_stream(
+                            process.stdout, stdout_lines, "stdout", session_fh
+                        ),
+                        read_stream(
+                            process.stderr, stderr_lines, "stderr", session_fh
+                        ),
+                    )
+                    remaining = effective_timeout - (
+                        asyncio.get_event_loop().time() - start_time
+                    )
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError(
+                            f"Task exceeded timeout of {effective_timeout} seconds"
+                        )
+                    return await asyncio.wait_for(
+                        process.wait(), timeout=remaining
+                    )
+
+                returncode = await asyncio.wait_for(
+                    _drain_and_wait(),
+                    timeout=max(0.01, float(effective_timeout)),
+                )
                 elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(f"Agent process completed: returncode={returncode}, elapsed={elapsed:.2f}s, stdout_lines={len(stdout_lines)}, stderr_lines={len(stderr_lines)}")
+                logger.info(
+                    f"Agent process completed: returncode={returncode}, "
+                    f"elapsed={elapsed:.2f}s, stdout_lines={len(stdout_lines)}, "
+                    f"stderr_lines={len(stderr_lines)}"
+                )
             except asyncio.TimeoutError:
                 elapsed = asyncio.get_event_loop().time() - start_time
-                logger.error(f"Agent task timed out after {elapsed:.2f}s (limit={effective_timeout}s)")
+                logger.error(
+                    f"Agent/opencode task timed out after {elapsed:.2f}s "
+                    f"(limit={effective_timeout}s)"
+                )
                 await self._kill_process_tree_escalating(process, task.task_id)
                 logger.info(f"Killed timed out process: task_id={task.task_id}")
                 # Extract session ID from output collected so far

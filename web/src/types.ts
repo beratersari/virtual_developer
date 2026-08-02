@@ -93,6 +93,11 @@ export type SettingsPayload = {
   trigger_labels: string
   trigger_on_assignment: boolean
   max_concurrent_jobs: number
+  /**
+   * Wall-clock seconds per OpenCode/agent attempt (same budget for both).
+   * Runtime only — mirrors AGENT_TASK_TIMEOUT_SECONDS.
+   */
+  agent_task_timeout_seconds: number
   default_branch: string
   dashboard_host: string
   dashboard_port: number

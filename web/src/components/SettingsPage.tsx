@@ -645,6 +645,32 @@ export function SettingsPage({
             onChange={(e) => mark('max_concurrent_jobs', Number(e.target.value))}
           />
         </label>
+        <label className="block text-sm">
+          <span className="text-text-secondary">
+            Agent / OpenCode timeout (seconds)
+          </span>
+          <input
+            type="number"
+            min={30}
+            max={86400}
+            step={30}
+            className="ops-input mt-1"
+            value={
+              settingsDraft.agent_task_timeout_seconds ??
+              data.settings.agent_task_timeout_seconds ??
+              1800
+            }
+            onChange={(e) =>
+              mark('agent_task_timeout_seconds', Number(e.target.value))
+            }
+          />
+          <p className="mt-1 text-xs text-text-muted">
+            One wall-clock budget for both the agent runner and the OpenCode CLI
+            process (default 1800 = 30 min). The orchestrator kills the process
+            when this limit is hit. Runtime only — not written to{' '}
+            <code className="text-text-secondary">.env</code>.
+          </p>
+        </label>
 
         <div className="grid grid-cols-2 gap-2 border-t border-border pt-3 text-xs text-text-muted">
           <div>

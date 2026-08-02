@@ -138,14 +138,20 @@ Incomplete templates cause a **user-visible Jira comment** with the format help 
 
 ### When the poller picks up an issue
 
-All of the following roughly apply:
+All of the following roughly apply **for first intake**:
 
 - Issue is on the configured **board**  
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
 - Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and/or** assignee name looks like the bot (when `TRIGGER_ON_ASSIGNMENT=true`)  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-Terminal issues reprocess only when moved back to **To Do** (or equivalent rework signal).
+**Trigger labels only mean “allowed to pick up work.”** They do **not** mean the bot
+re-runs the same ticket on every poll after work has already finished (see
+[Plans never auto-start](#plans-never-auto-start-intentional) below).
+
+Terminal issues (`error` / `cancelled` / `completed`) reprocess only when moved
+back to **To Do** (or another rework signal such as editing the description after
+an ERROR). A successful **plan** ends in `plan_ready`, which is different — see below.
 
 ---
 
@@ -155,8 +161,49 @@ Terminal issues reprocess only when moved back to **To Do** (or equivalent rewor
 
 1. Poller accepts issue → state `planning`  
 2. Prometheus runs in a temp clone  
-3. Plan posted to Jira → state **`plan_ready`**  
-4. **Plans never auto-start** (intentional). To implement: open a **new** issue with `Mode: build` (same `{params}` repo/branches), **or** add label `ai-start-work` / `ai-execute` while the plan ticket is **To Do**.
+3. Plan posted to Jira (comment + description) → local state **`plan_ready`**, label **`ai-plan-ready`**  
+4. Bot **stops**. The ticket may still show **To Do** on the board with `bot` — that is normal.  
+
+### Plans never auto-start (intentional)
+
+After planning finishes, the issue is **waiting for an explicit implement signal**.
+Sitting on **To Do** with only `bot` / `ai-assist` will **not** start coding.
+
+```text
+To Do + bot  →  Mode: plan runs  →  plan_ready + ai-plan-ready
+                                         │
+                    still To Do + bot alone │  no further work
+                                         ▼
+                         waiting (not stuck)
+                                         │
+          ┌──────────────────────────────┼──────────────────────────────┐
+          ▼                              ▼                              ▼
+  Add label                    Open a NEW issue              (Do not rely on
+  ai-start-work                with Mode: build              Mode: build alone
+  or ai-execute                (same {params})               on the plan ticket)
+  while still To Do
+          │                              │
+          └──────────►  build / implement  ◄──────────────────┘
+```
+
+| What you see | What it means |
+|--------------|----------------|
+| To Do + `bot` + local `plan_ready` | Plan done; waiting for start signal |
+| Label `ai-plan-ready` | Bot finished planning (not a start label) |
+| Labels `ai-start-work` or `ai-execute` on To Do | **Start implementation** on that same ticket |
+| New ticket with `Mode: build` + trigger label | Independent build run (recommended for clean history) |
+| Daemon log `Skip cold-start requeue … plan_ready` | Correct — daemon restart will not re-plan or auto-build |
+
+**How to implement after a plan**
+
+1. **Same ticket:** while status is **To Do**, add label `ai-start-work` or `ai-execute`  
+   (next poll starts the build path), **or**  
+2. **New ticket:** create an issue with the same `{params}` repo/branches and
+   `Mode: build`, plus a trigger label (`bot` / `ai-assist`).
+
+Changing the plan ticket to `Mode: build` **alone** does **not** auto-start
+(product rule so plans are reviewed before code). Dashboard **Start** is also
+disabled for the same reason.
 
 ### Build (`Mode: build`)
 
@@ -174,6 +221,14 @@ Consultative questions without implementation keywords may route to Oracle (read
 ```text
 pending → planning | executing → (plan_ready) → completed | error | cancelled
 ```
+
+| Status | Meaning for operators |
+|--------|------------------------|
+| `planning` / `executing` | Agent running — poller will not restart from board noise |
+| `plan_ready` | Plan finished; **not** an error. Needs start label or new `Mode: build` issue |
+| `completed` | Done (build delivered or soft no-op completion) |
+| `error` | Failed; fix description / params, then return to To Do (or edit text) to requeue |
+| `cancelled` | Operator cancel; not auto-retried while still To Do |
 
 Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned disk `planning`/`executing` states to `error`.
 
@@ -409,6 +464,7 @@ logs/             # optional log file (LOG_FILE)
 | Symptom | What to check |
 |---------|----------------|
 | Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
+| Ticket on To Do with `bot` but bot does nothing | Local status may be **`plan_ready`** (plan finished). `bot` alone does not re-run or auto-build — add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL`, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |

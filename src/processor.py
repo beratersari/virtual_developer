@@ -160,17 +160,20 @@ class JobProcessor:
             return WorkflowType.EXECUTION
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
-    def _mark_jira_in_progress(self, issue_key: str) -> None:
+    def _mark_jira_in_progress(self, issue_key: str) -> bool:
         """Move the Jira issue to an In Progress-like status when work starts.
 
         Soft-fails: a missing transition must not block agent work. Also updates
         the poller status tracker so leave→return To Do still requeues.
         (Poller may also transition when dispatching; both paths are safe.)
+
+        Returns True only when Jira accepted an In Progress transition (so the
+        poller tracker may honestly record ``in progress``).
         """
         try:
             client = self.jira_client
             if client is None:
-                return
+                return False
             if hasattr(client, "transition_to_in_progress"):
                 ok = client.transition_to_in_progress(issue_key)
                 if ok:
@@ -178,13 +181,24 @@ class JobProcessor:
                     poller = getattr(self, "_poller", None)
                     if poller is not None and hasattr(poller, "_last_jira_status"):
                         poller._last_jira_status[issue_key] = "in progress"
-                else:
-                    logger.warning(
-                        f"{issue_key}: could not transition to In Progress "
-                        f"(no matching transition or already in progress)"
-                    )
+                    return True
+                logger.warning(
+                    f"{issue_key}: could not transition to In Progress "
+                    f"(no matching transition or already in progress)"
+                )
+                return False
+            return False
         except Exception as e:
             logger.warning(f"{issue_key}: In Progress transition failed: {e}")
+            return False
+
+    def _poller_tracks_in_progress(self, issue_key: str) -> bool:
+        """True when the poller last recorded a real In Progress-like board status."""
+        poller = getattr(self, "_poller", None)
+        if poller is None or not hasattr(poller, "_last_jira_status"):
+            return False
+        prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
+        return prev in {"in progress", "in_progress", "doing", "wip"}
 
     def _ensure_job_for_failure(self, issue_key: str) -> None:
         """Create a job row if validation failed before ``_begin_workflow_run``.
@@ -233,15 +247,24 @@ class JobProcessor:
         """Mark issue ERROR, finish job record, allow re-queue, notify Jira.
 
         Uses compare-and-swap so a late fail/watchdog cannot overwrite
-        COMPLETED or CANCELLED. Always moves the Jira issue to *In Progress*
-        (best-effort) so a template/config failure does not leave the ticket
-        in *To Do*. Operators fix the description and move back to *To Do*.
+        COMPLETED or CANCELLED.
+
+        **Intentional fail UX (see AGENTS.md §2):** best-effort move Jira to
+        *In Progress*, post a clear error comment, and (only when the board
+        really left To Do / tracker already records In Progress) set the
+        poller tracker so a later operator move **back to To Do** requeues.
+        Do **not** invent tracker ``in progress`` when the transition failed —
+        that would make ``force_after_in_progress`` re-fire every poll while
+        the ticket never left To Do.
         """
         error_text = (error_message or "Unknown error")[:2000]
         try:
-            # Leave To Do even when work never started (missing Mode / {params}).
+            # Leave To Do when work fails (missing Mode / {params}, agent crash).
             # Poller + workflow also try this; fail path is the last guarantee.
-            self._mark_jira_in_progress(issue_key)
+            moved_ip = self._mark_jira_in_progress(issue_key)
+            # process_issue may already have transitioned + set tracker before
+            # the workflow failed; keep that real IP marker for leave→return.
+            already_tracked_ip = self._poller_tracks_in_progress(issue_key)
 
             # Always surface a job on the dashboard (incl. template/Mode failures)
             self._ensure_job_for_failure(issue_key)
@@ -286,17 +309,26 @@ class JobProcessor:
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
-            # Prefer "in progress" on the poller tracker after a failure so a
-            # later real move back to To Do is detected as reprocess (not skipped).
-            self._nudge_poller_after_terminal(issue_key, marker="in progress")
+            # Only force tracker In Progress when the board actually left To Do
+            # (or process_issue already recorded a successful transition).
+            if moved_ip or already_tracked_ip:
+                self._nudge_poller_after_terminal(issue_key, marker="in progress")
             state = updated
             # Default suggestion for config errors if caller did not pass one
             effective_suggestion = suggestion
             if not effective_suggestion:
-                effective_suggestion = (
-                    "Fix the issue description, then move the issue back to "
-                    "*To Do* to re-queue."
-                )
+                if moved_ip or already_tracked_ip:
+                    effective_suggestion = (
+                        "Fix the issue description, then move the issue back to "
+                        "*To Do* to re-queue."
+                    )
+                else:
+                    effective_suggestion = (
+                        "Fix the issue description (and ensure a transition to "
+                        "*In Progress* exists on this workflow). Edit the "
+                        "description while still on *To Do*, or move the issue "
+                        "away and back to *To Do*, to re-queue."
+                    )
             comment_id = self.reporter.post_error(
                 state, error_text, suggestion=effective_suggestion
             )

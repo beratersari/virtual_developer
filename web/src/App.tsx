@@ -36,7 +36,6 @@ import type {
   ModelsPayload,
   ScheduleCreateBody,
   ScheduleItem,
-  SettingsPayload,
   SystemLogLine,
   TaskDetail,
   TextArtifact,
@@ -581,6 +580,7 @@ export default function App() {
       trigger_labels: data.settings.trigger_labels,
       trigger_on_assignment: data.settings.trigger_on_assignment,
       max_concurrent_jobs: data.settings.max_concurrent_jobs,
+      agent_task_timeout_seconds: data.settings.agent_task_timeout_seconds,
       default_model: data.settings.default_model,
       gitlab_allowed_hosts: data.settings.gitlab_allowed_hosts ?? '',
       // Secrets are write-only — never hydrate from server
@@ -632,11 +632,17 @@ export default function App() {
       }
       const poll = Number(settingsDraft.poll_interval_seconds)
       const maxJobs = Number(settingsDraft.max_concurrent_jobs)
+      const agentTimeout = Number(settingsDraft.agent_task_timeout_seconds)
       if (!Number.isFinite(poll) || poll < 5 || poll > 3600) {
         throw new Error('Poll interval must be between 5 and 3600 seconds')
       }
       if (!Number.isFinite(maxJobs) || maxJobs < 1 || maxJobs > 64) {
         throw new Error('Max concurrent jobs must be between 1 and 64')
+      }
+      if (!Number.isFinite(agentTimeout) || agentTimeout < 30 || agentTimeout > 86400) {
+        throw new Error(
+          'Agent/OpenCode timeout must be between 30 and 86400 seconds',
+        )
       }
       const body: Parameters<typeof patchSettings>[0] = {
         jira_host: (settingsDraft.jira_host ?? '').trim(),
@@ -646,6 +652,7 @@ export default function App() {
         trigger_labels: settingsDraft.trigger_labels,
         trigger_on_assignment: settingsDraft.trigger_on_assignment,
         max_concurrent_jobs: maxJobs,
+        agent_task_timeout_seconds: agentTimeout,
         default_model: (settingsDraft.default_model ?? '').trim(),
       }
       // Write-only Jira token: only send when the operator typed a new value
@@ -687,6 +694,7 @@ export default function App() {
         trigger_labels: updated.trigger_labels,
         trigger_on_assignment: updated.trigger_on_assignment,
         max_concurrent_jobs: updated.max_concurrent_jobs,
+        agent_task_timeout_seconds: updated.agent_task_timeout_seconds,
         default_model: updated.default_model,
         gitlab_allowed_hosts: updated.gitlab_allowed_hosts ?? '',
         gitlab_cred_rows: (updated.gitlab_credentials || []).map((c) => ({

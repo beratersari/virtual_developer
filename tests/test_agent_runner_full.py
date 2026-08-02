@@ -178,6 +178,9 @@ async def test_run_agent_timeout(runner, tmp_path, monkeypatch):
         def kill(self):
             self.returncode = -9
 
+        def terminate(self):
+            self.returncode = -15
+
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_cli = "opencode"
         s.default_model = "m"
@@ -190,6 +193,49 @@ async def test_run_agent_timeout(runner, tmp_path, monkeypatch):
             result = await runner.run_agent(task, timeout_seconds=0.05)
     assert result["timed_out"] is True
     assert result["returncode"] == -1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_timeout_after_stream_eof(runner, tmp_path, monkeypatch):
+    """OpenCode can close stdout/stderr while the process hangs — still must time out."""
+    monkeypatch.chdir(tmp_path)
+
+    class EofButAlive:
+        def __init__(self):
+            self.returncode = None
+            self.pid = 9001
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            while self.returncode is None:
+                await asyncio.sleep(0.05)
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def terminate(self):
+            self.returncode = -15
+
+    with patch("src.orchestrator.agent_runner.settings") as s:
+        s.opencode_cli = "opencode"
+        s.default_model = "m"
+        s.agent_task_timeout_seconds = 30
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=EofButAlive()),
+        ):
+            task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-EOF")
+            result = await asyncio.wait_for(
+                runner.run_agent(task, timeout_seconds=0.25),
+                timeout=5.0,
+            )
+    assert result["timed_out"] is True
+    assert result["returncode"] == -1
+    assert "TIMEOUT" in (result.get("stderr") or "")
 
 
 @pytest.mark.asyncio

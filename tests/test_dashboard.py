@@ -80,11 +80,13 @@ def test_apply_settings_update_runtime(monkeypatch):
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "default_model", "old/m")
+    monkeypatch.setattr(settings, "agent_task_timeout_seconds", 1800)
     view = apply_settings_update(
         SettingsUpdate(
             poll_interval_seconds=45,
             jira_board_id="99",
             default_model="opencode/new-model",
+            agent_task_timeout_seconds=900,
         )
     )
     assert view.poll_interval_seconds == 45
@@ -92,6 +94,18 @@ def test_apply_settings_update_runtime(monkeypatch):
     assert settings.poll_interval_seconds == 45
     assert settings.default_model == "opencode/new-model"
     assert view.default_model == "opencode/new-model"
+    # Single agent/OpenCode wall-clock budget
+    assert settings.agent_task_timeout_seconds == 900
+    assert view.agent_task_timeout_seconds == 900
+
+
+def test_settings_view_includes_agent_timeout(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "agent_task_timeout_seconds", 2400)
+    view = build_settings_view()
+    assert view.agent_task_timeout_seconds == 2400
+    assert "agent_task_timeout_seconds" in view.model_dump()
 
 
 def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
