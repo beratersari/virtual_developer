@@ -150,6 +150,59 @@ export type JobsPayload = {
   server_time: string
 }
 
+export type ScheduleItem = {
+  schedule_id: string
+  title: string
+  description?: string
+  repository_url: string
+  source_branch: string
+  target_branch: string
+  mode: string
+  issue_type?: string
+  scheduled_at: string
+  status: string
+  issue_key: string
+  project_key?: string
+  label?: string
+  created_at?: string | null
+  updated_at?: string | null
+  dispatched_at?: string | null
+  error_message?: string | null
+}
+
+export type SchedulesPayload = {
+  schedules: ScheduleItem[]
+  total: number
+  server_time?: string
+}
+
+export type ScheduleCreateBody = {
+  title: string
+  description?: string
+  repository_url: string
+  source_branch: string
+  target_branch: string
+  mode: 'plan' | 'build'
+  scheduled_at: string
+  project_key?: string
+  /** Jira issue type name (Task, Story, ExtBug, Görev, …) */
+  issue_type?: string
+}
+
+export type JiraIssueType = {
+  id: string
+  name: string
+  subtask: boolean
+}
+
+export type JiraIssueTypesPayload = {
+  ok?: boolean
+  project_key?: string
+  issue_types: JiraIssueType[]
+  error?: string | null
+  server_time?: string
+}
+
 export type DashboardPayload = {
   type: string
   meta: Meta

@@ -60,6 +60,154 @@ class JiraClient:
             verify=False,
         )
         self.is_cloud = "atlassian.net" in self.host.lower()
+        # Last create_issue failure detail (for callers that soft-map None)
+        self.last_error: Optional[str] = None
+
+    # Locale-friendly aliases: English preferred name → match tokens (lower)
+    _ISSUE_TYPE_ALIASES: Dict[str, List[str]] = {
+        "task": ["task", "görev", "gorev"],
+        "story": ["story", "hikaye"],
+        "epic": ["epic", "epik"],
+        "bug": ["bug", "hata", "defect"],
+        "sub-task": ["sub-task", "subtask", "alt görev", "alt gorev", "altgörev"],
+        "subtask": ["sub-task", "subtask", "alt görev", "alt gorev", "altgörev"],
+    }
+
+    @staticmethod
+    def _format_jira_error_body(response: httpx.Response) -> str:
+        """Extract human-readable errors from a Jira REST error payload."""
+        try:
+            data = response.json()
+        except Exception:
+            return (response.text or f"HTTP {response.status_code}")[:500]
+        parts: List[str] = []
+        for m in data.get("errorMessages") or []:
+            if m:
+                parts.append(str(m))
+        errors = data.get("errors") or {}
+        if isinstance(errors, dict):
+            for k, v in errors.items():
+                parts.append(f"{k}: {v}")
+        if parts:
+            return "; ".join(parts)
+        return (response.text or f"HTTP {response.status_code}")[:500]
+
+    def get_project_issue_types(self, project: str) -> List[Dict[str, Any]]:
+        """Return issue types available for a project (create-meta / project API)."""
+        key = (project or "").strip()
+        if not key:
+            return []
+        # Prefer create-meta (types actually creatable for the project)
+        candidates = [
+            f"/issue/createmeta?projectKeys={key}&expand=projects.issuetypes",
+            f"/issue/createmeta/{key}/issuetypes",
+            f"/project/{key}",
+        ]
+        for path in candidates:
+            try:
+                response = self.client.get(path)
+                if response.status_code != 200:
+                    continue
+                data = response.json()
+                if "projects" in data:
+                    for p in data.get("projects") or []:
+                        types = p.get("issuetypes") or p.get("issueTypes") or []
+                        if types:
+                            return list(types)
+                if "issueTypes" in data:
+                    return list(data.get("issueTypes") or [])
+                if isinstance(data.get("values"), list) and data["values"]:
+                    # Some Cloud paginated shapes
+                    return list(data["values"])
+                if "issueTypes" in data or data.get("issueTypes"):
+                    return list(data.get("issueTypes") or [])
+            except Exception as e:
+                logger.debug(f"get_project_issue_types via {path}: {e}")
+        return []
+
+    def resolve_issuetype_ref(
+        self,
+        project: str,
+        preferred: str = "Task",
+    ) -> Dict[str, str]:
+        """Pick a creatable issue type for the project.
+
+        Team-managed / localized Jira Cloud often uses names like ``Görev``
+        instead of English ``Task``. Prefer matching by preferred name and
+        known locale aliases, then first non-subtask. Returns ``{"id": ...}``
+        when possible (most reliable), else ``{"name": preferred}``.
+        """
+        preferred = (preferred or "Task").strip() or "Task"
+        types = self.get_project_issue_types(project)
+        if not types:
+            return {"name": preferred}
+
+        pref_l = preferred.lower()
+        alias_tokens = set(self._ISSUE_TYPE_ALIASES.get(pref_l, [pref_l]))
+        alias_tokens.add(pref_l)
+
+        def _names(it: Dict[str, Any]) -> List[str]:
+            out = []
+            for k in ("name", "untranslatedName"):
+                v = (it.get(k) or "").strip()
+                if v:
+                    out.append(v)
+            return out
+
+        def _is_subtask(it: Dict[str, Any]) -> bool:
+            return bool(it.get("subtask"))
+
+        # 1) Exact preferred name / untranslatedName
+        for it in types:
+            for n in _names(it):
+                if n.lower() == pref_l and not _is_subtask(it):
+                    tid = it.get("id")
+                    if tid:
+                        logger.info(
+                            f"Issue type for {project}: id={tid} name={n!r} "
+                            f"(exact match for {preferred!r})"
+                        )
+                        return {"id": str(tid)}
+                    return {"name": n}
+
+        # 2) Locale aliases (Task ↔ Görev, Story ↔ Hikaye, …)
+        for it in types:
+            if _is_subtask(it):
+                continue
+            for n in _names(it):
+                if n.lower() in alias_tokens:
+                    tid = it.get("id")
+                    if tid:
+                        logger.info(
+                            f"Issue type for {project}: id={tid} name={n!r} "
+                            f"(alias of {preferred!r})"
+                        )
+                        return {"id": str(tid)}
+                    return {"name": n}
+
+        # 3) First non-subtask, non-epic-ish hierarchy if possible
+        for it in types:
+            if _is_subtask(it):
+                continue
+            names = [n.lower() for n in _names(it)]
+            if any(n in ("epic", "epik") for n in names):
+                continue
+            tid = it.get("id")
+            name = (_names(it) or [preferred])[0]
+            if tid:
+                logger.warning(
+                    f"Issue type for {project}: falling back to id={tid} "
+                    f"name={name!r} (preferred {preferred!r} not found)"
+                )
+                return {"id": str(tid)}
+            return {"name": name}
+
+        # 4) Last resort: first type with an id
+        for it in types:
+            tid = it.get("id")
+            if tid:
+                return {"id": str(tid)}
+        return {"name": preferred}
 
     def create_issue(
         self,
@@ -70,12 +218,19 @@ class JiraClient:
         assignee: Optional[str] = None,
         labels: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Create a new issue in JIRA (REST API v2 fields wrapper)."""
+        """Create a new issue in JIRA (REST API v2 fields wrapper).
+
+        Resolves issue type against the project's creatable types so localized
+        Cloud sites (e.g. ``Görev`` instead of ``Task``) still work.
+        On failure sets ``self.last_error`` with Jira's message.
+        """
+        self.last_error = None
+        itype_ref = self.resolve_issuetype_ref(project, issue_type)
         fields: Dict[str, Any] = {
             "project": {"key": project},
             "summary": summary,
             "description": description,
-            "issuetype": {"name": issue_type},
+            "issuetype": itype_ref,
         }
 
         if assignee:
@@ -91,10 +246,18 @@ class JiraClient:
             response = self.client.post("/issue", json=payload)
             logger.info(f"Create issue status: {response.status_code}")
             if response.status_code != 201:
-                logger.warning(f"Create issue response: {response.text[:500]}")
+                detail = self._format_jira_error_body(response)
+                self.last_error = detail
+                logger.warning(f"Create issue response: {detail}")
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as e:
+            if not self.last_error:
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    self.last_error = self._format_jira_error_body(resp)
+                else:
+                    self.last_error = str(e)
             logger.error(f"Error creating issue: {e}")
             return None
     

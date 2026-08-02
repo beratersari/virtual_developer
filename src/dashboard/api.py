@@ -12,7 +12,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
-from src.dashboard.schemas import BulkJobDeleteRequest, SettingsUpdate
+from src.dashboard.schemas import (
+    BulkJobDeleteRequest,
+    ScheduleCreateRequest,
+    SettingsUpdate,
+)
 from src.dashboard.service import (
     apply_settings_update,
     build_dashboard_payload,
@@ -26,6 +30,13 @@ from src.dashboard.service import (
     delete_job_record,
     delete_job_records,
 )
+from src.scheduler.service import (
+    cancel_scheduled_job,
+    create_scheduled_job,
+    list_project_issue_types,
+    list_scheduled_jobs,
+)
+from src.state.schedule_store import schedule_store
 from src.state.job_store import job_store
 from src.dashboard.snapshot import poll_snapshot_store
 from src.logger import logger
@@ -131,6 +142,75 @@ def create_dashboard_app(
             processor=app.state.processor,
             state_manager=app.state.state_manager,
         ).model_dump()
+
+    @app.get("/api/jira/issue-types")
+    def jira_issue_types(
+        project_key: Optional[str] = Query(
+            default=None,
+            description="Jira project key (default: first of JIRA_PROJECTS)",
+        ),
+    ) -> dict:
+        """List creatable issue types for the project (Cloud + on-prem)."""
+        result = list_project_issue_types(project_key=project_key)
+        result["server_time"] = build_meta().server_time
+        if not result.get("ok") and not result.get("issue_types"):
+            # Soft: still 200 with empty list + error so UI can fall back
+            return result
+        return result
+
+    @app.get("/api/schedules")
+    def schedules_list(
+        status: Optional[str] = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        """List local scheduled jobs (create via CLI or POST /api/schedules)."""
+        rows = list_scheduled_jobs(status=status, limit=limit, store=schedule_store)
+        return {
+            "schedules": rows,
+            "total": len(rows),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.post("/api/schedules")
+    def schedules_create(body: ScheduleCreateRequest) -> dict:
+        """Create Jira issue + schedule. Hard-fails only if issue create fails."""
+        result = create_scheduled_job(
+            title=body.title,
+            description=body.description or "",
+            repository_url=body.repository_url,
+            source_branch=body.source_branch,
+            target_branch=body.target_branch,
+            mode=body.mode,
+            scheduled_at=body.scheduled_at,
+            project_key=body.project_key,
+            issue_type=body.issue_type or "Task",
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Failed to create scheduled job",
+            )
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.post("/api/schedules/{schedule_id}/cancel")
+    def schedules_cancel(schedule_id: str) -> dict:
+        result = cancel_scheduled_job(schedule_id, store=schedule_store)
+        if not result.get("ok"):
+            err = result.get("error") or "Cancel failed"
+            if "No schedule" in err:
+                raise HTTPException(status_code=404, detail=err)
+            raise HTTPException(status_code=409, detail=err)
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "message": result.get("message"),
+            "server_time": build_meta().server_time,
+        }
 
     @app.post("/api/jobs/bulk-delete")
     def jobs_bulk_delete(body: BulkJobDeleteRequest) -> dict:
@@ -419,6 +499,8 @@ def create_dashboard_app(
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "job_delete": "DELETE /api/jobs/{job_id}",
                     "jobs_bulk_delete": "POST /api/jobs/bulk-delete",
+                    "schedules": "GET|POST /api/schedules",
+                    "schedule_cancel": "POST /api/schedules/{id}/cancel",
                     "poll": "/api/poll",
                     "settings": "/api/settings",
                     "models": "/api/models",

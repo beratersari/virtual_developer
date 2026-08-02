@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  cancelSchedule,
   cancelTask,
+  createSchedule,
   dashboardWsUrl,
   deleteJob,
   deleteJobs,
@@ -8,12 +10,14 @@ import {
   fetchJobById,
   fetchJobs,
   fetchModels,
+  fetchSchedules,
   fetchTaskDetail,
   patchSettings,
 } from './api'
 import { JobDetail } from './components/JobDetail'
 import { JobsPage } from './components/JobsPage'
 import { PollMonitor } from './components/PollMonitor'
+import { ScheduledPage } from './components/ScheduledPage'
 import { SettingsPage } from './components/SettingsPage'
 import { TaskDetailPage } from './components/TaskDetailPage'
 import type { JobStatusFilter } from './util/status'
@@ -30,13 +34,15 @@ import type {
   JobItem,
   JobsPayload,
   ModelsPayload,
+  ScheduleCreateBody,
+  ScheduleItem,
   SettingsPayload,
   SystemLogLine,
   TaskDetail,
   TextArtifact,
 } from './types'
 
-type Tab = 'tasks' | 'poll' | 'settings'
+type Tab = 'tasks' | 'poll' | 'settings' | 'scheduled'
 type ViewMode = 'list' | 'job' | 'task'
 type JobTab = 'overview' | 'prompt' | 'opencode' | 'logs'
 type TaskTab = 'overview' | 'logs'
@@ -106,6 +112,10 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false)
   const [deletingJob, setDeletingJob] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [schedules, setSchedules] = useState<ScheduleItem[]>([])
+  const [schedulesLoading, setSchedulesLoading] = useState(false)
+  const [schedulesError, setSchedulesError] = useState<string | null>(null)
+  const [scheduleCreating, setScheduleCreating] = useState(false)
   const [issueFilter, setIssueFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable')
@@ -462,10 +472,49 @@ export default function App() {
     }
   }
 
+  const reloadSchedules = useCallback(async () => {
+    setSchedulesLoading(true)
+    setSchedulesError(null)
+    try {
+      const payload = await fetchSchedules()
+      setSchedules(payload.schedules || [])
+    } catch (e) {
+      setSchedulesError(
+        e instanceof Error ? e.message : 'Failed to load schedules',
+      )
+    } finally {
+      setSchedulesLoading(false)
+    }
+  }, [])
+
+  const onCreateSchedule = async (body: ScheduleCreateBody) => {
+    setScheduleCreating(true)
+    setSchedulesError(null)
+    try {
+      await createSchedule(body)
+      await reloadSchedules()
+    } finally {
+      setScheduleCreating(false)
+    }
+  }
+
+  const onCancelSchedule = async (scheduleId: string) => {
+    setSchedulesError(null)
+    await cancelSchedule(scheduleId)
+    await reloadSchedules()
+  }
+
   useEffect(() => {
     const id = window.setInterval(() => setLocalClock(new Date()), 1000)
     return () => window.clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    if (tab !== 'scheduled') return
+    void reloadSchedules()
+    const id = window.setInterval(() => void reloadSchedules(), 15000)
+    return () => window.clearInterval(id)
+  }, [tab, reloadSchedules])
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -604,7 +653,9 @@ export default function App() {
       ? 'poll monitor'
       : detailReturnTab.current === 'settings'
         ? 'settings'
-        : 'jobs'
+        : detailReturnTab.current === 'scheduled'
+          ? 'scheduled'
+          : 'jobs'
 
   const detailOpen = viewMode === 'job' || viewMode === 'task'
 
@@ -665,6 +716,7 @@ export default function App() {
         </div>
         <div className="mx-auto flex max-w-7xl gap-1 px-4 pb-2">
           {navBtn('tasks', 'Jobs')}
+          {navBtn('scheduled', 'Scheduled')}
           {navBtn('poll', 'Poll monitor')}
           {navBtn('settings', 'Settings')}
         </div>
@@ -782,6 +834,21 @@ export default function App() {
             onOpenIssue={(key) => void openTaskDetail(key)}
             onBulkDelete={onBulkDeleteJobs}
             bulkDeleting={bulkDeleting}
+          />
+        )}
+
+        {tab === 'scheduled' && viewMode === 'list' && (
+          <ScheduledPage
+            schedules={schedules}
+            loading={schedulesLoading}
+            error={schedulesError}
+            creating={scheduleCreating}
+            onCreate={onCreateSchedule}
+            onCancel={onCancelSchedule}
+            onRefresh={() => void reloadSchedules()}
+            onOpenIssue={(key) =>
+              void openTaskDetail(key, { fromTab: 'scheduled' })
+            }
           />
         )}
 

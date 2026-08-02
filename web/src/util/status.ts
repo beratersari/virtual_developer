@@ -18,6 +18,10 @@ const STATUS_MAP: Record<string, StatusMeta> = {
   cancelled: { label: 'Cancelled', tone: 'neutral' },
   unknown: { label: 'Unknown', tone: 'warning' },
   superseded: { label: 'Superseded', tone: 'neutral' },
+  // Scheduled jobs
+  scheduled: { label: 'Scheduled', tone: 'info' },
+  dispatching: { label: 'Dispatching', tone: 'warning' },
+  dispatched: { label: 'Dispatched', tone: 'success' },
 }
 
 export function statusMeta(status: string): StatusMeta {

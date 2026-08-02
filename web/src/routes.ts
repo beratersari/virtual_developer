@@ -4,6 +4,7 @@ export type AppRoute =
   | { kind: 'tasks' }
   | { kind: 'poll' }
   | { kind: 'settings' }
+  | { kind: 'scheduled' }
   | { kind: 'job'; jobId: string; issueKey: string | null }
   | { kind: 'task'; issueKey: string }
 
@@ -16,6 +17,7 @@ export function parseLocation(
 
   if (path === '/poll') return { kind: 'poll' }
   if (path === '/settings') return { kind: 'settings' }
+  if (path === '/scheduled' || path === '/schedules') return { kind: 'scheduled' }
   if (path === '/jobs' || path === '/') return { kind: 'tasks' }
 
   // Job detail: /jobs/{jobId}  (optional ?issue= for legacy ids)
@@ -41,9 +43,12 @@ export function parseLocation(
   return { kind: 'tasks' }
 }
 
-export function pathForTab(tab: 'tasks' | 'poll' | 'settings'): string {
+export function pathForTab(
+  tab: 'tasks' | 'poll' | 'settings' | 'scheduled',
+): string {
   if (tab === 'poll') return '/poll'
   if (tab === 'settings') return '/settings'
+  if (tab === 'scheduled') return '/scheduled'
   return '/jobs'
 }
 
@@ -67,8 +72,11 @@ export function navigateTo(path: string, replace = false): void {
   window.history[method](null, '', path)
 }
 
-export function tabFromRoute(route: AppRoute): 'tasks' | 'poll' | 'settings' {
+export function tabFromRoute(
+  route: AppRoute,
+): 'tasks' | 'poll' | 'settings' | 'scheduled' {
   if (route.kind === 'poll') return 'poll'
   if (route.kind === 'settings') return 'settings'
+  if (route.kind === 'scheduled') return 'scheduled'
   return 'tasks'
 }

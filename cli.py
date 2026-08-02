@@ -269,6 +269,145 @@ def config():
     console.print(table)
 
 
+@cli.group()
+def schedule():
+    """Create and manage scheduled agent jobs (Jira issue + local fire time)."""
+    pass
+
+
+@schedule.command("create")
+@click.option("--title", "-t", required=True, help="Jira issue summary / job title")
+@click.option("--description", "-d", default="", help="Issue body (params block is added automatically)")
+@click.option("--repo", "--repository", "repository_url", required=True, help="Git repository URL")
+@click.option("--source", "source_branch", required=True, help="Source branch")
+@click.option("--target", "target_branch", required=True, help="Target / MR base branch")
+@click.option(
+    "--mode",
+    type=click.Choice(["plan", "build"], case_sensitive=False),
+    required=True,
+    help="Workflow mode: plan or build",
+)
+@click.option(
+    "--issue-type",
+    "issue_type",
+    default="Task",
+    show_default=True,
+    help="Jira issue type name (Task, Story, ExtBug, Görev, …)",
+)
+@click.option(
+    "--at",
+    "scheduled_at",
+    required=True,
+    help="When to start work (ISO datetime, e.g. 2026-08-03T15:00:00)",
+)
+@click.option(
+    "--project",
+    "-p",
+    default=None,
+    help="Jira project key (default: first of JIRA_PROJECTS)",
+)
+def schedule_create(
+    title: str,
+    description: str,
+    repository_url: str,
+    source_branch: str,
+    target_branch: str,
+    mode: str,
+    issue_type: str,
+    scheduled_at: str,
+    project: Optional[str],
+):
+    """Create a Jira issue (label SCHEDULED_AI_JOB) and schedule agent work.
+
+    The issue is created immediately and moved to In Progress (best-effort).
+    When --at is reached, the running daemon starts the workflow like a board poll.
+
+    Examples:
+        python cli.py schedule create \\
+            -t "Add retry guard" -d "Implement exponential backoff" \\
+            --repo https://gitlab.com/org/app.git \\
+            --source develop --target develop --mode build \\
+            --issue-type ExtBug --at 2026-08-03T15:00:00
+    """
+    validate_config()
+    from src.scheduler.service import create_scheduled_job
+
+    result = create_scheduled_job(
+        title=title,
+        description=description,
+        repository_url=repository_url,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        mode=mode,
+        scheduled_at=scheduled_at,
+        project_key=project,
+        issue_type=issue_type,
+    )
+    if not result.get("ok"):
+        console.print(f"[red]Failed:[/red] {result.get('error') or 'unknown error'}")
+        sys.exit(1)
+
+    rec = result["schedule"]
+    console.print("[green]Scheduled job created[/green]")
+    console.print(f"  Schedule ID: {rec.get('schedule_id')}")
+    console.print(f"  Jira issue:  {rec.get('issue_key')}")
+    console.print(f"  Issue type:  {rec.get('issue_type')}")
+    console.print(f"  Mode:        {rec.get('mode')}")
+    console.print(f"  Run at:      {rec.get('scheduled_at')}")
+    console.print(f"  Status:      {rec.get('status')}")
+    console.print(
+        "\n[dim]Daemon must be running to fire the job at the scheduled time.[/dim]"
+    )
+
+
+@schedule.command("list")
+@click.option("--status", "-s", default=None, help="Filter by status (scheduled, dispatched, …)")
+def schedule_list(status: Optional[str]):
+    """List local scheduled jobs."""
+    from src.scheduler.service import list_scheduled_jobs
+
+    rows = list_scheduled_jobs(status=status)
+    if not rows:
+        console.print("[yellow]No scheduled jobs[/yellow]")
+        return
+
+    table = Table(title="Scheduled Jobs")
+    table.add_column("Schedule ID", style="cyan")
+    table.add_column("Issue", style="green")
+    table.add_column("Title", style="white")
+    table.add_column("Mode", style="blue")
+    table.add_column("Run at", style="dim")
+    table.add_column("Status", style="magenta")
+
+    for r in rows:
+        title = r.get("title") or ""
+        if len(title) > 40:
+            title = title[:37] + "..."
+        table.add_row(
+            r.get("schedule_id") or "",
+            r.get("issue_key") or "",
+            title,
+            r.get("mode") or "",
+            r.get("scheduled_at") or "",
+            r.get("status") or "",
+        )
+    console.print(table)
+    console.print(f"\n[dim]Total: {len(rows)}[/dim]")
+
+
+@schedule.command("cancel")
+@click.argument("schedule_id")
+def schedule_cancel(schedule_id: str):
+    """Cancel a pending scheduled job (does not delete the Jira issue)."""
+    from src.scheduler.service import cancel_scheduled_job
+
+    result = cancel_scheduled_job(schedule_id)
+    if not result.get("ok"):
+        console.print(f"[red]{result.get('error') or 'Cancel failed'}[/red]")
+        sys.exit(1)
+    console.print(f"[green]{result.get('message') or 'Cancelled'}[/green] ({schedule_id})")
+
+
 @cli.command()
 def init():
     """Initialize the project structure."""
