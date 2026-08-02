@@ -237,9 +237,23 @@ def test_resolve_work_branch_fix_prefix(gm):
     assert gm._resolve_work_branch_name("COV-1") == "fix/hotfix-login"
 
 
-def test_resolve_work_branch_shared_staging_ignored(gm):
-    gm.source_branch = "staging"
+def test_resolve_work_branch_source_differs_from_issue_key(gm):
+    """Source branch name may differ from Jira key — still use params source."""
+    gm.source_branch = "feature/legacy-name"
+    gm.target_branch = "develop"
+    assert gm._resolve_work_branch_name("KAN-11") == "feature/legacy-name"
+
+
+def test_resolve_work_branch_custom_source_used(gm):
+    """Non-primary Source is used even when not feature/ or fix/ prefix."""
+    gm.source_branch = "staging-work"
     gm.target_branch = "main"
+    assert gm._resolve_work_branch_name("COV-1") == "staging-work"
+
+
+def test_resolve_work_branch_primary_base_uses_feature_key(gm):
+    gm.source_branch = "develop"
+    gm.target_branch = "develop"
     assert gm._resolve_work_branch_name("COV-1") == "feature/COV-1"
 
 
@@ -289,10 +303,51 @@ def test_checkout_source_branch(gm):
     with patch.object(gm, "_require_target_on_remote", return_value="develop"):
         with patch.object(gm, "_resolve_work_branch_name", return_value="feature/COV-1"):
             with patch.object(
-                gm, "_checkout_work_branch_from_target", return_value="feature/COV-1"
+                gm, "_prepare_work_branch", return_value="feature/COV-1"
             ) as co:
                 gm._checkout_source_branch()
                 co.assert_called_once_with("feature/COV-1", "develop")
+
+
+def test_prepare_work_branch_uses_remote_when_exists(gm):
+    """If source exists on remote, checkout it — do not recreate from target."""
+    with patch.object(gm, "_remote_head_exists", return_value=True):
+        with patch.object(
+            gm, "_checkout_existing_remote_branch", return_value="feature/legacy"
+        ) as existing:
+            with patch.object(gm, "_checkout_work_branch_from_target") as create:
+                out = gm._prepare_work_branch("feature/legacy", "develop")
+                assert out == "feature/legacy"
+                existing.assert_called_once_with("feature/legacy")
+                create.assert_not_called()
+
+
+def test_prepare_work_branch_creates_from_target_when_missing(gm):
+    """If source is not on remote, create it from target."""
+    with patch.object(gm, "_remote_head_exists", return_value=False):
+        with patch.object(gm, "_branch_exists", return_value=False):
+            with patch.object(
+                gm, "_checkout_work_branch_from_target", return_value="feature/legacy"
+            ) as create:
+                with patch.object(gm, "_checkout_existing_remote_branch") as existing:
+                    out = gm._prepare_work_branch("feature/legacy", "develop")
+                    assert out == "feature/legacy"
+                    create.assert_called_once_with("feature/legacy", "develop")
+                    existing.assert_not_called()
+
+
+def test_ensure_feature_branch_prepares_not_always_from_target(gm):
+    gm.source_branch = "feature/legacy"
+    gm.target_branch = "develop"
+    with patch.object(gm, "_require_target_on_remote", return_value="develop"):
+        with patch.object(
+            gm, "_resolve_work_branch_name", return_value="feature/legacy"
+        ):
+            with patch.object(
+                gm, "_prepare_work_branch", return_value="feature/legacy"
+            ) as prep:
+                assert gm.ensure_feature_branch("KAN-11") == "feature/legacy"
+                prep.assert_called_once_with("feature/legacy", "develop")
 
 
 def test_create_source_from_target_false_paths(gm):

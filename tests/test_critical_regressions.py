@@ -39,8 +39,15 @@ def _bind_git_agent(processor, issue_key: str, tmp_path: Path, *, push_ok: bool 
     git.push.return_value = push_ok
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
-    git.get_last_commit_sha.return_value = "abc123def456"
-    git.build_commit_url.return_value = "http://git/commit/abc123def456"
+    # First call = job-start baseline; later calls = post-agent HEAD (new commit)
+    _sha_calls = {"n": 0}
+
+    def _sha(*_a, **_k):
+        _sha_calls["n"] += 1
+        return "baseline000001" if _sha_calls["n"] == 1 else "delivered000002"
+
+    git.get_last_commit_sha.side_effect = _sha
+    git.build_commit_url.return_value = "http://git/commit/delivered000002"
     git.create_merge_request.return_value = "http://mr/1" if push_ok else None
     git.get_mr_url.return_value = "http://mr/1" if push_ok else None
     git.add_mr_comment.return_value = True

@@ -78,6 +78,9 @@ class JobItem(BaseModel):
     commit_sha: Optional[str] = None
     commit_subject: Optional[str] = None
     commit_url: Optional[str] = None
+    # delivered | no_new_commits | etc. (soft completion when no new commits)
+    delivery_status: Optional[str] = None
+    delivery_note: Optional[str] = None
 
 
 class JobsResponse(BaseModel):

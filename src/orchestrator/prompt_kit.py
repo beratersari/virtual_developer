@@ -23,10 +23,13 @@ KNOWN_SECTIONS = (
 # Built-in fallbacks if kit file is missing (keep short — same spirit as kit).
 _DEFAULT_SECTIONS: Dict[str, str] = {
     "policy.commit": (
-        "Work on branch `feature/{ISSUE_KEY}` (create if needed).\n"
+        "Stay on prepared work branch `{WORK_BRANCH}` (already checked out). "
+        "Do not create a different feature/{ISSUE_KEY} branch unless that is "
+        "already the work branch.\n"
         "If you change files, commit yourself. Do not push or open an MR. "
         "Do not commit secrets.\n\n"
-        "Subject: `[{ISSUE_KEY}] <type>: <short description>`\n"
+        "Subject always uses the Jira key (not the branch name): "
+        "`[{ISSUE_KEY}] <type>: <short description>`\n"
         "Types: feat, fix, refactor, docs, test, perf, ci, build, revert, chore\n"
         'Example: `git commit -m "[{ISSUE_KEY}] fix: short description"`'
     ),
@@ -78,6 +81,28 @@ def substitute_issue_key(text: str, issue_key: str) -> str:
         return ""
     key = (issue_key or "ISSUE").strip() or "ISSUE"
     return text.replace("{ISSUE_KEY}", key)
+
+
+def substitute_placeholders(
+    text: str,
+    *,
+    issue_key: Optional[str] = None,
+    work_branch: Optional[str] = None,
+) -> str:
+    """Replace kit placeholders ``{ISSUE_KEY}`` and ``{WORK_BRANCH}``."""
+    if not text:
+        return ""
+    out = text
+    if issue_key is not None:
+        out = substitute_issue_key(out, issue_key)
+    if work_branch is not None:
+        branch = (work_branch or "").strip() or "HEAD"
+        out = out.replace("{WORK_BRANCH}", branch)
+    # If work branch not provided, leave a sensible default for agents
+    if "{WORK_BRANCH}" in out:
+        key = (issue_key or "ISSUE").strip() or "ISSUE"
+        out = out.replace("{WORK_BRANCH}", f"feature/{key}")
+    return out
 
 
 def _resolve_kit_path(configured: Optional[Path] = None) -> Optional[Path]:
@@ -145,11 +170,15 @@ def get_section(
     *,
     kit_path: Optional[Path] = None,
     issue_key: Optional[str] = None,
+    work_branch: Optional[str] = None,
     refresh: bool = False,
 ) -> str:
-    """Return one section body; optionally substitute ``{ISSUE_KEY}``."""
+    """Return one section body; optionally substitute kit placeholders."""
     sections = load_prompt_sections(kit_path, refresh=refresh)
     body = sections.get(section_id) or _DEFAULT_SECTIONS.get(section_id) or ""
-    if issue_key is not None:
-        return substitute_issue_key(body, issue_key)
+    if issue_key is not None or work_branch is not None:
+        return substitute_placeholders(
+            body, issue_key=issue_key, work_branch=work_branch
+        )
+    return body
     return body

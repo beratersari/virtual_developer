@@ -8,7 +8,8 @@ Placeholders in sections (substituted at runtime):
 
 | Token | Meaning |
 |-------|---------|
-| `{ISSUE_KEY}` | Jira issue key, e.g. `KAN-1` |
+| `{ISSUE_KEY}` | Jira issue key, e.g. `KAN-1` (always for commit subjects) |
+| `{WORK_BRANCH}` | Prepared git work / MR source branch (may differ from the issue key) |
 
 Do **not** put large Jira descriptions here — those are injected per job.
 
@@ -16,12 +17,19 @@ Do **not** put large Jira descriptions here — those are injected per job.
 
 ## §policy.commit
 
-Work on branch `feature/{ISSUE_KEY}` (create it if needed).
+Stay on the **prepared work branch already checked out** in this workspace
+(`{WORK_BRANCH}`). The orchestrator chose it from the Jira issue Source
+branch field (or `feature/{ISSUE_KEY}` when Source is a base like `develop`).
+
+Do **not** create or switch to a different branch named after the Jira key
+unless that is already the prepared work branch. Source branch name and Jira
+key are independent.
 
 If you change any files, commit yourself. Do **not** push or open an MR
 (the orchestrator does that). Do not commit secrets (`.env`, tokens, keys).
 
-**Subject format (mandatory):**
+**Subject format (mandatory) — always use the Jira issue key, never the
+branch name:**
 
 ```text
 [{ISSUE_KEY}] <type>: <short description>

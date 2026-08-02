@@ -136,6 +136,9 @@ export type JobItem = {
   commit_sha?: string | null
   commit_subject?: string | null
   commit_url?: string | null
+  /** delivered | no_new_commits — soft complete when agent OK but no new commits */
+  delivery_status?: string | null
+  delivery_note?: string | null
 }
 
 export type JobsPayload = {
@@ -168,6 +171,9 @@ export type TextArtifact = {
 export type SystemLogLine = {
   timestamp: string
   message: string
+  /** Present when the daemon tagged the line with a job_id */
+  job_id?: string
+  issue_key?: string
 }
 
 export type TaskDetail = {

@@ -38,6 +38,14 @@ def _mock_git_and_agent(processor, tmp_path, returncode=0, stdout="done", stderr
     git.push.return_value = True
     git.get_last_commit_subject.return_value = "feat: x"
     git.get_last_commit_message.return_value = "feat: x\n\nbody"
+    _sha_calls = {"n": 0}
+
+    def _sha(*_a, **_k):
+        _sha_calls["n"] += 1
+        return "baseline000001" if _sha_calls["n"] == 1 else "delivered000002"
+
+    git.get_last_commit_sha.side_effect = _sha
+    git.build_commit_url.return_value = "http://git/commit/delivered000002"
     git.create_merge_request.return_value = "http://mr/1"
     git.get_mr_url.return_value = "http://mr/1"
     git.add_mr_comment.return_value = True

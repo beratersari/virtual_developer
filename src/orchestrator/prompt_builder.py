@@ -34,12 +34,21 @@ class PromptBuilder:
         return get_section(section_id, kit_path=PromptBuilder._kit_path())
 
     @staticmethod
-    def commit_message_block(issue_key: str) -> str:
-        """Issue-keyed git policy from ``§policy.commit``."""
+    def commit_message_block(
+        issue_key: str,
+        *,
+        work_branch: Optional[str] = None,
+    ) -> str:
+        """Git policy from ``§policy.commit``.
+
+        Commit subjects always use the Jira ``issue_key``. ``work_branch`` is
+        the prepared MR source (may differ from the issue key).
+        """
         body = get_section(
             "policy.commit",
             kit_path=PromptBuilder._kit_path(),
             issue_key=issue_key,
+            work_branch=work_branch,
         )
         return f"## Git policy\n\n{body}"
 
@@ -102,12 +111,20 @@ class PromptBuilder:
         issue_key: str,
         plan_path: str,
         previous_learnings: Optional[List[str]] = None,
+        *,
+        work_branch: Optional[str] = None,
     ) -> str:
         """Execution (Atlas): kit §role.execution + git policy + plan path."""
         body = (
             f"## Jira issue: {issue_key}\n\n"
             f"Execute the plan at:\n`{plan_path or '(no plan path)'}`\n"
         )
+        if work_branch:
+            body += (
+                f"\n### Prepared git work branch\n"
+                f"`{work_branch}` (already checked out — stay on it; "
+                f"commit subjects use `[{issue_key}]`, not the branch name)\n"
+            )
         if previous_learnings:
             body += "\n### Previous learnings\n"
             for learning in previous_learnings:
@@ -116,7 +133,9 @@ class PromptBuilder:
         return PromptBuilder._join_blocks(
             "# Task execution request",
             f"## Role\n\n{PromptBuilder.role_section('execution')}",
-            PromptBuilder.commit_message_block(issue_key),
+            PromptBuilder.commit_message_block(
+                issue_key, work_branch=work_branch
+            ),
             body,
         )
 
@@ -127,6 +146,7 @@ class PromptBuilder:
         context: Optional[Dict[str, Any]] = None,
         *,
         summary: str = "",
+        work_branch: Optional[str] = None,
     ) -> str:
         """Direct execution (Sisyphus): kit §role.direct + git policy + Jira body.
 
@@ -139,6 +159,12 @@ class PromptBuilder:
             task_description,
             extra_heading="### Task",
         )
+        if work_branch:
+            jira += (
+                f"\n\n### Prepared git work branch\n"
+                f"`{work_branch}` (already checked out — stay on it; "
+                f"commit subjects use `[{issue_key}]`, not the branch name)"
+            )
         if context:
             ctx_bits: List[str] = []
             if context.get("files"):
@@ -165,7 +191,9 @@ class PromptBuilder:
         return PromptBuilder._join_blocks(
             "# Direct task execution",
             f"## Role\n\n{PromptBuilder.role_section('direct')}",
-            PromptBuilder.commit_message_block(issue_key),
+            PromptBuilder.commit_message_block(
+                issue_key, work_branch=work_branch
+            ),
             jira,
         )
 

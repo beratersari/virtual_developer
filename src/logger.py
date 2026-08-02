@@ -121,6 +121,15 @@ class Logger:
         func_pad = f"{func_name:<20}"
         # Collapse accidental multi-line messages onto one logical line for the body
         body = " ".join(str(message).splitlines()) if message is not None else ""
+        # Prefix active job id so operators can filter dashboard job logs
+        try:
+            from src.log_context import get_job_id
+
+            jid = get_job_id()
+            if jid and f"job_id={jid}" not in body:
+                body = f"[job_id={jid}] {body}"
+        except Exception:
+            pass
 
         if self._use_colors:
             ts = f"{Colors.DIM}{timestamp}{Colors.RESET}"
@@ -166,16 +175,22 @@ class Logger:
         print(formatted, file=stream)
         stream.flush()
 
-        # Feed dashboard issue log buffer (plain text, no ANSI)
+        # Feed dashboard issue/job log buffer (plain text, no ANSI)
         try:
             from src.dashboard.issue_logs import issue_log_ring
+            from src.log_context import get_issue_key, get_job_id
 
+            jid = get_job_id()
+            ikey = get_issue_key()
+            body = " ".join(str(message).splitlines()) if message is not None else ""
+            if jid and f"job_id={jid}" not in body:
+                body = f"[job_id={jid}] {body}"
             plain = (
                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  "
                 f"{self._LEVEL_CONFIG[level][0]:<8}  "
-                f"[{filename}:{line_no}]  {func_name}  {message}"
+                f"[{filename}:{line_no}]  {func_name}  {body}"
             )
-            issue_log_ring.append(plain)
+            issue_log_ring.append(plain, job_id=jid, issue_key=ikey)
         except Exception:
             pass
 

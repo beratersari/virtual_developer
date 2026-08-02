@@ -30,13 +30,14 @@ import type {
   JobsPayload,
   ModelsPayload,
   SettingsPayload,
+  SystemLogLine,
   TaskDetail,
   TextArtifact,
 } from './types'
 
 type Tab = 'tasks' | 'poll' | 'settings'
 type ViewMode = 'list' | 'job' | 'task'
-type JobTab = 'overview' | 'prompt' | 'opencode'
+type JobTab = 'overview' | 'prompt' | 'opencode' | 'logs'
 type TaskTab = 'overview' | 'logs'
 
 function asJobItem(raw: Record<string, unknown> | JobItem): JobItem {
@@ -61,6 +62,13 @@ function asJobItem(raw: Record<string, unknown> | JobItem): JobItem {
     completed_at: j.completed_at ?? null,
     updated_at: j.updated_at ?? null,
     live: Boolean(j.live),
+    feature_branch: j.feature_branch ?? null,
+    merge_request_url: j.merge_request_url ?? null,
+    commit_sha: j.commit_sha ?? null,
+    commit_subject: j.commit_subject ?? null,
+    commit_url: j.commit_url ?? null,
+    delivery_status: j.delivery_status ?? null,
+    delivery_note: j.delivery_note ?? null,
   }
 }
 
@@ -87,6 +95,7 @@ export default function App() {
     prompts: TextArtifact[]
     sessionLogs: TextArtifact[]
   }>({ prompts: [], sessionLogs: [] })
+  const [jobSystemLogs, setJobSystemLogs] = useState<SystemLogLine[]>([])
   const [jobTab, setJobTab] = useState<JobTab>('overview')
 
   // Task / issue view
@@ -153,18 +162,10 @@ export default function App() {
     try {
       if (mode === 'job' && openJobIdRef.current) {
         const jobId = openJobIdRef.current
-        const issueHint = openIssueKeyRef.current
-        let job: JobItem | null = null
-        let issue: TaskDetail | null = null
-        if (issueHint) {
-          issue = await fetchTaskDetail(issueHint)
-          job = issue.jobs?.find((j) => j.job_id === jobId) ?? null
-        }
-        if (!job) {
-          const body = await fetchJobById(jobId)
-          job = asJobItem(body.job)
-          issue = body.issue
-        }
+        // Always hit job API so system_logs stay job-scoped
+        const body = await fetchJobById(jobId)
+        let job = asJobItem(body.job)
+        const issue = body.issue
         if (req !== detailRequestId.current) return
         if (job) {
           setJobView(job)
@@ -172,6 +173,11 @@ export default function App() {
             prompts: issue?.prompts?.captured_prompt_files || [],
             sessionLogs: issue?.session_logs || [],
           })
+          setJobSystemLogs(
+            Array.isArray(body.system_logs)
+              ? (body.system_logs as SystemLogLine[])
+              : [],
+          )
           setDetailStale(false)
         }
       } else if (mode === 'task' && openIssueKeyRef.current) {
@@ -236,6 +242,7 @@ export default function App() {
     setJobView(null)
     setTaskDetail(null)
     setJobArtifacts({ prompts: [], sessionLogs: [] })
+    setJobSystemLogs([])
     setDetailError(null)
     setDetailLoading(false)
     setDetailStale(false)
@@ -271,27 +278,15 @@ export default function App() {
       navigateTo(pathForJob(jid, issueKey), opts?.replace === true)
     }
     try {
-      let job: JobItem | null = null
-      let issue: TaskDetail | null = null
-      const hint = issueKey?.trim().toUpperCase()
-      if (hint) {
-        try {
-          issue = await fetchTaskDetail(hint)
-          job = issue.jobs?.find((j) => j.job_id === jid) ?? null
-        } catch {
-          /* fall through to job API */
-        }
-      }
-      if (!job) {
-        const body = await fetchJobById(jid)
-        job = asJobItem(body.job)
-        issue = body.issue
-        if (job.issue_key) {
-          openIssueKeyRef.current = job.issue_key.toUpperCase()
-        }
+      // Job API includes job-scoped system_logs (tagged with job_id)
+      const body = await fetchJobById(jid)
+      const job = asJobItem(body.job)
+      const issue = body.issue
+      if (job.issue_key) {
+        openIssueKeyRef.current = job.issue_key.toUpperCase()
       }
       if (req !== detailRequestId.current) return
-      if (!job) {
+      if (!job.job_id) {
         throw new Error(`Job ${jid} not found`)
       }
       setJobView(job)
@@ -299,6 +294,11 @@ export default function App() {
         prompts: issue?.prompts?.captured_prompt_files || [],
         sessionLogs: issue?.session_logs || [],
       })
+      setJobSystemLogs(
+        Array.isArray(body.system_logs)
+          ? (body.system_logs as SystemLogLine[])
+          : [],
+      )
       lastDetailRefreshRef.current = Date.now()
       // Prefer issue from URL if missing
       if (!opts?.skipNavigate && job.issue_key) {
@@ -307,6 +307,7 @@ export default function App() {
     } catch (e) {
       if (req !== detailRequestId.current) return
       setJobView(null)
+      setJobSystemLogs([])
       setDetailError(e instanceof Error ? e.message : 'Failed to load job')
     } finally {
       if (req === detailRequestId.current) {
@@ -566,15 +567,6 @@ export default function App() {
     }
   }
 
-  const problemTasks = useMemo(() => {
-    const tasks = data?.tasks?.tasks ?? []
-    return tasks.filter((t) =>
-      ['error', 'planning', 'executing', 'pending'].includes(
-        String(t.status || '').toLowerCase(),
-      ),
-    )
-  }, [data?.tasks])
-
   const backLabel =
     detailReturnTab.current === 'poll'
       ? 'poll monitor'
@@ -709,6 +701,7 @@ export default function App() {
           <JobDetail
             job={jobView}
             artifacts={jobArtifacts}
+            systemLogs={jobSystemLogs}
             loading={detailLoading}
             error={detailError}
             stale={detailStale}
@@ -752,7 +745,6 @@ export default function App() {
             density={density}
             setDensity={setDensity}
             setJobsPage={setJobsPage}
-            problemTasks={problemTasks}
             connected={connected}
             onOpenJob={(key, jobId) => void openJobDetail(jobId, key)}
             onOpenIssue={(key) => void openTaskDetail(key)}
