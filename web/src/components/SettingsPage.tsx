@@ -63,11 +63,6 @@ export function SettingsPage({
       data.settings.jira_host ??
       ''
     ).trim()
-    const email = (
-      settingsDraft.jira_email ??
-      data.settings.jira_email ??
-      ''
-    ).trim()
     const token = (settingsDraft.jira_api_token ?? '').trim()
     if (!host) {
       setJiraTestResult({ ok: false, error: 'Jira host is required' })
@@ -83,10 +78,10 @@ export function SettingsPage({
     setJiraTesting(true)
     setJiraTestResult({ loading: true })
     try {
-      // email + token → Cloud Basic; token only → Bearer PAT
+      // Host + token only in UI. Backend uses runtime JIRA_EMAIL from .env
+      // if set (Cloud Basic); otherwise Bearer PAT.
       const result = await testJiraConnection({
         host,
-        email: email || undefined,
         api_token: token || undefined,
       })
       setJiraTestResult(result)
@@ -247,12 +242,10 @@ export function SettingsPage({
             <div>
               <div className="text-sm font-semibold text-text">Jira connection</div>
               <p className="mt-1 text-xs text-text-muted">
-                <strong>Prod / on-prem:</strong> host + PAT →{' '}
-                <code className="text-text-secondary">Bearer</code> (leave email
-                empty). <strong>Cloud API token (dev):</strong> host + email +
-                token → HTTP Basic. Saving host/email/token rebuilds live Jira
-                clients. Use <strong>Test</strong> for{' '}
-                <code className="text-text-secondary">/myself</code> + projects.
+                Host + API token / PAT. Saving rebuilds live Jira clients. Use{' '}
+                <strong>Test</strong> for{' '}
+                <code className="text-text-secondary">/myself</code> and
+                projects the token can browse.
               </p>
             </div>
             <button
@@ -272,25 +265,6 @@ export function SettingsPage({
               placeholder="https://jira.example.com"
               onChange={(e) => {
                 mark('jira_host', e.target.value)
-                setJiraTestResult(null)
-              }}
-              autoComplete="off"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="text-text-secondary">
-              Jira email{' '}
-              <span className="text-text-muted">
-                (Cloud API token only; empty = Bearer PAT)
-              </span>
-            </span>
-            <input
-              type="email"
-              className="ops-input mt-1"
-              value={settingsDraft.jira_email ?? data.settings.jira_email ?? ''}
-              placeholder="you@company.com"
-              onChange={(e) => {
-                mark('jira_email', e.target.value)
                 setJiraTestResult(null)
               }}
               autoComplete="off"
