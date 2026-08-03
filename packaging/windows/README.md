@@ -24,16 +24,20 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
 2. Extract once (you should see `install.bat` and `start.bat` at the top level).
 3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
-4. Run **`install.bat`**:
-   - Creates `.venv` and installs Python deps from **`vendor\python-wheels`** (offline)
-   - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
-   - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+4. Install (pick one):
+   - **`install.bat`** — full offline setup:
+     - Creates `.venv` and installs Python deps from **`vendor\python-wheels`**
+     - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
+     - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+   - **`install-dashboard.bat`** — **backend + frontend only** (no OpenCode):
+     - Creates `.venv` + deps, start scripts, `.env`, `cli.py init`
+     - Does **not** touch `%USERPROFILE%\.opencode` (use when OpenCode is already installed)
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
    - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
    - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
    - **`start.bat`** — both (backend first, then frontend)
-7. Optional OpenCode TUI: **`start-opencode.bat`** (never from your user home folder).
+7. Optional OpenCode TUI: **`start-opencode.bat`** (after full `install.bat`; never from your user home folder).
 
 ### Frontend + backend model (offline)
 
