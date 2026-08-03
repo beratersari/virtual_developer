@@ -46,16 +46,15 @@ def test_jira_probe_ok():
     with patch("src.jira_connection.httpx.Client", return_value=client) as C:
         out = probe_jira_connection(
             host="https://ex.atlassian.net",
+            email="bot@ex.com",
             api_token="secret-token",
         )
     assert out["ok"] is True
     assert out["user"]["display_name"] == "Dev Bot"
     assert out["projects"][0]["key"] == "KAN"
     assert "secret-token" not in str(out)
-    assert out["auth_mode"] == "bearer"
-    headers = C.call_args.kwargs["headers"]
-    assert headers.get("Authorization") == "Bearer secret-token"
-    assert C.call_args.kwargs.get("auth") is None
+    assert out["auth_mode"] == "basic"
+    assert C.call_args.kwargs.get("auth") == ("bot@ex.com", "secret-token")
 
 
 def test_jira_probe_unauthorized():
@@ -68,18 +67,16 @@ def test_jira_probe_unauthorized():
     with patch("src.jira_connection.httpx.Client", return_value=client):
         out = probe_jira_connection(
             host="https://jira.example.com",
+            email="",  # force Bearer (ignore env JIRA_EMAIL)
             api_token="bad",
         )
     assert out["ok"] is False
     assert out["http_status"] == 401
     assert out["auth_mode"] == "bearer"
-    err = (out.get("error") or "").lower()
-    assert "basic auth" not in err
-    assert "set jira email" not in err
 
 
-def test_jira_probe_cloud_host_still_bearer():
-    """Cloud host uses Bearer (host + token only)."""
+def test_jira_probe_cloud_without_email_uses_bearer():
+    """Cloud host without email → Bearer (prod PAT style)."""
     me = _resp(200, {"displayName": "Cloud User", "accountId": "1"})
     projects = _resp(200, [])
     client = MagicMock()
@@ -90,6 +87,7 @@ def test_jira_probe_cloud_host_still_bearer():
     with patch("src.jira_connection.httpx.Client", return_value=client) as C:
         out = probe_jira_connection(
             host="https://site.atlassian.net",
+            email="",  # force Bearer even if env has JIRA_EMAIL
             api_token="pat-xyz",
         )
     assert out["ok"] is True
@@ -102,6 +100,7 @@ def test_jira_probe_uses_stored_token(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "jira_email", "")
     monkeypatch.setattr(settings, "jira_api_token", "stored-pat")
 
     me = _resp(200, {"displayName": "OnPrem", "name": "onprem"})
@@ -159,6 +158,7 @@ def test_api_jira_test_endpoint(tmp_path, monkeypatch):
             "/api/settings/jira/test",
             json={
                 "host": "https://ex.atlassian.net",
+                "email": "a@b.com",
                 "api_token": "tok",
             },
         )

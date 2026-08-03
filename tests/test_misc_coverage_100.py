@@ -483,12 +483,13 @@ def _jresp(status=200, json_data=None, text=""):
     return r
 
 
-def test_jira_cloud_host_uses_bearer():
+def test_jira_cloud_host_without_email_uses_bearer():
     with patch("src.jira.client.httpx.Client") as mock_cls:
         mock_cls.return_value = MagicMock()
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://acme.atlassian.net"
             s.jira_api_token = "tok"
+            s.jira_email = ""
             from src.jira.client import JiraClient
 
             c = JiraClient()

@@ -11,30 +11,44 @@ from src.logger import logger
 class JiraClient:
     """Client for JIRA REST API.
 
-    Auth (Bearer only):
-      ``JIRA_HOST`` + ``JIRA_API_TOKEN`` → ``Authorization: Bearer {token}``
+    Auth:
+      * **Bearer (default / prod):** ``JIRA_HOST`` + ``JIRA_API_TOKEN``
+        → ``Authorization: Bearer {token}``
+      * **Basic (Cloud / dev):** also set ``JIRA_EMAIL``
+        → HTTP Basic (email as username, API token as password)
 
-    No email / Basic auth path.
+    Empty email never forces Basic. Prod on-prem should leave email empty.
     """
     
     def __init__(
         self,
         host: Optional[str] = None,
         api_token: Optional[str] = None,
+        email: Optional[str] = None,
     ):
         self.host = (host or settings.jira_host).rstrip("/")
         self.api_token = api_token if api_token is not None else settings.jira_api_token
+        self.email = (
+            email if email is not None else getattr(settings, "jira_email", "")
+        ) or ""
         
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self.api_token:
+        auth = None
+        em = self.email.strip()
+        # Cloud personal API tokens need Basic email:token; PATs use Bearer.
+        if self.api_token and em:
+            auth = (em, self.api_token)
+            logger.info("JiraClient auth: HTTP Basic (email + API token)")
+        elif self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
             logger.info("JiraClient auth: Bearer token")
         
         self.client = httpx.Client(
             base_url=f"{self.host}/rest/api/2",
+            auth=auth,
             headers=headers,
             timeout=30.0,
             verify=False,

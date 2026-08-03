@@ -20,11 +20,20 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # JIRA Configuration — always Bearer (host + token only)
+    # JIRA Configuration
+    # - Prod / on-prem PAT: JIRA_HOST + JIRA_API_TOKEN → Bearer
+    # - Cloud (dev): also set JIRA_EMAIL → HTTP Basic (email + API token)
     jira_host: str = Field(default="", description="JIRA instance URL")
+    jira_email: str = Field(
+        default="",
+        description=(
+            "Optional Atlassian account email. When set with a token, Jira uses "
+            "HTTP Basic (Cloud API tokens). Leave empty for Bearer PAT (prod/on-prem)."
+        ),
+    )
     jira_api_token: str = Field(
         default="",
-        description="JIRA API token (Cloud) or personal access token (on-prem) — Bearer auth",
+        description="JIRA API token (Cloud) or personal access token (on-prem)",
     )
     jira_projects: str = Field(default="PROJ", description="Comma-separated project keys")
     jira_board_id: str = Field(

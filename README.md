@@ -283,12 +283,17 @@ Copy [`.env.example`](.env.example) → `.env`. Secrets must never be committed.
 | Variable | Description |
 |----------|-------------|
 | `JIRA_HOST` | Base URL (no trailing slash preferred) |
-| `JIRA_API_TOKEN` | Personal access token (Bearer) |
+| `JIRA_API_TOKEN` | Cloud API token **or** on-prem personal access token |
+| `JIRA_EMAIL` | **Cloud/dev only** — with token uses HTTP Basic. Leave empty for Bearer PAT (prod) |
 | `JIRA_PROJECTS` | Comma-separated project keys (reference / allow-list style) |
 | `JIRA_BOARD_ID` | Agile board id to poll (**required** for discovery) |
 
-Auth: **`JIRA_HOST` + `JIRA_API_TOKEN`** → `Authorization: Bearer …` only.  
-No email field. TLS verify is currently off for typical on-prem certs; do not “fix” that without a deliberate secure path.
+Auth summary:
+
+- **Prod / on-prem:** `JIRA_HOST` + `JIRA_API_TOKEN` → `Authorization: Bearer …`  
+- **Cloud (dev):** `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` → Basic email:token  
+
+TLS verify is currently off for typical on-prem certs; do not “fix” that without a deliberate secure path.
 
 ### Intake & dashboard
 
@@ -460,7 +465,7 @@ logs/             # optional log file (LOG_FILE)
 |---------|----------------|
 | Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
 | Ticket on To Do with `bot` but bot does nothing | Local status may be **`plan_ready`** (plan finished). `bot` alone does not re-run or auto-build — add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). |
-| 401 / 403 from Jira | Token validity/scopes, host URL, project permissions |
+| 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
 | Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |

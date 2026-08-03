@@ -63,6 +63,11 @@ export function SettingsPage({
       data.settings.jira_host ??
       ''
     ).trim()
+    const email = (
+      settingsDraft.jira_email ??
+      data.settings.jira_email ??
+      ''
+    ).trim()
     const token = (settingsDraft.jira_api_token ?? '').trim()
     if (!host) {
       setJiraTestResult({ ok: false, error: 'Jira host is required' })
@@ -78,9 +83,10 @@ export function SettingsPage({
     setJiraTesting(true)
     setJiraTestResult({ loading: true })
     try {
-      // Always Bearer — host + token only; never send/require email for auth
+      // email + token → Cloud Basic; token only → Bearer PAT
       const result = await testJiraConnection({
         host,
+        email: email || undefined,
         api_token: token || undefined,
       })
       setJiraTestResult(result)
@@ -241,13 +247,12 @@ export function SettingsPage({
             <div>
               <div className="text-sm font-semibold text-text">Jira connection</div>
               <p className="mt-1 text-xs text-text-muted">
-                Host + PAT only — always{' '}
-                <code className="text-text-secondary">Authorization: Bearer</code>
-                . Email is not required and is not used for auth. Saving
-                host/token rebuilds live Jira clients in this process. Use{' '}
-                <strong>Test</strong> to call{' '}
-                <code className="text-text-secondary">/myself</code> and list
-                projects the token can browse.
+                <strong>Prod / on-prem:</strong> host + PAT →{' '}
+                <code className="text-text-secondary">Bearer</code> (leave email
+                empty). <strong>Cloud API token (dev):</strong> host + email +
+                token → HTTP Basic. Saving host/email/token rebuilds live Jira
+                clients. Use <strong>Test</strong> for{' '}
+                <code className="text-text-secondary">/myself</code> + projects.
               </p>
             </div>
             <button
@@ -267,6 +272,25 @@ export function SettingsPage({
               placeholder="https://jira.example.com"
               onChange={(e) => {
                 mark('jira_host', e.target.value)
+                setJiraTestResult(null)
+              }}
+              autoComplete="off"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="text-text-secondary">
+              Jira email{' '}
+              <span className="text-text-muted">
+                (Cloud API token only; empty = Bearer PAT)
+              </span>
+            </span>
+            <input
+              type="email"
+              className="ops-input mt-1"
+              value={settingsDraft.jira_email ?? data.settings.jira_email ?? ''}
+              placeholder="you@company.com"
+              onChange={(e) => {
+                mark('jira_email', e.target.value)
                 setJiraTestResult(null)
               }}
               autoComplete="off"

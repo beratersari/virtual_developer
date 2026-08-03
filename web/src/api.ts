@@ -210,9 +210,12 @@ export type JiraConnectionTestResult = {
   server_time?: string
 }
 
-/** Test Jira connection — /myself + browsable projects (Bearer host+token). */
+/** Test Jira connection — /myself + projects.
+ *  email + token → Basic (Cloud); token only → Bearer (prod PAT).
+ */
 export async function testJiraConnection(body: {
   host?: string
+  email?: string
   api_token?: string
   max_projects?: number
 }): Promise<JiraConnectionTestResult> {
@@ -221,6 +224,7 @@ export async function testJiraConnection(body: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       host: body.host?.trim() || undefined,
+      email: body.email?.trim() || undefined,
       api_token: body.api_token?.trim() || undefined,
       max_projects: body.max_projects ?? 25,
     }),
@@ -237,6 +241,7 @@ export async function patchSettings(
     Pick<
       SettingsPayload,
       | 'jira_host'
+      | 'jira_email'
       | 'jira_board_id'
       | 'poll_interval_seconds'
       | 'trigger_labels'

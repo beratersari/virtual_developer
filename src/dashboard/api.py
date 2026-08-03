@@ -457,11 +457,12 @@ def create_dashboard_app(
     def settings_jira_test(body: JiraConnectionTestRequest) -> dict:
         """Verify Jira host credentials (``/myself`` + project list).
 
-        Always Bearer auth (host + token). Email is ignored for authentication.
-        Token is optional: empty uses stored runtime token. Never echoes secrets.
+        Token only → Bearer; email + token → Cloud Basic. Empty token uses the
+        stored runtime token. Never echoes secrets.
         """
         result = probe_jira_connection(
             host=body.host,
+            email=body.email,
             api_token=body.api_token,
             max_projects=int(body.max_projects or 25),
         )
@@ -476,7 +477,7 @@ def create_dashboard_app(
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
         # Detect auth/connection changes before apply (for client refresh)
-        auth_keys = ("jira_host", "jira_api_token")
+        auth_keys = ("jira_host", "jira_email", "jira_api_token")
         dumped = body.model_dump(exclude_unset=True)
         auth_changed = any(k in dumped for k in auth_keys)
 

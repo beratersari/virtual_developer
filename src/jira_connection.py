@@ -13,16 +13,22 @@ from src.logger import logger
 def probe_jira_connection(
     *,
     host: Optional[str] = None,
+    email: Optional[str] = None,
     api_token: Optional[str] = None,
     max_projects: int = 25,
 ) -> Dict[str, Any]:
     """Verify Jira credentials via ``/myself`` and list projects.
 
-    Always uses ``Authorization: Bearer {token}`` (host + token only).
+    Auth:
+      * email + token → HTTP Basic (Cloud API token / dev)
+      * token only → Bearer (PAT / prod)
 
     Omitted fields fall back to runtime ``settings``. Never returns the token.
     """
     h = (host if host is not None else settings.jira_host or "").strip().rstrip("/")
+    em = (
+        email if email is not None else getattr(settings, "jira_email", "") or ""
+    ).strip()
     tok = (api_token if api_token is not None else "").strip()
     if not tok:
         tok = (settings.jira_api_token or "").strip()
@@ -40,12 +46,14 @@ def probe_jira_connection(
         }
 
     is_cloud = "atlassian.net" in h.lower()
-    auth_mode = "bearer"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {tok}",
-    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    auth = None
+    if em:
+        auth = (em, tok)
+        auth_mode = "basic"
+    else:
+        headers["Authorization"] = f"Bearer {tok}"
+        auth_mode = "bearer"
 
     base = f"{h}/rest/api/2"
     timeout = httpx.Timeout(25.0, connect=10.0)
@@ -53,12 +61,20 @@ def probe_jira_connection(
     try:
         with httpx.Client(
             base_url=base,
+            auth=auth,
             headers=headers,
             timeout=timeout,
             verify=False,
         ) as client:
             me = client.get("/myself")
             if me.status_code in (401, 403):
+                hint = ""
+                if is_cloud and not em:
+                    hint = (
+                        " For Jira Cloud API tokens, set Jira email "
+                        "(HTTP Basic email+token). Leave email empty only for "
+                        "Bearer PAT (on-prem / prod)."
+                    )
                 return {
                     "ok": False,
                     "host": h,
@@ -66,8 +82,7 @@ def probe_jira_connection(
                     "http_status": me.status_code,
                     "error": (
                         f"Auth failed (HTTP {me.status_code}). "
-                        "Token invalid, revoked, or missing scopes. "
-                        "Use host + personal access token (Bearer auth)."
+                        f"Token invalid, revoked, or missing scopes.{hint}"
                     ),
                 }
             if me.status_code != 200:

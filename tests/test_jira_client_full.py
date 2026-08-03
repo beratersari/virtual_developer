@@ -259,23 +259,33 @@ def test_add_labels_merges_existing(client):
     assert labels == ["ai-assist", "bot", "ai-plan-ready"]
 
 
-def test_client_auth_bearer_only():
-    """Always Bearer — host + token only; no email constructor arg."""
+def test_client_auth_bearer_or_basic():
+    """Bearer when email empty; Basic when email + token (Cloud/dev)."""
     with patch("src.jira.client.httpx.Client") as mock_cls:
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.onprem.example.com/"
             s.jira_api_token = "tok"
+            s.jira_email = ""
             JiraClient()
             kwargs = mock_cls.call_args.kwargs
             assert kwargs["headers"]["Authorization"] == "Bearer tok"
             assert kwargs.get("auth") is None
 
+            # Cloud / dev Basic email:token
             s.jira_host = "https://x.atlassian.net"
+            s.jira_email = "user@example.com"
             s.jira_api_token = "cloudtok"
             JiraClient()
             kwargs_cloud = mock_cls.call_args.kwargs
-            assert kwargs_cloud["headers"]["Authorization"] == "Bearer cloudtok"
-            assert kwargs_cloud.get("auth") is None
+            assert kwargs_cloud.get("auth") == ("user@example.com", "cloudtok")
+            assert "Authorization" not in kwargs_cloud.get("headers", {})
+
+            # Cloud host without email → still Bearer (prod-style)
+            s.jira_email = ""
+            s.jira_api_token = "pat"
+            JiraClient()
+            kwargs_pat = mock_cls.call_args.kwargs
+            assert kwargs_pat["headers"]["Authorization"] == "Bearer pat"
 
             # No token → no Authorization header
             s.jira_api_token = ""
