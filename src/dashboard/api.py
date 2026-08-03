@@ -457,11 +457,11 @@ def create_dashboard_app(
     def settings_jira_test(body: JiraConnectionTestRequest) -> dict:
         """Verify Jira host credentials (``/myself`` + project list).
 
+        Always Bearer auth (host + token). Email is ignored for authentication.
         Token is optional: empty uses stored runtime token. Never echoes secrets.
         """
         result = probe_jira_connection(
             host=body.host,
-            email=body.email,
             api_token=body.api_token,
             max_projects=int(body.max_projects or 25),
         )

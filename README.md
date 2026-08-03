@@ -284,7 +284,7 @@ Copy [`.env.example`](.env.example) → `.env`. Secrets must never be committed.
 |----------|-------------|
 | `JIRA_HOST` | Base URL (no trailing slash preferred) |
 | `JIRA_API_TOKEN` | Cloud API token **or** on-prem personal access token |
-| `JIRA_EMAIL` | **Cloud only** — with token uses HTTP Basic. Leave empty for on-prem Bearer |
+| `JIRA_EMAIL` | Unused for auth (always Bearer). Optional/legacy only |
 | `JIRA_PROJECTS` | Comma-separated project keys (reference / allow-list style) |
 | `JIRA_BOARD_ID` | Agile board id to poll (**required** for discovery) |
 

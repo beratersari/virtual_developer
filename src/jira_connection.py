@@ -19,10 +19,14 @@ def probe_jira_connection(
 ) -> Dict[str, Any]:
     """Verify Jira credentials via ``/myself`` and list projects.
 
+    Always uses ``Authorization: Bearer {token}`` — never HTTP Basic and never
+    requires email (``email`` is accepted for API compatibility only).
+
     Omitted fields fall back to runtime ``settings``. Never returns the token.
     """
     h = (host if host is not None else settings.jira_host or "").strip().rstrip("/")
-    em = (email if email is not None else getattr(settings, "jira_email", "") or "").strip()
+    # email intentionally ignored for auth (dashboard / runtime Bearer-only)
+    _ = email
     tok = (api_token if api_token is not None else "").strip()
     if not tok:
         tok = (settings.jira_api_token or "").strip()
@@ -40,18 +44,12 @@ def probe_jira_connection(
         }
 
     is_cloud = "atlassian.net" in h.lower()
-    use_basic = bool(tok and em)
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    auth = None
     auth_mode = "bearer"
-    if use_basic:
-        auth = (em, tok)
-        auth_mode = "basic"
-    else:
-        headers["Authorization"] = f"Bearer {tok}"
-        if is_cloud:
-            # Still attempt Bearer so the error is explicit if email missing
-            auth_mode = "bearer (cloud host — email recommended)"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {tok}",
+    }
 
     base = f"{h}/rest/api/2"
     timeout = httpx.Timeout(25.0, connect=10.0)
@@ -59,19 +57,12 @@ def probe_jira_connection(
     try:
         with httpx.Client(
             base_url=base,
-            auth=auth,
             headers=headers,
             timeout=timeout,
             verify=False,
         ) as client:
             me = client.get("/myself")
             if me.status_code in (401, 403):
-                hint = ""
-                if is_cloud and not em:
-                    hint = (
-                        " Cloud hosts usually need email + API token (Basic auth). "
-                        "Set Jira email and retry."
-                    )
                 return {
                     "ok": False,
                     "host": h,
@@ -79,7 +70,9 @@ def probe_jira_connection(
                     "http_status": me.status_code,
                     "error": (
                         f"Auth failed (HTTP {me.status_code}). "
-                        f"Token invalid or missing scopes.{hint}"
+                        "Token invalid, revoked, or missing scopes. "
+                        "Use a personal access token with Bearer auth "
+                        "(host + token only; email is not used)."
                     ),
                 }
             if me.status_code != 200:

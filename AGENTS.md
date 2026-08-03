@@ -152,8 +152,9 @@ JIRA_API_TOKEN=your-api-token-here
 ```
 
 - REST **API v2** (`/rest/api/2/...`), Agile at `/rest/agile/1.0/...`.
-- Auth header: **`Authorization: Bearer {JIRA_API_TOKEN}`** only for on-prem PAT.
-  Cloud may use Basic (email + API token) when `JIRA_EMAIL` is set.
+- Auth header: **always** **`Authorization: Bearer {JIRA_API_TOKEN}`**
+  (dashboard settings Test + live clients). **Do not** switch to HTTP Basic
+  based on email. `JIRA_EMAIL` is unused for authentication.
 - No username/password and no Cloud-only `accountId` assumptions for core bot auth.
 - TLS: **`verify=False` on all Jira HTTP** (see §2 HTTP / TLS).
 
@@ -391,7 +392,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Keep changes scoped; add tests for behaviour you change.
 - Use conventional `type(scope): summary` for every commit and MR.
 - Keep Jira user-visible on failure/stuck states.
-- Preserve on-prem Bearer auth only (Cloud may use email+token Basic).
+- Preserve Bearer-only Jira auth (host + token); do not switch to Basic via email.
 - Use **`verify=False`** on every outbound HTTP(S) client (Jira, GitLab, probes).
 - For Windows dist changes: run/extend `packaging/windows/e2e-smoke.ps1` expectations (plugin tree size, `rg.exe`, pinned `oh-my-openagent@`, launcher).
 

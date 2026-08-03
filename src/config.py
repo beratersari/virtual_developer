@@ -20,13 +20,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # JIRA Configuration
-    # - On-prem Server/DC PAT: set JIRA_HOST + JIRA_API_TOKEN (Bearer)
-    # - Jira Cloud API token: set JIRA_HOST + JIRA_EMAIL + JIRA_API_TOKEN (Basic email:token)
+    # JIRA Configuration — always Bearer (host + token); email is unused for auth
     jira_host: str = Field(default="", description="JIRA instance URL")
     jira_email: str = Field(
         default="",
-        description="Atlassian account email (required for Jira Cloud API tokens; unused for on-prem Bearer PAT)",
+        description=(
+            "Optional display-only field (not used for Jira HTTP auth; "
+            "dashboard and runtime always use Bearer with JIRA_API_TOKEN)"
+        ),
     )
     jira_api_token: str = Field(
         default="",

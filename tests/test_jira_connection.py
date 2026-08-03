@@ -43,17 +43,20 @@ def test_jira_probe_ok():
     client.__exit__ = MagicMock(return_value=False)
     client.get.side_effect = [me, projects]
 
-    with patch("src.jira_connection.httpx.Client", return_value=client):
+    with patch("src.jira_connection.httpx.Client", return_value=client) as C:
         out = probe_jira_connection(
             host="https://ex.atlassian.net",
-            email="bot@ex.com",
+            email="bot@ex.com",  # ignored for auth
             api_token="secret-token",
         )
     assert out["ok"] is True
     assert out["user"]["display_name"] == "Dev Bot"
     assert out["projects"][0]["key"] == "KAN"
     assert "secret-token" not in str(out)
-    assert out["auth_mode"] == "basic"
+    assert out["auth_mode"] == "bearer"
+    headers = C.call_args.kwargs["headers"]
+    assert headers.get("Authorization") == "Bearer secret-token"
+    assert C.call_args.kwargs.get("auth") is None
 
 
 def test_jira_probe_unauthorized():
@@ -70,6 +73,31 @@ def test_jira_probe_unauthorized():
         )
     assert out["ok"] is False
     assert out["http_status"] == 401
+    assert out["auth_mode"] == "bearer"
+    err = (out.get("error") or "").lower()
+    assert "basic auth" not in err
+    assert "set jira email" not in err
+
+
+def test_jira_probe_cloud_with_email_still_bearer():
+    """Email must not switch dashboard probe to HTTP Basic."""
+    me = _resp(200, {"displayName": "Cloud User", "accountId": "1"})
+    projects = _resp(200, [])
+    client = MagicMock()
+    client.__enter__ = MagicMock(return_value=client)
+    client.__exit__ = MagicMock(return_value=False)
+    client.get.side_effect = [me, projects]
+
+    with patch("src.jira_connection.httpx.Client", return_value=client) as C:
+        out = probe_jira_connection(
+            host="https://site.atlassian.net",
+            email="someone@company.com",
+            api_token="pat-xyz",
+        )
+    assert out["ok"] is True
+    assert out["auth_mode"] == "bearer"
+    assert C.call_args.kwargs["headers"]["Authorization"] == "Bearer pat-xyz"
+    assert C.call_args.kwargs.get("auth") is None
 
 
 def test_jira_probe_uses_stored_token(monkeypatch):

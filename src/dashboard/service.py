@@ -368,10 +368,11 @@ def refresh_runtime_jira_clients(
     processor: Any = None,
     poller: Any = None,
 ) -> None:
-    """Rebuild live Jira clients after host/token/email settings change.
+    """Rebuild live Jira clients after host/token settings change.
 
-    Best-effort: logs and continues if a client cannot be closed/recreated.
-    GitLab PAT is read from ``settings`` on each git operation — no refresh needed.
+    Clients always use Bearer auth (email is not used). Best-effort: logs and
+    continues if a client cannot be closed/recreated. GitLab PAT is read from
+    ``settings`` on each git operation — no refresh needed.
     """
     from src.jira.client import create_jira_client
 
