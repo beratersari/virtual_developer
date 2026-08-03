@@ -235,13 +235,19 @@ export type ScheduleCreateBody = {
   title: string
   description?: string
   repository_url: string
-  source_branch: string
+  /** Required when source_branch_mode is "custom" */
+  source_branch?: string
   target_branch: string
   mode: 'plan' | 'build'
   scheduled_at: string
   project_key?: string
   /** Jira issue type name (Task, Story, ExtBug, Görev, …) */
   issue_type?: string
+  /**
+   * custom — use source_branch as given.
+   * issue_key — after create, set Source to feature/{NEW_JIRA_KEY}.
+   */
+  source_branch_mode?: 'custom' | 'issue_key'
 }
 
 export type JiraIssueType = {

@@ -507,8 +507,13 @@ export default function App() {
     setScheduleCreating(true)
     setSchedulesError(null)
     try {
-      await createSchedule(body)
+      const result = await createSchedule(body)
       await reloadSchedules()
+      return result
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Create schedule failed'
+      setSchedulesError(msg)
+      throw e
     } finally {
       setScheduleCreating(false)
     }

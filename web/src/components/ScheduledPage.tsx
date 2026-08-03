@@ -12,6 +12,12 @@ import type {
 } from '../types'
 import { StatusBadge } from './StatusBadge'
 
+type CreateSuccessInfo = {
+  issueKey: string
+  sourceBranch: string
+  scheduledAt: string
+}
+
 function defaultLocalDatetimeValue(): string {
   const d = new Date()
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
@@ -52,7 +58,9 @@ export function ScheduledPage({
   loading: boolean
   error: string | null
   creating: boolean
-  onCreate: (body: ScheduleCreateBody) => Promise<void>
+  onCreate: (
+    body: ScheduleCreateBody,
+  ) => Promise<{ ok?: boolean; issue_key?: string; schedule?: ScheduleItem }>
   onCancel: (scheduleId: string) => Promise<void>
   onRefresh: () => void
   onOpenIssue?: (issueKey: string) => void
@@ -63,6 +71,10 @@ export function ScheduledPage({
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [repositoryUrl, setRepositoryUrl] = useState('')
+  /** custom = typed branch; issue_key = feature/{new Jira key} after create */
+  const [sourceBranchMode, setSourceBranchMode] = useState<
+    'custom' | 'issue_key'
+  >('issue_key')
   const [sourceBranch, setSourceBranch] = useState('develop')
   const [targetBranch, setTargetBranch] = useState('develop')
   const [mode, setMode] = useState<'plan' | 'build'>('build')
@@ -72,6 +84,9 @@ export function ScheduledPage({
   const [typesError, setTypesError] = useState<string | null>(null)
   const [newScheduledAt, setNewScheduledAt] = useState(defaultLocalDatetimeValue)
   const [newFormError, setNewFormError] = useState<string | null>(null)
+  const [createSuccess, setCreateSuccess] = useState<CreateSuccessInfo | null>(
+    null,
+  )
 
   // --- Existing issue flow ---
   const [lookupKey, setLookupKey] = useState('')
@@ -116,6 +131,18 @@ export function ScheduledPage({
       void loadIssueTypes()
     }
   }, [createMode])
+
+  useEffect(() => {
+    if (!createSuccess) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        e.preventDefault()
+        setCreateSuccess(null)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [createSuccess])
 
   const selectableTypes = useMemo(
     () => issueTypes.filter((t) => !t.subtask),
@@ -192,8 +219,12 @@ export function ScheduledPage({
       setNewFormError('Git repository URL is required')
       return
     }
-    if (!sourceBranch.trim() || !targetBranch.trim()) {
-      setNewFormError('Source and target branches are required')
+    if (!targetBranch.trim()) {
+      setNewFormError('Target branch is required')
+      return
+    }
+    if (sourceBranchMode === 'custom' && !sourceBranch.trim()) {
+      setNewFormError('Source branch is required when using a custom branch')
       return
     }
     if (!issueType.trim()) {
@@ -205,19 +236,44 @@ export function ScheduledPage({
       return
     }
     try {
-      await onCreate({
+      const result = await onCreate({
         title: title.trim(),
         description: description.trim(),
         repository_url: repositoryUrl.trim(),
-        source_branch: sourceBranch.trim(),
+        source_branch:
+          sourceBranchMode === 'custom' ? sourceBranch.trim() : undefined,
+        source_branch_mode: sourceBranchMode,
         target_branch: targetBranch.trim(),
         mode,
         issue_type: issueType.trim(),
         scheduled_at: toIsoLocal(newScheduledAt),
       })
+      // Clear form so a second click cannot re-create the same issue
       setTitle('')
       setDescription('')
+      setRepositoryUrl('')
+      setSourceBranchMode('issue_key')
+      setSourceBranch('develop')
+      setTargetBranch('develop')
+      setMode('build')
       setNewScheduledAt(defaultLocalDatetimeValue())
+      setNewFormError(null)
+
+      const key =
+        result?.issue_key ||
+        result?.schedule?.issue_key ||
+        ''
+      const src =
+        result?.schedule?.source_branch ||
+        (sourceBranchMode === 'issue_key' && key
+          ? `feature/${key}`
+          : '')
+      const when = result?.schedule?.scheduled_at || ''
+      setCreateSuccess({
+        issueKey: key,
+        sourceBranch: src,
+        scheduledAt: when,
+      })
     } catch (err) {
       setNewFormError(err instanceof Error ? err.message : 'Create failed')
     }
@@ -243,6 +299,96 @@ export function ScheduledPage({
 
   return (
     <section className="space-y-6">
+      {createSuccess && (
+        <div
+          className="ops-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCreateSuccess(null)
+          }}
+        >
+          <div
+            className="ops-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sched-create-success-title"
+          >
+            <div className="flex items-start gap-3">
+              <span
+                className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-success-muted text-sm font-semibold text-success-text"
+                aria-hidden
+              >
+                ✓
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3
+                  id="sched-create-success-title"
+                  className="ops-modal-title"
+                >
+                  Scheduled job created
+                </h3>
+                <div className="ops-modal-body space-y-2">
+                  <p className="text-text-muted">
+                    The Jira issue was created and the run is on the schedule
+                    list. The form has been cleared.
+                  </p>
+                  <dl className="grid gap-1.5 rounded border border-border bg-bg px-3 py-2.5 text-xs">
+                    {createSuccess.issueKey ? (
+                      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                        <dt className="text-text-muted">Jira issue</dt>
+                        <dd className="font-mono font-medium text-accent-text">
+                          {onOpenIssue ? (
+                            <button
+                              type="button"
+                              className="underline-offset-2 hover:underline"
+                              onClick={() => {
+                                const key = createSuccess.issueKey
+                                setCreateSuccess(null)
+                                onOpenIssue(key)
+                              }}
+                            >
+                              {createSuccess.issueKey}
+                            </button>
+                          ) : (
+                            createSuccess.issueKey
+                          )}
+                        </dd>
+                      </div>
+                    ) : null}
+                    {createSuccess.sourceBranch ? (
+                      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                        <dt className="text-text-muted">Source branch</dt>
+                        <dd className="font-mono text-text">
+                          {createSuccess.sourceBranch}
+                        </dd>
+                      </div>
+                    ) : null}
+                    {createSuccess.scheduledAt ? (
+                      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                        <dt className="text-text-muted">Run at</dt>
+                        <dd className="font-mono text-text">
+                          {createSuccess.scheduledAt}
+                        </dd>
+                      </div>
+                    ) : null}
+                  </dl>
+                </div>
+                <div className="ops-modal-actions">
+                  <button
+                    type="button"
+                    className="ops-btn ops-btn-primary px-4 py-1.5 text-sm"
+                    autoFocus
+                    onClick={() => setCreateSuccess(null)}
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-text">Scheduled jobs</h2>
@@ -488,15 +634,63 @@ export function ScheduledPage({
                 required
               />
             </label>
-            <label className="block text-sm">
+            <div className="block text-sm sm:col-span-2">
               <span className="text-text-secondary">Source branch</span>
-              <input
-                className="ops-input mt-1 font-mono text-xs"
-                value={sourceBranch}
-                onChange={(e) => setSourceBranch(e.target.value)}
-                required
-              />
-            </label>
+              <div className="mt-1.5 space-y-2 rounded border border-border bg-bg p-3">
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-text">
+                  <input
+                    type="radio"
+                    className="mt-0.5"
+                    name="sourceBranchMode"
+                    checked={sourceBranchMode === 'issue_key'}
+                    onChange={() => setSourceBranchMode('issue_key')}
+                  />
+                  <span>
+                    <span className="font-medium">Use new issue key</span>
+                    <span className="mt-0.5 block text-text-muted">
+                      After create, set source to{' '}
+                      <span className="font-mono text-text-secondary">
+                        feature/&lt;JIRA-KEY&gt;
+                      </span>{' '}
+                      (e.g. <span className="font-mono">feature/PROJ-123</span>
+                      ). Isolated work branch for this ticket.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-text">
+                  <input
+                    type="radio"
+                    className="mt-0.5"
+                    name="sourceBranchMode"
+                    checked={sourceBranchMode === 'custom'}
+                    onChange={() => setSourceBranchMode('custom')}
+                  />
+                  <span>
+                    <span className="font-medium">Custom source branch</span>
+                    <span className="mt-0.5 block text-text-muted">
+                      Enter an existing or named branch (e.g.{' '}
+                      <span className="font-mono">develop</span>,{' '}
+                      <span className="font-mono">feature/legacy-name</span>).
+                    </span>
+                  </span>
+                </label>
+                {sourceBranchMode === 'custom' && (
+                  <input
+                    className="ops-input font-mono text-xs"
+                    value={sourceBranch}
+                    onChange={(e) => setSourceBranch(e.target.value)}
+                    placeholder="e.g. develop or feature/my-branch"
+                    required
+                  />
+                )}
+                {sourceBranchMode === 'issue_key' && (
+                  <p className="text-[10px] text-text-muted">
+                    No input needed — the branch name is set when the Jira issue
+                    is created.
+                  </p>
+                )}
+              </div>
+            </div>
             <label className="block text-sm">
               <span className="text-text-secondary">Target branch</span>
               <input

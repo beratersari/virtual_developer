@@ -26,13 +26,16 @@ class ScheduleCreateRequest(BaseModel):
     title: str
     description: str = ""
     repository_url: str
-    source_branch: str
+    # Required when source_branch_mode is "custom"; ignored for "issue_key"
+    source_branch: str = ""
     target_branch: str
     mode: str  # plan | build
     scheduled_at: str
     project_key: Optional[str] = None
     # Jira issue type name (Task, Story, ExtBug, Görev, …). Resolved per project.
     issue_type: str = "Task"
+    # custom = use source_branch; issue_key = feature/{NEW_JIRA_KEY} after create
+    source_branch_mode: str = "custom"
 
 
 class ScheduleExistingRequest(BaseModel):

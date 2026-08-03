@@ -278,3 +278,53 @@ body {
   background: var(--warning-muted);
   color: var(--warning-text);
 }
+
+.ops-alert-success {
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+  background: var(--success-muted);
+  color: var(--success-text);
+}
+
+/* In-app modal (replaces browser alert/confirm for ops UX) */
+.ops-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(2px);
+}
+
+.ops-modal {
+  width: 100%;
+  max-width: 26rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  padding: 1.25rem 1.35rem;
+}
+
+.ops-modal-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ops-modal-body {
+  margin-top: 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ops-modal-actions {
+  margin-top: 1.15rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}

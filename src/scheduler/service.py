@@ -9,6 +9,7 @@ Jira reliability rules
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -21,6 +22,11 @@ from src.issue_git_spec import (
 )
 from src.logger import logger
 from src.state.schedule_store import SCHEDULE_LABEL, ScheduleStore, schedule_store
+
+# source_branch_mode for create-new schedules
+_SOURCE_MODE_CUSTOM = "custom"
+_SOURCE_MODE_ISSUE_KEY = "issue_key"
+_SOURCE_MODES = frozenset({_SOURCE_MODE_CUSTOM, _SOURCE_MODE_ISSUE_KEY})
 
 if TYPE_CHECKING:
     from src.processor import JobProcessor
@@ -78,6 +84,24 @@ def build_issue_description(
     if body:
         return f"{body}\n\n{params}"
     return params
+
+
+def work_branch_for_issue_key(issue_key: str) -> str:
+    """Same convention as GitManager: ``feature/{ISSUE_KEY}`` (sanitized)."""
+    safe = re.sub(r"[^A-Za-z0-9\-]", "-", (issue_key or "").strip() or "issue")
+    safe = safe.strip("-") or "issue"
+    return f"feature/{safe}"
+
+
+def _canonical_source_branch_mode(raw: Optional[str]) -> str:
+    key = (raw or _SOURCE_MODE_CUSTOM).strip().lower().replace("-", "_")
+    if key in ("issue", "jira", "jira_key", "from_issue", "new_issue"):
+        key = _SOURCE_MODE_ISSUE_KEY
+    if key not in _SOURCE_MODES:
+        raise ValueError(
+            "source_branch_mode must be 'custom' or 'issue_key'"
+        )
+    return key
 
 
 def list_project_issue_types(
@@ -372,16 +396,23 @@ def create_scheduled_job(
     title: str,
     description: str = "",
     repository_url: str,
-    source_branch: str,
+    source_branch: str = "",
     target_branch: str,
     mode: str,
     scheduled_at: str,
     project_key: Optional[str] = None,
     issue_type: str = "Task",
+    source_branch_mode: str = _SOURCE_MODE_CUSTOM,
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
     """Create Jira issue + local schedule. Hard-fails only on issue creation.
+
+    ``source_branch_mode``:
+      * ``custom`` — use ``source_branch`` as given (required).
+      * ``issue_key`` — after the issue is created, set source to
+        ``feature/{ISSUE_KEY}`` (product work-branch convention) and rewrite
+        the issue description so the agent sees the correct params.
 
     ``issue_type`` is the Jira issue type name preferred for create (e.g.
     ``Task``, ``Story``, ``ExtBug``, or locale names like ``Görev``). The
@@ -398,17 +429,27 @@ def create_scheduled_job(
     except ValueError as e:
         return {"ok": False, "error": str(e)}
 
+    try:
+        src_mode = _canonical_source_branch_mode(source_branch_mode)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
     itype = (issue_type or "Task").strip() or "Task"
 
     repo = _normalize_repo_url(repository_url)
     if not repo:
         return {"ok": False, "error": "repository_url is required"}
-    src = _normalize_branch(source_branch)
     tgt = _normalize_branch(target_branch)
-    if not src:
-        return {"ok": False, "error": "source_branch is required"}
     if not tgt:
         return {"ok": False, "error": "target_branch is required"}
+
+    if src_mode == _SOURCE_MODE_CUSTOM:
+        src = _normalize_branch(source_branch)
+        if not src:
+            return {"ok": False, "error": "source_branch is required when mode is custom"}
+    else:
+        # Provisional until the Jira key is known; rewritten after create.
+        src = "feature/__pending__"
 
     try:
         at_dt = parse_schedule_at(scheduled_at)
@@ -461,6 +502,37 @@ def create_scheduled_job(
             }
         issue_key = str(created["key"]).strip().upper()
 
+        if src_mode == _SOURCE_MODE_ISSUE_KEY:
+            src = work_branch_for_issue_key(issue_key)
+            issue_description = build_issue_description(
+                description=description,
+                repository_url=repo,
+                source_branch=src,
+                target_branch=tgt,
+                mode=mode_c,
+            )
+            # Soft: rewrite description so agents see feature/KEY (not __pending__)
+            try:
+                if hasattr(client, "update_issue"):
+                    ok_upd = client.update_issue(
+                        issue_key, fields={"description": issue_description}
+                    )
+                    if ok_upd:
+                        logger.info(
+                            f"{issue_key}: source branch set to {src} "
+                            f"(source_branch_mode=issue_key)"
+                        )
+                    else:
+                        logger.warning(
+                            f"{issue_key}: could not update description with "
+                            f"source {src}; schedule still uses {src}"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"{issue_key}: description update soft-failed: {e} "
+                    f"(local schedule still has source={src})"
+                )
+
         # Soft: In Progress — do not fail the schedule if Jira is flaky
         try:
             if hasattr(client, "transition_to_in_progress"):
@@ -493,7 +565,13 @@ def create_scheduled_job(
             issue_type=itype,
             source="new",
         )
-        return {"ok": True, "schedule": rec, "issue_key": issue_key}
+        return {
+            "ok": True,
+            "schedule": rec,
+            "issue_key": issue_key,
+            "source_branch": src,
+            "source_branch_mode": src_mode,
+        }
     finally:
         if close_client and hasattr(client, "close"):
             try:

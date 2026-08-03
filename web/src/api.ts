@@ -13,6 +13,47 @@ import type {
   TaskDetail,
 } from './types'
 
+/**
+ * FastAPI may return ``detail`` as a string, an object, or a list of
+ * validation errors. Never pass a raw object into ``new Error(...)`` — that
+ * becomes the useless message ``[object Object]``.
+ */
+export function formatApiError(
+  detail: unknown,
+  fallback: string,
+): string {
+  if (detail == null || detail === '') return fallback
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (typeof item === 'string') return item
+      if (item && typeof item === 'object') {
+        const o = item as { msg?: string; loc?: unknown; type?: string }
+        const where = Array.isArray(o.loc)
+          ? o.loc.filter((x) => x !== 'body').join('.')
+          : ''
+        const msg = o.msg || o.type || JSON.stringify(item)
+        return where ? `${where}: ${msg}` : String(msg)
+      }
+      return String(item)
+    })
+    const joined = parts.filter(Boolean).join('; ')
+    return joined || fallback
+  }
+  if (typeof detail === 'object') {
+    const o = detail as { message?: string; error?: string; msg?: string }
+    if (o.message) return String(o.message)
+    if (o.error) return String(o.error)
+    if (o.msg) return String(o.msg)
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      return fallback
+    }
+  }
+  return String(detail)
+}
+
 export async function fetchDashboard(): Promise<DashboardPayload> {
   const res = await fetch('/api/dashboard')
   if (!res.ok) {
@@ -43,7 +84,7 @@ export async function fetchTaskDetail(issueKey: string): Promise<TaskDetail> {
   const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}`)
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || `Task detail failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Task detail failed: ${res.status}`))
   }
   return res.json()
 }
@@ -60,7 +101,7 @@ export async function fetchJobById(
   const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`)
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || `Job detail failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Job detail failed: ${res.status}`))
   }
   return res.json()
 }
@@ -87,7 +128,7 @@ export async function deleteJob(
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(body.detail || `Delete failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Delete failed: ${res.status}`))
   }
   return body
 }
@@ -117,7 +158,7 @@ export async function deleteJobs(
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(body.detail || `Bulk delete failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Bulk delete failed: ${res.status}`))
   }
   return body as BulkDeleteJobsResult
 }
@@ -128,7 +169,7 @@ export async function cancelTask(issueKey: string): Promise<{ ok: boolean; messa
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(body.detail || `Cancel failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Cancel failed: ${res.status}`))
   }
   return body
 }
@@ -139,7 +180,7 @@ export async function startTask(issueKey: string): Promise<{ ok: boolean; messag
   })
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(body.detail || `Start failed: ${res.status}`)
+    throw new Error(formatApiError(body?.detail, `Start failed: ${res.status}`))
   }
   return body
 }
@@ -180,7 +221,7 @@ export async function testGitlabConnection(body: {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `GitLab test failed: ${res.status}`)
+    throw new Error(formatApiError(data?.detail, `GitLab test failed: ${res.status}`))
   }
   return data as GitlabConnectionTestResult
 }
@@ -231,7 +272,7 @@ export async function testJiraConnection(body: {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `Jira test failed: ${res.status}`)
+    throw new Error(formatApiError(data?.detail, `Jira test failed: ${res.status}`))
   }
   return data as JiraConnectionTestResult
 }
@@ -327,14 +368,34 @@ export async function fetchSchedules(opts?: {
 export async function createSchedule(
   body: ScheduleCreateBody,
 ): Promise<{ ok: boolean; schedule: ScheduleItem; issue_key?: string }> {
+  // Always send explicit source_branch_mode; for issue_key omit empty custom branch
+  const payload: Record<string, unknown> = {
+    title: body.title,
+    description: body.description ?? '',
+    repository_url: body.repository_url,
+    target_branch: body.target_branch,
+    mode: body.mode,
+    scheduled_at: body.scheduled_at,
+    source_branch_mode: body.source_branch_mode || 'custom',
+  }
+  if (body.project_key) payload.project_key = body.project_key
+  if (body.issue_type) payload.issue_type = body.issue_type
+  if (body.source_branch_mode === 'issue_key') {
+    payload.source_branch = ''
+  } else {
+    payload.source_branch = body.source_branch ?? ''
+  }
+
   const res = await fetch('/api/schedules', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `Create schedule failed: ${res.status}`)
+    throw new Error(
+      formatApiError(data?.detail, `Create schedule failed: ${res.status}`),
+    )
   }
   return data
 }
@@ -348,7 +409,9 @@ export async function cancelSchedule(
   )
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `Cancel schedule failed: ${res.status}`)
+    throw new Error(
+      formatApiError(data?.detail, `Cancel schedule failed: ${res.status}`),
+    )
   }
   return data
 }
@@ -361,7 +424,7 @@ export async function previewScheduleIssue(
   const res = await fetch(`/api/schedules/preview?${params.toString()}`)
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `Preview failed: ${res.status}`)
+    throw new Error(formatApiError(data?.detail, `Preview failed: ${res.status}`))
   }
   return data as SchedulePreview
 }
@@ -378,7 +441,7 @@ export async function scheduleExistingIssue(body: {
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
-    throw new Error(data.detail || `Schedule existing failed: ${res.status}`)
+    throw new Error(formatApiError(data?.detail, `Schedule existing failed: ${res.status}`))
   }
   return data
 }
