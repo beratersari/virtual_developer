@@ -249,6 +249,7 @@ $copyItems = @(
     "requirements.txt",
     ".env.example",
     "install.bat",
+    "install-dashboard.bat",
     "VERSION",
     "README.md",
     "AGENTS.md",
@@ -676,7 +677,7 @@ PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat from this folder. Do not manually unpack vendor files.
+NOTE=Run install.bat (full) or install-dashboard.bat (app only). Do not manually unpack vendor files.
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -688,16 +689,15 @@ JIRA Virtual Developer — Windows offline package
 1. Extract the GitHub Actions download ONCE (you should see install.bat here).
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
-4. Run install.bat
-   - Creates .venv and installs Python deps from vendor\python-wheels
-   - Installs OpenCode under %USERPROFILE%\.opencode
-   - Ships prebuilt ops dashboard SPA in web\dist (no Node needed at runtime)
+4. Install (pick one):
+      install.bat            — full: Python + OpenCode + plugins + glab
+      install-dashboard.bat  — backend + frontend only (keeps your existing OpenCode)
 5. Edit .env with Jira / GitLab settings
 6. Start:
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
       start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
       start.bat           → both (backend then frontend)
-7. OpenCode TUI (optional):
+7. OpenCode TUI (optional; after full install.bat):
       start-opencode.bat
    NEVER run "opencode" from C:\Users\<you> — black-screen hang.
 8. Verify:  where opencode

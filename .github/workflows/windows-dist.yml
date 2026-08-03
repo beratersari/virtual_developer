@@ -97,6 +97,7 @@ jobs:
           $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
           foreach ($rel in @(
             "install.bat",
+            "install-dashboard.bat",
             "start.bat",
             "start-backend.bat",
             "start-frontend.bat",

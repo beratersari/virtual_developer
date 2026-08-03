@@ -28,7 +28,7 @@ echo Proxies  : /api and /ws  -^>  %BACKEND_URL%
 echo.
 
 if not exist "%VENV_PY%" (
-    echo [ERROR] Missing .venv - run install.bat first.
+    echo [ERROR] Missing .venv - run install-dashboard.bat ^(or full install.bat^) first.
     call :maybe_pause
     exit /b 1
 )

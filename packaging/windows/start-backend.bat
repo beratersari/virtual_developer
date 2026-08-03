@@ -31,7 +31,7 @@ echo API+SPA : http://0.0.0.0:%DASH_PORT%/  ^(open http://127.0.0.1:%DASH_PORT%/
 echo.
 
 if not exist "%VENV_PY%" (
-    echo [ERROR] Missing .venv - run install.bat first.
+    echo [ERROR] Missing .venv - run install-dashboard.bat ^(or full install.bat^) first.
     call :maybe_pause
     exit /b 1
 )

@@ -100,11 +100,14 @@ CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.m
 ```cmd
 :: Extract zip so install.bat sits next to vendor\ and src\
 install.bat
+:: Or, if OpenCode is already installed on this PC (skip OpenCode install):
+install-dashboard.bat
 :: Edit .env, then:
-.venv\Scripts\python.exe cli.py start
+start.bat
+::   or: start-backend.bat / start-frontend.bat
 ```
 
-Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
+Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder (after full `install.bat`) — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
 
 ### Docker
 
