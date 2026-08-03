@@ -1966,10 +1966,10 @@ class JobProcessor:
         # Claim in-flight BEFORE slow git clone so poll cannot double-start
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
-            prompt=PromptBuilder.build_prometheus_prompt(
+            prompt=PromptBuilder.build_plan_prompt(
                 issue_key=state.issue_key,
-                summary=state.issue_summary,
-                description=state.description,
+                summary=state.issue_summary or "",
+                description=state.description or "",
             ),
             agent=settings.planning_agent,
             issue_key=state.issue_key,
@@ -2210,12 +2210,14 @@ class JobProcessor:
             else (state.plan_path or "")
         )
 
-        # Create task first
+        # Create task first (rebuild prompt after clone with work_branch)
         task = AgentTask(
             description=f"Execute: {state.issue_key}",
-            prompt=PromptBuilder.build_atlas_prompt(
+            prompt=PromptBuilder.build_build_prompt(
                 issue_key=state.issue_key,
-                plan_path=plan_for_prompt,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_for_prompt or None,
             ),
             agent=settings.orchestrator_agent,
             issue_key=state.issue_key,
@@ -2260,10 +2262,13 @@ class JobProcessor:
             )
         # Rebuild prompt after workspace prep so work_branch (may differ from
         # issue key) and commit policy use the real checked-out source.
+        # Always include Jira title + description (build path).
         work_branch = (getattr(git, "work_branch", None) or "").strip() or None
-        task.prompt = PromptBuilder.build_atlas_prompt(
+        task.prompt = PromptBuilder.build_build_prompt(
             issue_key=state.issue_key,
-            plan_path=plan_path_for_agent,
+            summary=state.issue_summary or "",
+            description=state.description or "",
+            plan_path=plan_path_for_agent or None,
             work_branch=work_branch,
         )
         if work_branch:
@@ -3047,10 +3052,10 @@ class JobProcessor:
         try:
             runner = self._ensure_agent_runner(state.issue_key)
 
-            prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=state.description or state.issue_summary or "",
+            prompt = PromptBuilder.build_plan_prompt(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
+                description=state.description or state.issue_summary or "",
             )
 
             task = AgentTask(
@@ -3148,19 +3153,17 @@ class JobProcessor:
             else:
                 created_context = issue_key in self._contexts
 
-            # Free-form @mention: execution kit (direct workflow removed)
+            # Free-form @mention: same build path (system + title + description)
             summary = (state.issue_summary if state else "") or ""
             git = self._git_for(issue_key)
             work_branch = (
                 (getattr(git, "work_branch", None) or "").strip() if git else ""
             ) or None
-            prompt = PromptBuilder.build_atlas_prompt(
+            desc = (request or "").strip() or (state.description if state else "") or ""
+            prompt = PromptBuilder.build_build_prompt(
                 issue_key=issue_key,
-                plan_path="",
-                previous_learnings=[
-                    f"Free-form request: {request}",
-                    f"Summary: {summary}",
-                ],
+                summary=summary,
+                description=desc,
                 work_branch=work_branch,
             )
 

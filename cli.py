@@ -561,7 +561,7 @@ def test_issue(
             state.status = TaskStatus.PLANNING
             state_manager.set_state(state)
             
-            prompt = PromptBuilder.build_prometheus_prompt(
+            prompt = PromptBuilder.build_plan_prompt(
                 issue_key=issue_key,
                 summary=title,
                 description=description,
@@ -574,10 +574,12 @@ def test_issue(
                 model=model,
             )
         elif agent == "oracle":
-            # Oracle consultation
+            # Oracle consultation → plan-shaped prompt (system + title + body)
             console.print("[blue]Starting Oracle consultation...[/blue]")
-            prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=description,
+            prompt = PromptBuilder.build_plan_prompt(
+                issue_key=issue_key,
+                summary=title or "",
+                description=description or "",
             )
             task = AgentTask(
                 description=f"Consult: {title}",
@@ -587,14 +589,15 @@ def test_issue(
                 model=model,
             )
         else:
-            # Direct execution
+            # Build / direct execution → build path
             console.print("[blue]Starting direct execution...[/blue]")
             state.status = TaskStatus.EXECUTING
             state_manager.set_state(state)
             
-            prompt = PromptBuilder.build_sisyphus_prompt(
+            prompt = PromptBuilder.build_build_prompt(
                 issue_key=issue_key,
-                task_description=description,
+                summary=title or "",
+                description=description or "",
             )
             task = AgentTask(
                 description=f"Execute: {title}",
