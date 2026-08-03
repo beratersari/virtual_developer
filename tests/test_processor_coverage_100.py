@@ -596,13 +596,16 @@ async def test_handle_updated_reprocess_and_label_fail(processor, state_manager)
     state_manager.create_state("UP-L", "s", "d")
     state_manager.update_state("UP-L", status=TaskStatus.PLAN_READY)
     processor._contexts["UP-L"] = {"git": None, "runner": None}
+    # Start labels only apply while the board is still To Do-like (product rule)
     event = {
         "webhookEvent": "jira:issue_updated",
         "issue": {
             "key": "UP-L",
             "fields": {
-                "status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
                 "labels": ["ai-start-work"],
+                "summary": "s",
+                "description": "d",
             },
         },
     }

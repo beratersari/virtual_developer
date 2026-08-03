@@ -303,7 +303,9 @@ async def test_e2e_dispatch_uses_local_snapshot_when_jira_get_fails(tmp_path):
     client.get_issue.side_effect = RuntimeError("Jira offline at dispatch")
 
     processor = MagicMock()
-    processor.process_event = AsyncMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
 
     result = await dispatch_due_schedules(
         processor=processor,
@@ -316,6 +318,107 @@ async def test_e2e_dispatch_uses_local_snapshot_when_jira_get_fails(tmp_path):
     assert event["issue"]["key"] == "KAN-LOCAL"
     assert "local only" in (event["issue"]["fields"]["description"] or "")
     assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
+    tmp_path, monkeypatch
+):
+    """CRITICAL #6: schedule fire on plan_ready must start work, not false-dispatch."""
+    monkeypatch.chdir(tmp_path)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-PR", "plan done", _valid_params(mode="build"))
+    sm.update_state("KAN-PR", status=TaskStatus.PLAN_READY)
+
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="later",
+        description="",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-PR",
+        issue_description=build_issue_description(
+            description="x",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+        ),
+        source="existing",
+    )
+
+    from src.processor import JobProcessor
+
+    with patch("src.processor.create_jira_client"):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+    proc._start_execution_workflow = AsyncMock()
+    proc._start_planning_workflow = AsyncMock()
+    proc._mark_jira_in_progress = MagicMock()
+
+    result = await dispatch_due_schedules(
+        processor=proc, store=store, jira_client=None
+    )
+
+    assert result["started"] == 1
+    assert result["failed"] == 0
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+    proc._start_execution_workflow.assert_awaited_once()
+    proc._start_planning_workflow.assert_not_awaited()
+    # Workflow begin would set EXECUTING; we mocked it, so still plan_ready
+    # unless _begin_workflow_run ran — mock means status may stay plan_ready,
+    # but the execution entrypoint was invoked (the real success signal).
+    assert proc._start_execution_workflow.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_e2e_dispatch_in_flight_is_not_false_success(tmp_path, monkeypatch):
+    """In-flight issue: schedule must not report dispatched without starting."""
+    monkeypatch.chdir(tmp_path)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-LIVE", "busy", _valid_params())
+    sm.update_state("KAN-LIVE", status=TaskStatus.EXECUTING)
+
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="busy",
+        description="",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-LIVE",
+        issue_description=_valid_params(),
+        source="existing",
+    )
+
+    from src.processor import JobProcessor
+
+    with patch("src.processor.create_jira_client"):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+    proc._start_execution_workflow = AsyncMock()
+    proc._start_planning_workflow = AsyncMock()
+
+    result = await dispatch_due_schedules(
+        processor=proc, store=store, jira_client=None
+    )
+
+    assert result["started"] == 0
+    assert result["failed"] == 1
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "error"
+    assert "in progress" in (refreshed.get("error_message") or "").lower()
+    proc._start_execution_workflow.assert_not_awaited()
+    assert sm.get_state("KAN-LIVE").status == TaskStatus.EXECUTING
 
 
 @pytest.mark.asyncio
