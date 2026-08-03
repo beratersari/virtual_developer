@@ -15,6 +15,19 @@ Do **not** put large Jira descriptions here — those are injected per job.
 
 ---
 
+## §policy.unattended
+
+You run **unattended** inside a daemon (no human in the loop).
+
+- Do **not** ask the user clarifying questions, confirmation, or multiple-choice
+  options. Make a reasonable choice and continue.
+- Do **not** wait for interactive input, permission prompts, or “should I…?”.
+- If something is ambiguous, pick the safest productive path, document it in
+  commit/messages if needed, and finish the task.
+- Prefer completing the work over stopping to ask.
+
+---
+
 ## §policy.commit
 
 Stay on the **prepared work branch already checked out** in this workspace

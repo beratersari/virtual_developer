@@ -14,10 +14,10 @@ class PromptBuilder:
 
     Paths:
 
-    * **planning** — ``§role.planning`` + summary/description (no git policy)
-    * **direct** — ``§role.direct`` + ``§policy.commit`` + summary/description
-    * **execution** — ``§role.execution`` + ``§policy.commit`` + plan path
-    * **oracle** — ``§role.oracle`` + question (no git policy)
+    * **planning** — ``§policy.unattended`` + ``§role.planning`` + body
+    * **direct** — unattended + ``§role.direct`` + ``§policy.commit`` + body
+    * **execution** — unattended + ``§role.execution`` + ``§policy.commit`` + plan
+    * **oracle** — unattended + ``§role.oracle`` + question
 
     Jira ``{params}`` git blocks are stripped from prompt text (still used by
     GitManager for clone/push).
@@ -32,6 +32,15 @@ class PromptBuilder:
         """Load a role section: planning | execution | direct | oracle."""
         section_id = role if role.startswith("role.") else f"role.{role}"
         return get_section(section_id, kit_path=PromptBuilder._kit_path())
+
+    @staticmethod
+    def unattended_policy_block() -> str:
+        """Daemon non-interactive policy from ``§policy.unattended``."""
+        body = get_section(
+            "policy.unattended",
+            kit_path=PromptBuilder._kit_path(),
+        )
+        return f"## Unattended run (no questions)\n\n{body}"
 
     @staticmethod
     def commit_message_block(
@@ -101,6 +110,7 @@ class PromptBuilder:
 
         return PromptBuilder._join_blocks(
             "# Task planning request",
+            PromptBuilder.unattended_policy_block(),
             f"## Role\n\n{PromptBuilder.role_section('planning')}",
             plan_instr,
             jira,
@@ -132,6 +142,7 @@ class PromptBuilder:
 
         return PromptBuilder._join_blocks(
             "# Task execution request",
+            PromptBuilder.unattended_policy_block(),
             f"## Role\n\n{PromptBuilder.role_section('execution')}",
             PromptBuilder.commit_message_block(
                 issue_key, work_branch=work_branch
@@ -190,6 +201,7 @@ class PromptBuilder:
 
         return PromptBuilder._join_blocks(
             "# Direct task execution",
+            PromptBuilder.unattended_policy_block(),
             f"## Role\n\n{PromptBuilder.role_section('direct')}",
             PromptBuilder.commit_message_block(
                 issue_key, work_branch=work_branch
@@ -218,6 +230,7 @@ class PromptBuilder:
 
         return PromptBuilder._join_blocks(
             "# Architecture consultation",
+            PromptBuilder.unattended_policy_block(),
             f"## Role\n\n{PromptBuilder.role_section('oracle')}",
             *parts,
         )

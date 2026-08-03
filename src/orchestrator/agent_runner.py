@@ -545,10 +545,9 @@ class AgentRunner:
             # Current OpenCode CLI uses --session, not --session-id
             cmd_parts.extend(["--session", task.session_id])
 
-        # Title helps map sessions back to Jira issues in the OpenCode DB
-        if task.issue_key:
-            title = f"{task.issue_key}: {(task.description or '')[:80]}"
-            cmd_parts.extend(["--title", title])
+        # Unattended daemon runs: never prompt for permission / tool approval.
+        # (--title omitted on purpose — not needed; sessions keyed by issue/dir.)
+        cmd_parts.append("--auto")
         
         # Final gate: never pass {params} git blocks to the agent CLI
         from src.issue_git_spec import strip_params_block

@@ -63,6 +63,7 @@ def test_build_command_with_session_and_model(runner):
         agent="sisyphus",
         session_id="ses_1",
         model="custom-model",
+        issue_key="KAN-9",
     )
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_cli = "opencode"
@@ -74,6 +75,9 @@ def test_build_command_with_session_and_model(runner):
     assert "custom-model" in cmd
     assert "--session" in cmd
     assert "ses_1" in cmd
+    # Unattended: auto-approve permissions; no --title
+    assert "--auto" in cmd
+    assert "--title" not in cmd
     assert cmd[-1] == "hello world"
 
 
@@ -84,6 +88,8 @@ def test_build_command_default_model(runner):
         s.default_model = "m1"
         cmd = runner._build_command(t, Path("/tmp/x.log"))
     assert "m1" in cmd
+    assert "--auto" in cmd
+    assert "--title" not in cmd
 
 
 def test_get_session_file_variants(runner, tmp_path, monkeypatch):
