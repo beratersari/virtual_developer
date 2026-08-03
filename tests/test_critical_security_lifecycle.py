@@ -86,7 +86,7 @@ def test_clone_argv_never_embeds_pat(tmp_path, monkeypatch):
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("src.git_manager.subprocess.run", side_effect=fake_run):
-        with patch.object(gm, "_sync_remote_branches"):
+        with patch.object(gm, "_materialize_job_remote_refs"):
             with patch.object(gm, "_scrub_remote_credentials"):
                 gm._clone_into_temp()
 

@@ -441,22 +441,22 @@ def test_format_commit_strips_leading_key(gm):
     assert msg.count("[COV-1]") == 1
 
 
-def test_sync_remote_branches_creates_tracking(gm):
-    def run_git(args, check=True, auth=False):
-        if args[:2] == ["fetch", "--all"]:
-            return _cp()
-        if args[:2] == ["branch", "-r"]:
-            return _cp("  origin/main\n  origin/HEAD -> origin/main\n  origin/feat\n")
-        if args[0] == "rev-parse":
-            return _cp(returncode=1)
-        if args[0] == "branch" and "--track" in args:
-            return _cp()
-        if args[:2] == ["remote", "set-url"]:
-            return _cp()
+def test_materialize_job_remote_refs_fetches_target_only(gm):
+    gm.source_branch = ""
+    gm.target_branch = "main"
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    calls: list = []
+
+    def run_git(args, check=True, auth=False, timeout=None):
+        calls.append(list(args))
         return _cp()
 
     with patch.object(gm, "_run_git", side_effect=run_git):
-        gm._sync_remote_branches()
+        gm._materialize_job_remote_refs()
+
+    assert ["fetch", "origin", "main"] in calls
+    assert not any("--track" in c for c in calls)
+    assert not any(c[:2] == ["branch", "-r"] for c in calls)
 
 
 # --- GitLab host / glab env / API MR ---

@@ -188,7 +188,9 @@ class GitManager:
         # Fail closed: never inject PAT for untrusted/unknown hosts
         self._assert_remote_host_allowed(self.remote_url or "")
 
-        gitlab_pat = self._pat_for_remote(self.remote_url or "")
+        raw_pat = self._pat_for_remote(self.remote_url or "")
+        # Coerce so mock/non-str never break redact/replace
+        gitlab_pat = raw_pat if isinstance(raw_pat, str) and raw_pat.strip() else ""
         # Clean URL only — PAT never appears in argv (use GIT_ASKPASS instead)
         clone_url = (self.remote_url or "").strip()
 
@@ -242,7 +244,10 @@ class GitManager:
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
 
-        self._sync_remote_branches()
+        # Do NOT create local tracking branches for every remote feature/*.
+        # Clone already has origin/* refs (--no-single-branch); ensure_feature_branch
+        # fetches only target/source when preparing the work branch.
+        self._materialize_job_remote_refs()
 
     @staticmethod
     def _host_from_url(url: str) -> str:
@@ -393,46 +398,50 @@ class GitManager:
         self._assert_remote_host_allowed(self.remote_url)
         self._run_git(["remote", "set-url", "origin", self.remote_url], check=False)
 
-    def _sync_remote_branches(self) -> None:
-        """Sync all remote branches locally."""
-        logger.info("Syncing remote branches...")
+    def _job_branch_names(self) -> List[str]:
+        """Source/target names for this issue (deduped, non-empty)."""
+        names: List[str] = []
+        for raw in (self.target_branch, self.source_branch):
+            n = (raw or "").strip()
+            if n and n not in names:
+                names.append(n)
+        return names
+
+    def _materialize_job_remote_refs(self) -> None:
+        """Fetch only this job's source/target tips — not every remote branch.
+
+        Previously we listed all ``origin/*`` and created a local tracking
+        branch for each (causing noisy ``rev-parse`` failures on a fresh clone
+        and pointless work for old feature/* branches). Job setup only needs
+        target (MR base) and optionally source (existing work tip).
+        """
+        branches = self._job_branch_names()
+        if not branches:
+            logger.debug(
+                "No source/target set at clone time; "
+                "ensure_feature_branch will fetch when preparing work"
+            )
+            return
+        if not self.remote_url:
+            return
+        logger.info(f"Fetching job branches only (not full remote mirror): {branches}")
         try:
-            logger.debug("Running git fetch --all")
             self._with_auth_remote()
             try:
-                self._run_git(["fetch", "--all"], check=False, auth=True)
+                for branch in branches:
+                    self._run_git(
+                        ["fetch", "origin", branch],
+                        check=False,
+                        auth=True,
+                    )
             finally:
                 self._scrub_remote_credentials()
-
-            result = self._run_git(["branch", "-r"], check=False)
-
-            if result.returncode == 0:
-                remote_branches = [
-                    b.strip().replace("origin/", "")
-                    for b in result.stdout.splitlines()
-                    if b.strip() and "HEAD" not in b
-                ]
-
-                logger.debug(f"Found {len(remote_branches)} remote branches: {remote_branches}")
-
-                for remote_branch in remote_branches:
-                    local_exists = self._run_git(
-                        ["rev-parse", "--verify", f"refs/heads/{remote_branch}"],
-                        check=False
-                    ).returncode == 0
-
-                    if not local_exists:
-                        logger.debug(f"Creating local tracking branch: {remote_branch}")
-                        self._run_git(
-                            ["branch", "--track", remote_branch, f"origin/{remote_branch}"],
-                            check=False
-                        )
-
-                logger.info(f"Synced {len(remote_branches)} remote branches")
-            else:
-                logger.warning(f"Failed to list remote branches: {result.stderr}")
         except Exception as e:
-            logger.warning(f"Could not sync remote branches: {e}")
+            logger.warning(f"Could not fetch job branches {branches}: {e}")
+
+    def _sync_remote_branches(self) -> None:
+        """Backward-compatible alias: only materialize source/target, not all remotes."""
+        self._materialize_job_remote_refs()
 
     def _git_command_timeout(self) -> int:
         """Wall-clock cap for non-clone git/glab (push, fetch, MR, etc.)."""
@@ -498,9 +507,26 @@ class GitManager:
 
         if result.returncode != 0:
             safe_err = self._redact_secret_text(result.stderr or "")
-            logger.error(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
+            # rev-parse --verify is often a "does this ref exist?" probe with
+            # check=False; log at debug so missing local branches are not ERROR spam.
+            is_probe = (
+                not check
+                and args
+                and args[0] == "rev-parse"
+                and "--verify" in args
+            )
+            if is_probe:
+                logger.debug(
+                    f"Git ref missing (probe): git {' '.join(safe_args)} — {safe_err.strip()}"
+                )
+            else:
+                logger.error(
+                    f"Git command failed: git {' '.join(safe_args)}\n{safe_err}"
+                )
             if check:
-                raise RuntimeError(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
+                raise RuntimeError(
+                    f"Git command failed: git {' '.join(safe_args)}\n{safe_err}"
+                )
         else:
             logger.debug(f"Git command succeeded: git {' '.join(safe_args)}")
 
