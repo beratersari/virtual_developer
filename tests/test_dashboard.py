@@ -112,7 +112,6 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "jira_host", "https://old.example.com")
-    monkeypatch.setattr(settings, "jira_email", "old@ex.com")
     monkeypatch.setattr(settings, "jira_api_token", "old-token")
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_pat", "old-pat")
@@ -121,7 +120,6 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     view = apply_settings_update(
         SettingsUpdate(
             jira_host="https://new.example.com/",
-            jira_email="new@ex.com",
             jira_api_token="new-secret-token",
             gitlab_credentials=[
                 {"host": "gitlab.com", "pat": "pat-cloud"},
@@ -130,8 +128,8 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
         )
     )
     assert settings.jira_host == "https://new.example.com"
-    assert settings.jira_email == "new@ex.com"
     assert settings.jira_api_token == "new-secret-token"
+    assert not hasattr(view, "jira_email") or "jira_email" not in view.model_dump()
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
     assert settings.gitlab_pat_for_host("api.gitlab.com") == "pat-cloud"

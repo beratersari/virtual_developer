@@ -11,24 +11,19 @@ from src.logger import logger
 class JiraClient:
     """Client for JIRA REST API.
 
-    Auth (always Bearer — no email check):
+    Auth (Bearer only):
       ``JIRA_HOST`` + ``JIRA_API_TOKEN`` → ``Authorization: Bearer {token}``
 
-    Dashboard settings and runtime clients never switch to HTTP Basic based on
-    email. ``email`` is accepted for API compatibility only and is not used
-    for authentication.
+    No email / Basic auth path.
     """
     
     def __init__(
         self,
         host: Optional[str] = None,
         api_token: Optional[str] = None,
-        email: Optional[str] = None,
     ):
         self.host = (host or settings.jira_host).rstrip("/")
         self.api_token = api_token if api_token is not None else settings.jira_api_token
-        # Stored for callers/tests that still read it; never used for HTTP auth
-        self.email = (email if email is not None else getattr(settings, "jira_email", "")) or ""
         
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

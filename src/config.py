@@ -20,18 +20,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
-    # JIRA Configuration — always Bearer (host + token); email is unused for auth
+    # JIRA Configuration — always Bearer (host + token only)
     jira_host: str = Field(default="", description="JIRA instance URL")
-    jira_email: str = Field(
-        default="",
-        description=(
-            "Optional display-only field (not used for Jira HTTP auth; "
-            "dashboard and runtime always use Bearer with JIRA_API_TOKEN)"
-        ),
-    )
     jira_api_token: str = Field(
         default="",
-        description="JIRA API token (Cloud) or personal access token (on-prem)",
+        description="JIRA API token (Cloud) or personal access token (on-prem) — Bearer auth",
     )
     jira_projects: str = Field(default="PROJ", description="Comma-separated project keys")
     jira_board_id: str = Field(

@@ -103,9 +103,6 @@ export type SettingsPayload = {
   dashboard_port: number
   jira_token_configured: boolean
   gitlab_pat_configured: boolean
-  jira_email_configured: boolean
-  /** Cloud Basic auth email (not a secret). Empty for on-prem Bearer PAT. */
-  jira_email?: string
   /** Derived host list (legacy / summary). */
   gitlab_allowed_hosts?: string
   /** Per-host GitLab credentials (hosts + flags only). */

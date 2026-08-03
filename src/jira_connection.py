@@ -13,20 +13,16 @@ from src.logger import logger
 def probe_jira_connection(
     *,
     host: Optional[str] = None,
-    email: Optional[str] = None,
     api_token: Optional[str] = None,
     max_projects: int = 25,
 ) -> Dict[str, Any]:
     """Verify Jira credentials via ``/myself`` and list projects.
 
-    Always uses ``Authorization: Bearer {token}`` — never HTTP Basic and never
-    requires email (``email`` is accepted for API compatibility only).
+    Always uses ``Authorization: Bearer {token}`` (host + token only).
 
     Omitted fields fall back to runtime ``settings``. Never returns the token.
     """
     h = (host if host is not None else settings.jira_host or "").strip().rstrip("/")
-    # email intentionally ignored for auth (dashboard / runtime Bearer-only)
-    _ = email
     tok = (api_token if api_token is not None else "").strip()
     if not tok:
         tok = (settings.jira_api_token or "").strip()
@@ -71,8 +67,7 @@ def probe_jira_connection(
                     "error": (
                         f"Auth failed (HTTP {me.status_code}). "
                         "Token invalid, revoked, or missing scopes. "
-                        "Use a personal access token with Bearer auth "
-                        "(host + token only; email is not used)."
+                        "Use host + personal access token (Bearer auth)."
                     ),
                 }
             if me.status_code != 200:

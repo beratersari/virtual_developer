@@ -219,8 +219,6 @@ def build_settings_view() -> SettingsView:
             if hasattr(settings, "gitlab_has_any_pat")
             else (settings.gitlab_pat or "").strip()
         ),
-        jira_email_configured=bool((getattr(settings, "jira_email", "") or "").strip()),
-        jira_email=(getattr(settings, "jira_email", "") or "").strip(),
         gitlab_allowed_hosts=",".join(settings.gitlab_allowed_hosts_list),
         gitlab_credentials=[
             GitlabHostCredentialView(host=h, pat_configured=True)
@@ -267,16 +265,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets). Does not rewrite .env.
 
     Returns a safe projection (no token values). Callers should refresh live
-    Jira clients when host/token/email change (see ``refresh_runtime_jira_clients``).
+    Jira clients when host/token change (see ``refresh_runtime_jira_clients``).
     """
     data = body.model_dump(exclude_unset=True)
 
     if "jira_host" in data and data["jira_host"] is not None:
         host = str(data["jira_host"]).strip().rstrip("/")
         settings.jira_host = host
-    if "jira_email" in data and data["jira_email"] is not None:
-        # Empty string clears Cloud email (switch to Bearer / on-prem style)
-        settings.jira_email = str(data["jira_email"]).strip()
     if "jira_api_token" in data and data["jira_api_token"] is not None:
         # Write-only: only apply non-empty values so blank UI fields keep current
         tok = str(data["jira_api_token"])

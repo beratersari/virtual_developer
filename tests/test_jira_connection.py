@@ -46,7 +46,6 @@ def test_jira_probe_ok():
     with patch("src.jira_connection.httpx.Client", return_value=client) as C:
         out = probe_jira_connection(
             host="https://ex.atlassian.net",
-            email="bot@ex.com",  # ignored for auth
             api_token="secret-token",
         )
     assert out["ok"] is True
@@ -79,8 +78,8 @@ def test_jira_probe_unauthorized():
     assert "set jira email" not in err
 
 
-def test_jira_probe_cloud_with_email_still_bearer():
-    """Email must not switch dashboard probe to HTTP Basic."""
+def test_jira_probe_cloud_host_still_bearer():
+    """Cloud host uses Bearer (host + token only)."""
     me = _resp(200, {"displayName": "Cloud User", "accountId": "1"})
     projects = _resp(200, [])
     client = MagicMock()
@@ -91,7 +90,6 @@ def test_jira_probe_cloud_with_email_still_bearer():
     with patch("src.jira_connection.httpx.Client", return_value=client) as C:
         out = probe_jira_connection(
             host="https://site.atlassian.net",
-            email="someone@company.com",
             api_token="pat-xyz",
         )
     assert out["ok"] is True
@@ -104,7 +102,6 @@ def test_jira_probe_uses_stored_token(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
-    monkeypatch.setattr(settings, "jira_email", "")
     monkeypatch.setattr(settings, "jira_api_token", "stored-pat")
 
     me = _resp(200, {"displayName": "OnPrem", "name": "onprem"})
@@ -162,7 +159,6 @@ def test_api_jira_test_endpoint(tmp_path, monkeypatch):
             "/api/settings/jira/test",
             json={
                 "host": "https://ex.atlassian.net",
-                "email": "a@b.com",
                 "api_token": "tok",
             },
         )

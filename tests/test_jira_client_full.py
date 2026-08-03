@@ -260,20 +260,17 @@ def test_add_labels_merges_existing(client):
 
 
 def test_client_auth_bearer_only():
-    """Always Bearer — email never switches auth to HTTP Basic."""
+    """Always Bearer — host + token only; no email constructor arg."""
     with patch("src.jira.client.httpx.Client") as mock_cls:
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.onprem.example.com/"
             s.jira_api_token = "tok"
-            s.jira_email = ""
             JiraClient()
             kwargs = mock_cls.call_args.kwargs
             assert kwargs["headers"]["Authorization"] == "Bearer tok"
             assert kwargs.get("auth") is None
 
-            # Email set must still be Bearer (dashboard / runtime never Basic)
             s.jira_host = "https://x.atlassian.net"
-            s.jira_email = "user@example.com"
             s.jira_api_token = "cloudtok"
             JiraClient()
             kwargs_cloud = mock_cls.call_args.kwargs
@@ -282,7 +279,6 @@ def test_client_auth_bearer_only():
 
             # No token → no Authorization header
             s.jira_api_token = ""
-            s.jira_email = ""
             JiraClient(host="https://h", api_token="")
             kwargs2 = mock_cls.call_args.kwargs
             assert "Authorization" not in kwargs2.get("headers", {})

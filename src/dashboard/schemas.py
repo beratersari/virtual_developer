@@ -212,9 +212,6 @@ class SettingsView(BaseModel):
     # Presence flags only — never return token/PAT values
     jira_token_configured: bool = False
     gitlab_pat_configured: bool = False
-    jira_email_configured: bool = False
-    # Cloud Basic auth username (email); not secret but useful for ops
-    jira_email: str = ""
     # Legacy flat list of hosts (derived from credential map)
     gitlab_allowed_hosts: str = ""
     # Per-host GitLab credentials (hosts only + configured flag; no PAT values)
@@ -255,10 +252,10 @@ class JiraConnectionTestRequest(BaseModel):
     """Body for POST /api/settings/jira/test.
 
     Omitted/empty token uses the stored runtime token. Never echoed back.
+    Bearer only — host + token; no email field.
     """
 
     host: Optional[str] = Field(default=None, max_length=500)
-    email: Optional[str] = Field(default=None, max_length=320)
     api_token: Optional[str] = Field(default=None, max_length=4000)
     max_projects: int = Field(default=25, ge=1, le=50)
 
@@ -272,7 +269,6 @@ class SettingsUpdate(BaseModel):
     """
 
     jira_host: Optional[str] = Field(default=None, max_length=500)
-    jira_email: Optional[str] = Field(default=None, max_length=320)
     jira_api_token: Optional[str] = Field(
         default=None,
         max_length=4000,

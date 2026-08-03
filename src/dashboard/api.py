@@ -476,7 +476,7 @@ def create_dashboard_app(
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
         # Detect auth/connection changes before apply (for client refresh)
-        auth_keys = ("jira_host", "jira_email", "jira_api_token")
+        auth_keys = ("jira_host", "jira_api_token")
         dumped = body.model_dump(exclude_unset=True)
         auth_changed = any(k in dumped for k in auth_keys)
 

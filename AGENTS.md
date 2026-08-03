@@ -153,8 +153,8 @@ JIRA_API_TOKEN=your-api-token-here
 
 - REST **API v2** (`/rest/api/2/...`), Agile at `/rest/agile/1.0/...`.
 - Auth header: **always** **`Authorization: Bearer {JIRA_API_TOKEN}`**
-  (dashboard settings Test + live clients). **Do not** switch to HTTP Basic
-  based on email. `JIRA_EMAIL` is unused for authentication.
+  (dashboard settings Test + live clients). Host + token only — **no email**
+  field in config, API, or UI.
 - No username/password and no Cloud-only `accountId` assumptions for core bot auth.
 - TLS: **`verify=False` on all Jira HTTP** (see §2 HTTP / TLS).
 

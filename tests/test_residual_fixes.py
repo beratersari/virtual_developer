@@ -216,7 +216,6 @@ def test_board_issues_pagination():
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.example.com"
             s.jira_api_token = "t"
-            s.jira_email = ""
             client = JiraClient()
             client.client = http
 
