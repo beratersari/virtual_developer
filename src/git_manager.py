@@ -434,6 +434,13 @@ class GitManager:
         except Exception as e:
             logger.warning(f"Could not sync remote branches: {e}")
 
+    def _git_command_timeout(self) -> int:
+        """Wall-clock cap for non-clone git/glab (push, fetch, MR, etc.)."""
+        return max(
+            30,
+            int(getattr(settings, "git_command_timeout_seconds", 300) or 300),
+        )
+
     def _run_git(
         self,
         args: list,
@@ -441,11 +448,15 @@ class GitManager:
         check: bool = True,
         *,
         auth: bool = False,
+        timeout: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
         """Run a git command in the temp working directory.
 
         When ``auth=True``, inject askpass env so push/fetch can authenticate
         without putting the PAT on the command line.
+
+        Always applies a hard timeout (default ``git_command_timeout_seconds``)
+        so a hung push/fetch cannot pin a job slot forever.
         """
         cwd = cwd or self.temp_dir
 
@@ -459,14 +470,32 @@ class GitManager:
 
         use_auth = auth and bool(self._pat_for_remote(self.remote_url or ""))
         env = self._git_auth_env() if use_auth else None
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            env=env,
+        cmd_timeout = (
+            max(30, int(timeout))
+            if timeout is not None
+            else self._git_command_timeout()
         )
-        
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=cmd_timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            safe_err = f"git command timed out after {cmd_timeout}s: git {' '.join(safe_args)}"
+            logger.error(safe_err)
+            if check:
+                raise RuntimeError(safe_err) from e
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=-1,
+                stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
+                stderr=safe_err,
+            )
+
         if result.returncode != 0:
             safe_err = self._redact_secret_text(result.stderr or "")
             logger.error(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
@@ -474,7 +503,7 @@ class GitManager:
                 raise RuntimeError(f"Git command failed: git {' '.join(safe_args)}\n{safe_err}")
         else:
             logger.debug(f"Git command succeeded: git {' '.join(safe_args)}")
-        
+
         return result
 
     @staticmethod
@@ -1085,17 +1114,45 @@ class GitManager:
         env.setdefault("GITLAB_PROTOCOL", "https")
         return env
 
-    def _run_glab(self, args: List[str], *, check: bool = False) -> subprocess.CompletedProcess:
-        """Run glab with auth from settings (never log the token)."""
+    def _run_glab(
+        self,
+        args: List[str],
+        *,
+        check: bool = False,
+        timeout: Optional[int] = None,
+    ) -> subprocess.CompletedProcess:
+        """Run glab with auth from settings (never log the token).
+
+        Applies ``git_command_timeout_seconds`` so a hung MR create cannot pin
+        a job slot forever.
+        """
         cmd = ["glab", *args]
         logger.debug(f"Running glab: glab {' '.join(args)}")
-        return subprocess.run(
-            cmd,
-            cwd=self.temp_dir,
-            capture_output=True,
-            text=True,
-            env=self._glab_env(),
+        cmd_timeout = (
+            max(30, int(timeout))
+            if timeout is not None
+            else self._git_command_timeout()
         )
+        try:
+            return subprocess.run(
+                cmd,
+                cwd=self.temp_dir,
+                capture_output=True,
+                text=True,
+                env=self._glab_env(),
+                timeout=cmd_timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            safe_err = f"glab timed out after {cmd_timeout}s: glab {' '.join(args)}"
+            logger.error(safe_err)
+            if check:
+                raise RuntimeError(safe_err) from e
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=-1,
+                stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
+                stderr=safe_err,
+            )
 
     def _create_mr_via_api(
         self,

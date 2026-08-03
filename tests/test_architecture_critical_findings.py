@@ -301,7 +301,7 @@ async def test_c4_cancel_then_begin_under_lock_stays_cancelled(processor, state_
         task = AgentTask(
             description="d", prompt="p", agent="a", issue_key="RACE-2"
         )
-        processor._begin_workflow_run(
+        job_id = processor._begin_workflow_run(
             state_manager.get_state("RACE-2"),
             status=TaskStatus.EXECUTING,
             task=task,
@@ -309,9 +309,193 @@ async def test_c4_cancel_then_begin_under_lock_stays_cancelled(processor, state_
             agent="a",
             job_status="executing",
         )
+        assert job_id is None, "begin must refuse after cancel"
         assert state_manager.get_state("RACE-2").status == TaskStatus.CANCELLED
     finally:
         lock.release()
+
+
+# ---------------------------------------------------------------------------
+# C4b — Cancel mid-clone must not re-arm context / start agent
+# ---------------------------------------------------------------------------
+
+
+def test_c4b_init_skips_when_already_cancelled(processor, state_manager):
+    """Already CANCELLED: no clone, no context."""
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "Mode: build\n"
+        "{params}\n"
+    )
+    state_manager.create_state("CLONE-ABORT-0", "s", desc)
+    state_manager.update_state(
+        "CLONE-ABORT-0",
+        status=TaskStatus.CANCELLED,
+        error_message="Cancelled from dashboard",
+        completed_at=datetime.now(),
+    )
+    with patch("src.processor.GitManager") as GM:
+        out = processor._init_git_manager("CLONE-ABORT-0")
+        assert out is None
+        GM.assert_not_called()
+        assert "CLONE-ABORT-0" not in processor._contexts
+
+
+def test_c4b_init_git_manager_discards_workspace_when_cancelled(
+    processor, state_manager, tmp_path
+):
+    """Cancel during GitManager construct: cleanup + no _contexts."""
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "Mode: build\n"
+        "{params}\n"
+    )
+    state_manager.create_state("CLONE-ABORT-1", "s", desc)
+    state_manager.update_state("CLONE-ABORT-1", status=TaskStatus.EXECUTING)
+
+    fake_git = MagicMock()
+    fake_git.get_working_directory.return_value = tmp_path
+    fake_git.cleanup = MagicMock(return_value=True)
+
+    def construct_and_cancel(*_a, **_k):
+        state_manager.update_state(
+            "CLONE-ABORT-1",
+            status=TaskStatus.CANCELLED,
+            error_message="Cancelled from dashboard",
+            completed_at=datetime.now(),
+        )
+        return fake_git
+
+    with patch("src.processor.GitManager", side_effect=construct_and_cancel):
+        with patch("src.processor.AgentRunner") as AR:
+            out = processor._init_git_manager("CLONE-ABORT-1")
+            assert out is None
+            AR.assert_not_called()
+            fake_git.cleanup.assert_called_once()
+            assert "CLONE-ABORT-1" not in processor._contexts
+
+
+def test_c4b_prepare_blocking_returns_none_when_aborted_after_init(
+    processor, state_manager
+):
+    """If cancel lands after context register, prep must release and return None."""
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "Mode: build\n"
+        "{params}\n"
+    )
+    state = state_manager.create_state("CLONE-ABORT-2", "s", desc)
+    state_manager.update_state("CLONE-ABORT-2", status=TaskStatus.EXECUTING)
+
+    git = MagicMock()
+    git.target_branch = "main"
+    git.ensure_feature_branch.return_value = "feature/CLONE-ABORT-2"
+    git.cleanup = MagicMock(return_value=True)
+
+    def init_then_cancel(issue_key, st=None):
+        # Simulate cancel winning while clone/setup was in flight
+        state_manager.update_state(
+            issue_key,
+            status=TaskStatus.CANCELLED,
+            error_message="Cancelled from dashboard",
+            completed_at=datetime.now(),
+        )
+        processor._contexts[issue_key] = {"git": git, "runner": MagicMock()}
+        return git
+
+    with patch.object(processor, "_init_git_manager", side_effect=init_then_cancel):
+        out = processor._prepare_git_workspace_blocking(state)
+
+    assert out is None
+    assert "CLONE-ABORT-2" not in processor._contexts
+    assert state_manager.get_state("CLONE-ABORT-2").status == TaskStatus.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# C7 — git push / glab must hard-timeout
+# ---------------------------------------------------------------------------
+
+
+def test_c7_run_git_applies_timeout():
+    """_run_git must pass timeout= to subprocess.run (no hang forever)."""
+    from pathlib import Path
+    import tempfile
+
+    from src.git_manager import GitManager
+
+    with tempfile.TemporaryDirectory() as td:
+        gm = GitManager.__new__(GitManager)
+        gm.temp_dir = Path(td)
+        gm.remote_url = "https://gitlab.example.com/g/r.git"
+        gm.remote_enabled = True
+        gm._pat_for_remote = MagicMock(return_value=None)
+        gm._redact_git_args = lambda args: args
+        gm._redact_secret_text = lambda t: t
+        gm._git_auth_env = MagicMock(return_value=None)
+
+        with patch("src.git_manager.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            with patch("src.git_manager.settings") as s:
+                s.git_command_timeout_seconds = 42
+                gm._run_git(["status"], check=False)
+            assert run.called
+            kwargs = run.call_args.kwargs
+            assert kwargs.get("timeout") == 42
+
+
+def test_c7_run_git_timeout_raises_when_check_true():
+    from pathlib import Path
+    import subprocess
+    import tempfile
+
+    from src.git_manager import GitManager
+
+    with tempfile.TemporaryDirectory() as td:
+        gm = GitManager.__new__(GitManager)
+        gm.temp_dir = Path(td)
+        gm.remote_url = ""
+        gm._pat_for_remote = MagicMock(return_value=None)
+        gm._redact_git_args = lambda args: args
+        gm._redact_secret_text = lambda t: t
+        gm._git_auth_env = MagicMock(return_value=None)
+
+        with patch(
+            "src.git_manager.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30),
+        ):
+            with patch("src.git_manager.settings") as s:
+                s.git_command_timeout_seconds = 30
+                with pytest.raises(RuntimeError, match="timed out"):
+                    gm._run_git(["push", "-u", "origin", "feature/x"], check=True)
+
+
+def test_c7_run_glab_applies_timeout():
+    from pathlib import Path
+    import tempfile
+
+    from src.git_manager import GitManager
+
+    with tempfile.TemporaryDirectory() as td:
+        gm = GitManager.__new__(GitManager)
+        gm.temp_dir = Path(td)
+        gm.remote_url = "https://gitlab.example.com/g/r.git"
+        gm._glab_env = MagicMock(return_value={})
+
+        with patch("src.git_manager.subprocess.run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            with patch("src.git_manager.settings") as s:
+                s.git_command_timeout_seconds = 99
+                gm._run_glab(["mr", "create", "--fill"], check=False)
+            assert run.call_args.kwargs.get("timeout") == 99
 
 
 # ---------------------------------------------------------------------------
