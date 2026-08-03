@@ -743,17 +743,24 @@ class JobProcessor:
         agent: str,
         job_status: str,
         started_at: Optional[datetime] = None,
-    ) -> str:
+    ) -> Optional[str]:
         """Archive previous run ids, claim in-flight fields, create a new job.
 
         Call this instead of writing ``current_task_id`` then starting a job
         separately — archive must run **before** the previous task id is
         overwritten.
+
+        Uses CAS so a concurrent cancel/fail/complete (which does **not** take
+        the issue lock) cannot be overwritten by a late begin. Returns the new
+        job_id, or ``None`` when the claim was rejected (caller must abort).
         """
         archive = self._archive_run_identifiers(state.issue_key)
         archive["requeue_eligible"] = False
-        self.state_manager.update_state(
+        # Reject terminal statuses: cancel/fail can land between accept and begin
+        # without holding the issue lock.
+        claimed = self.state_manager.update_state_if(
             state.issue_key,
+            reject_statuses=self.TERMINAL_STATUSES,
             status=status,
             started_at=started_at or datetime.now(),
             current_task_id=task.task_id,
@@ -762,8 +769,15 @@ class JobProcessor:
             max_retries=settings.agent_task_max_retries,
             metadata=archive,
         )
+        if claimed is None:
+            logger.info(
+                f"_begin_workflow_run refused for {state.issue_key}: "
+                f"status is terminal (cancel/fail/complete won the race)"
+            )
+            return None
         state.current_task_id = task.task_id
         state.current_opencode_session_id = None
+        state.status = claimed.status
         return self._start_job_record(
             state,
             workflow_type=workflow_type,
@@ -1768,27 +1782,36 @@ class JobProcessor:
         self,
         issue_key: str,
         state: Optional[JiraAgentState] = None,
-    ) -> GitManager:
+    ) -> Optional[GitManager]:
         """Clone from the issue template (Repository + Source + Target).
 
         Always re-reads summary/description from Jira when possible so
         ``{params}`` matches the current ticket, not a stale state snapshot.
 
+        Returns ``None`` when the issue was cancelled/errored during clone
+        (workspace discarded; no live context registered).
+
         Raises IssueGitConfigError / GitCloneError / GitSourceBranchError /
         GitTargetBranchError with user-facing messages suitable for Jira comments.
         """
         logger.info(f"Initializing git manager for {issue_key}")
+        if self._is_aborted(issue_key):
+            logger.info(f"{issue_key}: aborted before git init; skipping clone")
+            return None
         st = state or self.state_manager.get_state(issue_key)
         summary, description = self._refresh_issue_text_from_jira(issue_key, st)
         # Re-load state after refresh (update may have persisted)
         st = self.state_manager.get_state(issue_key) or st
+        if self._is_aborted(issue_key):
+            logger.info(f"{issue_key}: aborted after Jira refresh; skipping clone")
+            return None
         spec = require_issue_git_spec(summary=summary, description=description)
         logger.info(
             f"{issue_key} git from issue: repo={spec.repository_url} "
             f"source_branch={spec.source_branch} target_branch={spec.target_branch} "
             f"(MR plan: work branch from target, then MR source → target)"
         )
-        if st:
+        if st and not self._is_aborted(issue_key):
             self.state_manager.update_state(
                 issue_key,
                 metadata={
@@ -1804,6 +1827,18 @@ class JobProcessor:
             source_branch=spec.source_branch,
             target_branch=spec.target_branch,
         )
+        # Cancel may have won while clone ran (no runner registered yet).
+        # Do not re-arm live context after terminal status.
+        if self._is_aborted(issue_key):
+            logger.info(
+                f"{issue_key}: aborted during/after clone; discarding workspace"
+            )
+            try:
+                git.cleanup(success=False)
+            except Exception as e:
+                logger.warning(f"{issue_key}: cleanup after abort failed: {e}")
+            return None
+
         working_dir = git.get_working_directory()
         logger.debug(f"Working directory: {working_dir}")
         runner = AgentRunner(working_directory=working_dir)
@@ -1822,10 +1857,37 @@ class JobProcessor:
 
         Must not run on the asyncio event loop — use
         :meth:`_prepare_git_workspace` which offloads via ``asyncio.to_thread``.
+
+        Returns ``None`` on hard failure (``_fail_issue`` already called) **or**
+        when the issue was cancelled/errored mid-setup (no fail — already terminal).
         """
         try:
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted before git workspace prep"
+                )
+                return None
             git = self._init_git_manager(state.issue_key, state)
+            if git is None:
+                # Cancel/fail during clone — do not overwrite terminal with ERROR
+                logger.info(
+                    f"{state.issue_key}: git init returned None (aborted); "
+                    f"skipping agent start"
+                )
+                return None
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted after git init; releasing context"
+                )
+                self._release_context(state.issue_key, success=False)
+                return None
             branch_name = git.ensure_feature_branch(state.issue_key)
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted after branch setup; releasing context"
+                )
+                self._release_context(state.issue_key, success=False)
+                return None
             logger.info(
                 f"Work branch ready: {branch_name} "
                 f"(based on target={git.target_branch}; MR {branch_name} → {git.target_branch})"
@@ -1912,7 +1974,7 @@ class JobProcessor:
             agent=settings.planning_agent,
             issue_key=state.issue_key,
         )
-        self._begin_workflow_run(
+        job_id = self._begin_workflow_run(
             state,
             status=TaskStatus.PLANNING,
             task=task,
@@ -1921,10 +1983,22 @@ class JobProcessor:
             job_status="planning",
             started_at=workflow_start_time,
         )
+        if job_id is None:
+            logger.info(
+                f"Planning not started for {state.issue_key}: begin claim rejected"
+            )
+            return
         self._mark_jira_in_progress(state.issue_key)
 
         git = await self._prepare_git_workspace(state)
         if git is None:
+            return
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Planning aborted after clone for {state.issue_key}; "
+                f"not starting agent"
+            )
+            self._release_context(state.issue_key, success=False)
             return
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
@@ -2148,7 +2222,7 @@ class JobProcessor:
         )
 
         # Claim in-flight before git clone (archives prior task/session/job ids)
-        self._begin_workflow_run(
+        job_id = self._begin_workflow_run(
             state,
             status=TaskStatus.EXECUTING,
             task=task,
@@ -2157,10 +2231,22 @@ class JobProcessor:
             job_status="executing",
             started_at=workflow_start_time,
         )
+        if job_id is None:
+            logger.info(
+                f"Execution not started for {state.issue_key}: begin claim rejected"
+            )
+            return
         self._mark_jira_in_progress(state.issue_key)
 
         git = await self._prepare_git_workspace(state)
         if git is None:
+            return
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Execution aborted after clone for {state.issue_key}; "
+                f"not starting agent"
+            )
+            self._release_context(state.issue_key, success=False)
             return
         # Materialize durable plan into the fresh clone for Atlas
         in_workspace = self._materialize_plan_into_workspace(state.issue_key)
@@ -2929,26 +3015,30 @@ class JobProcessor:
             return self.agent_runner
 
         try:
-            self._init_git_manager(issue_key)
+            git = self._init_git_manager(issue_key)
+            if git is not None:
+                runner = self._runner_for(issue_key)
+                if runner is not None:
+                    return runner
+            # Aborted during clone (None) or context not registered — sandbox below
         except Exception as e:
             logger.warning(
                 f"Git workspace init failed for {issue_key}, "
                 f"using isolated sandbox (not project_root): {e}"
             )
-            safe = "".join(
-                c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
-            )[:80]
-            sandbox = (
-                Path.cwd()
-                / settings.temp_dir_base
-                / f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            sandbox.mkdir(parents=True, exist_ok=True)
-            runner = AgentRunner(working_directory=sandbox)
-            self._contexts[issue_key] = {"git": None, "runner": runner}
-            self.agent_runner = runner
-        assert self.agent_runner is not None
-        return self.agent_runner
+        safe = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
+        )[:80]
+        sandbox = (
+            Path.cwd()
+            / settings.temp_dir_base
+            / f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        sandbox.mkdir(parents=True, exist_ok=True)
+        runner = AgentRunner(working_directory=sandbox)
+        self._contexts[issue_key] = {"git": None, "runner": runner}
+        self.agent_runner = runner
+        return runner
 
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""
@@ -2970,7 +3060,7 @@ class JobProcessor:
                 issue_key=state.issue_key,
             )
 
-            self._begin_workflow_run(
+            job_id = self._begin_workflow_run(
                 state,
                 status=TaskStatus.EXECUTING,
                 task=task,
@@ -2978,7 +3068,17 @@ class JobProcessor:
                 agent="oracle",
                 job_status="executing",
             )
+            if job_id is None:
+                logger.info(
+                    f"Oracle not started for {state.issue_key}: begin claim rejected"
+                )
+                return
             self._mark_jira_in_progress(state.issue_key)
+
+            if self._is_aborted(state.issue_key):
+                logger.info(f"Oracle aborted before agent for {state.issue_key}")
+                self._release_context(state.issue_key, success=False)
+                return
 
             result = await runner.run_agent(
                 task,

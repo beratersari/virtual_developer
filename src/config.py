@@ -169,6 +169,14 @@ class Settings(BaseSettings):
         default=300,
         description="Max seconds for git clone (hard kill; default 5 minutes)",
     )
+    # Push / fetch / merge / glab MR — hung network ops must not pin job slots forever
+    git_command_timeout_seconds: int = Field(
+        default=300,
+        description=(
+            "Max seconds for non-clone git and glab subprocesses "
+            "(push, fetch, MR create; default 5 minutes)"
+        ),
+    )
     
     # Redis / Celery
     redis_url: str = Field(default="redis://localhost:6379/0")
