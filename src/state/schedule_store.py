@@ -136,6 +136,67 @@ class ScheduleStore:
             self._write(rec)
             return rec
 
+    def recover_stuck_dispatching(
+        self,
+        *,
+        max_age_seconds: float = 0.0,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Reset ``dispatching`` rows back to ``scheduled`` after a crash.
+
+        Claim moves ``scheduled → dispatching`` before ``process_event`` finishes
+        and marks ``dispatched``. If the daemon dies mid-flight, the row stays
+        ``dispatching`` forever (never due, cancel was refused).
+
+        ``max_age_seconds=0`` recovers **all** dispatching rows (startup path).
+        Positive age only recovers rows whose ``updated_at`` is older than the
+        cutoff (periodic safety net during long process_event waits).
+
+        Returns the number of rows re-opened.
+        """
+        when = now or datetime.now()
+        recovered = 0
+        with self._lock:
+            for path in list(self.schedules_dir.glob("sched_*.json")):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if (rec.get("status") or "").lower() != "dispatching":
+                    continue
+                if max_age_seconds and max_age_seconds > 0:
+                    raw = (rec.get("updated_at") or rec.get("created_at") or "").strip()
+                    if raw:
+                        try:
+                            ts = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+                            updated = datetime.fromisoformat(ts)
+                            if updated.tzinfo is not None and when.tzinfo is None:
+                                when_cmp = when.replace(tzinfo=updated.tzinfo)
+                            else:
+                                when_cmp = when
+                            age = (when_cmp - updated).total_seconds()
+                            if age < max_age_seconds:
+                                continue
+                        except ValueError:
+                            # Unparseable timestamp — recover rather than stuck forever
+                            pass
+                rec["status"] = "scheduled"
+                rec["error_message"] = None
+                rec["updated_at"] = _now_iso()
+                try:
+                    self._write(rec)
+                    recovered += 1
+                    logger.info(
+                        f"Recovered stuck schedule {rec.get('schedule_id')} "
+                        f"(dispatching → scheduled)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not recover schedule {rec.get('schedule_id')}: {e}"
+                    )
+        return recovered
+
     def list_schedules(
         self,
         *,

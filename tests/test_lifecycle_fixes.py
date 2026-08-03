@@ -185,3 +185,60 @@ def test_cleanup_age_keeps_fresh_dir(tmp_path):
         s.temp_cleanup_max_age_days = 1.0
         assert gm.cleanup(success=True) is True
         assert d.exists()
+
+
+# ---------------------------------------------------------------------------
+# Cancel / abort during post-agent push (critical finding #6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_skips_when_aborted(processor, state_manager):
+    """Cancel/watchdog before delivery must not push or open MR."""
+    state_manager.create_state("AB-1", "s", "d")
+    state_manager.update_state("AB-1", status=TaskStatus.CANCELLED)
+    git = MagicMock()
+    processor._contexts = {"AB-1": {"git": git, "runner": MagicMock()}}
+
+    ok = await processor._push_and_create_mr(state_manager.get_state("AB-1"))
+    assert ok is False
+    git.push.assert_not_called()
+    git.create_merge_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_skips_mr_when_aborted_after_push(processor, state_manager):
+    """If cancel lands after git.push, do not open MR or stamp delivery."""
+    state_manager.create_state("AB-2", "s", "d")
+    state_manager.update_state("AB-2", status=TaskStatus.EXECUTING)
+    git = MagicMock()
+    git.ensure_on_work_branch = MagicMock(return_value=True)
+    git.work_branch = "feature/AB-2"
+    git.target_branch = "develop"
+    git.push = MagicMock(return_value=True)
+    git.get_last_commit_subject = MagicMock(return_value="feat: x")
+    git.get_last_commit_message = MagicMock(return_value="feat: x")
+    git.get_last_commit_sha = MagicMock(return_value="abc123deadbeef")
+    git.create_merge_request = MagicMock(return_value="https://mr/1")
+    git.build_commit_url = MagicMock(return_value=None)
+
+    processor._contexts = {"AB-2": {"git": git, "runner": MagicMock()}}
+    state = state_manager.get_state("AB-2")
+    call_count = {"n": 0}
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        call_count["n"] += 1
+        out = fn(*args, **kwargs)
+        # ensure_on_work_branch (1) then push (2) — abort after push
+        if call_count["n"] == 2:
+            state_manager.update_state("AB-2", status=TaskStatus.CANCELLED)
+        return out
+
+    with patch("src.processor.asyncio.to_thread", side_effect=fake_to_thread):
+        ok = await processor._push_and_create_mr(state)
+
+    assert ok is False
+    git.create_merge_request.assert_not_called()
+    st = state_manager.get_state("AB-2")
+    assert st.status == TaskStatus.CANCELLED
+    assert (st.metadata or {}).get("delivery_status") != "delivered"

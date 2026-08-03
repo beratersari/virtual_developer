@@ -271,15 +271,17 @@ class JobProcessor:
             meta_patch = self._archive_run_identifiers(issue_key)
             meta_patch["requeue_eligible"] = True
             # Fingerprint current text so poller only reprocesses when user edits
-            # the description (e.g. adds Mode) while staying on To Do.
+            # summary/description while staying on To Do. Store full + light
+            # (summary-only) so light board scans do not false-match every poll.
             st0 = self.state_manager.get_state(issue_key)
             if st0 is not None:
-                raw = f"{st0.issue_summary or ''}\n{st0.description or ''}"
-                import hashlib
+                from src.jira.poller import JiraPoller
 
-                meta_patch["last_intake_fingerprint"] = hashlib.sha256(
-                    raw.encode("utf-8", errors="replace")
-                ).hexdigest()[:20]
+                meta_patch.update(
+                    JiraPoller.text_fingerprints_from_state(
+                        st0.issue_summary, st0.description
+                    )
+                )
             # CAS: never clobber success or operator cancel
             updated = self.state_manager.update_state_if(
                 issue_key,
@@ -2419,7 +2421,24 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
+            # Cancel/watchdog after agent success: never start delivery
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"Execution aborted for {state.issue_key} before push; "
+                    "skipping delivery"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
             push_ok = await self._push_and_create_mr(state)
+            # Abort wins over delivery bookkeeping even if push already ran
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"Execution aborted for {state.issue_key} during/after push; "
+                    "not marking delivered or completed"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
             if not push_ok:
                 self._fail_issue(
                     state.issue_key,
@@ -2697,7 +2716,17 @@ class JobProcessor:
         Returns True if the branch was pushed (MR is best-effort after push).
         Returns False on missing git manager, protected branch, or push failure.
         Always pushes ``git.work_branch`` (not drifted HEAD) — B5.
+
+        Checks cancel/watchdog abort before expensive git work and before
+        recording delivery so cancel after agent success does not stamp
+        ``delivery_status=delivered`` or open an MR after terminal cancel.
         """
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Skipping push/MR for aborted {state.issue_key}"
+            )
+            return False
+
         git = self._git_for(state.issue_key)
         if not git:
             logger.warning(f"No git manager for {state.issue_key}")
@@ -2714,6 +2743,12 @@ class JobProcessor:
 
         # B5: force work_branch, never drift HEAD (off event loop — git I/O)
         on_work = await asyncio.to_thread(git.ensure_on_work_branch)
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Abort after work-branch checkout for {state.issue_key}; "
+                "skipping push"
+            )
+            return False
         if not on_work:
             msg = (
                 f"Refusing to push: could not checkout prepared work branch "
@@ -2750,12 +2785,26 @@ class JobProcessor:
             return False
 
         # Always record branch for completion messages (even if push fails later)
-        self.state_manager.update_state(
-            state.issue_key,
-            metadata={"feature_branch": branch_name},
-        )
+        if not self._is_aborted(state.issue_key):
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={"feature_branch": branch_name},
+            )
+
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Abort before push for {state.issue_key}; skipping remote delivery"
+            )
+            return False
 
         push_success = await asyncio.to_thread(git.push, branch_name)
+        if self._is_aborted(state.issue_key):
+            # Push may have already completed; do not open MR or stamp delivery.
+            logger.warning(
+                f"{state.issue_key}: abort after push attempt — "
+                "not creating MR or recording delivery"
+            )
+            return False
         if not push_success:
             logger.warning(f"Push failed or remote not configured for {state.issue_key}")
             try:
@@ -2802,12 +2851,22 @@ class JobProcessor:
             .strip()
             or None
         )
+        if self._is_aborted(state.issue_key):
+            logger.warning(
+                f"{state.issue_key}: abort before MR — not recording delivery"
+            )
+            return False
         mr_url = await asyncio.to_thread(
             git.create_merge_request,
             title=mr_title,
             body=mr_body,
             target_branch=target_branch,
         )
+        if self._is_aborted(state.issue_key):
+            logger.warning(
+                f"{state.issue_key}: abort after MR attempt — not recording delivery"
+            )
+            return False
 
         # Only attribute MR/commit to *this* job when HEAD moved past baseline
         baseline = self._resolve_delivery_baseline(state.issue_key, git)
