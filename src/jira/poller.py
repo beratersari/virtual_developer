@@ -310,15 +310,47 @@ class JiraPoller:
         return new_issues + reprocess_issues + plan_start_issues
 
     @staticmethod
-    def issue_text_fingerprint(issue: dict) -> str:
-        """Stable hash of summary+description for reprocess-on-edit detection."""
+    def issue_text_fingerprint(issue: dict, *, light: Optional[bool] = None) -> str:
+        """Stable hash for reprocess-on-edit detection.
+
+        Full fingerprint: ``summary + "\\n" + description``.
+        Light fingerprint (board scan omits description): ``summary + "\\n"``.
+
+        When ``light`` is None, light mode is chosen automatically if the
+        ``description`` key is absent from fields (poll_board payload shape).
+        """
         fields = issue.get("fields") or {}
         summary = fields.get("summary") or ""
-        desc = fields.get("description") or ""
-        if not isinstance(desc, str):
-            desc = str(desc)
-        raw = f"{summary}\n{desc}".encode("utf-8", errors="replace")
+        if light is None:
+            light = "description" not in fields
+        if light:
+            raw = f"{summary}\n".encode("utf-8", errors="replace")
+        else:
+            desc = fields.get("description") or ""
+            if not isinstance(desc, str):
+                desc = str(desc)
+            raw = f"{summary}\n{desc}".encode("utf-8", errors="replace")
         return hashlib.sha256(raw).hexdigest()[:20]
+
+    @staticmethod
+    def text_fingerprints_from_state(
+        summary: Optional[str], description: Optional[str]
+    ) -> Dict[str, str]:
+        """Full + light fingerprints for fail-path metadata (poller-compatible)."""
+        s = summary or ""
+        d = description or ""
+        if not isinstance(d, str):
+            d = str(d)
+        full = hashlib.sha256(f"{s}\n{d}".encode("utf-8", errors="replace")).hexdigest()[
+            :20
+        ]
+        light = hashlib.sha256(f"{s}\n".encode("utf-8", errors="replace")).hexdigest()[
+            :20
+        ]
+        return {
+            "last_intake_fingerprint": full,
+            "last_intake_fingerprint_light": light,
+        }
 
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
         """Re-queue terminal issues that should run again.
@@ -367,11 +399,17 @@ class JiraPoller:
             # while Jira stayed on To Do after cancel/fail.
             synthetic = frozenset({"__cancelled__", "__terminal_local__"})
 
-            # Real board leave non-To-Do → return to To Do
+            # Real board leave non-To-Do → return to To Do.
+            # Require an actual status *name* change: category-"new" columns
+            # (e.g. "Selected for Development") are To Do-like for eligibility
+            # but are not in the hard-coded English name set. Without prev!=curr
+            # they re-fired every poll for terminal work.
             entered_todo_from_elsewhere = (
                 prev_before is not None
                 and prev_before not in synthetic
+                and prev_before != curr_name
                 and not self._is_todo_status_name(prev_before)
+                and self._is_todo_status(fields)
             )
             # Cancel/error: only when Jira status *string* changed into To Do
             # (user actually moved the ticket). Synthetic markers alone do NOT count.
@@ -390,17 +428,17 @@ class JiraPoller:
             )
             # User fixed description (Mode/{params}) while staying on To Do after ERROR.
             # CANCELLED while still To Do must NOT auto-retry (operator cancelled).
-            # When fingerprint is missing (legacy), treat as "needs one retry attempt".
+            # Board scan omits description — use light fingerprint there so a full
+            # stored hash never false-matches "text changed" every poll.
             text_changed_retry = False
             if (
                 requeue_eligible
                 and state.status == TaskStatus.ERROR
                 and self._is_todo_status(fields)
             ):
-                fp = self.issue_text_fingerprint(issue)
-                last_fp = meta.get("last_intake_fingerprint")
-                if last_fp is None or last_fp != fp:
-                    text_changed_retry = True
+                text_changed_retry = self._error_text_changed_for_reprocess(
+                    issue, meta
+                )
 
             if not (
                 entered_todo_from_elsewhere
@@ -428,6 +466,35 @@ class JiraPoller:
             reprocess_issues.append(issue)
 
         return reprocess_issues
+
+    def _error_text_changed_for_reprocess(
+        self, issue: dict, meta: dict
+    ) -> bool:
+        """True when ERROR requeue should fire due to summary/description edit.
+
+        Light board payloads (no ``description`` key) compare only the summary
+        fingerprint so missing description never looks like a user edit.
+        When description is present (enriched), use the full fingerprint.
+        """
+        fields = issue.get("fields") or {}
+        board_is_light = "description" not in fields
+
+        if board_is_light:
+            light_fp = self.issue_text_fingerprint(issue, light=True)
+            last_light = meta.get("last_intake_fingerprint_light")
+            if last_light is not None:
+                return last_light != light_fp
+            # Legacy rows with only full fingerprint: do not false-positive.
+            # Missing fingerprint entirely: allow one requeue attempt.
+            if meta.get("last_intake_fingerprint") is None:
+                return True
+            return False
+
+        fp = self.issue_text_fingerprint(issue, light=False)
+        last_fp = meta.get("last_intake_fingerprint")
+        if last_fp is None:
+            return True
+        return last_fp != fp
 
     def _enrich_issue_for_work(self, issue: dict) -> dict:
         """Fetch full issue (incl. description) only for keys we will process."""

@@ -54,6 +54,19 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Startup orphan recovery failed: {e}", e)
 
+        # Schedules left in "dispatching" after crash never become due again
+        try:
+            from src.scheduler.service import recover_stuck_schedules
+
+            n = recover_stuck_schedules(max_age_seconds=0.0)
+            if n:
+                logger.info(
+                    f"Startup recovery re-opened {n} stuck schedule(s) "
+                    f"(dispatching → scheduled)"
+                )
+        except Exception as e:
+            logger.exception(f"Startup schedule recovery failed: {e}", e)
+
         # Age-based temp clone sweep (default: delete dirs older than 24h)
         try:
             from src.git_manager import purge_stale_temp_dirs

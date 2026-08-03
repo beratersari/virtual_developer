@@ -517,13 +517,17 @@ def cancel_scheduled_job(
     *,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
-    """Cancel a pending schedule. Does not delete the Jira issue."""
+    """Cancel a pending schedule. Does not delete the Jira issue.
+
+    ``dispatching`` may be cancelled (stuck claim after crash, or operator
+    abort before dispatch finishes). ``dispatched`` is terminal.
+    """
     ss = store or schedule_store
     rec = ss.get(schedule_id)
     if not rec:
         return {"ok": False, "error": f"No schedule {schedule_id}"}
     st = (rec.get("status") or "").lower()
-    if st in ("dispatched", "dispatching"):
+    if st == "dispatched":
         return {
             "ok": False,
             "error": f"Cannot cancel schedule in status {st}",
@@ -533,6 +537,16 @@ def cancel_scheduled_job(
         return {"ok": True, "schedule": rec, "message": "Already cancelled"}
     updated = ss.update(schedule_id, status="cancelled", error_message=None)
     return {"ok": True, "schedule": updated, "message": "Schedule cancelled"}
+
+
+def recover_stuck_schedules(
+    *,
+    store: Optional[ScheduleStore] = None,
+    max_age_seconds: float = 0.0,
+) -> int:
+    """Re-open stuck ``dispatching`` schedules (daemon crash recovery)."""
+    ss = store or schedule_store
+    return ss.recover_stuck_dispatching(max_age_seconds=max_age_seconds)
 
 
 def _issue_payload_for_dispatch(
@@ -624,6 +638,14 @@ async def dispatch_due_schedules(
     Returns counts: claimed, started, failed.
     """
     ss = store or schedule_store
+    # Re-open dispatching rows left by a prior crash (or a claim older than
+    # 30 minutes — process_event should not hold the claim that long).
+    try:
+        n = ss.recover_stuck_dispatching(max_age_seconds=1800.0, now=now)
+        if n:
+            logger.info(f"Schedule dispatch: recovered {n} stuck dispatching row(s)")
+    except Exception as e:
+        logger.warning(f"Schedule dispatch: stuck recovery failed: {e}")
     due = ss.list_due(now=now)
     claimed = 0
     started = 0

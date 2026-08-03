@@ -234,6 +234,56 @@ def test_cancel_scheduled_job(tmp_path):
     assert store.get(rec["schedule_id"])["status"] == "cancelled"
 
 
+def test_recover_stuck_dispatching_reopens_for_list_due(tmp_path):
+    """Crash after claim left status=dispatching — must not stay black-holed."""
+    from datetime import datetime
+
+    from src.scheduler.service import recover_stuck_schedules
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="stuck",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="plan",
+        scheduled_at="2000-01-01T00:00:00",
+        issue_key="KAN-STUCK",
+        issue_description="x",
+    )
+    claimed = store.claim_due(rec["schedule_id"])
+    assert claimed["status"] == "dispatching"
+    assert store.list_due(now=datetime(2026, 1, 1)) == []
+
+    n = recover_stuck_schedules(store=store, max_age_seconds=0.0)
+    assert n == 1
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "scheduled"
+    due = store.list_due(now=datetime(2026, 1, 1))
+    assert len(due) == 1
+    assert due[0]["schedule_id"] == rec["schedule_id"]
+
+
+def test_cancel_dispatching_schedule_allowed(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="c",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2026-12-01T00:00:00",
+        issue_key="KAN-DISP",
+        issue_description="x",
+    )
+    store.claim_due(rec["schedule_id"])
+    out = cancel_scheduled_job(rec["schedule_id"], store=store)
+    assert out["ok"] is True
+    assert store.get(rec["schedule_id"])["status"] == "cancelled"
+
+
 def test_preview_existing_issue_valid_template():
     client = MagicMock()
     client.get_issue.return_value = {
