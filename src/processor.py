@@ -1533,31 +1533,25 @@ class JobProcessor:
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        # Terminal → reprocess when Jira is To Do (operator reopen), OR when
-        # board is stuck In Progress after a failed schedule (local still
-        # terminal, no live job — poller stuck-IP recovery path).
+        # Terminal → reprocess only when Jira is To Do (operator reopen).
+        # ERROR/CANCELLED require requeue_eligible (set by cancel/fail).
+        # COMPLETED may reprocess when poller detected a real To Do return.
+        # Do NOT auto-reprocess while board is still In Progress (that caused
+        # infinite "no new commits" job loops every poll).
         if state.status in self.TERMINAL_STATUSES:
-            status_l = (status_name or "").strip().lower()
-            stuck_ip = (not is_todo) and any(
-                tok in status_l
-                for tok in ("progress", "doing", "started", "wip", "devam")
-            )
-            if is_todo or stuck_ip:
+            if is_todo:
                 meta = state.metadata or {}
                 if state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED):
-                    if not meta.get("requeue_eligible") and not stuck_ip:
+                    if not meta.get("requeue_eligible"):
                         logger.debug(
                             f"{issue_key} is {state.status.value} without "
                             f"requeue_eligible; ignoring update event"
                         )
                         return False, f"{state.status.value} without requeue_eligible"
-                if state.status == TaskStatus.CANCELLED and stuck_ip:
-                    if not meta.get("requeue_eligible"):
-                        return False, "cancelled without requeue_eligible (stuck IP)"
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
-                    f"(Jira status '{status_name}', stuck_ip={stuck_ip}, "
-                    f"requeue_eligible={bool(meta.get('requeue_eligible'))})"
+                    f"(Jira status '{status_name}' is To Do, requeue_eligible="
+                    f"{bool(meta.get('requeue_eligible'))})"
                 )
                 self._reset_for_reprocess(issue_key)
                 return await self._handle_issue_created(event)

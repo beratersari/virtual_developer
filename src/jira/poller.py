@@ -274,18 +274,6 @@ class JiraPoller:
 
         reprocess_issues = self.check_status_changes(todo_issues)
 
-        # Recovery: board left on In Progress after a failed job schedule
-        # (e.g. "Event loop is closed") while local state stayed terminal.
-        # Without this, tickets sit In Progress forever and never re-enter
-        # check_status_changes (which only looks at To Do).
-        stuck_ip = self._stuck_in_progress_without_job(issues)
-        if stuck_ip:
-            seen_rep = {i["key"] for i in reprocess_issues}
-            for issue in stuck_ip:
-                if issue["key"] not in seen_rep:
-                    reprocess_issues.append(issue)
-                    seen_rep.add(issue["key"])
-
         # Deduplicate: prefer create over update when both would fire
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
@@ -440,50 +428,6 @@ class JiraPoller:
             reprocess_issues.append(issue)
 
         return reprocess_issues
-
-    def _stuck_in_progress_without_job(self, issues: list) -> list:
-        """Re-fire work when Jira is In Progress-like but local work is terminal.
-
-        Happens when process_issue transitions the board first, then fails to
-        schedule process_event (closed event loop, multi-daemon races, etc.).
-        """
-        stuck = []
-        # Only COMPLETED: failed schedule left board In Progress while local
-        # stayed completed. Do NOT auto-loop ERROR tickets every poll.
-        trigger_labels = set(settings.trigger_labels_list)
-
-        for issue in issues:
-            issue_key = issue.get("key") or ""
-            fields = issue.get("fields") or {}
-            if self._is_todo_status(fields):
-                continue
-            status_name = (
-                ((fields.get("status") or {}).get("name") or "").strip().lower()
-            )
-            if not any(
-                tok in status_name
-                for tok in ("progress", "doing", "started", "wip", "devam")
-            ):
-                continue
-
-            labels = set(fields.get("labels") or [])
-            has_label = bool(trigger_labels & labels)
-            is_bot = self._is_assigned_to_jira_ai_bot(issue_key, fields)
-            should = has_label or (
-                is_bot and bool(settings.trigger_on_assignment)
-            )
-            if not should:
-                continue
-
-            state = self.state_manager.get_state(issue_key)
-            if not state or state.status != TaskStatus.COMPLETED:
-                continue
-            logger.info(
-                f"stuck In Progress recovery for {issue_key} "
-                f"(local completed, board '{status_name}'); reprocessing"
-            )
-            stuck.append(issue)
-        return stuck
 
     def _enrich_issue_for_work(self, issue: dict) -> dict:
         """Fetch full issue (incl. description) only for keys we will process."""
