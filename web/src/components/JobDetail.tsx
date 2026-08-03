@@ -4,6 +4,7 @@ import {
   findPromptForJobPath,
   pathBasename,
 } from '../util/paths'
+import { jobIsCancellable, jobIsDeletable } from '../util/status'
 import type { JobItem, SystemLogLine, TextArtifact } from '../types'
 import { PromptBlock } from './PromptBlock'
 import { StatusBadge } from './StatusBadge'
@@ -14,8 +15,6 @@ type DetailTab = 'overview' | 'prompt' | 'opencode' | 'logs'
  * Job (single run) page — only fields and artifacts for this job.
  * Issue-level state and other runs live on TaskDetailPage.
  */
-const LIVE_STATUSES = new Set(['running', 'planning', 'executing', 'pending'])
-
 export function JobDetail({
   job,
   artifacts,
@@ -29,6 +28,8 @@ export function JobDetail({
   onBack,
   onRefresh,
   onOpenTask,
+  onCancel,
+  cancelling = false,
   onDelete,
   deleting = false,
 }: {
@@ -49,13 +50,18 @@ export function JobDetail({
   onBack: () => void
   onRefresh: () => void
   onOpenTask: (issueKey: string) => void
+  /** Cancel in-flight agent work for this job's issue (POST /api/tasks/{key}/cancel). */
+  onCancel?: () => void
+  cancelling?: boolean
   onDelete?: () => void
   deleting?: boolean
 }) {
+  const canCancel =
+    Boolean(job?.issue_key) &&
+    Boolean(onCancel) &&
+    jobIsCancellable(job!.status || '', Boolean(job!.live))
   const canDelete =
-    Boolean(job) &&
-    !job!.live &&
-    !LIVE_STATUSES.has((job!.status || '').toLowerCase())
+    Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
   const promptMatch = useMemo(() => {
     const match = findPromptForJobPath(
       artifacts.prompts,
@@ -123,6 +129,17 @@ export function JobDetail({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {canCancel && (
+            <button
+              type="button"
+              className="ops-btn ops-btn-danger"
+              disabled={cancelling}
+              title={`Cancel in-flight work for issue ${job?.issue_key}`}
+              onClick={onCancel}
+            >
+              {cancelling ? 'Cancelling…' : 'Cancel job'}
+            </button>
+          )}
           {job?.issue_key && (
             <button
               type="button"
@@ -139,11 +156,11 @@ export function JobDetail({
             <button
               type="button"
               className="ops-btn ops-btn-danger"
-              disabled={!canDelete || deleting}
+              disabled={!canDelete || deleting || cancelling}
               title={
                 canDelete
                   ? 'Permanently delete this job record and linked session files'
-                  : 'Cannot delete a live or in-flight job'
+                  : 'Cannot delete a live or in-flight job — cancel it first'
               }
               onClick={onDelete}
             >

@@ -83,3 +83,12 @@ export function jobIsDeletable(status: string, live: boolean): boolean {
   if (live) return false
   return !LIVE_JOB_STATUSES.has((status || '').toLowerCase())
 }
+
+/**
+ * Whether Cancel should be offered for a job run (UI hint only).
+ * Backend cancels by issue key; live or in-flight job statuses are eligible.
+ */
+export function jobIsCancellable(status: string, live: boolean): boolean {
+  if (live) return true
+  return LIVE_JOB_STATUSES.has((status || '').toLowerCase())
+}
