@@ -396,17 +396,34 @@ export default function App() {
   }, [])
 
   const onCancelIssue = async () => {
-    if (!taskDetail?.issue_key || !taskDetail.can_cancel) return
+    // Prefer task detail; fall back to job view (job page previously had no Cancel).
+    const issueKey =
+      (taskDetail?.issue_key || jobView?.issue_key || '').trim().toUpperCase()
+    if (!issueKey) return
+    if (taskDetail?.issue_key && !taskDetail.can_cancel) return
+    if (
+      jobView &&
+      !taskDetail &&
+      !jobView.live &&
+      !['pending', 'planning', 'executing', 'running'].includes(
+        (jobView.status || '').toLowerCase(),
+      )
+    ) {
+      return
+    }
     if (
       !window.confirm(
-        `Cancel in-flight work for issue ${taskDetail.issue_key}?`,
+        `Cancel in-flight work for issue ${issueKey}?` +
+          (jobView?.job_id ? `\n\nJob: ${jobView.job_id}` : ''),
       )
     )
       return
     setCancelling(true)
+    setDetailError(null)
     try {
-      await cancelTask(taskDetail.issue_key)
+      await cancelTask(issueKey)
       await refreshDetail()
+      void reloadJobs()
       const dash = await fetchDashboard()
       applyPayload(dash)
     } catch (e) {
@@ -860,6 +877,8 @@ export default function App() {
             onBack={() => closeDetail()}
             onRefresh={() => void refreshDetail()}
             onOpenTask={(key) => void openTaskDetail(key)}
+            onCancel={() => void onCancelIssue()}
+            cancelling={cancelling}
             onDelete={() => void onDeleteJob()}
             deleting={deletingJob}
           />
