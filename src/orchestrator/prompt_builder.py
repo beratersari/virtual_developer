@@ -92,10 +92,14 @@ class PromptBuilder:
         plan_instr = (
             f"## Required plan file (mandatory)\n\n"
             f"Before you finish, write the **full** plan (markdown with task "
-            f"checkboxes) to:\n\n`{plan_rel}`\n\n"
+            f"checkboxes / to-do items) to:\n\n`{plan_rel}`\n\n"
             f"Also acceptable: `.omo/plans/{issue_key}.md` "
             f"(drafts under `.omo/drafts/` alone are **not** enough).\n\n"
-            f"Exit with success only after that file exists and is non-empty."
+            f"The to-do list **must** end with a commit item for the build agent, e.g.\n"
+            f"`[ ] Commit with the conventional format if files changed: "
+            f"`[{issue_key}] <type>: <short description>``\n\n"
+            f"Exit with success only after that file exists, is non-empty, and "
+            f"includes the commit to-do."
         )
         system = PromptBuilder._join_blocks(
             "# Plan request",
@@ -124,11 +128,24 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Build path: system (unattended + execution + commit) + title + description."""
+        """Build path: Atlas system (unattended + execution + commit) + title + description."""
+        atlas_ops = (
+            f"## Atlas build order (mandatory)\n\n"
+            f"1. **Plan first** — read the plan file if present; otherwise re-plan briefly.\n"
+            f"2. **Create to-do items** before heavy code edits. Todos **must** include:\n"
+            f"   - Implementation steps\n"
+            f"   - Verification when practical\n"
+            f"   - **Commit with the convention below if you made changes:**\n"
+            f"     `[{issue_key}] <type>: <short description>`\n"
+            f"3. **Then** edit code, check off todos, and complete the commit todo last "
+            f"when files changed.\n"
+            f"Do not ask the user questions. Do not push or open an MR.\n"
+        )
         system_parts = [
-            "# Build request",
+            "# Build request (Atlas)",
             PromptBuilder.unattended_policy_block(),
             f"## Role\n\n{PromptBuilder.role_section('execution')}",
+            atlas_ops,
             PromptBuilder.commit_message_block(
                 issue_key, work_branch=work_branch
             ),

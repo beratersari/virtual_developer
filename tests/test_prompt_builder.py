@@ -54,6 +54,9 @@ def test_build_path_includes_title_description_and_plan():
         work_branch="feature/A-1",
     )
     assert "Build request" in p
+    assert "Atlas" in p
+    assert "Create to-do" in p or "to-do" in p.lower()
+    assert "Commit with the convention" in p or "conventional" in p.lower()
     assert "Jira title" in p and "Build the feature" in p
     assert "Jira description" in p and "Do the work carefully" in p
     assert "/plans/A-1.md" in p
@@ -61,6 +64,12 @@ def test_build_path_includes_title_description_and_plan():
     assert "## Git policy" in p
     assert "[A-1]" in p
     assert p.count("## Git policy") == 1
+
+
+def test_plan_path_requires_commit_todo_in_plan_file_instructions():
+    p = PromptBuilder.build_plan_prompt("KAN-7", "title", "desc")
+    assert "Commit with the conventional format" in p
+    assert "[KAN-7]" in p
 
 
 def test_build_without_plan_still_has_description():

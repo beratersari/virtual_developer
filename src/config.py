@@ -73,7 +73,8 @@ class Settings(BaseSettings):
     )
     
     # Agent Configuration
-    default_agent: str = Field(default="sisyphus")
+    # Build/default agent is Atlas (strong orchestrator); plan uses Prometheus
+    default_agent: str = Field(default="atlas")
     planning_agent: str = Field(default="prometheus")
     orchestrator_agent: str = Field(default="atlas")
     execution_category: str = Field(default="deep")
