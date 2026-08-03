@@ -721,7 +721,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=IssueGitConfigError("bad template"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
     assert state_manager.get_state("GW-1").status == TaskStatus.ERROR
 
     state = state_manager.create_state("GW-2", "s", "d")
@@ -730,7 +730,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitCloneError("clone fail"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-3", "s", "d")
     with patch.object(
@@ -738,7 +738,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitTargetBranchError("no target"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-4", "s", "d")
     with patch.object(
@@ -746,13 +746,13 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitSourceBranchError("no source"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-5", "s", "d")
     with patch.object(
         processor, "_init_git_manager", side_effect=RuntimeError("weird")
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1368,7 +1368,9 @@ async def test_execution_prepare_git_none_returns(
 ):
     monkeypatch.chdir(tmp_path)
     state = state_manager.create_state("EXN-1", "s", "d")
-    with patch.object(processor, "_prepare_git_workspace", return_value=None):
+    with patch.object(
+        processor, "_prepare_git_workspace", new_callable=AsyncMock, return_value=None
+    ):
         with patch("src.processor.settings") as s:
             s.orchestrator_agent = "atlas"
             s.agent_task_timeout_seconds = 10

@@ -519,7 +519,7 @@ async def test_prepare_git_workspace_template_error(processor, state_manager, fa
     state = state_manager.create_state("TPL-1", "no git fields", "just a task")
     processor._begin_workflow_run = MagicMock()
     # Already need an in-flight-ish state for fail path
-    out = processor._prepare_git_workspace(state)
+    out = processor._prepare_git_workspace_blocking(state)
     assert out is None
     assert fake_jira.comments  # Jira notified
     loaded = state_manager.get_state("TPL-1")

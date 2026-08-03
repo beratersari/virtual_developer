@@ -1815,10 +1815,13 @@ class JobProcessor:
         self.agent_runner = runner
         return git
 
-    def _prepare_git_workspace(self, state: JiraAgentState) -> Optional[GitManager]:
-        """Init git + work branch from target, or fail the issue with a Jira message.
+    def _prepare_git_workspace_blocking(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Sync clone + work-branch setup (may take minutes on large repos).
 
-        Returns GitManager on success, None after calling ``_fail_issue``.
+        Must not run on the asyncio event loop — use
+        :meth:`_prepare_git_workspace` which offloads via ``asyncio.to_thread``.
         """
         try:
             git = self._init_git_manager(state.issue_key, state)
@@ -1884,6 +1887,16 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
             return None
 
+    async def _prepare_git_workspace(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Init git + work branch without blocking the asyncio event loop.
+
+        Large clones previously froze the ops dashboard (same process/loop as
+        uvicorn). Offload clone/checkout to a worker thread.
+        """
+        return await asyncio.to_thread(self._prepare_git_workspace_blocking, state)
+
     async def _start_planning_workflow(self, state: JiraAgentState):
         logger.info(f"Starting planning workflow for {state.issue_key}")
         workflow_start_time = datetime.now()
@@ -1910,7 +1923,7 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
             return
         runner = self._runner_for(state.issue_key)
@@ -2146,7 +2159,7 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
             return
         # Materialize durable plan into the fresh clone for Atlas
@@ -2606,8 +2619,9 @@ class JobProcessor:
 
         logger.info(f"Starting push and MR creation for {state.issue_key}")
 
-        # B5: force work_branch, never drift HEAD
-        if not git.ensure_on_work_branch():
+        # B5: force work_branch, never drift HEAD (off event loop — git I/O)
+        on_work = await asyncio.to_thread(git.ensure_on_work_branch)
+        if not on_work:
             msg = (
                 f"Refusing to push: could not checkout prepared work branch "
                 f"`{getattr(git, 'work_branch', None)}`."
@@ -2619,7 +2633,9 @@ class JobProcessor:
                 pass
             return False
 
-        branch_name = (getattr(git, "work_branch", None) or "").strip() or git.get_current_branch()
+        branch_name = (getattr(git, "work_branch", None) or "").strip()
+        if not branch_name:
+            branch_name = await asyncio.to_thread(git.get_current_branch)
 
         # Refuse to push protected bases / MR target / release/*
         target = (getattr(git, "target_branch", None) or "").strip().lower()
@@ -2646,7 +2662,7 @@ class JobProcessor:
             metadata={"feature_branch": branch_name},
         )
 
-        push_success = git.push(branch_name)
+        push_success = await asyncio.to_thread(git.push, branch_name)
         if not push_success:
             logger.warning(f"Push failed or remote not configured for {state.issue_key}")
             try:
@@ -2693,7 +2709,8 @@ class JobProcessor:
             .strip()
             or None
         )
-        mr_url = git.create_merge_request(
+        mr_url = await asyncio.to_thread(
+            git.create_merge_request,
             title=mr_title,
             body=mr_body,
             target_branch=target_branch,
