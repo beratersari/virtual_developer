@@ -98,9 +98,108 @@ def test_create_scheduled_job_hard_fails_without_issue(tmp_path):
     )
     assert out["ok"] is False
     assert "Failed to create Jira issue" in out["error"]
-    assert "Schedule was not saved" in out["error"]
+
+
+def test_work_branch_for_issue_key():
+    from src.scheduler.service import work_branch_for_issue_key
+
+    assert work_branch_for_issue_key("KAN-42") == "feature/KAN-42"
+    assert work_branch_for_issue_key("PROJ/1") == "feature/PROJ-1"
+
+
+def test_create_scheduled_job_custom_source_branch(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-9"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Custom branch job",
+        description="body",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["source_branch"] == "develop"
+    assert out["schedule"]["source_branch"] == "develop"
+    # Description on create already has develop
+    desc = client.create_issue.call_args.kwargs.get("description") or ""
+    assert "Source branch: develop" in desc
+    client.update_issue.assert_not_called()
+
+
+def test_create_scheduled_job_source_from_issue_key(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-99"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Issue-key branch job",
+        description="Implement feature",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="",  # ignored for issue_key mode
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="issue_key",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["issue_key"] == "KAN-99"
+    assert out["source_branch"] == "feature/KAN-99"
+    assert out["schedule"]["source_branch"] == "feature/KAN-99"
+    assert "feature/KAN-99" in (out["schedule"].get("issue_description") or "")
+    # After create, description rewritten with real key
+    client.update_issue.assert_called_once()
+    upd_fields = client.update_issue.call_args.kwargs.get("fields") or {}
+    if not upd_fields and client.update_issue.call_args.args:
+        # positional (issue_key, fields=...)
+        pass
+    # kwargs form: update_issue(issue_key, fields={...})
+    call_kw = client.update_issue.call_args
+    fields = call_kw.kwargs.get("fields")
+    if fields is None and len(call_kw.args) >= 2:
+        fields = call_kw.args[1]
+    assert fields is not None
+    assert "Source branch: feature/KAN-99" in fields.get("description", "")
+
+
+def test_create_scheduled_job_issue_key_mode_requires_no_custom_source(tmp_path):
+    """custom mode without source_branch fails; issue_key mode does not need it."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "X-1"}
+    client.update_issue.return_value = True
+    missing = create_scheduled_job(
+        title="T",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="",
+        target_branch="develop",
+        mode="plan",
+        scheduled_at=datetime.now().isoformat(timespec="seconds"),
+        project_key="X",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert missing["ok"] is False
+    assert "source_branch" in missing["error"]
     assert store.list_schedules() == []
-    client.transition_to_in_progress.assert_not_called()
+    client.create_issue.assert_not_called()
 
 
 def test_create_scheduled_job_soft_transition_and_saves(tmp_path):

@@ -220,12 +220,13 @@ def create_dashboard_app(
             title=body.title,
             description=body.description or "",
             repository_url=body.repository_url,
-            source_branch=body.source_branch,
+            source_branch=body.source_branch or "",
             target_branch=body.target_branch,
             mode=body.mode,
             scheduled_at=body.scheduled_at,
             project_key=body.project_key,
             issue_type=body.issue_type or "Task",
+            source_branch_mode=body.source_branch_mode or "custom",
         )
         if not result.get("ok"):
             raise HTTPException(
