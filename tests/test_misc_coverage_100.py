@@ -463,7 +463,6 @@ def jira_client():
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.example.com"
             s.jira_api_token = "token"
-            s.jira_email = ""
             from src.jira.client import JiraClient
 
             c = JiraClient()
@@ -484,7 +483,7 @@ def _jresp(status=200, json_data=None, text=""):
     return r
 
 
-def test_jira_cloud_host_without_email_warns():
+def test_jira_cloud_host_without_email_uses_bearer():
     with patch("src.jira.client.httpx.Client") as mock_cls:
         mock_cls.return_value = MagicMock()
         with patch("src.jira.client.settings") as s:
@@ -1392,25 +1391,19 @@ def test_logger_issue_ring_exception(monkeypatch):
 def test_prompt_builder_empty_and_context():
     from src.orchestrator.prompt_builder import PromptBuilder
 
-    body = PromptBuilder._jira_body("I-1", "", "")
+    body = PromptBuilder._jira_title_and_description("I-1", "", "")
     assert "no summary" in body.lower() or "I-1" in body
 
-    prompt = PromptBuilder.build_sisyphus_prompt(
+    prompt = PromptBuilder.build_build_prompt(
         "I-2",
+        "sum",
         "task body",
-        context={
-            "files": ["a.py"],
-            "patterns": ["singleton"],
-            "note": "extra",
-        },
-        summary="sum",
     )
-    assert "a.py" in prompt
-    assert "singleton" in prompt
-    assert "extra" in prompt
+    assert "task body" in prompt
+    assert "sum" in prompt
+    assert "Jira description" in prompt
 
-    # empty context keys skip
-    p2 = PromptBuilder.build_sisyphus_prompt("I-3", "t", context={})
+    p2 = PromptBuilder.build_build_prompt("I-3", "", "t")
     assert "I-3" in p2
 
 

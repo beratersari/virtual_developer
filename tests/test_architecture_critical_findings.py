@@ -731,7 +731,6 @@ def test_sanity_create_issue_uses_fields_wrapper():
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.example.com"
             s.jira_api_token = "t"
-            s.jira_email = ""
             c = JiraClient()
             c.client = http
             c.resolve_issuetype_ref = MagicMock(return_value={"name": "Task"})

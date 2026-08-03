@@ -90,11 +90,13 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
     gm.remote_url = f"https://{host}/group/repo.git"
     with patch("src.git_manager.subprocess.run") as run:
         run.return_value = _cp(returncode=0)
-        with patch.object(gm, "_sync_remote_branches"):
+        with patch.object(gm, "_materialize_job_remote_refs"):
             with patch("src.git_manager.settings") as s:
                 s.gitlab_pat = "pat"
                 s.gitlab_allowed_hosts = host
                 s.gitlab_allowed_hosts_list = [host]
+                s.git_command_timeout_seconds = 300
+                s.git_clone_timeout_seconds = 300
                 gm._clone_into_temp()
     with patch("src.git_manager.subprocess.run") as run:
         run.return_value = _cp(returncode=1, stderr="fail")
@@ -112,29 +114,43 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
         gm._clone_into_temp()
 
 
-def test_sync_remote_branches(gm):
-    def run_git(args, check=True):
-        if args[:2] == ["branch", "-r"]:
-            return _cp("  origin/main\n  origin/HEAD -> origin/main\n  origin/feature/x\n")
-        if args[0] == "rev-parse":
-            return _cp(returncode=1)
+def test_materialize_job_remote_refs_only_fetches_source_target(gm):
+    """Must not list/track every origin/* branch — only source/target."""
+    gm.source_branch = "feature/job"
+    gm.target_branch = "develop"
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    calls: list = []
+
+    def run_git(args, check=True, auth=False, timeout=None):
+        calls.append(list(args))
         return _cp()
 
     with patch.object(gm, "_run_git", side_effect=run_git):
+        gm._materialize_job_remote_refs()
+
+    fetch_args = [c for c in calls if c[:2] == ["fetch", "origin"]]
+    assert any(c == ["fetch", "origin", "develop"] for c in fetch_args)
+    assert any(c == ["fetch", "origin", "feature/job"] for c in fetch_args)
+    # No mass branch -r / --track of unrelated remotes
+    assert not any(c[:2] == ["branch", "-r"] for c in calls)
+    assert not any("--track" in c for c in calls)
+
+
+def test_sync_remote_branches_is_alias_to_job_materialize(gm):
+    gm.source_branch = "develop"
+    gm.target_branch = "develop"
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    with patch.object(gm, "_materialize_job_remote_refs") as m:
         gm._sync_remote_branches()
+        m.assert_called_once()
 
-    with patch.object(gm, "_run_git", side_effect=RuntimeError("x")):
-        gm._sync_remote_branches()
 
-    with patch.object(gm, "_run_git", return_value=_cp(returncode=1, stderr="e")):
-        # branch -r fails after fetch
-        def rg(args, check=True):
-            if args[:2] == ["branch", "-r"]:
-                return _cp(returncode=1, stderr="e")
-            return _cp()
-
-        with patch.object(gm, "_run_git", side_effect=rg):
-            gm._sync_remote_branches()
+def test_materialize_job_remote_refs_noop_without_branches(gm):
+    gm.source_branch = ""
+    gm.target_branch = ""
+    with patch.object(gm, "_run_git") as rg:
+        gm._materialize_job_remote_refs()
+        rg.assert_not_called()
 
 
 def test_run_git_missing_dir(gm):

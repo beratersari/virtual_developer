@@ -275,7 +275,7 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         host = str(data["jira_host"]).strip().rstrip("/")
         settings.jira_host = host
     if "jira_email" in data and data["jira_email"] is not None:
-        # Empty string clears Cloud email (switch to Bearer / on-prem style)
+        # Empty string clears Cloud email → Bearer PAT mode
         settings.jira_email = str(data["jira_email"]).strip()
     if "jira_api_token" in data and data["jira_api_token"] is not None:
         # Write-only: only apply non-empty values so blank UI fields keep current

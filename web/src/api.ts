@@ -210,7 +210,9 @@ export type JiraConnectionTestResult = {
   server_time?: string
 }
 
-/** Test Jira connection — /myself + browsable projects. */
+/** Test Jira connection — /myself + projects.
+ *  email + token → Basic (Cloud); token only → Bearer (prod PAT).
+ */
 export async function testJiraConnection(body: {
   host?: string
   email?: string

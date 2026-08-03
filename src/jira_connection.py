@@ -19,10 +19,16 @@ def probe_jira_connection(
 ) -> Dict[str, Any]:
     """Verify Jira credentials via ``/myself`` and list projects.
 
+    Auth:
+      * email + token → HTTP Basic (Cloud API token / dev)
+      * token only → Bearer (PAT / prod)
+
     Omitted fields fall back to runtime ``settings``. Never returns the token.
     """
     h = (host if host is not None else settings.jira_host or "").strip().rstrip("/")
-    em = (email if email is not None else getattr(settings, "jira_email", "") or "").strip()
+    em = (
+        email if email is not None else getattr(settings, "jira_email", "") or ""
+    ).strip()
     tok = (api_token if api_token is not None else "").strip()
     if not tok:
         tok = (settings.jira_api_token or "").strip()
@@ -40,18 +46,14 @@ def probe_jira_connection(
         }
 
     is_cloud = "atlassian.net" in h.lower()
-    use_basic = bool(tok and em)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     auth = None
-    auth_mode = "bearer"
-    if use_basic:
+    if em:
         auth = (em, tok)
         auth_mode = "basic"
     else:
         headers["Authorization"] = f"Bearer {tok}"
-        if is_cloud:
-            # Still attempt Bearer so the error is explicit if email missing
-            auth_mode = "bearer (cloud host — email recommended)"
+        auth_mode = "bearer"
 
     base = f"{h}/rest/api/2"
     timeout = httpx.Timeout(25.0, connect=10.0)
@@ -69,8 +71,9 @@ def probe_jira_connection(
                 hint = ""
                 if is_cloud and not em:
                     hint = (
-                        " Cloud hosts usually need email + API token (Basic auth). "
-                        "Set Jira email and retry."
+                        " For Jira Cloud API tokens, set Jira email "
+                        "(HTTP Basic email+token). Leave email empty only for "
+                        "Bearer PAT (on-prem / prod)."
                     )
                 return {
                     "ok": False,
@@ -79,7 +82,7 @@ def probe_jira_connection(
                     "http_status": me.status_code,
                     "error": (
                         f"Auth failed (HTTP {me.status_code}). "
-                        f"Token invalid or missing scopes.{hint}"
+                        f"Token invalid, revoked, or missing scopes.{hint}"
                     ),
                 }
             if me.status_code != 200:

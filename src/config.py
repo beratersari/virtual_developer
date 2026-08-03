@@ -21,12 +21,15 @@ class Settings(BaseSettings):
     )
     
     # JIRA Configuration
-    # - On-prem Server/DC PAT: set JIRA_HOST + JIRA_API_TOKEN (Bearer)
-    # - Jira Cloud API token: set JIRA_HOST + JIRA_EMAIL + JIRA_API_TOKEN (Basic email:token)
+    # - Prod / on-prem PAT: JIRA_HOST + JIRA_API_TOKEN → Bearer
+    # - Cloud (dev): also set JIRA_EMAIL → HTTP Basic (email + API token)
     jira_host: str = Field(default="", description="JIRA instance URL")
     jira_email: str = Field(
         default="",
-        description="Atlassian account email (required for Jira Cloud API tokens; unused for on-prem Bearer PAT)",
+        description=(
+            "Optional Atlassian account email. When set with a token, Jira uses "
+            "HTTP Basic (Cloud API tokens). Leave empty for Bearer PAT (prod/on-prem)."
+        ),
     )
     jira_api_token: str = Field(
         default="",
@@ -70,7 +73,8 @@ class Settings(BaseSettings):
     )
     
     # Agent Configuration
-    default_agent: str = Field(default="sisyphus")
+    # Build/default agent is Atlas (strong orchestrator); plan uses Prometheus
+    default_agent: str = Field(default="atlas")
     planning_agent: str = Field(default="prometheus")
     orchestrator_agent: str = Field(default="atlas")
     execution_category: str = Field(default="deep")

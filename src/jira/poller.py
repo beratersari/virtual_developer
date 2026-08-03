@@ -280,7 +280,8 @@ class JiraPoller:
         plan_start_issues = [
             i
             for i in plan_start_issues
-            if i["key"] not in new_keys and i["key"] not in {x["key"] for x in reprocess_issues}
+            if i["key"] not in new_keys
+            and i["key"] not in {x["key"] for x in reprocess_issues}
         ]
         reprocess_keys = {i["key"] for i in reprocess_issues} | {
             i["key"] for i in plan_start_issues

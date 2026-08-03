@@ -591,7 +591,6 @@ export default function App() {
     const creds = data.settings.gitlab_credentials ?? []
     setSettingsDraft({
       jira_host: data.settings.jira_host,
-      jira_email: data.settings.jira_email ?? '',
       jira_board_id: data.settings.jira_board_id,
       poll_interval_seconds: data.settings.poll_interval_seconds,
       trigger_labels: data.settings.trigger_labels,
@@ -663,7 +662,7 @@ export default function App() {
       }
       const body: Parameters<typeof patchSettings>[0] = {
         jira_host: (settingsDraft.jira_host ?? '').trim(),
-        jira_email: (settingsDraft.jira_email ?? '').trim(),
+        // jira_email is env-only (not edited in UI) so we never PATCH it
         jira_board_id: board,
         poll_interval_seconds: poll,
         trigger_labels: settingsDraft.trigger_labels,
@@ -703,7 +702,6 @@ export default function App() {
       // Clear secret fields after successful save
       setSettingsDraft({
         jira_host: updated.jira_host,
-        jira_email: updated.jira_email ?? '',
         jira_api_token: '',
         gitlab_pat: '',
         jira_board_id: updated.jira_board_id,

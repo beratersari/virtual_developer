@@ -132,6 +132,7 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     assert settings.jira_host == "https://new.example.com"
     assert settings.jira_email == "new@ex.com"
     assert settings.jira_api_token == "new-secret-token"
+    assert view.jira_email == "new@ex.com"
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
     assert settings.gitlab_pat_for_host("api.gitlab.com") == "pat-cloud"

@@ -457,7 +457,8 @@ def create_dashboard_app(
     def settings_jira_test(body: JiraConnectionTestRequest) -> dict:
         """Verify Jira host credentials (``/myself`` + project list).
 
-        Token is optional: empty uses stored runtime token. Never echoes secrets.
+        Token only → Bearer; email + token → Cloud Basic. Empty token uses the
+        stored runtime token. Never echoes secrets.
         """
         result = probe_jira_connection(
             host=body.host,

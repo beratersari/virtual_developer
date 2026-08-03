@@ -12,10 +12,12 @@ class JiraClient:
     """Client for JIRA REST API.
 
     Auth:
-      * **On-prem PAT**: ``JIRA_HOST`` + ``JIRA_API_TOKEN`` → ``Authorization: Bearer``
-      * **Jira Cloud API token**: ``JIRA_HOST`` + ``JIRA_EMAIL`` + ``JIRA_API_TOKEN``
-        → HTTP Basic (email as username, token as password). Cloud personal API
-        tokens do not work as Bearer.
+      * **Bearer (default / prod):** ``JIRA_HOST`` + ``JIRA_API_TOKEN``
+        → ``Authorization: Bearer {token}``
+      * **Basic (Cloud / dev):** also set ``JIRA_EMAIL``
+        → HTTP Basic (email as username, API token as password)
+
+    Empty email never forces Basic. Prod on-prem should leave email empty.
     """
     
     def __init__(
@@ -26,31 +28,23 @@ class JiraClient:
     ):
         self.host = (host or settings.jira_host).rstrip("/")
         self.api_token = api_token if api_token is not None else settings.jira_api_token
-        self.email = (email if email is not None else getattr(settings, "jira_email", "")) or ""
+        self.email = (
+            email if email is not None else getattr(settings, "jira_email", "")
+        ) or ""
         
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         auth = None
-
-        use_cloud_basic = bool(self.api_token and self.email.strip())
-        # Auto-detect Cloud sites even if email is missing (will log clearly)
-        is_cloud_host = "atlassian.net" in self.host.lower()
-
-        if use_cloud_basic:
-            # Cloud API token: Basic email:token
-            auth = (self.email.strip(), self.api_token)
-            logger.info("JiraClient auth: HTTP Basic (Cloud API token + email)")
+        em = self.email.strip()
+        # Cloud personal API tokens need Basic email:token; PATs use Bearer.
+        if self.api_token and em:
+            auth = (em, self.api_token)
+            logger.info("JiraClient auth: HTTP Basic (email + API token)")
         elif self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
-            if is_cloud_host:
-                logger.warning(
-                    "Jira host looks like Cloud (atlassian.net) but JIRA_EMAIL is empty. "
-                    "Cloud API tokens require Basic auth with email+token; Bearer will fail (403)."
-                )
-            else:
-                logger.info("JiraClient auth: Bearer token (on-prem PAT)")
+            logger.info("JiraClient auth: Bearer token")
         
         self.client = httpx.Client(
             base_url=f"{self.host}/rest/api/2",

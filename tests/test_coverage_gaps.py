@@ -147,7 +147,7 @@ def test_git_manager_full_setup(tmp_path, monkeypatch):
         s.gitlab_pat = "pat"
         s.temp_dir_base = Path(".temp")
         with patch.object(GitManager, "_clone_into_temp") as clone:
-            with patch.object(GitManager, "_sync_remote_branches"):
+            with patch.object(GitManager, "_materialize_job_remote_refs"):
                 with patch("src.git_manager.set_current_temp_dir"):
                     g = GitManager(
                         issue_key="GS-1",
