@@ -48,6 +48,25 @@ def test_spa_index_served(dist: Path):
     assert 'id="root"' in r.text
 
 
+def test_js_assets_not_served_as_text_plain(dist: Path, monkeypatch):
+    """Windows registry can map .js → text/plain; SPA module scripts require JS MIME."""
+    import mimetypes
+
+    # Simulate broken Windows MIME map
+    mimetypes.init()
+    mimetypes.types_map[".js"] = "text/plain"
+
+    mod = _load_serve_frontend()
+    app = mod.build_app(dist=dist, backend="http://127.0.0.1:8080")
+    client = TestClient(app)
+
+    r = client.get("/assets/app.js")
+    assert r.status_code == 200
+    ct = (r.headers.get("content-type") or "").lower()
+    assert "javascript" in ct, f"expected JS MIME, got {ct!r}"
+    assert "text/plain" not in ct
+
+
 def test_proxy_api_returns_502_when_backend_down(dist: Path):
     mod = _load_serve_frontend()
     app = mod.build_app(dist=dist, backend="http://127.0.0.1:9")
