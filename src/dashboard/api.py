@@ -112,6 +112,14 @@ def create_dashboard_app(
     state_manager: Optional[JiraStateManager] = None,
 ) -> FastAPI:
     """Create dashboard FastAPI application bound to daemon services."""
+    # Windows registry can map .js → text/plain; force SPA-safe types before StaticFiles
+    try:
+        from src.web_mimetypes import ensure_spa_mimetypes, media_type_for_path
+
+        ensure_spa_mimetypes()
+    except Exception:
+        media_type_for_path = None  # type: ignore[assignment]
+
     sm = state_manager or JiraStateManager()
     # No OpenAPI UI in production path — dashboard has no auth
     app = FastAPI(
@@ -561,10 +569,29 @@ def create_dashboard_app(
         logger.info(f"Dashboard SPA static root: {static}")
         assets = static / "assets"
         if assets.is_dir():
-            # Mount assets first so hashed JS/CSS are not swallowed by SPA fallback
+            # Mount assets first so hashed JS/CSS are not swallowed by SPA fallback.
+            # Subclass forces JS/CSS MIME — Windows registry can map .js → text/plain.
+            class _SpaStaticFiles(StaticFiles):
+                def file_response(  # type: ignore[no-untyped-def]
+                    self, full_path, stat_result, scope, status_code=200
+                ):
+                    resp = super().file_response(
+                        full_path, stat_result, scope, status_code=status_code
+                    )
+                    if media_type_for_path is not None:
+                        try:
+                            mt = media_type_for_path(Path(str(full_path)))
+                        except Exception:
+                            mt = None
+                        if mt:
+                            resp.headers["content-type"] = mt
+                            if hasattr(resp, "media_type"):
+                                resp.media_type = mt
+                    return resp
+
             app.mount(
                 "/assets",
-                StaticFiles(directory=str(assets)),
+                _SpaStaticFiles(directory=str(assets)),
                 name="assets",
             )
         else:
@@ -590,13 +617,22 @@ def create_dashboard_app(
                 cache = "public, max-age=31536000, immutable"
             else:
                 cache = "no-cache, no-store, must-revalidate"
-            return FileResponse(
-                path,
-                headers={
+            mt = None
+            if media_type_for_path is not None:
+                try:
+                    mt = media_type_for_path(path)
+                except Exception:
+                    mt = None
+            kwargs: dict = {
+                "path": path,
+                "headers": {
                     "Cache-Control": cache,
                     "Pragma": "no-cache" if "no-cache" in cache else "public",
                 },
-            )
+            }
+            if mt:
+                kwargs["media_type"] = mt
+            return FileResponse(**kwargs)
 
         @app.get("/")
         def index() -> FileResponse:

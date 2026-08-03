@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import mimetypes
 import os
 import sys
 from pathlib import Path
@@ -26,13 +27,77 @@ def _env(name: str, default: str) -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _ensure_spa_mimetypes() -> None:
+    """Force correct types for SPA assets (Windows registry often maps .js → text/plain)."""
+    try:
+        # Prefer shared helper when running from product tree
+        from src.web_mimetypes import ensure_spa_mimetypes
+
+        ensure_spa_mimetypes()
+        return
+    except Exception:
+        pass
+    # Standalone / import-path fallback (same overrides as src.web_mimetypes)
+    overrides = {
+        ".js": "text/javascript",
+        ".mjs": "text/javascript",
+        ".cjs": "text/javascript",
+        ".css": "text/css",
+        ".wasm": "application/wasm",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".map": "application/json",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".html": "text/html",
+    }
+    mimetypes.init()
+    for ext, mime in overrides.items():
+        mimetypes.add_type(mime, ext, strict=True)
+        mimetypes.types_map[ext] = mime
+
+
+def _media_type_for(path: Path) -> Optional[str]:
+    try:
+        from src.web_mimetypes import media_type_for_path
+
+        return media_type_for_path(path)
+    except Exception:
+        _ensure_spa_mimetypes()
+        return mimetypes.types_map.get(path.suffix.lower()) or mimetypes.guess_type(
+            str(path)
+        )[0]
+
+
 def build_app(*, dist: Path, backend: str) -> FastAPI:
+    # Must run before StaticFiles / FileResponse guess MIME types
+    _ensure_spa_mimetypes()
+
     backend = backend.rstrip("/")
     app = FastAPI(title="VD Frontend", docs_url=None, redoc_url=None, openapi_url=None)
 
     assets = dist / "assets"
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+        class _SpaStaticFiles(StaticFiles):
+            """StaticFiles that never serves .js as text/plain (Windows MIME bug)."""
+
+            def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[no-untyped-def]
+                resp = super().file_response(
+                    full_path, stat_result, scope, status_code=status_code
+                )
+                mt = _media_type_for(Path(str(full_path)))
+                if mt:
+                    # Starlette may have guessed text/plain from Windows registry
+                    resp.headers["content-type"] = mt
+                    if hasattr(resp, "media_type"):
+                        resp.media_type = mt
+                return resp
+
+        app.mount(
+            "/assets",
+            _SpaStaticFiles(directory=str(assets)),
+            name="assets",
+        )
 
     hop_by_hop = {
         "connection",
@@ -168,11 +233,27 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
     def _spa_index() -> FileResponse:
         return FileResponse(
             dist / "index.html",
+            media_type="text/html; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
             },
         )
+
+    def _file_response(path: Path) -> FileResponse:
+        mt = _media_type_for(path)
+        kwargs = {
+            "path": path,
+            "headers": {
+                "Cache-Control": "public, max-age=31536000, immutable"
+                if path.suffix.lower() in {".js", ".css", ".woff", ".woff2"}
+                and "index-" in path.name
+                else "no-cache",
+            },
+        }
+        if mt:
+            kwargs["media_type"] = mt
+        return FileResponse(**kwargs)
 
     @app.get("/")
     def index() -> FileResponse:
@@ -191,10 +272,11 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
         except ValueError:
             return _spa_index()
         if candidate.is_file():
-            return FileResponse(candidate)
+            return _file_response(candidate)
         return _spa_index()
 
     return app
+
 
 
 def main(argv: Optional[list[str]] = None) -> int:
