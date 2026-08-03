@@ -29,11 +29,17 @@ class JiraAgentDaemon:
         self._stopping = False
         self._poller: Optional[JiraPoller] = None
         self._dashboard_server: Optional[uvicorn.Server] = None
+        # Main asyncio loop used by poller thread → process_event handoff
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def start(self):
         """Start the daemon."""
         # Validate configuration
         settings.validate_or_raise()
+
+        # Capture the running loop once so poller workers never call
+        # run_coroutine_threadsafe on a closed/stale loop reference.
+        self._main_loop = asyncio.get_running_loop()
 
         logger.info("Starting JIRA Virtual Developer daemon")
         logger.info(f"project_root={settings.project_root}")
@@ -202,17 +208,57 @@ class JiraAgentDaemon:
         if app is not None:
             app.state.poller = self._poller
 
-        # Run poller in executor since it's blocking
-        loop = asyncio.get_event_loop()
+        # Prefer the loop captured at start(); fall back to running loop here
+        loop = self._main_loop or asyncio.get_running_loop()
+        self._main_loop = loop
 
         # Create async-safe handler that works from a different thread
         def async_handler(event):
             if not self._running or self._stopping:
                 return
-            asyncio.run_coroutine_threadsafe(
-                self.processor.process_event(event),
-                loop,
-            )
+            issue_key = (event.get("issue") or {}).get("key") or "unknown"
+            main = self._main_loop
+            if main is None:
+                logger.error(
+                    f"Cannot schedule process_event for {issue_key}: "
+                    f"no asyncio loop captured (restart daemon)"
+                )
+                return
+            try:
+                if main.is_closed():
+                    logger.error(
+                        f"Cannot schedule process_event for {issue_key}: "
+                        f"asyncio event loop is closed "
+                        f"(issue may sit In Progress without a job — restart daemon)"
+                    )
+                    return
+            except Exception:
+                pass
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.processor.process_event(event),
+                    main,
+                )
+            except RuntimeError as e:
+                logger.error(
+                    f"Failed to schedule process_event for {issue_key}: {e} "
+                    f"(issue may sit In Progress without a job — restart daemon)"
+                )
+                return
+
+            def _on_done(f: "asyncio.Future") -> None:
+                try:
+                    f.result()
+                except Exception as exc:
+                    logger.exception(
+                        f"process_event failed for {issue_key}: {exc}",
+                        exc,
+                    )
+
+            try:
+                fut.add_done_callback(_on_done)
+            except Exception:
+                pass
 
         await loop.run_in_executor(
             None,
