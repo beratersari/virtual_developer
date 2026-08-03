@@ -152,7 +152,10 @@ async def test_dispatch_due_schedules(tmp_path):
         ),
     )
     processor = MagicMock()
-    processor.process_event = AsyncMock()
+    # Structured outcome (real JobProcessor shape)
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
 
     result = await dispatch_due_schedules(
         processor=processor,
@@ -168,6 +171,49 @@ async def test_dispatch_due_schedules(tmp_path):
 
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_marks_error_when_process_event_noops(tmp_path):
+    """Do not mark dispatched when processor reports no work started."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(seconds=30)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Skip",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-NOOP",
+        issue_description=build_issue_description(
+            description="d",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+        ),
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={
+            "ok": True,
+            "work_started": False,
+            "skipped": "already in progress (executing)",
+        }
+    )
+
+    result = await dispatch_due_schedules(
+        processor=processor,
+        store=store,
+        jira_client=None,
+    )
+    assert result["started"] == 0
+    assert result["failed"] == 1
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "error"
+    assert "already in progress" in (refreshed.get("error_message") or "")
 
 
 def test_cancel_scheduled_job(tmp_path):

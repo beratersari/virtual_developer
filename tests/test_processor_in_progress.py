@@ -110,7 +110,7 @@ async def test_template_error_moves_jira_in_progress(
             "is incomplete.\n\n*Missing / invalid:* Mode."
         ),
     ):
-        git = processor._prepare_git_workspace(state)
+        git = processor._prepare_git_workspace_blocking(state)
 
     assert git is None
     assert state_manager.get_state("KAN-TMP").status == TaskStatus.ERROR

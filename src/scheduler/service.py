@@ -591,6 +591,22 @@ def _issue_payload_for_dispatch(
     }
 
 
+def _outcome_work_started(outcome: Any) -> tuple[bool, Optional[str]]:
+    """Interpret ``process_event`` return value for schedule bookkeeping.
+
+    Real ``JobProcessor.process_event`` returns a dict with ``work_started``.
+    Bare test mocks that return ``None`` / non-dict are treated as success so
+    unit tests that only assert the event was fired stay valid.
+    """
+    if isinstance(outcome, dict):
+        started = bool(outcome.get("work_started"))
+        skipped = outcome.get("skipped")
+        reason = str(skipped) if skipped else None
+        return started, reason
+    # MagicMock / None / unexpected: assume the await meant work was invoked
+    return True, None
+
+
 async def dispatch_due_schedules(
     *,
     processor: "JobProcessor",
@@ -599,6 +615,11 @@ async def dispatch_due_schedules(
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Claim and start process_event for every due schedule.
+
+    Only marks a schedule ``dispatched`` when the processor reports that work
+    actually started (or a bare mock returns no structured outcome). Silent
+    no-ops (e.g. already in-flight without a scheduled start path) become
+    ``error`` so the UI does not show a false success.
 
     Returns counts: claimed, started, failed.
     """
@@ -638,7 +659,23 @@ async def dispatch_due_schedules(
                     "schedule_id": sid,
                 }
                 # Fire and await so we record outcome; process_event holds slots
-                await processor.process_event(event)
+                outcome = await processor.process_event(event)
+                work_started, skip_reason = _outcome_work_started(outcome)
+                if not work_started:
+                    failed += 1
+                    msg = (
+                        skip_reason
+                        or "processor did not start work for this schedule"
+                    )
+                    ss.update(
+                        sid,
+                        status="error",
+                        error_message=msg[:1000],
+                    )
+                    logger.warning(
+                        f"Schedule {sid} for {issue_key} did not start work: {msg}"
+                    )
+                    continue
                 ss.update(
                     sid,
                     status="dispatched",

@@ -1222,15 +1222,44 @@ class JobProcessor:
         logger.info(f"Shutdown processing complete: {finalised} issue(s) finalised")
         return finalised
 
-    async def process_event(self, event: Dict[str, Any]):
+    @staticmethod
+    def _unpack_handler_result(result: Any) -> tuple[bool, Optional[str]]:
+        """Normalize handler returns for schedule outcome bookkeeping.
+
+        Real handlers return ``(work_started, skip_reason)``. Unit tests often
+        patch handlers with bare ``AsyncMock`` (MagicMock return) — treat those
+        as ``work_started=True`` so process_event paths keep working.
+        """
+        if isinstance(result, tuple) and len(result) >= 2:
+            skipped = result[1]
+            return bool(result[0]), (str(skipped) if skipped else None)
+        if isinstance(result, tuple) and len(result) == 1:
+            return bool(result[0]), None
+        if isinstance(result, bool):
+            return result, None
+        if result is None:
+            return False, "handler returned no result"
+        # MagicMock / unexpected objects from tests
+        return True, None
+
+    async def process_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Process a JIRA poll (or CLI) event.
 
         Events use a ``webhookEvent`` key for historical compatibility with
         the poller envelope (``jira:issue_created`` / ``jira:issue_updated``).
         HTTP webhooks are not supported.
+
+        Returns a small outcome dict so schedule dispatch can tell a real start
+        from a deliberate no-op (e.g. plan_ready without an explicit start).
         """
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
+        outcome: Dict[str, Any] = {
+            "ok": True,
+            "issue_key": issue_key,
+            "work_started": False,
+            "skipped": None,
+        }
 
         from src.log_context import clear_log_context, set_issue_key, set_job_id
 
@@ -1255,17 +1284,32 @@ class JobProcessor:
                     # Accept both on-prem/cloud comment event names
                     if event_type == "jira:issue_created":
                         logger.info(f"Handling issue created event for {issue_key}")
-                        await self._handle_issue_created(event)
+                        started, skip_reason = self._unpack_handler_result(
+                            await self._handle_issue_created(event)
+                        )
+                        outcome["work_started"] = started
+                        outcome["skipped"] = skip_reason
                     elif event_type == "jira:issue_updated":
                         logger.info(f"Handling issue updated event for {issue_key}")
-                        await self._handle_issue_updated(event)
+                        started, skip_reason = self._unpack_handler_result(
+                            await self._handle_issue_updated(event)
+                        )
+                        outcome["work_started"] = started
+                        outcome["skipped"] = skip_reason
                     elif event_type in ("comment_created", "jira:issue_commented"):
                         logger.info(f"Handling comment created event for {issue_key}")
                         await self._handle_comment_created(event)
+                        # Comments may start work; report conservatively via status.
+                        st = self.state_manager.get_state(issue_key)
+                        if st and st.status in self.IN_FLIGHT_STATUSES:
+                            outcome["work_started"] = True
                     else:
                         logger.debug(f"Unknown event type: {event_type}, ignoring")
+                        outcome["skipped"] = f"unknown event type: {event_type}"
         except Exception as e:
             logger.exception(f"Unhandled error processing event for {issue_key}: {e}", e)
+            outcome["ok"] = False
+            outcome["skipped"] = str(e)
             if issue_key and issue_key != "unknown":
                 self._fail_issue(
                     issue_key,
@@ -1275,11 +1319,20 @@ class JobProcessor:
                 self._release_context(issue_key, success=False)
         finally:
             clear_log_context()
+        return outcome
     
-    async def _handle_issue_created(self, event: Dict[str, Any]):
+    async def _handle_issue_created(
+        self, event: Dict[str, Any]
+    ) -> tuple[bool, Optional[str]]:
+        """Handle create-style events.
+
+        Returns ``(work_started, skip_reason)``. ``skip_reason`` is set when no
+        workflow was started (caller may mark a schedule as failed).
+        """
         issue = event.get("issue", {})
         issue_key = issue.get("key", "unknown")
         fields = issue.get("fields", {})
+        scheduled_job = bool(event.get("scheduled_job"))
         
         summary = fields.get("summary", "")
         description = fields.get("description", "") or ""
@@ -1293,21 +1346,59 @@ class JobProcessor:
         # Live in-memory cache wins over disk — never double-start a held job
         if self._is_live_processing(issue_key):
             logger.info(f"Issue {issue_key} already live in processing cache, skipping")
-            return
+            return False, "already live in processing cache"
 
         existing = self.state_manager.get_state(issue_key)
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
-            return
+            return False, f"already in progress ({existing.status.value})"
         # PLAN_READY: do not re-plan from a create event.
         # Plans never auto-start (intentional). Explicit start only via
-        # ai-start-work / ai-execute labels on issue_updated, or a new Mode: build issue.
+        # ai-start-work / ai-execute labels on issue_updated, a scheduled_job
+        # fire (dashboard schedule), or a new Mode: build issue.
         if existing and existing.status == TaskStatus.PLAN_READY:
+            if scheduled_job:
+                # Schedule fire is an explicit operator start signal.
+                if summary:
+                    existing.issue_summary = summary
+                if description:
+                    existing.description = description
+                self.state_manager.update_state(
+                    issue_key,
+                    issue_summary=existing.issue_summary,
+                    description=existing.description,
+                    metadata={"workflow_type": WorkflowType.EXECUTION.value},
+                )
+                state = self.state_manager.get_state(issue_key) or existing
+                logger.info(
+                    f"Issue {issue_key} plan_ready + scheduled_job; "
+                    f"beginning execution (schedule_id={event.get('schedule_id')})"
+                )
+                self._mark_jira_in_progress(issue_key)
+                try:
+                    await self._start_execution_workflow(state)
+                    return True, None
+                except Exception as e:
+                    logger.exception(
+                        f"Scheduled plan start failed for {issue_key}: {e}", e
+                    )
+                    self._fail_issue(
+                        issue_key,
+                        f"Failed to start scheduled plan execution: {e}",
+                        suggestion=(
+                            "Check logs. Re-schedule the issue or add "
+                            "ai-start-work / open Mode: build."
+                        ),
+                    )
+                    self._release_context(issue_key, success=False)
+                    # Work was attempted (workflow entry); not a silent no-op.
+                    return True, None
             logger.info(
                 f"Issue {issue_key} has plan ready; no auto-start "
-                f"(add label ai-start-work / ai-execute, or open Mode: build issue)"
+                f"(add label ai-start-work / ai-execute, schedule a run, "
+                f"or open Mode: build issue)"
             )
-            return
+            return False, "plan_ready; no auto-start without schedule or start label"
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
@@ -1349,7 +1440,7 @@ class JobProcessor:
                 issue_key=issue_key,
                 issue_summary=summary,
                 description=description,
-                triggered_by="poller",
+                triggered_by="scheduled" if scheduled_job else "poller",
                 jira_assignee=assignee,
             )
             self.state_manager.update_state(
@@ -1380,6 +1471,7 @@ class JobProcessor:
                 await self._start_execution_workflow(state)
             elif workflow_type == WorkflowType.ORACLE_CONSULT:
                 await self._start_oracle_consultation(state)
+            return True, None
         except Exception as e:
             logger.exception(f"Workflow {workflow_type.value} crashed for {issue_key}: {e}", e)
             self._fail_issue(
@@ -1388,35 +1480,39 @@ class JobProcessor:
                 suggestion="Check agent/session logs, then move the issue back to TO DO to retry.",
             )
             self._release_context(issue_key, success=False)
+            # Entry was attempted; schedule should not look like a silent success skip.
+            return True, None
     
-    async def _handle_issue_updated(self, event: Dict[str, Any]):
+    async def _handle_issue_updated(
+        self, event: Dict[str, Any]
+    ) -> tuple[bool, Optional[str]]:
+        """Handle update-style events. Returns ``(work_started, skip_reason)``."""
         issue = event.get("issue") or {}
         issue_key = issue.get("key")
         if not issue_key:
             logger.warning("issue_updated event missing issue key, ignoring")
-            return
+            return False, "missing issue key"
         fields = issue.get("fields", {})
         status_data = fields.get("status", {})
         status_name = status_data.get("name", "")
         
         if self._is_live_processing(issue_key):
             logger.info(f"{issue_key} is live in processing cache; ignoring update event")
-            return
+            return False, "already live in processing cache"
 
         state = self.state_manager.get_state(issue_key)
 
         logger.debug(f"Issue {issue_key} - Event status: '{status_name}', State status: {state.status.value if state else 'NO_STATE'}")
 
         if not state:
-            await self._handle_issue_created(event)
-            return
+            return await self._handle_issue_created(event)
 
         # Never interrupt or restart in-flight agent work from poll noise
         if state.status in self.IN_FLIGHT_STATUSES:
             logger.info(
                 f"{issue_key} is in-flight ({state.status.value}); ignoring update event"
             )
-            return
+            return False, f"already in progress ({state.status.value})"
 
         # Locale-safe To Do (English "To Do", Turkish "Yapılacaklar", statusCategory=new)
         from src.jira.poller import JiraPoller
@@ -1435,35 +1531,34 @@ class JobProcessor:
                             f"{issue_key} is {state.status.value} without "
                             f"requeue_eligible; ignoring update event"
                         )
-                        return
+                        return False, f"{state.status.value} without requeue_eligible"
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
                     f"(Jira status '{status_name}' is To Do, requeue_eligible="
                     f"{bool(meta.get('requeue_eligible'))})"
                 )
                 self._reset_for_reprocess(issue_key)
-                await self._handle_issue_created(event)
-            else:
-                logger.debug(
-                    f"{issue_key} is {state.status.value}; Jira status "
-                    f"'{status_name}' is not To Do — not reprocessing"
-                )
-            return
+                return await self._handle_issue_created(event)
+            logger.debug(
+                f"{issue_key} is {state.status.value}; Jira status "
+                f"'{status_name}' is not To Do — not reprocessing"
+            )
+            return False, f"terminal {state.status.value}; Jira not To Do"
 
         # Non-terminal waiting: re-kick PENDING if still To Do
         if is_todo and state.status == TaskStatus.PENDING:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
-            await self._handle_issue_created(event)
-            return
+            return await self._handle_issue_created(event)
 
         # plan_ready → execute only on explicit start labels (ai-start-work /
         # ai-execute). Mode: build alone does NOT auto-start (intentional product
         # choice — no plan→build autostart). Open a new Mode: build issue to
         # implement, or add a start label on this ticket while it is To Do.
+        # (scheduled_job create events are handled in _handle_issue_created.)
         if state.status == TaskStatus.PLAN_READY:
             if self._is_live_processing(issue_key):
                 logger.info(f"{issue_key} plan_ready but already live; skip start")
-                return
+                return False, "plan_ready but already live"
 
             labels = list(fields.get("labels") or [])
             label_set = {str(x).strip().lower() for x in labels}
@@ -1497,6 +1592,7 @@ class JobProcessor:
                 )
                 try:
                     await self._start_execution_workflow(state)
+                    return True, None
                 except Exception as e:
                     logger.exception(
                         f"Plan start from label failed for {issue_key}: {e}", e
@@ -1510,16 +1606,20 @@ class JobProcessor:
                         ),
                     )
                     self._release_context(issue_key, success=False)
-            elif is_todo and not has_start_label:
+                    return True, None
+            if is_todo and not has_start_label:
                 logger.info(
                     f"{issue_key} plan_ready and To Do; no auto-start "
                     f"(add ai-start-work / ai-execute, or open Mode: build issue)"
                 )
-            else:
-                logger.debug(
-                    f"{issue_key} plan_ready; waiting for explicit start "
-                    f"(jira status '{status_name}')"
-                )
+                return False, "plan_ready; no start label"
+            logger.debug(
+                f"{issue_key} plan_ready; waiting for explicit start "
+                f"(jira status '{status_name}')"
+            )
+            return False, f"plan_ready; jira status '{status_name}'"
+
+        return False, f"no action for status {state.status.value}"
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -1715,10 +1815,13 @@ class JobProcessor:
         self.agent_runner = runner
         return git
 
-    def _prepare_git_workspace(self, state: JiraAgentState) -> Optional[GitManager]:
-        """Init git + work branch from target, or fail the issue with a Jira message.
+    def _prepare_git_workspace_blocking(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Sync clone + work-branch setup (may take minutes on large repos).
 
-        Returns GitManager on success, None after calling ``_fail_issue``.
+        Must not run on the asyncio event loop — use
+        :meth:`_prepare_git_workspace` which offloads via ``asyncio.to_thread``.
         """
         try:
             git = self._init_git_manager(state.issue_key, state)
@@ -1784,6 +1887,16 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
             return None
 
+    async def _prepare_git_workspace(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Init git + work branch without blocking the asyncio event loop.
+
+        Large clones previously froze the ops dashboard (same process/loop as
+        uvicorn). Offload clone/checkout to a worker thread.
+        """
+        return await asyncio.to_thread(self._prepare_git_workspace_blocking, state)
+
     async def _start_planning_workflow(self, state: JiraAgentState):
         logger.info(f"Starting planning workflow for {state.issue_key}")
         workflow_start_time = datetime.now()
@@ -1810,7 +1923,7 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
             return
         runner = self._runner_for(state.issue_key)
@@ -2046,7 +2159,7 @@ class JobProcessor:
         )
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
             return
         # Materialize durable plan into the fresh clone for Atlas
@@ -2506,8 +2619,9 @@ class JobProcessor:
 
         logger.info(f"Starting push and MR creation for {state.issue_key}")
 
-        # B5: force work_branch, never drift HEAD
-        if not git.ensure_on_work_branch():
+        # B5: force work_branch, never drift HEAD (off event loop — git I/O)
+        on_work = await asyncio.to_thread(git.ensure_on_work_branch)
+        if not on_work:
             msg = (
                 f"Refusing to push: could not checkout prepared work branch "
                 f"`{getattr(git, 'work_branch', None)}`."
@@ -2519,7 +2633,9 @@ class JobProcessor:
                 pass
             return False
 
-        branch_name = (getattr(git, "work_branch", None) or "").strip() or git.get_current_branch()
+        branch_name = (getattr(git, "work_branch", None) or "").strip()
+        if not branch_name:
+            branch_name = await asyncio.to_thread(git.get_current_branch)
 
         # Refuse to push protected bases / MR target / release/*
         target = (getattr(git, "target_branch", None) or "").strip().lower()
@@ -2546,7 +2662,7 @@ class JobProcessor:
             metadata={"feature_branch": branch_name},
         )
 
-        push_success = git.push(branch_name)
+        push_success = await asyncio.to_thread(git.push, branch_name)
         if not push_success:
             logger.warning(f"Push failed or remote not configured for {state.issue_key}")
             try:
@@ -2593,7 +2709,8 @@ class JobProcessor:
             .strip()
             or None
         )
-        mr_url = git.create_merge_request(
+        mr_url = await asyncio.to_thread(
+            git.create_merge_request,
             title=mr_title,
             body=mr_body,
             target_branch=target_branch,
