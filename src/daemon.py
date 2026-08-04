@@ -13,7 +13,6 @@ from src.dashboard.api import create_dashboard_app
 from src.jira.poller import JiraPoller
 from src.logger import logger
 from src.processor import JobProcessor
-from src.state.manager import JiraStateManager
 
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
@@ -24,7 +23,8 @@ class JiraAgentDaemon:
 
     def __init__(self):
         self.processor = JobProcessor()
-        self.state_manager = JiraStateManager()
+        # One process-wide state manager (processor owns it; dashboard + poller share)
+        self.state_manager = self.processor.state_manager
         self._running = False
         self._stopping = False
         self._poller: Optional[JiraPoller] = None
@@ -208,7 +208,10 @@ class JiraAgentDaemon:
 
     async def _start_poller(self):
         """Start the JIRA poller."""
-        self._poller = JiraPoller(board_id=settings.jira_board_id)
+        self._poller = JiraPoller(
+            board_id=settings.jira_board_id,
+            state_manager=self.state_manager,
+        )
         # Link live poller for dashboard settings + cancel re-queue status markers
         self.processor._poller = self._poller
         try:

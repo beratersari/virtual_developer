@@ -405,6 +405,7 @@ class JobProcessor:
         meta_patch["current_job_id"] = None
         self.state_manager.update_state(
             issue_key,
+            force=True,  # intentional reopen: terminal → PENDING for reprocess
             status=TaskStatus.PENDING,
             progress_percentage=0,
             error_message=None,
@@ -796,11 +797,15 @@ class JobProcessor:
         agent: str,
         task_id: Optional[str] = None,
         status: str = "running",
-    ) -> str:
+    ) -> Optional[str]:
         """Create a **new** job history row for this run; returns job_id.
 
         Never reuses or overwrites a previous job file. Each run gets a unique
         ``job_*`` record with its own task_id / session_id fields.
+
+        If the issue is already terminal (cancel/fail won the race after CAS
+        begin), either refuse to create a live row or immediately finish it so
+        the Jobs UI never shows a permanent running/planning ghost.
         """
         # If a previous run left an active job pointer, finish it first
         if self._active_jobs.get(state.issue_key):
@@ -809,6 +814,52 @@ class JobProcessor:
                 status="superseded",
                 error_message="Superseded by new job start",
             )
+
+        # Cancel/fail can land between CAS claim and job create without the
+        # issue lock — re-read disk and refuse a live row for terminal issues.
+        live_now = self.state_manager.get_state(state.issue_key)
+        if live_now and live_now.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"_start_job_record refused for {state.issue_key}: "
+                f"already terminal ({live_now.status.value})"
+            )
+            # Still create a history row marked terminal so operators see the
+            # aborted attempt, then leave no live job pointer.
+            term = live_now.status.value
+            job = self.job_store.create_job(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                workflow_type=workflow_type,
+                agent=agent,
+                task_id=task_id,
+                status=term,
+            )
+            job_id = job["job_id"]
+            self._active_jobs[state.issue_key] = job_id
+            self._finish_job_record(
+                state.issue_key,
+                status=term,
+                error_message=(
+                    live_now.error_message
+                    or f"Not started — issue already {term}"
+                ),
+            )
+            # Keep job_ids history without treating this as a live current job
+            st = self.state_manager.get_state(state.issue_key)
+            meta = dict((st.metadata if st else None) or {})
+            job_ids = list(meta.get("job_ids") or [])
+            if job_id not in job_ids:
+                job_ids.append(job_id)
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={
+                    "job_ids": job_ids[-200:],
+                    # Clear live pointer if finish left it
+                    "current_job_id": meta.get("current_job_id"),
+                },
+            )
+            return job_id
 
         job = self.job_store.create_job(
             issue_key=state.issue_key,
@@ -830,7 +881,33 @@ class JobProcessor:
         except Exception:
             pass
 
+        # Re-check after create: cancel may have won during create_job
         st = self.state_manager.get_state(state.issue_key)
+        if st and st.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"_start_job_record finishing immediately for {state.issue_key}: "
+                f"became terminal ({st.status.value}) during job create"
+            )
+            self._finish_job_record(
+                state.issue_key,
+                status=st.status.value,
+                error_message=st.error_message
+                or f"Aborted — issue became {st.status.value}",
+            )
+            meta = dict(st.metadata or {})
+            job_ids = list(meta.get("job_ids") or [])
+            if job_id not in job_ids:
+                job_ids.append(job_id)
+            task_ids = list(meta.get("task_ids") or [])
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+            patch: Dict[str, Any] = {"job_ids": job_ids[-200:]}
+            if task_id:
+                patch["task_ids"] = task_ids[-100:]
+                patch["last_task_id"] = task_id
+            self.state_manager.update_state(state.issue_key, metadata=patch)
+            return job_id
+
         meta = dict((st.metadata if st else None) or {})
         job_ids = list(meta.get("job_ids") or [])
         if job_id not in job_ids:
@@ -838,7 +915,7 @@ class JobProcessor:
         task_ids = list(meta.get("task_ids") or [])
         if task_id and task_id not in task_ids:
             task_ids.append(task_id)
-        patch: Dict[str, Any] = {
+        patch = {
             "job_ids": job_ids[-200:],
             "current_job_id": job_id,
         }

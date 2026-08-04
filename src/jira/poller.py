@@ -21,11 +21,13 @@ class JiraPoller:
         client: Optional[JiraClient] = None,
         interval_seconds: Optional[int] = None,
         board_id: Optional[str] = None,
+        state_manager: Optional[JiraStateManager] = None,
     ):
         self.client = client or JiraClient()
         self.interval = interval_seconds or settings.poll_interval_seconds
         self.board_id = board_id or settings.jira_board_id
-        self.state_manager = JiraStateManager()
+        # Prefer shared manager from daemon/processor (same process lock + dir)
+        self.state_manager = state_manager or JiraStateManager()
 
         logger.info(
             f"Initializing JiraPoller - interval: {self.interval}s, "
