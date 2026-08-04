@@ -975,7 +975,7 @@ class GitManager:
         work = self._resolve_work_branch_name(key)
         return self._prepare_work_branch(work, target)
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
-        """Format a commit message per agent/AGENT_PROMPT.md §policy.commit.
+        """Format a commit message per agent/BUILD_PROMPT.md git policy.
 
         Required subject: ``[ISSUE-KEY] type: description``
         ``summary`` should already include the type prefix (e.g. ``fix: foo``).

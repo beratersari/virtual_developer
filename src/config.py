@@ -73,16 +73,25 @@ class Settings(BaseSettings):
     )
     
     # Agent Configuration
-    # Build/default agent is Atlas (strong orchestrator); plan uses Prometheus
+    # Mode (plan vs build) selects the prompt file; agent name does not change prompts.
+    # Defaults use the same OpenCode agent for both modes (fewer agents to manage).
     default_agent: str = Field(default="atlas")
-    planning_agent: str = Field(default="prometheus")
+    planning_agent: str = Field(default="atlas")
     orchestrator_agent: str = Field(default="atlas")
     execution_category: str = Field(default="deep")
 
-    # Agent prompts: one kit file with ## §section_id headers (see agent/AGENT_PROMPT.md)
-    prompt_kit_file: Path = Field(
-        default=Path("agent/AGENT_PROMPT.md"),
-        description="Unified agent prompt kit",
+    # Exactly two mode prompts (agent name does not change prompt text)
+    agent_prompts_dir: Path = Field(
+        default=Path("agent"),
+        description="Directory with PLAN_PROMPT.md and BUILD_PROMPT.md",
+    )
+    plan_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Plan-mode prompt (default: {agent_prompts_dir}/PLAN_PROMPT.md)",
+    )
+    build_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Build-mode prompt (default: {agent_prompts_dir}/BUILD_PROMPT.md)",
     )
     
     # How many agent jobs run at once (raise for large boards / many subtasks)
@@ -313,30 +322,35 @@ class Settings(BaseSettings):
         """All configured PAT values (for log redaction)."""
         return list(dict.fromkeys(self.gitlab_host_pat_map().values()))
     
-    def _kit_section(self, section_id: str) -> str:
-        from src.orchestrator.prompt_kit import get_section
-
-        return get_section(section_id, kit_path=self.prompt_kit_file)
-
     @property
     def prompt_planning(self) -> str:
-        """Planning role rules (kit §role.planning)."""
-        return self._kit_section("role.planning")
+        """Plan-mode prompt body (PLAN_PROMPT.md)."""
+        from src.orchestrator.prompt_builder import PromptBuilder
+
+        return PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key="ISSUE",
+        )
 
     @property
     def prompt_execution(self) -> str:
-        """Atlas execution role rules (kit §role.execution)."""
-        return self._kit_section("role.execution")
+        """Build-mode prompt body (BUILD_PROMPT.md)."""
+        from src.orchestrator.prompt_builder import PromptBuilder
+
+        return PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key="ISSUE",
+        )
 
     @property
     def prompt_direct_execution(self) -> str:
-        """Sisyphus direct-execution rules (kit §role.direct)."""
-        return self._kit_section("role.direct")
+        """Same as build-mode prompt (agent name does not change text)."""
+        return self.prompt_execution
 
     @property
     def prompt_oracle(self) -> str:
-        """Oracle consultation rules (kit §role.oracle)."""
-        return self._kit_section("role.oracle")
+        """Same as plan-mode prompt (consult uses plan body)."""
+        return self.prompt_planning
 
     def prompt_commit_policy(
         self,
@@ -344,14 +358,11 @@ class Settings(BaseSettings):
         *,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Issue-keyed git policy from kit §policy.commit."""
-        from src.orchestrator.prompt_kit import get_section
+        """Issue-keyed git policy from BUILD_PROMPT.md."""
+        from src.orchestrator.prompt_builder import PromptBuilder
 
-        return get_section(
-            "policy.commit",
-            kit_path=self.prompt_kit_file,
-            issue_key=issue_key,
-            work_branch=work_branch,
+        return PromptBuilder.commit_message_block(
+            issue_key, work_branch=work_branch
         )
 
     @property

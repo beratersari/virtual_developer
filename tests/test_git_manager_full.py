@@ -309,7 +309,7 @@ def test_create_source_from_target(gm):
 
 
 def test_format_commit_message(gm):
-    # §policy.commit format: [KEY] type: description
+    # BUILD_PROMPT commit format: [KEY] type: description
     msg = gm._format_commit_message("GM-1", "fix: short", "body")
     assert msg.startswith("[GM-1] fix: short")
     assert "body" in msg
