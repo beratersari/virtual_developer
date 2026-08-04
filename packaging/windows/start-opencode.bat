@@ -11,7 +11,8 @@ set "PATH=%USERPROFILE%\.opencode\bin;%PATH%"
 
 cd /d "%SCRIPT_DIR%"
 if not exist "%USERPROFILE%\.opencode\bin\opencode.exe" (
-    echo [ERROR] OpenCode not installed. Run install.bat first.
+    echo [ERROR] OpenCode not installed.
+    echo Run install.bat ^(full offline^) or install-opencode-online.bat ^(network + vendor\node^).
     pause
     exit /b 1
 )

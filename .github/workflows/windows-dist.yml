@@ -47,7 +47,7 @@ jobs:
             $p = $line -split "=", 2
             if ($p.Count -eq 2) { $map[$p[0].Trim()] = $p[1].Trim() }
           }
-          foreach ($k in @("OPENCODE_VERSION","OH_MY_OPENCODE_VERSION","GLAB_VERSION","PYTHON_VERSION","NODE_VERSION")) {
+          foreach ($k in @("OPENCODE_VERSION","OH_MY_OPENCODE_VERSION","GLAB_VERSION","PYTHON_VERSION","NODE_VERSION","NODE_FULL_VERSION")) {
             if (-not $map.ContainsKey($k) -or -not $map[$k]) {
               throw "Missing $k in packaging/windows/versions.env"
             }
@@ -98,6 +98,7 @@ jobs:
           foreach ($rel in @(
             "install.bat",
             "install-dashboard.bat",
+            "install-opencode-online.bat",
             "start.bat",
             "start-backend.bat",
             "start-frontend.bat",
@@ -106,6 +107,12 @@ jobs:
             "web/dist/index.html",
             "vendor/opencode-home.zip",
             "vendor/python-wheels",
+            "vendor/node/node.exe",
+            "vendor/node/npm.cmd",
+            "vendor/npm-online.npmrc",
+            "vendor/online-sources.env",
+            "packaging/windows/Install-OpencodeOnline.ps1",
+            "packaging/windows/npm-online.npmrc",
             "packaging/windows/Stop-VdProcesses.ps1",
             "packaging/windows/Wait-Http.ps1",
             "packaging/windows/serve_frontend.py"

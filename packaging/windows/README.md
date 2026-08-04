@@ -32,12 +32,19 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install-dashboard.bat`** — **backend + frontend only** (no OpenCode):
      - Creates `.venv` + deps, start scripts, `.env`, `cli.py init`
      - Does **not** touch `%USERPROFILE%\.opencode` (use when OpenCode is already installed)
+   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network; does **not** replace offline `install.bat`):
+     - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)
+     - Edit **`vendor\npm-online.npmrc`** (or `packaging\windows\npm-online.npmrc`) → set `registry=` to your npm mirror
+     - Optional: **`vendor\online-sources.env`** for `OPENCODE_ZIP_URL` / `NPM_REGISTRY` pointing at your HTTP file server
+     - Downloads OpenCode CLI + glab, `npm install`s **oh-my-openagent** / **oh-my-opencode**
+     - Seeds `%USERPROFILE%\.opencode`, `.config\opencode`, and `.cache\opencode` (full plugin tree)
+     - **Offline OpenCode still uses `install.bat` + `vendor\opencode-home.zip` only**
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
    - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
    - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
    - **`start.bat`** — both (backend first, then frontend)
-7. Optional OpenCode TUI: **`start-opencode.bat`** (after full `install.bat`; never from your user home folder).
+7. Optional OpenCode TUI: **`start-opencode.bat`** (after `install.bat` or `install-opencode-online.bat`; never from your user home folder).
 
 ### Frontend + backend model (offline)
 
@@ -84,13 +91,18 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 |------|------|
 | `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python wheel set / Node |
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
-| `opencode.json` | Registers `oh-my-opencode` plugin |
+| `opencode.json` | Registers `oh-my-openagent@…` plugin |
 | `oh-my-opencode.json` | Default plugin config stub |
+| `Install-OpencodeOnline.ps1` | Online OpenCode + npm plugin install (called by root bat; not used by offline install.bat) |
+| `npm-online.npmrc` | Editable npm `registry=` for online install only |
+| `online-sources.env` | Optional `OPENCODE_ZIP_URL` / `NPM_REGISTRY` mirrors |
 | `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
 | `start.bat` | User launcher: kill old processes → start daemon + dashboard |
 | `Stop-VdProcesses.ps1` | Helper used by `start.bat` to free ports / kill old daemons |
 | `e2e-smoke.ps1` | CI: deep-path install + assert SPA + launchers + OpenCode |
 | `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
+
+Payload also ships **`vendor/node/`** (official Node win-x64 tree: `node.exe`, `npm.cmd`, npm deps) for online OpenCode installs without a system Node.
 
 ## Bumping versions
 
