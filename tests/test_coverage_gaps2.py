@@ -241,7 +241,7 @@ async def test_execution_on_retry_no_state(state_manager, reporter, fake_jira, t
     p.agent_runner = runner
     with patch.object(p, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"

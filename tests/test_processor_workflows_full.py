@@ -210,15 +210,16 @@ async def test_bot_commands(processor, state_manager, tmp_path, fake_jira):
         await processor._handle_bot_command("BC-1", "please explain")
         d.assert_awaited()
 
-    # start-work crash
-    state_manager.update_state("BC-1", status=TaskStatus.PLAN_READY)
+    # start-work crash (must leave CANCELLED first — CAS refuses terminal clobber)
+    state_manager.create_state("BC-2", "s", "d")
+    state_manager.update_state("BC-2", status=TaskStatus.PLAN_READY, plan_path="p.md")
     with patch.object(
         processor,
         "_start_execution_workflow",
         side_effect=RuntimeError("exec fail"),
     ):
-        await processor._handle_bot_command("BC-1", "/start-work")
-    assert state_manager.get_state("BC-1").status == TaskStatus.ERROR
+        await processor._handle_bot_command("BC-2", "/start-work")
+    assert state_manager.get_state("BC-2").status == TaskStatus.ERROR
 
 
 @pytest.mark.asyncio
@@ -232,7 +233,7 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -248,7 +249,7 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
     git2, runner2 = _mock_git_and_agent(processor, tmp_path, returncode=1, stderr="plan fail")
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -262,7 +263,7 @@ async def test_planning_success_and_fail(processor, state_manager, tmp_path, mon
     git3, runner3 = _mock_git_and_agent(processor, tmp_path, returncode=0)
     with patch.object(processor, "_init_git_manager", return_value=git3):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -307,7 +308,7 @@ async def test_planning_retry_callback(processor, state_manager, tmp_path):
     (plans / "PLR-1.md").write_text("# plan\n- [ ] a\n")
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
@@ -325,7 +326,7 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.default_branch = "main"
@@ -338,7 +339,7 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
     git_f, runner_f = _mock_git_and_agent(processor, tmp_path, returncode=1, stderr="exec fail")
     with patch.object(processor, "_init_git_manager", return_value=git_f):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             await processor._start_execution_workflow(state_f)
@@ -357,7 +358,6 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
     with patch.object(processor, "_init_git_manager", return_value=git_d):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.default_branch = "main"
@@ -370,7 +370,6 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
     with patch.object(processor, "_init_git_manager", return_value=git_df):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             await processor._start_execution_workflow(state_df)

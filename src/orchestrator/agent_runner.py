@@ -177,7 +177,6 @@ class AgentTask:
     description: str
     prompt: str
     agent: str
-    category: Optional[str] = None
     issue_key: Optional[str] = None
     session_id: Optional[str] = None
     task_id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
@@ -196,7 +195,6 @@ class AgentTask:
             "task_id": self.task_id,
             "description": self.description,
             "agent": self.agent,
-            "category": self.category,
             "prompt": self.prompt,
             "skills": self.skills,
             "session_id": self.session_id,

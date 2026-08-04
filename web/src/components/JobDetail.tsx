@@ -1,13 +1,23 @@
-import { useMemo, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   findLogForJobPath,
   findPromptForJobPath,
   pathBasename,
 } from '../util/paths'
 import { jobIsCancellable, jobIsDeletable } from '../util/status'
+import { formatElapsedBetween } from '../util/time'
 import type { JobItem, SystemLogLine, TextArtifact } from '../types'
 import { PromptBlock } from './PromptBlock'
 import { StatusBadge } from './StatusBadge'
+
+/** Statuses that should keep a live elapsed ticker when not yet completed. */
+const IN_FLIGHT_STATUSES = new Set([
+  'pending',
+  'planning',
+  'executing',
+  'running',
+  'dispatching',
+])
 
 type DetailTab = 'overview' | 'prompt' | 'opencode' | 'logs'
 
@@ -62,6 +72,9 @@ export function JobDetail({
     jobIsCancellable(job!.status || '', Boolean(job!.live))
   const canDelete =
     Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
+
+  const elapsedLabel = useJobElapsed(job)
+
   const promptMatch = useMemo(() => {
     const match = findPromptForJobPath(
       artifacts.prompts,
@@ -124,6 +137,19 @@ export function JobDetail({
                 {job.workflow_type}
                 {job.agent ? ` · ${job.agent}` : ''}
               </span>
+              {elapsedLabel !== '—' && (
+                <span
+                  className="inline-flex items-center gap-1.5 font-mono text-xs text-text-secondary"
+                  title={
+                    job.completed_at
+                      ? 'Wall time from started to completed'
+                      : 'Wall time since started (updating live)'
+                  }
+                >
+                  <span className="text-text-muted">elapsed</span>
+                  <span className="text-text">{elapsedLabel}</span>
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -231,6 +257,29 @@ export function JobDetail({
               <MetaCard label="Issue" mono value={job.issue_key || '—'} />
               <MetaCard label="Started" mono value={job.started_at ?? '—'} />
               <MetaCard label="Completed" mono value={job.completed_at ?? '—'} />
+              <MetaCard
+                label="Elapsed"
+                mono
+                value={elapsedLabel}
+                valueNode={
+                  elapsedLabel === '—' ? undefined : (
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-sm tabular-nums text-text">
+                        {elapsedLabel}
+                      </span>
+                      {!job.completed_at &&
+                        (job.live ||
+                          IN_FLIGHT_STATUSES.has(
+                            (job.status || '').toLowerCase(),
+                          )) && (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-warning-text">
+                            live
+                          </span>
+                        )}
+                    </div>
+                  )
+                }
+              />
               {job.error_message && (
                 <div className="sm:col-span-2 lg:col-span-3">
                   <div className="mb-1 text-xs font-medium uppercase tracking-wide text-danger-text">
@@ -538,5 +587,31 @@ function MetaCard({
         </div>
       )}
     </div>
+  )
+}
+
+/** Elapsed wall time; ticks every second while the job is in flight. */
+function useJobElapsed(job: JobItem | null): string {
+  const startedAt = job?.started_at ?? null
+  const completedAt = job?.completed_at ?? null
+  const status = (job?.status || '').toLowerCase()
+  const live = Boolean(job?.live)
+  const tick =
+    Boolean(startedAt) &&
+    !completedAt &&
+    (live || IN_FLIGHT_STATUSES.has(status))
+
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!tick) return
+    setNowMs(Date.now())
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [tick, startedAt, completedAt, status, live])
+
+  return useMemo(
+    () => formatElapsedBetween(startedAt, completedAt, nowMs),
+    [startedAt, completedAt, nowMs],
   )
 }

@@ -42,7 +42,7 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 |-----------|------|
 | **Board poller** | Sole intake. Reads board/sprint issues; writes a poll snapshot for the UI |
 | **Job processor** | State machine, concurrency limits, plan vs build routing, fail + Jira notify |
-| **Agent runner** | Spawns OpenCode with prompt kit sections; streams session logs |
+| **Agent runner** | Spawns OpenCode with plan/build mode prompts; streams session logs |
 | **Jira client** | REST API v2 + Agile; Bearer (on-prem PAT) or Basic (Cloud email+token) |
 | **Git manager** | Clone, branch, commit identity, push, MR via `glab` / GitLab API |
 | **State store** | Per-issue JSON under `.jira-agent/state/`; job records for the dashboard |
@@ -50,12 +50,11 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 
 ### Agents (Oh My OpenAgent)
 
-| Agent | Role | When |
-|-------|------|------|
-| **Prometheus** | Planning | `Mode: plan` |
-| **Atlas** | Orchestrated implementation | `Mode: build` |
-| **Oracle** | Architecture Q&A | Consultative wording, not implementation |
-| **Sisyphus** | Direct implementation helper | CLI `test-issue` / legacy paths; production board work uses **Mode** |
+| Setting | Role |
+|---------|------|
+| **`DEFAULT_AGENT`** (e.g. `atlas`) | OpenCode persona for both `Mode: plan` and `Mode: build` |
+| **Plan vs build text** | `agent/PLAN_PROMPT.md` vs `agent/BUILD_PROMPT.md` (mode only) |
+| **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
 
@@ -334,10 +333,7 @@ Repo URL and branches always come from the issue `{params}` block.
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
 | `DEFAULT_MODEL` | (see `.env.example`) | Passed to `opencode run --model` |
-| `DEFAULT_AGENT` | `sisyphus` | Defaults for agent names |
-| `PLANNING_AGENT` | `prometheus` | |
-| `ORCHESTRATOR_AGENT` | `atlas` | |
-| `EXECUTION_CATEGORY` | `deep` | Category for deep work |
+| `DEFAULT_AGENT` | `atlas` | OpenCode agent for plan and build jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |

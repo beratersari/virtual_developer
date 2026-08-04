@@ -31,7 +31,7 @@ def test_config_empty_trigger_labels_and_gitlab_hosts():
         jira_projects="",
     )
     assert s.trigger_labels_list == ["ai-assist", "bot"]
-    assert s.gitlab_allowed_hosts_list == ["gitlab.com", "example.com"]
+    assert s.gitlab_allowed_hosts_list == ["example.com", "gitlab.com"]
     assert s.jira_projects_list == ["PROJ"]
 
 
@@ -180,7 +180,8 @@ def test_workflow_router_mode_and_reason_edges():
     assert WorkflowRouter.route_issue("X", "s", build) == WorkflowType.EXECUTION
     wt, err = WorkflowRouter.route_issue_with_reason("X", "fix bug", "implement feature")
     assert wt == WorkflowType.PLANNING
-    assert err and "Mode" in err
+    # Mode / git template validation is deferred to workspace prep (err always None)
+    assert err is None
     wt2, err2 = WorkflowRouter.route_issue_with_reason(
         "X", "how to design", "should we use pattern"
     )
@@ -189,9 +190,9 @@ def test_workflow_router_mode_and_reason_edges():
 
 
 def test_prompt_builder_empty_jira_body():
-    p = PromptBuilder.build_prometheus_prompt("K-1", "", "")
+    p = PromptBuilder.build_plan_prompt("K-1", "", "")
     assert "K-1" in p
-    p2 = PromptBuilder.build_sisyphus_prompt("K-1", "", summary="")
+    p2 = PromptBuilder.build_build_prompt("K-1", "", "")
     assert "K-1" in p2
 
 

@@ -119,24 +119,19 @@ def test_only_two_primary_paths():
     assert plan != build
 
 
-def test_compat_aliases_map_to_two_paths():
-    plan = PromptBuilder.build_prometheus_prompt("A-1", "title", "body text")
+def test_mode_prompts_include_jira_and_plan_path():
+    plan = PromptBuilder.build_plan_prompt("A-1", "title", "body text")
     assert "body text" in plan and "title" in plan
 
-    build = PromptBuilder.build_atlas_prompt(
+    build = PromptBuilder.build_build_prompt(
         "A-1",
-        "/p.md",
-        summary="sum",
-        description="desc body",
+        "sum",
+        "desc body",
+        plan_path="/p.md",
         work_branch="feature/x",
     )
     assert "sum" in build and "desc body" in build
     assert "/p.md" in build
-
-    direct = PromptBuilder.build_sisyphus_prompt(
-        "A-1", "do thing", summary="Fix bug"
-    )
-    assert "do thing" in direct and "Fix bug" in direct
 
     oracle = PromptBuilder.build_oracle_consult_prompt(
         "why design X?", issue_key="A-1", summary="Arch"
@@ -144,14 +139,13 @@ def test_compat_aliases_map_to_two_paths():
     assert "why design X?" in oracle and "Arch" in oracle
 
 
-def test_agent_name_does_not_change_prompt_shape():
-    a = PromptBuilder.build_atlas_prompt(
-        "X-1", summary="s", description="d", work_branch="feature/x"
+def test_plan_and_build_prompts_differ():
+    a = PromptBuilder.build_plan_prompt("X-1", "s", "d")
+    b = PromptBuilder.build_build_prompt(
+        "X-1", "s", "d", work_branch="feature/x"
     )
-    b = PromptBuilder.build_sisyphus_prompt(
-        "X-1", "d", summary="s", work_branch="feature/x"
-    )
-    assert a == b
+    assert a != b
+    assert "Jira title" in a and "Jira title" in b
 
 
 def test_no_comment_response_builder():

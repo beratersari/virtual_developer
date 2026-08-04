@@ -62,12 +62,13 @@ def test_should_auto_start_planning_never():
 
 def test_get_agent_for_workflow_all_types():
     with patch("src.orchestrator.workflow_router.settings") as s:
-        s.planning_agent = "prometheus"
-        s.orchestrator_agent = "atlas"
-        s.default_agent = "sisyphus"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "prometheus"
+        s.default_agent = "atlas"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "atlas"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "atlas"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT) == "oracle"
+        s.default_agent = "sisyphus"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "sisyphus"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "sisyphus"
 
 
 def test_extract_mention_command_found():

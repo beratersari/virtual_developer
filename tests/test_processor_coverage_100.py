@@ -941,7 +941,7 @@ async def test_planning_missing_plan_and_durable_fail(
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -959,7 +959,7 @@ async def test_planning_missing_plan_and_durable_fail(
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", return_value=None):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
@@ -995,7 +995,7 @@ async def test_planning_aborted_and_cas_race(
     runner.run_agent_with_retry = AsyncMock(side_effect=abort_result)
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1034,7 +1034,7 @@ async def test_planning_aborted_and_cas_race(
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", side_effect=persist_and_cancel):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
@@ -1066,7 +1066,7 @@ async def test_execution_delivery_and_push_failures(
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1084,7 +1084,7 @@ async def test_execution_delivery_and_push_failures(
         with patch.object(processor, "_push_and_create_mr", new_callable=AsyncMock) as p:
             p.return_value = False
             with patch("src.processor.settings") as s:
-                s.orchestrator_agent = "atlas"
+                s.default_agent = "atlas"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
@@ -1112,7 +1112,7 @@ async def test_execution_delivery_and_push_failures(
     runner3.run_agent_with_retry = AsyncMock(side_effect=aborting)
     with patch.object(processor, "_init_git_manager", return_value=git3):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1311,9 +1311,7 @@ def test_job_processor_init_real_client_branch(monkeypatch, tmp_path):
     with patch("src.processor.settings") as s:
         s.is_configured.return_value = True
         s.jira_host = "https://jira.real.example.com"
-        s.default_agent = "a"
-        s.planning_agent = "p"
-        s.orchestrator_agent = "o"
+        s.default_agent = "atlas"
         with patch("src.processor.create_jira_client", return_value=MagicMock()) as cj:
             proc = JobProcessor()
             cj.assert_called()
@@ -1372,7 +1370,7 @@ async def test_execution_prepare_git_none_returns(
         processor, "_prepare_git_workspace", new_callable=AsyncMock, return_value=None
     ):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = tmp_path / "plans"
@@ -1418,7 +1416,7 @@ async def test_planning_success_with_retry_info_no_auto_start(
     runner.run_agent_with_retry = with_hooks
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
@@ -1465,7 +1463,7 @@ async def test_execution_success_full_path(
     runner.run_agent_with_retry = with_hooks
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
