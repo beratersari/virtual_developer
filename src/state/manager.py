@@ -10,6 +10,31 @@ from src.config import settings
 from src.logger import logger
 from src.state.models import JiraAgentState, TaskStatus
 
+# Terminal statuses must not be overwritten by in-flight / pending writes
+# (dashboard RMW or a second JiraStateManager instance on the same dir).
+_TERMINAL_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.ERROR,
+        TaskStatus.CANCELLED,
+    }
+)
+
+# Process-wide locks keyed by resolved state_dir so every manager instance
+# sharing a directory serializes RMW (daemon + processor + poller + tests).
+_DIR_LOCKS: Dict[str, threading.RLock] = {}
+_DIR_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for_state_dir(state_dir: Path) -> threading.RLock:
+    key = str(Path(state_dir).resolve())
+    with _DIR_LOCKS_GUARD:
+        lock = _DIR_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _DIR_LOCKS[key] = lock
+        return lock
+
 
 def _log_state_transition(issue_key: str, old_status: TaskStatus, new_status: TaskStatus) -> None:
     """Log a status change using the standard application logger format."""
@@ -22,10 +47,10 @@ class JiraStateManager:
     """Manages JIRA agent state persistence to disk."""
 
     def __init__(self, state_dir: Optional[Path] = None):
-        self.state_dir = state_dir or settings.state_dir
+        self.state_dir = Path(state_dir or settings.state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        # Serialize read-modify-write across threads (dashboard + poller + async)
-        self._lock = threading.RLock()
+        # Shared across all instances for this directory (not per-instance)
+        self._lock = _lock_for_state_dir(self.state_dir)
 
     def _get_state_file(self, issue_key: str) -> Path:
         """Get path to state file for an issue."""
@@ -47,8 +72,16 @@ class JiraStateManager:
                 logger.error(f"Error loading state for {issue_key}: {e}")
                 return None
 
-    def set_state(self, state: JiraAgentState) -> None:
-        """Save state to disk atomically. Logs state transitions to terminal."""
+    def set_state(self, state: JiraAgentState, *, force: bool = False) -> bool:
+        """Save state to disk atomically.
+
+        Returns True when the file was written. Returns False when:
+        * disk write fails, or
+        * the write would clobber a terminal status with a non-terminal one
+          (protects COMPLETED/CANCELLED/ERROR from stale dashboard RMW).
+
+        Pass ``force=True`` for intentional reprocess resets (terminal → PENDING).
+        """
         state_file = self._get_state_file(state.issue_key)
 
         with self._lock:
@@ -57,6 +90,16 @@ class JiraStateManager:
                     with open(state_file, "r", encoding="utf-8") as f:
                         old_data = json.load(f)
                     old_status = TaskStatus(old_data.get("status", "pending"))
+                    if (
+                        not force
+                        and old_status in _TERMINAL_STATUSES
+                        and state.status not in _TERMINAL_STATUSES
+                    ):
+                        logger.warning(
+                            f"Refuse set_state {state.issue_key}: would clobber "
+                            f"terminal {old_status.value} with {state.status.value}"
+                        )
+                        return False
                     if old_status != state.status:
                         _log_state_transition(state.issue_key, old_status, state.status)
             except Exception:
@@ -70,6 +113,7 @@ class JiraStateManager:
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp, state_file)
+                return True
             except Exception as e:
                 logger.error(f"Error saving state for {state.issue_key}: {e}")
                 try:
@@ -78,6 +122,7 @@ class JiraStateManager:
                         tmp.unlink()
                 except Exception:
                     pass
+                return False
 
     def create_state(
         self,
@@ -99,15 +144,24 @@ class JiraStateManager:
             jira_assignee=jira_assignee,
             metadata={},
         )
-        self.set_state(state)
+        if not self.set_state(state):
+            logger.error(f"state {issue_key}: create failed to persist to disk")
         return state
 
     def update_state(
         self,
         issue_key: str,
+        *,
+        force: bool = False,
         **kwargs: Any,
     ) -> Optional[JiraAgentState]:
-        """Update specific fields of an existing state (locked RMW)."""
+        """Update specific fields of an existing state (locked RMW).
+
+        Returns None when the issue is missing, the write is refused
+        (terminal clobber), or disk persistence fails.
+
+        ``force=True`` allows intentional reprocess (terminal → PENDING).
+        """
         with self._lock:
             state = self.get_state(issue_key)
             if not state:
@@ -123,7 +177,8 @@ class JiraStateManager:
                 else:
                     setattr(state, key, value)
 
-            self.set_state(state)
+            if not self.set_state(state, force=force):
+                return None
             return state
 
     def update_state_if(
@@ -139,6 +194,7 @@ class JiraStateManager:
         * If ``expected_statuses`` is set, current status must be in that set.
         * If ``reject_statuses`` is set, current status must *not* be in that set.
         * On mismatch, returns None without writing (caller treats as aborted/stale).
+        * On disk write failure or terminal-clobber refuse, returns None.
 
         Metadata patches still merge. Use this for progress→terminal transitions
         so cancel/watchdog ERROR/CANCELLED cannot be overwritten by late success.
@@ -170,7 +226,8 @@ class JiraStateManager:
                 else:
                     setattr(state, key, value)
 
-            self.set_state(state)
+            if not self.set_state(state):
+                return None
             return state
 
     def record_retry_attempt(
@@ -205,7 +262,8 @@ class JiraStateManager:
                 state.current_task_id = current_task_id
             if current_opencode_session_id is not None:
                 state.current_opencode_session_id = current_opencode_session_id
-            self.set_state(state)
+            if not self.set_state(state):
+                return None
             return state
 
     def get_all_states(self) -> List[JiraAgentState]:

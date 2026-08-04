@@ -1,61 +1,58 @@
-"""Build prompts for plan vs build workflows from the unified prompt kit."""
+"""Build prompts for plan vs build: two files + Jira title/description.
+
+Mode is the only switch (``Mode: plan`` vs ``Mode: build``). OpenCode agent
+names do not change prompt text.
+"""
 
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from src.config import settings
 from src.issue_git_spec import strip_params_block
-from src.orchestrator.prompt_kit import get_section, substitute_issue_key
+from src.logger import logger
+from src.orchestrator.prompt_kit import substitute_placeholders
 
 
 class PromptBuilder:
-    """Exactly two prompt paths: **plan** and **build**.
+    """Exactly two prompts: **plan** and **build**.
 
-    Both concatenate:
+    Each run is:
 
-    1. **System** — unattended policy + role (+ commit policy / plan path for build)
-    2. **Jira title** (summary)
-    3. **Jira description**
+    1. Full text from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
+       (placeholders ``{ISSUE_KEY}``, ``{WORK_BRANCH}``, ``{PLAN_PATH}``)
+    2. Jira title (summary)
+    3. Jira description
 
-    Jira ``{params}`` git blocks are stripped from prompt text (still used by
-    GitManager for clone/push). Agent choice (prometheus/atlas/…) is separate
-    from which of these two prompt shapes is used.
+    Agent selection (prometheus/atlas/…) does **not** change the prompt body.
     """
 
     @staticmethod
-    def _kit_path():
-        return settings.prompt_kit_file
+    def _agent_dir() -> Path:
+        """Directory containing PLAN_PROMPT.md / BUILD_PROMPT.md."""
+        custom = getattr(settings, "agent_prompts_dir", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return Path.cwd() / "agent"
 
     @staticmethod
-    def role_section(role: str) -> str:
-        """Load a role section: planning | execution."""
-        section_id = role if role.startswith("role.") else f"role.{role}"
-        return get_section(section_id, kit_path=PromptBuilder._kit_path())
+    def plan_prompt_path() -> Path:
+        custom = getattr(settings, "plan_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "PLAN_PROMPT.md"
 
     @staticmethod
-    def unattended_policy_block() -> str:
-        """Daemon non-interactive policy from ``§policy.unattended``."""
-        body = get_section(
-            "policy.unattended",
-            kit_path=PromptBuilder._kit_path(),
-        )
-        return f"## Unattended run (no questions)\n\n{body}"
-
-    @staticmethod
-    def commit_message_block(
-        issue_key: str,
-        *,
-        work_branch: Optional[str] = None,
-    ) -> str:
-        """Git policy from ``§policy.commit``."""
-        body = get_section(
-            "policy.commit",
-            kit_path=PromptBuilder._kit_path(),
-            issue_key=issue_key,
-            work_branch=work_branch,
-        )
-        return f"## Git policy\n\n{body}"
+    def build_prompt_path() -> Path:
+        custom = getattr(settings, "build_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "BUILD_PROMPT.md"
 
     @staticmethod
     def _join_blocks(*parts: str) -> str:
@@ -80,6 +77,51 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     @staticmethod
+    @lru_cache(maxsize=16)
+    def _read_prompt_file_cached(path_str: str, mtime_ns: int) -> str:
+        del mtime_ns  # cache key only
+        return Path(path_str).read_text(encoding="utf-8")
+
+    @staticmethod
+    def clear_prompt_file_cache() -> None:
+        """Drop file cache (tests / hot-reload after edit)."""
+        PromptBuilder._read_prompt_file_cached.cache_clear()
+
+    @staticmethod
+    def _load_mode_prompt(
+        path: Path,
+        *,
+        issue_key: str,
+        work_branch: Optional[str] = None,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Load one mode file and substitute placeholders."""
+        text = ""
+        if path.is_file():
+            try:
+                stat = path.stat()
+                text = PromptBuilder._read_prompt_file_cached(
+                    str(path.resolve()), stat.st_mtime_ns
+                )
+            except OSError as e:
+                logger.warning(f"Could not read prompt file {path}: {e}")
+        if not text.strip():
+            logger.warning(f"Prompt file missing or empty: {path}; using minimal stub")
+            text = (
+                f"# Mode prompt missing\n\n"
+                f"Work on issue {{ISSUE_KEY}}. Plan path: {{PLAN_PATH}}. "
+                f"Work branch: {{WORK_BRANCH}}.\n"
+            )
+
+        out = substitute_placeholders(
+            text,
+            issue_key=issue_key,
+            work_branch=work_branch,
+            plan_path=plan_path,
+        )
+        return out.strip()
+
+    @staticmethod
     def build_plan_prompt(
         issue_key: str,
         summary: str,
@@ -87,27 +129,13 @@ class PromptBuilder:
         *,
         acceptance_criteria: Optional[str] = None,
     ) -> str:
-        """Planning path: system (unattended + planning role) + title + description."""
+        """Plan mode: ``PLAN_PROMPT.md`` + Jira title + description."""
         plan_rel = f".sisyphus/plans/{issue_key}.md"
-        plan_instr = (
-            f"## Required plan file (mandatory)\n\n"
-            f"Before you finish, write the **full** plan (markdown with task "
-            f"checkboxes / to-do items) to:\n\n`{plan_rel}`\n\n"
-            f"Also acceptable: `.omo/plans/{issue_key}.md` "
-            f"(drafts under `.omo/drafts/` alone are **not** enough).\n\n"
-            f"The to-do list **must** end with a commit item for the build agent, e.g.\n"
-            f"`[ ] Commit with the conventional format if files changed: "
-            f"`[{issue_key}] <type>: <short description>``\n\n"
-            f"Exit with success only after that file exists, is non-empty, and "
-            f"includes the commit to-do."
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key=issue_key,
+            plan_path=plan_rel,
         )
-        system = PromptBuilder._join_blocks(
-            "# Plan request",
-            PromptBuilder.unattended_policy_block(),
-            f"## Role\n\n{PromptBuilder.role_section('planning')}",
-            plan_instr,
-        ).rstrip()
-
         jira = PromptBuilder._jira_title_and_description(
             issue_key, summary, description
         )
@@ -116,7 +144,6 @@ class PromptBuilder:
                 f"\n\n### Acceptance criteria\n"
                 f"{str(acceptance_criteria).strip()}"
             )
-
         return PromptBuilder._join_blocks(system, jira)
 
     @staticmethod
@@ -128,48 +155,20 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Build path: Atlas system (unattended + execution + commit) + title + description."""
-        atlas_ops = (
-            f"## Atlas build order (mandatory)\n\n"
-            f"1. **Plan first** — read the plan file if present; otherwise re-plan briefly.\n"
-            f"2. **Create to-do items** before heavy code edits. Todos **must** include:\n"
-            f"   - Implementation steps\n"
-            f"   - Verification when practical\n"
-            f"   - **Commit with the convention below if you made changes:**\n"
-            f"     `[{issue_key}] <type>: <short description>`\n"
-            f"3. **Then** edit code, check off todos, and complete the commit todo last "
-            f"when files changed.\n"
-            f"Do not ask the user questions. Do not push or open an MR.\n"
+        """Build mode: ``BUILD_PROMPT.md`` + Jira title + description."""
+        plan = (plan_path or "").strip() or f".sisyphus/plans/{issue_key}.md"
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=work_branch,
+            plan_path=plan,
         )
-        system_parts = [
-            "# Build request (Atlas)",
-            PromptBuilder.unattended_policy_block(),
-            f"## Role\n\n{PromptBuilder.role_section('execution')}",
-            atlas_ops,
-            PromptBuilder.commit_message_block(
-                issue_key, work_branch=work_branch
-            ),
-        ]
-        if plan_path and str(plan_path).strip():
-            system_parts.append(
-                f"## Plan file\n\n"
-                f"Execute the plan at:\n`{str(plan_path).strip()}`\n"
-            )
-        if work_branch and str(work_branch).strip():
-            wb = str(work_branch).strip()
-            system_parts.append(
-                f"## Prepared git work branch\n\n"
-                f"`{wb}` (already checked out — stay on it; "
-                f"commit subjects use `[{issue_key}]`, not the branch name)\n"
-            )
-
-        system = PromptBuilder._join_blocks(*system_parts).rstrip()
         jira = PromptBuilder._jira_title_and_description(
             issue_key, summary, description
         )
         return PromptBuilder._join_blocks(system, jira)
 
-    # --- Compatibility aliases (map old names → the two paths only) ---
+    # --- Compatibility aliases (same two paths; agent name does not matter) ---
 
     @staticmethod
     def build_prometheus_prompt(
@@ -178,7 +177,6 @@ class PromptBuilder:
         description: str,
         acceptance_criteria: Optional[str] = None,
     ) -> str:
-        """Alias → :meth:`build_plan_prompt`."""
         return PromptBuilder.build_plan_prompt(
             issue_key,
             summary,
@@ -196,8 +194,6 @@ class PromptBuilder:
         description: str = "",
         work_branch: Optional[str] = None,
     ) -> str:
-        """Alias → :meth:`build_build_prompt` (includes summary + description)."""
-        # previous_learnings folded into description when present (compat)
         desc = description or ""
         if previous_learnings:
             extra = "\n".join(f"- {x}" for x in previous_learnings if x)
@@ -220,7 +216,6 @@ class PromptBuilder:
         summary: str = "",
         work_branch: Optional[str] = None,
     ) -> str:
-        """Alias → :meth:`build_build_prompt`."""
         desc = task_description or ""
         if context:
             bits: list[str] = []
@@ -259,7 +254,7 @@ class PromptBuilder:
         issue_key: str = "",
         summary: str = "",
     ) -> str:
-        """Alias → :meth:`build_plan_prompt` (consult uses plan-shaped system + Jira body)."""
+        """Consult uses the plan-mode prompt + question as description."""
         desc = (question or "").strip()
         if context_files:
             desc = (
@@ -270,5 +265,47 @@ class PromptBuilder:
         key = issue_key or "CONSULT"
         return PromptBuilder.build_plan_prompt(key, summary or "", desc)
 
+    # Legacy helpers used by a few tests / docs — thin wrappers, not section kit.
 
-__all__ = ["PromptBuilder", "substitute_issue_key"]
+    @staticmethod
+    def unattended_policy_block() -> str:
+        """Best-effort extract of unattended guidance from plan file."""
+        body = PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key="ISSUE",
+        )
+        return body
+
+    @staticmethod
+    def commit_message_block(
+        issue_key: str,
+        *,
+        work_branch: Optional[str] = None,
+    ) -> str:
+        """Best-effort git policy text from build prompt (for tests/compat)."""
+        body = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=work_branch or f"feature/{issue_key}",
+        )
+        # Prefer the Git policy section if present
+        marker = "## Git policy"
+        if marker in body:
+            return marker + body.split(marker, 1)[1]
+        return f"## Git policy\n\nCommit as `[{issue_key}] <type>: <short description>`."
+
+    @staticmethod
+    def role_section(role: str) -> str:
+        """Compat: planning → plan file, anything else → build file."""
+        if "plan" in (role or "").lower():
+            return PromptBuilder._load_mode_prompt(
+                PromptBuilder.plan_prompt_path(),
+                issue_key="ISSUE",
+            )
+        return PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key="ISSUE",
+        )
+
+
+__all__ = ["PromptBuilder"]

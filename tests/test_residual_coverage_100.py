@@ -560,31 +560,18 @@ def test_agent_runner_kill_edges():
     assert out in (None, False, True)
 
 
-def test_prompt_kit_missing_sections(tmp_path):
+def test_prompt_placeholders_only():
     from src.orchestrator.prompt_kit import (
-        get_section,
-        load_prompt_sections,
-        parse_prompt_kit,
+        clear_prompt_kit_cache,
         substitute_issue_key,
+        substitute_placeholders,
     )
 
-    kit = tmp_path / "kit.md"
-    kit.write_text(
-        "## §role.planning\n---\nPlan stuff\n---\n## §role.execution\nDo stuff\n",
-        encoding="utf-8",
-    )
-    secs = parse_prompt_kit(kit.read_text(encoding="utf-8"))
-    assert "role.planning" in secs
-    loaded = load_prompt_sections(kit_path=kit, refresh=True)
-    assert "role.planning" in loaded
     assert substitute_issue_key("", "K-1") == ""
     assert "K-1" in substitute_issue_key("branch feature/{ISSUE_KEY}", "K-1")
-    body = get_section("role.planning", kit_path=kit)
-    assert body
-    # OSError reading kit
-    missing = tmp_path / "nope.md"
-    loaded2 = load_prompt_sections(kit_path=missing, refresh=True)
-    assert isinstance(loaded2, dict)
+    out = substitute_placeholders("{ISSUE_KEY} {PLAN_PATH}", issue_key="K-1")
+    assert "K-1" in out and "plans/K-1" in out
+    clear_prompt_kit_cache()
 
 
 def test_opencode_sessions_edges(tmp_path):

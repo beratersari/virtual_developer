@@ -338,7 +338,7 @@ Repo URL and branches always come from the issue `{params}` block.
 | `PLANNING_AGENT` | `prometheus` | |
 | `ORCHESTRATOR_AGENT` | `atlas` | |
 | `EXECUTION_CATEGORY` | `deep` | Category for deep work |
-| `PROMPT_KIT_FILE` | `agent/AGENT_PROMPT.md` | Unified prompt kit (`§policy.commit`, `§role.*`) |
+| `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
 | `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
@@ -395,7 +395,8 @@ virtual_developer/
 ├── VERSION                # SemVer product version
 ├── .env.example           # Config template
 ├── requirements.txt
-├── agent/AGENT_PROMPT.md  # Prompt kit sections
+├── agent/PLAN_PROMPT.md   # Plan mode prompt
+├── agent/BUILD_PROMPT.md  # Build mode prompt
 ├── src/
 │   ├── daemon.py          # Process entry: poller + dashboard + monitor
 │   ├── config.py
@@ -445,7 +446,7 @@ feat(dashboard): show poll countdown
 fix(poller): do not requeue in-flight issues
 ```
 
-Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/AGENT_PROMPT.md` / `commitMsgFormat.md`.
+Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/BUILD_PROMPT.md` / `commitMsgFormat.md`.
 
 ---
 
@@ -498,7 +499,8 @@ python cli.py show PROJ-123
 | Doc | Purpose |
 |-----|---------|
 | [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
-| [agent/AGENT_PROMPT.md](agent/AGENT_PROMPT.md) | Unified agent prompt kit for target clones |
+| [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Plan-mode prompt |
+| [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Build-mode prompt |
 | [packaging/windows/README.md](packaging/windows/README.md) | Offline zip design and versioning |
 | [`.env.example`](.env.example) | Full environment template with comments |
 | [web/README.md](web/README.md) | Frontend notes (if present) |

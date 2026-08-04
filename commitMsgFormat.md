@@ -1,6 +1,6 @@
 # Commit message format (target product repos)
 
-**Source of truth:** `agent/AGENT_PROMPT.md` → section `## §policy.commit`.
+**Source of truth:** `agent/BUILD_PROMPT.md` (Git policy section). Plan mode: `agent/PLAN_PROMPT.md`.
 
 Agents in temp clones use:
 

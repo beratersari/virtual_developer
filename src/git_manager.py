@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, urlunparse
 
 from src.config import settings, set_current_temp_dir
 from src.logger import logger
@@ -191,12 +191,15 @@ class GitManager:
         raw_pat = self._pat_for_remote(self.remote_url or "")
         # Coerce so mock/non-str never break redact/replace
         gitlab_pat = raw_pat if isinstance(raw_pat, str) and raw_pat.strip() else ""
-        # Clean URL only — PAT never appears in argv (use GIT_ASKPASS instead)
-        clone_url = (self.remote_url or "").strip()
+        clean_url = (self.remote_url or "").strip()
+        # Prefer settings PAT in the clone URL so Windows Credential Manager is
+        # not consulted for this call — helpers stay enabled for the user elsewhere.
+        # Without a settings PAT, use the clean URL (host helpers may apply).
+        clone_url = self._https_url_with_settings_pat(clean_url) or clean_url
 
         logger.info(f"Cloning repository into {self.temp_dir}...")
         logger.debug(f"Remote URL: {self.remote_url}")
-        logger.debug(f"Clone will use askpass auth: {bool(gitlab_pat)}")
+        logger.debug(f"Clone will use settings PAT in URL: {bool(gitlab_pat)}")
 
         clone_timeout = max(30, int(getattr(settings, "git_clone_timeout_seconds", 300) or 300))
         try:
@@ -204,7 +207,6 @@ class GitManager:
                 ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
                 capture_output=True,
                 text=True,
-                env=self._git_auth_env() if gitlab_pat else None,
                 timeout=clone_timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -311,11 +313,65 @@ class GitManager:
             )
         )
 
-    def _git_auth_env(self, *, url: str = "") -> Dict[str, str]:
-        """Build env for git so credentials come from askpass, not argv.
+    def _https_url_with_settings_pat(self, url: str = "") -> Optional[str]:
+        """Build ``https://oauth2:PAT@host/...`` from settings, or None.
 
-        PAT is chosen for the remote host and placed in a process environment
-        variable consumed by a short askpass helper — never in argv.
+        Used only for VD child-process clone/push/fetch so the **settings** PAT
+        is preferred without clearing the user's Windows credential helpers.
+        When credentials are already in the URL, git does not call helpers.
+        Origin is scrubbed back to a clean URL after the operation.
+        """
+        base = (url or self.remote_url or "").strip()
+        if not base:
+            return None
+        pat = self._pat_for_remote(base)
+        if not pat:
+            return None
+        if not base.startswith("http"):
+            base = "https://" + base
+        parsed = urlparse(base)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        # GitLab convention: username oauth2, password = PAT
+        userinfo = f"oauth2:{quote(pat, safe='')}"
+        host = parsed.hostname
+        netloc = f"{userinfo}@{host}:{parsed.port}" if parsed.port else f"{userinfo}@{host}"
+        return urlunparse(
+            (
+                parsed.scheme,
+                netloc,
+                parsed.path or "",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+
+    def _apply_settings_pat_to_origin(self) -> bool:
+        """Temporarily set origin to a settings-PAT URL. Returns True if applied."""
+        auth_url = self._https_url_with_settings_pat()
+        if not auth_url or not self.temp_dir or not self.temp_dir.is_dir():
+            return False
+        try:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", auth_url],
+                cwd=self.temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._git_command_timeout(),
+                check=False,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Could not apply settings PAT to origin: {e}")
+            return False
+
+    def _git_auth_env(self, *, url: str = "") -> Dict[str, str]:
+        """Optional askpass env (legacy/tests). Does **not** clear credential helpers.
+
+        Preferred auth for clone/push is ``_https_url_with_settings_pat`` so the
+        Windows credential helper remains available for the user and for ops
+        without a settings PAT. Askpass alone loses to Windows GCM when both run.
         """
         env = dict(os.environ)
         pat = self._pat_for_remote(url or self.remote_url or "")
@@ -324,12 +380,7 @@ class GitManager:
         askpass = self._ensure_askpass_script()
         env["GIT_ASKPASS"] = str(askpass)
         env["GIT_TERMINAL_PROMPT"] = "0"
-        env["GCM_INTERACTIVE"] = "never"
-        # Username for HTTPS; password comes from VD_GIT_PASSWORD via askpass
         env["VD_GIT_PASSWORD"] = pat
-        env["GIT_CONFIG_COUNT"] = "1"
-        env["GIT_CONFIG_KEY_0"] = "credential.helper"
-        env["GIT_CONFIG_VALUE_0"] = ""
         return env
 
     @staticmethod
@@ -461,8 +512,10 @@ class GitManager:
     ) -> subprocess.CompletedProcess:
         """Run a git command in the temp working directory.
 
-        When ``auth=True``, inject askpass env so push/fetch can authenticate
-        without putting the PAT on the command line.
+        When ``auth=True`` and a settings PAT exists for the host, temporarily
+        points ``origin`` at ``https://oauth2:PAT@…`` so **settings** win without
+        clearing Windows credential helpers. Scrubs origin afterward. With no
+        settings PAT, leaves helpers alone (Windows Credential Manager can apply).
 
         Always applies a hard timeout (default ``git_command_timeout_seconds``)
         so a hung push/fetch cannot pin a job slot forever.
@@ -477,8 +530,10 @@ class GitManager:
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
 
-        use_auth = auth and bool(self._pat_for_remote(self.remote_url or ""))
-        env = self._git_auth_env() if use_auth else None
+        applied_settings_pat = False
+        if auth:
+            applied_settings_pat = self._apply_settings_pat_to_origin()
+
         cmd_timeout = (
             max(30, int(timeout))
             if timeout is not None
@@ -490,7 +545,6 @@ class GitManager:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                env=env,
                 timeout=cmd_timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -504,6 +558,12 @@ class GitManager:
                 stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
                 stderr=safe_err,
             )
+        finally:
+            if applied_settings_pat:
+                try:
+                    self._scrub_remote_credentials()
+                except Exception:
+                    pass
 
         if result.returncode != 0:
             safe_err = self._redact_secret_text(result.stderr or "")
@@ -915,7 +975,7 @@ class GitManager:
         work = self._resolve_work_branch_name(key)
         return self._prepare_work_branch(work, target)
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
-        """Format a commit message per agent/AGENT_PROMPT.md §policy.commit.
+        """Format a commit message per agent/BUILD_PROMPT.md git policy.
 
         Required subject: ``[ISSUE-KEY] type: description``
         ``summary`` should already include the type prefix (e.g. ``fix: foo``).
@@ -1077,6 +1137,8 @@ class GitManager:
             or self.get_current_branch()
         )
 
+        # auth=True → settings PAT on origin for the push when configured;
+        # otherwise host Windows credential helpers remain available.
         try:
             self._with_auth_remote()
             try:

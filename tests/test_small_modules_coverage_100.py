@@ -58,7 +58,8 @@ def test_update_state_if_reject_and_unknown_field(tmp_path):
         )
         is None
     )
-    sm.update_state("U-1", status=TaskStatus.EXECUTING)
+    # Intentional re-open from terminal requires force=True
+    sm.update_state("U-1", force=True, status=TaskStatus.EXECUTING)
     out = sm.update_state_if(
         "U-1",
         expected_statuses={TaskStatus.EXECUTING},

@@ -64,12 +64,17 @@ def test_assert_remote_host_requires_allowlist_when_pat_set(monkeypatch):
     assert "GITLAB_ALLOWED_HOSTS" in str(ei.value)
 
 
-def test_clone_argv_never_embeds_pat(tmp_path, monkeypatch):
+def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
+    """Clone uses oauth2:PAT@ URL when settings PAT exists; never clears helpers."""
     from src.config import settings as real_settings
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(real_settings, "gitlab_pat", "super-secret-pat-xyz")
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map(
+            {"gitlab.example.com": "super-secret-pat-xyz"}
+        )
     monkeypatch.setattr(real_settings, "temp_dir_base", Path(".temp"))
 
     with patch.object(GitManager, "_setup_temp_working_dir"):
@@ -81,21 +86,112 @@ def test_clone_argv_never_embeds_pat(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["env"] = kwargs.get("env")
+        captured["cmd"] = list(cmd)
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("src.git_manager.subprocess.run", side_effect=fake_run):
         with patch.object(gm, "_materialize_job_remote_refs"):
-            with patch.object(gm, "_scrub_remote_credentials"):
+            with patch.object(gm, "_scrub_remote_credentials") as scrub:
                 gm._clone_into_temp()
+                scrub.assert_called()
 
-    joined = " ".join(str(c) for c in captured["cmd"])
-    assert "super-secret-pat-xyz" not in joined
-    assert "oauth2:" not in joined
-    env = captured["env"] or {}
-    assert env.get("VD_GIT_PASSWORD") == "super-secret-pat-xyz"
-    assert env.get("GIT_ASKPASS")
+    assert captured["cmd"][0:3] == ["git", "clone", "--no-single-branch"]
+    # Settings PAT is in the clone URL (not via clearing Windows helpers)
+    assert "oauth2:super-secret-pat-xyz@" in captured["cmd"][3]
+    assert "credential.helper=" not in captured["cmd"]
+
+
+def test_push_applies_settings_pat_to_origin_without_clearing_helpers(
+    tmp_path, monkeypatch
+):
+    """Push with settings PAT sets origin URL temporarily; no credential.helper=."""
+    from src.config import settings as real_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(real_settings, "gitlab_pat", "settings-pat-from-dashboard")
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map(
+            {"gitlab.example.com": "settings-pat-from-dashboard"}
+        )
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-PUSH")
+    gm.remote_enabled = True
+    gm.remote_url = "https://gitlab.example.com/group/repo.git"
+    gm.temp_dir = tmp_path / "repo"
+    gm.temp_dir.mkdir()
+    gm.work_branch = "feature/SEC-PUSH"
+    gm._assert_remote_host_allowed = MagicMock()
+
+    captured = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("src.git_manager.subprocess.run", side_effect=fake_run):
+        with patch.object(gm, "_with_auth_remote"):
+            ok = gm.push("feature/SEC-PUSH")
+
+    assert ok is True
+    # set-url with oauth2:PAT before push
+    set_urls = [c for c in captured if c[:3] == ["git", "remote", "set-url"]]
+    assert any("oauth2:settings-pat-from-dashboard@" in " ".join(c) for c in set_urls)
+    # Never disable Windows credential helper
+    for c in captured:
+        assert "credential.helper=" not in c
+
+
+def test_push_without_settings_pat_leaves_helpers_available(tmp_path, monkeypatch):
+    """No settings PAT → push still runs (Windows/host helpers may authenticate)."""
+    from src.config import settings as real_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(real_settings, "gitlab_pat", "")
+    monkeypatch.setattr(real_settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map({})
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-NOPAT")
+    gm.remote_enabled = True
+    gm.remote_url = "https://gitlab.example.com/group/repo.git"
+    gm.temp_dir = tmp_path / "repo"
+    gm.temp_dir.mkdir()
+    gm.work_branch = "feature/x"
+    gm._assert_remote_host_allowed = MagicMock()
+
+    captured = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("src.git_manager.subprocess.run", side_effect=fake_run):
+        with patch.object(gm, "_with_auth_remote"):
+            with patch.object(gm, "_scrub_remote_credentials"):
+                ok = gm.push("feature/x")
+
+    assert ok is True
+    assert any("push" in c for c in captured)
+    # No oauth2 embed when no settings PAT
+    assert not any("oauth2:" in " ".join(c) for c in captured)
+
+
+def test_https_url_with_settings_pat_builds_oauth2_url(tmp_path, monkeypatch):
+    from src.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "gitlab_pat", "glpat-abc")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map({"gitlab.example.com": "glpat-abc"})
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-URL")
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    out = gm._https_url_with_settings_pat()
+    assert out == "https://oauth2:glpat-abc@gitlab.example.com/g/r.git"
 
 
 def test_build_clone_url_does_not_embed_pat():
