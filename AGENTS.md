@@ -423,6 +423,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
+| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install.bat`**). Requires **`vendor/node`**. Edit **`npm-online.npmrc`** `registry=` for private/FTP-backed HTTP mirrors. Offline OpenCode remains **`vendor/opencode-home.zip`**. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
 ### 9.2 cmd.exe / install.bat landmines

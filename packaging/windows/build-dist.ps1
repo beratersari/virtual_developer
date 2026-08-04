@@ -205,6 +205,7 @@ $ver = Read-Versions $versionsFile
 $OPENCODE_VERSION = $ver["OPENCODE_VERSION"]
 $OH_MY_OPENCODE_VERSION = $ver["OH_MY_OPENCODE_VERSION"]
 $GLAB_VERSION = $ver["GLAB_VERSION"]
+$NODE_FULL_VERSION = if ($ver["NODE_FULL_VERSION"]) { $ver["NODE_FULL_VERSION"] } else { "20.19.0" }
 $PYTHON_MIN_VERSION = if ($ver["PYTHON_MIN_VERSION"]) { $ver["PYTHON_MIN_VERSION"] } else { "3.10" }
 $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
     @($ver["PYTHON_WHEEL_VERSIONS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -215,6 +216,7 @@ $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
 if (-not $OPENCODE_VERSION) { throw "OPENCODE_VERSION missing in versions.env" }
 if (-not $OH_MY_OPENCODE_VERSION) { throw "OH_MY_OPENCODE_VERSION missing in versions.env" }
 if (-not $GLAB_VERSION) { throw "GLAB_VERSION missing in versions.env" }
+if (-not $NODE_FULL_VERSION) { throw "NODE_FULL_VERSION missing in versions.env" }
 
 if (-not $OutDir) {
     $OutDir = Join-Path $root "dist"
@@ -250,6 +252,7 @@ $copyItems = @(
     ".env.example",
     "install.bat",
     "install-dashboard.bat",
+    "install-opencode-online.bat",
     "VERSION",
     "README.md",
     "AGENTS.md",
@@ -390,6 +393,8 @@ glab=$GLAB_VERSION
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
 OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install.bat)
+PortableNode=vendor/node (node.exe + npm for install-opencode-online.bat)
+NodeFull=$NODE_FULL_VERSION
 "@
 Set-Content -Path (Join-Path $payload "DIST_VERSION.txt") -Value $marker -Encoding UTF8
 Set-Content -Path (Join-Path $payload "VERSION") -Value $productVersion -Encoding UTF8
@@ -636,6 +641,72 @@ Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyConti
 Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to %USERPROFILE%\.opencode)"
 
 # ---------------------------------------------------------------------------
+# 4b) Portable Node win-x64 (node.exe + npm) for install-opencode-online.bat
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 4b: Staging portable Node v$NODE_FULL_VERSION (vendor\node)..."
+
+$nodeZipName = "node-v$NODE_FULL_VERSION-win-x64.zip"
+$nodeZip = Join-Path $dl $nodeZipName
+$nodeUrl = "https://nodejs.org/dist/v$NODE_FULL_VERSION/$nodeZipName"
+Download-File $nodeUrl $nodeZip
+
+$nodeExtract = Join-Path $dl "node-extract"
+if (Test-Path -LiteralPath $nodeExtract) {
+    Remove-Item -LiteralPath $nodeExtract -Recurse -Force
+}
+Expand-ZipSafe $nodeZip $nodeExtract
+
+# Official zip has a single top folder node-v*-win-x64\
+$nodeInner = Get-ChildItem -Path $nodeExtract -Directory | Select-Object -First 1
+if (-not $nodeInner) {
+    throw "Unexpected Node zip layout (no top-level directory)"
+}
+$nodeExeSrc = Join-Path $nodeInner.FullName "node.exe"
+$npmCmdSrc = Join-Path $nodeInner.FullName "npm.cmd"
+if (-not (Test-Path -LiteralPath $nodeExeSrc)) {
+    throw "node.exe missing in Node zip: $nodeExeSrc"
+}
+if (-not (Test-Path -LiteralPath $npmCmdSrc)) {
+    throw "npm.cmd missing in Node zip: $npmCmdSrc"
+}
+
+$vendorNode = Join-Path $vendor "node"
+if (Test-Path -LiteralPath $vendorNode) {
+    Remove-Item -LiteralPath $vendorNode -Recurse -Force
+}
+Ensure-Dir $vendorNode
+# Flatten into vendor\node so install-opencode-online finds vendor\node\node.exe
+$rcNode = Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+    $nodeInner.FullName, $vendorNode, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np", "/R:1", "/W:1"
+) -Wait -PassThru -NoNewWindow
+if ($rcNode.ExitCode -ge 8) {
+    throw "robocopy Node tree failed (exit $($rcNode.ExitCode))"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $vendorNode "node.exe"))) {
+    throw "vendor\node\node.exe missing after stage"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $vendorNode "npm.cmd"))) {
+    throw "vendor\node\npm.cmd missing after stage"
+}
+# Sanity: node runs
+$nodeSmoke = & (Join-Path $vendorNode "node.exe") --version 2>&1
+Write-Host "  portable node: $nodeSmoke"
+Write-Host ("  vendor\node staged ({0:N1} MB tree)" -f (
+    (Get-ChildItem -Path $vendorNode -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
+))
+
+# Online-installer config templates (user-editable; offline install.bat never uses these)
+foreach ($cfgName in @("npm-online.npmrc", "online-sources.env")) {
+    $cfgSrc = Join-Path $root "packaging\windows\$cfgName"
+    if (Test-Path -LiteralPath $cfgSrc) {
+        Copy-Item -LiteralPath $cfgSrc -Destination (Join-Path $vendor $cfgName) -Force
+        Write-Host "  + vendor\$cfgName"
+    }
+}
+
+
+# ---------------------------------------------------------------------------
 # 5) Download Python wheels for 3.10+ (win_amd64)
 # ---------------------------------------------------------------------------
 Write-Host ""
@@ -673,11 +744,12 @@ $versionsCopy = @"
 OPENCODE_VERSION=$OPENCODE_VERSION
 OH_MY_OPENCODE_VERSION=$OH_MY_OPENCODE_VERSION
 GLAB_VERSION=$GLAB_VERSION
+NODE_FULL_VERSION=$NODE_FULL_VERSION
 PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat (full) or install-dashboard.bat (app only). Do not manually unpack vendor files.
+NOTE=Run install.bat (full offline), install-dashboard.bat (app only), or install-opencode-online.bat (OpenCode via network + vendor\node).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -690,19 +762,23 @@ JIRA Virtual Developer — Windows offline package
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
 4. Install (pick one):
-      install.bat            — full: Python + OpenCode + plugins + glab
-      install-dashboard.bat  — backend + frontend only (keeps your existing OpenCode)
+      install.bat                 — full OFFLINE: Python + OpenCode + plugins + glab
+      install-dashboard.bat       — backend + frontend only (no OpenCode)
+      install-opencode-online.bat — ONLINE OpenCode only (requires vendor\node;
+                                    edit vendor\npm-online.npmrc registry= for your mirror;
+                                    does NOT replace offline install.bat)
 5. Edit .env with Jira / GitLab settings
 6. Start:
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
       start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
       start.bat           → both (backend then frontend)
-7. OpenCode TUI (optional; after full install.bat):
+7. OpenCode TUI (optional; after install.bat or install-opencode-online.bat):
       start-opencode.bat
    NEVER run "opencode" from C:\Users\<you> — black-screen hang.
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
+Portable Node (online OpenCode): vendor\node\node.exe (v$NODE_FULL_VERSION)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 

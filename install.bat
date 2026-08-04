@@ -849,6 +849,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 exit /b 0
 
 :install_opencode_online
+REM Rare fallback when vendor\opencode-home.zip is missing AND VD_ALLOW_ONLINE=1.
+REM Full offline install.bat path never reaches here. For the supported online
+REM OpenCode flow (portable vendor\node + npm registry), use install-opencode-online.bat.
 echo   Fetching OpenCode v!OPENCODE_VERSION! ...
 set "TMP_OC=%TEMP%\vd-opencode-%RANDOM%"
 mkdir "!TMP_OC!" 2>nul
@@ -900,7 +903,7 @@ if not errorlevel 1 (
 
 where npm >nul 2>&1
 if errorlevel 1 (
-    echo [WARNING] npm not found — plugin not installed. Use the CI zip instead.
+    echo [WARNING] npm not found - plugin not installed. Prefer install-opencode-online.bat ^(vendor\node^) or the full offline CI zip.
 ) else (
     pushd "!OPENCODE_HOME!"
     call npm install --omit=dev --no-fund --no-audit "oh-my-opencode@!OH_MY_OPENCODE_VERSION!"
