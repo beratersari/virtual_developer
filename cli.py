@@ -259,9 +259,7 @@ def config():
     
     table.add_row("JIRA Host", settings.jira_host)
     table.add_row("Projects", ", ".join(settings.jira_projects_list))
-    table.add_row("Default Agent", settings.default_agent)
-    table.add_row("Planning Agent", settings.planning_agent)
-    table.add_row("Orchestrator Agent", settings.orchestrator_agent)
+    table.add_row("Agent", settings.default_agent)
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Poll Interval (s)", str(settings.poll_interval_seconds))
     table.add_row("Board ID", settings.jira_board_id or "(not set)")
@@ -474,9 +472,13 @@ def init():
 @click.option("--project", "-p", default="sample_project", help="Project directory to work on")
 @click.option("--title", "-t", required=True, help="Issue title/summary")
 @click.option("--description", "-d", required=True, help="Issue description")
-@click.option("--agent", "-a", default="sisyphus", help="Agent to use (sisyphus, prometheus, atlas, oracle)")
-@click.option("--category", "-c", help="Category for task (quick, deep, visual-engineering, etc.)")
-@click.option("--plan-only", is_flag=True, help="Only create a plan (Prometheus), don't execute")
+@click.option(
+    "--agent",
+    "-a",
+    default=None,
+    help="OpenCode agent (default: DEFAULT_AGENT from settings; use oracle for consult)",
+)
+@click.option("--plan-only", is_flag=True, help="Only create a plan (Mode: plan path), don't execute")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running agent")
 @click.option("--model", "-m", default=None, help="Override DEFAULT_MODEL for this run")
 @click.option("--timeout", default=None, type=int, help="Agent timeout seconds (default from settings)")
@@ -484,8 +486,7 @@ def test_issue(
     project: str,
     title: str,
     description: str,
-    agent: str,
-    category: Optional[str],
+    agent: Optional[str],
     plan_only: bool,
     dry_run: bool,
     model: Optional[str],
@@ -504,12 +505,6 @@ def test_issue(
             --title "Add logging" \\
             --description "Add logging to all calculator methods" \\
             --plan-only
-        
-        # Use specific category
-        python cli.py test-issue \\
-            --title "Update UI" \\
-            --description "Make it look better" \\
-            --category visual-engineering
     """
     import asyncio
     from datetime import datetime
@@ -518,6 +513,8 @@ def test_issue(
     from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
     from src.state.manager import JiraStateManager
     from src.state.models import JiraAgentState, TaskStatus
+
+    agent = (agent or settings.default_agent).strip() or settings.default_agent
     
     # Generate a fake issue key
     issue_key = f"TEST-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -527,8 +524,6 @@ def test_issue(
     console.print(f"Title: {title}")
     console.print(f"Description: {description}")
     console.print(f"Agent: {agent}")
-    if category:
-        console.print(f"Category: {category}")
     console.print()
     
     if dry_run:
@@ -569,7 +564,7 @@ def test_issue(
             task = AgentTask(
                 description=f"Plan: {title}",
                 prompt=prompt,
-                agent="prometheus",
+                agent=agent if agent != "oracle" else settings.default_agent,
                 issue_key=issue_key,
                 model=model,
             )
@@ -603,7 +598,6 @@ def test_issue(
                 description=f"Execute: {title}",
                 prompt=prompt,
                 agent=agent,
-                category=category or settings.execution_category,
                 issue_key=issue_key,
                 model=model,
             )

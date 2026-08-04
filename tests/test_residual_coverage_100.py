@@ -132,7 +132,7 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch.object(processor, "_resolve_plan_path", return_value=bad):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
@@ -169,7 +169,7 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", side_effect=persist_then_cancel):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
@@ -192,7 +192,7 @@ async def test_planning_reporter_exceptions_still_plan_ready(
     processor.reporter.post_plan_summary = MagicMock(side_effect=RuntimeError("b"))
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 0
             s.full_plans_dir = plans

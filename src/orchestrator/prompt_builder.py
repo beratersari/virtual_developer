@@ -168,84 +168,6 @@ class PromptBuilder:
         )
         return PromptBuilder._join_blocks(system, jira)
 
-    # --- Compatibility aliases (same two paths; agent name does not matter) ---
-
-    @staticmethod
-    def build_prometheus_prompt(
-        issue_key: str,
-        summary: str,
-        description: str,
-        acceptance_criteria: Optional[str] = None,
-    ) -> str:
-        return PromptBuilder.build_plan_prompt(
-            issue_key,
-            summary,
-            description,
-            acceptance_criteria=acceptance_criteria,
-        )
-
-    @staticmethod
-    def build_atlas_prompt(
-        issue_key: str,
-        plan_path: str = "",
-        previous_learnings: Optional[list] = None,
-        *,
-        summary: str = "",
-        description: str = "",
-        work_branch: Optional[str] = None,
-    ) -> str:
-        desc = description or ""
-        if previous_learnings:
-            extra = "\n".join(f"- {x}" for x in previous_learnings if x)
-            if extra:
-                desc = (desc + "\n\n### Notes\n" + extra).strip()
-        return PromptBuilder.build_build_prompt(
-            issue_key,
-            summary,
-            desc,
-            plan_path=plan_path or None,
-            work_branch=work_branch,
-        )
-
-    @staticmethod
-    def build_sisyphus_prompt(
-        issue_key: str,
-        task_description: str,
-        context: Optional[dict] = None,
-        *,
-        summary: str = "",
-        work_branch: Optional[str] = None,
-    ) -> str:
-        desc = task_description or ""
-        if context:
-            bits: list[str] = []
-            if context.get("files"):
-                bits.append(
-                    "**Relevant files:**\n"
-                    + "\n".join(f"- {f}" for f in context["files"])
-                )
-            if context.get("patterns"):
-                bits.append(
-                    "**Code patterns:**\n"
-                    + "\n".join(f"- {p}" for p in context["patterns"])
-                )
-            extra = {
-                k: v for k, v in context.items() if k not in ("files", "patterns")
-            }
-            if extra:
-                bits.append(
-                    "**Other context:**\n"
-                    + "\n".join(f"- {k}: {v}" for k, v in extra.items())
-                )
-            if bits:
-                desc = (desc + "\n\n### Context\n" + "\n\n".join(bits)).strip()
-        return PromptBuilder.build_build_prompt(
-            issue_key,
-            summary,
-            desc,
-            work_branch=work_branch,
-        )
-
     @staticmethod
     def build_oracle_consult_prompt(
         question: str,
@@ -265,47 +187,22 @@ class PromptBuilder:
         key = issue_key or "CONSULT"
         return PromptBuilder.build_plan_prompt(key, summary or "", desc)
 
-    # Legacy helpers used by a few tests / docs — thin wrappers, not section kit.
-
-    @staticmethod
-    def unattended_policy_block() -> str:
-        """Best-effort extract of unattended guidance from plan file."""
-        body = PromptBuilder._load_mode_prompt(
-            PromptBuilder.plan_prompt_path(),
-            issue_key="ISSUE",
-        )
-        return body
-
     @staticmethod
     def commit_message_block(
         issue_key: str,
         *,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Best-effort git policy text from build prompt (for tests/compat)."""
+        """Git policy text from build prompt (for tests / commit policy helpers)."""
         body = PromptBuilder._load_mode_prompt(
             PromptBuilder.build_prompt_path(),
             issue_key=issue_key,
             work_branch=work_branch or f"feature/{issue_key}",
         )
-        # Prefer the Git policy section if present
         marker = "## Git policy"
         if marker in body:
             return marker + body.split(marker, 1)[1]
         return f"## Git policy\n\nCommit as `[{issue_key}] <type>: <short description>`."
-
-    @staticmethod
-    def role_section(role: str) -> str:
-        """Compat: planning → plan file, anything else → build file."""
-        if "plan" in (role or "").lower():
-            return PromptBuilder._load_mode_prompt(
-                PromptBuilder.plan_prompt_path(),
-                issue_key="ISSUE",
-            )
-        return PromptBuilder._load_mode_prompt(
-            PromptBuilder.build_prompt_path(),
-            issue_key="ISSUE",
-        )
 
 
 __all__ = ["PromptBuilder"]

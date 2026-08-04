@@ -37,8 +37,8 @@ def test_prompt_roles_from_mode_files(tmp_path, monkeypatch):
     s.agent_prompts_dir = Path("agent")
     assert "FROM_PLAN_FILE" in s.prompt_planning
     assert "FROM_BUILD_FILE" in s.prompt_execution
-    assert "FROM_BUILD_FILE" in s.prompt_direct_execution
-    assert "FROM_PLAN_FILE" in s.prompt_oracle
+    assert "FROM_BUILD_FILE" in s.prompt_execution
+    assert "FROM_PLAN_FILE" in s.prompt_planning
     assert "ABC-1" in s.prompt_commit_policy("ABC-1")
     assert "{ISSUE_KEY}" not in s.prompt_commit_policy("ABC-1")
 
@@ -53,8 +53,8 @@ def test_prompt_defaults_without_mode_files(tmp_path, monkeypatch):
     s.agent_prompts_dir = Path("agent")
     # Missing files → non-empty stub still returned
     assert s.prompt_planning
-    assert s.prompt_direct_execution
-    assert s.prompt_oracle
+    assert s.prompt_execution
+    assert s.prompt_planning
 
 
 def test_temp_dir_helpers(tmp_path):

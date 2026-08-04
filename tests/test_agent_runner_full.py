@@ -32,7 +32,7 @@ def test_resolve_opencode_agent_name_sisyphus_stack():
 
 
 def test_agent_task_to_dict():
-    t = AgentTask(description="d", prompt="p", agent="a", category="deep", issue_key="I-1")
+    t = AgentTask(description="d", prompt="p", agent="a", issue_key="I-1")
     d = t.to_dict()
     assert d["agent"] == "a"
     assert d["task_id"].startswith("task_")

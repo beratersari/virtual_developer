@@ -109,13 +109,10 @@ class WorkflowRouter:
 
     @classmethod
     def get_agent_for_workflow(cls, workflow_type: WorkflowType) -> str:
-        """Get default agent for workflow type."""
-        mapping = {
-            WorkflowType.PLANNING: settings.planning_agent,
-            WorkflowType.EXECUTION: settings.orchestrator_agent,
-            WorkflowType.ORACLE_CONSULT: "oracle",
-        }
-        return mapping.get(workflow_type, settings.default_agent)
+        """OpenCode agent for this workflow (oracle consult is fixed)."""
+        if workflow_type == WorkflowType.ORACLE_CONSULT:
+            return "oracle"
+        return settings.default_agent
 
     @classmethod
     def extract_mention_command(cls, comment_text: str) -> Optional[str]:

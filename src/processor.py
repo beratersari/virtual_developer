@@ -120,8 +120,9 @@ class JobProcessor:
             logger.info("Using real JIRA client")
         
         self.jira_client = create_jira_client(simulated=use_simulated)
-        logger.debug(f"JobProcessor initialized - default_agent: {settings.default_agent}, "
-                     f"planning_agent: {settings.planning_agent}, orchestrator_agent: {settings.orchestrator_agent}")
+        logger.debug(
+            f"JobProcessor initialized - default_agent: {settings.default_agent}"
+        )
     
     # Statuses where an agent is actively running — never restart these from updates
     IN_FLIGHT_STATUSES = {
@@ -2052,7 +2053,7 @@ class JobProcessor:
                 summary=state.issue_summary or "",
                 description=state.description or "",
             ),
-            agent=settings.planning_agent,
+            agent=settings.default_agent,
             issue_key=state.issue_key,
         )
         job_id = self._begin_workflow_run(
@@ -2060,7 +2061,7 @@ class JobProcessor:
             status=TaskStatus.PLANNING,
             task=task,
             workflow_type="planning",
-            agent=settings.planning_agent,
+            agent=settings.default_agent,
             job_status="planning",
             started_at=workflow_start_time,
         )
@@ -2300,7 +2301,7 @@ class JobProcessor:
                 description=state.description or "",
                 plan_path=plan_for_prompt or None,
             ),
-            agent=settings.orchestrator_agent,
+            agent=settings.default_agent,
             issue_key=state.issue_key,
         )
 
@@ -2310,7 +2311,7 @@ class JobProcessor:
             status=TaskStatus.EXECUTING,
             task=task,
             workflow_type="execution",
-            agent=settings.orchestrator_agent,
+            agent=settings.default_agent,
             job_status="executing",
             started_at=workflow_start_time,
         )
@@ -2344,7 +2345,8 @@ class JobProcessor:
         # Rebuild prompt after workspace prep so work_branch (may differ from
         # issue key) and commit policy use the real checked-out source.
         # Always include Jira title + description (build path).
-        work_branch = (getattr(git, "work_branch", None) or "").strip() or None
+        raw_wb = getattr(git, "work_branch", None)
+        work_branch = raw_wb.strip() if isinstance(raw_wb, str) and raw_wb.strip() else None
         task.prompt = PromptBuilder.build_build_prompt(
             issue_key=state.issue_key,
             summary=state.issue_summary or "",
@@ -3308,7 +3310,7 @@ class JobProcessor:
             task = AgentTask(
                 description=f"Comment request: {issue_key}",
                 prompt=prompt,
-                agent=settings.orchestrator_agent,
+                agent=settings.default_agent,
                 issue_key=issue_key,
             )
 

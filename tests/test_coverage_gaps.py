@@ -402,9 +402,7 @@ def test_processor_real_jira_client_branch(tmp_path, monkeypatch):
     with patch("src.processor.settings") as s:
         s.is_configured.return_value = True
         s.jira_host = "https://real.jira.local"
-        s.default_agent = "a"
-        s.planning_agent = "p"
-        s.orchestrator_agent = "o"
+        s.default_agent = "atlas"
         with patch("src.processor.create_jira_client") as f:
             f.return_value = FakeJiraClient()
             JobProcessor()
@@ -429,6 +427,7 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
     state = state_manager.create_state("EXR-1", "s", "d")
     state_manager.update_state("EXR-1", plan_path="p.md")
     git = MagicMock()
+    git.work_branch = "feature/EXR-1"
     git.ensure_feature_branch.return_value = "feature/EXR-1"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/EXR-1"
@@ -465,7 +464,7 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
 
     with patch.object(proc, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             await proc._start_execution_workflow(state)
@@ -475,7 +474,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
     with patch.object(proc, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             await proc._start_execution_workflow(state2)

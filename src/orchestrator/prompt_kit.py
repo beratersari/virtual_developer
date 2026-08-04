@@ -27,7 +27,8 @@ def substitute_placeholders(
     if issue_key is not None:
         out = substitute_issue_key(out, issue_key)
     if work_branch is not None:
-        branch = (work_branch or "").strip() or "HEAD"
+        # Coerce non-str (e.g. mock objects in tests) so replace never TypeErrors
+        branch = str(work_branch or "").strip() or "HEAD"
         out = out.replace("{WORK_BRANCH}", branch)
     if "{WORK_BRANCH}" in out:
         key = (issue_key or "ISSUE").strip() or "ISSUE"

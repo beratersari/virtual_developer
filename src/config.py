@@ -72,13 +72,12 @@ class Settings(BaseSettings):
         description="Legacy comma-separated hosts for single GITLAB_PAT (fail-closed when PAT is set)",
     )
     
-    # Agent Configuration
+    # OpenCode agent name for plan + build runs (oracle consult uses "oracle").
     # Mode (plan vs build) selects the prompt file; agent name does not change prompts.
-    # Defaults use the same OpenCode agent for both modes (fewer agents to manage).
-    default_agent: str = Field(default="atlas")
-    planning_agent: str = Field(default="atlas")
-    orchestrator_agent: str = Field(default="atlas")
-    execution_category: str = Field(default="deep")
+    default_agent: str = Field(
+        default="atlas",
+        description="OpenCode / oh-my-openagent agent for plan and build jobs",
+    )
 
     # Exactly two mode prompts (agent name does not change prompt text)
     agent_prompts_dir: Path = Field(
@@ -191,9 +190,6 @@ class Settings(BaseSettings):
         ),
     )
     
-    # Redis / Celery
-    redis_url: str = Field(default="redis://localhost:6379/0")
-    
     # Logging
     log_level: str = Field(default="INFO")
     log_file: Optional[Path] = Field(default=Path("logs/jira-agent.log"))
@@ -201,6 +197,7 @@ class Settings(BaseSettings):
     # Trigger Configuration - stored as strings, parsed as properties
     trigger_on_assignment: bool = Field(default=True)
     trigger_labels: str = Field(default="ai-assist,bot")
+    # Optional @mention strings for free-form comment commands (not board intake)
     trigger_mentions: str = Field(default="@DevBot,@AI")
     # Substrings matched against assignee displayName / name / key (case-insensitive)
     trigger_assignee_names: str = Field(
@@ -341,16 +338,6 @@ class Settings(BaseSettings):
             PromptBuilder.build_prompt_path(),
             issue_key="ISSUE",
         )
-
-    @property
-    def prompt_direct_execution(self) -> str:
-        """Same as build-mode prompt (agent name does not change text)."""
-        return self.prompt_execution
-
-    @property
-    def prompt_oracle(self) -> str:
-        """Same as plan-mode prompt (consult uses plan body)."""
-        return self.prompt_planning
 
     def prompt_commit_policy(
         self,

@@ -151,6 +151,7 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     p.reporter = reporter
 
     git = MagicMock()
+    git.work_branch = "feature/x"
     git.ensure_feature_branch.return_value = "feature/x"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/x"
@@ -183,7 +184,7 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     state_manager.update_state("OO-1", plan_path="p.md")
     with patch.object(p, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
@@ -193,7 +194,6 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     with patch.object(p, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
