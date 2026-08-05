@@ -55,61 +55,45 @@ def resolve_opencode_agent_name(agent: str) -> str:
     # Title-case single tokens often still fail; try lower map again
     return OPENCODE_AGENT_ALIASES.get(key.lower().replace("_", "-"), key)
 
-# B10: allowlist child env (not denylist). Host Jira/GitLab push creds stay out.
-# Model provider keys OpenCode needs are explicitly allowed.
-_AGENT_ENV_ALLOW_EXACT = frozenset(
+# ---------------------------------------------------------------------------
+# Agent child env: pass everything except sensitive names.
+# (working_directory is accepted for call-site compatibility; unused.)
+# ---------------------------------------------------------------------------
+
+# Host bot / push / SSH — always blocked.
+_AGENT_ENV_BLOCK_EXACT = frozenset(
     {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LANGUAGE",
-        "TZ",
-        "TERM",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        "PWD",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "SYSTEMROOT",
-        "WINDIR",
-        "COMSPEC",
-        "PATHEXT",
-        "NUMBER_OF_PROCESSORS",
-        "PROCESSOR_ARCHITECTURE",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        # OpenCode / Bun / Node runtime
-        "OPENCODE_DISABLE_MODELS_FETCH",
-        "OPENCODE_CONFIG",
-        "OPENCODE_CONFIG_DIR",
-        "OPENCODE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "BUN_INSTALL",
-        "NODE_ENV",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "npm_config_cache",
-        # Model providers the agent needs to call LLMs (not Jira/GitLab)
+        "JIRA_API_TOKEN",
+        "JIRA_PASSWORD",
+        "JIRA_EMAIL",
+        "GITLAB_PAT",
+        "GITLAB_TOKEN",
+        "GITLAB_HOST_PATS",
+        "GITLAB_PRIVATE_TOKEN",
+        "GITLAB_ACCESS_TOKEN",
+        "VD_GIT_PASSWORD",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
+        "GIT_ASKPASS",
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "SSH_ASKPASS",
+    }
+)
+
+# Block if any of these appear in the variable name.
+# (No bare "_PAT" — it false-matches CMAKE_PREFIX_PATH; PATs are in EXACT above.)
+_AGENT_ENV_BLOCK_PATTERNS = (
+    "_PASSWORD",
+    "_SECRET",
+    "_TOKEN",
+    "_API_KEY",
+    "PRIVATE_KEY",
+)
+
+# LLM keys: needed by OpenCode even though they match _API_KEY / _TOKEN.
+_AGENT_ENV_PASS = frozenset(
+    {
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "ANTHROPIC_API_KEY",
@@ -128,41 +112,33 @@ _AGENT_ENV_ALLOW_EXACT = frozenset(
         "OLLAMA_API_KEY",
     }
 )
-_AGENT_ENV_ALLOW_PREFIXES = (
-    "LC_",
-    "OPENCODE_",
-    "BUN_",
-    "npm_config_",
-)
 
 
-def _agent_subprocess_env() -> Dict[str, str]:
-    """Minimal env for agent children: allowlist + no host git credentials.
+def _agent_subprocess_env(
+    working_directory: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Pass all env vars except blocked sensitive credentials.
 
-    Never pass Jira/GitLab tokens, SSH agent, or credential helpers.
-    Push/auth remains host-side via GitManager askpass only.
+    - Build tools get toolchain vars (PATH, INCLUDE, LIB, MSVC, CMake, …).
+    - Model provider keys pass (see ``_AGENT_ENV_PASS``).
+    - Host Jira/GitLab/SSH secrets stay out; push stays on GitManager askpass.
     """
     env: Dict[str, str] = {}
     for key, value in os.environ.items():
         if value is None:
             continue
-        if key in _AGENT_ENV_ALLOW_EXACT:
-            env[key] = value
+        if key in _AGENT_ENV_BLOCK_EXACT:
             continue
-        if any(key.startswith(p) for p in _AGENT_ENV_ALLOW_PREFIXES):
-            env[key] = value
+        if key.startswith("VD_GIT_"):
+            continue
+        if key not in _AGENT_ENV_PASS:
+            if any(p in key for p in _AGENT_ENV_BLOCK_PATTERNS):
+                continue
+        env[key] = value
+
     # Harden git so the agent cannot push with host credentials
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
-    env.pop("SSH_AUTH_SOCK", None)
-    env.pop("SSH_AGENT_PID", None)
-    env.pop("GIT_ASKPASS", None)
-    env.pop("GIT_SSH_COMMAND", None)
-    env.pop("VD_GIT_PASSWORD", None)
-    env.pop("GITLAB_PAT", None)
-    env.pop("GITLAB_TOKEN", None)
-    env.pop("JIRA_API_TOKEN", None)
-    env.pop("JIRA_PASSWORD", None)
     return env
 
 
@@ -288,7 +264,7 @@ class AgentRunner:
         with open(session_file, 'w', encoding='utf-8') as session_fh:
             # Run the process using exec (no shell) for cross-platform compatibility
             # On Windows, we need to use shell=False and handle the command differently
-            child_env = _agent_subprocess_env()
+            child_env = _agent_subprocess_env(self.working_directory)
             if IS_WINDOWS:
                 process = await asyncio.create_subprocess_exec(
                     *cmd_list,
@@ -686,7 +662,7 @@ class AgentRunner:
         
         cmd_list = self._build_command(task, session_file)
         
-        child_env = _agent_subprocess_env()
+        child_env = _agent_subprocess_env(self.working_directory)
         if IS_WINDOWS:
             process = await asyncio.create_subprocess_exec(
                 *cmd_list,

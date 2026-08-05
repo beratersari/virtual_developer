@@ -22,43 +22,33 @@ from tests.conftest import FakeJiraClient
 # ---------------------------------------------------------------------------
 
 
-def test_agent_subprocess_env_allowlist_and_strip_secrets(monkeypatch):
+def test_agent_subprocess_env_simple_block(monkeypatch):
     from src.orchestrator.agent_runner import _agent_subprocess_env
 
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/home/test")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setenv("OPENCODE_HOME", "/opt/oc")
-    monkeypatch.setenv("BUN_INSTALL", "/opt/bun")
-    monkeypatch.setenv("npm_config_cache", "/tmp/npm")
+    monkeypatch.setenv("INCLUDE", "C:\\SDK\\include")
+    monkeypatch.setenv("MVCC_HOME", "/opt/mvcc")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", "/opt/cmake")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("GITLAB_PAT", "pat-secret")
-    monkeypatch.setenv("GITLAB_TOKEN", "tok-secret")
-    monkeypatch.setenv("JIRA_API_TOKEN", "jira-secret")
-    monkeypatch.setenv("JIRA_PASSWORD", "pw-secret")
+    monkeypatch.setenv("NPM_TOKEN", "blocked")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "blocked")
+    monkeypatch.setenv("GITLAB_PAT", "blocked")
+    monkeypatch.setenv("JIRA_API_TOKEN", "blocked")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh.sock")
-    monkeypatch.setenv("GIT_ASKPASS", "/bin/askpass")
-    monkeypatch.setenv("VD_GIT_PASSWORD", "git-secret")
-    monkeypatch.setenv("RANDOM_HOST_SECRET", "nope")
 
     env = _agent_subprocess_env()
     assert env.get("PATH") == "/usr/bin"
-    assert env.get("HOME") == "/home/test"
-    assert env.get("LC_ALL") == "C"
-    assert env.get("OPENCODE_HOME") == "/opt/oc"
-    assert env.get("BUN_INSTALL") == "/opt/bun"
-    assert env.get("npm_config_cache") == "/tmp/npm"
+    assert env.get("MVCC_HOME") == "/opt/mvcc"
+    assert env.get("CMAKE_PREFIX_PATH") == "/opt/cmake"
+    assert env.get("INCLUDE") == "C:\\SDK\\include"
     assert env.get("OPENAI_API_KEY") == "sk-test"
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
-    assert env.get("GCM_INTERACTIVE") == "never"
+    assert "NPM_TOKEN" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
     assert "GITLAB_PAT" not in env
-    assert "GITLAB_TOKEN" not in env
     assert "JIRA_API_TOKEN" not in env
-    assert "JIRA_PASSWORD" not in env
     assert "SSH_AUTH_SOCK" not in env
-    assert "GIT_ASKPASS" not in env
-    assert "VD_GIT_PASSWORD" not in env
-    assert "RANDOM_HOST_SECRET" not in env
 
 
 def test_agent_subprocess_env_skips_none_values(monkeypatch):

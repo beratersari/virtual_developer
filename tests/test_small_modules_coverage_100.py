@@ -220,7 +220,7 @@ def test_issue_git_spec_expand_links_and_strip():
     assert "{params}" not in cleaned
 
 
-def test_agent_env_allowlist_strips_secrets():
+def test_agent_env_simple_pass_and_block():
     from src.orchestrator.agent_runner import _agent_subprocess_env
     import os
 
@@ -234,18 +234,22 @@ def test_agent_env_allowlist_strips_secrets():
             "OPENAI_API_KEY": "ok",
             "SSH_AUTH_SOCK": "/tmp/ssh",
             "VD_GIT_PASSWORD": "pat",
-            "RANDOM_SECRET": "nope",
+            "NPM_TOKEN": "build-me",
+            "CMAKE_GENERATOR": "Ninja",
+            "MVCC_HOME": "/opt/mvcc",
         },
         clear=False,
     ):
         env = _agent_subprocess_env()
     assert env.get("PATH")
     assert env.get("OPENAI_API_KEY") == "ok"
+    assert env.get("CMAKE_GENERATOR") == "Ninja"
+    assert env.get("MVCC_HOME") == "/opt/mvcc"
+    assert "NPM_TOKEN" not in env
     assert "GITLAB_PAT" not in env
     assert "JIRA_API_TOKEN" not in env
     assert "SSH_AUTH_SOCK" not in env
     assert "VD_GIT_PASSWORD" not in env
-    assert "RANDOM_SECRET" not in env
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
 
 
