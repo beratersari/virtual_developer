@@ -514,12 +514,32 @@ class JobProcessor:
                 issue_key, session_id, session_file=session_file
             )
         jid = self._active_jobs.get(issue_key)
-        if jid and (new_task_id or session_id or session_file):
-            patch: Dict[str, Any] = {}
+        if jid and (new_task_id or session_id or session_file or reason):
+            # Nest this failure under the active job (never as a separate/legacy job).
+            # attempt_number is 1-based for the upcoming retry; label matches session
+            # file suffix _retryN from AgentRunner.
+            retry_label = f"retry{int(attempt_number)}"
+            patch: Dict[str, Any] = {
+                "retry_attempt": {
+                    "attempt_number": int(attempt_number),
+                    "label": retry_label,
+                    "reason": reason or "",
+                    "delay_seconds": float(delay_seconds or 0),
+                    "failed_session_log_path": session_file,
+                    "error_message": (error_message or "")[:2000]
+                    if error_message
+                    else None,
+                    "return_code": return_code,
+                    "opencode_session_id": session_id,
+                    "task_id": new_task_id,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                },
+            }
             if new_task_id:
                 patch["task_id"] = new_task_id
             if session_id:
                 patch["opencode_session_id"] = session_id
+            # Keep failed attempt path on the job's path list (append, not replace)
             if session_file:
                 patch["session_log_path"] = session_file
             try:
@@ -717,8 +737,18 @@ class JobProcessor:
             patch: Dict[str, Any] = {}
             if sid:
                 patch["opencode_session_id"] = sid
+            # Fold every attempt's session log under this job (initial + _retryN)
+            all_files = []
+            if result.get("retry_info"):
+                all_files = list(
+                    result["retry_info"].get("all_session_files") or []
+                )
+            if result.get("session_file") and result["session_file"] not in all_files:
+                all_files.append(result["session_file"])
+            if all_files:
+                patch["session_log_paths"] = all_files
+                patch["session_log_path"] = all_files[-1]
             if result.get("session_file"):
-                patch["session_log_path"] = result.get("session_file")
                 try:
                     p = Path(str(result["session_file"]))
                     prompt = p.parent / f"{p.stem}.prompt.txt"

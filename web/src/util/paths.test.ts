@@ -4,10 +4,13 @@
  */
 import {
   findPromptForJobPath,
+  jobSessionPaths,
   normalizePath,
   pathBasename,
   pathStem,
   pathsMatch,
+  sessionLogRetryLabel,
+  sessionLogSortKey,
 } from './paths'
 
 function assert(cond: unknown, msg: string) {
@@ -37,5 +40,17 @@ assert(viaLog?.content === 'A', 'prompt via session log stem')
 
 const miss = findPromptForJobPath(prompts, '/sessions/missing.prompt.txt', null)
 assert(miss === undefined, 'no fail-open match')
+
+assert(sessionLogRetryLabel('KAN-1_20260101_120000.log') === 'initial', 'initial label')
+assert(sessionLogRetryLabel('KAN-1_20260101_120100_retry1.log') === 'retry1', 'retry1 label')
+assert(sessionLogRetryLabel('KAN-1_20260101_120200_retry2.log') === 'retry2', 'retry2 label')
+assert(sessionLogSortKey('x_retry2.log') > sessionLogSortKey('x_retry1.log'), 'sort retry')
+
+const nested = jobSessionPaths({
+  session_log_path: '/s/final_retry1.log',
+  session_log_paths: ['/s/first.log'],
+  retry_attempts: [{ failed_session_log_path: '/s/first.log' }],
+})
+assert(nested.includes('/s/first.log') && nested.includes('/s/final_retry1.log'), 'job paths nest retries')
 
 console.log('paths.test.ts: ok')

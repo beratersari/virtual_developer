@@ -489,8 +489,23 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
     )
     issue_log_ring.append("Working on DET-1 something")
     sessions = isolate_jira_agent_artifacts["sessions_dir"]
-    (sessions / "DET-1_20260101_120000_0.log").write_text("opencode output line\n")
-    (sessions / "DET-1_20260101_120000_0.prompt.txt").write_text("full prompt body")
+    log_path = sessions / "DET-1_20260101_120000.log"
+    log_path.write_text("opencode output line\n")
+    (sessions / "DET-1_20260101_120000.prompt.txt").write_text("full prompt body")
+
+    store = isolate_jira_agent_artifacts["job_store"]
+    det_job = store.create_job(
+        issue_key="DET-1",
+        summary="summary here",
+        description="do the thing",
+        status="executing",
+        task_id="task-abc",
+    )
+    store.update_job(
+        det_job["job_id"],
+        session_log_path=str(log_path.resolve()),
+        prompt_path=str((sessions / "DET-1_20260101_120000.prompt.txt").resolve()),
+    )
 
     # Live Jira returns updated description/status (not frozen local state)
     fake_jira.get_issue = MagicMock(
@@ -510,74 +525,84 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
     proc.state_manager = sm
     proc.reporter = MagicMock()
     proc.jira_client = fake_jira
+    proc.job_store = store
     runner = MagicMock()
     runner.cancel_task = MagicMock(return_value=True)
     runner.cancel_all_tasks = MagicMock(return_value=1)
     proc._contexts["DET-1"] = {"git": MagicMock(), "runner": runner}
+    proc._active_jobs["DET-1"] = det_job["job_id"]
 
-    app = create_dashboard_app(processor=proc, state_manager=sm)
-    client = TestClient(app)
+    with patch("src.dashboard.api.job_store", store):
+        with patch("src.dashboard.service.default_job_store", store):
+            app = create_dashboard_app(processor=proc, state_manager=sm)
+            client = TestClient(app)
 
-    r = client.get("/api/tasks/DET-1")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["issue_key"] == "DET-1"
-    assert body["can_cancel"] is True
-    assert body["live"] is True
-    assert body["description"] == "description updated in jira"
-    assert body["summary"] == "summary from jira live"
-    assert body["jira_status"] == "In Progress"
-    assert body["jira_live"] is True
-    assert "agent" in body["prompts"]
-    assert "assembled_prompt" not in body["prompts"]
-    assert "system_rules" not in body["prompts"]
-    assert any("opencode output" in (s.get("content") or "") for s in body["session_logs"])
-    assert any("DET-1" in (line.get("message") or "") for line in body["system_logs"])
+            r = client.get("/api/tasks/DET-1")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["issue_key"] == "DET-1"
+            assert body["can_cancel"] is True
+            assert body["live"] is True
+            assert body["description"] == "description updated in jira"
+            assert body["summary"] == "summary from jira live"
+            assert body["jira_status"] == "In Progress"
+            assert body["jira_live"] is True
+            assert "agent" in body["prompts"]
+            assert "assembled_prompt" not in body["prompts"]
+            assert "system_rules" not in body["prompts"]
+            assert any(
+                "opencode output" in (s.get("content") or "")
+                for s in body["session_logs"]
+            )
+            assert any(
+                "DET-1" in (line.get("message") or "") for line in body["system_logs"]
+            )
 
-    c = client.post("/api/tasks/DET-1/cancel")
-    assert c.status_code == 200
-    assert c.json()["ok"] is True
-    st = sm.get_state("DET-1")
-    assert st.status == TaskStatus.CANCELLED
-    assert st.current_task_id is None
-    # Preserved for dashboard display
-    assert (st.metadata or {}).get("last_task_id") == "task-abc"
-    assert "DET-1" not in proc._contexts
+            c = client.post("/api/tasks/DET-1/cancel")
+            assert c.status_code == 200
+            assert c.json()["ok"] is True
+            st = sm.get_state("DET-1")
+            assert st.status == TaskStatus.CANCELLED
+            assert st.current_task_id is None
+            # Preserved for dashboard display
+            assert (st.metadata or {}).get("last_task_id") == "task-abc"
+            assert "DET-1" not in proc._contexts
 
-    detail_after = client.get("/api/tasks/DET-1").json()
-    assert detail_after["current_task_id"] == "task-abc"
-    # Jobs embedded on detail (legacy session-derived when no JobStore rows)
-    assert "jobs" in detail_after
-    assert any(j["issue_key"] == "DET-1" for j in detail_after["jobs"])
+            detail_after = client.get("/api/tasks/DET-1").json()
+            assert detail_after["current_task_id"] == "task-abc"
+            # Real JobStore job only — never legacy_* from session files
+            assert "jobs" in detail_after
+            assert any(j["issue_key"] == "DET-1" for j in detail_after["jobs"])
+            assert any(j["job_id"] == det_job["job_id"] for j in detail_after["jobs"])
+            assert not any(
+                j["job_id"].startswith("legacy_") for j in detail_after["jobs"]
+            )
 
-    # Terminal cannot cancel again
-    c2 = client.post("/api/tasks/DET-1/cancel")
-    assert c2.status_code == 400
+            # Terminal cannot cancel again
+            c2 = client.post("/api/tasks/DET-1/cancel")
+            assert c2.status_code == 400
 
-
-def test_api_jobs_filter_and_legacy_sessions(
+def test_api_jobs_filter_no_legacy_sessions(
     tmp_path, monkeypatch, isolate_jira_agent_artifacts
 ):
-    """Jobs list supports issue_key filter; session logs become legacy jobs."""
-    from src.state.job_store import JobStore
-
+    """Jobs list filters by issue_key; session files never become legacy jobs."""
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("JOB-1", "first issue", "desc live latest")
     sm.create_state("JOB-2", "second", "d")
 
     sessions = isolate_jira_agent_artifacts["sessions_dir"]
-    (sessions / "JOB-1_20260101_100000_0.log").write_text("run a\n")
-    (sessions / "JOB-1_20260101_100000_0.log.session_id").write_text("ses_aaa")
-    (sessions / "JOB-1_20260101_100000_0.prompt.txt").write_text(
+    (sessions / "JOB-1_20260101_100000.log").write_text("run a\n")
+    (sessions / "JOB-1_20260101_100000.log.session_id").write_text("ses_aaa")
+    (sessions / "JOB-1_20260101_100000.prompt.txt").write_text(
         "# Direct\n\n## Task\ndesc from first prompt\n\n# X\n",
         encoding="utf-8",
     )
-    (sessions / "JOB-1_20260102_110000_0.log").write_text("run b\n")
-    (sessions / "JOB-1_20260102_110000_0.prompt.txt").write_text(
+    (sessions / "JOB-1_20260102_110000.log").write_text("run b\n")
+    (sessions / "JOB-1_20260102_110000.prompt.txt").write_text(
         "# Direct\n\n## Task\ndesc from second prompt\n\n# X\n",
         encoding="utf-8",
     )
-    (sessions / "JOB-2_20260101_120000_0.log").write_text("other\n")
+    (sessions / "JOB-2_20260101_120000.log").write_text("other\n")
 
     store = isolate_jira_agent_artifacts["job_store"]
     stored = store.create_job(
@@ -590,9 +615,16 @@ def test_api_jobs_filter_and_legacy_sessions(
     )
     store.update_job(
         stored["job_id"],
-        session_log_path=str((sessions / "JOB-1_20260102_110000_0.log").resolve()),
-        prompt_path=str((sessions / "JOB-1_20260102_110000_0.prompt.txt").resolve()),
+        session_log_path=str((sessions / "JOB-1_20260102_110000.log").resolve()),
+        prompt_path=str((sessions / "JOB-1_20260102_110000.prompt.txt").resolve()),
         opencode_session_id="ses_bbb",
+    )
+    # Second real job for JOB-2 (not a legacy session row)
+    stored2 = store.create_job(
+        issue_key="JOB-2",
+        summary="second",
+        description="d",
+        status="completed",
     )
 
     monkeypatch.chdir(tmp_path)
@@ -606,31 +638,27 @@ def test_api_jobs_filter_and_legacy_sessions(
             keys = {j["issue_key"] for j in all_jobs["jobs"]}
             assert "JOB-1" in keys
             assert "JOB-2" in keys
+            assert not any(
+                j["job_id"].startswith("legacy_") for j in all_jobs["jobs"]
+            )
 
             filtered = client.get("/api/jobs", params={"issue_key": "job-1"}).json()
             assert filtered["issue_key_filter"] == "job-1" or filtered["issue_key_filter"] == "JOB-1"
             assert filtered["total"] >= 1
             assert all(j["issue_key"] == "JOB-1" for j in filtered["jobs"])
-            # Stored job + legacy for the other session
             job_ids = {j["job_id"] for j in filtered["jobs"]}
             assert stored["job_id"] in job_ids
-            assert any(jid.startswith("legacy_") for jid in job_ids)
+            assert not any(jid.startswith("legacy_") for jid in job_ids)
 
             detail = client.get("/api/tasks/JOB-1").json()
             assert len(detail["jobs"]) >= 1
             assert all(j["issue_key"] == "JOB-1" for j in detail["jobs"])
-            # Live issue description must not overwrite per-job snapshots
             assert detail["description"] == "desc live latest"
             by_id = {j["job_id"]: j for j in detail["jobs"]}
             assert by_id[stored["job_id"]]["description"] == "desc frozen on job store"
-            legacy = [j for j in detail["jobs"] if j["job_id"].startswith("legacy_")]
-            assert legacy, "expected legacy job from first session"
-            assert any(
-                j["description"] == "desc from first prompt" for j in legacy
-            ), [j["description"] for j in legacy]
-            # Distinct job descriptions must not all equal live issue text
-            descs = {j["description"] for j in detail["jobs"] if j.get("description")}
-            assert len(descs) >= 2, descs
+            assert not any(j["job_id"].startswith("legacy_") for j in detail["jobs"])
+            # Second store job only for JOB-2
+            assert stored2["job_id"] not in by_id
 
 
 def test_task_detail_without_state_is_stub_not_404(tmp_path):

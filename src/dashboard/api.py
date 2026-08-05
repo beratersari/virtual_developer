@@ -320,22 +320,33 @@ def create_dashboard_app(
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str) -> dict:
-        """Single job document. Falls back to merged jobs list (incl. legacy session rows)."""
+        """Single job document from JobStore (retries are fields on the job)."""
         jid = (job_id or "").strip()
-        job = job_store.get_job(jid) if jid else None
-        if not job and jid:
-            # Legacy session-derived jobs are not in JobStore files
-            merged = build_jobs(
-                limit=500,
-                page=1,
-                page_size=500,
-                processor=app.state.processor,
-                state_manager=app.state.state_manager,
+        if not jid or jid.startswith("legacy_"):
+            raise HTTPException(
+                status_code=404,
+                detail="Legacy session jobs are not supported; open a real job_* id",
             )
-            for item in merged.jobs:
-                if item.job_id == jid:
-                    job = item.model_dump()
-                    break
+        # Prefer enriched JobItem (session_log_paths, retry_attempts, live flag)
+        job = None
+        issue_key_hint = None
+        raw = job_store.get_job(jid)
+        if raw:
+            issue_key_hint = raw.get("issue_key")
+        merged = build_jobs(
+            issue_key=issue_key_hint,
+            limit=500,
+            page=1,
+            page_size=500,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+        )
+        for item in merged.jobs:
+            if item.job_id == jid:
+                job = item.model_dump()
+                break
+        if not job and raw:
+            job = raw
         if not job:
             raise HTTPException(status_code=404, detail=f"No job {job_id}")
         issue_key = job.get("issue_key") or ""

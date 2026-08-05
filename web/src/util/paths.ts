@@ -68,3 +68,43 @@ export function findLogForJobPath<T extends { path: string }>(
 ): T | undefined {
   return findByPath(logs, sessionLogPath)
 }
+
+/** Label for a session log basename: initial | retry1 | retry2 | … */
+export function sessionLogRetryLabel(pathOrName: string): string {
+  const base = pathBasename(pathOrName)
+  const m = base.match(/_retry(\d+)\.log$/i)
+  if (m) return `retry${m[1]}`
+  // legacy numeric suffix ISSUE_ts_N.log (not _retryN)
+  const legacy = base.match(/_(\d+)\.log$/i)
+  if (legacy && !/_\d{8}_\d{6}\.log$/i.test(base)) {
+    const n = Number(legacy[1])
+    if (n > 0) return `retry${n}`
+  }
+  return 'initial'
+}
+
+/** Collect all job session paths (paths array + latest + failed retries), de-duplicated. */
+export function jobSessionPaths(job: {
+  session_log_path?: string | null
+  session_log_paths?: string[] | null
+  retry_attempts?: Array<{ failed_session_log_path?: string | null }> | null
+}): string[] {
+  const out: string[] = []
+  const add = (p?: string | null) => {
+    if (p && !out.includes(p)) out.push(p)
+  }
+  for (const p of job.session_log_paths || []) add(p)
+  add(job.session_log_path)
+  for (const r of job.retry_attempts || []) {
+    add(r.failed_session_log_path)
+  }
+  return out
+}
+
+/** Sort key for session labels: initial=0, retry1=1, retry2=2, … */
+export function sessionLogSortKey(pathOrName: string): number {
+  const label = sessionLogRetryLabel(pathOrName)
+  if (label === 'initial') return 0
+  const m = label.match(/^retry(\d+)$/i)
+  return m ? Number(m[1]) : 999
+}

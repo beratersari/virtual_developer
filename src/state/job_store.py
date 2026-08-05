@@ -144,7 +144,12 @@ class JobStore:
             "opencode_session_id": None,
             "opencode_session_ids": [],
             "session_log_path": None,
+            # All OpenCode session logs for this job (initial + _retryN), ordered
+            "session_log_paths": [],
             "prompt_path": None,
+            "prompt_paths": [],
+            # Failed-attempt bookkeeping nested under this job (not separate jobs)
+            "retry_attempts": [],
             "progress_percentage": 0,
             "error_message": None,
             "started_at": now,
@@ -176,6 +181,32 @@ class JobStore:
                         tids.append(value)
                     job["task_ids"] = tids
                     job["task_id"] = value
+                elif key == "session_log_path" and value:
+                    paths = list(job.get("session_log_paths") or [])
+                    if value not in paths:
+                        paths.append(value)
+                    job["session_log_paths"] = paths
+                    job["session_log_path"] = value  # latest
+                elif key == "prompt_path" and value:
+                    paths = list(job.get("prompt_paths") or [])
+                    if value not in paths:
+                        paths.append(value)
+                    job["prompt_paths"] = paths
+                    job["prompt_path"] = value  # latest
+                elif key == "retry_attempt" and isinstance(value, dict):
+                    # Append one failed-attempt record under this job
+                    history = list(job.get("retry_attempts") or [])
+                    history.append(value)
+                    job["retry_attempts"] = history
+                elif key == "session_log_paths" and isinstance(value, list):
+                    # Merge unique paths preserving order
+                    existing = list(job.get("session_log_paths") or [])
+                    for p in value:
+                        if p and p not in existing:
+                            existing.append(p)
+                    job["session_log_paths"] = existing
+                    if existing:
+                        job["session_log_path"] = existing[-1]
                 else:
                     job[key] = value
             job["updated_at"] = datetime.now().isoformat(timespec="seconds")
