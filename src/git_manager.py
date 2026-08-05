@@ -180,6 +180,148 @@ class GitManager:
         logger.info(f"Created temp directory: {temp_path}")
         return temp_path
 
+    def _submodule_auth_env(self) -> Dict[str, str]:
+        """Env that rewrites https://host/ → oauth2:PAT@host for nested submodule clones.
+
+        Parent ``origin`` auth alone does not cover absolute submodule URLs on
+        the same GitLab host. ``url.*.insteadOf`` via ``GIT_CONFIG_*`` avoids
+        writing the PAT into the repo config file.
+        """
+        env = dict(os.environ)
+        base = (self.remote_url or "").strip()
+        pat = self._pat_for_remote(base)
+        host = self._host_from_url(base)
+        if not pat or not host:
+            return env
+        # Prefer settings PAT over Windows GCM for this child process only
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        pairs = [
+            (
+                f"url.https://oauth2:{pat}@{host}/.insteadOf",
+                f"https://{host}/",
+            ),
+            (
+                f"url.http://oauth2:{pat}@{host}/.insteadOf",
+                f"http://{host}/",
+            ),
+        ]
+        try:
+            base_count = int(env.get("GIT_CONFIG_COUNT") or "0")
+        except ValueError:
+            base_count = 0
+        for i, (key, value) in enumerate(pairs):
+            idx = base_count + i
+            env[f"GIT_CONFIG_KEY_{idx}"] = key
+            env[f"GIT_CONFIG_VALUE_{idx}"] = value
+        env["GIT_CONFIG_COUNT"] = str(base_count + len(pairs))
+        return env
+
+    def _update_submodules(self, *, reason: str = "") -> None:
+        """Init and update submodules recursively after clone / branch checkout.
+
+        No-op when ``settings.git_update_submodules`` is false or when the repo
+        has no ``.gitmodules``. Hard-fails with ``GitCloneError`` on timeout or
+        non-zero exit so agents never run on an incomplete tree.
+
+        Logs only start/end (no live git progress stream).
+        """
+        if not getattr(settings, "git_update_submodules", True):
+            logger.info(
+                "Submodule update skipped "
+                f"(git_update_submodules=false){f'; {reason}' if reason else ''}"
+            )
+            return
+        if not self.temp_dir or not self.temp_dir.is_dir():
+            raise RuntimeError("Temp directory not initialized for submodule update")
+
+        gitmodules = self.temp_dir / ".gitmodules"
+        if not gitmodules.is_file():
+            logger.info(
+                "Submodule update: no .gitmodules found "
+                f"(nothing to init){f'; {reason}' if reason else ''}"
+            )
+            return
+
+        reason_suffix = f" ({reason})" if reason else ""
+        timeout = max(
+            60,
+            int(getattr(settings, "git_submodule_timeout_seconds", 1800) or 1800),
+        )
+        issue_tag = self.issue_key or "(unknown)"
+        logger.info(
+            f"Submodule update started for {issue_tag}{reason_suffix} "
+            f"(timeout={timeout}s)"
+        )
+        started = time.monotonic()
+
+        applied = self._apply_settings_pat_to_origin()
+        env = self._submodule_auth_env()
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                ],
+                cwd=self.temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                f"Submodule update timed out for {issue_tag} after {timeout}s"
+            )
+            raise GitCloneError(
+                (
+                    f"*Virtual Developer* could not **update git submodules** "
+                    f"(timed out after {timeout}s).\n\n"
+                    f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
+                    f"*When:* {reason or 'workspace setup'}\n\n"
+                    "Raise `GIT_SUBMODULE_TIMEOUT_SECONDS` if the tree is very "
+                    "large, check network access to nested repos, then move the "
+                    "issue back to *To Do*."
+                ),
+                technical=str(e),
+            ) from e
+        finally:
+            if applied:
+                try:
+                    self._scrub_remote_credentials()
+                except Exception:
+                    pass
+
+        elapsed = time.monotonic() - started
+        if result.returncode != 0:
+            safe_err = self._redact_secret_text(
+                (result.stderr or result.stdout or "")[-2000:]
+                or "git submodule update failed"
+            )
+            logger.error(
+                f"Submodule update failed for {issue_tag} after {elapsed:.1f}s: "
+                f"{safe_err.strip()[:500]}"
+            )
+            raise GitCloneError(
+                (
+                    f"*Virtual Developer* could not **update git submodules**.\n\n"
+                    f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
+                    f"*When:* {reason or 'workspace setup'}\n"
+                    f"*Detail:* {safe_err.strip()[:800]}\n\n"
+                    "Check nested repository URLs, that the PAT can access "
+                    "submodule hosts, and network reachability. Then move the "
+                    "issue back to *To Do*."
+                ),
+                technical=safe_err,
+            )
+
+        logger.info(
+            f"Submodule update finished for {issue_tag}{reason_suffix} "
+            f"in {elapsed:.1f}s"
+        )
+
     def _clone_into_temp(self) -> None:
         """Clone the remote repository into the temp directory."""
         if not self.temp_dir:
@@ -197,11 +339,18 @@ class GitManager:
         # Without a settings PAT, use the clean URL (host helpers may apply).
         clone_url = self._https_url_with_settings_pat(clean_url) or clean_url
 
-        logger.info(f"Cloning repository into {self.temp_dir}...")
-        logger.debug(f"Remote URL: {self.remote_url}")
+        issue_tag = self.issue_key or "(unknown)"
+        clone_timeout = max(
+            60,
+            int(getattr(settings, "git_clone_timeout_seconds", 1800) or 1800),
+        )
+        logger.info(
+            f"Clone started for {issue_tag}: {self.remote_url} "
+            f"→ {self.temp_dir} (timeout={clone_timeout}s)"
+        )
         logger.debug(f"Clone will use settings PAT in URL: {bool(gitlab_pat)}")
+        started = time.monotonic()
 
-        clone_timeout = max(30, int(getattr(settings, "git_clone_timeout_seconds", 300) or 300))
         try:
             result = subprocess.run(
                 ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
@@ -210,25 +359,31 @@ class GitManager:
                 timeout=clone_timeout,
             )
         except subprocess.TimeoutExpired as e:
-            safe_err = f"git clone timed out after {clone_timeout}s"
-            logger.error(safe_err)
+            logger.error(
+                f"Clone timed out for {issue_tag} after {clone_timeout}s"
+            )
             raise GitCloneError(
                 (
                     f"*Virtual Developer* could not **clone** the repository "
                     f"(timed out after {clone_timeout}s).\n\n"
                     f"*Repository:* `{self.remote_url or '(unknown)'}`\n\n"
-                    "Check network access to GitLab, then move the issue back to *To Do*."
+                    "Raise `GIT_CLONE_TIMEOUT_SECONDS` for large repos, check "
+                    "network access to GitLab, then move the issue back to *To Do*."
                 ),
                 technical=str(e),
             ) from e
 
+        elapsed = time.monotonic() - started
         if result.returncode != 0:
             # Never surface PAT-bearing URLs from git stderr to callers/logs
-            safe_err = (result.stderr or "").replace(gitlab_pat, "***") if gitlab_pat else (
-                result.stderr or ""
-            )
+            safe_err = (result.stderr or result.stdout or "")
+            if gitlab_pat:
+                safe_err = safe_err.replace(gitlab_pat, "***")
             safe_err = self._redact_secret_text(safe_err)
-            logger.error(f"Clone failed: {safe_err}")
+            logger.error(
+                f"Clone failed for {issue_tag} after {elapsed:.1f}s: "
+                f"{safe_err.strip()[:500]}"
+            )
             repo_display = self.remote_url or "(unknown)"
             raise GitCloneError(
                 (
@@ -242,9 +397,13 @@ class GitManager:
                 technical=safe_err,
             )
 
-        logger.info("Clone completed successfully")
+        logger.info(f"Clone finished for {issue_tag} in {elapsed:.1f}s")
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
+
+        # Init nested modules on the default tip from clone.
+        # ensure_feature_branch re-runs after work-branch checkout so pins match.
+        self._update_submodules(reason="after clone")
 
         # Do NOT create local tracking branches for every remote feature/*.
         # Clone already has origin/* refs (--no-single-branch); ensure_feature_branch
@@ -973,7 +1132,13 @@ class GitManager:
         )
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(key)
-        return self._prepare_work_branch(work, target)
+        checked_out = self._prepare_work_branch(work, target)
+        # Submodule SHAs often differ per branch — refresh after checkout so the
+        # agent sees the tree for the work branch (not only the clone default).
+        self._update_submodules(
+            reason=f"after work branch checkout ({checked_out or work})"
+        )
+        return checked_out
     def _format_commit_message(self, issue_key: str, summary: str, description: str = "") -> str:
         """Format a commit message per agent/BUILD_PROMPT.md git policy.
 

@@ -58,22 +58,47 @@ def test_git_source_branch_error_attrs():
 def test_clone_timeout_raises_git_clone_error(gm):
     with patch(
         "src.git_manager.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30),
+        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=60),
     ):
         with patch("src.git_manager.settings") as s:
             s.gitlab_pat = ""
             s.gitlab_allowed_hosts_list = []
-            s.git_clone_timeout_seconds = 30
+            s.gitlab_pat_for_host = lambda h: ""
+            s.gitlab_host_pat_map = lambda: {}
+            s.all_gitlab_pats = lambda: []
+            s.git_clone_timeout_seconds = 60
             with pytest.raises(GitCloneError) as ei:
                 gm._clone_into_temp()
     assert "timed out" in ei.value.user_message.lower()
-    assert "30" in ei.value.user_message
+    assert "60" in ei.value.user_message
+
+
+def test_submodule_timeout_raises_git_clone_error(gm, tmp_path):
+    (gm.temp_dir / ".gitmodules").write_text('[submodule "a"]\n', encoding="utf-8")
+    with patch(
+        "src.git_manager.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=90),
+    ):
+        with patch.object(gm, "_apply_settings_pat_to_origin", return_value=False):
+            with patch("src.git_manager.settings") as s:
+                s.git_update_submodules = True
+                s.git_submodule_timeout_seconds = 90
+                s.gitlab_pat = ""
+                s.gitlab_pat_for_host = lambda h: ""
+                with pytest.raises(GitCloneError) as ei:
+                    gm._update_submodules(reason="after clone")
+    assert "submodule" in ei.value.user_message.lower()
+    assert "90" in ei.value.user_message
 
 
 def test_assert_remote_host_allowed_branches(gm, monkeypatch):
     from src.config import settings
 
+    # Isolate from real .env host→PAT maps so this test is deterministic
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_pat", "secret-pat")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+
     # urlparse("https://") → no hostname
     with patch.object(
         type(settings),
@@ -84,7 +109,7 @@ def test_assert_remote_host_allowed_branches(gm, monkeypatch):
             gm._assert_remote_host_allowed("https://")
 
     with patch.object(type(settings), "gitlab_allowed_hosts_list", property(lambda self: [])):
-        with pytest.raises(GitCloneError, match="GITLAB_ALLOWED_HOSTS"):
+        with pytest.raises(GitCloneError, match="GITLAB_ALLOWED_HOSTS|host→PAT mapping"):
             gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")
 
     with patch.object(
