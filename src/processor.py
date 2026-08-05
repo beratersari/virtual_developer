@@ -792,6 +792,12 @@ class JobProcessor:
         archive["requeue_eligible"] = False
         # Reject terminal statuses: cancel/fail can land between accept and begin
         # without holding the issue lock.
+        # Always re-read live settings (dashboard may have changed timeout)
+        from src.config import get_settings
+
+        live = get_settings()
+        timeout_s = int(live.agent_task_timeout_seconds or 1800)
+        max_retries = int(live.agent_task_max_retries or 0)
         claimed = self.state_manager.update_state_if(
             state.issue_key,
             reject_statuses=self.TERMINAL_STATUSES,
@@ -799,8 +805,8 @@ class JobProcessor:
             started_at=started_at or datetime.now(),
             current_task_id=task.task_id,
             current_opencode_session_id=None,
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            timeout_seconds=timeout_s,
+            max_retries=max_retries,
             metadata=archive,
         )
         if claimed is None:
@@ -809,9 +815,16 @@ class JobProcessor:
                 f"status is terminal (cancel/fail/complete won the race)"
             )
             return None
+        logger.info(
+            f"{state.issue_key} job budget: timeout={timeout_s}s "
+            f"max_retries={max_retries} "
+            f"(stuck limit ≈ {int(timeout_s * (max_retries + 1) * 1.5)}s)"
+        )
         state.current_task_id = task.task_id
         state.current_opencode_session_id = None
         state.status = claimed.status
+        state.timeout_seconds = timeout_s
+        state.max_retries = max_retries
         return self._start_job_record(
             state,
             workflow_type=workflow_type,
@@ -2159,6 +2172,20 @@ class JobProcessor:
                 progress_percentage=state.progress_percentage,
             )
 
+        from src.config import get_settings as _get_settings
+
+        _live = _get_settings()
+        # Prefer values frozen on state at job begin (already from live settings)
+        _timeout = (
+            state.timeout_seconds
+            if state.timeout_seconds is not None
+            else _live.agent_task_timeout_seconds
+        )
+        _retries = (
+            state.max_retries
+            if state.max_retries is not None
+            else _live.agent_task_max_retries
+        )
         result = await runner.run_agent_with_retry(
             task,
             on_output=on_output,
@@ -2167,8 +2194,8 @@ class JobProcessor:
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
             ),
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            timeout_seconds=_timeout,
+            max_retries=_retries,
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
@@ -2441,6 +2468,19 @@ class JobProcessor:
                 progress_percentage=state.progress_percentage,
             )
 
+        from src.config import get_settings as _get_settings
+
+        _live = _get_settings()
+        _timeout = (
+            state.timeout_seconds
+            if state.timeout_seconds is not None
+            else _live.agent_task_timeout_seconds
+        )
+        _retries = (
+            state.max_retries
+            if state.max_retries is not None
+            else _live.agent_task_max_retries
+        )
         result = await runner.run_agent_with_retry(
             task,
             on_output=on_output,
@@ -2449,8 +2489,8 @@ class JobProcessor:
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
             ),
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            timeout_seconds=_timeout,
+            max_retries=_retries,
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)

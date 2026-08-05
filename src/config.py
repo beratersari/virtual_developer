@@ -3,7 +3,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -469,10 +469,121 @@ class Settings(BaseSettings):
 _settings: Optional[Settings] = None
 _current_temp_dir: Optional[Path] = None
 
+# Dashboard runtime overrides (survive process restart; win over .env).
+# Written by apply_settings_update; applied after Settings() loads env.
+_RUNTIME_SETTINGS_REL = Path(".jira-agent") / "runtime_settings.json"
+
+# Keys the dashboard may persist (no secrets).
+_RUNTIME_PERSIST_KEYS = frozenset(
+    {
+        "agent_task_timeout_seconds",
+        "poll_interval_seconds",
+        "max_concurrent_jobs",
+        "jira_board_id",
+        "trigger_labels",
+        "trigger_on_assignment",
+        "default_model",
+    }
+)
+
+# Map Settings field → env var name for os.environ mirror (so re-reads stay consistent).
+_RUNTIME_ENV_MIRROR = {
+    "agent_task_timeout_seconds": "AGENT_TASK_TIMEOUT_SECONDS",
+    "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
+    "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
+    "jira_board_id": "JIRA_BOARD_ID",
+    "trigger_labels": "TRIGGER_LABELS",
+    "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
+    "default_model": "DEFAULT_MODEL",
+}
+
+
+def runtime_settings_path() -> Path:
+    """Path to JSON file holding dashboard runtime overrides."""
+    return (Path.cwd() / _RUNTIME_SETTINGS_REL).resolve()
+
+
+def load_runtime_settings() -> Dict[str, Any]:
+    """Load dashboard runtime overrides from disk (empty dict if missing)."""
+    path = runtime_settings_path()
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if k in _RUNTIME_PERSIST_KEYS}
+    except Exception as e:
+        logger.warning(f"Could not load runtime settings {path}: {e}")
+        return {}
+
+
+def save_runtime_settings(updates: Dict[str, Any]) -> None:
+    """Merge *updates* into runtime settings file and mirror into os.environ."""
+    path = runtime_settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        current = load_runtime_settings()
+        for key, value in updates.items():
+            if key not in _RUNTIME_PERSIST_KEYS:
+                continue
+            if value is None:
+                continue
+            current[key] = value
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _mirror_runtime_to_environ(current)
+        logger.info(
+            f"Persisted runtime settings to {path}: "
+            + ", ".join(f"{k}={current[k]!r}" for k in sorted(updates) if k in current)
+        )
+    except Exception as e:
+        logger.error(f"Could not save runtime settings {path}: {e}")
+
+
+def _mirror_runtime_to_environ(data: Dict[str, Any]) -> None:
+    """Keep os.environ in sync so timeout is not lost if something re-reads env."""
+    for key, value in data.items():
+        env_name = _RUNTIME_ENV_MIRROR.get(key)
+        if not env_name:
+            continue
+        if isinstance(value, bool):
+            os.environ[env_name] = "true" if value else "false"
+        else:
+            os.environ[env_name] = str(value)
+
+
+def apply_runtime_settings_to(settings_obj: "Settings") -> None:
+    """Apply persisted dashboard overrides onto a Settings instance (after env load)."""
+    data = load_runtime_settings()
+    if not data:
+        return
+    for key, value in data.items():
+        if not hasattr(settings_obj, key):
+            continue
+        try:
+            setattr(settings_obj, key, value)
+        except Exception as e:
+            logger.warning(f"Could not apply runtime setting {key}={value!r}: {e}")
+    _mirror_runtime_to_environ(data)
+    logger.info(
+        "Applied runtime settings overrides: "
+        + ", ".join(f"{k}={data[k]!r}" for k in sorted(data))
+    )
+
+
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        # Dashboard overrides win over .env so agent timeout changes stick.
+        apply_runtime_settings_to(_settings)
     return _settings
 
 def set_current_temp_dir(temp_dir: Optional[Path]) -> None:

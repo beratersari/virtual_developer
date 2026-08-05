@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from src.config import settings
+from src.config import save_runtime_settings, settings
 from src.dashboard.issue_logs import issue_log_ring
 from src.logger import logger
 from src.dashboard.schemas import (
@@ -342,26 +342,47 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                     {h: settings.gitlab_pat.strip() for h in hosts}
                 )
 
+    # Runtime-persisted fields (survive restart; win over .env)
+    runtime_persist: Dict[str, Any] = {}
+
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
+        runtime_persist["jira_board_id"] = settings.jira_board_id
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
+        runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
     if "trigger_labels" in data and data["trigger_labels"] is not None:
         settings.trigger_labels = str(data["trigger_labels"])
+        runtime_persist["trigger_labels"] = settings.trigger_labels
     if "trigger_on_assignment" in data and data["trigger_on_assignment"] is not None:
         settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
+        runtime_persist["trigger_on_assignment"] = settings.trigger_on_assignment
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
+        runtime_persist["max_concurrent_jobs"] = settings.max_concurrent_jobs
     if (
         "agent_task_timeout_seconds" in data
         and data["agent_task_timeout_seconds"] is not None
     ):
         # Single budget for agent runner + OpenCode CLI process
         settings.agent_task_timeout_seconds = int(data["agent_task_timeout_seconds"])
+        runtime_persist["agent_task_timeout_seconds"] = (
+            settings.agent_task_timeout_seconds
+        )
+        logger.info(
+            f"Agent/OpenCode timeout set to "
+            f"{settings.agent_task_timeout_seconds}s (next job uses this)"
+        )
     if "default_model" in data and data["default_model"] is not None:
         model = str(data["default_model"]).strip()
         if model:
             settings.default_model = model
+            runtime_persist["default_model"] = settings.default_model
+
+    if runtime_persist:
+        # Persist so the next job (and process restart) does not fall back to .env
+        save_runtime_settings(runtime_persist)
+
     return build_settings_view()
 
 
