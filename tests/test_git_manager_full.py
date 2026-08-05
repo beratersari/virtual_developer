@@ -88,22 +88,38 @@ def test_create_temp_directory_collision(tmp_path, monkeypatch):
 def test_clone_into_temp_success_and_fail(gm, tmp_path):
     host = "gitlab.example.com"
     gm.remote_url = f"https://{host}/group/repo.git"
-    with patch("src.git_manager.subprocess.run") as run:
-        run.return_value = _cp(returncode=0)
-        with patch.object(gm, "_materialize_job_remote_refs"):
-            with patch("src.git_manager.settings") as s:
-                s.gitlab_pat = "pat"
-                s.gitlab_allowed_hosts = host
-                s.gitlab_allowed_hosts_list = [host]
-                s.git_command_timeout_seconds = 300
-                s.git_clone_timeout_seconds = 300
-                gm._clone_into_temp()
-    with patch("src.git_manager.subprocess.run") as run:
-        run.return_value = _cp(returncode=1, stderr="fail")
+    with patch("src.git_manager.subprocess.run", return_value=_cp(returncode=0)) as run:
+        with patch.object(gm, "_update_submodules") as upd:
+            with patch.object(gm, "_materialize_job_remote_refs"):
+                with patch("src.git_manager.settings") as s:
+                    s.gitlab_pat = "pat"
+                    s.gitlab_allowed_hosts = host
+                    s.gitlab_allowed_hosts_list = [host]
+                    s.git_command_timeout_seconds = 300
+                    s.git_clone_timeout_seconds = 1800
+                    s.git_update_submodules = True
+                    s.gitlab_pat_for_host = lambda h: "pat"
+                    s.gitlab_host_pat_map = lambda: {host: "pat"}
+                    s.all_gitlab_pats = lambda: ["pat"]
+                    gm._clone_into_temp()
+        upd.assert_called_once()
+        clone_cmds = [
+            c.args[0] for c in run.call_args_list if c.args and c.args[0][:2] == ["git", "clone"]
+        ]
+        assert clone_cmds, "expected a git clone subprocess call"
+        assert clone_cmds[0][:3] == ["git", "clone", "--no-single-branch"]
+    with patch(
+        "src.git_manager.subprocess.run",
+        return_value=_cp(returncode=1, stderr="fail"),
+    ):
         with patch("src.git_manager.settings") as s:
             s.gitlab_pat = ""
             s.gitlab_allowed_hosts = ""
             s.gitlab_allowed_hosts_list = []
+            s.gitlab_pat_for_host = lambda h: ""
+            s.gitlab_host_pat_map = lambda: {}
+            s.all_gitlab_pats = lambda: []
+            s.git_clone_timeout_seconds = 1800
             from src.git_manager import GitCloneError
 
             with pytest.raises(GitCloneError) as ei:
@@ -112,6 +128,74 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
     gm.temp_dir = None
     with pytest.raises(RuntimeError):
         gm._clone_into_temp()
+
+
+def test_update_submodules_skips_without_gitmodules(gm, tmp_path):
+    with patch("src.git_manager.settings") as s:
+        s.git_update_submodules = True
+        s.git_submodule_timeout_seconds = 1800
+        with patch("src.git_manager.subprocess.run") as run:
+            gm._update_submodules(reason="test")
+        run.assert_not_called()
+
+
+def test_update_submodules_runs_init_recursive(gm, tmp_path):
+    (gm.temp_dir / ".gitmodules").write_text('[submodule "x"]\n', encoding="utf-8")
+    with patch("src.git_manager.settings") as s:
+        s.git_update_submodules = True
+        s.git_submodule_timeout_seconds = 1800
+        s.gitlab_pat = "pat"
+        s.gitlab_pat_for_host = lambda h: "pat"
+        with patch.object(gm, "_apply_settings_pat_to_origin", return_value=True):
+            with patch.object(gm, "_scrub_remote_credentials") as scrub:
+                with patch(
+                    "src.git_manager.subprocess.run",
+                    return_value=_cp(returncode=0),
+                ) as run:
+                    gm._update_submodules(reason="after clone")
+        run.assert_called_once()
+        cmd = run.call_args[0][0]
+        assert cmd == [
+            "git",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ]
+        scrub.assert_called()
+
+
+def test_update_submodules_failure_raises(gm, tmp_path):
+    from src.git_manager import GitCloneError
+
+    (gm.temp_dir / ".gitmodules").write_text('[submodule "x"]\n', encoding="utf-8")
+    with patch("src.git_manager.settings") as s:
+        s.git_update_submodules = True
+        s.git_submodule_timeout_seconds = 1800
+        s.gitlab_pat = ""
+        s.gitlab_pat_for_host = lambda h: ""
+        with patch.object(gm, "_apply_settings_pat_to_origin", return_value=False):
+            with patch(
+                "src.git_manager.subprocess.run",
+                return_value=_cp(returncode=1, stderr="auth failed"),
+            ):
+                with pytest.raises(GitCloneError) as ei:
+                    gm._update_submodules(reason="after clone")
+    assert "submodule" in ei.value.user_message.lower()
+
+
+def test_ensure_feature_branch_updates_submodules_after_checkout(gm):
+    with patch.object(gm, "_require_target_on_remote", return_value="develop"):
+        with patch.object(gm, "_resolve_work_branch_name", return_value="feature/GM-1"):
+            with patch.object(
+                gm, "_prepare_work_branch", return_value="feature/GM-1"
+            ) as prep:
+                with patch.object(gm, "_update_submodules") as upd:
+                    out = gm.ensure_feature_branch("GM-1")
+    assert out == "feature/GM-1"
+    prep.assert_called_once()
+    upd.assert_called_once()
+    assert "work branch" in (upd.call_args[1].get("reason") or "")
 
 
 def test_materialize_job_remote_refs_only_fetches_source_target(gm):

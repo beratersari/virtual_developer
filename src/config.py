@@ -176,10 +176,30 @@ class Settings(BaseSettings):
         default=True,
         description="Whether to retry tasks that fail with errors"
     )
-    # Git clone hard timeout (B11) — hung clones must not hold job slots forever
+    # Git clone hard timeout — large monorepos + many remotes need a high ceiling
     git_clone_timeout_seconds: int = Field(
-        default=300,
-        description="Max seconds for git clone (hard kill; default 5 minutes)",
+        default=1800,
+        description=(
+            "Max seconds for git clone (hard kill; default 1800 = 30 minutes). "
+            "Raise further for very large repositories."
+        ),
+    )
+    # Submodule init/update (often slower than parent clone when many nested modules)
+    git_submodule_timeout_seconds: int = Field(
+        default=1800,
+        description=(
+            "Max seconds for git submodule update --init --recursive "
+            "(hard kill; default 1800 = 30 minutes). Applied after clone and "
+            "again after work-branch checkout."
+        ),
+    )
+    git_update_submodules: bool = Field(
+        default=True,
+        description=(
+            "After clone (and after work-branch checkout), run "
+            "`git submodule update --init --recursive`. Disable only if "
+            "target repos never use submodules."
+        ),
     )
     # Push / fetch / merge / glab MR — hung network ops must not pin job slots forever
     git_command_timeout_seconds: int = Field(
