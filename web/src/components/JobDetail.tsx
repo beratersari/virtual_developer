@@ -2,11 +2,14 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   findLogForJobPath,
   findPromptForJobPath,
+  jobSessionPaths,
   pathBasename,
+  sessionLogRetryLabel,
+  sessionLogSortKey,
 } from '../util/paths'
 import { jobIsCancellable, jobIsDeletable } from '../util/status'
 import { formatElapsedBetween } from '../util/time'
-import type { JobItem, SystemLogLine, TextArtifact } from '../types'
+import type { JobItem, JobRetryAttempt, SystemLogLine, TextArtifact } from '../types'
 import { PromptBlock } from './PromptBlock'
 import { StatusBadge } from './StatusBadge'
 
@@ -94,6 +97,95 @@ export function JobDetail({
       triedMatch: Boolean(job?.session_log_path),
     }
   }, [artifacts.sessionLogs, job])
+
+  const sessionPaths = useMemo(
+    () => (job ? jobSessionPaths(job) : []),
+    [job],
+  )
+
+  const retryAttempts: JobRetryAttempt[] = job?.retry_attempts || []
+
+  /**
+   * All OpenCode outputs for this job (initial + _retryN), foldable under the
+   * OpenCode tab. Paths come from the job record; content from issue artifacts.
+   */
+  const sessionEntries = useMemo(() => {
+    // Prefer job-linked paths; also accept any artifact whose basename matches
+    // a linked path (absolute paths can differ across machines).
+    const pathSet = new Set(sessionPaths)
+    const byBase = new Map<string, string>()
+    for (const p of sessionPaths) {
+      byBase.set(pathBasename(p), p)
+    }
+    for (const log of artifacts.sessionLogs || []) {
+      const base = pathBasename(log.path)
+      if (byBase.has(base) && !pathSet.has(log.path)) {
+        // Prefer artifact path when job path has no content match
+        pathSet.add(log.path)
+      }
+    }
+
+    const paths =
+      pathSet.size > 0
+        ? Array.from(pathSet).sort(
+            (a, b) => sessionLogSortKey(a) - sessionLogSortKey(b),
+          )
+        : job?.session_log_path
+          ? [job.session_log_path]
+          : []
+
+    return paths.map((path, idx) => {
+      const label = sessionLogRetryLabel(path)
+      const match =
+        findLogForJobPath(artifacts.sessionLogs, path) ||
+        findLogForJobPath(
+          artifacts.sessionLogs,
+          byBase.get(pathBasename(path)) || null,
+        )
+      // Failure recorded when this log was the attempt that failed before retry
+      const failedAs =
+        retryAttempts.find(
+          (r) =>
+            r.failed_session_log_path &&
+            (pathBasename(r.failed_session_log_path) === pathBasename(path) ||
+              r.failed_session_log_path === path),
+        ) || null
+      const attemptMeta =
+        retryAttempts.find(
+          (r) =>
+            r.label === label ||
+            (label.startsWith('retry') &&
+              r.attempt_number === Number(label.replace(/^retry/, ''))),
+        ) || null
+      return {
+        path,
+        label,
+        index: idx,
+        match,
+        failedAs,
+        attemptMeta,
+      }
+    })
+  }, [sessionPaths, retryAttempts, artifacts.sessionLogs, job?.session_log_path])
+
+  // Fold state: latest open by default; user can expand/collapse all
+  const [openLogKeys, setOpenLogKeys] = useState<Record<string, boolean>>({})
+  const sessionKey = sessionEntries.map((e) => e.path).join('|')
+  useEffect(() => {
+    // Reset fold map when job's log set changes — latest open, older closed
+    const next: Record<string, boolean> = {}
+    sessionEntries.forEach((e, i) => {
+      next[e.path] = i === sessionEntries.length - 1
+    })
+    setOpenLogKeys(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-init when path set identity changes
+  }, [sessionKey])
+
+  const setAllLogsOpen = (open: boolean) => {
+    const next: Record<string, boolean> = {}
+    for (const e of sessionEntries) next[e.path] = open
+    setOpenLogKeys(next)
+  }
 
   return (
     <section className="space-y-4">
@@ -423,7 +515,7 @@ export function JobDetail({
                   />
                 )}
                 <MetaCard
-                  label="Session log path"
+                  label="Session log path (latest)"
                   mono
                   className="sm:col-span-2 lg:col-span-3"
                   value={job.session_log_path ?? '—'}
@@ -435,6 +527,69 @@ export function JobDetail({
                   value={job.prompt_path ?? '—'}
                 />
               </div>
+
+              {retryAttempts.length > 0 && (
+                <div className="mt-4">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+                    Retries under this job
+                  </h3>
+                  <p className="mt-1 text-xs text-text-muted">
+                    Each row is a failed attempt that scheduled another OpenCode
+                    run. Outputs use{' '}
+                    <span className="font-mono">_retryN</span> suffixes — not
+                    separate jobs.
+                  </p>
+                  <div className="mt-2 overflow-x-auto rounded border border-border">
+                    <table className="w-full min-w-[32rem] text-left text-xs">
+                      <thead className="bg-surface-2 text-[10px] uppercase tracking-wide text-text-muted">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">Label</th>
+                          <th className="px-3 py-2 font-medium">Reason</th>
+                          <th className="px-3 py-2 font-medium">Return</th>
+                          <th className="px-3 py-2 font-medium">Error</th>
+                          <th className="px-3 py-2 font-medium">Failed log</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {retryAttempts.map((r, i) => (
+                          <tr key={`${r.label}-${r.timestamp || i}`}>
+                            <td className="px-3 py-2 font-mono text-text">
+                              _{r.label || `retry${r.attempt_number}`}
+                            </td>
+                            <td className="px-3 py-2 text-text">
+                              <span
+                                className={
+                                  r.reason === 'timeout'
+                                    ? 'text-warning-text'
+                                    : 'text-danger-text'
+                                }
+                              >
+                                {r.reason || '—'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 font-mono text-text-secondary">
+                              {r.return_code ?? '—'}
+                            </td>
+                            <td
+                              className="max-w-xs truncate px-3 py-2 font-mono text-text-secondary"
+                              title={r.error_message || undefined}
+                            >
+                              {r.error_message
+                                ? r.error_message.slice(0, 160)
+                                : '—'}
+                            </td>
+                            <td className="px-3 py-2 font-mono text-text-muted">
+                              {r.failed_session_log_path
+                                ? pathBasename(r.failed_session_log_path)
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -484,10 +639,127 @@ export function JobDetail({
 
         {job && detailTab === 'opencode' && (
           <div className="space-y-3 text-sm">
-            <p className="text-xs text-text-muted">
-              Session log for this job only.
-            </p>
-            {logMatch.match ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-text-muted">
+                OpenCode output for this job. Initial run and each{' '}
+                <span className="font-mono">_retryN</span> log are listed below
+                (foldable). Latest attempt opens by default.
+              </p>
+              {sessionEntries.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="ops-btn-ghost text-[11px]"
+                    onClick={() => setAllLogsOpen(true)}
+                  >
+                    Expand all
+                  </button>
+                  <button
+                    type="button"
+                    className="ops-btn-ghost text-[11px]"
+                    onClick={() => setAllLogsOpen(false)}
+                  >
+                    Collapse all
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {sessionEntries.length > 0 ? (
+              <div className="space-y-2">
+                {sessionEntries.map((entry) => {
+                  const isLatest = entry.index === sessionEntries.length - 1
+                  const isOpen = openLogKeys[entry.path] ?? isLatest
+                  const titleLabel =
+                    entry.label === 'initial' ? 'initial' : `_${entry.label}`
+                  const body =
+                    entry.match?.content ||
+                    entry.match?.error ||
+                    (entry.match ? '(empty)' : '')
+                  return (
+                    <details
+                      key={entry.path}
+                      className={`group rounded-lg border ${
+                        isLatest
+                          ? 'border-accent/40 bg-accent-muted/20'
+                          : 'border-border bg-bg'
+                      }`}
+                      open={isOpen}
+                      onToggle={(ev) => {
+                        const el = ev.currentTarget
+                        setOpenLogKeys((prev) => ({
+                          ...prev,
+                          [entry.path]: el.open,
+                        }))
+                      }}
+                    >
+                      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 px-3 py-2.5 text-xs marker:content-none [&::-webkit-details-marker]:hidden">
+                        <span
+                          className="inline-block w-3 text-text-muted transition-transform group-open:rotate-90"
+                          aria-hidden
+                        >
+                          ▸
+                        </span>
+                        <span className="rounded border border-border bg-surface-2 px-2 py-0.5 font-mono font-semibold text-text">
+                          {titleLabel}
+                        </span>
+                        {isLatest && (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-accent-text">
+                            latest
+                          </span>
+                        )}
+                        {entry.failedAs && (
+                          <span className="text-danger-text">
+                            failed → {entry.failedAs.reason || 'error'}
+                            {entry.failedAs.return_code != null
+                              ? ` (rc=${entry.failedAs.return_code})`
+                              : ''}
+                          </span>
+                        )}
+                        {!entry.failedAs &&
+                          entry.attemptMeta &&
+                          entry.label !== 'initial' && (
+                            <span className="text-text-secondary">
+                              retry after {entry.attemptMeta.reason || 'error'}
+                            </span>
+                          )}
+                        <span className="min-w-0 flex-1 truncate font-mono text-text-muted">
+                          {pathBasename(entry.path)}
+                        </span>
+                        {entry.match?.truncated && (
+                          <span className="text-text-muted">(truncated)</span>
+                        )}
+                      </summary>
+                      <div className="border-t border-border">
+                        {entry.failedAs?.error_message && (
+                          <div className="border-b border-border bg-surface-2 px-3 py-2 text-[11px]">
+                            <span className="font-medium text-danger-text">
+                              Failure reason:{' '}
+                            </span>
+                            <span className="font-mono text-text-secondary whitespace-pre-wrap break-all">
+                              {entry.failedAs.error_message.slice(0, 500)}
+                            </span>
+                          </div>
+                        )}
+                        {entry.match ? (
+                          <pre className="max-h-[min(60vh,36rem)] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed text-text">
+                            {body}
+                          </pre>
+                        ) : (
+                          <div className="ops-alert ops-alert-warning m-3">
+                            Could not load session log (
+                            <span className="font-mono">
+                              {pathBasename(entry.path)}
+                            </span>
+                            ).
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )
+                })}
+              </div>
+            ) : logMatch.match ? (
               <PromptBlock
                 highlight
                 title={`Session log · ${job.job_id}${
@@ -516,7 +788,7 @@ export function JobDetail({
                     .
                   </>
                 ) : (
-                  <>No session_log_path on this job record yet.</>
+                  <>No OpenCode session logs linked to this job yet.</>
                 )}
               </div>
             )}

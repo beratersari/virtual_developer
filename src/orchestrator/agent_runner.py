@@ -604,10 +604,11 @@ class AgentRunner:
         Returns:
             Path to the session log file
 
-        Naming convention:
-            - Normal task: PROJ-123_20240327_143052_0.log
-            - Code review: PROJ-123_review_20240327_143052_0.log
-            - Retry 1: PROJ-123_20240327_143052_1.log
+        Naming convention (attempt_number is 0-based; retries use _retryN):
+            - First attempt: PROJ-123_20240327_143052.log
+            - Code review:   PROJ-123_review_20240327_143052.log
+            - Retry 1:       PROJ-123_20240327_143052_retry1.log
+            - Retry 2:       PROJ-123_20240327_143052_retry2.log
         """
         # Ensure directory exists (tests patch _default_sessions_dir to isolate)
         sessions_dir = _default_sessions_dir()
@@ -627,14 +628,22 @@ class AgentRunner:
         if issue_key:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_key = _safe_token(issue_key)
+            # attempt 0 = initial run; attempt N>=1 → suffix _retryN (dashboard labels)
+            retry_suffix = (
+                f"_retry{int(attempt_number)}" if int(attempt_number or 0) > 0 else ""
+            )
             if task_type:
                 filename = (
-                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}_{attempt_number}.log"
+                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}{retry_suffix}.log"
                 )
             else:
-                filename = f"{safe_key}_{timestamp}_{attempt_number}.log"
+                filename = f"{safe_key}_{timestamp}{retry_suffix}.log"
         else:
-            filename = f"{_safe_token(task_id or 'task')}.log"
+            base = _safe_token(task_id or "task")
+            if int(attempt_number or 0) > 0:
+                filename = f"{base}_retry{int(attempt_number)}.log"
+            else:
+                filename = f"{base}.log"
 
         path = sessions_dir / filename
         try:

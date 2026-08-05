@@ -96,10 +96,17 @@ def test_get_session_file_variants(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     p1 = runner._get_session_file("task_abc", issue_key="PROJ-1", attempt_number=0)
     assert "PROJ-1" in p1.name
-    p2 = runner._get_session_file("task_abc", issue_key="PROJ-1", attempt_number=1, task_type="review")
+    assert "_retry" not in p1.name
+    assert p1.name.endswith(".log")
+    p2 = runner._get_session_file(
+        "task_abc", issue_key="PROJ-1", attempt_number=1, task_type="review"
+    )
     assert "review" in p2.name
+    assert "_retry1" in p2.name
     p3 = runner._get_session_file("task_only")
     assert p3.name == "task_only.log"
+    p4 = runner._get_session_file("task_only", attempt_number=2)
+    assert p4.name == "task_only_retry2.log"
 
 
 def test_build_shell_command_unix(runner, tmp_path):

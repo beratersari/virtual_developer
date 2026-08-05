@@ -103,6 +103,21 @@ class GitDeliveryItem(BaseModel):
     status: Optional[str] = None
 
 
+class JobRetryAttempt(BaseModel):
+    """One failed attempt that triggered a retry, nested under a parent job."""
+
+    attempt_number: int = 0
+    label: str = ""  # e.g. "retry1" — matches session file _retryN suffix
+    reason: str = ""  # "error" | "timeout"
+    delay_seconds: float = 0.0
+    failed_session_log_path: Optional[str] = None
+    error_message: Optional[str] = None
+    return_code: Optional[int] = None
+    opencode_session_id: Optional[str] = None
+    task_id: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
 class JobItem(BaseModel):
     """One processing run (job) for a Jira issue."""
 
@@ -118,7 +133,12 @@ class JobItem(BaseModel):
     opencode_session_id: Optional[str] = None
     opencode_session_ids: List[str] = Field(default_factory=list)
     session_log_path: Optional[str] = None
+    # All OpenCode logs for this job (initial + _retryN), ordered oldest→newest
+    session_log_paths: List[str] = Field(default_factory=list)
     prompt_path: Optional[str] = None
+    prompt_paths: List[str] = Field(default_factory=list)
+    # Failed attempts that scheduled retries (nested; not separate dashboard jobs)
+    retry_attempts: List[JobRetryAttempt] = Field(default_factory=list)
     progress_percentage: int = 0
     error_message: Optional[str] = None
     started_at: Optional[str] = None

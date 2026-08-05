@@ -14,6 +14,7 @@ from src.dashboard.schemas import (
     GitDeliveryItem,
     GitlabHostCredentialView,
     JobItem,
+    JobRetryAttempt,
     JobsResponse,
     MetaResponse,
     ModelOption,
@@ -43,8 +44,9 @@ if TYPE_CHECKING:
 # Cap large payloads for API safety
 _MAX_SESSION_CHARS = 400_000
 _MAX_PROMPT_CHARS = 200_000
-_MAX_SESSION_LOG_FILES = 5
-_MAX_PROMPT_FILES = 5
+# Higher than one-run: initial + several _retryN session logs per job
+_MAX_SESSION_LOG_FILES = 20
+_MAX_PROMPT_FILES = 20
 
 
 def read_app_version() -> str:
@@ -419,9 +421,20 @@ def refresh_runtime_jira_clients(
 
 
 def _parse_session_log_name(name: str) -> Optional[tuple]:
-    """Parse ISSUE_YYYYMMDD_HHMMSS_n.log → (issue_key, started_at iso)."""
+    """Parse session log basename → (issue_key, started_at iso).
+
+    Accepts:
+      ISSUE_YYYYMMDD_HHMMSS.log
+      ISSUE_YYYYMMDD_HHMMSS_retryN.log
+      ISSUE_YYYYMMDD_HHMMSS_N.log  (legacy numeric suffix)
+      ISSUE_type_YYYYMMDD_HHMMSS[.log|_retryN.log]
+    """
     m = re.match(
-        r"^([A-Z][A-Z0-9]+-\d+)_(\d{8})_(\d{6})_\d+\.log$",
+        r"^([A-Z][A-Z0-9]+-\d+)"
+        r"(?:_[A-Za-z][A-Za-z0-9._-]*)?"  # optional task_type
+        r"_(\d{8})_(\d{6})"
+        r"(?:_retry\d+|_\d+)?"
+        r"\.log$",
         name,
         re.IGNORECASE,
     )
@@ -441,93 +454,60 @@ def _legacy_jobs_from_sessions(
     limit: int = 200,
     suppress_logs_after: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Synthesize job rows from session logs not already linked to a stored job.
+    """Deprecated: legacy session rows are no longer merged into the jobs list.
 
-    Lets the dashboard show historical runs that finished before JobStore existed.
-
-    ``suppress_logs_after`` maps issue_key → job started_at ISO. Session logs for
-    that issue with started_at >= cutoff are skipped so an in-flight JobStore row
-    is not duplicated as a fake ``legacy_*`` completed job while the agent runs
-    (session file exists before ``session_log_path`` is written on the job).
+    Kept as a no-op so older tests/call sites that import the symbol still work.
+    Retries and multi-attempt OpenCode logs belong on the parent JobStore job
+    (``session_log_paths`` / ``retry_attempts``), not as ``legacy_*`` rows.
     """
-    sessions_dir = _sessions_dir()
-    if not sessions_dir.is_dir():
-        return []
-    needle = (issue_key or "").strip().upper()
-    suppress = {k.upper(): v for k, v in (suppress_logs_after or {}).items()}
-    out: List[Dict[str, Any]] = []
-    paths = (
-        sorted(sessions_dir.glob(f"{needle}_*.log"), key=lambda p: p.name, reverse=True)
-        if needle
-        else sorted(sessions_dir.glob("*.log"), key=lambda p: p.name, reverse=True)
-    )
-    for path in paths:
-        if path.name.endswith(".prompt.txt") or not path.is_file():
+    return []
+
+
+def _job_session_log_paths(j: Dict[str, Any]) -> List[str]:
+    """Ordered unique session log paths for a job dict."""
+    paths: List[str] = []
+    for p in j.get("session_log_paths") or []:
+        if p and p not in paths:
+            paths.append(str(p))
+    latest = j.get("session_log_path")
+    if latest and latest not in paths:
+        paths.append(str(latest))
+    return paths
+
+
+def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
+    paths: List[str] = []
+    for p in j.get("prompt_paths") or []:
+        if p and p not in paths:
+            paths.append(str(p))
+    latest = j.get("prompt_path")
+    if latest and latest not in paths:
+        paths.append(str(latest))
+    return paths
+
+
+def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:
+    out: List[JobRetryAttempt] = []
+    for raw in j.get("retry_attempts") or []:
+        if not isinstance(raw, dict):
             continue
-        if path.suffix != ".log":
+        try:
+            out.append(
+                JobRetryAttempt(
+                    attempt_number=int(raw.get("attempt_number") or 0),
+                    label=str(raw.get("label") or ""),
+                    reason=str(raw.get("reason") or ""),
+                    delay_seconds=float(raw.get("delay_seconds") or 0),
+                    failed_session_log_path=raw.get("failed_session_log_path"),
+                    error_message=raw.get("error_message"),
+                    return_code=raw.get("return_code"),
+                    opencode_session_id=raw.get("opencode_session_id"),
+                    task_id=raw.get("task_id"),
+                    timestamp=raw.get("timestamp"),
+                )
+            )
+        except Exception:
             continue
-        resolved = str(path.resolve())
-        # Also match by basename in case absolute paths differ
-        if resolved in covered_paths or str(path) in covered_paths:
-            continue
-        # Basename coverage (job may store relative path)
-        if path.name in covered_paths or path.stem in covered_paths:
-            continue
-        parsed = _parse_session_log_name(path.name)
-        if not parsed:
-            continue
-        ik, started = parsed
-        if needle and ik != needle:
-            continue
-        cutoff = suppress.get(ik)
-        if cutoff is not None:
-            # Log timestamp from filename vs job start — suppress overlap window
-            if not cutoff or started >= cutoff[:19]:
-                continue
-        sid = None
-        sid_file = path.with_suffix(path.suffix + ".session_id")
-        if sid_file.is_file():
-            try:
-                sid = sid_file.read_text(encoding="utf-8").strip() or None
-            except OSError:
-                sid = None
-        prompt = path.with_suffix(".prompt.txt")
-        # Prefer sibling named like foo.prompt.txt next to foo.log
-        prompt_alt = Path(str(path) + ".prompt.txt")  # unlikely
-        prompt_path = None
-        for candidate in (
-            path.parent / f"{path.stem}.prompt.txt",
-            prompt,
-            prompt_alt,
-        ):
-            if candidate.is_file():
-                prompt_path = str(candidate)
-                break
-        desc = description_from_prompt_path(prompt_path) if prompt_path else ""
-        out.append(
-            {
-                "job_id": f"legacy_{path.stem}",
-                "issue_key": ik,
-                "summary": summaries.get(ik, ""),
-                "description": desc,
-                "workflow_type": "execution",
-                "agent": "",
-                # F6: never imply success for unparsed legacy session logs
-                "status": "unknown",
-                "task_id": None,
-                "opencode_session_id": sid,
-                "opencode_session_ids": [sid] if sid else [],
-                "session_log_path": resolved,
-                "prompt_path": prompt_path,
-                "progress_percentage": 0,
-                "error_message": None,
-                "started_at": started,
-                "completed_at": started,
-                "updated_at": started,
-            }
-        )
-        if len(out) >= limit:
-            break
     return out
 
 
@@ -563,50 +543,15 @@ def build_jobs(
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
 
-    # Load a wide window so we can merge legacy session rows then paginate
+    # JobStore only — never synthesize legacy_* rows from session files.
+    # Retries live under the parent job (session_log_paths / retry_attempts).
     fetch_cap = 2000
     raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
-    covered_paths: set = set()
-    # Open JobStore runs without session_log_path yet — suppress matching session logs
-    suppress_logs_after: Dict[str, str] = {}
-    for j in raw:
-        for key in ("session_log_path", "prompt_path"):
-            p = j.get(key)
-            if p:
-                covered_paths.add(str(p))
-                try:
-                    pp = Path(p)
-                    covered_paths.add(str(pp.resolve()))
-                    covered_paths.add(pp.name)
-                    covered_paths.add(pp.stem)
-                    # Log sibling of .prompt.txt
-                    if pp.name.endswith(".prompt.txt"):
-                        covered_paths.add(pp.name[: -len(".prompt.txt")] + ".log")
-                        covered_paths.add(pp.stem.replace(".prompt", ""))
-                except Exception:
-                    pass
-        st = (j.get("status") or "").lower()
-        if st in ("running", "planning", "executing") and not j.get("session_log_path"):
-            ik = (j.get("issue_key") or "").upper()
-            started = j.get("started_at") or ""
-            if ik and (ik not in suppress_logs_after or started < suppress_logs_after[ik]):
-                suppress_logs_after[ik] = started
-
-    # Merge stored jobs with legacy session-derived rows (newest first after merge)
-    remaining = max(0, fetch_cap - len(raw))
-    if remaining > 0:
-        legacy = _legacy_jobs_from_sessions(
-            issue_key=issue_key,
-            covered_paths=covered_paths,
-            summaries=summaries,
-            limit=remaining,
-            suppress_logs_after=suppress_logs_after,
-        )
-        raw = list(raw) + legacy
-        raw.sort(
-            key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-            reverse=True,
-        )
+    raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
+    raw.sort(
+        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
+        reverse=True,
+    )
 
     total = len(raw)
     page_raw = raw[offset : offset + size]
@@ -626,6 +571,8 @@ def build_jobs(
         live = jid in active_job_ids or (
             ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
         )
+        session_paths = _job_session_log_paths(j)
+        prompt_paths = _job_prompt_paths(j)
         items.append(
             JobItem(
                 job_id=jid,
@@ -640,8 +587,15 @@ def build_jobs(
                 task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
                 opencode_session_id=j.get("opencode_session_id"),
                 opencode_session_ids=list(j.get("opencode_session_ids") or []),
-                session_log_path=j.get("session_log_path"),
-                prompt_path=j.get("prompt_path"),
+                session_log_path=j.get("session_log_path") or (
+                    session_paths[-1] if session_paths else None
+                ),
+                session_log_paths=session_paths,
+                prompt_path=j.get("prompt_path") or (
+                    prompt_paths[-1] if prompt_paths else None
+                ),
+                prompt_paths=prompt_paths,
+                retry_attempts=_job_retry_attempts(j),
                 progress_percentage=int(j.get("progress_percentage") or 0),
                 error_message=j.get("error_message"),
                 started_at=j.get("started_at"),
@@ -822,19 +776,31 @@ def delete_job_record(
         store_deleted = js.delete_job(jid) if jid.startswith("job_") else False
 
     if delete_artifacts:
-        for key in ("session_log_path", "prompt_path"):
-            gone = _safe_delete_agent_artifact(job.get(key))
+        # All session/prompt artifacts for this job (initial + retries)
+        artifact_candidates: List[Optional[str]] = []
+        artifact_candidates.extend(_job_session_log_paths(job))
+        artifact_candidates.extend(_job_prompt_paths(job))
+        artifact_candidates.append(job.get("session_log_path"))
+        artifact_candidates.append(job.get("prompt_path"))
+        for raw_ra in job.get("retry_attempts") or []:
+            if isinstance(raw_ra, dict):
+                artifact_candidates.append(raw_ra.get("failed_session_log_path"))
+        seen_art: set = set()
+        for p in artifact_candidates:
+            if not p or p in seen_art:
+                continue
+            seen_art.add(p)
+            gone = _safe_delete_agent_artifact(p)
             if gone:
                 deleted_paths.append(gone)
-        # Common sibling prompt next to log
-        log_path = job.get("session_log_path")
-        if log_path and not job.get("prompt_path"):
+            # Sibling prompt next to each session log
             try:
-                log = Path(str(log_path))
-                sibling = log.parent / f"{log.stem}.prompt.txt"
-                gone = _safe_delete_agent_artifact(str(sibling))
-                if gone:
-                    deleted_paths.append(gone)
+                log = Path(str(p))
+                if log.suffix == ".log":
+                    sibling = log.parent / f"{log.stem}.prompt.txt"
+                    gone = _safe_delete_agent_artifact(str(sibling))
+                    if gone:
+                        deleted_paths.append(gone)
             except Exception:
                 pass
         # Durable per-job system log (daemon lines tagged with job_id)

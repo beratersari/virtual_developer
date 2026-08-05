@@ -328,52 +328,20 @@ def test_build_models_config_label():
     assert r.error == "warn"
 
 
-def test_legacy_jobs_unknown_status(tmp_path, monkeypatch):
+def test_legacy_jobs_helper_is_noop(tmp_path, monkeypatch):
+    """legacy_* synthesis is disabled — always empty regardless of session files."""
     sessions = tmp_path / "sessions"
     sessions.mkdir()
-    log = sessions / "LEG-1_20260115_090000_0.log"
+    log = sessions / "LEG-1_20260115_090000.log"
     log.write_text("output\n", encoding="utf-8")
-    (sessions / "LEG-1_20260115_090000_0.log.session_id").write_text("ses_1")
-    (sessions / "LEG-1_20260115_090000_0.prompt.txt").write_text(
-        "# Direct\n\n## Task\nfrom prompt\n\n# end\n"
-    )
-    # unparseable name skipped
-    (sessions / "junk.log").write_text("x")
-    # covered path skipped
-    covered = {str(log.resolve()), log.name}
-
     monkeypatch.setattr("src.dashboard.service._sessions_dir", lambda: sessions)
     rows = _legacy_jobs_from_sessions(
         issue_key="LEG-1",
-        covered_paths=covered,
-        summaries={"LEG-1": "sum"},
-        limit=10,
-    )
-    # covered so empty
-    assert rows == []
-
-    rows = _legacy_jobs_from_sessions(
-        issue_key="LEG-1",
         covered_paths=set(),
         summaries={"LEG-1": "sum"},
         limit=10,
-        suppress_logs_after={"LEG-1": "2026-01-01T00:00:00"},
     )
-    # started 20260115 >= suppress cutoff -> suppressed
     assert rows == []
-
-    rows = _legacy_jobs_from_sessions(
-        issue_key="LEG-1",
-        covered_paths=set(),
-        summaries={"LEG-1": "sum"},
-        limit=10,
-        suppress_logs_after={"LEG-1": "2026-12-31T00:00:00"},
-    )
-    # started before cutoff — included
-    assert len(rows) == 1
-    assert rows[0]["status"] == "unknown"
-    assert rows[0]["job_id"].startswith("legacy_")
-    assert rows[0]["opencode_session_id"] == "ses_1"
 
 
 def test_build_jobs_suppress_running_and_summary(tmp_path, monkeypatch):

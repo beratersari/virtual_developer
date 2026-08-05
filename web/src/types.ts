@@ -144,6 +144,21 @@ export type GitDelivery = {
   status?: string | null
 }
 
+/** Failed attempt that scheduled a retry — nested under the parent job. */
+export type JobRetryAttempt = {
+  attempt_number: number
+  /** Matches OpenCode session file suffix, e.g. retry1 */
+  label: string
+  reason: string
+  delay_seconds: number
+  failed_session_log_path?: string | null
+  error_message?: string | null
+  return_code?: number | null
+  opencode_session_id?: string | null
+  task_id?: string | null
+  timestamp?: string | null
+}
+
 export type JobItem = {
   job_id: string
   issue_key: string
@@ -158,7 +173,12 @@ export type JobItem = {
   opencode_session_id?: string | null
   opencode_session_ids?: string[]
   session_log_path?: string | null
+  /** All OpenCode logs for this job (initial + _retryN), oldest→newest. */
+  session_log_paths?: string[]
   prompt_path?: string | null
+  prompt_paths?: string[]
+  /** Retries nested under this job — never separate legacy dashboard rows. */
+  retry_attempts?: JobRetryAttempt[]
   progress_percentage: number
   error_message?: string | null
   started_at?: string | null
