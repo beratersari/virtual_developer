@@ -11,6 +11,70 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from src.logger import logger
 
 
+def bootstrap_dotenv_into_environ(
+    *paths: Path,
+    override: bool = False,
+) -> int:
+    """Load KEY=VAL pairs from .env file(s) into ``os.environ``.
+
+    Pydantic Settings only maps *declared* fields (``extra=ignore``), so project
+    build tokens (NPM_TOKEN, AWS_*, DOCKER_*, NuGet, etc.) written in ``.env``
+    never reached agent children. This bootstrap keeps those keys available to
+    the process and therefore to ``_agent_subprocess_env``.
+
+    Existing process environment wins unless ``override=True``.
+    Returns the number of keys newly applied (approx).
+    """
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return 0
+
+    candidates: List[Path] = []
+    if paths:
+        candidates.extend(Path(p) for p in paths if p)
+    else:
+        # CWD first (how operators run the daemon), then package root next to src/
+        candidates.append(Path.cwd() / ".env")
+        candidates.append(Path.cwd() / ".env.agent")
+        try:
+            pkg_root = Path(__file__).resolve().parent.parent
+            candidates.append(pkg_root / ".env")
+            candidates.append(pkg_root / ".env.agent")
+        except Exception:
+            pass
+
+    applied = 0
+    seen: set = set()
+    for path in candidates:
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            values = dotenv_values(path)
+        except Exception as e:
+            logger.warning(f"Could not read dotenv {path}: {e}")
+            continue
+        for key, value in (values or {}).items():
+            if not key or value is None:
+                continue
+            if not override and key in os.environ:
+                continue
+            os.environ[key] = str(value)
+            applied += 1
+        if applied:
+            logger.debug(f"Loaded dotenv keys from {path} (applied≈{applied})")
+    return applied
+
+
+# Ensure .env tokens exist in os.environ before Settings() and agent children run.
+bootstrap_dotenv_into_environ()
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
