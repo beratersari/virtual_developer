@@ -102,6 +102,7 @@ jobs:
             "start.bat",
             "start-backend.bat",
             "start-frontend.bat",
+            "start-opencode-serve.bat",
             "cli.py",
             "src/daemon.py",
             "web/dist/index.html",

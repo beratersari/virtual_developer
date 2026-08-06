@@ -171,3 +171,275 @@ def resolve_session_id(
     if sessions:
         return sessions[0]["id"]
     return preferred
+
+
+# Patterns seen when OpenCode is mid-compaction or just finished compact without
+# continuing the agent loop (headless `opencode run` exit-0 bug).
+_COMPACT_OUTPUT_RE = re.compile(
+    r"(?:"
+    r"\bcompacting\b"
+    r"|\bcompaction\b"
+    r"|\bsession\s+compact(?:ed|ing)?\b"
+    r"|\bauto[- ]?compact\b"
+    r"|\bcontext\s+(?:automatically\s+)?compacted\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Finish values that mean the agent was still mid-tool-loop when the process
+# stopped (not a clean terminal answer).
+_UNFINISHED_FINISH = frozenset({"tool-calls", "unknown", ""})
+
+
+def detect_compact_in_output(text: str) -> bool:
+    """True if CLI transcript mentions an in-progress / just-finished compact."""
+    if not text:
+        return False
+    return bool(_COMPACT_OUTPUT_RE.search(text))
+
+
+def _apply_todo_counts(result: Dict[str, Any], todos: List[Dict[str, Any]]) -> None:
+    """Merge open-todo signals from a list of {status: ...} rows."""
+    by_status: Dict[str, int] = {}
+    for row in todos:
+        if not isinstance(row, dict):
+            continue
+        st = (row.get("status") or "").strip().lower()
+        by_status[st] = by_status.get(st, 0) + 1
+    pending = by_status.get("pending", 0)
+    in_prog = by_status.get("in_progress", 0) + by_status.get("in-progress", 0)
+    result["pending_todos"] = pending
+    result["in_progress_todos"] = in_prog
+    result["open_todos"] = pending + in_prog
+    if result["open_todos"] > 0:
+        result["reasons"].append(
+            f"open todos: {pending} pending, {in_prog} in_progress"
+        )
+
+
+def _apply_last_assistant(
+    result: Dict[str, Any],
+    *,
+    role: Any,
+    finish: Any,
+    summary: Any,
+    parts: Optional[List[Any]] = None,
+) -> None:
+    """Record last-message signals used for premature-exit detection."""
+    is_summary = summary is True or (
+        isinstance(summary, dict) and bool(summary.get("compaction"))
+    )
+    if summary is True:
+        is_summary = True
+    # Compaction user part as last-ish signal when assistant summary follows
+    if parts:
+        if any(isinstance(p, dict) and p.get("type") == "compaction" for p in parts):
+            # Not necessarily incomplete alone; summary assistant check below
+            pass
+
+    result["last_role"] = role
+    result["last_finish"] = finish
+    result["last_is_summary"] = bool(is_summary)
+
+    if role == "assistant":
+        finish_s = "" if finish is None else str(finish).strip().lower()
+        if finish is None or finish_s in _UNFINISHED_FINISH:
+            result["reasons"].append(
+                f"last assistant finish is unfinished ({finish!r})"
+            )
+        elif is_summary and finish_s == "stop":
+            result["reasons"].append(
+                "session ended on compaction summary (finish=stop, summary=true)"
+            )
+
+
+def assess_session_completeness(
+    session_id: Optional[str],
+    *,
+    output_text: str = "",
+    db_path: Optional[Path] = None,
+    messages: Optional[List[Dict[str, Any]]] = None,
+    todos: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Decide whether an OpenCode session looks finished after a run/turn.
+
+    Background (upstream + production):
+    - ``opencode run`` can exit **0** after auto-compaction without continuing
+      the task (anomalyco/opencode#13946, #3560). Transcripts often end on a
+      "compacting" step; Virtual Developer previously treated that as success.
+    - Sessions also die mid-turn (``finish`` null, only ``step-start``) while
+      todos remain ``pending`` / ``in_progress`` — still exit 0 sometimes.
+
+    Signals (any one can mark premature):
+    1. Open todos (``pending`` / ``in_progress``) — API list or SQLite
+    2. Last assistant message has no terminal ``finish`` (or is mid tool-calls)
+    3. Last assistant is a compaction **summary** (``summary`` truthy) with
+       finish ``stop`` — classic compact-then-exit without "Continue..."
+    4. CLI output ends with compacting markers (when no stronger state signal)
+
+    ``messages`` / ``todos``: optional live snapshots from ``opencode serve``
+    HTTP (preferred when provided; skips SQLite for those fields).
+
+    Returns a dict always including ``complete`` (bool) and ``reasons`` (list).
+    """
+    result: Dict[str, Any] = {
+        "complete": True,
+        "premature": False,
+        "session_id": session_id,
+        "reasons": [],
+        "open_todos": 0,
+        "pending_todos": 0,
+        "in_progress_todos": 0,
+        "last_finish": None,
+        "last_role": None,
+        "last_is_summary": False,
+        "compact_in_output": detect_compact_in_output(output_text or ""),
+        "db_checked": False,
+        "api_checked": False,
+    }
+
+    # --- Live API snapshots (serve mode) ---
+    if todos is not None:
+        result["api_checked"] = True
+        _apply_todo_counts(result, list(todos))
+
+    if messages is not None:
+        result["api_checked"] = True
+        # Walk from the end to find the last assistant (or last message)
+        last_assistant: Optional[Dict[str, Any]] = None
+        last_any: Optional[Dict[str, Any]] = None
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            last_any = m
+            role = m.get("role")
+            if role is None and isinstance(m.get("info"), dict):
+                role = m["info"].get("role")
+            if role == "assistant":
+                last_assistant = m
+        target = last_assistant or last_any
+        if target is not None:
+            info = target.get("info") if isinstance(target.get("info"), dict) else {}
+            role = target.get("role") or info.get("role")
+            finish = target.get("finish")
+            if finish is None:
+                finish = info.get("finish")
+            summary = target.get("summary")
+            if summary is None:
+                summary = info.get("summary")
+            parts = target.get("_parts") or target.get("parts") or []
+            _apply_last_assistant(
+                result,
+                role=role,
+                finish=finish,
+                summary=summary,
+                parts=parts if isinstance(parts, list) else None,
+            )
+            # If the absolute last message is a compaction *user* part with no
+            # following assistant, treat as mid-compact incomplete.
+            if last_any is not None and last_assistant is not last_any:
+                parts_last = last_any.get("_parts") or last_any.get("parts") or []
+                if any(
+                    isinstance(p, dict) and p.get("type") == "compaction"
+                    for p in parts_last
+                ):
+                    result["reasons"].append(
+                        "session ended on compaction user part (no follow-up)"
+                    )
+
+    sid = (session_id or "").strip()
+    path = db_path or _default_db_path()
+
+    # --- SQLite fallback when API snapshots not supplied ---
+    use_db_todos = todos is None
+    use_db_messages = messages is None
+    if sid and path.is_file() and (use_db_todos or use_db_messages):
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            result["db_checked"] = True
+
+            if use_db_todos:
+                try:
+                    todo_rows = cur.execute(
+                        """
+                        SELECT status, COUNT(*) AS c
+                        FROM todo
+                        WHERE session_id = ?
+                        GROUP BY status
+                        """,
+                        (sid,),
+                    ).fetchall()
+                    flat: List[Dict[str, Any]] = []
+                    for row in todo_rows:
+                        st = (row["status"] or "").strip().lower()
+                        for _ in range(int(row["c"] or 0)):
+                            flat.append({"status": st})
+                    _apply_todo_counts(result, flat)
+                except sqlite3.Error as e:
+                    logger.debug(f"todo completeness check skipped for {sid}: {e}")
+
+            if use_db_messages:
+                try:
+                    last = cur.execute(
+                        """
+                        SELECT id, data
+                        FROM message
+                        WHERE session_id = ?
+                        ORDER BY time_created DESC
+                        LIMIT 1
+                        """,
+                        (sid,),
+                    ).fetchone()
+                    if last is not None:
+                        import json
+
+                        raw = last["data"]
+                        data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                        if not isinstance(data, dict):
+                            data = {}
+                        info = (
+                            data.get("info")
+                            if isinstance(data.get("info"), dict)
+                            else {}
+                        )
+                        role = data.get("role") or info.get("role")
+                        finish = data.get("finish")
+                        if finish is None:
+                            finish = info.get("finish")
+                        summary = data.get("summary")
+                        if summary is None:
+                            summary = info.get("summary")
+                        _apply_last_assistant(
+                            result, role=role, finish=finish, summary=summary
+                        )
+                except (sqlite3.Error, ValueError, TypeError) as e:
+                    logger.debug(
+                        f"message completeness check skipped for {sid}: {e}"
+                    )
+
+            con.close()
+        except Exception as e:
+            logger.debug(f"OpenCode completeness lookup failed for {sid}: {e}")
+
+    # Output-only signal: compacting was the last notable activity and we have
+    # no contradictory "all clear" from state.
+    if result["compact_in_output"]:
+        tail = (output_text or "")[-2048:]
+        if detect_compact_in_output(tail):
+            clean = (
+                (result["db_checked"] or result["api_checked"])
+                and result["open_todos"] == 0
+                and (result["last_finish"] or "").lower() == "stop"
+                and not result["last_is_summary"]
+            )
+            if not clean:
+                result["reasons"].append(
+                    "CLI output indicates compaction near end of run"
+                )
+
+    if result["reasons"]:
+        result["complete"] = False
+        result["premature"] = True
+    return result

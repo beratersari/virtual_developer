@@ -322,6 +322,10 @@ if exist "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" (
     copy /Y "%SCRIPT_DIR%\packaging\windows\start-opencode.bat" "%SCRIPT_DIR%\start-opencode.bat" >nul
     echo [OK] start-opencode.bat — OpenCode TUI
 )
+if exist "%SCRIPT_DIR%\packaging\windows\start-opencode-serve.bat" (
+    copy /Y "%SCRIPT_DIR%\packaging\windows\start-opencode-serve.bat" "%SCRIPT_DIR%\start-opencode-serve.bat" >nul
+    echo [OK] start-opencode-serve.bat
+)
 for %%F in (start.bat start-backend.bat start-frontend.bat) do (
     if exist "%SCRIPT_DIR%\packaging\windows\%%F" (
         copy /Y "%SCRIPT_DIR%\packaging\windows\%%F" "%SCRIPT_DIR%\%%F" >nul
@@ -418,9 +422,9 @@ echo   4. Start the product:
 echo        start-backend.bat    API + SPA on http://127.0.0.1:8080/
 echo        start-frontend.bat   UI on http://127.0.0.1:5173/ ^(proxies /api to backend^)
 echo        start.bat            both ^(backend then frontend^)
-echo   5. Optional — OpenCode TUI:
-echo        start-opencode.bat
-echo      NEVER run "opencode" from C:\Users\... ^(black screen^)
+echo   5. Optional - OpenCode:
+echo        start-opencode.bat         TUI ^(never from C:\Users\... black screen^)
+echo        start-opencode-serve.bat
 echo.
 echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%

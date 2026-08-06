@@ -283,7 +283,12 @@ foreach ($item in $copyItems) {
 }
 
 # Root launchers (backend / frontend / both)
-foreach ($launcher in @("start.bat", "start-backend.bat", "start-frontend.bat")) {
+foreach ($launcher in @(
+        "start.bat",
+        "start-backend.bat",
+        "start-frontend.bat",
+        "start-opencode-serve.bat"
+    )) {
     $srcLauncher = Join-Path $root "packaging\windows\$launcher"
     if (-not (Test-Path -LiteralPath $srcLauncher)) {
         throw "packaging\windows\$launcher missing"
@@ -772,9 +777,10 @@ JIRA Virtual Developer — Windows offline package
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
       start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
       start.bat           → both (backend then frontend)
-7. OpenCode TUI (optional; after install.bat or install-opencode-online.bat):
+7. OpenCode (optional; after install.bat or install-opencode-online.bat):
       start-opencode.bat
-   NEVER run "opencode" from C:\Users\<you> — black-screen hang.
+      start-opencode-serve.bat
+
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')

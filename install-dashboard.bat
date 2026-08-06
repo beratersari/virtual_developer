@@ -121,7 +121,7 @@ REM Step 3: Product launchers ^(backend / frontend / both^)
 REM ---------------------------------------------------------------------------
 echo.
 echo Step 3: Product start scripts...
-for %%F in (start.bat start-backend.bat start-frontend.bat) do (
+for %%F in (start.bat start-backend.bat start-frontend.bat start-opencode.bat start-opencode-serve.bat) do (
     if exist "%SCRIPT_DIR%\packaging\windows\%%F" (
         copy /Y "%SCRIPT_DIR%\packaging\windows\%%F" "%SCRIPT_DIR%\%%F" >nul
         echo [OK] %%F

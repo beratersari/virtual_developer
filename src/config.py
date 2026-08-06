@@ -107,6 +107,26 @@ class Settings(BaseSettings):
 
     # Oh My OpenAgent Configuration
     opencode_cli: str = Field(default="opencode", description="OpenCode CLI command")
+    # How to drive OpenCode: "cli" = opencode run subprocess (default);
+    # "serve" = HTTP control loop against opencode serve (compact-aware continue).
+    opencode_run_mode: str = Field(
+        default="cli",
+        description=(
+            "OpenCode drive mode: 'cli' (opencode run) or 'serve' "
+            "(HTTP to opencode serve with multi-compact continue)"
+        ),
+    )
+    opencode_serve_url: str = Field(
+        default="http://127.0.0.1:4096",
+        description="Base URL for opencode serve when opencode_run_mode=serve",
+    )
+    opencode_serve_max_compact_continues: int = Field(
+        default=3,
+        description=(
+            "When serve mode detects incomplete/compact-stop, how many "
+            "Continue prompts to send on the same session (0 = fail immediately)"
+        ),
+    )
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")

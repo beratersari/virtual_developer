@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from src.opencode_sessions import (
+    assess_session_completeness,
+    detect_compact_in_output,
     find_sessions_for_issue,
     path_contains_issue_key,
     resolve_session_id,
@@ -266,3 +268,214 @@ def test_resolve_uses_path_segment_when_no_preferred(session_db: Path):
     )
     # Exact directory match on path_segment row
     assert sid == "ses_path_segment"
+
+
+# --- completeness / compact premature exit ---
+
+
+def _make_full_session_db(
+    path: Path,
+    *,
+    session_id: str = "ses_test1",
+    todos: list[tuple[str, str]] | None = None,
+    last_message: dict | None = None,
+) -> Path:
+    """Session + optional todo + message tables matching real OpenCode layout."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute(
+        """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            directory TEXT,
+            agent TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            cost REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE todo (
+            session_id TEXT,
+            content TEXT,
+            status TEXT,
+            priority TEXT,
+            position INTEGER,
+            time_created INTEGER,
+            time_updated INTEGER
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            data TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO session (
+            id, title, directory, agent,
+            time_created, time_updated, cost, tokens_input, tokens_output
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, "PROJ-1: work", "/tmp/x", "build", 1, 2, 0.0, 80000, 1000),
+    )
+    for i, (content, status) in enumerate(todos or []):
+        con.execute(
+            """
+            INSERT INTO todo (
+                session_id, content, status, priority, position,
+                time_created, time_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, content, status, "high", i, 1, 1),
+        )
+    if last_message is not None:
+        con.execute(
+            """
+            INSERT INTO message (id, session_id, time_created, time_updated, data)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "msg_last",
+                session_id,
+                99,
+                99,
+                json.dumps(last_message),
+            ),
+        )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_detect_compact_in_output_patterns():
+    assert detect_compact_in_output("… Compacting session …")
+    assert detect_compact_in_output("session compacted successfully")
+    assert detect_compact_in_output("Context automatically compacted")
+    assert detect_compact_in_output("auto-compact triggered")
+    assert not detect_compact_in_output("implemented compact hash function")
+    assert not detect_compact_in_output("")
+
+
+def test_assess_complete_when_todos_done_and_finish_stop(tmp_path: Path):
+    db = _make_full_session_db(
+        tmp_path / "ok.db",
+        todos=[("Implement", "completed"), ("Commit", "completed")],
+        last_message={"role": "assistant", "finish": "stop", "summary": None},
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["complete"] is True
+    assert r["premature"] is False
+    assert r["open_todos"] == 0
+
+
+def test_assess_premature_open_todos(tmp_path: Path):
+    """Reproduce: process exits 0 while todos remain (compact / mid-work die)."""
+    db = _make_full_session_db(
+        tmp_path / "open.db",
+        todos=[
+            ("Explore", "completed"),
+            ("Build", "in_progress"),
+            ("Commit", "pending"),
+        ],
+        last_message={"role": "assistant", "finish": None},
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["complete"] is False
+    assert r["premature"] is True
+    assert r["open_todos"] == 2
+    assert any("open todos" in x for x in r["reasons"])
+    assert any("unfinished" in x for x in r["reasons"])
+
+
+def test_assess_premature_compaction_summary_stop(tmp_path: Path):
+    """Upstream bug: last msg is compaction summary with finish=stop → exit 0."""
+    db = _make_full_session_db(
+        tmp_path / "compact.db",
+        todos=[("Still working", "pending")],
+        last_message={
+            "role": "assistant",
+            "finish": "stop",
+            "summary": True,
+        },
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["premature"] is True
+    assert any("compaction summary" in x for x in r["reasons"])
+
+
+def test_assess_premature_from_compacting_cli_output(tmp_path: Path):
+    db = _make_full_session_db(
+        tmp_path / "cli.db",
+        todos=[],  # no todos table signal
+        last_message={"role": "assistant", "finish": "tool-calls"},
+    )
+    out = (
+        "read files...\n"
+        "tool: bash\n"
+        "Compacting session to free context…\n"
+    )
+    r = assess_session_completeness(
+        "ses_test1",
+        output_text=out,
+        db_path=db,
+    )
+    assert r["premature"] is True
+    assert r["compact_in_output"] is True
+
+
+def test_assess_no_session_id_with_compact_output_still_flags():
+    r = assess_session_completeness(
+        None,
+        output_text="done some work\ncompacting\n",
+    )
+    assert r["premature"] is True
+    assert r["compact_in_output"] is True
+
+
+def test_live_incomplete_session_if_present():
+    """Optional: prove real local OpenCode DB still has incomplete KAN-12 session.
+
+    Skips when the known session is gone (clean machines / CI).
+    """
+    from pathlib import Path
+
+    db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    sid = "ses_02ca1287effeEErvnu2CC4dNhK"
+    if not db.is_file():
+        pytest.skip("no local OpenCode DB")
+    # Only run if that session still exists
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute(
+            "SELECT id FROM session WHERE id = ?", (sid,)
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        pytest.skip("known incomplete session not present")
+
+    r = assess_session_completeness(sid, db_path=db)
+    assert r["db_checked"] is True
+    assert r["premature"] is True, r
+    assert r["open_todos"] > 0
+    # Last turn aborted mid-step (finish null) — matches production incomplete
+    assert r["last_finish"] is None or str(r["last_finish"]).lower() in {
+        "tool-calls",
+        "unknown",
+        "",
+    }
