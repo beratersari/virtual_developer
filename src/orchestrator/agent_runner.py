@@ -256,6 +256,19 @@ class AgentRunner:
             except Exception as e:
                 logger.debug(f"on_session_file callback failed: {e}")
 
+        # Serve mode: HTTP control loop (compact-aware continue) instead of CLI
+        run_mode = (getattr(settings, "opencode_run_mode", None) or "cli").strip().lower()
+        if run_mode == "serve":
+            return await self._run_agent_via_serve(
+                task,
+                session_file=session_file,
+                on_output=on_output,
+                on_complete=on_complete,
+                on_progress=on_progress,
+                timeout_seconds=effective_timeout,
+                start_time=start_time,
+            )
+
         # Build the command as a list (cross-platform)
         cmd_list = self._build_command(task, session_file)
         logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
@@ -402,17 +415,50 @@ class AgentRunner:
         )
         logger.debug(f"Extracted session ID: {session_id}")
 
+        stdout_text = "\n".join(stdout_lines)
+        stderr_text = "\n".join(stderr_lines)
+        combined_output = stdout_text + "\n" + stderr_text
+
+        # OpenCode headless bug: process can exit 0 after compaction / mid-turn
+        # while todos remain open. Do not treat that as task success.
+        incomplete_meta: Optional[Dict[str, Any]] = None
+        if returncode == 0:
+            incomplete_meta = self._assess_incomplete_run(
+                session_id=session_id,
+                output_text=combined_output,
+            )
+            if incomplete_meta and incomplete_meta.get("premature"):
+                reasons = incomplete_meta.get("reasons") or ["incomplete session"]
+                reason_txt = "; ".join(str(r) for r in reasons)
+                logger.warning(
+                    f"Agent exited 0 but session looks incomplete: "
+                    f"task_id={task.task_id}, session={session_id}, "
+                    f"reasons={reason_txt}"
+                )
+                # Non-zero so run_agent_with_retry / processor fail paths run.
+                returncode = 2
+                note = (
+                    f"[INCOMPLETE] OpenCode exited 0 but the session is not "
+                    f"finished ({reason_txt}). Often caused by auto-compaction "
+                    f"stopping `opencode run` without continuing the task."
+                )
+                stderr_text = (stderr_text + "\n" + note).strip()
+
         elapsed = asyncio.get_event_loop().time() - start_time
         result = {
             "task_id": task.task_id,
             "returncode": returncode,
-            "stdout": "\n".join(stdout_lines),
-            "stderr": "\n".join(stderr_lines),
+            "stdout": stdout_text,
+            "stderr": stderr_text,
             "session_file": str(session_file),
             "opencode_session_id": session_id,
             "progress": 100 if returncode == 0 else last_progress,
         }
-        
+        if incomplete_meta and incomplete_meta.get("premature"):
+            result["incomplete"] = True
+            result["incomplete_reasons"] = list(incomplete_meta.get("reasons") or [])
+            result["session_completeness"] = incomplete_meta
+
         if returncode == 0:
             logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
         else:
@@ -421,6 +467,153 @@ class AgentRunner:
         if on_complete:
             on_complete(result)
 
+        return result
+
+    def _assess_incomplete_run(
+        self,
+        *,
+        session_id: Optional[str],
+        output_text: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Inspect OpenCode DB + transcript for premature exit-0 runs."""
+        try:
+            from src.opencode_sessions import assess_session_completeness
+
+            return assess_session_completeness(
+                session_id,
+                output_text=output_text or "",
+            )
+        except Exception as e:
+            logger.debug(f"Session completeness assessment failed: {e}")
+            return None
+
+    async def _run_agent_via_serve(
+        self,
+        task: AgentTask,
+        *,
+        session_file: Path,
+        on_output: Optional[callable] = None,
+        on_complete: Optional[callable] = None,
+        on_progress: Optional[callable] = None,
+        timeout_seconds: int = 1800,
+        start_time: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Drive OpenCode over HTTP serve with multi-compact continue.
+
+        Requires a running ``opencode serve`` at ``settings.opencode_serve_url``.
+        """
+        from src.opencode_serve import OpenCodeServeClient, ServeOrchestrator
+
+        base = (
+            getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
+        )
+        max_cont = int(
+            getattr(settings, "opencode_serve_max_compact_continues", 3) or 0
+        )
+        work_dir = str(self.working_directory) if self.working_directory else None
+        agent_name = resolve_opencode_agent_name(task.agent)
+        model = task.model or settings.default_model
+        title = (
+            f"{task.issue_key}: {task.description}"
+            if task.issue_key
+            else (task.description or task.task_id)
+        )[:120]
+
+        log_lines: List[str] = []
+        client = OpenCodeServeClient(
+            base,
+            timeout_seconds=float(timeout_seconds),
+            directory=work_dir,
+        )
+        # Cancel handle: serve path stores client + session (not a subprocess).
+        serve_handle: Dict[str, Any] = {
+            "mode": "serve",
+            "client": client,
+            "session_id": task.session_id,
+        }
+        self._running_tasks[task.task_id] = serve_handle
+
+        def _on_out(stream: str, line: str) -> None:
+            if on_output:
+                on_output(stream, line)
+
+        orch = ServeOrchestrator(
+            client=client,
+            max_compact_continues=max_cont,
+        )
+        turn = None
+        try:
+            turn = await orch.run(
+                prompt=task.prompt or "",
+                title=title,
+                agent=agent_name,
+                model=model,
+                session_id=task.session_id,
+                on_output=_on_out,
+                log_lines=log_lines,
+            )
+            if turn.session_id:
+                serve_handle["session_id"] = turn.session_id
+        finally:
+            self._running_tasks.pop(task.task_id, None)
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+        if turn is None:
+            result = {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "\n".join(log_lines),
+                "stderr": "[serve] no result",
+                "session_file": str(session_file),
+                "opencode_session_id": None,
+                "progress": 0,
+                "mode": "serve",
+            }
+            if on_complete:
+                on_complete(result)
+            return result
+
+        try:
+            body = turn.stdout or ""
+            if turn.stderr:
+                body = body + ("\n" if body else "") + turn.stderr
+            session_file.write_text(body, encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not write serve session log: {e}")
+
+        if turn.session_id:
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    turn.session_id + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+        if on_progress and turn.returncode == 0:
+            try:
+                on_progress(100, "serve complete")
+            except Exception:
+                pass
+
+        result = turn.to_agent_result(task.task_id, session_file=str(session_file))
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if turn.returncode == 0:
+            logger.info(
+                f"Serve agent completed: task_id={task.task_id}, "
+                f"session={turn.session_id}, continues={turn.continue_count}, "
+                f"compacts={turn.compact_events}, duration={elapsed:.2f}s"
+            )
+        else:
+            logger.warning(
+                f"Serve agent failed: task_id={task.task_id}, "
+                f"returncode={turn.returncode}, continues={turn.continue_count}, "
+                f"incomplete={turn.incomplete}, duration={elapsed:.2f}s"
+            )
+        if on_complete:
+            on_complete(result)
         return result
     
     def _parse_progress(self, line: str) -> Optional[int]:
@@ -703,7 +896,11 @@ class AgentRunner:
         if not process:
             logger.debug(f"Task not found in running tasks: {task_id}")
             return None
-        
+
+        # Serve-mode handle is a dict, not a subprocess
+        if isinstance(process, dict) and process.get("mode") == "serve":
+            return {"task_id": task_id, "status": "running", "mode": "serve"}
+
         # Check if process has completed
         if process.returncode is not None:
             del self._running_tasks[task_id]
@@ -802,7 +999,31 @@ class AgentRunner:
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
-        if process and process.returncode is None:
+        if not process:
+            logger.debug(f"Task not found or already completed: task_id={task_id}")
+            return False
+
+        # Serve mode: POST /session/{id}/abort (best effort, sync wrapper)
+        if isinstance(process, dict) and process.get("mode") == "serve":
+            sid = process.get("session_id")
+            client = process.get("client")
+            logger.info(f"Cancelling serve task: task_id={task_id}, session={sid}")
+            if client is not None and sid:
+                try:
+                    # cancel_task is sync; schedule abort if loop is running
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(client.abort(sid))
+                        else:
+                            loop.run_until_complete(client.abort(sid))
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.debug(f"serve abort failed: {e}")
+            return True
+
+        if process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
             self._kill_process_tree(process, force=False)
             # Escalate if still running (sync path — best effort)
@@ -827,6 +1048,10 @@ class AgentRunner:
         killed = 0
         for task_id, process in list(self._running_tasks.items()):
             if process is None:
+                continue
+            if isinstance(process, dict) and process.get("mode") == "serve":
+                if self.cancel_task(task_id):
+                    killed += 1
                 continue
             if getattr(process, "returncode", None) is not None:
                 continue

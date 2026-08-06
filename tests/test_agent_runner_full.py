@@ -161,16 +161,145 @@ async def test_run_agent_success(runner, tmp_path, monkeypatch):
             "asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=FakeProc()),
         ):
-            task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-1")
-            result = await runner.run_agent(
-                task,
-                on_output=lambda stream, line: outputs.append((stream, line)),
-                on_complete=lambda r: progresses.append("done"),
-                on_progress=lambda pct, msg: progresses.append(pct),
-            )
+            # Completeness: complete session (no open todos / clean finish)
+            with patch.object(
+                runner,
+                "_assess_incomplete_run",
+                return_value={
+                    "complete": True,
+                    "premature": False,
+                    "reasons": [],
+                },
+            ):
+                task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-1")
+                result = await runner.run_agent(
+                    task,
+                    on_output=lambda stream, line: outputs.append((stream, line)),
+                    on_complete=lambda r: progresses.append("done"),
+                    on_progress=lambda pct, msg: progresses.append(pct),
+                )
     assert result["returncode"] == 0
     assert result["opencode_session_id"] == "ses_ok1"
     assert "done" in progresses
+    assert not result.get("incomplete")
+
+
+@pytest.mark.asyncio
+async def test_run_agent_exit0_after_compacting_treated_as_failure(
+    runner, tmp_path, monkeypatch
+):
+    """Reproduce: OpenCode exits 0 after compaction → must NOT look successful.
+
+    Upstream: opencode run can return exit code 0 when auto-compaction stops
+    the headless loop without continuing the agent (issue #13946 / #3560).
+    Virtual Developer used to mark those jobs completed; session logs end on
+    "compacting" with open work remaining.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    class CompactExitProc:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(
+                b"Session: ses_compact1\n"
+                b"Reading files...\n"
+                b"Compacting session to free context...\n"
+            )
+            self.stdout.feed_eof()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    with patch("src.orchestrator.agent_runner.settings") as s:
+        s.opencode_cli = "opencode"
+        s.default_model = "m"
+        s.agent_task_timeout_seconds = 30
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=CompactExitProc()),
+        ):
+            # Simulate DB-backed incompleteness (open todos after compact exit)
+            with patch.object(
+                runner,
+                "_assess_incomplete_run",
+                return_value={
+                    "complete": False,
+                    "premature": True,
+                    "reasons": [
+                        "open todos: 1 pending, 1 in_progress",
+                        "CLI output indicates compaction near end of run",
+                    ],
+                    "open_todos": 2,
+                    "compact_in_output": True,
+                },
+            ):
+                task = AgentTask(
+                    description="d",
+                    prompt="implement feature",
+                    agent="sisyphus",
+                    issue_key="KAN-12",
+                )
+                result = await runner.run_agent(task)
+
+    assert result["returncode"] != 0
+    assert result["returncode"] == 2
+    assert result.get("incomplete") is True
+    assert result.get("opencode_session_id") == "ses_compact1"
+    assert "INCOMPLETE" in (result.get("stderr") or "")
+    assert any("compact" in r.lower() or "todo" in r.lower()
+               for r in (result.get("incomplete_reasons") or []))
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_retry_retries_incomplete_compact_exit(
+    runner, tmp_path, monkeypatch
+):
+    """Incomplete compact exit should go through the normal retry path."""
+    monkeypatch.chdir(tmp_path)
+    calls = {"n": 0}
+
+    async def fake_run(task, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "task_id": task.task_id,
+                "returncode": 2,
+                "stdout": "Compacting...",
+                "stderr": "[INCOMPLETE] compact stop",
+                "session_file": str(tmp_path / "s1.log"),
+                "opencode_session_id": "ses_c1",
+                "incomplete": True,
+                "incomplete_reasons": ["compaction summary"],
+            }
+        return {
+            "task_id": task.task_id,
+            "returncode": 0,
+            "stdout": "done",
+            "stderr": "",
+            "session_file": str(tmp_path / "s2.log"),
+            "opencode_session_id": "ses_c2",
+        }
+
+    with patch.object(runner, "run_agent", side_effect=fake_run):
+        with patch("src.orchestrator.agent_runner.settings") as s:
+            s.agent_task_max_retries = 2
+            s.agent_task_retry_delay_seconds = 0
+            s.agent_task_retry_backoff_multiplier = 1
+            s.agent_task_retry_on_timeout = True
+            s.agent_task_retry_on_error = True
+            task = AgentTask(description="d", prompt="p", agent="a")
+            result = await runner.run_agent_with_retry(task, max_retries=1)
+
+    assert calls["n"] == 2
+    assert result["returncode"] == 0
+    assert result["retry_info"]["retried"] is True
 
 
 @pytest.mark.asyncio
