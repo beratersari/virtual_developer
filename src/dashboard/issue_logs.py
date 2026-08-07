@@ -109,11 +109,20 @@ class IssueLogRing:
         with self._lock:
             matched = []
             for ts, msg, jid, ikey in self._lines:
-                if (ikey and ikey.upper() == key_u) or key in msg or key_u in msg:
-                    row: Dict[str, str] = {"timestamp": ts, "message": msg}
-                    if jid:
-                        row["job_id"] = jid
-                    matched.append(row)
+                if ikey and ikey.upper() == key_u:
+                    hit = True
+                elif ikey:
+                    # Tagged for a different issue — do not fall through to
+                    # substring match (KAN-1 must not pull KAN-10 lines).
+                    hit = False
+                else:
+                    hit = _message_mentions_issue_key(msg, key)
+                if not hit:
+                    continue
+                row: Dict[str, str] = {"timestamp": ts, "message": msg}
+                if jid:
+                    row["job_id"] = jid
+                matched.append(row)
         return matched[-limit:]
 
     def for_job_memory(self, job_id: str, *, limit: int = 500) -> List[Dict[str, str]]:
@@ -197,6 +206,30 @@ class IssueLogRing:
 _TS_PREFIX = re.compile(
     r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
 )
+
+# Whole issue-key token in free text (not a prefix of a longer key like KAN-10).
+# Lookbehind/ahead: key must not sit inside a longer PROJECT-NNN style id.
+_ISSUE_KEY_IN_MSG_CACHE: Dict[str, re.Pattern] = {}
+
+
+def _message_mentions_issue_key(message: str, issue_key: str) -> bool:
+    """True when ``message`` contains ``issue_key`` as a whole Jira-style key.
+
+    Bare substring matching is wrong: ``KAN-1`` appears inside ``KAN-10``.
+    """
+    key = (issue_key or "").strip()
+    msg = message or ""
+    if not key or not msg:
+        return False
+    pat = _ISSUE_KEY_IN_MSG_CACHE.get(key)
+    if pat is None:
+        # Boundary: not alnum before; not alnum or '-' after (avoids KAN-1 ⊂ KAN-10)
+        pat = re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(key)}(?![A-Za-z0-9\-])",
+            re.IGNORECASE,
+        )
+        _ISSUE_KEY_IN_MSG_CACHE[key] = pat
+    return pat.search(msg) is not None
 
 
 def _extract_timestamp(message: str) -> Optional[str]:
