@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +16,9 @@ from src.scheduler.service import (
     cancel_scheduled_job,
     create_scheduled_job,
     dispatch_due_schedules,
+    inflight_dispatch_ids,
     parse_schedule_at,
+    wait_inflight_dispatches,
 )
 from src.state.manager import JiraStateManager
 from src.state.schedule_store import SCHEDULE_LABEL, ScheduleStore
@@ -261,7 +264,8 @@ async def test_dispatch_due_schedules(tmp_path):
         store=store,
         jira_client=None,
     )
-    assert result["started"] == 1
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     processor.process_event.assert_awaited_once()
     event = processor.process_event.await_args.args[0]
     assert event["webhookEvent"] == "jira:issue_created"
@@ -308,11 +312,201 @@ async def test_dispatch_marks_error_when_process_event_noops(tmp_path):
         store=store,
         jira_client=None,
     )
-    assert result["started"] == 0
-    assert result["failed"] == 1
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "error"
     assert "already in progress" in (refreshed.get("error_message") or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_block_other_due_schedules(tmp_path):
+    """One long process_event must not delay claiming other already-due jobs."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    earlier = (datetime.now() - timedelta(minutes=2)).isoformat(timespec="seconds")
+    later = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec_a = store.create(
+        title="slow",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=earlier,
+        issue_key="KAN-SLOW",
+        issue_description="a",
+    )
+    rec_b = store.create(
+        title="fast",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=later,
+        issue_key="KAN-FAST",
+        issue_description="b",
+    )
+
+    release_slow = asyncio.Event()
+    started: list[str] = []
+
+    async def process_event(event):
+        key = event["issue"]["key"]
+        started.append(key)
+        if key == "KAN-SLOW":
+            await release_slow.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    result = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert result["launched"] == 2
+    # Let both tasks reach process_event (slow waits on the event).
+    for _ in range(50):
+        if len(started) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert started == ["KAN-SLOW", "KAN-FAST"] or set(started) == {
+        "KAN-SLOW",
+        "KAN-FAST",
+    }
+    assert rec_a["schedule_id"] in inflight_dispatch_ids()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatching"
+    # Fast job must be allowed to finish while slow is still running.
+    for _ in range(50):
+        if store.get(rec_b["schedule_id"])["status"] == "dispatched":
+            break
+        await asyncio.sleep(0.01)
+    assert store.get(rec_b["schedule_id"])["status"] == "dispatched"
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatching"
+
+    release_slow.set()
+    await wait_inflight_dispatches()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_next_dispatch_tick_while_previous_still_running(tmp_path):
+    """Daemon 15s tick must pick up newly due jobs while another is dispatching."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    future = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    rec_a = store.create(
+        title="first",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-A",
+        issue_description="a",
+    )
+    rec_c = store.create(
+        title="later",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-C",
+        issue_description="c",
+    )
+
+    release_a = asyncio.Event()
+    seen: list[str] = []
+
+    async def process_event(event):
+        key = event["issue"]["key"]
+        seen.append(key)
+        if key == "KAN-A":
+            await release_a.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    r1 = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert r1["launched"] == 1
+    for _ in range(50):
+        if "KAN-A" in seen:
+            break
+        await asyncio.sleep(0.01)
+    assert "KAN-A" in seen
+
+    store.update(
+        rec_c["schedule_id"],
+        scheduled_at=(datetime.now() - timedelta(seconds=1)).isoformat(
+            timespec="seconds"
+        ),
+    )
+    r2 = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert r2["launched"] == 1
+    for _ in range(50):
+        if "KAN-C" in seen:
+            break
+        await asyncio.sleep(0.01)
+    assert "KAN-C" in seen
+    assert rec_a["schedule_id"] in inflight_dispatch_ids()
+
+    release_a.set()
+    await wait_inflight_dispatches()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatched"
+    assert store.get(rec_c["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_recover_skips_inflight_dispatching_rows(tmp_path):
+    """Age recovery must not reset a schedule whose worker is still running."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="live",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-LIVE-REC",
+        issue_description="x",
+    )
+    gate = asyncio.Event()
+
+    async def process_event(event):
+        await gate.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    await dispatch_due_schedules(processor=processor, store=store, jira_client=None)
+    sid = rec["schedule_id"]
+    assert sid in inflight_dispatch_ids()
+    assert store.get(sid)["status"] == "dispatching"
+
+    from src.scheduler.service import recover_stuck_schedules
+
+    n = recover_stuck_schedules(
+        store=store,
+        max_age_seconds=0.0,
+        exclude_ids=inflight_dispatch_ids(),
+    )
+    assert n == 0
+    assert store.get(sid)["status"] == "dispatching"
+
+    gate.set()
+    await wait_inflight_dispatches()
+    assert store.get(sid)["status"] == "dispatched"
 
 
 def test_cancel_scheduled_job(tmp_path):

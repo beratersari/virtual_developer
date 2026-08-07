@@ -447,6 +447,55 @@ def test_assess_no_session_id_with_compact_output_still_flags():
     assert r["compact_in_output"] is True
 
 
+def test_assess_compact_output_plus_finish_stop_empty_todos_is_premature(
+    tmp_path: Path,
+):
+    """False success: compact-then-exit-0 with todos gone / finish=stop.
+
+    Production hole: assess treated this as ``clean`` and marked COMPLETED.
+    """
+    db = _make_full_session_db(
+        tmp_path / "false_ok.db",
+        todos=[],
+        last_message={"role": "assistant", "finish": "stop", "summary": None},
+    )
+    out = (
+        "All todos complete.\n"
+        "Compacting session to free context…\n"
+    )
+    r = assess_session_completeness(
+        "ses_test1",
+        output_text=out,
+        db_path=db,
+    )
+    assert r["premature"] is True, r
+    assert r["compact_in_output"] is True
+    assert any("compaction" in x.lower() for x in r["reasons"])
+
+
+def test_assess_compact_then_stop_message_sequence_is_premature():
+    """Serve/API: last assistant immediately after a compaction user part."""
+    messages = [
+        {
+            "role": "user",
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": None,
+            "parts": [{"type": "text", "text": "All todos complete."}],
+        },
+    ]
+    r = assess_session_completeness(
+        "ses_api",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["premature"] is True, r
+    assert any("compact-then-stop" in x for x in r["reasons"])
+
+
 def test_live_incomplete_session_if_present():
     """Optional: prove real local OpenCode DB still has incomplete KAN-12 session.
 

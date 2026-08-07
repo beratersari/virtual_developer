@@ -258,16 +258,72 @@ async def test_run_agent_exit0_after_compacting_treated_as_failure(
 
 
 @pytest.mark.asyncio
+async def test_run_agent_exit0_compact_cli_without_open_todos_still_fails(
+    runner, tmp_path, monkeypatch
+):
+    """CLI mode: compact in transcript + finish=stop + no todos ≠ success.
+
+    Do not mock ``_assess_incomplete_run`` — that was the production hole:
+    empty todos + last finish=stop bypassed the compact-output signal.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    class CompactExitProc:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.stdout.feed_data(
+                b"Session: ses_compact2\n"
+                b"All todos complete.\n"
+                b"Compacting session to free context...\n"
+            )
+            self.stdout.feed_eof()
+            self.stderr.feed_data(b"")
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    with patch("src.orchestrator.agent_runner.settings") as s:
+        s.opencode_cli = "opencode"
+        s.default_model = "m"
+        s.agent_task_timeout_seconds = 30
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=CompactExitProc()),
+        ):
+            task = AgentTask(
+                description="d",
+                prompt="5+4",
+                agent="atlas",
+                issue_key="E2E-COMPACT",
+            )
+            result = await runner.run_agent(task)
+
+    assert result["returncode"] == 2
+    assert result.get("incomplete") is True
+    assert "INCOMPLETE" in (result.get("stderr") or "")
+
+
+@pytest.mark.asyncio
 async def test_run_agent_with_retry_retries_incomplete_compact_exit(
     runner, tmp_path, monkeypatch
 ):
-    """Incomplete compact exit should go through the normal retry path."""
+    """Incomplete compact exit should resume the same OpenCode session.
+
+    CLI already supports ``opencode run --session``. A cold retry (new session +
+    original BUILD prompt) throws away compacted history — same idea as serve.
+    """
     monkeypatch.chdir(tmp_path)
-    calls = {"n": 0}
+    seen: list[tuple[str | None, str, str]] = []
 
     async def fake_run(task, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
+        seen.append((task.session_id, task.prompt or "", task.task_id))
+        if len(seen) == 1:
             return {
                 "task_id": task.task_id,
                 "returncode": 2,
@@ -284,7 +340,7 @@ async def test_run_agent_with_retry_retries_incomplete_compact_exit(
             "stdout": "done",
             "stderr": "",
             "session_file": str(tmp_path / "s2.log"),
-            "opencode_session_id": "ses_c2",
+            "opencode_session_id": "ses_c1",
         }
 
     with patch.object(runner, "run_agent", side_effect=fake_run):
@@ -293,11 +349,26 @@ async def test_run_agent_with_retry_retries_incomplete_compact_exit(
             s.agent_task_retry_delay_seconds = 0
             s.agent_task_retry_backoff_multiplier = 1
             s.agent_task_retry_on_timeout = True
-            s.agent_task_retry_on_error = True
-            task = AgentTask(description="d", prompt="p", agent="a")
+            s.agent_task_retry_on_error = False  # resume must not depend on this
+            task = AgentTask(description="d", prompt="full BUILD prompt", agent="a")
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
-    assert calls["n"] == 2
+    assert len(seen) == 2
+    assert seen[0][0] is None
+    assert seen[0][1] == "full BUILD prompt"
+    assert seen[1][0] == "ses_c1"
+    assert seen[1][1].lstrip().lower().startswith("continue")
+    cmd = runner._build_command(
+        AgentTask(
+            description="d",
+            prompt=seen[1][1],
+            agent="a",
+            session_id=seen[1][0],
+        ),
+        tmp_path / "x.log",
+    )
+    assert "--session" in cmd
+    assert "ses_c1" in cmd
     assert result["returncode"] == 0
     assert result["retry_info"]["retried"] is True
 
@@ -413,8 +484,11 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     calls = {"n": 0}
 
-    async def flaky(*a, **k):
+    snaps: list[str | None] = []
+
+    async def flaky(task, **k):
         calls["n"] += 1
+        snaps.append(task.session_id)
         if calls["n"] == 1:
             return {
                 "task_id": "t",
@@ -431,7 +505,7 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
             "stdout": "ok",
             "stderr": "",
             "session_file": str(tmp_path / "s2.log"),
-            "opencode_session_id": "ses_ok",
+            "opencode_session_id": "ses_fail",
             "progress": 100,
         }
 
@@ -452,6 +526,7 @@ async def test_run_agent_with_retry_then_success(runner, tmp_path, monkeypatch):
             )
     assert result["returncode"] == 0
     assert result["retry_info"]["retried"] is True
+    assert snaps == [None, "ses_fail"]
     assert retries
     # 8th arg is new_task_id for the upcoming attempt (must differ from first)
     assert len(retries[0]) >= 8

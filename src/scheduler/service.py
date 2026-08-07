@@ -9,10 +9,11 @@ Jira reliability rules
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set
 
 from src.config import settings
 from src.issue_git_spec import (
@@ -621,10 +622,14 @@ def recover_stuck_schedules(
     *,
     store: Optional[ScheduleStore] = None,
     max_age_seconds: float = 0.0,
+    exclude_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """Re-open stuck ``dispatching`` schedules (daemon crash recovery)."""
     ss = store or schedule_store
-    return ss.recover_stuck_dispatching(max_age_seconds=max_age_seconds)
+    return ss.recover_stuck_dispatching(
+        max_age_seconds=max_age_seconds,
+        exclude_ids=exclude_ids,
+    )
 
 
 def _issue_payload_for_dispatch(
@@ -699,6 +704,81 @@ def _outcome_work_started(outcome: Any) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+# Live ``process_event`` tasks keyed by schedule_id. Same asyncio loop as the
+# daemon dispatcher. Used so a long agent run does not block other due jobs,
+# and so crash-recovery does not re-open a still-running dispatch.
+_INFLIGHT_DISPATCHES: Dict[str, "asyncio.Task[None]"] = {}
+
+
+def inflight_dispatch_ids() -> Set[str]:
+    """Schedule ids whose ``process_event`` is still running in this process."""
+    return set(_INFLIGHT_DISPATCHES)
+
+
+async def wait_inflight_dispatches() -> None:
+    """Await every in-flight dispatch (tests)."""
+    tasks = [t for t in list(_INFLIGHT_DISPATCHES.values()) if t is not None]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _finish_schedule_dispatch(
+    ss: ScheduleStore,
+    schedule_id: str,
+    *,
+    status: str,
+    error_message: Optional[str] = None,
+) -> None:
+    """Write terminal dispatch outcome only while the row is still ``dispatching``.
+
+    Operator cancel mid-flight must not be overwritten by a late success.
+    """
+    rec = ss.get(schedule_id)
+    if not rec:
+        return
+    if (rec.get("status") or "").lower() != "dispatching":
+        return
+    fields: Dict[str, Any] = {"status": status, "error_message": error_message}
+    if status == "dispatched":
+        fields["dispatched_at"] = datetime.now().isoformat(timespec="seconds")
+        fields["error_message"] = None
+    ss.update(schedule_id, **fields)
+
+
+async def _dispatch_claimed_schedule(
+    *,
+    processor: "JobProcessor",
+    store: ScheduleStore,
+    schedule_id: str,
+    issue_key: str,
+    event: Dict[str, Any],
+) -> None:
+    """Run ``process_event`` and record dispatched / error (background worker)."""
+    try:
+        outcome = await processor.process_event(event)
+        work_started, skip_reason = _outcome_work_started(outcome)
+        if not work_started:
+            msg = skip_reason or "processor did not start work for this schedule"
+            _finish_schedule_dispatch(
+                store, schedule_id, status="error", error_message=msg[:1000]
+            )
+            logger.warning(
+                f"Schedule {schedule_id} for {issue_key} did not start work: {msg}"
+            )
+            return
+        _finish_schedule_dispatch(store, schedule_id, status="dispatched")
+        logger.info(f"Schedule {schedule_id} dispatched for {issue_key}")
+    except Exception as e:
+        logger.exception(
+            f"Schedule {schedule_id} dispatch failed for {issue_key}: {e}", e
+        )
+        _finish_schedule_dispatch(
+            store, schedule_id, status="error", error_message=str(e)[:1000]
+        )
+    finally:
+        _INFLIGHT_DISPATCHES.pop(schedule_id, None)
+
+
 async def dispatch_due_schedules(
     *,
     processor: "JobProcessor",
@@ -706,27 +786,37 @@ async def dispatch_due_schedules(
     jira_client: Any = None,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Claim and start process_event for every due schedule.
+    """Claim every due schedule and start ``process_event`` without blocking.
+
+    ``process_event`` holds the job slot for the full agent run. Awaiting it
+    here would freeze the daemon dispatcher tick — later-due jobs would sit
+    ``scheduled`` until the first job finished. Each claim is launched as an
+    asyncio task; this function returns after launching.
 
     Only marks a schedule ``dispatched`` when the processor reports that work
     actually started (or a bare mock returns no structured outcome). Silent
-    no-ops (e.g. already in-flight without a scheduled start path) become
-    ``error`` so the UI does not show a false success.
+    no-ops become ``error`` so the UI does not show a false success.
 
-    Returns counts: claimed, started, failed.
+    Returns counts: due, claimed, launched. ``started`` / ``failed`` stay 0 at
+    return time (outcomes land asynchronously); tests should
+    ``await wait_inflight_dispatches()`` then read the store.
     """
     ss = store or schedule_store
-    # Re-open dispatching rows left by a prior crash (or a claim older than
-    # 30 minutes — process_event should not hold the claim that long).
+    # Re-open dispatching rows left by a prior crash. Skip ids still running
+    # in this process (long agent jobs must not be reset to scheduled).
     try:
-        n = ss.recover_stuck_dispatching(max_age_seconds=1800.0, now=now)
+        n = ss.recover_stuck_dispatching(
+            max_age_seconds=1800.0,
+            now=now,
+            exclude_ids=inflight_dispatch_ids(),
+        )
         if n:
             logger.info(f"Schedule dispatch: recovered {n} stuck dispatching row(s)")
     except Exception as e:
         logger.warning(f"Schedule dispatch: stuck recovery failed: {e}")
     due = ss.list_due(now=now)
     claimed = 0
-    started = 0
+    launched = 0
     failed = 0
 
     client = jira_client
@@ -758,41 +848,27 @@ async def dispatch_due_schedules(
                     "scheduled_job": True,
                     "schedule_id": sid,
                 }
-                # Fire and await so we record outcome; process_event holds slots
-                outcome = await processor.process_event(event)
-                work_started, skip_reason = _outcome_work_started(outcome)
-                if not work_started:
-                    failed += 1
-                    msg = (
-                        skip_reason
-                        or "processor did not start work for this schedule"
-                    )
-                    ss.update(
-                        sid,
-                        status="error",
-                        error_message=msg[:1000],
-                    )
-                    logger.warning(
-                        f"Schedule {sid} for {issue_key} did not start work: {msg}"
-                    )
-                    continue
-                ss.update(
-                    sid,
-                    status="dispatched",
-                    dispatched_at=datetime.now().isoformat(timespec="seconds"),
-                    error_message=None,
+                task = asyncio.create_task(
+                    _dispatch_claimed_schedule(
+                        processor=processor,
+                        store=ss,
+                        schedule_id=sid,
+                        issue_key=issue_key,
+                        event=event,
+                    ),
+                    name=f"vd-sched-{sid}",
                 )
-                started += 1
-                logger.info(
-                    f"Schedule {sid} dispatched for {issue_key}"
-                )
+                _INFLIGHT_DISPATCHES[sid] = task
+                # Instant-complete mocks can finish before the dict write;
+                # finally already popped — drop the stale completed handle.
+                if task.done():
+                    _INFLIGHT_DISPATCHES.pop(sid, None)
+                launched += 1
             except Exception as e:
                 failed += 1
                 logger.exception(
                     f"Schedule {sid} dispatch failed for {issue_key}: {e}", e
                 )
-                # Leave local UI truthful; soft on Jira. Mark schedule error so
-                # we do not spin forever. Operator can re-queue via board/CLI.
                 ss.update(
                     sid,
                     status="error",
@@ -809,6 +885,7 @@ async def dispatch_due_schedules(
         "ok": True,
         "due": len(due),
         "claimed": claimed,
-        "started": started,
+        "launched": launched,
+        "started": 0,
         "failed": failed,
     }
