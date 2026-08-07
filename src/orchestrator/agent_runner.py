@@ -469,6 +469,35 @@ class AgentRunner:
 
         return result
 
+    @staticmethod
+    def _resume_opencode_session_for_retry(
+        task: AgentTask,
+        session_id: Optional[str],
+        *,
+        why: str,
+    ) -> None:
+        """Point the next CLI/serve attempt at an existing OpenCode session.
+
+        ``opencode run --session`` and serve ``create_session`` skip both use
+        ``task.session_id``. A cold retry would discard compacted history.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            logger.warning(
+                f"Retry after {why} has no OpenCode session id; starting cold"
+            )
+            return
+        task.session_id = sid
+        from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
+
+        prev = (task.prompt or "").lstrip()
+        if not prev.lower().startswith("continue"):
+            task.prompt = DEFAULT_CONTINUE_PROMPT
+        logger.warning(
+            f"Retry after {why}: resume OpenCode session {sid} "
+            f"(CLI --session / serve reuse)"
+        )
+
     def _assess_incomplete_run(
         self,
         *,
@@ -1213,6 +1242,14 @@ class AgentRunner:
                     should_retry = True
                     retry_reason = "timeout"
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
+            elif result.get("incomplete") and attempt < effective_max_retries:
+                # Compact-then-exit-0 (or mid-turn stop): same session + Continue.
+                should_retry = True
+                retry_reason = "incomplete_session"
+                logger.warning(
+                    f"Incomplete session on attempt {attempt + 1}: "
+                    f"task_id={task.task_id}"
+                )
             elif retry_on_error and attempt < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
@@ -1221,6 +1258,11 @@ class AgentRunner:
                 logger.error(f"Agent failed and no more retries allowed: task_id={task.task_id}, attempt={attempt + 1}")
 
             if should_retry:
+                self._resume_opencode_session_for_retry(
+                    task,
+                    result.get("opencode_session_id") or last_session_id,
+                    why=retry_reason,
+                )
                 if _aborted():
                     logger.info(
                         f"Abort before scheduling retry: task_id={task.task_id}"

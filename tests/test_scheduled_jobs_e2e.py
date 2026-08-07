@@ -23,6 +23,7 @@ from src.scheduler.service import (
     dispatch_due_schedules,
     preview_existing_issue,
     schedule_existing_issue,
+    wait_inflight_dispatches,
 )
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
@@ -312,7 +313,8 @@ async def test_e2e_dispatch_uses_local_snapshot_when_jira_get_fails(tmp_path):
         store=store,
         jira_client=client,
     )
-    assert result["started"] == 1
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     processor.process_event.assert_awaited_once()
     event = processor.process_event.await_args.args[0]
     assert event["issue"]["key"] == "KAN-LOCAL"
@@ -364,9 +366,9 @@ async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
     result = await dispatch_due_schedules(
         processor=proc, store=store, jira_client=None
     )
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
 
-    assert result["started"] == 1
-    assert result["failed"] == 0
     assert store.get(rec["schedule_id"])["status"] == "dispatched"
     proc._start_execution_workflow.assert_awaited_once()
     proc._start_planning_workflow.assert_not_awaited()
@@ -411,9 +413,9 @@ async def test_e2e_dispatch_in_flight_is_not_false_success(tmp_path, monkeypatch
     result = await dispatch_due_schedules(
         processor=proc, store=store, jira_client=None
     )
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
 
-    assert result["started"] == 0
-    assert result["failed"] == 1
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "error"
     assert "in progress" in (refreshed.get("error_message") or "").lower()
@@ -444,8 +446,8 @@ async def test_e2e_dispatch_process_event_crash_marks_schedule_error(tmp_path):
         store=store,
         jira_client=None,
     )
-    assert result["failed"] == 1
-    assert result["started"] == 0
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "error"
     assert "workflow exploded" in (refreshed.get("error_message") or "")
@@ -486,7 +488,7 @@ async def test_e2e_dispatch_skips_future_and_cancelled(tmp_path):
         processor=processor, store=store, jira_client=None
     )
     assert result["due"] == 0
-    assert result["started"] == 0
+    assert result["launched"] == 0
     processor.process_event.assert_not_called()
 
 
@@ -574,7 +576,8 @@ async def test_e2e_full_pipeline_comments_fail_local_state_still_updates(
         store=store,
         jira_client=jira,
     )
-    assert result["started"] == 1, result
+    assert result["launched"] == 1, result
+    await wait_inflight_dispatches()
     assert store.get(sid)["status"] == "dispatched"
 
     # 4) Local state exists and is completed despite Jira comment failures

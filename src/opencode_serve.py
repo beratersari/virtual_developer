@@ -30,11 +30,41 @@ import httpx
 from src.logger import logger
 from src.opencode_sessions import assess_session_completeness
 
+
+def is_serve_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, (httpx.TimeoutException, TimeoutError))
+
+
+def format_serve_error(
+    exc: BaseException, *, timeout_seconds: Optional[float] = None
+) -> str:
+    """Human-readable serve HTTP error. ``str(httpx.ReadTimeout())`` is empty."""
+    if is_serve_timeout(exc):
+        limit = ""
+        if timeout_seconds is not None:
+            limit = f" ({float(timeout_seconds):.0f}s budget)"
+        return (
+            f"{type(exc).__name__}: POST /session/{{id}}/message exceeded "
+            f"HTTP wait{limit}. OpenCode may still be running that turn."
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        resp = exc.response
+        body = ""
+        try:
+            body = (resp.text or "").strip().replace("\n", " ")[:400]
+        except Exception:
+            body = ""
+        extra = f" {body}" if body else ""
+        return f"HTTP {resp.status_code} {resp.reason_phrase}:{extra}".rstrip(":")
+    msg = str(exc).strip() or repr(exc)
+    return f"{type(exc).__name__}: {msg}"
+
 # Injected after compaction / premature idle so the agent loop resumes work.
 DEFAULT_CONTINUE_PROMPT = (
-    "Continue after context compaction. Finish all remaining todos and complete "
-    "the original task. Do not stop only because the session was compacted; "
-    "resume implementation, verification, and commit steps as required."
+    "Continue the previous OpenCode session. The last turn stopped early "
+    "(context compaction, timeout, or error). Finish all remaining todos and "
+    "complete the original task. Do not restart from scratch; resume "
+    "implementation, verification, and commit steps as required."
 )
 
 
@@ -53,6 +83,7 @@ class ServeTurnResult:
     turns: List[Dict[str, Any]] = field(default_factory=list)
     session_completeness: Optional[Dict[str, Any]] = None
     progress: int = 0
+    timed_out: bool = False
 
     def to_agent_result(self, task_id: str, session_file: Optional[str] = None) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -71,6 +102,8 @@ class ServeTurnResult:
         if self.incomplete:
             out["incomplete"] = True
             out["incomplete_reasons"] = list(self.incomplete_reasons)
+        if self.timed_out:
+            out["timed_out"] = True
         if self.session_completeness is not None:
             out["session_completeness"] = self.session_completeness
         return out
@@ -260,8 +293,12 @@ def count_compaction_signals(
             n += 1
             continue
         info = m.get("info") if isinstance(m.get("info"), dict) else m
-        if isinstance(info, dict) and info.get("summary") is True:
-            n += 1
+        if isinstance(info, dict):
+            summary = info.get("summary")
+            if summary is True or (
+                isinstance(summary, dict) and summary.get("compaction")
+            ):
+                n += 1
     return n
 
 
@@ -271,6 +308,7 @@ def assess_serve_turn(
     messages: Optional[Sequence[Dict[str, Any]]] = None,
     todos: Optional[Sequence[Dict[str, Any]]] = None,
     compact_events_seen: int = 0,
+    new_compacts_this_turn: int = 0,
     output_text: str = "",
     db_path: Optional[Any] = None,
 ) -> Dict[str, Any]:
@@ -290,13 +328,19 @@ def assess_serve_turn(
         todos=api_todos if api_todos else None,
     )
 
-    # Extra: if we saw compact events and last assistant is summary, ensure premature
-    if compact_events_seen > 0 and result.get("complete"):
-        # Double-check last assistant isn't just post-compact fluff with open work
-        # (assess should already catch open todos / summary stop)
-        pass
+    # Compaction *this turn* + finish=stop / empty todos is the false-success
+    # case. Historical compact markers from earlier turns must not loop forever.
+    if int(new_compacts_this_turn or 0) > 0 and result.get("complete"):
+        reasons = list(result.get("reasons") or [])
+        reasons.append(
+            "compaction occurred this turn; not treating exit as success"
+        )
+        result["reasons"] = reasons
+        result["complete"] = False
+        result["premature"] = True
 
     result["compact_events_seen"] = compact_events_seen
+    result["new_compacts_this_turn"] = int(new_compacts_this_turn or 0)
     return result
 
 
@@ -403,6 +447,14 @@ class ServeOrchestrator:
                 )
 
             label = "initial" if turn_idx == 0 else f"continue#{turn_idx}"
+            # Markers already in the session (resume / prior turn) must not count
+            # as "new this turn" or every retry after compact looks premature.
+            try:
+                messages_before = await self.client.list_messages(sid, limit=80)
+            except Exception:
+                messages_before = []
+            markers_before = count_compaction_signals(messages_before)
+
             _emit("stdout", f"[serve] turn={label} sending message…")
             t0 = time.time()
             try:
@@ -413,17 +465,35 @@ class ServeOrchestrator:
                     model=model,
                 )
             except Exception as e:
-                _emit("stderr", f"[serve] message failed: {e}")
+                err = format_serve_error(
+                    e, timeout_seconds=getattr(self.client, "timeout_seconds", None)
+                )
+                timed_out = is_serve_timeout(e)
+                note = f"[serve] message failed: {err}"
+                if timed_out:
+                    # Dropping the HTTP wait does not stop OpenCode. Abort so a
+                    # Continue retry is not posted into a still-running turn.
+                    try:
+                        await self.client.abort(sid)
+                        note = note + "\n[serve] aborted session after HTTP timeout"
+                    except Exception as abort_exc:
+                        note = (
+                            note
+                            + f"\n[serve] abort after timeout failed: {abort_exc}"
+                        )
                 return ServeTurnResult(
                     session_id=sid,
-                    returncode=1,
+                    returncode=-1 if timed_out else 1,
                     stdout="\n".join(lines),
-                    stderr=f"[serve] message failed: {e}",
+                    stderr=note,
                     incomplete=True,
-                    incomplete_reasons=[f"message error: {e}"],
+                    incomplete_reasons=[
+                        "http timeout" if timed_out else f"message error: {err}"
+                    ],
                     compact_events=compact_total,
                     continue_count=continue_count,
                     turns=turns,
+                    timed_out=timed_out,
                 )
             elapsed = time.time() - t0
             info = msg.get("info") if isinstance(msg.get("info"), dict) else msg
@@ -443,6 +513,7 @@ class ServeOrchestrator:
             )
 
             # Optional forced compaction (e2e / stress): simulate context pressure
+            forced_compact = False
             if self.force_summarize_after_turn:
                 try:
                     _emit("stdout", "[serve] force summarize (compact)…")
@@ -452,7 +523,7 @@ class ServeOrchestrator:
                         model_id=self.force_summarize_model,
                         auto=True,
                     )
-                    compact_total += 1
+                    forced_compact = True
                     _emit("stdout", "[serve] summarize returned; re-fetching messages")
                 except Exception as e:
                     _emit("stderr", f"[serve] force summarize failed: {e}")
@@ -470,14 +541,23 @@ class ServeOrchestrator:
                 _emit("stderr", f"[serve] list todos failed: {e}")
 
             compact_in_msgs = count_compaction_signals(messages)
-            compact_total = max(compact_total, compact_in_msgs)
+            new_this_turn = max(0, int(compact_in_msgs) - int(markers_before))
+            if forced_compact:
+                new_this_turn = max(new_this_turn, 1)
+            compact_total = max(
+                compact_total + (1 if forced_compact else 0), compact_in_msgs
+            )
 
             assessment = assess_serve_turn(
                 sid,
                 messages=messages,
                 todos=todos,
                 compact_events_seen=compact_total,
-                output_text="\n".join(lines),
+                new_compacts_this_turn=new_this_turn,
+                # This turn's assistant text only — the accumulated serve log
+                # still contains earlier "Compacting…" lines and would false-
+                # flag every later continue as incomplete.
+                output_text=reply_text,
             )
             turn_rec = {
                 "turn": label,

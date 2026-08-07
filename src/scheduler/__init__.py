@@ -10,6 +10,7 @@ from src.scheduler.service import (
     parse_schedule_at,
     preview_existing_issue,
     schedule_existing_issue,
+    wait_inflight_dispatches,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "parse_schedule_at",
     "preview_existing_issue",
     "schedule_existing_issue",
+    "wait_inflight_dispatches",
 ]

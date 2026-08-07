@@ -315,7 +315,8 @@ class JiraAgentDaemon:
                 if result.get("claimed"):
                     logger.info(
                         f"Schedule dispatch: due={result.get('due')} "
-                        f"started={result.get('started')} failed={result.get('failed')}"
+                        f"claimed={result.get('claimed')} "
+                        f"launched={result.get('launched')}"
                     )
             except Exception as e:
                 logger.exception(f"Schedule dispatcher tick failed: {e}", e)

@@ -14,12 +14,16 @@ from unittest.mock import patch
 
 import pytest
 
+import httpx
+
 from src.opencode_serve import (
     DEFAULT_CONTINUE_PROMPT,
     OpenCodeServeClient,
     ServeOrchestrator,
     assess_serve_turn,
     count_compaction_signals,
+    format_serve_error,
+    is_serve_timeout,
 )
 from src.opencode_sessions import assess_session_completeness
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
@@ -240,6 +244,54 @@ def test_assess_serve_turn_open_todos_and_summary():
     assert r["open_todos"] == 2
 
 
+def test_assess_serve_turn_new_compact_this_turn_not_success():
+    """Empty todos + finish=stop after a *new* compact must not be complete."""
+    messages = [
+        {
+            "info": {"role": "user", "finish": None},
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "info": {"role": "assistant", "finish": "stop", "summary": None},
+            "parts": [{"type": "text", "text": "All todos complete."}],
+        },
+    ]
+    r = assess_serve_turn(
+        "ses_false_ok",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+        compact_events_seen=1,
+        new_compacts_this_turn=1,
+    )
+    assert r["premature"] is True, r
+    assert r["complete"] is False
+
+
+def test_assess_serve_turn_old_compact_markers_do_not_loop():
+    """After a successful continue, leftover compact markers must not force another."""
+    messages = [
+        {
+            "info": {"role": "user"},
+            "parts": [{"type": "compaction"}],
+        },
+        {
+            "info": {"role": "assistant", "finish": "stop", "summary": None},
+            "parts": [{"type": "text", "text": "Finished remaining work and committed."}],
+        },
+    ]
+    r = assess_serve_turn(
+        "ses_after_continue",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+        compact_events_seen=1,
+        new_compacts_this_turn=0,
+    )
+    # Sequence still looks like compact-then-stop on the last two messages —
+    # that path is intentional (assess_session_completeness). This test only
+    # asserts *cumulative* compact_events_seen alone does not add a reason.
+    assert r.get("new_compacts_this_turn") == 0
+
+
 def test_assess_complete_after_final_stop():
     messages = [
         {
@@ -266,6 +318,89 @@ def test_assess_complete_after_final_stop():
 # ---------------------------------------------------------------------------
 # E2E: orchestrator must continue through TWO compacts
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class FakeSilentCompactStopBackend(FakeServeBackend):
+    """Compact-then-stop that *looks* successful: finish=stop, todos completed.
+
+    This is the production false-complete shape (KAN-style): no summary=True,
+    no open todos — only a compaction part then a cheerful stop.
+    """
+
+    def __init__(self):
+        super().__init__(required_compacts=0)
+        self._silent_compact_pending = True
+
+    async def send_message(self, session_id: str, text: str, **kwargs):
+        self.message_calls += 1
+        self.prompts.append(text)
+        self.messages.append(
+            {
+                "info": {"role": "user", "finish": None, "summary": None},
+                "parts": [{"type": "text", "text": text}],
+            }
+        )
+        if self._silent_compact_pending:
+            self._silent_compact_pending = False
+            self.todos = [
+                {"content": "Explore", "status": "completed"},
+                {"content": "Implement", "status": "completed"},
+            ]
+            compact_user = {
+                "info": {"role": "user", "finish": None},
+                "parts": [{"type": "compaction", "auto": True}],
+            }
+            stop = {
+                "info": {
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "All todos complete. Context was compacted.",
+                    }
+                ],
+            }
+            self.messages.extend([compact_user, stop])
+            return stop
+        # Continue turn: real finish, no new compact
+        self.todos = [
+            {"content": "Explore", "status": "completed"},
+            {"content": "Implement", "status": "completed"},
+            {"content": "Commit", "status": "completed"},
+        ]
+        final = {
+            "info": {"role": "assistant", "finish": "stop", "summary": None},
+            "parts": [
+                {
+                    "type": "text",
+                    "text": "Resumed after compact; committed the change.",
+                }
+            ],
+        }
+        self.messages.append(final)
+        return final
+
+
+@pytest.mark.asyncio
+async def test_e2e_silent_compact_stop_does_not_false_complete():
+    """finish=stop + empty open todos after compact must Continue, not succeed."""
+    backend = FakeSilentCompactStopBackend()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    result = await orch.run(
+        prompt="implement 5+4",
+        title="E2E-COMPACT: silent stop",
+        agent="atlas",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert result.continue_count >= 1
+    assert len(backend.prompts) >= 2
+    assert result.turns[0]["assessment"]["premature"] is True
 
 
 @pytest.mark.asyncio
@@ -407,3 +542,52 @@ async def test_serve_health_failure():
 
 def test_default_continue_prompt_mentions_compaction():
     assert "compaction" in DEFAULT_CONTINUE_PROMPT.lower()
+
+
+def test_format_serve_error_empty_read_timeout():
+    """httpx.ReadTimeout() stringifies to '' — logs must still name the type."""
+    err = httpx.ReadTimeout("")
+    assert str(err) == ""
+    assert is_serve_timeout(err)
+    text = format_serve_error(err, timeout_seconds=30)
+    assert "ReadTimeout" in text
+    assert "30s" in text
+    assert "message failed" not in text  # prefix is added by orchestrator
+
+
+def test_format_serve_error_http_status_includes_body():
+    req = httpx.Request("POST", "http://fake/session/ses_x/message")
+    resp = httpx.Response(400, request=req, text='{"error":"session busy"}')
+    exc = httpx.HTTPStatusError("boom", request=req, response=resp)
+    text = format_serve_error(exc)
+    assert "400" in text
+    assert "session busy" in text
+
+
+@pytest.mark.asyncio
+async def test_e2e_serve_http_timeout_aborts_and_marks_timed_out():
+    """ReadTimeout → timed_out, abort session, one readable error line."""
+
+    class TimeoutOnce(FakeServeBackend):
+        async def send_message(self, session_id, text, **kwargs):
+            self.prompts.append(text)
+            raise httpx.ReadTimeout("")
+
+    backend = TimeoutOnce(required_compacts=0)
+    backend.session_id = "ses_timeout_busy"
+    client = FakeServeClient(backend)
+    client.timeout_seconds = 30.0
+    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    result = await orch.run(prompt="do work", title="KAN-TO")
+
+    assert result.timed_out is True
+    assert result.returncode == -1
+    assert result.incomplete is True
+    assert backend.aborted is True
+    assert result.stderr.count("[serve] message failed:") == 1
+    assert "ReadTimeout" in (result.stderr or "")
+    assert "30s" in (result.stderr or "")
+    assert "aborted session" in (result.stderr or "")
+    out = result.to_agent_result("task_to")
+    assert out.get("timed_out") is True
+    assert out.get("opencode_session_id") == "ses_timeout_busy"

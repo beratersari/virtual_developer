@@ -7,7 +7,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from src.logger import logger
 
@@ -141,6 +141,7 @@ class ScheduleStore:
         *,
         max_age_seconds: float = 0.0,
         now: Optional[datetime] = None,
+        exclude_ids: Optional[Iterable[str]] = None,
     ) -> int:
         """Reset ``dispatching`` rows back to ``scheduled`` after a crash.
 
@@ -150,11 +151,17 @@ class ScheduleStore:
 
         ``max_age_seconds=0`` recovers **all** dispatching rows (startup path).
         Positive age only recovers rows whose ``updated_at`` is older than the
-        cutoff (periodic safety net during long process_event waits).
+        cutoff (periodic safety net after a lost worker).
+
+        ``exclude_ids`` are live in-process dispatches — never re-open those
+        while ``process_event`` is still running (agent jobs can exceed 30 min).
 
         Returns the number of rows re-opened.
         """
         when = now or datetime.now()
+        skip: Set[str] = {
+            str(x).strip() for x in (exclude_ids or []) if str(x).strip()
+        }
         recovered = 0
         with self._lock:
             for path in list(self.schedules_dir.glob("sched_*.json")):
@@ -164,6 +171,9 @@ class ScheduleStore:
                 except Exception:
                     continue
                 if (rec.get("status") or "").lower() != "dispatching":
+                    continue
+                sid = rec.get("schedule_id") or ""
+                if sid in skip:
                     continue
                 if max_age_seconds and max_age_seconds > 0:
                     raw = (rec.get("updated_at") or rec.get("created_at") or "").strip()

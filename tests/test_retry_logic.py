@@ -250,8 +250,11 @@ async def test_timeout_retries_when_retry_on_timeout_true():
     calls = {"n": 0}
     reasons: List[str] = []
 
-    async def timeout_then_ok(*a, **k):
+    snapshots: List[tuple] = []
+
+    async def timeout_then_ok(task, **k):
         calls["n"] += 1
+        snapshots.append((task.session_id, (task.prompt or "")[:40]))
         if calls["n"] == 1:
             return _fail_result(
                 returncode=-1,
@@ -259,7 +262,7 @@ async def test_timeout_retries_when_retry_on_timeout_true():
                 timed_out=True,
                 session_id="ses_to",
             )
-        return _ok_result()
+        return _ok_result(session_id="ses_to")
 
     with patch.object(runner, "run_agent", side_effect=timeout_then_ok):
         with _SettingsCtx(
@@ -268,7 +271,7 @@ async def test_timeout_retries_when_retry_on_timeout_true():
             retry_on_timeout=True,
             retry_on_error=False,
         ):
-            task = AgentTask(description="d", prompt="p", agent="a")
+            task = AgentTask(description="d", prompt="original BUILD", agent="a")
             result = await runner.run_agent_with_retry(
                 task,
                 max_retries=2,
@@ -277,6 +280,9 @@ async def test_timeout_retries_when_retry_on_timeout_true():
 
     assert calls["n"] == 2
     assert reasons == ["timeout"]
+    assert snapshots[0][0] is None
+    assert snapshots[1][0] == "ses_to"
+    assert snapshots[1][1].lower().startswith("continue")
     assert result["returncode"] == 0
     assert result["retry_info"]["retried"] is True
 
@@ -311,12 +317,14 @@ async def test_error_retries_when_flag_true_even_if_timeout_flag_false():
     """Non-timeout failure uses elif retry_on_error; timeout flag irrelevant."""
     runner = AgentRunner()
     calls = {"n": 0}
+    snaps: List[tuple] = []
 
-    async def fail_then_ok(*a, **k):
+    async def fail_then_ok(task, **k):
         calls["n"] += 1
+        snaps.append((task.session_id, (task.prompt or "")[:50]))
         if calls["n"] == 1:
-            return _fail_result()  # no timed_out key
-        return _ok_result()
+            return _fail_result()  # no timed_out key; session ses_fail
+        return _ok_result(session_id="ses_fail")
 
     with patch.object(runner, "run_agent", side_effect=fail_then_ok):
         with _SettingsCtx(
@@ -325,10 +333,13 @@ async def test_error_retries_when_flag_true_even_if_timeout_flag_false():
             retry_on_timeout=False,
             retry_on_error=True,
         ):
-            task = AgentTask(description="d", prompt="p", agent="a")
+            task = AgentTask(description="d", prompt="full BUILD prompt", agent="a")
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
     assert calls["n"] == 2
+    assert snaps[0][0] is None
+    assert snaps[1][0] == "ses_fail"
+    assert snaps[1][1].lower().startswith("continue")
     assert result["returncode"] == 0
 
 

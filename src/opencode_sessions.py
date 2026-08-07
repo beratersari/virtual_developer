@@ -217,6 +217,22 @@ def _apply_todo_counts(result: Dict[str, Any], todos: List[Dict[str, Any]]) -> N
         )
 
 
+def _is_compaction_summary(summary: Any) -> bool:
+    """True for OpenCode compaction summary flags (bool or ``{compaction: …}``)."""
+    if summary is True:
+        return True
+    if isinstance(summary, dict) and summary.get("compaction"):
+        return True
+    return False
+
+
+def _message_has_compaction_part(msg: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    parts = msg.get("_parts") or msg.get("parts") or []
+    return any(isinstance(p, dict) and p.get("type") == "compaction" for p in parts)
+
+
 def _apply_last_assistant(
     result: Dict[str, Any],
     *,
@@ -226,12 +242,7 @@ def _apply_last_assistant(
     parts: Optional[List[Any]] = None,
 ) -> None:
     """Record last-message signals used for premature-exit detection."""
-    is_summary = summary is True or (
-        isinstance(summary, dict) and bool(summary.get("compaction"))
-    )
-    if summary is True:
-        is_summary = True
-    # Compaction user part as last-ish signal when assistant summary follows
+    is_summary = _is_compaction_summary(summary)
     if parts:
         if any(isinstance(p, dict) and p.get("type") == "compaction" for p in parts):
             # Not necessarily incomplete alone; summary assistant check below
@@ -306,17 +317,22 @@ def assess_session_completeness(
     if messages is not None:
         result["api_checked"] = True
         # Walk from the end to find the last assistant (or last message)
+        indexed: List[Dict[str, Any]] = [
+            m for m in messages if isinstance(m, dict)
+        ]
         last_assistant: Optional[Dict[str, Any]] = None
+        last_assistant_idx: Optional[int] = None
         last_any: Optional[Dict[str, Any]] = None
-        for m in messages:
-            if not isinstance(m, dict):
-                continue
+        last_any_idx: Optional[int] = None
+        for i, m in enumerate(indexed):
             last_any = m
+            last_any_idx = i
             role = m.get("role")
             if role is None and isinstance(m.get("info"), dict):
                 role = m["info"].get("role")
             if role == "assistant":
                 last_assistant = m
+                last_assistant_idx = i
         target = last_assistant or last_any
         if target is not None:
             info = target.get("info") if isinstance(target.get("info"), dict) else {}
@@ -338,13 +354,26 @@ def assess_session_completeness(
             # If the absolute last message is a compaction *user* part with no
             # following assistant, treat as mid-compact incomplete.
             if last_any is not None and last_assistant is not last_any:
-                parts_last = last_any.get("_parts") or last_any.get("parts") or []
-                if any(
-                    isinstance(p, dict) and p.get("type") == "compaction"
-                    for p in parts_last
-                ):
+                if _message_has_compaction_part(last_any):
                     result["reasons"].append(
                         "session ended on compaction user part (no follow-up)"
+                    )
+            # Compact-then-stop: last assistant immediately follows a compaction
+            # message (classic auto-compact exit that still looks like finish=stop).
+            if last_assistant_idx is not None and last_assistant_idx > 0:
+                prev = indexed[last_assistant_idx - 1]
+                prev_info = (
+                    prev.get("info") if isinstance(prev.get("info"), dict) else prev
+                )
+                prev_summary = prev.get("summary")
+                if prev_summary is None and isinstance(prev_info, dict):
+                    prev_summary = prev_info.get("summary")
+                if _message_has_compaction_part(prev) or _is_compaction_summary(
+                    prev_summary
+                ):
+                    result["reasons"].append(
+                        "last assistant followed a compaction message "
+                        "(compact-then-stop)"
                     )
 
     sid = (session_id or "").strip()
@@ -423,21 +452,15 @@ def assess_session_completeness(
         except Exception as e:
             logger.debug(f"OpenCode completeness lookup failed for {sid}: {e}")
 
-    # Output-only signal: compacting was the last notable activity and we have
-    # no contradictory "all clear" from state.
+    # Output-only signal: compacting near the end of the transcript.
+    # Do **not** treat empty todos + finish=stop as all-clear — that is the
+    # upstream compact-then-exit-0 false success (opencode#13946).
     if result["compact_in_output"]:
         tail = (output_text or "")[-2048:]
         if detect_compact_in_output(tail):
-            clean = (
-                (result["db_checked"] or result["api_checked"])
-                and result["open_todos"] == 0
-                and (result["last_finish"] or "").lower() == "stop"
-                and not result["last_is_summary"]
+            result["reasons"].append(
+                "CLI output indicates compaction near end of run"
             )
-            if not clean:
-                result["reasons"].append(
-                    "CLI output indicates compaction near end of run"
-                )
 
     if result["reasons"]:
         result["complete"] = False
