@@ -110,10 +110,15 @@ export function TaskDetailPage({
           )}
           {detail?.status === 'plan_ready' && (
             <p className="mt-2 text-xs text-text-muted">
-              To start build: set <code className="text-text-secondary">Mode: build</code>{' '}
-              in the issue description and move the issue back to{' '}
-              <strong className="font-medium text-text-secondary">To Do</strong>. There is
-              no Start button on the dashboard.
+              To start build: keep this issue on{' '}
+              <strong className="font-medium text-text-secondary">To Do</strong> and add
+              label <code className="text-text-secondary">ai-start-work</code> or{' '}
+              <code className="text-text-secondary">ai-execute</code>
+              (with a trigger label such as <code className="text-text-secondary">bot</code>
+              ). Or open a <strong className="font-medium text-text-secondary">new</strong>{' '}
+              issue with <code className="text-text-secondary">Mode: build</code> and the
+              same {'{params}'}. Changing Mode on this ticket alone does not start work.
+              There is no Start button on the dashboard.
             </p>
           )}
         </div>

@@ -94,6 +94,30 @@ def test_issue_log_ring_filter_and_overflow():
     assert all("KAN-1" in (x.get("message") or "") for x in lines)
 
 
+def test_issue_log_ring_for_issue_no_prefix_bleed():
+    """KAN-1 must not surface KAN-10 (or other longer keys) system log lines."""
+    ring = IssueLogRing(maxlen=50, persist=False)
+    ring.append("started", issue_key="KAN-1")
+    ring.append("other ticket work", issue_key="KAN-10")
+    ring.append("untagged free text about KAN-1 only")
+    ring.append("untagged free text about KAN-10 only")
+    ring.append("still KAN-1 via tag", issue_key="KAN-1")
+
+    for_k1 = ring.for_issue("KAN-1")
+    msgs = [x.get("message") or "" for x in for_k1]
+    assert "started" in msgs
+    assert "still KAN-1 via tag" in msgs
+    assert "untagged free text about KAN-1 only" in msgs
+    assert "other ticket work" not in msgs
+    assert "untagged free text about KAN-10 only" not in msgs
+
+    for_k10 = ring.for_issue("KAN-10")
+    msgs10 = [x.get("message") or "" for x in for_k10]
+    assert "other ticket work" in msgs10
+    assert "untagged free text about KAN-10 only" in msgs10
+    assert "started" not in msgs10
+
+
 def test_issue_log_ring_for_job():
     ring = IssueLogRing(maxlen=50, persist=False)
     ring.append("untagged", issue_key="KAN-1")
