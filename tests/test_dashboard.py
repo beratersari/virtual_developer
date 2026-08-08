@@ -163,6 +163,48 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     assert settings.gitlab_pat_for_host("gitlab.example.com") == ""
 
 
+def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+    if hasattr(settings, "set_gitlab_host_pat_map"):
+        settings.set_gitlab_host_pat_map({"gitlab.com": "keep-me-secret"})
+
+    apply_settings_update(
+        SettingsUpdate(
+            gitlab_credentials=[
+                {
+                    "host": "gitlab.company.com",
+                    "pat": "",
+                    "previous_host": "gitlab.com",
+                }
+            ]
+        )
+    )
+    assert settings.gitlab_pat_for_host("gitlab.company.com") == "keep-me-secret"
+    assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
+def test_apply_settings_gitlab_rename_1to1_without_previous_host(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+    if hasattr(settings, "set_gitlab_host_pat_map"):
+        settings.set_gitlab_host_pat_map({"gitlab.com": "keep-me-secret"})
+
+    apply_settings_update(
+        SettingsUpdate(
+            gitlab_credentials=[{"host": "gitlab.company.com", "pat": ""}]
+        )
+    )
+    assert settings.gitlab_pat_for_host("gitlab.company.com") == "keep-me-secret"
+    assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
 def test_refresh_runtime_jira_clients(monkeypatch):
     from src.dashboard.service import refresh_runtime_jira_clients
 
@@ -580,7 +622,7 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
             app = create_dashboard_app(processor=proc, state_manager=sm)
             client = TestClient(app)
 
-            r = client.get("/api/tasks/DET-1")
+            r = client.get("/api/tasks/DET-1?live=true&artifacts=true")
             assert r.status_code == 200
             body = r.json()
             assert body["issue_key"] == "DET-1"
@@ -693,7 +735,7 @@ def test_api_jobs_filter_no_legacy_sessions(
             assert stored["job_id"] in job_ids
             assert not any(jid.startswith("legacy_") for jid in job_ids)
 
-            detail = client.get("/api/tasks/JOB-1").json()
+            detail = client.get("/api/tasks/JOB-1?live=true").json()
             assert len(detail["jobs"]) >= 1
             assert all(j["issue_key"] == "JOB-1" for j in detail["jobs"])
             assert detail["description"] == "desc live latest"

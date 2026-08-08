@@ -10,4 +10,4 @@ npm run dev      # :5173, proxies /api and /ws → :8080
 npm run build    # writes web/dist for FastAPI / offline zip
 ```
 
-Routes: `/jobs`, `/jobs/:jobId`, `/tasks/:issueKey`, `/poll`, `/scheduled`, `/settings`.
+Routes: `/jobs`, `/jobs/:jobId`, `/tasks/:issueKey`, `/poll`, `/scheduled`, `/sessions`, `/settings`.

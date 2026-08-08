@@ -4,6 +4,7 @@ import type {
   JobDetailResponse,
   JobItem,
   JobsPayload,
+  OpencodeSessionsPayload,
   JiraConnectionTestResult,
   JiraIssueTypesPayload,
   ModelsPayload,
@@ -160,13 +161,28 @@ export async function fetchJobById(jobId: string): Promise<JobDetailResponse> {
   }
 }
 
-export function fetchTaskDetail(issueKey: string) {
-  return request<TaskDetail>(`/api/tasks/${encodeURIComponent(issueKey)}`).then(
-    (d) => ({
-      ...d,
-      jobs: (d.jobs || []).map(normalizeJob),
-    }),
-  )
+export async function fetchJobArtifacts(jobId: string): Promise<{
+  job_id: string
+  prompts: import('./types').TextArtifact[]
+  session_logs: import('./types').TextArtifact[]
+}> {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`)
+}
+
+export function fetchTaskDetail(
+  issueKey: string,
+  opts?: { live?: boolean; artifacts?: boolean },
+) {
+  const params = new URLSearchParams()
+  if (opts?.live) params.set('live', 'true')
+  if (opts?.artifacts) params.set('artifacts', 'true')
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return request<TaskDetail>(
+    `/api/tasks/${encodeURIComponent(issueKey)}${q}`,
+  ).then((d) => ({
+    ...d,
+    jobs: (d.jobs || []).map(normalizeJob),
+  }))
 }
 
 export function cancelTask(issueKey: string) {
@@ -252,6 +268,17 @@ export function fetchIssueTypes(projectKey?: string) {
   if (projectKey?.trim()) params.set('project_key', projectKey.trim())
   const q = params.toString() ? `?${params.toString()}` : ''
   return request<JiraIssueTypesPayload>(`/api/jira/issue-types${q}`)
+}
+
+export function fetchOpencodeSessions() {
+  return request<OpencodeSessionsPayload>('/api/opencode-sessions')
+}
+
+export function resetOpencodeSession(bindId: string) {
+  return request<{ ok: boolean; bind_id: string; message?: string }>(
+    `/api/opencode-sessions/${encodeURIComponent(bindId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export function fetchSchedules(opts?: { status?: string }) {

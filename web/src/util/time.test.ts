@@ -2,6 +2,7 @@
  * Run: npx tsx src/lib/time.test.ts
  */
 import {
+  datetimeLocalToNaiveIso,
   elapsedSecondsBetween,
   formatElapsedBetween,
   formatElapsedSeconds,
@@ -28,6 +29,10 @@ assert(formatElapsedBetween(start, end) === '1h 02m 05s', 'between')
 
 const now = Date.parse(start) + 30_000
 assert(elapsedSecondsBetween(start, null, now) === 30, 'running uses now')
+
+assert(datetimeLocalToNaiveIso('2026-08-08T15:29') === '2026-08-08T15:29:00', 'local pad seconds')
+assert(datetimeLocalToNaiveIso('2026-08-08T15:29:00') === '2026-08-08T15:29:00', 'already naive')
+assert(datetimeLocalToNaiveIso('') === '', 'empty local')
 assert(formatElapsedBetween(start, null, now) === '30s', 'running format')
 
 console.log('time.test.ts: ok')

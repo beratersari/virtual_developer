@@ -107,6 +107,7 @@ export type GitlabHostCredentialDraft = {
   host: string
   pat: string
   pat_configured: boolean
+  original_host?: string
 }
 
 export type GitDelivery = {
@@ -172,6 +173,24 @@ export type JobsPayload = {
   page_size?: number
   issue_key_filter?: string | null
   server_time: string
+}
+
+export type OpencodeSessionBind = {
+  bind_id: string
+  repository_url: string
+  repository_key?: string
+  branch: string
+  session_id: string
+  issue_key?: string
+  job_id?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export type OpencodeSessionsPayload = {
+  sessions: OpencodeSessionBind[]
+  total: number
+  server_time?: string
 }
 
 export type ScheduleItem = {
@@ -387,5 +406,5 @@ export type SettingsPatch = Partial<
 > & {
   jira_api_token?: string
   gitlab_pat?: string
-  gitlab_credentials?: { host: string; pat?: string }[]
+  gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
 }

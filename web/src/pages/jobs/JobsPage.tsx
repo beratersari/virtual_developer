@@ -12,6 +12,7 @@ import { Alert } from '../../ui/Alert'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { LiveDot } from '../../ui/LiveDot'
 import { PageHeader } from '../../ui/PageHeader'
+import { peekJobsPayload, rememberJobsPayload } from '../../app/entityCache'
 import { JobsTable } from './JobsTable'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
@@ -32,7 +33,7 @@ export function JobsPage() {
   const [debouncedFilter, setDebouncedFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [page, setPage] = useState(1)
-  const [payload, setPayload] = useState<JobsPayload | null>(null)
+  const [payload, setPayload] = useState<JobsPayload | null>(() => peekJobsPayload())
   const [error, setError] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -58,6 +59,7 @@ export function JobsPage() {
           pageSize: PAGE_SIZE,
         })
         if (req !== reqId.current) return
+        rememberJobsPayload(data)
         setPayload(data)
         setError(null)
       } catch (e) {

@@ -241,35 +241,37 @@ class JiraPoller:
             checked_count += 1
 
             if should_process and is_todo:
-                if not seen:
-                    # Cold start: do NOT re-fire terminal/in-flight/plan_ready work
-                    # as "new" — only true first sightings (no local state) or
-                    # PENDING-like states. Terminal rework requires a real To Do
-                    # transition via check_status_changes.
-                    local_st = local.status if local else None
-                    skip_as_new = local_st in {
-                        TaskStatus.COMPLETED,
-                        TaskStatus.ERROR,
-                        TaskStatus.CANCELLED,
-                        TaskStatus.PLANNING,
-                        TaskStatus.EXECUTING,
-                        TaskStatus.PLAN_READY,
-                    }
-                    if skip_as_new:
-                        self._seen_issues.add(issue_key)
-                        logger.debug(
-                            f"Skip cold-start requeue for {issue_key} "
-                            f"(local status={local_st.value if local_st else None})"
+                local_st = local.status if local else None
+                # Never restart in-flight work. plan_ready still waits for
+                # ai-start-work / ai-execute (or a new Mode: build issue).
+                # Terminal (completed/error/cancelled) + To Do + trigger label
+                # is intake again — operator expectation: bot/ai-assist on To Do
+                # means run, including after a finished job.
+                in_flight = local_st in {
+                    TaskStatus.PLANNING,
+                    TaskStatus.EXECUTING,
+                }
+                waiting_plan = local_st == TaskStatus.PLAN_READY
+                if in_flight or waiting_plan:
+                    logger.debug(
+                        f"Skip poller intake for {issue_key} "
+                        f"(local status={local_st.value if local_st else None})"
+                    )
+                elif self._issue_has_pending_schedule(issue_key):
+                    logger.info(
+                        f"Skip poller intake for {issue_key}: pending schedule"
+                    )
+                else:
+                    new_issues.append(issue)
+                    logger.info(
+                        f"{'Re-queue' if seen or local_st else 'New issue to process'}: "
+                        f"{issue_key}"
+                        + (
+                            f" (local status={local_st.value})"
+                            if local_st
+                            else ""
                         )
-                    elif self._issue_has_pending_schedule(issue_key):
-                        # Do not mark seen — if the schedule is cancelled,
-                        # the next poll must still be able to intake as new.
-                        logger.info(
-                            f"Skip poller intake for {issue_key}: pending schedule"
-                        )
-                    else:
-                        new_issues.append(issue)
-                        logger.info(f"New issue to process: {issue_key}")
+                    )
                 todo_issues.append(issue)
 
             # plan_ready start labels work without requiring bot/ai-assist (P4)

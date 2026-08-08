@@ -475,18 +475,61 @@ class AgentRunner:
         return result
 
     @staticmethod
+    def _session_log_is_empty(session_file: Optional[str]) -> bool:
+        if not session_file:
+            return True
+        try:
+            p = Path(session_file)
+            return (not p.is_file()) or p.stat().st_size < 40
+        except OSError:
+            return True
+
     def _resume_opencode_session_for_retry(
+        self,
         task: AgentTask,
         session_id: Optional[str],
         *,
         why: str,
+        session_file: Optional[str] = None,
+        timed_out: bool = False,
+        stdout: Optional[str] = None,
     ) -> None:
         """Point the next CLI/serve attempt at an existing OpenCode session.
 
-        ``opencode run --session`` and serve ``create_session`` skip both use
-        ``task.session_id``. A cold retry would discard compacted history.
+        ``opencode run --session`` and serve reuse both use ``task.session_id``.
+        A cold retry would discard compacted history — but an empty timeout
+        usually means ``--session`` pointed at another clone directory and
+        hung; retrying Continue on that id stays stuck.
         """
         sid = (session_id or "").strip()
+        empty_log = self._session_log_is_empty(session_file)
+        no_stdout = not (stdout or "").strip()
+        if timed_out and empty_log and no_stdout:
+            logger.warning(
+                f"Retry after {why}: empty session log — not resuming "
+                f"{sid or '(unknown)'}; starting cold"
+            )
+            task.session_id = None
+            return
+        if sid and self.working_directory:
+            try:
+                from src.opencode_sessions import (
+                    get_session_directory,
+                    session_matches_workdir,
+                )
+
+                stored_dir = get_session_directory(sid)
+                if stored_dir and not session_matches_workdir(
+                    sid, self.working_directory
+                ):
+                    logger.warning(
+                        f"Retry after {why}: session {sid} is not for "
+                        f"{self.working_directory}; starting cold"
+                    )
+                    task.session_id = None
+                    return
+            except Exception as e:
+                logger.debug(f"session dir check failed: {e}")
         if not sid:
             logger.warning(
                 f"Retry after {why} has no OpenCode session id; starting cold"
@@ -571,6 +614,19 @@ class AgentRunner:
             if on_output:
                 on_output(stream, line)
 
+        def _remember_session(sid: str) -> None:
+            """Publish ses_* immediately so cancel/retry/continue share it."""
+            if not sid:
+                return
+            serve_handle["session_id"] = sid
+            task.session_id = sid
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    sid + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+
         orch = ServeOrchestrator(
             client=client,
             max_compact_continues=max_cont,
@@ -585,12 +641,13 @@ class AgentRunner:
                     model=model,
                     session_id=task.session_id,
                     on_output=_on_out,
+                    on_session=_remember_session,
                     log_lines=log_lines,
                 ),
                 timeout=float(timeout_seconds),
             )
             if turn.session_id:
-                serve_handle["session_id"] = turn.session_id
+                _remember_session(turn.session_id)
         except asyncio.TimeoutError:
             try:
                 sid = serve_handle.get("session_id")
@@ -787,15 +844,21 @@ class AgentRunner:
         *,
         session_file: Optional[Path] = None,
     ) -> Optional[str]:
-        """Parse CLI output, then fall back to OpenCode SQLite by issue/dir."""
+        """Parse CLI output; keep launched session; only then SQLite by dir."""
         session_id = self._parse_session_id(output_lines)
-        if not session_id and task.issue_key:
+        launched = (task.session_id or "").strip() or None
+        # Empty timeout must not pick an unrelated historical ses_* for this
+        # issue key (that is what hung KAN-7 on Continue + old session).
+        if not session_id and launched:
+            session_id = launched
+        if not session_id and task.issue_key and output_lines:
             try:
                 from src.opencode_sessions import resolve_session_id
 
                 session_id = resolve_session_id(
                     task.issue_key,
                     working_directory=self.working_directory,
+                    preferred=launched,
                 )
             except Exception as e:
                 logger.debug(f"Session DB lookup failed: {e}")
@@ -1290,6 +1353,9 @@ class AgentRunner:
                     task,
                     result.get("opencode_session_id") or last_session_id,
                     why=retry_reason,
+                    session_file=result.get("session_file"),
+                    timed_out=bool(result.get("timed_out")),
+                    stdout=result.get("stdout"),
                 )
                 if _aborted():
                     logger.info(

@@ -14,18 +14,13 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
+import { datetimeLocalToNaiveIso } from '../../util/time'
 
 function defaultWhen(): string {
   const d = new Date()
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset() + 5)
   d.setSeconds(0, 0)
   return d.toISOString().slice(0, 16)
-}
-
-function toIso(local: string): string {
-  const raw = local.length === 16 ? `${local}:00` : local
-  const d = new Date(raw)
-  return Number.isNaN(d.getTime()) ? raw : d.toISOString()
 }
 
 export function SchedulesPage() {
@@ -167,7 +162,10 @@ function Existing({ onDone }: { onDone: () => void }) {
     setBusy(true)
     setErr(null)
     try {
-      await scheduleExistingIssue({ issue_key: preview.issue_key, scheduled_at: toIso(when) })
+      await scheduleExistingIssue({
+        issue_key: preview.issue_key,
+        scheduled_at: datetimeLocalToNaiveIso(when),
+      })
       setPreview(null)
       setKey('')
       onDone()
@@ -250,7 +248,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         target_branch: target.trim(),
         mode,
         issue_type: issueType.trim(),
-        scheduled_at: toIso(when),
+        scheduled_at: datetimeLocalToNaiveIso(when),
       })
       setTitle('')
       setDescription('')

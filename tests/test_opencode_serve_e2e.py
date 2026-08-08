@@ -435,6 +435,28 @@ async def test_e2e_double_compact_then_success():
 
 
 @pytest.mark.asyncio
+async def test_on_session_fires_before_first_continue_message():
+    """Session id must be known before the first POST /session/{id}/message."""
+    backend = FakeServeBackend(required_compacts=1)
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    seen: list = []
+
+    def on_session(sid: str) -> None:
+        seen.append((sid, backend.message_calls))
+
+    result = await orch.run(
+        prompt="Do the work",
+        title="KAN-1: session bind",
+        on_session=on_session,
+    )
+    assert result.returncode == 0
+    assert seen == [("ses_fake_double_compact", 0)]
+    assert result.session_id == "ses_fake_double_compact"
+    assert backend.message_calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_e2e_double_compact_fails_if_max_continues_too_low():
     """With max_compact_continues=1, two required compacts → incomplete failure."""
     backend = FakeServeBackend(required_compacts=2)

@@ -365,6 +365,7 @@ class ServeOrchestrator:
         model: Optional[str] = None,
         session_id: Optional[str] = None,
         on_output: Optional[Callable[[str, str], None]] = None,
+        on_session: Optional[Callable[[str], None]] = None,
         should_abort: Optional[Callable[[], bool]] = None,
         log_lines: Optional[List[str]] = None,
     ) -> ServeTurnResult:
@@ -401,7 +402,7 @@ class ServeOrchestrator:
                 incomplete_reasons=[f"serve unreachable: {e}"],
             )
 
-        # Session
+        # Session — create once, then every Continue POST uses the same id
         sid = session_id
         if not sid:
             try:
@@ -417,6 +418,8 @@ class ServeOrchestrator:
                     incomplete=True,
                     incomplete_reasons=[f"create session: {e}"],
                 )
+        else:
+            _emit("stdout", f"[serve] session resumed: {sid}")
         if not sid:
             return ServeTurnResult(
                 session_id=None,
@@ -426,6 +429,11 @@ class ServeOrchestrator:
                 incomplete=True,
                 incomplete_reasons=["no session id"],
             )
+        if on_session:
+            try:
+                on_session(str(sid))
+            except Exception:
+                pass
 
         current_prompt = prompt
         # Initial prompt + up to max_compact_continues continues

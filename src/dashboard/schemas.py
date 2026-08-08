@@ -217,6 +217,20 @@ class ModelsResponse(BaseModel):
     server_time: str = ""
 
 
+class OpencodeSessionBind(BaseModel):
+    """One persisted OpenCode session keyed by repository + work branch."""
+
+    bind_id: str
+    repository_url: str = ""
+    repository_key: str = ""
+    branch: str = ""
+    session_id: str = ""
+    issue_key: str = ""
+    job_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class SettingsView(BaseModel):
     """Safe settings projection (secrets never included as plaintext values)."""
 
@@ -258,11 +272,17 @@ class GitlabHostCredentialUpdate(BaseModel):
 
     * ``pat`` omit/empty → keep existing PAT for that host (if any)
     * ``pat`` non-empty → set/replace PAT for host
+    * ``previous_host`` + empty pat → copy stored PAT from the old hostname
     * Hosts omitted from the list on full replace are removed
     """
 
     host: str = Field(..., min_length=1, max_length=253)
     pat: Optional[str] = Field(default=None, max_length=4000)
+    previous_host: Optional[str] = Field(
+        default=None,
+        max_length=253,
+        description="If the operator renamed this host and pat is empty, copy the stored PAT from previous_host",
+    )
 
 
 class GitlabConnectionTestRequest(BaseModel):

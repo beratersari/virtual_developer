@@ -26,10 +26,12 @@ from src.dashboard.service import (
     build_jobs,
     build_meta,
     build_models_response,
+    build_one_job,
     build_poll_status,
     build_settings_view,
     build_task_detail,
     build_tasks,
+    collect_job_text_artifacts,
     delete_job_record,
     delete_job_records,
     refresh_runtime_jira_clients,
@@ -302,6 +304,37 @@ def create_dashboard_app(
             "server_time": build_meta().server_time,
         }
 
+    @app.get("/api/opencode-sessions")
+    def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
+        """OpenCode sessions bound to a git repository + work branch."""
+        from src.state.session_bind_store import session_bind_store as binds
+
+        rows = binds.list_binds(limit=limit)
+        return {
+            "sessions": rows,
+            "total": len(rows),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.delete("/api/opencode-sessions/{bind_id}")
+    def opencode_sessions_reset(bind_id: str) -> dict:
+        """Forget the stored session for this repo+branch (next job starts cold)."""
+        from src.state.session_bind_store import session_bind_store as binds
+
+        bid = (bind_id or "").strip()
+        rec = binds.get_by_id(bid)
+        if not rec or not binds.delete(bid):
+            raise HTTPException(status_code=404, detail=f"No session bind {bind_id}")
+        return {
+            "ok": True,
+            "bind_id": bid,
+            "message": (
+                f"Reset OpenCode session for {rec.get('repository_key') or rec.get('repository_url')}"
+                f"@{rec.get('branch')}. Next job on that branch starts a new session."
+            ),
+            "server_time": build_meta().server_time,
+        }
+
     @app.post("/api/jobs/bulk-delete")
     def jobs_bulk_delete(body: BulkJobDeleteRequest) -> dict:
         """Permanently delete multiple historical job records.
@@ -322,56 +355,72 @@ def create_dashboard_app(
         result["server_time"] = build_meta().server_time
         return result
 
-    @app.get("/api/jobs/{job_id}")
-    def job_detail(job_id: str) -> dict:
-        """Single job document from JobStore (retries are fields on the job)."""
+    @app.get("/api/jobs/{job_id}/artifacts")
+    def job_artifacts(job_id: str) -> dict:
+        """Prompt + OpenCode session text for this job only (lazy tab load)."""
         jid = (job_id or "").strip()
         if not jid or jid.startswith("legacy_"):
             raise HTTPException(
                 status_code=404,
                 detail="Legacy session jobs are not supported; open a real job_* id",
             )
-        # Prefer enriched JobItem (session_log_paths, retry_attempts, live flag)
-        job = None
-        issue_key_hint = None
-        raw = job_store.get_job(jid)
-        if raw:
-            issue_key_hint = raw.get("issue_key")
-        merged = build_jobs(
-            issue_key=issue_key_hint,
-            limit=500,
-            page=1,
-            page_size=500,
+        item = build_one_job(
+            jid,
             processor=app.state.processor,
+            store=job_store,
             state_manager=app.state.state_manager,
         )
-        for item in merged.jobs:
-            if item.job_id == jid:
-                job = item.model_dump()
-                break
-        if not job and raw:
-            job = raw
-        if not job:
+        if item is None:
             raise HTTPException(status_code=404, detail=f"No job {job_id}")
-        issue_key = job.get("issue_key") or ""
+        arts = collect_job_text_artifacts(item)
+        return {
+            "job_id": item.job_id,
+            "prompts": arts["prompts"],
+            "session_logs": arts["session_logs"],
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/jobs/{job_id}")
+    def job_detail(job_id: str) -> dict:
+        """Single job document from JobStore (retries are fields on the job).
+
+        Overview-only: no issue-wide session dumps and no live Jira. Prompt /
+        Output tabs fetch ``GET /api/jobs/{id}/artifacts``.
+        """
+        jid = (job_id or "").strip()
+        if not jid or jid.startswith("legacy_"):
+            raise HTTPException(
+                status_code=404,
+                detail="Legacy session jobs are not supported; open a real job_* id",
+            )
+        item = build_one_job(
+            jid,
+            processor=app.state.processor,
+            store=job_store,
+            state_manager=app.state.state_manager,
+        )
+        if item is None:
+            raw = job_store.get_job(jid)
+            if not raw:
+                raise HTTPException(status_code=404, detail=f"No job {job_id}")
+            job = raw
+            issue_key = (job.get("issue_key") or "").strip()
+        else:
+            job = item.model_dump()
+            issue_key = item.issue_key or ""
         detail = None
         if issue_key:
             detail = build_task_detail(
                 issue_key,
                 state_manager=app.state.state_manager,
                 processor=app.state.processor,
+                include_artifacts=False,
+                include_live_jira=False,
+                jobs=[item] if item is not None else None,
             )
-            if detail is not None:
-                detail["jobs"] = build_jobs(
-                    issue_key=issue_key,
-                    limit=100,
-                    processor=app.state.processor,
-                    state_manager=app.state.state_manager,
-                ).model_dump()["jobs"]
-        # Daemon log lines for this job: durable file + live ring (survives restart)
         from src.dashboard.issue_logs import issue_log_ring
 
-        system_logs = issue_log_ring.for_job(jid, limit=2000)
+        system_logs = issue_log_ring.for_job(jid, limit=500)
         return {
             "job": job,
             "issue": detail,
@@ -407,20 +456,36 @@ def create_dashboard_app(
         return result
 
     @app.get("/api/tasks/{issue_key}")
-    def task_detail(issue_key: str) -> dict:
+    def task_detail(
+        issue_key: str,
+        live: bool = Query(
+            default=False,
+            description="Fetch live Jira summary/description (slower).",
+        ),
+        artifacts: bool = Query(
+            default=False,
+            description="Include issue-wide prompt/session file bodies.",
+        ),
+    ) -> dict:
+        jobs_resp = build_jobs(
+            issue_key=issue_key,
+            limit=100,
+            page=1,
+            page_size=100,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+        )
         detail = build_task_detail(
             issue_key,
             state_manager=app.state.state_manager,
             processor=app.state.processor,
+            include_artifacts=artifacts,
+            include_live_jira=live,
+            jobs=jobs_resp.jobs,
         )
         if detail is None:
             raise HTTPException(status_code=404, detail=f"No state for {issue_key}")
-        detail["jobs"] = build_jobs(
-            issue_key=issue_key,
-            limit=100,
-            processor=app.state.processor,
-            state_manager=app.state.state_manager,
-        ).model_dump()["jobs"]
+        detail["jobs"] = jobs_resp.model_dump()["jobs"]
         return detail
 
     @app.post("/api/tasks/{issue_key}/cancel")
