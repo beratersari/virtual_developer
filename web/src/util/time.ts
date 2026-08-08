@@ -1,4 +1,5 @@
-/** Display helpers for timestamps and elapsed duration (presentation only). */
+import { useEffect, useMemo, useState } from 'react'
+import { IN_FLIGHT_STATUSES } from './status'
 
 export function parseTimeMs(iso: string | null | undefined): number | null {
   if (!iso || !String(iso).trim()) return null
@@ -6,7 +7,6 @@ export function parseTimeMs(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null
 }
 
-/** Whole seconds between start and end (or now if end omitted). */
 export function elapsedSecondsBetween(
   startedAt: string | null | undefined,
   completedAt: string | null | undefined,
@@ -19,9 +19,6 @@ export function elapsedSecondsBetween(
   return Math.max(0, Math.floor((end - start) / 1000))
 }
 
-/**
- * Compact human duration, e.g. ``45s``, ``3m 05s``, ``1h 02m 03s``.
- */
 export function formatElapsedSeconds(totalSeconds: number | null | undefined): string {
   if (totalSeconds == null || !Number.isFinite(totalSeconds) || totalSeconds < 0) {
     return '—'
@@ -45,4 +42,40 @@ export function formatElapsedBetween(
   nowMs: number = Date.now(),
 ): string {
   return formatElapsedSeconds(elapsedSecondsBetween(startedAt, completedAt, nowMs))
+}
+
+export function formatCountdown(seconds: number | null | undefined): string {
+  if (seconds == null) return '—'
+  const s = Math.max(0, seconds)
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return m > 0 ? `${m}m ${r}s` : `${r}s`
+}
+
+export function useNow(enabled = true, intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!enabled) return
+    setNow(Date.now())
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs)
+    return () => window.clearInterval(id)
+  }, [enabled, intervalMs])
+  return now
+}
+
+export function useElapsedLabel(
+  startedAt: string | null | undefined,
+  completedAt: string | null | undefined,
+  status: string,
+  live: boolean,
+): string {
+  const tick =
+    Boolean(startedAt) &&
+    !completedAt &&
+    (live || IN_FLIGHT_STATUSES.has((status || '').toLowerCase()))
+  const now = useNow(tick)
+  return useMemo(
+    () => formatElapsedBetween(startedAt, completedAt, now),
+    [startedAt, completedAt, now],
+  )
 }

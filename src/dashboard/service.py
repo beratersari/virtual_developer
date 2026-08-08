@@ -715,11 +715,7 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         except ValueError:
             return False
 
-    allowed = (
-        _under(Path.cwd() / ".jira-agent")
-        or _under(Path.cwd() / ".jira-agent" / "sessions")
-        or ".jira-agent" in path.parts
-    )
+    allowed = _under(Path.cwd() / ".jira-agent")
     if not allowed:
         return None
     blocked = {"etc", "proc", "sys", "windows", "system32"}
@@ -1133,18 +1129,45 @@ def _collect_git_deliveries(
     """
     meta = meta or {}
     items: List[Dict[str, Any]] = []
-    seen: set = set()
+    index: Dict[tuple, Dict[str, Any]] = {}
 
-    def _key(d: Dict[str, Any]) -> str:
-        return "|".join(
-            [
-                str(d.get("job_id") or ""),
-                str(d.get("merge_request_url") or ""),
-                str(d.get("commit_sha") or ""),
-                str(d.get("feature_branch") or ""),
-                str(d.get("created_at") or ""),
-            ]
-        )
+    def _identities(d: Dict[str, Any]) -> List[tuple]:
+        """Stable keys so the same MR is not listed three times.
+
+        One push is stored on the job, in ``metadata.git_deliveries``, and again
+        as top-level ``merge_request_url`` / ``feature_branch``. Those rows
+        differ by job_id / created_at / status and used to bypass exact-key
+        dedupe.
+        """
+        ids: List[tuple] = []
+        mr = str(d.get("merge_request_url") or "").strip().rstrip("/")
+        sha = str(d.get("commit_sha") or "").strip().lower()
+        jid = str(d.get("job_id") or "").strip()
+        if mr:
+            ids.append(("mr", mr))
+        if sha:
+            ids.append(("sha", sha))
+        if jid:
+            ids.append(("job", jid))
+        if not ids:
+            branch = str(d.get("feature_branch") or "").strip()
+            if branch:
+                ids.append(("branch", branch))
+        return ids
+
+    def _merge_into(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+        for key in (
+            "job_id",
+            "feature_branch",
+            "merge_request_url",
+            "commit_sha",
+            "commit_subject",
+            "commit_url",
+            "created_at",
+            "status",
+        ):
+            if not dst.get(key) and src.get(key):
+                dst[key] = src[key]
 
     def _add(raw: Dict[str, Any]) -> None:
         if not any(
@@ -1156,22 +1179,33 @@ def _collect_git_deliveries(
             ]
         ):
             return
-        k = _key(raw)
-        if k in seen:
+        row = {
+            "job_id": raw.get("job_id") or None,
+            "feature_branch": raw.get("feature_branch") or None,
+            "merge_request_url": raw.get("merge_request_url") or None,
+            "commit_sha": raw.get("commit_sha") or None,
+            "commit_subject": raw.get("commit_subject") or None,
+            "commit_url": raw.get("commit_url") or None,
+            "created_at": raw.get("created_at") or None,
+            "status": raw.get("status") or None,
+        }
+        ids = _identities(row)
+        if not ids:
             return
-        seen.add(k)
-        items.append(
-            {
-                "job_id": raw.get("job_id"),
-                "feature_branch": raw.get("feature_branch") or None,
-                "merge_request_url": raw.get("merge_request_url") or None,
-                "commit_sha": raw.get("commit_sha") or None,
-                "commit_subject": raw.get("commit_subject") or None,
-                "commit_url": raw.get("commit_url") or None,
-                "created_at": raw.get("created_at") or None,
-                "status": raw.get("status") or None,
-            }
-        )
+        existing: Optional[Dict[str, Any]] = None
+        for ident in ids:
+            hit = index.get(ident)
+            if hit is not None:
+                existing = hit
+                break
+        if existing is not None:
+            _merge_into(existing, row)
+            target = existing
+        else:
+            items.append(row)
+            target = row
+        for ident in _identities(target):
+            index[ident] = target
 
     # 1) Jobs (source of truth per run)
     job_rows: List[Any] = list(jobs or [])
@@ -1237,10 +1271,15 @@ def _build_task_detail_without_state(
     operators can inspect the ticket without a 404.
     """
     key = (issue_key or "").strip().upper()
-    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    # Never open a live Jira client from a no-state stub (arbitrary key SSRF/read)
+    jira_live: Dict[str, Any] = {}
+    if processor is not None:
+        jira_live = _fetch_live_jira_fields(key, processor=processor)
     poll_row: Dict[str, Any] = {}
     try:
-        snap = poll_snapshot_store.snapshot()
+        from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+        snap = snap_store.snapshot()
         for row in snap.get("issues") or []:
             if (row.get("key") or "").strip().upper() == key:
                 poll_row = row
@@ -1316,7 +1355,23 @@ def build_task_detail(
     if not state:
         if not key:
             return None
-        return _build_task_detail_without_state(key, processor=processor)
+        # Live Jira GET only for keys on the last poll snapshot (board read).
+        # Arbitrary keys stay stub-only so this is not an open Jira proxy.
+        on_board = False
+        try:
+            from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+            snap = snap_store.snapshot()
+            on_board = any(
+                str(row.get("key") or "").upper() == key
+                for row in (snap.get("issues") or [])
+                if isinstance(row, dict)
+            )
+        except Exception:
+            on_board = False
+        return _build_task_detail_without_state(
+            key, processor=processor if on_board else None
+        )
 
     live = False
     if processor is not None:

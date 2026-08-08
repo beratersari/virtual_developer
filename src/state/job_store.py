@@ -75,18 +75,7 @@ def description_from_prompt_path(prompt_path: Optional[str]) -> str:
             except ValueError:
                 return False
 
-        allowed = (
-            _under(Path.cwd() / ".jira-agent")
-            or _under(_default_jobs_dir())
-            or ".jira-agent" in path.parts
-            or (
-                path.parent.name == "sessions"
-                and (
-                    path.name.endswith(".prompt.txt")
-                    or path.suffix == ".log"
-                )
-            )
-        )
+        allowed = _under(Path.cwd() / ".jira-agent") or _under(_default_jobs_dir())
         if not allowed:
             logger.debug(f"Refusing prompt path outside agent dirs: {path}")
             return ""

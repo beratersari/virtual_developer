@@ -337,7 +337,12 @@ class GitManager:
         # Prefer settings PAT in the clone URL so Windows Credential Manager is
         # not consulted for this call — helpers stay enabled for the user elsewhere.
         # Without a settings PAT, use the clean URL (host helpers may apply).
-        clone_url = self._https_url_with_settings_pat(clean_url) or clean_url
+        # Never embed PAT in argv (ps /proc cmdline). Askpass + disabled helper.
+        clone_url = clean_url
+        clone_env = self._git_auth_env(url=clean_url)
+        clone_env["GIT_CONFIG_COUNT"] = "1"
+        clone_env["GIT_CONFIG_KEY_0"] = "credential.helper"
+        clone_env["GIT_CONFIG_VALUE_0"] = ""
 
         issue_tag = self.issue_key or "(unknown)"
         clone_timeout = max(
@@ -357,6 +362,7 @@ class GitManager:
                 capture_output=True,
                 text=True,
                 timeout=clone_timeout,
+                env=clone_env,
             )
         except subprocess.TimeoutExpired as e:
             logger.error(
@@ -824,15 +830,23 @@ class GitManager:
             logger.warning(f"Could not delete branch {branch_name}: {e}")
             return False
 
+    def _safe_git_ref(self, branch: str) -> Optional[str]:
+        """Return branch if it is a safe git ref (not an option like --mirror)."""
+        name = (branch or "").strip()
+        if not name or name.startswith("-"):
+            logger.error(f"Refusing option-like git ref: {branch!r}")
+            return None
+        return name
+
     def _remote_head_exists(self, branch: str) -> bool:
         """True if origin has refs/heads/{branch} (uses ls-remote)."""
-        branch = (branch or "").strip()
+        branch = self._safe_git_ref(branch) or ""
         if not branch:
             return False
         self._with_auth_remote()
         try:
             result = self._run_git(
-                ["ls-remote", "--heads", "origin", branch], check=False, auth=True
+                ["ls-remote", "--heads", "origin", "--", branch], check=False, auth=True
             )
         finally:
             self._scrub_remote_credentials()
@@ -1296,29 +1310,32 @@ class GitManager:
             return False
 
         # Prefer prepared work_branch over drifted HEAD (B5)
-        branch = (
+        branch = self._safe_git_ref(
             (branch_name or "").strip()
             or (self.work_branch or "").strip()
             or self.get_current_branch()
         )
+        if not branch:
+            logger.error("Push refused: branch name missing or looks like a git option")
+            return False
 
         # auth=True → settings PAT on origin for the push when configured;
         # otherwise host Windows credential helpers remain available.
         try:
             self._with_auth_remote()
             try:
-                self._run_git(["push", "-u", "origin", branch], auth=True)
+                self._run_git(["push", "-u", "origin", "--", branch], auth=True)
                 logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
             except RuntimeError:
                 logger.warning(f"Push failed, attempting to pull and merge...")
                 try:
-                    self._run_git(["fetch", "origin", branch], check=False, auth=True)
+                    self._run_git(["fetch", "origin", "--", branch], check=False, auth=True)
                     self._run_git(
                         ["merge", f"origin/{branch}", "-m", f"Merge remote branch {branch}"],
                         check=False,
                     )
-                    self._run_git(["push", "-u", "origin", branch], auth=True)
+                    self._run_git(["push", "-u", "origin", "--", branch], auth=True)
                     logger.info(f"Pushed branch '{branch}' after merge.")
                     return True
                 except RuntimeError as e2:
@@ -1709,11 +1726,13 @@ def purge_stale_temp_dirs(
     *,
     max_age_days: Optional[float] = None,
     base_dir: Optional[Path] = None,
+    protect_paths: Optional[set] = None,
 ) -> int:
     """Delete temp clone directories older than ``max_age_days`` under the temp base.
 
     Returns the number of directories removed. Safe to call when the base is missing.
     Used on daemon start and periodically so ``age`` policy actually frees disk.
+    ``protect_paths`` are live clone dirs that must not be removed.
     """
     age = max_age_days
     if age is None:
@@ -1727,6 +1746,13 @@ def purge_stale_temp_dirs(
     if not base.exists() or not base.is_dir():
         return 0
 
+    protected: set = set()
+    for p in protect_paths or ():
+        try:
+            protected.add(Path(p).resolve())
+        except (OSError, TypeError):
+            continue
+
     cutoff = time.time() - (age * 86400.0)
     removed = 0
     try:
@@ -1737,6 +1763,13 @@ def purge_stale_temp_dirs(
 
     for entry in entries:
         if not entry.is_dir():
+            continue
+        try:
+            resolved = entry.resolve()
+        except OSError:
+            continue
+        if resolved in protected:
+            logger.info(f"Skipping live temp directory: {entry}")
             continue
         try:
             mtime = entry.stat().st_mtime

@@ -175,6 +175,9 @@ def _looks_like_branch(name: str) -> bool:
         return False
     if name.startswith("/") or name.endswith("/"):
         return False
+    # Leading '-' is a git option (e.g. --mirror), not a ref
+    if name.startswith("-"):
+        return False
     return bool(re.match(r"^[A-Za-z0-9._/\-]+$", name))
 
 

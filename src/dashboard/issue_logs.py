@@ -134,7 +134,7 @@ class IssueLogRing:
         with self._lock:
             matched = []
             for ts, msg, line_jid, ikey in self._lines:
-                if line_jid == jid or needle in msg or jid in msg:
+                if line_jid == jid or needle in msg:
                     row: Dict[str, str] = {
                         "timestamp": ts,
                         "message": msg,

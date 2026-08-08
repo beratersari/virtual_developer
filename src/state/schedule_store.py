@@ -112,11 +112,26 @@ class ScheduleStore:
             logger.error(f"Error loading schedule {schedule_id}: {e}")
             return None
 
-    def update(self, schedule_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
+    def update(
+        self,
+        schedule_id: str,
+        *,
+        expected_status: Optional[str] = None,
+        **fields: Any,
+    ) -> Optional[Dict[str, Any]]:
         with self._lock:
             rec = self.get(schedule_id)
             if not rec:
                 return None
+            if expected_status is not None and (rec.get("status") or "") != expected_status:
+                return rec
+            new_status = fields.get("status")
+            if (
+                new_status in ("dispatched", "error")
+                and (rec.get("status") or "") != "dispatching"
+                and expected_status is None
+            ):
+                return rec
             for key, value in fields.items():
                 if key == "schedule_id":
                     continue

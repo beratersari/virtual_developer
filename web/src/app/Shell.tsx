@@ -1,0 +1,121 @@
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Alert } from '../ui/Alert'
+import { useLive } from './live'
+
+const NAV = [
+  { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
+  { to: '/scheduled', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
+  { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
+  { to: '/settings', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
+] as const
+
+function IconJobs() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="2" y="3" width="12" height="3" rx="1" fill="currentColor" opacity="0.9" />
+      <rect x="2" y="8" width="12" height="2" rx="1" fill="currentColor" opacity="0.55" />
+      <rect x="2" y="12" width="8" height="2" rx="1" fill="currentColor" opacity="0.35" />
+    </svg>
+  )
+}
+function IconClock() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+function IconBoard() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="2" y="2.5" width="4" height="11" rx="1" fill="currentColor" opacity="0.9" />
+      <rect x="7" y="2.5" width="3" height="7" rx="1" fill="currentColor" opacity="0.55" />
+      <rect x="11" y="2.5" width="3" height="9" rx="1" fill="currentColor" opacity="0.35" />
+    </svg>
+  )
+}
+function IconGear() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M8 2.2v1.4M8 12.4v1.4M2.2 8h1.4M12.4 8h1.4M3.9 3.9l1 1M11.1 11.1l1 1M12.1 3.9l-1 1M4.9 11.1l-1 1"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+const ICONS = [IconJobs, IconClock, IconBoard, IconGear]
+
+export function Shell() {
+  const live = useLive()
+  const location = useLocation()
+  const queued = live.poll?.will_process_count ?? 0
+
+  return (
+    <div className="vd-app">
+      <aside className="vd-sidebar">
+        <div className="vd-brand">
+          <div className="vd-mark">VD</div>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold tracking-tight">Virtual Developer</div>
+            <div className="text-[11px] text-text-muted">v{live.meta?.version ?? '—'}</div>
+          </div>
+        </div>
+
+        <nav className="vd-nav" aria-label="Primary">
+          {NAV.map((item, i) => {
+            const Icon = ICONS[i]
+            const active = item.match(location.pathname)
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={active ? 'active' : undefined}
+                aria-current={active ? 'page' : undefined}
+              >
+                <Icon />
+                <span className="flex-1">{item.label}</span>
+                {item.to === '/poll' && queued > 0 && (
+                  <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]">
+                    {queued}
+                  </span>
+                )}
+              </NavLink>
+            )
+          })}
+        </nav>
+
+        <div className="mt-3 hidden items-center gap-2 px-2 text-xs md:flex">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              live.connected ? 'vd-pulse bg-live' : 'bg-warning'
+            }`}
+          />
+          <span className={live.connected ? 'text-success-text' : 'text-warning-text'}>
+            {live.connected ? 'Connected' : 'Reconnecting'}
+          </span>
+        </div>
+      </aside>
+
+      <main className="vd-main">
+        <div className="vd-main-inner space-y-5">
+          {live.error && <Alert>{live.error}</Alert>}
+          {live.poll?.error && (
+            <Alert tone="warning">
+              <span className="font-medium">Poller: </span>
+              {live.poll.error}
+            </Alert>
+          )}
+          <div key={location.pathname} className="vd-page">
+            <Outlet />
+          </div>
+        </div>
+      </main>
+    </div>
+  )
+}

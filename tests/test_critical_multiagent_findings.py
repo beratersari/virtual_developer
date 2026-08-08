@@ -16,7 +16,7 @@ import inspect
 import os
 import time
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -216,10 +216,6 @@ async def test_s3_cancel_before_job_create_must_not_leave_live_job(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL S3b: planning/execution early-return when git is None does not finish job row",
-)
 async def test_s3b_execution_early_return_when_git_none_must_finish_job(
     processor, state_manager
 ):
@@ -237,29 +233,15 @@ async def test_s3b_execution_early_return_when_git_none_must_finish_job(
     )
     state_manager.create_state("GHOST-2", "s", desc)
     state = state_manager.get_state("GHOST-2")
-    task = AgentTask(description="d", prompt="p", agent="a", issue_key="GHOST-2")
-    job_id = processor._begin_workflow_run(
-        state,
-        status=TaskStatus.EXECUTING,
-        task=task,
-        workflow_type="execution",
-        agent="a",
-        job_status="executing",
-    )
-    assert job_id is not None
-
-    # Simulate workflow body after begin (see processor planning/execution paths)
-    async def workflow_body_like_production():
-        git = await processor._prepare_git_workspace(state)
-        if git is None:
-            # Production returns here — does NOT call _finish_job_record
-            return
 
     with patch.object(
         processor, "_prepare_git_workspace", return_value=None
     ):
-        await workflow_body_like_production()
+        await processor._start_execution_workflow(state)
 
+    meta = state_manager.get_state("GHOST-2").metadata or {}
+    job_id = meta.get("current_job_id") or (meta.get("job_ids") or [None])[-1]
+    assert job_id is not None
     job = job_store_mod.job_store.get_job(job_id)
     assert job is not None
     assert job["status"] not in {"running", "planning", "executing", "pending"}, (
@@ -298,15 +280,10 @@ def test_p1_plan_start_emitted_every_poll_while_plan_ready(poller, state_manager
     r2 = poller.poll_board()
     keys1 = [i["key"] for i in r1]
     keys2 = [i["key"] for i in r2]
-    # Current (buggy) behaviour: both polls emit the start
     assert "PS-1" in keys1
-    assert "PS-1" in keys2
+    assert "PS-1" not in keys2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL P1: plan_ready+start label re-emitted every poll → double process_event",
-)
 def test_p1_plan_start_must_not_reemit_every_poll(poller, state_manager, monkeypatch):
     from src.config import settings
 
@@ -334,15 +311,12 @@ def test_p1_plan_start_must_not_reemit_every_poll(poller, state_manager, monkeyp
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL P1b: COMPLETED + To Do reprocesses without requeue_eligible",
-)
-async def test_p1b_completed_todo_must_require_requeue_or_real_reopen(
-    processor, state_manager
-):
-    """Second process_event after COMPLETED must not auto-rebuild on mere To Do."""
+def test_p1b_completed_still_todo_poller_does_not_reemit(poller, state_manager):
+    """Poller must not fire COMPLETED every cycle while the ticket stays To Do.
+
+    Processor trusts poller reopen events (so old COMPLETED tickets can still
+    leave→return To Do). The firehose guard belongs here, not in process_event.
+    """
     state_manager.create_state("PS-3", "s", "d")
     state_manager.update_state(
         "PS-3",
@@ -350,30 +324,18 @@ async def test_p1b_completed_todo_must_require_requeue_or_real_reopen(
         completed_at=datetime.now(),
         metadata={"requeue_eligible": False},
     )
-    event = {
-        "webhookEvent": "jira:issue_updated",
-        "issue": {
+    poller._status_before_poll = {"PS-3": "to do"}
+    issues = [
+        {
             "key": "PS-3",
             "fields": {
                 "summary": "s",
-                "description": "d",
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
                 "labels": ["bot", "ai-start-work"],
             },
-        },
-    }
-    with patch.object(
-        processor, "_handle_issue_created", new=AsyncMock(return_value=(True, "ok"))
-    ) as h:
-        result = await processor._handle_issue_updated(event)
-    # Correct: COMPLETED without reopen signal should not reset and re-run
-    if isinstance(result, tuple):
-        ok, msg = result
-    else:
-        ok, msg = result, ""
-    assert ok is False or h.await_count == 0, (
-        f"COMPLETED must not reprocess without reopen; result={result!r} calls={h.await_count}"
-    )
+        }
+    ]
+    assert poller.check_status_changes(issues) == []
 
 
 # ===========================================================================
@@ -381,13 +343,6 @@ async def test_p1b_completed_todo_must_require_requeue_or_real_reopen(
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CRITICAL P2: Selected for Development is category-new but not in "
-        "_is_todo_status_name; hop SFD→To Do reprocesses COMPLETED"
-    ),
-)
 def test_p2_completed_sfd_to_todo_must_not_reprocess_as_reopen(poller, state_manager):
     """Both SFD and To Do are backlog/category-new — not a real leave→return."""
     state_manager.create_state("SFD-HOP", "done", "")
@@ -415,13 +370,13 @@ def test_p2_completed_sfd_to_todo_must_not_reprocess_as_reopen(poller, state_man
 def test_p2_error_sfd_to_todo_with_requeue_reprocesses_today(poller, state_manager):
     """Current behaviour document: status_changed_into_todo fires on any name change."""
     state_manager.create_state("SFD-ERR", "err", "body")
+    fps = poller.text_fingerprints_from_state("err", "body")
     state_manager.update_state(
         "SFD-ERR",
         status=TaskStatus.ERROR,
         metadata={
             "requeue_eligible": True,
-            "last_intake_fingerprint": "x",
-            "last_intake_fingerprint_light": "x",
+            **fps,
         },
     )
     poller._status_before_poll = {"SFD-ERR": "selected for development"}
@@ -436,8 +391,8 @@ def test_p2_error_sfd_to_todo_with_requeue_reprocesses_today(poller, state_manag
         }
     ]
     out = poller.check_status_changes(issues)
-    # Documents current (over-eager) reprocess
-    assert [i["key"] for i in out] == ["SFD-ERR"]
+    # Backlog column hop is not a real leave→return
+    assert out == []
 
 
 # ===========================================================================
@@ -454,15 +409,10 @@ def test_p3_orphan_recovery_sets_requeue_without_fingerprints(processor, state_m
     st = state_manager.get_state("ORPH-1")
     assert st.status == TaskStatus.ERROR
     assert st.metadata.get("requeue_eligible") is True
-    # Bug: no fingerprints stored
-    assert st.metadata.get("last_intake_fingerprint") is None
-    assert st.metadata.get("last_intake_fingerprint_light") is None
+    assert st.metadata.get("last_intake_fingerprint")
+    assert st.metadata.get("last_intake_fingerprint_light")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL P3: missing fingerprint returns True every light poll (not once)",
-)
 def test_p3_missing_fingerprint_must_not_requeue_every_poll(poller, state_manager):
     state_manager.create_state("ORPH-2", "s", "body")
     state_manager.update_state(
@@ -495,7 +445,7 @@ def test_p3_error_text_changed_true_when_fingerprint_missing(poller):
         "key": "X",
         "fields": {"summary": "s"},  # no description → light
     }
-    assert poller._error_text_changed_for_reprocess(issue, {}) is True
+    assert poller._error_text_changed_for_reprocess(issue, {}) is False
 
 
 # ===========================================================================
@@ -503,13 +453,6 @@ def test_p3_error_text_changed_true_when_fingerprint_missing(poller):
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CRITICAL P4: plan_start nested under should_process (bot/assignee); "
-        "ai-start-work alone never dispatches"
-    ),
-)
 def test_p4_plan_start_with_only_start_label_must_dispatch(
     poller, state_manager, monkeypatch
 ):
@@ -594,10 +537,6 @@ def test_d1_dashboard_app_has_no_auth_middleware():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL D2: empty api_token falls back to settings token sent to attacker host",
-)
 def test_d2_jira_probe_must_not_send_stored_token_to_untrusted_host(monkeypatch):
     from src.config import settings
     from src.jira_connection import probe_jira_connection
@@ -668,10 +607,12 @@ def test_d2_jira_probe_currently_exfils_to_attacker_host(monkeypatch):
             return m
 
     with patch("src.jira_connection.httpx.Client", FakeClient):
-        probe_jira_connection(host="https://attacker.example", api_token="")
+        out = probe_jira_connection(host="https://attacker.example", api_token="")
 
-    assert "attacker.example" in captured.get("base_url", "")
-    assert "REAL-SECRET-TOKEN" in captured.get("headers", {}).get("Authorization", "")
+    assert out.get("ok") is False
+    assert "REAL-SECRET-TOKEN" not in (captured.get("headers") or {}).get(
+        "Authorization", ""
+    )
 
 
 def test_d2b_gitlab_probe_currently_exfils_global_pat_to_attacker(monkeypatch):
@@ -703,15 +644,12 @@ def test_d2b_gitlab_probe_currently_exfils_global_pat_to_attacker(monkeypatch):
             return m
 
     with patch("src.gitlab_connection.httpx.Client", FakeClient):
-        probe_gitlab_connection("attacker.example", pat="")
+        out = probe_gitlab_connection("attacker.example", pat="")
 
-    assert captured.get("headers", {}).get("PRIVATE-TOKEN") == "GLOBAL-PAT-SECRET"
+    assert out.get("ok") is False
+    assert captured.get("headers", {}).get("PRIVATE-TOKEN") != "GLOBAL-PAT-SECRET"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL D2b: GitLab probe falls back to global PAT for attacker host",
-)
 def test_d2b_gitlab_probe_must_not_send_global_pat_to_untrusted_host(monkeypatch):
     from src.config import settings
     from src.gitlab_connection import probe_gitlab_connection
@@ -821,10 +759,6 @@ def test_d5_unauthenticated_cancel_endpoint_no_401(processor, state_manager, tmp
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL G1: purge_stale_temp_dirs does not protect live/in-use clones",
-)
 def test_g1_purge_must_not_delete_registered_live_clone(tmp_path):
     from src.git_manager import purge_stale_temp_dirs
 
@@ -887,10 +821,6 @@ def test_g2_agent_env_includes_home():
     assert "JIRA_API_TOKEN" not in env or env.get("JIRA_API_TOKEN") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CRITICAL G2: agent env should use synthetic HOME / disable credential.helper",
-)
 def test_g2_agent_env_must_isolate_home_and_disable_credential_helper():
     from src.orchestrator.agent_runner import _agent_subprocess_env
 
@@ -947,13 +877,6 @@ def test_g4_resolve_work_branch_uses_shared_source_as_is():
     assert name_a == name_b, "Concurrent issues with same Source share one remote branch"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CRITICAL G4: no concurrency guard for shared (repo, source_branch); "
-        "parallel jobs interleave commits"
-    ),
-)
 def test_g4_must_refuse_or_serialize_duplicate_source_branch_jobs(processor):
     """Correct: refuse second concurrent job with same repo+source or serialize."""
     # Product currently has no lock key on (repository_url, source_branch)

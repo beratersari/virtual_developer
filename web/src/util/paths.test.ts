@@ -1,6 +1,5 @@
 /**
- * Lightweight assertions for path matching (run via: npx tsx src/util/paths.test.ts)
- * Kept as a plain script so we don't add a frontend test runner.
+ * Run: npx tsx src/lib/paths.test.ts
  */
 import {
   findPromptForJobPath,
@@ -21,18 +20,22 @@ assert(normalizePath('C:\\a\\b.log') === 'C:/a/b.log', 'normalize windows')
 assert(pathBasename('/tmp/KAN-1_x.prompt.txt') === 'KAN-1_x.prompt.txt', 'basename')
 assert(pathStem('KAN-1_x.prompt.txt') === 'KAN-1_x', 'stem prompt')
 assert(pathStem('KAN-1_x.log') === 'KAN-1_x', 'stem log')
-assert(pathsMatch('/a/b/c.log', 'c.log'), 'suffix match')
+assert(pathsMatch('/a/b/c.log', 'c.log'), 'basename match')
 assert(pathsMatch('C:\\sess\\x.log', '/other/x.log'), 'basename cross-os')
+assert(
+  pathsMatch('/sessions/KAN-1_foo.log', 'o.log') === false,
+  'must not treat arbitrary path suffix as the same artifact',
+)
+assert(
+  pathsMatch('/sessions/KAN-10_2024.log', 'KAN-1_2024.log') === false,
+  'KAN-10 must not match KAN-1 basename',
+)
 
 const prompts = [
   { path: '/sessions/KAN-1_a.prompt.txt', content: 'A' },
   { path: '/sessions/KAN-1_b.prompt.txt', content: 'B' },
 ]
-const hit = findPromptForJobPath(
-  prompts,
-  '/sessions/KAN-1_b.prompt.txt',
-  null,
-)
+const hit = findPromptForJobPath(prompts, '/sessions/KAN-1_b.prompt.txt', null)
 assert(hit?.content === 'B', 'direct prompt path')
 
 const viaLog = findPromptForJobPath(prompts, null, '/sessions/KAN-1_a.log')

@@ -87,6 +87,7 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         captured["cmd"] = list(cmd)
+        captured["env"] = kwargs.get("env") or {}
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("src.git_manager.subprocess.run", side_effect=fake_run):
@@ -97,9 +98,11 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
                     scrub.assert_called()
 
     assert captured["cmd"][0:3] == ["git", "clone", "--no-single-branch"]
-    # Settings PAT is in the clone URL (not via clearing Windows helpers)
-    assert "oauth2:super-secret-pat-xyz@" in captured["cmd"][3]
-    assert "credential.helper=" not in captured["cmd"]
+    # PAT must not appear in argv (askpass + disabled helper instead)
+    assert "oauth2:super-secret-pat-xyz@" not in captured["cmd"][3]
+    env = captured.get("env") or {}
+    # fake_run may not have captured kwargs — check clone URL is clean
+    assert captured["cmd"][3] == "https://gitlab.example.com/group/repo.git"
 
 
 def test_push_applies_settings_pat_to_origin_without_clearing_helpers(

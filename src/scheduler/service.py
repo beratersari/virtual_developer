@@ -595,6 +595,7 @@ def cancel_scheduled_job(
     schedule_id: str,
     *,
     store: Optional[ScheduleStore] = None,
+    processor: Any = None,
 ) -> Dict[str, Any]:
     """Cancel a pending schedule. Does not delete the Jira issue.
 
@@ -614,7 +615,41 @@ def cancel_scheduled_job(
         }
     if st == "cancelled":
         return {"ok": True, "schedule": rec, "message": "Already cancelled"}
+    issue_key = (rec.get("issue_key") or "").strip().upper()
+    was_dispatching = st == "dispatching"
     updated = ss.update(schedule_id, status="cancelled", error_message=None)
+    task = _INFLIGHT_DISPATCHES.pop(schedule_id, None)
+    if task is not None and not task.done():
+        try:
+            task.cancel()
+        except Exception:
+            pass
+    # Only abort live agent work when this schedule was actually running.
+    # Cancelling a future "scheduled" row must not cancel unrelated issue jobs.
+    if (
+        was_dispatching
+        and processor is not None
+        and issue_key
+        and hasattr(processor, "cancel_job")
+    ):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                processor.cancel_job(
+                    issue_key, reason="Schedule cancelled from dashboard"
+                )
+            )
+        except RuntimeError:
+            try:
+                asyncio.run(
+                    processor.cancel_job(
+                        issue_key, reason="Schedule cancelled from dashboard"
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Schedule cancel could not abort job {issue_key}: {e}")
+        except Exception as e:
+            logger.warning(f"Schedule cancel could not abort job {issue_key}: {e}")
     return {"ok": True, "schedule": updated, "message": "Schedule cancelled"}
 
 
@@ -742,7 +777,7 @@ def _finish_schedule_dispatch(
     if status == "dispatched":
         fields["dispatched_at"] = datetime.now().isoformat(timespec="seconds")
         fields["error_message"] = None
-    ss.update(schedule_id, **fields)
+    ss.update(schedule_id, expected_status="dispatching", **fields)
 
 
 async def _dispatch_claimed_schedule(
