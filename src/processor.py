@@ -753,7 +753,14 @@ class JobProcessor:
     def _repo_and_work_branch(
         self, issue_key: str, git: Any = None
     ) -> tuple[str, str]:
-        """Best-effort (repository_url, work_branch) for session binding."""
+        """Best-effort (repository_url, work_branch) — tests / logging."""
+        repo, branch, _tgt = self._session_bind_key(issue_key, git)
+        return repo, branch
+
+    def _session_bind_key(
+        self, issue_key: str, git: Any = None
+    ) -> tuple[str, str, str]:
+        """(repository_url, work_branch, target_branch) for session + clone bind."""
         gm = git if git is not None else self._git_for(issue_key)
         st = self.state_manager.get_state(issue_key)
         meta = dict((st.metadata if st else None) or {})
@@ -763,29 +770,32 @@ class JobProcessor:
 
         repo = ""
         branch = ""
+        target = ""
         if gm is not None:
             repo = _s(getattr(gm, "remote_url", None))
             branch = _s(getattr(gm, "work_branch", None))
+            target = _s(getattr(gm, "target_branch", None))
         repo = repo or _s(meta.get("repository_url"))
         branch = (
             branch
             or _s(meta.get("feature_branch"))
             or _s(meta.get("source_branch"))
         )
-        return repo, branch
+        target = target or _s(meta.get("target_branch"))
+        return repo, branch, target
 
     def _attach_bound_opencode_session(
         self, issue_key: str, task: AgentTask, git: Any = None
     ) -> Optional[str]:
-        """Reuse a stored OpenCode session for this repo + work branch (CLI and serve)."""
+        """Reuse a stored OpenCode session for this repo + work + target."""
         if getattr(task, "session_id", None):
             return task.session_id
-        repo, branch = self._repo_and_work_branch(issue_key, git)
-        if not repo or not branch:
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        if not repo or not branch or not target:
             return None
         import src.state.session_bind_store as session_binds
 
-        rec = session_binds.session_bind_store.get(repo, branch)
+        rec = session_binds.session_bind_store.get(repo, branch, target)
         sid = (rec or {}).get("session_id") if rec else None
         if not sid:
             return None
@@ -828,7 +838,8 @@ class JobProcessor:
         except Exception:
             pass
         logger.info(
-            f"{issue_key}: resuming OpenCode session {sid} for {repo}@{branch}"
+            f"{issue_key}: resuming OpenCode session {sid} for "
+            f"{repo}@{branch}→{target}"
         )
         return sid
 
@@ -836,19 +847,29 @@ class JobProcessor:
         sid = (session_id or "").strip()
         if not sid:
             return
-        repo, branch = self._repo_and_work_branch(issue_key)
-        if not repo or not branch:
+        git = self._git_for(issue_key)
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        if not repo or not branch or not target:
             return
         import src.state.session_bind_store as session_binds
 
         raw_jid = self._active_jobs.get(issue_key)
         job_id = raw_jid if isinstance(raw_jid, str) else None
+        wd = None
+        if git is not None and hasattr(git, "get_working_directory"):
+            try:
+                got = git.get_working_directory()
+                wd = str(got) if got else None
+            except Exception:
+                wd = None
         session_binds.session_bind_store.upsert(
             repository_url=repo,
             branch=branch,
+            target_branch=target,
             session_id=sid,
             issue_key=issue_key,
             job_id=job_id,
+            working_directory=wd,
         )
 
     def _link_job_session_paths(

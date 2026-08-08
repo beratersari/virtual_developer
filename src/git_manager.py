@@ -1,19 +1,20 @@
 """Git manager for JIRA Virtual Developer.
 
 Handles branch creation, commits, and git operations within temp working directories.
-Each JIRA issue gets its own isolated temp folder cloned from the repository URL
-declared on the issue (see ``src.issue_git_spec``).
+Clones are keyed by repository + work branch + target so later jobs with the
+same Source **and** Target reuse the folder and continue the OpenCode session
+(see ``src.issue_git_spec``). A different Target gets a new clone.
 """
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from urllib.parse import quote, urlparse, urlunparse
 
 from src.config import settings, set_current_temp_dir
@@ -131,11 +132,22 @@ class GitManager:
             f"(MR will be source → target; work branch created from target)"
         )
 
+        # Resolve work branch before naming the folder so the same
+        # repo + Source (+ isolated feature/KEY) always land in one clone.
+        self.work_branch = self._resolve_work_branch_name(self.issue_key)
         self.temp_dir = self._create_temp_directory()
-        logger.info(f"Temp working directory created: {self.temp_dir}")
+        logger.info(f"Temp working directory: {self.temp_dir}")
 
-        logger.info("Starting repository clone...")
-        self._clone_into_temp()
+        if self._existing_clone_usable():
+            logger.info(
+                f"Reusing existing clone for {self.issue_key} "
+                f"({self.remote_name} @ {self.work_branch})"
+            )
+            self._refresh_existing_clone()
+        else:
+            self._reset_temp_dir_for_clone()
+            logger.info("Starting repository clone...")
+            self._clone_into_temp()
         logger.info(f"Setup complete for issue: {self.issue_key}")
     def _extract_remote_name(self, url: str) -> str:
         """Extract a short name from remote URL."""
@@ -145,40 +157,115 @@ class GitManager:
         logger.debug(f"Extracted remote name '{remote_name}' from URL: {url}")
         return remote_name
 
+    @staticmethod
+    def _safe_fs_token(token: str, *, max_len: int = 80) -> str:
+        cleaned = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in (token or "unknown")
+        )
+        cleaned = cleaned.strip("._-") or "unknown"
+        return cleaned[:max_len]
+
+    def _workspace_folder_name(self) -> str:
+        """Stable folder for this repo + work branch + target (OpenCode dir)."""
+        from src.state.session_bind_store import normalize_branch, normalize_repo_key
+
+        work = (
+            (self.work_branch or "").strip()
+            or self._resolve_work_branch_name(self.issue_key)
+        )
+        repo_key = normalize_repo_key(self.remote_url or "")
+        branch = normalize_branch(work)
+        target = normalize_branch(self.target_branch or "")
+        digest = hashlib.sha256(
+            f"{repo_key}\0{branch}\0{target}".encode("utf-8")
+        ).hexdigest()[:12]
+        remote = self._safe_fs_token(self.remote_name or "repo", max_len=32)
+        branch_tok = self._safe_fs_token(branch.replace("/", "-"), max_len=40)
+        target_tok = self._safe_fs_token(target.replace("/", "-"), max_len=24)
+        return f"{remote}_{branch_tok}_{target_tok}_{digest}"
+
     def _create_temp_directory(self) -> Path:
-        """Create temp directory with format: {remote_name}_{jira_issue_id}_{timestamp}"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        """Return the stable temp clone dir for this repo + work + target.
 
-        def _safe(token: str) -> str:
-            cleaned = "".join(
-                c if c.isalnum() or c in "._-" else "_" for c in (token or "unknown")
-            )
-            cleaned = cleaned.strip("._-") or "unknown"
-            return cleaned[:80]
-
-        folder_name = f"{_safe(self.remote_name)}_{_safe(self.issue_key)}_{timestamp}"
+        Reuses the folder when it already exists so OpenCode ``--session`` can
+        continue (same ``--dir``). Isolated ``feature/{KEY}`` work branches still
+        get their own directory. Same Source with a **different Target** gets a
+        new folder (different MR base / branch point).
+        """
+        folder_name = self._workspace_folder_name()
 
         base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
         base_temp.mkdir(parents=True, exist_ok=True)
         logger.debug(f"Base temp directory: {base_temp}")
 
         temp_path = base_temp / folder_name
-        # Ensure path stays under base_temp (no traversal via issue_key)
+        # Ensure path stays under base_temp (no traversal via issue_key/branch)
         try:
             temp_path.resolve().relative_to(base_temp)
         except ValueError as e:
             raise RuntimeError(f"Unsafe temp path rejected: {temp_path}") from e
 
-        counter = 1
-        original_path = temp_path
-        while temp_path.exists():
-            temp_path = Path(str(original_path) + f"_{counter}")
-            counter += 1
-            logger.debug(f"Path already exists, trying: {temp_path}")
+        if temp_path.exists():
+            logger.info(f"Reusing temp directory: {temp_path}")
+            return temp_path
 
         temp_path.mkdir(parents=True)
         logger.info(f"Created temp directory: {temp_path}")
         return temp_path
+
+    def _existing_clone_usable(self) -> bool:
+        """True when temp_dir is a git checkout of this remote."""
+        if not self.temp_dir or not self.temp_dir.is_dir():
+            return False
+        git_dir = self.temp_dir / ".git"
+        if not git_dir.exists():
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=self.temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._git_command_timeout(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+        from src.state.session_bind_store import normalize_repo_key
+
+        origin = (result.stdout or "").strip()
+        return bool(origin) and normalize_repo_key(origin) == normalize_repo_key(
+            self.remote_url or ""
+        )
+
+    def _reset_temp_dir_for_clone(self) -> None:
+        """Make temp_dir an empty folder ready for ``git clone``."""
+        if not self.temp_dir:
+            return
+        if self.temp_dir.exists():
+            try:
+                nonempty = any(self.temp_dir.iterdir())
+            except OSError:
+                nonempty = True
+            if nonempty:
+                shutil.rmtree(self.temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _refresh_existing_clone(self) -> None:
+        """Fetch remotes in a reused clone (work branch checkout happens later)."""
+        if not self.temp_dir:
+            raise RuntimeError("Temp directory not initialized")
+        self._assert_remote_host_allowed(self.remote_url or "")
+        issue_tag = self.issue_key or "(unknown)"
+        logger.info(f"Refreshing reused clone for {issue_tag}: {self.temp_dir}")
+        self._with_auth_remote()
+        try:
+            self._run_git(["fetch", "origin", "--prune"], check=False, auth=True)
+        finally:
+            self._scrub_remote_credentials()
+        self._update_submodules(reason="after reuse fetch")
+        self._materialize_job_remote_refs()
 
     def _submodule_auth_env(self) -> Dict[str, str]:
         """Env that rewrites https://host/ → oauth2:PAT@host for nested submodule clones.
@@ -1680,6 +1767,16 @@ class GitManager:
         if not self.temp_dir or not self.temp_dir.exists():
             return True
 
+        try:
+            resolved = self.temp_dir.resolve()
+        except OSError:
+            resolved = None
+        if resolved is not None and resolved in session_bound_workspace_paths():
+            logger.info(
+                f"Keeping session-bound temp directory: {self.temp_dir}"
+            )
+            return True
+
         policy = (settings.temp_cleanup_policy or "age").strip().lower()
 
         if policy == "never":
@@ -1722,6 +1819,16 @@ class GitManager:
             return False
 
 
+def session_bound_workspace_paths() -> Set[Path]:
+    """Clone dirs referenced by OpenCode session binds (must survive purge)."""
+    try:
+        from src.state.session_bind_store import session_bind_store
+
+        return set(session_bind_store.working_directories())
+    except Exception:
+        return set()
+
+
 def purge_stale_temp_dirs(
     *,
     max_age_days: Optional[float] = None,
@@ -1733,6 +1840,7 @@ def purge_stale_temp_dirs(
     Returns the number of directories removed. Safe to call when the base is missing.
     Used on daemon start and periodically so ``age`` policy actually frees disk.
     ``protect_paths`` are live clone dirs that must not be removed.
+    Session-bound workspaces are always protected.
     """
     age = max_age_days
     if age is None:
@@ -1747,7 +1855,7 @@ def purge_stale_temp_dirs(
         return 0
 
     protected: set = set()
-    for p in protect_paths or ():
+    for p in list(protect_paths or ()) + list(session_bound_workspace_paths()):
         try:
             protected.add(Path(p).resolve())
         except (OSError, TypeError):

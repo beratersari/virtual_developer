@@ -36,7 +36,7 @@ export function SessionsPage() {
       <PageHeader
         kicker="OpenCode"
         title="Sessions"
-        description="One session per git repository + work branch. The next job on that branch continues the same OpenCode session (CLI --session or serve). Reset starts cold."
+        description="One session per repository + Source + Target. Same Source with a different Target starts a new clone and a new OpenCode session. Reset starts cold."
       />
       {error && <p className="text-sm text-danger-text">{error}</p>}
       <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
@@ -46,12 +46,20 @@ export function SessionsPage() {
               <div className="font-mono text-xs text-text-muted">
                 {s.repository_key || s.repository_url}
               </div>
-              <div className="font-mono text-sm font-semibold text-text">{s.branch}</div>
+              <div className="font-mono text-sm font-semibold text-text">
+                {s.branch}
+                {s.target_branch ? ` → ${s.target_branch}` : ''}
+              </div>
               <div className="font-mono text-[11px] text-text-secondary">
                 {s.session_id}
                 {s.issue_key ? ` · last ${s.issue_key}` : ''}
                 {s.updated_at ? ` · ${s.updated_at}` : ''}
               </div>
+              {s.working_directory && (
+                <div className="truncate font-mono text-[11px] text-text-muted">
+                  {s.working_directory}
+                </div>
+              )}
             </div>
             <button
               type="button"
@@ -71,7 +79,7 @@ export function SessionsPage() {
         title="Reset this OpenCode session?"
         body={
           target
-            ? `Next job on ${target.branch} (${target.repository_key || target.repository_url}) starts a new session.\n\nDoes not delete OpenCode’s own history — only our resume pointer.`
+            ? `Next job on ${target.branch}${target.target_branch ? ` → ${target.target_branch}` : ''} (${target.repository_key || target.repository_url}) starts a new session.\n\nDoes not delete OpenCode’s own history — only our resume pointer.`
             : 'Next job on this branch starts a new session.'
         }
         confirmLabel="Reset session"

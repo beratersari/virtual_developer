@@ -69,9 +69,11 @@ class JiraAgentDaemon:
 
         # Age-based temp clone sweep (default: delete dirs older than 24h)
         try:
-            from src.git_manager import purge_stale_temp_dirs
+            from src.git_manager import purge_stale_temp_dirs, session_bound_workspace_paths
 
-            purged = purge_stale_temp_dirs()
+            purged = purge_stale_temp_dirs(
+                protect_paths=session_bound_workspace_paths()
+            )
             if purged:
                 logger.info(f"Startup temp purge removed {purged} stale clone(s)")
         except Exception as e:
@@ -343,6 +345,12 @@ class JiraAgentDaemon:
                                 protect.add(td)
                     except Exception:
                         protect = set()
+                    try:
+                        from src.git_manager import session_bound_workspace_paths
+
+                        protect.update(session_bound_workspace_paths())
+                    except Exception:
+                        pass
                     n = purge_stale_temp_dirs(protect_paths=protect)
                     if n:
                         logger.info(f"Periodic temp purge removed {n} stale clone(s)")

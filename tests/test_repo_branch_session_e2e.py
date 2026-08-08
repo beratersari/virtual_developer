@@ -90,13 +90,14 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
         }
 
     monkeypatch.setattr(runner, "run_agent", fake_run)
-    monkeypatch.setattr(
-        "src.opencode_sessions.get_session_directory",
-        lambda sid, db_path=None: str(tmp_path),
+    from tests.test_opencode_sessions import _make_session_db
+
+    session_db = _make_session_db(
+        tmp_path / "opencode.db",
+        [{"id": "ses_new_1", "directory": str(tmp_path), "title": "KAN-A: x"}],
     )
     monkeypatch.setattr(
-        "src.opencode_sessions.session_matches_workdir",
-        lambda sid, wd, db_path=None: True,
+        "src.opencode_sessions._default_db_path", lambda: session_db
     )
 
     async def fake_prepare(state):
@@ -130,10 +131,13 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     await run_issue("KAN-A")
     assert seen[0]["session_id"] is None
     first_sid = "ses_new_1"
-    bound = binds.get(repo, branch)
+    bound = binds.get(repo, branch, "develop")
     assert bound is not None
     assert bound["session_id"] == first_sid
     assert bound["issue_key"] == "KAN-A"
+    assert bound.get("working_directory")
+    # Second issue continues because both jobs use the same clone folder
+    # (stable temp dir) and OpenCode still lists ses_new_1 under that dir.
 
     # CLI argv would include --session for a real run_agent
     cmd = runner._build_command(
@@ -152,7 +156,7 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     await run_issue("KAN-B")
     assert seen[1]["issue_key"] == "KAN-B"
     assert seen[1]["session_id"] == first_sid
-    assert binds.get(repo, branch)["issue_key"] == "KAN-B"
+    assert binds.get(repo, branch, "develop")["issue_key"] == "KAN-B"
 
     app = create_dashboard_app(processor=proc, state_manager=sm)
     client = TestClient(app)
@@ -168,7 +172,7 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     assert reset.json()["ok"] is True
     empty = client.get("/api/opencode-sessions").json()
     assert empty["total"] == 0
-    assert binds.get(repo, branch) is None
+    assert binds.get(repo, branch, "develop") is None
 
     gone = client.delete(f"/api/opencode-sessions/{bind_id}")
     assert gone.status_code == 404
@@ -176,7 +180,7 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     await run_issue("KAN-C")
     assert seen[2]["issue_key"] == "KAN-C"
     assert seen[2]["session_id"] is None
-    rebound = binds.get(repo, branch)
+    rebound = binds.get(repo, branch, "develop")
     assert rebound is not None
     assert rebound["session_id"] == "ses_new_3"
     assert rebound["session_id"] != first_sid

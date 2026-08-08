@@ -218,15 +218,17 @@ class ModelsResponse(BaseModel):
 
 
 class OpencodeSessionBind(BaseModel):
-    """One persisted OpenCode session keyed by repository + work branch."""
+    """One persisted OpenCode session keyed by repository + work + target."""
 
     bind_id: str
     repository_url: str = ""
     repository_key: str = ""
     branch: str = ""
+    target_branch: str = ""
     session_id: str = ""
     issue_key: str = ""
     job_id: Optional[str] = None
+    working_directory: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
