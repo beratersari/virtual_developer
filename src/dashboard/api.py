@@ -285,7 +285,11 @@ def create_dashboard_app(
 
     @app.post("/api/schedules/{schedule_id}/cancel")
     def schedules_cancel(schedule_id: str) -> dict:
-        result = cancel_scheduled_job(schedule_id, store=schedule_store)
+        result = cancel_scheduled_job(
+            schedule_id,
+            store=schedule_store,
+            processor=app.state.processor,
+        )
         if not result.get("ok"):
             err = result.get("error") or "Cancel failed"
             if "No schedule" in err:

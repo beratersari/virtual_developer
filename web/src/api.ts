@@ -174,17 +174,6 @@ export async function cancelTask(issueKey: string): Promise<{ ok: boolean; messa
   return body
 }
 
-export async function startTask(issueKey: string): Promise<{ ok: boolean; message?: string }> {
-  const res = await fetch(`/api/tasks/${encodeURIComponent(issueKey)}/start`, {
-    method: 'POST',
-  })
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    throw new Error(formatApiError(body?.detail, `Start failed: ${res.status}`))
-  }
-  return body
-}
-
 export type GitlabConnectionTestResult = {
   ok: boolean
   host?: string

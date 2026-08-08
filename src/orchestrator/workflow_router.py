@@ -25,7 +25,6 @@ class WorkflowRouter:
         "design pattern",
         "best practice",
         "how to",
-        "approach",
     ]
 
     # Words that signal real implementation work (must not route to oracle-only)

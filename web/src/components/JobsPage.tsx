@@ -10,7 +10,7 @@ import { JobsTable } from './JobsTable'
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
   { id: 'live', label: 'Live' },
-  { id: 'active', label: 'Planned' },
+  { id: 'active', label: 'Active' },
   { id: 'error', label: 'Error' },
   { id: 'completed', label: 'Completed' },
   { id: 'cancelled', label: 'Cancelled' },

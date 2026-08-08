@@ -255,7 +255,7 @@ export function JobDetail({
               title={`Cancel in-flight work for issue ${job?.issue_key}`}
               onClick={onCancel}
             >
-              {cancelling ? 'Cancelling…' : 'Cancel job'}
+              {cancelling ? 'Cancelling…' : 'Cancel issue work'}
             </button>
           )}
           {job?.issue_key && (

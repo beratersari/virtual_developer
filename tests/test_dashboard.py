@@ -57,6 +57,7 @@ def test_settings_view_hides_secrets(monkeypatch):
     monkeypatch.setattr(settings, "jira_api_token", "super-secret")
     monkeypatch.setattr(settings, "gitlab_pat", "pat-secret")
     monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "gitlab.com")
     view = build_settings_view()
     dumped = view.model_dump()
@@ -266,7 +267,7 @@ def test_task_detail_without_local_state(tmp_path):
         ],
         interval_seconds=30,
     )
-    with patch("src.dashboard.service.poll_snapshot_store", store):
+    with patch("src.dashboard.snapshot.poll_snapshot_store", store):
         with patch(
             "src.dashboard.service._fetch_live_jira_fields",
             return_value={},

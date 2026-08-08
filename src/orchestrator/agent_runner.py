@@ -136,9 +136,14 @@ def _agent_subprocess_env(
                 continue
         env[key] = value
 
-    # Harden git so the agent cannot push with host credentials
+    # Harden git so the agent cannot push with host credentials.
+    # Do NOT rewrite HOME/USERPROFILE — OpenCode loads plugins from
+    # ~/.opencode, ~/.config/opencode, ~/.cache/opencode.
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_0"] = ""
     return env
 
 
@@ -572,17 +577,41 @@ class AgentRunner:
         )
         turn = None
         try:
-            turn = await orch.run(
-                prompt=task.prompt or "",
-                title=title,
-                agent=agent_name,
-                model=model,
-                session_id=task.session_id,
-                on_output=_on_out,
-                log_lines=log_lines,
+            turn = await asyncio.wait_for(
+                orch.run(
+                    prompt=task.prompt or "",
+                    title=title,
+                    agent=agent_name,
+                    model=model,
+                    session_id=task.session_id,
+                    on_output=_on_out,
+                    log_lines=log_lines,
+                ),
+                timeout=float(timeout_seconds),
             )
             if turn.session_id:
                 serve_handle["session_id"] = turn.session_id
+        except asyncio.TimeoutError:
+            try:
+                sid = serve_handle.get("session_id")
+                if sid:
+                    await client.abort(sid)
+            except Exception:
+                pass
+            result = {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "\n".join(log_lines),
+                "stderr": f"[serve] timed out after {timeout_seconds}s",
+                "session_file": str(session_file),
+                "opencode_session_id": serve_handle.get("session_id"),
+                "progress": 0,
+                "mode": "serve",
+                "timed_out": True,
+            }
+            if on_complete:
+                on_complete(result)
+            return result
         finally:
             self._running_tasks.pop(task.task_id, None)
             try:
@@ -663,10 +692,9 @@ class AgentRunner:
         if match:
             return _clamp(int(match.group(1)))
 
-        # Pattern 2: Progress bar blocks
-        # Count filled vs empty blocks
+        # Pattern 2: Progress bar blocks (do not count prose spaces as empty cells)
         filled_blocks = line.count('█') + line.count('▓') + line.count('■')
-        empty_blocks = line.count('░') + line.count('▒') + line.count(' ')
+        empty_blocks = line.count('░') + line.count('▒')
         total_blocks = filled_blocks + empty_blocks
         if total_blocks >= 5 and filled_blocks > 0:
             return _clamp(int((filled_blocks / total_blocks) * 100))

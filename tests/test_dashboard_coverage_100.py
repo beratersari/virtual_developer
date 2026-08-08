@@ -455,19 +455,10 @@ def test_build_task_detail_without_state_jira_and_poll(tmp_path):
         ],
         interval_seconds=10,
     )
-    with patch("src.dashboard.service.poll_snapshot_store", store):
-        with patch(
-            "src.dashboard.service._fetch_live_jira_fields",
-            return_value={
-                "summary": "jira sum",
-                "description": "jira desc",
-                "jira_status": "Open",
-            },
-        ):
-            d = _build_task_detail_without_state("poll-7", processor=None)
+    with patch("src.dashboard.snapshot.poll_snapshot_store", store):
+        d = _build_task_detail_without_state("poll-7", processor=None)
     assert d["issue_key"] == "POLL-7"
-    assert d["summary"] == "jira sum"
-    assert d["description"] == "jira desc"
+    assert d["summary"] == "poll sum"
     assert d["can_start"] is False
 
 

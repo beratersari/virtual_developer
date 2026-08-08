@@ -407,18 +407,20 @@ async def test_poller_handler_ignored_while_stopping():
     daemon = JiraAgentDaemon()
     daemon.processor = MagicMock()
     daemon.processor.process_event = AsyncMock()
+    daemon.processor.seed_poller_requeue_markers = MagicMock(return_value=0)
     daemon._running = False
     daemon._stopping = True
+    daemon._main_loop = None
 
     with patch("src.daemon.JiraPoller") as Poller:
         poller = MagicMock()
         Poller.return_value = poller
         with patch("src.daemon.settings") as s:
             s.jira_board_id = "1"
-            with patch("asyncio.get_event_loop") as gel:
-                loop = MagicMock()
-                loop.run_in_executor = AsyncMock(return_value=None)
-                gel.return_value = loop
+            loop = MagicMock()
+            loop.run_in_executor = AsyncMock(return_value=None)
+            loop.is_closed = MagicMock(return_value=False)
+            with patch("asyncio.get_running_loop", return_value=loop):
                 await daemon._start_poller()
                 handler = loop.run_in_executor.call_args[0][2]
                 handler({"webhookEvent": "jira:issue_created", "issue": {"key": "X"}})

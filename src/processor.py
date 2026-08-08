@@ -109,6 +109,9 @@ class JobProcessor:
         self._active_jobs: Dict[str, str] = {}
         # Per-issue locks prevent double-start races under concurrent events
         self._issue_locks: Dict[str, asyncio.Lock] = {}
+        # Serialize concurrent jobs that share (repo, source_branch)
+        self._source_branch_locks: Dict[str, asyncio.Lock] = {}
+        self._source_branch_holders: Dict[str, str] = {}
         
         logger.info("Initializing JobProcessor")
         
@@ -562,6 +565,53 @@ class JobProcessor:
                 git.cleanup(success=success)
             except Exception as e:
                 logger.warning(f"Cleanup failed for {issue_key}: {e}")
+        self._release_source_branch(issue_key)
+        # Drop leftover legacy mirrors so oracle/comment cannot adopt a dead clone
+        if self.agent_runner is not None and ctx and ctx.get("runner") is self.agent_runner:
+            self.agent_runner = None
+        if self.git_manager is not None and git is self.git_manager:
+            self.git_manager = None
+
+    def _source_lock_key(self, repository_url: str, source_branch: str) -> str:
+        repo = (repository_url or "").strip().lower().rstrip("/")
+        branch = (source_branch or "").strip().lower()
+        return f"{repo}::{branch}"
+
+    def _claim_source_branch(self, issue_key: str, repository_url: str, source_branch: str) -> bool:
+        """Refuse a second concurrent job on the same (repo, source) pair."""
+        key = self._source_lock_key(repository_url, source_branch)
+        if not key.strip(":"):
+            return True
+        holder = self._source_branch_holders.get(key)
+        if holder and holder != issue_key:
+            logger.warning(
+                f"{issue_key}: source branch {source_branch} already in use by {holder}"
+            )
+            return False
+        self._source_branch_holders[key] = issue_key
+        return True
+
+    def _release_source_branch(self, issue_key: str) -> None:
+        dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
+        for k in dead:
+            self._source_branch_holders.pop(k, None)
+
+    def _finish_after_git_missing(self, issue_key: str) -> None:
+        """Close live job + context when git prep returns None after begin."""
+        st = self.state_manager.get_state(issue_key)
+        if st and st.status in self.IN_FLIGHT_STATUSES:
+            self._fail_issue(
+                issue_key,
+                "Git workspace was not prepared; aborting this run.",
+                suggestion="Check clone/template errors, then move back to To Do.",
+            )
+        elif not st or st.status not in self.TERMINAL_STATUSES:
+            self._finish_job_record(
+                issue_key,
+                status="error",
+                error_message="Git workspace was not prepared",
+            )
+        self._release_context(issue_key, success=False)
 
     def _is_live_processing(self, issue_key: str) -> bool:
         """True when this process holds an in-memory processing slot for the issue."""
@@ -1215,6 +1265,16 @@ class JobProcessor:
             # Allow poller to re-queue when the user returns the issue to To Do
             if status in (TaskStatus.CANCELLED, TaskStatus.ERROR):
                 meta_patch["requeue_eligible"] = True
+                if status == TaskStatus.ERROR:
+                    st0 = self.state_manager.get_state(issue_key)
+                    if st0 is not None:
+                        from src.jira.poller import JiraPoller
+
+                        meta_patch.update(
+                            JiraPoller.text_fingerprints_from_state(
+                                st0.issue_summary, st0.description
+                            )
+                        )
 
             update_kwargs: Dict[str, Any] = {
                 "status": status,
@@ -1800,6 +1860,7 @@ class JobProcessor:
                         f"Execution workflow failed: {e}",
                         suggestion="Check logs, then try /start-work again.",
                     )
+                    self._release_context(issue_key, success=False)
             else:
                 self.reporter.post_comment_response(
                     issue_key,
@@ -1946,6 +2007,20 @@ class JobProcessor:
                 },
             )
 
+        # Only serialize custom shared Source branches. Primary bases
+        # (develop/main/…) use isolated feature/{KEY} work branches.
+        src = (spec.source_branch or "").strip()
+        tgt = (spec.target_branch or "").strip()
+        if src and src != tgt and not GitManager._is_primary_base(src):
+            if not self._claim_source_branch(
+                issue_key, spec.repository_url, spec.source_branch
+            ):
+                raise GitSourceBranchError(
+                    f"{issue_key}: another job is already using source branch "
+                    f"`{spec.source_branch}` on this repository. Wait for it to "
+                    f"finish or use a distinct Source branch."
+                )
+
         git = GitManager(
             issue_key=issue_key,
             remote_url=spec.repository_url,
@@ -1962,6 +2037,7 @@ class JobProcessor:
                 git.cleanup(success=False)
             except Exception as e:
                 logger.warning(f"{issue_key}: cleanup after abort failed: {e}")
+            self._release_source_branch(issue_key)
             return None
 
         working_dir = git.get_working_directory()
@@ -2117,6 +2193,7 @@ class JobProcessor:
 
         git = await self._prepare_git_workspace(state)
         if git is None:
+            self._finish_after_git_missing(state.issue_key)
             return
         if self._is_aborted(state.issue_key):
             logger.info(
@@ -2381,6 +2458,7 @@ class JobProcessor:
 
         git = await self._prepare_git_workspace(state)
         if git is None:
+            self._finish_after_git_missing(state.issue_key)
             return
         if self._is_aborted(state.issue_key):
             logger.info(
@@ -2642,6 +2720,7 @@ class JobProcessor:
             status=TaskStatus.COMPLETED,
             completed_at=completed_at,
             progress_percentage=100,
+            metadata={"requeue_eligible": True},
         )
         if updated is None:
             logger.info(
@@ -2786,6 +2865,12 @@ class JobProcessor:
             )
 
         baseline = self._resolve_delivery_baseline(issue_key, git)
+        if not baseline:
+            return (
+                "Could not snapshot HEAD at job start (delivery baseline missing). "
+                "Refusing to attribute existing commits on this branch to this job. "
+                "Re-queue after the workspace can record a baseline."
+            )
         if baseline and head == baseline:
             short = head[:12]
             return (
@@ -3217,11 +3302,14 @@ class JobProcessor:
             self.git_manager = existing.get("git")
             return existing["runner"]
 
-        # Adopt a test/pre-set runner only when no other issue contexts exist
-        # (avoids cross-issue reuse under concurrency).
+        # Adopt a test/pre-set runner only when it is unbound (no leftover
+        # working_directory from a released issue clone).
+        wd = getattr(self.agent_runner, "working_directory", None)
+        wd_is_real_path = isinstance(wd, (str, Path)) and bool(str(wd).strip())
         if (
             self.agent_runner is not None
             and not self._contexts
+            and not wd_is_real_path
         ):
             self._contexts[issue_key] = {
                 "git": self.git_manager,

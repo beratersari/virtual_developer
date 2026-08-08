@@ -50,7 +50,7 @@ export function SettingsPage({
 
   const [testingIdx, setTestingIdx] = useState<number | null>(null)
   const [testResults, setTestResults] = useState<
-    Record<number, GitlabConnectionTestResult | { loading: true }>
+    Record<string, GitlabConnectionTestResult | { loading: true }>
   >({})
   const [jiraTesting, setJiraTesting] = useState(false)
   const [jiraTestResult, setJiraTestResult] = useState<
@@ -102,14 +102,14 @@ export function SettingsPage({
     if (!host) {
       setTestResults((r) => ({
         ...r,
-        [idx]: { ok: false, error: 'Enter a host first' },
+        [String(idx)]: { ok: false, error: 'Enter a host first' },
       }))
       return
     }
     if (!(row.pat || '').trim() && !row.pat_configured) {
       setTestResults((r) => ({
         ...r,
-        [idx]: {
+        [host]: {
           ok: false,
           error: 'Paste a PAT or save credentials before testing',
         },
@@ -117,17 +117,17 @@ export function SettingsPage({
       return
     }
     setTestingIdx(idx)
-    setTestResults((r) => ({ ...r, [idx]: { loading: true } }))
+    setTestResults((r) => ({ ...r, [host]: { loading: true } }))
     try {
       const result = await testGitlabConnection({
         host,
         pat: (row.pat || '').trim() || undefined,
       })
-      setTestResults((r) => ({ ...r, [idx]: result }))
+      setTestResults((r) => ({ ...r, [host]: result }))
     } catch (e) {
       setTestResults((r) => ({
         ...r,
-        [idx]: {
+        [host]: {
           ok: false,
           error: e instanceof Error ? e.message : 'Test failed',
         },
@@ -403,7 +403,7 @@ export function SettingsPage({
 
           <div className="space-y-3">
             {(settingsDraft.gitlab_cred_rows || []).map((row, idx) => {
-              const tr = testResults[idx]
+              const tr = testResults[(row.host || '').trim()]
               const testing = testingIdx === idx
               return (
                 <div
@@ -427,7 +427,7 @@ export function SettingsPage({
                           })
                           setTestResults((r) => {
                             const next = { ...r }
-                            delete next[idx]
+                            delete next[row.host]
                             return next
                           })
                         }}
@@ -491,7 +491,8 @@ export function SettingsPage({
                           }))
                           setTestResults((r) => {
                             const next = { ...r }
-                            delete next[idx]
+                            const host = (row.host || '').trim()
+                            if (host) delete next[host]
                             return next
                           })
                         }}
@@ -617,7 +618,7 @@ export function SettingsPage({
           <input
             type="number"
             min={1}
-            max={32}
+            max={64}
             className="ops-input mt-1"
             value={settingsDraft.max_concurrent_jobs ?? 3}
             onChange={(e) => mark('max_concurrent_jobs', Number(e.target.value))}

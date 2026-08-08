@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 from src.config import settings
 from src.logger import logger
+
+
+def _normalize_jira_host(raw: str) -> str:
+    host = (raw or "").strip().rstrip("/")
+    if not host:
+        return ""
+    if "://" not in host:
+        host = f"https://{host}"
+    try:
+        parsed = urlparse(host)
+        return (parsed.hostname or "").lower()
+    except Exception:
+        return host.lower().split("/")[0].split(":")[0]
 
 
 def probe_jira_connection(
@@ -30,11 +44,23 @@ def probe_jira_connection(
         email if email is not None else getattr(settings, "jira_email", "") or ""
     ).strip()
     tok = (api_token if api_token is not None else "").strip()
+    provided_token = bool(tok)
     if not tok:
         tok = (settings.jira_api_token or "").strip()
 
     if not h:
         return {"ok": False, "error": "Jira host is required", "host": ""}
+    configured = _normalize_jira_host(settings.jira_host or "")
+    requested = _normalize_jira_host(h)
+    if tok and not provided_token and requested != configured:
+        return {
+            "ok": False,
+            "host": h,
+            "error": (
+                "Refusing to send the stored Jira token to a different host. "
+                "Paste a token for this host, or test the configured Jira host."
+            ),
+        }
     if not tok:
         return {
             "ok": False,

@@ -1,11 +1,27 @@
 """JIRA API client wrapper."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import httpx
 
 from src.config import settings
 from src.logger import logger
+
+
+def _jira_fields_query(fields: Union[str, Iterable[str], None]) -> Optional[str]:
+    """Normalize ``fields`` to a Jira ``fields=a,b,c`` query value.
+
+    Callers sometimes pass a single string (``\"description\"``). ``\",\"``.join
+    on a str iterates characters and requests ``d,e,s,c,...`` — which makes
+    Jira omit the real description and can wipe the issue body on PUT.
+    """
+    if fields is None:
+        return None
+    if isinstance(fields, str):
+        value = fields.strip()
+        return value or None
+    parts = [str(f).strip() for f in fields if str(f).strip()]
+    return ",".join(parts) if parts else None
 
 
 class JiraClient:
@@ -258,16 +274,18 @@ class JiraClient:
     def get_issue(
         self,
         issue_key: str,
-        fields: Optional[List[str]] = None,
+        fields: Optional[Union[str, List[str]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Get issue details by key.
 
         ``fields`` limits payload size when only a subset is needed (e.g. description).
+        Accepts a list or a single field name string.
         """
         try:
             params: Dict[str, Any] = {}
-            if fields:
-                params["fields"] = ",".join(fields)
+            fields_q = _jira_fields_query(fields)
+            if fields_q:
+                params["fields"] = fields_q
             response = self.client.get(f"/issue/{issue_key}", params=params or None)
             if response.status_code != 200:
                 logger.warning(f"Get issue {issue_key}: {response.status_code}")
@@ -289,8 +307,9 @@ class JiraClient:
             "jql": jql,
             "maxResults": max_results,
         }
-        if fields:
-            params["fields"] = ",".join(fields)
+        fields_q = _jira_fields_query(fields)
+        if fields_q:
+            params["fields"] = fields_q
         
         try:
             response = self.client.get("/search", params=params)
@@ -318,8 +337,9 @@ class JiraClient:
                     "maxResults": max_results,
                     "startAt": page_start,
                 }
-                if fields:
-                    params["fields"] = ",".join(fields)
+                fields_q = _jira_fields_query(fields)
+                if fields_q:
+                    params["fields"] = fields_q
                 response = self.client.get(url, params=params)
                 response.raise_for_status()
                 data = response.json()
@@ -391,8 +411,9 @@ class JiraClient:
                 "startAt": start_at,
                 "maxResults": max_results,
             }
-            if fields:
-                params["fields"] = ",".join(fields)
+            fields_q = _jira_fields_query(fields)
+            if fields_q:
+                params["fields"] = fields_q
             
             try:
                 # Agile API is at /rest/agile/1.0, not /rest/api/2
@@ -578,14 +599,20 @@ class JiraClient:
         if not text:
             return True
         try:
-            issue = self.get_issue(issue_key, fields="description")
+            issue = self.get_issue(issue_key, fields=["description"])
+            # Fail closed: never PUT a plan-only body when we could not read
+            # the current description (would wipe {params} / operator text).
+            if not issue or not isinstance(issue, dict):
+                logger.error(
+                    f"Cannot append description on {issue_key}: get_issue failed"
+                )
+                return False
             old = ""
-            if issue and isinstance(issue, dict):
-                raw = (issue.get("fields") or {}).get("description")
-                if isinstance(raw, str):
-                    old = raw
-                elif raw is not None:
-                    old = str(raw)
+            raw = (issue.get("fields") or {}).get("description")
+            if isinstance(raw, str):
+                old = raw
+            elif raw is not None:
+                old = str(raw)
             sep = "\n\n" if old and not old.endswith("\n") else "\n" if old else ""
             new_desc = f"{old}{sep}{text}"
             return self.update_issue(issue_key, fields={"description": new_desc})
@@ -679,7 +706,11 @@ class JiraClient:
                 response = self.client.post(
                     f"/issue/{issue_key}/attachments",
                     files=files,
-                    headers={"X-Atlassian-Token": "no-check"},
+                    headers={
+                        "X-Atlassian-Token": "no-check",
+                        # Override client default application/json so multipart works
+                        "Content-Type": None,
+                    },
                 )
             response.raise_for_status()
             return response.json()

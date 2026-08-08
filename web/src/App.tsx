@@ -143,6 +143,8 @@ export default function App() {
   const openIssueKeyRef = useRef<string | null>(null)
   const openViewModeRef = useRef<ViewMode>('list')
   const lastDetailRefreshRef = useRef(0)
+  const lastAppliedServerMs = useRef<number | null>(null)
+  const pollCountdownRef = useRef<{ secs: number; atMs: number } | null>(null)
   const reloadJobsRef = useRef<(opts?: { filter?: string; page?: number }) => Promise<void>>(
     async () => {},
   )
@@ -208,10 +210,21 @@ export default function App() {
   const applyPayload = useCallback(
     (payload: DashboardPayload) => {
       const st = payload.poll?.server_time || payload.meta?.server_time || null
-      if (st && lastAppliedServerTime.current && st < lastAppliedServerTime.current) {
+      const nextMs = st ? Date.parse(st) : Number.NaN
+      if (
+        lastAppliedServerMs.current != null &&
+        !Number.isNaN(nextMs) &&
+        nextMs + 2000 < lastAppliedServerMs.current
+      ) {
         return
       }
-      if (st) lastAppliedServerTime.current = st
+      if (!Number.isNaN(nextMs)) lastAppliedServerMs.current = nextMs
+      lastAppliedServerTime.current = st
+
+      const secs = payload.poll?.seconds_until_next_poll
+      if (typeof secs === 'number') {
+        pollCountdownRef.current = { secs, atMs: Date.now() }
+      }
 
       setData(payload)
 
@@ -639,12 +652,13 @@ export default function App() {
   const displayTime = useMemo(() => localClock.toLocaleString(), [localClock])
 
   const tickLeft = useMemo(() => {
-    const next = data?.poll?.next_poll_at
-    if (!next) return data?.poll?.seconds_until_next_poll ?? null
-    const ms = Date.parse(next)
-    if (Number.isNaN(ms)) return data?.poll?.seconds_until_next_poll ?? null
-    return Math.max(0, Math.floor((ms - localClock.getTime()) / 1000))
-  }, [data?.poll?.next_poll_at, data?.poll?.seconds_until_next_poll, localClock])
+    const snap = pollCountdownRef.current
+    if (snap) {
+      const elapsed = Math.floor((localClock.getTime() - snap.atMs) / 1000)
+      return Math.max(0, snap.secs - elapsed)
+    }
+    return data?.poll?.seconds_until_next_poll ?? null
+  }, [data?.poll?.seconds_until_next_poll, localClock])
 
   const onSaveSettings = async () => {
     setSaving(true)

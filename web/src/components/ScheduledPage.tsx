@@ -27,7 +27,10 @@ function defaultLocalDatetimeValue(): string {
 }
 
 function toIsoLocal(datetimeLocal: string): string {
-  return datetimeLocal.length === 16 ? `${datetimeLocal}:00` : datetimeLocal
+  const raw = datetimeLocal.length === 16 ? `${datetimeLocal}:00` : datetimeLocal
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime())) return raw
+  return d.toISOString()
 }
 
 /** Prefer Task / Görev as default when present. */
@@ -814,7 +817,9 @@ export function ScheduledPage({
             )}
             {schedules.map((s) => {
               const canCancel =
-                s.status === 'scheduled' || s.status === 'error'
+                s.status === 'scheduled' ||
+                s.status === 'error' ||
+                s.status === 'dispatching'
               const src = (s.source || 'new').toLowerCase()
               return (
                 <tr key={s.schedule_id}>

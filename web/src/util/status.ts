@@ -89,6 +89,8 @@ export function jobIsDeletable(status: string, live: boolean): boolean {
  * Backend cancels by issue key; live or in-flight job statuses are eligible.
  */
 export function jobIsCancellable(status: string, live: boolean): boolean {
+  const s = (status || '').toLowerCase()
+  if (['completed', 'error', 'cancelled', 'superseded'].includes(s)) return false
   if (live) return true
-  return LIVE_JOB_STATUSES.has((status || '').toLowerCase())
+  return LIVE_JOB_STATUSES.has(s)
 }

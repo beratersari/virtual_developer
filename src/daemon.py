@@ -334,7 +334,16 @@ class JiraAgentDaemon:
                 # Always allow age purge when policy is age; also run when always
                 # is set so long-lived dirs still get collected
                 if policy in {"age", "always"}:
-                    n = purge_stale_temp_dirs()
+                    protect = set()
+                    try:
+                        for ctx in (self.processor._contexts or {}).values():
+                            git = ctx.get("git") if isinstance(ctx, dict) else None
+                            td = getattr(git, "temp_dir", None) if git is not None else None
+                            if td:
+                                protect.add(td)
+                    except Exception:
+                        protect = set()
+                    n = purge_stale_temp_dirs(protect_paths=protect)
                     if n:
                         logger.info(f"Periodic temp purge removed {n} stale clone(s)")
             except Exception as e:
@@ -375,6 +384,17 @@ class JiraAgentDaemon:
                     )
                     # Allow full retry budget plus 50% headroom for backoff/overhead
                     limit_seconds = timeout * (retries + 1) * 1.5
+                    # Clone phase (live context, no agent task id yet) uses git budget
+                    live = False
+                    try:
+                        live = self.processor._is_live_processing(state.issue_key)
+                    except Exception:
+                        live = False
+                    if live and not getattr(state, "current_task_id", None):
+                        clone_budget = int(
+                            getattr(settings, "git_clone_timeout_seconds", 1800) or 1800
+                        )
+                        limit_seconds = max(limit_seconds, clone_budget + 60)
 
                     # Missing started_at must not leave jobs stuck forever.
                     if not state.started_at:

@@ -42,10 +42,30 @@ def probe_gitlab_connection(
         return {"ok": False, "error": "host is required", "host": ""}
 
     token = (pat or "").strip()
+    provided_pat = bool(token)
     if not token and hasattr(settings, "gitlab_pat_for_host"):
         token = (settings.gitlab_pat_for_host(h) or "").strip()
     if not token:
-        token = (settings.gitlab_pat or "").strip()
+        allowed = []
+        if hasattr(settings, "gitlab_allowed_hosts_list"):
+            allowed = [x.lower() for x in settings.gitlab_allowed_hosts_list]
+        mapped = {}
+        if hasattr(settings, "gitlab_host_pat_map"):
+            try:
+                mapped = settings.gitlab_host_pat_map() or {}
+            except Exception:
+                mapped = {}
+        if h in mapped or h in allowed:
+            token = (settings.gitlab_pat or "").strip()
+        elif not provided_pat:
+            return {
+                "ok": False,
+                "host": h,
+                "error": (
+                    "No PAT stored for this host. Paste a PAT or add the host "
+                    "in Settings before testing."
+                ),
+            }
     if not token:
         return {
             "ok": False,

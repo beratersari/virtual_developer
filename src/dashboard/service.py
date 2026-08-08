@@ -715,11 +715,7 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         except ValueError:
             return False
 
-    allowed = (
-        _under(Path.cwd() / ".jira-agent")
-        or _under(Path.cwd() / ".jira-agent" / "sessions")
-        or ".jira-agent" in path.parts
-    )
+    allowed = _under(Path.cwd() / ".jira-agent")
     if not allowed:
         return None
     blocked = {"etc", "proc", "sys", "windows", "system32"}
@@ -1237,10 +1233,15 @@ def _build_task_detail_without_state(
     operators can inspect the ticket without a 404.
     """
     key = (issue_key or "").strip().upper()
-    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    # Never open a live Jira client from a no-state stub (arbitrary key SSRF/read)
+    jira_live: Dict[str, Any] = {}
+    if processor is not None:
+        jira_live = _fetch_live_jira_fields(key, processor=processor)
     poll_row: Dict[str, Any] = {}
     try:
-        snap = poll_snapshot_store.snapshot()
+        from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+        snap = snap_store.snapshot()
         for row in snap.get("issues") or []:
             if (row.get("key") or "").strip().upper() == key:
                 poll_row = row
@@ -1316,7 +1317,23 @@ def build_task_detail(
     if not state:
         if not key:
             return None
-        return _build_task_detail_without_state(key, processor=processor)
+        # Live Jira GET only for keys on the last poll snapshot (board read).
+        # Arbitrary keys stay stub-only so this is not an open Jira proxy.
+        on_board = False
+        try:
+            from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+            snap = snap_store.snapshot()
+            on_board = any(
+                str(row.get("key") or "").upper() == key
+                for row in (snap.get("issues") or [])
+                if isinstance(row, dict)
+            )
+        except Exception:
+            on_board = False
+        return _build_task_detail_without_state(
+            key, processor=processor if on_board else None
+        )
 
     live = False
     if processor is not None:

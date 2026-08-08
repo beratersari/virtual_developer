@@ -24,12 +24,8 @@ export function pathsMatch(a?: string | null, b?: string | null): boolean {
   const na = normalizePath(a)
   const nb = normalizePath(b)
   if (na === nb) return true
-  if (na.endsWith(nb) || nb.endsWith(na)) return true
-  const ba = pathBasename(na)
-  const bb = pathBasename(nb)
-  if (ba === bb) return true
-  // stem equality for sibling .log / .prompt.txt pairs is handled by caller
-  return false
+  // Basename only — do not use unbounded endsWith (KAN-1_foo.log vs o.log).
+  return pathBasename(na) === pathBasename(nb)
 }
 
 export function findByPath<T extends { path: string }>(

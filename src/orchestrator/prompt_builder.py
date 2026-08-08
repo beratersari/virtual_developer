@@ -185,7 +185,15 @@ class PromptBuilder:
                 + "\n".join(f"- {f}" for f in context_files)
             ).strip()
         key = issue_key or "CONSULT"
-        return PromptBuilder.build_plan_prompt(key, summary or "", desc)
+        title = (summary or "").strip() or "Oracle consultation"
+        q = desc or "(no question provided)"
+        return (
+            f"## Oracle consultation: {key}\n\n"
+            f"Answer the operator's question. Do **not** write a plan file, "
+            f"do not modify product code, and do not invent a Mode/params template.\n\n"
+            f"## Jira title\n\n{title}\n\n"
+            f"## Question\n\n{q}\n"
+        )
 
     @staticmethod
     def commit_message_block(

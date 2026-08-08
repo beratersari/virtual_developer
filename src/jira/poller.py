@@ -42,6 +42,8 @@ class JiraPoller:
         # Last observed Jira status name (lowercased) per issue — used to detect
         # real transitions into "To Do" rather than re-queueing every poll.
         self._last_jira_status: Dict[str, str] = {}
+        # Latch: emit plan_ready start once until status leaves PLAN_READY
+        self._plan_start_emitted: Set[str] = set()
         self._running = False
         self._handler: Optional[Callable[[dict], None]] = None
 
@@ -98,6 +100,8 @@ class JiraPoller:
             "open",
             "backlog",
             "new",
+            "selected for development",
+            "ready for development",
             "yapılacaklar",  # Turkish
             "yapilacaklar",
         }
@@ -257,22 +261,37 @@ class JiraPoller:
                             f"Skip cold-start requeue for {issue_key} "
                             f"(local status={local_st.value if local_st else None})"
                         )
+                    elif self._issue_has_pending_schedule(issue_key):
+                        # Do not mark seen — if the schedule is cancelled,
+                        # the next poll must still be able to intake as new.
+                        logger.info(
+                            f"Skip poller intake for {issue_key}: pending schedule"
+                        )
                     else:
                         new_issues.append(issue)
                         logger.info(f"New issue to process: {issue_key}")
                 todo_issues.append(issue)
 
-                # plan_ready is not terminal — start via label without comment poll
-                if (
-                    local
-                    and local.status == TaskStatus.PLAN_READY
-                    and (_START_LABELS & {str(x).strip().lower() for x in labels})
-                ):
+            # plan_ready start labels work without requiring bot/ai-assist (P4)
+            if (
+                local
+                and local.status == TaskStatus.PLAN_READY
+                and is_todo
+                and (_START_LABELS & {str(x).strip().lower() for x in labels})
+            ):
+                if issue_key in self._plan_start_emitted:
+                    logger.debug(
+                        f"Skip repeat plan-start emit for {issue_key} (already latched)"
+                    )
+                else:
                     plan_start_issues.append(issue)
+                    self._plan_start_emitted.add(issue_key)
                     logger.info(
                         f"Plan-ready start signal for {issue_key} "
                         f"(label ai-start-work / ai-execute)"
                     )
+            elif local and local.status != TaskStatus.PLAN_READY:
+                self._plan_start_emitted.discard(issue_key)
 
         reprocess_issues = self.check_status_changes(todo_issues)
 
@@ -420,6 +439,7 @@ class JiraPoller:
                 and prev_before is not None
                 and prev_before not in synthetic
                 and prev_before != curr_name
+                and not self._is_todo_status_name(prev_before)
                 and self._is_todo_status(fields)
             )
             # After process_issue moved tracker to "in progress", returning to To Do
@@ -487,9 +507,8 @@ class JiraPoller:
             if last_light is not None:
                 return last_light != light_fp
             # Legacy rows with only full fingerprint: do not false-positive.
-            # Missing fingerprint entirely: allow one requeue attempt.
-            if meta.get("last_intake_fingerprint") is None:
-                return True
+            # Missing fingerprint: do not re-fire every poll (orphan recovery
+            # must write fingerprints; operator edit or leave→return still works).
             return False
 
         fp = self.issue_text_fingerprint(issue, light=False)
@@ -497,6 +516,26 @@ class JiraPoller:
         if last_fp is None:
             return True
         return last_fp != fp
+
+    def _issue_has_pending_schedule(self, issue_key: str) -> bool:
+        """True when a non-terminal schedule is waiting/dispatching for this key."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return False
+        ss = getattr(self, "schedule_store", None)
+        if ss is None:
+            try:
+                from src.state.schedule_store import schedule_store as ss
+            except Exception:
+                return False
+        try:
+            for status in ("scheduled", "dispatching"):
+                for rec in ss.list_schedules(status=status, limit=500):
+                    if (rec.get("issue_key") or "").strip().upper() == key:
+                        return True
+        except Exception:
+            return False
+        return False
 
     def _enrich_issue_for_work(self, issue: dict) -> dict:
         """Fetch full issue (incl. description) only for keys we will process."""
