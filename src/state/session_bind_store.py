@@ -1,8 +1,9 @@
-"""Persist OpenCode session ids keyed by git repository + work branch.
+"""Persist OpenCode session ids keyed by repository + work branch + target.
 
-A later issue (or re-run) that uses the same remote and branch can resume
-``opencode run --session`` / serve ``session_id`` instead of starting cold.
-Operators reset a bind from the dashboard when they want a fresh session.
+A later issue (or re-run) with the same remote, work/Source branch, **and**
+Target can resume ``opencode run --session`` / serve. A different Target is a
+different MR base — new clone folder + new session so the model is not mixed
+with work aimed at another branch. Dashboard Reset drops the bind.
 """
 
 from __future__ import annotations
@@ -58,15 +59,20 @@ def normalize_branch(name: str) -> str:
     return branch
 
 
-def bind_id_for(repository_url: str, branch: str) -> str:
+def bind_id_for(
+    repository_url: str, branch: str, target_branch: str = ""
+) -> str:
     repo_key = normalize_repo_key(repository_url)
     br = normalize_branch(branch)
-    digest = hashlib.sha256(f"{repo_key}\0{br}".encode("utf-8")).hexdigest()[:16]
+    tgt = normalize_branch(target_branch)
+    digest = hashlib.sha256(
+        f"{repo_key}\0{br}\0{tgt}".encode("utf-8")
+    ).hexdigest()[:16]
     return f"osb_{digest}"
 
 
 class SessionBindStore:
-    """One JSON file per (repo, branch) → OpenCode session id."""
+    """One JSON file per (repo, work branch, target) → OpenCode session id."""
 
     def __init__(self, binds_dir: Optional[Path] = None) -> None:
         self.binds_dir = binds_dir or _default_binds_dir()
@@ -85,11 +91,16 @@ class SessionBindStore:
         tmp.replace(path)
 
     def get(
-        self, repository_url: str, branch: str
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str = "",
     ) -> Optional[Dict[str, Any]]:
-        bid = bind_id_for(repository_url, branch)
         if not normalize_repo_key(repository_url) or not normalize_branch(branch):
             return None
+        if not normalize_branch(target_branch):
+            return None
+        bid = bind_id_for(repository_url, branch, target_branch)
         return self.get_by_id(bid)
 
     def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
@@ -112,18 +123,29 @@ class SessionBindStore:
         session_id: str,
         issue_key: str = "",
         job_id: Optional[str] = None,
+        working_directory: Optional[str] = None,
+        target_branch: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(repository_url, str) or not isinstance(branch, str):
             return None
         if not isinstance(session_id, str):
             return None
+        if not isinstance(target_branch, str):
+            return None
         repo = repository_url.strip()
         br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
         sid = session_id.strip()
-        if not normalize_repo_key(repo) or not br or not sid:
+        if not normalize_repo_key(repo) or not br or not tgt or not sid:
             return None
-        bid = bind_id_for(repo, br)
+        bid = bind_id_for(repo, br, tgt)
         now = _now_iso()
+        wd = (working_directory or "").strip() or None
+        if wd:
+            try:
+                wd = str(Path(wd).resolve())
+            except OSError:
+                wd = str(wd)
         with self._lock:
             prev = self.get_by_id(bid) or {}
             rec: Dict[str, Any] = {
@@ -131,15 +153,18 @@ class SessionBindStore:
                 "repository_url": repo,
                 "repository_key": normalize_repo_key(repo),
                 "branch": br,
+                "target_branch": tgt,
                 "session_id": sid,
                 "issue_key": (issue_key or "").strip().upper(),
                 "job_id": job_id or prev.get("job_id"),
+                "working_directory": wd or prev.get("working_directory"),
                 "created_at": prev.get("created_at") or now,
                 "updated_at": now,
             }
             self._write(rec)
         logger.info(
-            f"OpenCode session bind {bid}: {normalize_repo_key(repo)}@{br} → {sid}"
+            f"OpenCode session bind {bid}: {normalize_repo_key(repo)}"
+            f"@{br}→{tgt} → {sid}"
         )
         return rec
 
@@ -159,8 +184,12 @@ class SessionBindStore:
         logger.info(f"OpenCode session bind reset: {bid}")
         return True
 
-    def delete_for(self, repository_url: str, branch: str) -> bool:
-        return self.delete(bind_id_for(repository_url, branch))
+    def delete_for(
+        self, repository_url: str, branch: str, target_branch: str = ""
+    ) -> bool:
+        if not normalize_branch(target_branch):
+            return False
+        return self.delete(bind_id_for(repository_url, branch, target_branch))
 
     def list_binds(self, *, limit: int = 200) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -177,6 +206,25 @@ class SessionBindStore:
                     items.append(rec)
         items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
         return items[: max(1, int(limit))]
+
+    def working_directories(self) -> List[Path]:
+        """Clone paths still referenced by a session bind (protect from purge)."""
+        out: List[Path] = []
+        seen: set[str] = set()
+        for rec in self.list_binds(limit=500):
+            raw = rec.get("working_directory")
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                resolved = Path(raw).resolve()
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(resolved)
+        return out
 
 
 session_bind_store = SessionBindStore()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.state.session_bind_store import (
     SessionBindStore,
     bind_id_for,
@@ -70,17 +72,68 @@ def test_bind_store_upsert_get_delete(tmp_path):
     rec = store.upsert(
         repository_url="https://gitlab.com/g/r.git",
         branch="feature/shared",
+        target_branch="develop",
         session_id="ses_abc123",
         issue_key="KAN-1",
         job_id="job_1",
+        working_directory=str(tmp_path / "clone"),
     )
     assert rec is not None
-    assert rec["bind_id"] == bind_id_for("https://gitlab.com/g/r.git", "feature/shared")
-    got = store.get("https://gitlab.com/g/r", "feature/shared")
+    assert rec["bind_id"] == bind_id_for(
+        "https://gitlab.com/g/r.git", "feature/shared", "develop"
+    )
+    got = store.get("https://gitlab.com/g/r", "feature/shared", "develop")
     assert got is not None
     assert got["session_id"] == "ses_abc123"
     assert got["issue_key"] == "KAN-1"
+    assert got["target_branch"] == "develop"
+    assert Path(got["working_directory"]).resolve() == (tmp_path / "clone").resolve()
+    dirs = store.working_directories()
+    assert (tmp_path / "clone").resolve() in dirs
     listed = store.list_binds()
     assert len(listed) == 1
     assert store.delete(rec["bind_id"]) is True
+    assert store.get("https://gitlab.com/g/r.git", "feature/shared", "develop") is None
+
+
+def test_bind_id_differs_when_only_target_differs():
+    a = bind_id_for("https://gitlab.com/g/r.git", "feature/shared", "develop")
+    b = bind_id_for("https://gitlab.com/g/r.git", "feature/shared", "main")
+    c = bind_id_for("https://gitlab.com/g/r.git", "feature/shared", "develop")
+    assert a != b
+    assert a == c
+
+
+def test_bind_store_isolates_sessions_by_target(tmp_path):
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    store.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_dev",
+        issue_key="KAN-1",
+    )
+    store.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/shared",
+        target_branch="main",
+        session_id="ses_main",
+        issue_key="KAN-2",
+    )
+    assert (
+        store.get("https://gitlab.com/g/r.git", "feature/shared", "develop")[
+            "session_id"
+        ]
+        == "ses_dev"
+    )
+    assert (
+        store.get("https://gitlab.com/g/r.git", "feature/shared", "main")["session_id"]
+        == "ses_main"
+    )
     assert store.get("https://gitlab.com/g/r.git", "feature/shared") is None
+    assert store.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/shared",
+        target_branch="",
+        session_id="ses_no_tgt",
+    ) is None

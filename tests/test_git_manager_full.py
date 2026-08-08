@@ -67,22 +67,30 @@ def test_build_clone_url(gm):
     assert gm._build_clone_url("https://h/r.git", "") == "https://h/r.git"
 
 
-def test_create_temp_directory_collision(tmp_path, monkeypatch):
+def test_create_temp_directory_reuses_stable_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with patch.object(GitManager, "_setup_temp_working_dir"):
         g = GitManager(issue_key="C-1")
     g.remote_name = "repo"
     g.issue_key = "C-1"
+    g.remote_url = "https://gitlab.example.com/g/r.git"
+    g.source_branch = "feature/shared"
+    g.target_branch = "develop"
+    g.work_branch = "feature/shared"
     with patch("src.git_manager.settings") as s:
         s.temp_dir_base = Path(".temp")
-        with patch("src.git_manager.datetime") as dt:
-            dt.now.return_value.strftime.return_value = "20260101_000000"
-            # pre-create path so counter kicks in
-            base = tmp_path / ".temp"
-            base.mkdir()
-            (base / "repo_C-1_20260101_000000").mkdir()
-            p = g._create_temp_directory()
-            assert p.exists()
+        first = g._create_temp_directory()
+        second = g._create_temp_directory()
+        assert first == second
+        assert first.exists()
+        assert first.parent == (tmp_path / ".temp").resolve()
+        # Same repo + work + target from another issue → same folder
+        g.issue_key = "C-2"
+        third = g._create_temp_directory()
+        assert third == first
+        g.target_branch = "main"
+        fourth = g._create_temp_directory()
+        assert fourth != first
 
 
 def test_clone_into_temp_success_and_fail(gm, tmp_path):

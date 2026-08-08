@@ -180,9 +180,11 @@ export type OpencodeSessionBind = {
   repository_url: string
   repository_key?: string
   branch: string
+  target_branch?: string
   session_id: string
   issue_key?: string
   job_id?: string | null
+  working_directory?: string | null
   created_at?: string | null
   updated_at?: string | null
 }

@@ -212,8 +212,12 @@ class Settings(BaseSettings):
         description="Base directory for temp working folders (relative to agent root)"
     )
     temp_dir_format: str = Field(
-        default="{remote_name}_{jira_issue_id}_{timestamp}",
-        description="Temp folder naming format. Available: {remote_name}, {jira_issue_id}, {timestamp}, {uuid}"
+        default="{remote_name}_{work_branch}_{repo_branch_hash}",
+        description=(
+            "Legacy description only — clones use a stable "
+            "{remote}_{work}_{target}_{hash(repo+work+target)} folder so "
+            "OpenCode sessions resume only for the same Source and Target."
+        ),
     )
     temp_cleanup_policy: str = Field(
         default="age",

@@ -1,0 +1,193 @@
+"""Stable temp clone + OpenCode session resume on same repo/work branch."""
+
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.git_manager import (
+    GitManager,
+    purge_stale_temp_dirs,
+    session_bound_workspace_paths,
+)
+from src.orchestrator.agent_runner import AgentTask
+from src.processor import JobProcessor
+from src.state.manager import JiraStateManager
+from src.state.session_bind_store import SessionBindStore
+from tests.test_opencode_sessions import _make_session_db
+
+
+def _gm(tmp_path, *, issue_key: str, source: str, target: str, url: str):
+    with patch.object(GitManager, "_clone_into_temp"), patch.object(
+        GitManager, "_refresh_existing_clone"
+    ), patch("src.git_manager.set_current_temp_dir"):
+        return GitManager(
+            issue_key=issue_key,
+            remote_url=url,
+            source_branch=source,
+            target_branch=target,
+        )
+
+
+def test_shared_source_different_target_uses_new_temp_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    a = _gm(tmp_path, issue_key="KAN-A", source="feature/shared", target="develop", url=url)
+    b = _gm(tmp_path, issue_key="KAN-B", source="feature/shared", target="main", url=url)
+    assert a.temp_dir.resolve() != b.temp_dir.resolve()
+
+
+def test_shared_source_reuses_same_temp_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    a = _gm(tmp_path, issue_key="KAN-A", source="feature/shared", target="develop", url=url)
+    b = _gm(tmp_path, issue_key="KAN-B", source="feature/shared", target="develop", url=url)
+    assert a.temp_dir is not None and b.temp_dir is not None
+    assert a.temp_dir.resolve() == b.temp_dir.resolve()
+    assert a.work_branch == "feature/shared"
+    assert b.work_branch == "feature/shared"
+
+
+def test_primary_source_isolates_per_issue_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    a = _gm(tmp_path, issue_key="KAN-1", source="develop", target="develop", url=url)
+    b = _gm(tmp_path, issue_key="KAN-2", source="develop", target="develop", url=url)
+    assert a.temp_dir is not None and b.temp_dir is not None
+    assert a.temp_dir.resolve() != b.temp_dir.resolve()
+    assert a.work_branch == "feature/KAN-1"
+    assert b.work_branch == "feature/KAN-2"
+
+
+def test_same_issue_rerun_reuses_feature_key_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    first = _gm(tmp_path, issue_key="KAN-9", source="develop", target="develop", url=url)
+    second = _gm(tmp_path, issue_key="KAN-9", source="develop", target="develop", url=url)
+    assert first.temp_dir.resolve() == second.temp_dir.resolve()
+
+
+def test_existing_git_clone_is_refreshed_not_cloned(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    first = _gm(tmp_path, issue_key="KAN-A", source="feature/shared", target="develop", url=url)
+    git_dir = first.temp_dir / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/feature/shared\n", encoding="utf-8")
+
+    def fake_origin(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        if cmd[:3] == ["git", "remote", "get-url"]:
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = url + "\n"
+            r.stderr = ""
+            return r
+        raise AssertionError(f"unexpected subprocess: {cmd}")
+
+    refreshed = {"n": 0}
+    cloned = {"n": 0}
+
+    def mark_refresh(self):
+        refreshed["n"] += 1
+
+    def mark_clone(self):
+        cloned["n"] += 1
+
+    with patch.object(GitManager, "_refresh_existing_clone", mark_refresh), patch.object(
+        GitManager, "_clone_into_temp", mark_clone
+    ), patch("src.git_manager.subprocess.run", side_effect=fake_origin), patch(
+        "src.git_manager.set_current_temp_dir"
+    ):
+        again = GitManager(
+            issue_key="KAN-B",
+            remote_url=url,
+            source_branch="feature/shared",
+            target_branch="develop",
+        )
+    assert again.temp_dir.resolve() == first.temp_dir.resolve()
+    assert refreshed["n"] == 1
+    assert cloned["n"] == 0
+
+
+def test_cleanup_keeps_session_bound_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/app.git"
+    gm = _gm(tmp_path, issue_key="KAN-A", source="feature/shared", target="develop", url=url)
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    store.upsert(
+        repository_url=url,
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_keep",
+        issue_key="KAN-A",
+        working_directory=str(gm.temp_dir),
+    )
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    monkeypatch.setattr("src.git_manager.settings.temp_cleanup_policy", "always")
+    assert gm.cleanup(success=True) is True
+    assert gm.temp_dir is not None and gm.temp_dir.exists()
+
+
+def test_purge_protects_bound_workspace(tmp_path, monkeypatch):
+    clone = tmp_path / "bound_clone"
+    clone.mkdir()
+    (clone / "f").write_text("x", encoding="utf-8")
+    old = time.time() - (3 * 86400)
+    os.utime(clone, (old, old))
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    store.upsert(
+        repository_url="https://gitlab.example.com/acme/app.git",
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_keep",
+        issue_key="KAN-A",
+        working_directory=str(clone),
+    )
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    removed = purge_stale_temp_dirs(max_age_days=1.0, base_dir=tmp_path)
+    assert clone.exists()
+    assert removed == 0
+    assert clone.resolve() in session_bound_workspace_paths()
+
+
+def test_attach_resumes_when_second_job_reuses_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    clone = tmp_path / "shared_clone"
+    clone.mkdir()
+    db = _make_session_db(
+        tmp_path / "opencode.db",
+        [{"id": "ses_shared", "directory": str(clone), "title": "KAN-A: x"}],
+    )
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "feature/shared"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    sm.create_state("KAN-A", "s", "d")
+    proc._contexts["KAN-A"] = {"git": git, "runner": None}
+    proc._active_jobs["KAN-A"] = "job_a"
+    proc._upsert_session_bind("KAN-A", "ses_shared")
+    bound = store.get(git.remote_url, "feature/shared", "develop")
+    assert bound is not None
+    assert Path(bound["working_directory"]).resolve() == clone.resolve()
+
+    sm.create_state("KAN-B", "s", "d")
+    proc._contexts["KAN-B"] = {"git": git, "runner": None}
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-B")
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        sid = proc._attach_bound_opencode_session("KAN-B", task, git)
+    assert sid == "ses_shared"
+    assert task.session_id == "ses_shared"
