@@ -447,6 +447,50 @@ def test_build_jobs_pagination(tmp_path):
     assert len(ids) == 7
 
 
+def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):
+    from src.dashboard.service import build_one_job
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import SessionBindStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    stored = jobs.create_job(
+        issue_key="WD-1",
+        summary="s",
+        description="d",
+        status="completed",
+    )
+    jobs.update_job(
+        stored["job_id"],
+        working_directory=str(tmp_path / "clone-a"),
+    )
+    item = build_one_job(stored["job_id"], store=jobs, state_manager=sm)
+    assert item is not None
+    assert item.working_directory == str(tmp_path / "clone-a")
+
+    stored2 = jobs.create_job(
+        issue_key="WD-2",
+        summary="s2",
+        description="d2",
+        status="completed",
+    )
+    jobs.update_job(stored2["job_id"], opencode_session_id="ses_wd2")
+    binds = SessionBindStore(binds_dir=tmp_path / "binds")
+    binds.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/WD-2",
+        target_branch="develop",
+        session_id="ses_wd2",
+        issue_key="WD-2",
+        job_id=stored2["job_id"],
+        working_directory=str(tmp_path / "clone-b"),
+    )
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", binds)
+    item2 = build_one_job(stored2["job_id"], store=jobs, state_manager=sm)
+    assert item2 is not None
+    assert item2.working_directory == str((tmp_path / "clone-b").resolve())
+
+
 def test_poll_api_hides_unmatched_board_issues(tmp_path):
     """Poll DTO lists only bot-eligible issues (label or assignee match)."""
     from src.dashboard.service import build_poll_status

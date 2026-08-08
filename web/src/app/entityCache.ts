@@ -15,6 +15,12 @@ export function peekJobsPayload(): JobsPayload | null {
 
 export function rememberJob(job: JobItem) {
   if (!job?.job_id) return
+  const prev = jobsById.get(job.job_id)
+  // List rows used to omit description; never let a later empty field wipe one
+  // we already have from a detail fetch.
+  if (prev && !(job.description || '').trim() && (prev.description || '').trim()) {
+    job = { ...job, description: prev.description }
+  }
   jobsById.set(job.job_id, job)
 }
 

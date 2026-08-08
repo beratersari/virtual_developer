@@ -21,6 +21,19 @@ export function JobOverview({
 
   return (
     <div className="space-y-6 text-sm">
+      <div className="rounded border border-border bg-bg px-4 py-3">
+        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+          Jira description
+        </div>
+        {job.description?.trim() ? (
+          <p className="whitespace-pre-wrap text-sm text-text-secondary">{job.description}</p>
+        ) : (
+          <p className="text-sm italic text-text-muted">
+            No Jira description was stored when this job started.
+          </p>
+        )}
+      </div>
+
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <MetaCard label="Job id" mono value={job.job_id} />
         <MetaCard label="Status" valueNode={<StatusBadge status={job.status} />} />
@@ -28,6 +41,12 @@ export function JobOverview({
         <MetaCard label="Workflow" value={job.workflow_type || '—'} />
         <MetaCard label="Agent" value={job.agent || '—'} />
         <MetaCard label="Issue" mono value={job.issue_key || '—'} />
+        <MetaCard
+          label="Working folder"
+          mono
+          className="sm:col-span-2 lg:col-span-3"
+          value={job.working_directory || '—'}
+        />
         <MetaCard label="Started" mono value={job.started_at ?? '—'} />
         <MetaCard label="Completed" mono value={job.completed_at ?? '—'} />
         <MetaCard

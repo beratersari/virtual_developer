@@ -111,6 +111,7 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     commit_url: j.commit_url ?? null,
     delivery_status: j.delivery_status ?? null,
     delivery_note: j.delivery_note ?? null,
+    working_directory: j.working_directory ?? null,
   }
 }
 
