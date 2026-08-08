@@ -1,6 +1,5 @@
 /**
- * Lightweight assertions for path matching (run via: npx tsx src/util/paths.test.ts)
- * Kept as a plain script so we don't add a frontend test runner.
+ * Run: npx tsx src/lib/paths.test.ts
  */
 import {
   findPromptForJobPath,
@@ -36,11 +35,7 @@ const prompts = [
   { path: '/sessions/KAN-1_a.prompt.txt', content: 'A' },
   { path: '/sessions/KAN-1_b.prompt.txt', content: 'B' },
 ]
-const hit = findPromptForJobPath(
-  prompts,
-  '/sessions/KAN-1_b.prompt.txt',
-  null,
-)
+const hit = findPromptForJobPath(prompts, '/sessions/KAN-1_b.prompt.txt', null)
 assert(hit?.content === 'B', 'direct prompt path')
 
 const viaLog = findPromptForJobPath(prompts, null, '/sessions/KAN-1_a.log')

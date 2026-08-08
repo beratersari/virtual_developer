@@ -1,5 +1,5 @@
 /**
- * Run: npx tsx src/util/status.test.ts
+ * Run: npx tsx src/lib/status.test.ts
  */
 import { jobIsCancellable, jobIsDeletable } from './status'
 

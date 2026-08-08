@@ -1129,18 +1129,45 @@ def _collect_git_deliveries(
     """
     meta = meta or {}
     items: List[Dict[str, Any]] = []
-    seen: set = set()
+    index: Dict[tuple, Dict[str, Any]] = {}
 
-    def _key(d: Dict[str, Any]) -> str:
-        return "|".join(
-            [
-                str(d.get("job_id") or ""),
-                str(d.get("merge_request_url") or ""),
-                str(d.get("commit_sha") or ""),
-                str(d.get("feature_branch") or ""),
-                str(d.get("created_at") or ""),
-            ]
-        )
+    def _identities(d: Dict[str, Any]) -> List[tuple]:
+        """Stable keys so the same MR is not listed three times.
+
+        One push is stored on the job, in ``metadata.git_deliveries``, and again
+        as top-level ``merge_request_url`` / ``feature_branch``. Those rows
+        differ by job_id / created_at / status and used to bypass exact-key
+        dedupe.
+        """
+        ids: List[tuple] = []
+        mr = str(d.get("merge_request_url") or "").strip().rstrip("/")
+        sha = str(d.get("commit_sha") or "").strip().lower()
+        jid = str(d.get("job_id") or "").strip()
+        if mr:
+            ids.append(("mr", mr))
+        if sha:
+            ids.append(("sha", sha))
+        if jid:
+            ids.append(("job", jid))
+        if not ids:
+            branch = str(d.get("feature_branch") or "").strip()
+            if branch:
+                ids.append(("branch", branch))
+        return ids
+
+    def _merge_into(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+        for key in (
+            "job_id",
+            "feature_branch",
+            "merge_request_url",
+            "commit_sha",
+            "commit_subject",
+            "commit_url",
+            "created_at",
+            "status",
+        ):
+            if not dst.get(key) and src.get(key):
+                dst[key] = src[key]
 
     def _add(raw: Dict[str, Any]) -> None:
         if not any(
@@ -1152,22 +1179,33 @@ def _collect_git_deliveries(
             ]
         ):
             return
-        k = _key(raw)
-        if k in seen:
+        row = {
+            "job_id": raw.get("job_id") or None,
+            "feature_branch": raw.get("feature_branch") or None,
+            "merge_request_url": raw.get("merge_request_url") or None,
+            "commit_sha": raw.get("commit_sha") or None,
+            "commit_subject": raw.get("commit_subject") or None,
+            "commit_url": raw.get("commit_url") or None,
+            "created_at": raw.get("created_at") or None,
+            "status": raw.get("status") or None,
+        }
+        ids = _identities(row)
+        if not ids:
             return
-        seen.add(k)
-        items.append(
-            {
-                "job_id": raw.get("job_id"),
-                "feature_branch": raw.get("feature_branch") or None,
-                "merge_request_url": raw.get("merge_request_url") or None,
-                "commit_sha": raw.get("commit_sha") or None,
-                "commit_subject": raw.get("commit_subject") or None,
-                "commit_url": raw.get("commit_url") or None,
-                "created_at": raw.get("created_at") or None,
-                "status": raw.get("status") or None,
-            }
-        )
+        existing: Optional[Dict[str, Any]] = None
+        for ident in ids:
+            hit = index.get(ident)
+            if hit is not None:
+                existing = hit
+                break
+        if existing is not None:
+            _merge_into(existing, row)
+            target = existing
+        else:
+            items.append(row)
+            target = row
+        for ident in _identities(target):
+            index[ident] = target
 
     # 1) Jobs (source of truth per run)
     job_rows: List[Any] = list(jobs or [])

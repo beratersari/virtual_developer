@@ -1,4 +1,4 @@
-/** Normalize path separators and match job artifacts across OS path styles. */
+/** Match job artifacts across OS path styles. Display-only. */
 
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+/g, '/')
@@ -12,19 +12,16 @@ export function pathBasename(p: string): string {
 
 export function pathStem(p: string): string {
   const base = pathBasename(p)
-  // e.g. KAN-1_2024.log → KAN-1_2024 ; foo.prompt.txt → foo
   if (base.endsWith('.prompt.txt')) return base.slice(0, -'.prompt.txt'.length)
   const i = base.lastIndexOf('.')
   return i > 0 ? base.slice(0, i) : base
 }
 
-/** True when two filesystem paths refer to the same artifact (absolute, relative, or basename). */
 export function pathsMatch(a?: string | null, b?: string | null): boolean {
   if (!a || !b) return false
   const na = normalizePath(a)
   const nb = normalizePath(b)
   if (na === nb) return true
-  // Basename only — do not use unbounded endsWith (KAN-1_foo.log vs o.log).
   return pathBasename(na) === pathBasename(nb)
 }
 
@@ -36,7 +33,6 @@ export function findByPath<T extends { path: string }>(
   return items.find((item) => pathsMatch(item.path, targetPath))
 }
 
-/** Match prompt files that share a stem with a session log path. */
 export function findPromptForJobPath<T extends { path: string; name?: string }>(
   prompts: T[],
   promptPath?: string | null,
@@ -46,14 +42,12 @@ export function findPromptForJobPath<T extends { path: string; name?: string }>(
     const direct = findByPath(prompts, promptPath)
     if (direct) return direct
   }
-  // Derive from session log: FOO.log → FOO.prompt.txt
   if (sessionLogPath) {
     const stem = pathStem(sessionLogPath)
-    const byStem = prompts.find((p) => {
+    return prompts.find((p) => {
       const pStem = pathStem(p.path)
       return pStem === stem || pathBasename(p.path) === `${stem}.prompt.txt`
     })
-    if (byStem) return byStem
   }
   return undefined
 }
@@ -65,12 +59,10 @@ export function findLogForJobPath<T extends { path: string }>(
   return findByPath(logs, sessionLogPath)
 }
 
-/** Label for a session log basename: initial | retry1 | retry2 | … */
 export function sessionLogRetryLabel(pathOrName: string): string {
   const base = pathBasename(pathOrName)
   const m = base.match(/_retry(\d+)\.log$/i)
   if (m) return `retry${m[1]}`
-  // legacy numeric suffix ISSUE_ts_N.log (not _retryN)
   const legacy = base.match(/_(\d+)\.log$/i)
   if (legacy && !/_\d{8}_\d{6}\.log$/i.test(base)) {
     const n = Number(legacy[1])
@@ -79,7 +71,6 @@ export function sessionLogRetryLabel(pathOrName: string): string {
   return 'initial'
 }
 
-/** Collect all job session paths (paths array + latest + failed retries), de-duplicated. */
 export function jobSessionPaths(job: {
   session_log_path?: string | null
   session_log_paths?: string[] | null
@@ -91,13 +82,10 @@ export function jobSessionPaths(job: {
   }
   for (const p of job.session_log_paths || []) add(p)
   add(job.session_log_path)
-  for (const r of job.retry_attempts || []) {
-    add(r.failed_session_log_path)
-  }
+  for (const r of job.retry_attempts || []) add(r.failed_session_log_path)
   return out
 }
 
-/** Sort key for session labels: initial=0, retry1=1, retry2=2, … */
 export function sessionLogSortKey(pathOrName: string): number {
   const label = sessionLogRetryLabel(pathOrName)
   if (label === 'initial') return 0

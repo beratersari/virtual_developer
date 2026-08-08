@@ -1,4 +1,4 @@
-/** Status presentation — sparse semantics, neutral default. */
+/** Status presentation only. Cancel/delete hints must match backend rules. */
 
 export type StatusTone = 'neutral' | 'info' | 'warning' | 'success' | 'danger'
 
@@ -18,7 +18,6 @@ const STATUS_MAP: Record<string, StatusMeta> = {
   cancelled: { label: 'Cancelled', tone: 'neutral' },
   unknown: { label: 'Unknown', tone: 'warning' },
   superseded: { label: 'Superseded', tone: 'neutral' },
-  // Scheduled jobs
   scheduled: { label: 'Scheduled', tone: 'info' },
   dispatching: { label: 'Dispatching', tone: 'warning' },
   dispatched: { label: 'Dispatched', tone: 'success' },
@@ -34,7 +33,6 @@ export function statusMeta(status: string): StatusMeta {
   )
 }
 
-/** Client-side job list filter groups. */
 export type JobStatusFilter =
   | 'all'
   | 'live'
@@ -70,7 +68,6 @@ export function jobMatchesFilter(
   }
 }
 
-/** Statuses the dashboard refuses to delete (matches backend). */
 const LIVE_JOB_STATUSES = new Set([
   'running',
   'planning',
@@ -78,16 +75,23 @@ const LIVE_JOB_STATUSES = new Set([
   'pending',
 ])
 
-/** Whether a job row can be selected for permanent delete (UI hint only). */
+export const IN_FLIGHT_STATUSES = new Set([
+  'pending',
+  'planning',
+  'executing',
+  'running',
+  'dispatching',
+])
+
 export function jobIsDeletable(status: string, live: boolean): boolean {
   if (live) return false
   return !LIVE_JOB_STATUSES.has((status || '').toLowerCase())
 }
 
-/**
- * Whether Cancel should be offered for a job run (UI hint only).
- * Backend cancels by issue key; live or in-flight job statuses are eligible.
- */
+export function statusToneClass(status: string): string {
+  return `tone-${statusMeta(status).tone}`
+}
+
 export function jobIsCancellable(status: string, live: boolean): boolean {
   const s = (status || '').toLowerCase()
   if (['completed', 'error', 'cancelled', 'superseded'].includes(s)) return false

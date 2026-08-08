@@ -1,5 +1,5 @@
 /**
- * Lightweight assertions (run: npx tsx src/util/time.test.ts)
+ * Run: npx tsx src/lib/time.test.ts
  */
 import {
   elapsedSecondsBetween,

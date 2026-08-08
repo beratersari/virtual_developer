@@ -325,15 +325,57 @@ def test_git_deliveries_aggregate_from_jobs_and_meta(tmp_path, monkeypatch):
         meta=sm.get_state("GIT-1").metadata or {},
         store=jobs,
     )
-    assert len(deliveries) >= 2
+    assert len(deliveries) == 2
     mrs = {d["merge_request_url"] for d in deliveries if d.get("merge_request_url")}
     assert "https://gitlab.example.com/g/r/-/merge_requests/1" in mrs
     assert "https://gitlab.example.com/g/r/-/merge_requests/2" in mrs
+    # Top-level issue MR must merge into the matching job row, not a third card.
+    by_mr = {d["merge_request_url"]: d for d in deliveries}
+    assert by_mr["https://gitlab.example.com/g/r/-/merge_requests/2"]["job_id"] == j2["job_id"]
 
     listed = build_jobs(issue_key="GIT-1", page=1, page_size=10, store=jobs, state_manager=sm)
     by_id = {j.job_id: j for j in listed.jobs}
     assert by_id[j1["job_id"]].merge_request_url.endswith("/merge_requests/1")
     assert by_id[j2["job_id"]].commit_sha.startswith("bbbb")
+
+
+def test_git_deliveries_dedupe_same_mr_from_job_history_and_legacy():
+    """Same MR stored on the job, git_deliveries list, and top-level meta → one row."""
+    from src.dashboard.service import _collect_git_deliveries
+
+    mr = "https://gitlab.com/org/repo/-/merge_requests/18"
+    branch = "feature/KAN-1905"
+    job_id = "job_b17057e81181"
+    deliveries = _collect_git_deliveries(
+        issue_key="KAN-1905",
+        meta={
+            "feature_branch": branch,
+            "merge_request_url": mr,
+            "current_job_id": None,
+            "git_deliveries": [
+                {
+                    "job_id": job_id,
+                    "feature_branch": branch,
+                    "merge_request_url": mr,
+                    "created_at": "2026-08-01T12:00:00",
+                }
+            ],
+        },
+        jobs=[
+            {
+                "job_id": job_id,
+                "status": "completed",
+                "feature_branch": branch,
+                "merge_request_url": mr,
+                "completed_at": "2026-08-01T12:05:00",
+            }
+        ],
+    )
+    assert len(deliveries) == 1
+    assert deliveries[0]["job_id"] == job_id
+    assert deliveries[0]["status"] == "completed"
+    assert deliveries[0]["merge_request_url"] == mr
+    assert deliveries[0]["feature_branch"] == branch
 
 
 def test_build_jobs_pagination(tmp_path):
