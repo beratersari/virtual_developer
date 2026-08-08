@@ -57,9 +57,10 @@ JIRA Virtual Developer is a Python daemon that:
 
 ### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
 
-Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) only mean
-**“eligible for first intake”** while the issue is To Do-like. They do **not** mean
-“re-run this ticket on every poll forever.”
+Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) mean
+the issue is eligible for intake **whenever it is To Do-like**, including after
+a previous completed/error/cancelled run. In-flight (`planning` / `executing`)
+is never restarted from poll noise. **`plan_ready`** still does not auto-build.
 
 Typical **plan** lifecycle:
 
@@ -89,7 +90,7 @@ To Do + bot (or ai-assist)
 | Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
 | Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
 | Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
-| Local `error` / `cancelled` / `completed` | Requeue only on leave→return To Do, ERROR text change, or other rework signals — not mere label presence |
+| Local `error` / `cancelled` / `completed` + To Do + trigger label | **Re-queue** (reset and run again) |
 
 **Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
 only `bot`. Operators will see “stuck on To Do with bot label” after a successful

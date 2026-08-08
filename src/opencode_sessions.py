@@ -173,6 +173,55 @@ def resolve_session_id(
     return preferred
 
 
+def get_session_directory(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Return OpenCode ``session.directory`` for this id, or None."""
+    sid = (session_id or "").strip()
+    if not sid:
+        return None
+    path = db_path or _default_db_path()
+    if not path.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        cur = con.cursor()
+        cur.execute("SELECT directory FROM session WHERE id = ? LIMIT 1", (sid,))
+        row = cur.fetchone()
+        con.close()
+    except Exception as e:
+        logger.debug(f"OpenCode session dir lookup failed for {sid}: {e}")
+        return None
+    if not row:
+        return None
+    d = row[0]
+    return str(d) if d else None
+
+
+def session_matches_workdir(
+    session_id: str,
+    working_directory: Optional[Path],
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """True when OpenCode stored this session under *working_directory*.
+
+    ``opencode run --session`` + ``--dir`` on a *new* temp clone hangs or
+    no-ops; only resume when the clone path still matches.
+    """
+    if not working_directory:
+        return False
+    stored = get_session_directory(session_id, db_path=db_path)
+    if not stored:
+        return False
+    try:
+        return Path(stored).resolve() == Path(working_directory).resolve()
+    except OSError:
+        return False
+
+
 # Patterns seen when OpenCode is mid-compaction or just finished compact without
 # continuing the agent loop (headless `opencode run` exit-0 bug).
 _COMPACT_OUTPUT_RE = re.compile(

@@ -521,6 +521,9 @@ def test_api_health_meta_jobs_detail(tmp_path):
         r = client.get(f"/api/jobs/{j['job_id']}")
         assert r.status_code == 200
         assert r.json()["job"]["job_id"] == j["job_id"]
+        arts = client.get(f"/api/jobs/{j['job_id']}/artifacts")
+        assert arts.status_code == 200
+        assert arts.json()["job_id"] == j["job_id"]
         assert client.get("/api/jobs/missing-id").status_code == 404
 
 

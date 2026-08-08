@@ -52,6 +52,18 @@ export function formatCountdown(seconds: number | null | undefined): string {
   return m > 0 ? `${m}m ${r}s` : `${r}s`
 }
 
+/**
+ * ``datetime-local`` value → naive local ISO for the scheduler.
+ *
+ * Do not use ``Date#toISOString()``: that emits UTC ``Z``, and ``list_due``
+ * treats naive stamps as local wall clock (same as CLI / existing rows).
+ */
+export function datetimeLocalToNaiveIso(local: string): string {
+  const raw = (local || '').trim()
+  if (!raw) return raw
+  return raw.length === 16 ? `${raw}:00` : raw
+}
+
 export function useNow(enabled = true, intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {

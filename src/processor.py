@@ -750,6 +750,107 @@ class JobProcessor:
         )
         logger.info(f"{issue_key} OpenCode session: {session_id}")
 
+    def _repo_and_work_branch(
+        self, issue_key: str, git: Any = None
+    ) -> tuple[str, str]:
+        """Best-effort (repository_url, work_branch) for session binding."""
+        gm = git if git is not None else self._git_for(issue_key)
+        st = self.state_manager.get_state(issue_key)
+        meta = dict((st.metadata if st else None) or {})
+
+        def _s(val: Any) -> str:
+            return val.strip() if isinstance(val, str) else ""
+
+        repo = ""
+        branch = ""
+        if gm is not None:
+            repo = _s(getattr(gm, "remote_url", None))
+            branch = _s(getattr(gm, "work_branch", None))
+        repo = repo or _s(meta.get("repository_url"))
+        branch = (
+            branch
+            or _s(meta.get("feature_branch"))
+            or _s(meta.get("source_branch"))
+        )
+        return repo, branch
+
+    def _attach_bound_opencode_session(
+        self, issue_key: str, task: AgentTask, git: Any = None
+    ) -> Optional[str]:
+        """Reuse a stored OpenCode session for this repo + work branch (CLI and serve)."""
+        if getattr(task, "session_id", None):
+            return task.session_id
+        repo, branch = self._repo_and_work_branch(issue_key, git)
+        if not repo or not branch:
+            return None
+        import src.state.session_bind_store as session_binds
+
+        rec = session_binds.session_bind_store.get(repo, branch)
+        sid = (rec or {}).get("session_id") if rec else None
+        if not sid:
+            return None
+        wd = None
+        if git is not None and hasattr(git, "get_working_directory"):
+            try:
+                wd = git.get_working_directory()
+            except Exception:
+                wd = None
+        if wd is None:
+            runner = self._runner_for(issue_key)
+            wd = getattr(runner, "working_directory", None) if runner else None
+        try:
+            from src.opencode_sessions import (
+                get_session_directory,
+                session_matches_workdir,
+            )
+
+            stored_dir = get_session_directory(sid)
+            if not stored_dir:
+                logger.info(
+                    f"{issue_key}: bound session {sid} not in OpenCode DB; "
+                    f"starting a new session"
+                )
+                return None
+            if not session_matches_workdir(sid, Path(wd) if wd else None):
+                logger.info(
+                    f"{issue_key}: bound session {sid} is for another clone "
+                    f"({stored_dir}); starting a new OpenCode session"
+                )
+                return None
+        except Exception as e:
+            logger.debug(f"{issue_key}: session dir check failed: {e}")
+            return None
+        task.session_id = sid
+        try:
+            self.state_manager.update_state(
+                issue_key, current_opencode_session_id=sid
+            )
+        except Exception:
+            pass
+        logger.info(
+            f"{issue_key}: resuming OpenCode session {sid} for {repo}@{branch}"
+        )
+        return sid
+
+    def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        repo, branch = self._repo_and_work_branch(issue_key)
+        if not repo or not branch:
+            return
+        import src.state.session_bind_store as session_binds
+
+        raw_jid = self._active_jobs.get(issue_key)
+        job_id = raw_jid if isinstance(raw_jid, str) else None
+        session_binds.session_bind_store.upsert(
+            repository_url=repo,
+            branch=branch,
+            session_id=sid,
+            issue_key=issue_key,
+            job_id=job_id,
+        )
+
     def _link_job_session_paths(
         self,
         issue_key: str,
@@ -782,6 +883,8 @@ class JobProcessor:
             sid,
             session_file=result.get("session_file"),
         )
+        if sid:
+            self._upsert_session_bind(issue_key, sid)
         job_id = self._active_jobs.get(issue_key)
         if job_id:
             patch: Dict[str, Any] = {}
@@ -2204,6 +2307,7 @@ class JobProcessor:
             return
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
+        self._attach_bound_opencode_session(state.issue_key, task, git)
 
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
@@ -2502,6 +2606,7 @@ class JobProcessor:
         self._snapshot_delivery_baseline(state.issue_key, git)
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
+        self._attach_bound_opencode_session(state.issue_key, task, git)
 
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):

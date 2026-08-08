@@ -34,17 +34,24 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     runtime = tmp_path / "_vd_runtime"
     jobs_dir = runtime / "jobs"
     sessions_dir = runtime / "sessions"
+    binds_dir = runtime / "opencode-binds"
     jobs_dir.mkdir(parents=True)
     sessions_dir.mkdir(parents=True)
+    binds_dir.mkdir(parents=True)
 
     from src.state.job_store import JobStore
+    from src.state.session_bind_store import SessionBindStore
     import src.processor as processor_mod
     import src.state.job_store as job_store_mod
+    import src.state.session_bind_store as bind_store_mod
 
     isolated_store = JobStore(jobs_dir=jobs_dir)
+    isolated_binds = SessionBindStore(binds_dir=binds_dir)
     monkeypatch.setattr(job_store_mod, "job_store", isolated_store)
     monkeypatch.setattr(job_store_mod, "_default_jobs_dir", lambda: jobs_dir)
     monkeypatch.setattr(processor_mod, "job_store", isolated_store)
+    monkeypatch.setattr(bind_store_mod, "session_bind_store", isolated_binds)
+    monkeypatch.setattr(bind_store_mod, "_default_binds_dir", lambda: binds_dir)
 
     monkeypatch.setattr(
         "src.orchestrator.agent_runner._default_sessions_dir",
@@ -61,6 +68,8 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "jobs_dir": jobs_dir,
         "sessions_dir": sessions_dir,
         "job_store": isolated_store,
+        "session_bind_store": isolated_binds,
+        "binds_dir": binds_dir,
     }
 
     shutil.rmtree(runtime, ignore_errors=True)

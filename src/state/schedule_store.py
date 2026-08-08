@@ -29,6 +29,14 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _as_local_aware(dt: datetime) -> datetime:
+    """Treat naive datetimes as local wall clock; leave aware stamps intact."""
+    if dt.tzinfo is not None:
+        return dt
+    tz = datetime.now().astimezone().tzinfo
+    return dt.replace(tzinfo=tz)
+
+
 class ScheduleStore:
     """File-backed store of scheduled agent jobs (one JSON per schedule)."""
 
@@ -264,12 +272,9 @@ class ScheduleStore:
                 # Support trailing Z
                 ts = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
                 at = datetime.fromisoformat(ts)
-                # Compare naive local if both naive; if aware, compare to local now aware
-                if at.tzinfo is not None and when.tzinfo is None:
-                    when_cmp = when.replace(tzinfo=at.tzinfo)
-                else:
-                    when_cmp = when
-                if at <= when_cmp:
+                # Naive = local wall clock (CLI + dashboard datetime-local).
+                # Aware/Z = real UTC instant — never label naive now as UTC.
+                if _as_local_aware(at) <= _as_local_aware(when):
                     due.append(rec)
             except ValueError:
                 logger.warning(

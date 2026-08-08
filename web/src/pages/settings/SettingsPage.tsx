@@ -44,6 +44,7 @@ function fromSettings(s: SettingsPayload): Draft {
       host: c.host,
       pat: '',
       pat_configured: Boolean(c.pat_configured),
+      original_host: c.host,
     })),
   }
 }
@@ -116,7 +117,16 @@ export function SettingsPage() {
         agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
         default_model: draft.default_model.trim(),
         gitlab_credentials: draft.gitlab_cred_rows
-          .map((r) => ({ host: r.host.trim(), pat: r.pat.trim() || undefined }))
+          .map((r) => {
+            const host = r.host.trim()
+            const prev = (r.original_host || '').trim()
+            const row: { host: string; pat?: string; previous_host?: string } = { host }
+            if (r.pat.trim()) row.pat = r.pat.trim()
+            if (prev && prev.toLowerCase() !== host.toLowerCase()) {
+              row.previous_host = prev
+            }
+            return row
+          })
           .filter((r) => r.host),
       }
       if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
@@ -233,7 +243,7 @@ export function SettingsPage() {
       <div key="gitlab" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">GitLab credentials</div>
       <p className="text-xs text-text-muted">
-        One row per host. Empty PAT keeps the stored token.
+        One row per host. Empty PAT keeps the stored token (including after a host rename).
       </p>
       {draft.gitlab_cred_rows.map((row, idx) => (
         <div key={idx}>
@@ -336,7 +346,7 @@ export function SettingsPage() {
                     ...d,
                     gitlab_cred_rows: [
                       ...d.gitlab_cred_rows,
-                      { host: '', pat: '', pat_configured: false },
+                      { host: '', pat: '', pat_configured: false, original_host: '' },
                     ],
                   }
                 : d,

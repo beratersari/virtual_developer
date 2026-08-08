@@ -265,6 +265,22 @@ def build_models_response(*, refresh: bool = False) -> ModelsResponse:
     )
 
 
+def _normalize_gitlab_host(raw: Any) -> str:
+    """Lowercase host; strip scheme/path if the operator pasted a URL."""
+    host = str(raw or "").strip().lower()
+    if not host:
+        return ""
+    if "://" in host or "/" in host:
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(host if "://" in host else f"https://{host}")
+            host = (parsed.hostname or host).lower()
+        except Exception:
+            host = host.split("/")[0]
+    return host.strip()
+
+
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets). Does not rewrite .env.
 
@@ -293,30 +309,34 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             else {}
         )
         new_map: Dict[str, str] = {}
+        pending_no_pat: List[str] = []
         for item in data["gitlab_credentials"] or []:
             if isinstance(item, dict):
-                host = str(item.get("host") or "").strip().lower()
+                host = _normalize_gitlab_host(item.get("host"))
                 pat_raw = item.get("pat")
+                previous_host = _normalize_gitlab_host(item.get("previous_host"))
             else:
-                host = str(getattr(item, "host", "") or "").strip().lower()
+                host = _normalize_gitlab_host(getattr(item, "host", None))
                 pat_raw = getattr(item, "pat", None)
+                previous_host = _normalize_gitlab_host(
+                    getattr(item, "previous_host", None)
+                )
             if not host:
                 continue
-            # Strip scheme if operator pasted a URL
-            if "://" in host:
-                try:
-                    from urllib.parse import urlparse
-
-                    host = (urlparse(host if "://" in host else f"https://{host}").hostname or host)
-                    host = host.lower()
-                except Exception:
-                    pass
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[host] = pat
             elif host in current:
                 new_map[host] = current[host]
-            # else: new host without PAT — skip (cannot auth)
+            elif previous_host and previous_host in current:
+                new_map[host] = current[previous_host]
+            else:
+                pending_no_pat.append(host)
+        # 1:1 rename without previous_host (older clients): copy the dropped PAT
+        dropped = [h for h in current if h not in new_map]
+        still_pending = [h for h in pending_no_pat if h not in new_map]
+        if len(dropped) == 1 and len(still_pending) == 1:
+            new_map[still_pending[0]] = current[dropped[0]]
         if hasattr(settings, "set_gitlab_host_pat_map"):
             settings.set_gitlab_host_pat_map(new_map)
         else:
@@ -507,6 +527,105 @@ def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
     return paths
 
 
+def job_dict_to_item(
+    j: Dict[str, Any],
+    *,
+    summaries: Optional[Dict[str, str]] = None,
+    live_keys: Optional[set] = None,
+    active_job_ids: Optional[set] = None,
+    store: Optional[JobStore] = None,
+    include_description: bool = True,
+) -> JobItem:
+    """Enrich one JobStore dict into a JobItem (list or single-job detail)."""
+    summaries = summaries or {}
+    live_keys = live_keys or set()
+    active_job_ids = active_job_ids or set()
+    js = store or default_job_store
+    jid = j.get("job_id") or ""
+    ik = j.get("issue_key") or ""
+    if not j.get("summary") and ik in summaries:
+        j = {**j, "summary": summaries[ik]}
+    description = ""
+    if include_description:
+        j = js.ensure_description(j, persist=str(jid).startswith("job_"))
+        if not (j.get("description") or "").strip() and j.get("prompt_path"):
+            recovered = description_from_prompt_path(j.get("prompt_path"))
+            if recovered:
+                j = {**j, "description": recovered}
+        description = j.get("description") or ""
+    live = jid in active_job_ids or (
+        ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
+    )
+    session_paths = _job_session_log_paths(j)
+    prompt_paths = _job_prompt_paths(j)
+    return JobItem(
+        job_id=jid,
+        issue_key=ik,
+        summary=j.get("summary") or "",
+        description=description,
+        workflow_type=j.get("workflow_type") or "execution",
+        agent=j.get("agent") or "",
+        status=j.get("status") or "unknown",
+        task_id=j.get("task_id"),
+        task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
+        opencode_session_id=j.get("opencode_session_id"),
+        opencode_session_ids=list(j.get("opencode_session_ids") or []),
+        session_log_path=j.get("session_log_path") or (
+            session_paths[-1] if session_paths else None
+        ),
+        session_log_paths=session_paths,
+        prompt_path=j.get("prompt_path") or (prompt_paths[-1] if prompt_paths else None),
+        prompt_paths=prompt_paths,
+        retry_attempts=_job_retry_attempts(j),
+        progress_percentage=int(j.get("progress_percentage") or 0),
+        error_message=j.get("error_message"),
+        started_at=j.get("started_at"),
+        completed_at=j.get("completed_at"),
+        updated_at=j.get("updated_at"),
+        live=live,
+        feature_branch=j.get("feature_branch") or None,
+        merge_request_url=j.get("merge_request_url") or None,
+        commit_sha=j.get("commit_sha") or None,
+        commit_subject=j.get("commit_subject") or None,
+        commit_url=j.get("commit_url") or None,
+        delivery_status=j.get("delivery_status") or None,
+        delivery_note=j.get("delivery_note") or None,
+    )
+
+
+def build_one_job(
+    job_id: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[JobStore] = None,
+    state_manager: Optional[JiraStateManager] = None,
+) -> Optional[JobItem]:
+    """Single enriched job without scanning the whole JobStore list."""
+    js = store or default_job_store
+    raw = js.get_job((job_id or "").strip())
+    if not raw:
+        return None
+    live_keys: set = set()
+    active_job_ids: set = set()
+    if processor is not None:
+        live_keys = set(processor.list_live_processing_keys())
+        active_job_ids = set((processor._active_jobs or {}).values())
+    summaries: Dict[str, str] = {}
+    ik = (raw.get("issue_key") or "").strip()
+    if state_manager is not None and ik:
+        st = state_manager.get_state(ik)
+        if st and st.issue_summary:
+            summaries[st.issue_key] = st.issue_summary
+    return job_dict_to_item(
+        raw,
+        summaries=summaries,
+        live_keys=live_keys,
+        active_job_ids=active_job_ids,
+        store=js,
+        include_description=True,
+    )
+
+
 def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:
     out: List[JobRetryAttempt] = []
     for raw in j.get("retry_attempts") or []:
@@ -579,57 +698,14 @@ def build_jobs(
 
     items: List[JobItem] = []
     for j in page_raw:
-        jid = j.get("job_id") or ""
-        ik = j.get("issue_key") or ""
-        if not j.get("summary") and ik in summaries:
-            j = {**j, "summary": summaries[ik]}
-        # Recover description from this job's prompt — never from live issue state
-        j = js.ensure_description(j, persist=jid.startswith("job_"))
-        if not (j.get("description") or "").strip() and j.get("prompt_path"):
-            recovered = description_from_prompt_path(j.get("prompt_path"))
-            if recovered:
-                j = {**j, "description": recovered}
-        live = jid in active_job_ids or (
-            ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
-        )
-        session_paths = _job_session_log_paths(j)
-        prompt_paths = _job_prompt_paths(j)
         items.append(
-            JobItem(
-                job_id=jid,
-                issue_key=ik,
-                summary=j.get("summary") or "",
-                # Per-job snapshot only (or recovered from that job's prompt file)
-                description=j.get("description") or "",
-                workflow_type=j.get("workflow_type") or "execution",
-                agent=j.get("agent") or "",
-                status=j.get("status") or "unknown",
-                task_id=j.get("task_id"),
-                task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
-                opencode_session_id=j.get("opencode_session_id"),
-                opencode_session_ids=list(j.get("opencode_session_ids") or []),
-                session_log_path=j.get("session_log_path") or (
-                    session_paths[-1] if session_paths else None
-                ),
-                session_log_paths=session_paths,
-                prompt_path=j.get("prompt_path") or (
-                    prompt_paths[-1] if prompt_paths else None
-                ),
-                prompt_paths=prompt_paths,
-                retry_attempts=_job_retry_attempts(j),
-                progress_percentage=int(j.get("progress_percentage") or 0),
-                error_message=j.get("error_message"),
-                started_at=j.get("started_at"),
-                completed_at=j.get("completed_at"),
-                updated_at=j.get("updated_at"),
-                live=live,
-                feature_branch=j.get("feature_branch") or None,
-                merge_request_url=j.get("merge_request_url") or None,
-                commit_sha=j.get("commit_sha") or None,
-                commit_subject=j.get("commit_subject") or None,
-                commit_url=j.get("commit_url") or None,
-                delivery_status=j.get("delivery_status") or None,
-                delivery_note=j.get("delivery_note") or None,
+            job_dict_to_item(
+                j,
+                summaries=summaries,
+                live_keys=live_keys,
+                active_job_ids=active_job_ids,
+                store=js,
+                include_description=bool(issue_key),
             )
         )
     return JobsResponse(
@@ -1031,6 +1107,34 @@ def _collect_session_artifacts(issue_key: str) -> Dict[str, Any]:
     return {"session_logs": logs, "prompt_files": prompts}
 
 
+def _artifacts_root() -> Path:
+    return (Path.cwd() / ".jira-agent").resolve()
+
+
+def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Read prompt/session files linked on this job only (not the whole issue)."""
+    if hasattr(job, "model_dump"):
+        job = job.model_dump()
+    if not isinstance(job, dict):
+        return {"prompts": [], "session_logs": []}
+    root = _artifacts_root()
+    prompts: List[Dict[str, Any]] = []
+    logs: List[Dict[str, Any]] = []
+    seen_p: set = set()
+    seen_l: set = set()
+    for p in _job_prompt_paths(job):
+        if not p or p in seen_p:
+            continue
+        seen_p.add(p)
+        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, root=root))
+    for p in _job_session_log_paths(job):
+        if not p or p in seen_l:
+            continue
+        seen_l.add(p)
+        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, root=root))
+    return {"prompts": prompts, "session_logs": logs}
+
+
 def _reconstruct_prompts(state) -> Dict[str, Any]:
     """Metadata for the prompts tab (agent/workflow only).
 
@@ -1343,11 +1447,18 @@ def build_task_detail(
     *,
     state_manager: Optional[JiraStateManager] = None,
     processor: Optional["JobProcessor"] = None,
+    include_artifacts: bool = True,
+    include_live_jira: bool = True,
+    jobs: Optional[List[Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility).
 
     Returns a read-only stub when the issue is on the board but has no local
     agent state yet (so Poll monitor can open any eligible key).
+
+    ``include_artifacts`` / ``include_live_jira`` default True for callers that
+    need the full dump. HTTP handlers pass False so overview paints quickly.
+    Pass ``jobs`` to avoid a second JobStore scan for git deliveries.
     """
     sm = state_manager or JiraStateManager()
     key = (issue_key or "").strip().upper()
@@ -1370,7 +1481,7 @@ def build_task_detail(
         except Exception:
             on_board = False
         return _build_task_detail_without_state(
-            key, processor=processor if on_board else None
+            key, processor=processor if (on_board and include_live_jira) else None
         )
 
     live = False
@@ -1378,7 +1489,9 @@ def build_task_detail(
         live = processor._is_live_processing(key)
 
     # Live fields from Jira (not frozen local state / job snapshot)
-    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    jira_live: Dict[str, Any] = {}
+    if include_live_jira:
+        jira_live = _fetch_live_jira_fields(key, processor=processor)
     if jira_live:
         live_summary = jira_live.get("summary") or state.issue_summary or ""
         live_description = jira_live.get("description", "")
@@ -1386,7 +1499,9 @@ def build_task_detail(
         live_summary = state.issue_summary or ""
         live_description = state.description or ""
 
-    artifacts = _collect_session_artifacts(key)
+    artifacts: Dict[str, Any] = {"session_logs": [], "prompt_files": []}
+    if include_artifacts:
+        artifacts = _collect_session_artifacts(key)
     prompts = _reconstruct_prompts(state)
     # Prefer on-disk prompt captures when present (actual text sent to agent)
     if artifacts["prompt_files"]:
@@ -1422,23 +1537,24 @@ def build_task_detail(
     job_ids = list(meta.get("job_ids") or [])
     if meta.get("current_job_id") and meta["current_job_id"] not in job_ids:
         job_ids = [*job_ids, meta["current_job_id"]]
-    # Sibling .session_id files next to session logs
-    for log in artifacts["session_logs"]:
-        sid_file = Path(log["path"] + ".session_id")
-        if sid_file.is_file():
-            try:
-                sid = sid_file.read_text(encoding="utf-8").strip()
-                if sid and sid not in session_ids:
-                    session_ids.append(sid)
-                if not current_sid:
-                    current_sid = sid
-            except OSError:
-                pass
-    db_sessions = find_sessions_for_issue(key, limit=20)
-    for s in db_sessions:
-        sid = s.get("id")
-        if sid and sid not in session_ids:
-            session_ids.append(sid)
+    db_sessions: List[Any] = []
+    if include_artifacts:
+        for log in artifacts["session_logs"]:
+            sid_file = Path(log["path"] + ".session_id")
+            if sid_file.is_file():
+                try:
+                    sid = sid_file.read_text(encoding="utf-8").strip()
+                    if sid and sid not in session_ids:
+                        session_ids.append(sid)
+                    if not current_sid:
+                        current_sid = sid
+                except OSError:
+                    pass
+        db_sessions = find_sessions_for_issue(key, limit=20)
+        for s in db_sessions:
+            sid = s.get("id")
+            if sid and sid not in session_ids:
+                session_ids.append(sid)
     if not current_sid and session_ids:
         current_sid = session_ids[-1]
 
@@ -1472,6 +1588,7 @@ def build_task_detail(
         "git_deliveries": _collect_git_deliveries(
             issue_key=key,
             meta=meta,
+            jobs=jobs,
         ),
         "retry_history": retry_history,
         "prompts": prompts,

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { cancelTask, fetchTaskDetail } from '../../api/client'
 import type { GitDelivery, TaskDetail } from '../../api/types'
+import { peekTask, rememberJob, rememberTask } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { Spinner } from '../../ui/Spinner'
@@ -31,8 +32,9 @@ export function IssueDetailPage() {
   const { issueKey = '' } = useParams()
   const navigate = useNavigate()
   const live = useLive()
-  const [detail, setDetail] = useState<TaskDetail | null>(null)
-  const [loading, setLoading] = useState(true)
+  const cached = peekTask(issueKey.trim().toUpperCase())
+  const [detail, setDetail] = useState<TaskDetail | null>(cached)
+  const [loading, setLoading] = useState(!cached)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
   const [tab, setTab] = useState<'overview' | 'logs'>('overview')
@@ -42,22 +44,25 @@ export function IssueDetailPage() {
   const lastSoft = useRef(0)
 
   const load = useCallback(
-    async (soft = false) => {
+    async (soft = false, live = false) => {
       const key = issueKey.trim().toUpperCase()
       if (!key) return
       const req = ++reqId.current
-      if (!soft) {
+      const haveRow = Boolean(peekTask(key))
+      if (!soft && !haveRow) {
         setLoading(true)
         setError(null)
       }
       try {
-        const d = await fetchTaskDetail(key)
+        const d = await fetchTaskDetail(key, { live })
         if (req !== reqId.current) return
+        rememberTask(d)
+        for (const j of d.jobs || []) rememberJob(j)
         setDetail(d)
         setStale(false)
       } catch (e) {
         if (req !== reqId.current) return
-        if (soft) setStale(true)
+        if (soft || haveRow) setStale(true)
         else {
           setDetail(null)
           setError(e instanceof Error ? e.message : 'Failed to load issue')
@@ -71,8 +76,14 @@ export function IssueDetailPage() {
 
   useEffect(() => {
     setTab('overview')
-    void load(false)
-  }, [load])
+    lastSoft.current = Date.now()
+    const seed = peekTask(issueKey.trim().toUpperCase())
+    if (seed) {
+      setDetail(seed)
+      setLoading(false)
+    }
+    void load(Boolean(seed))
+  }, [issueKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const now = Date.now()
@@ -140,7 +151,7 @@ export function IssueDetailPage() {
           )}
           <button
             type="button"
-            onClick={() => void load(false)}
+            onClick={() => void load(Boolean(detail), true)}
             className="vd-btn vd-btn-secondary"
             disabled={loading}
           >
@@ -158,7 +169,7 @@ export function IssueDetailPage() {
       {detail?.description?.trim() ? (
         <div className="vd-card px-4 py-3">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-            Live issue description
+            {detail.jira_live ? 'Live issue description' : 'Issue description'}
           </div>
           <p className="whitespace-pre-wrap text-sm text-text-secondary">{detail.description}</p>
         </div>
@@ -174,7 +185,7 @@ export function IssueDetailPage() {
       />
 
       <div className="vd-card min-h-[50vh] p-5">
-        {loading && <p className="text-sm text-text-muted">Loading issue…</p>}
+        {loading && !detail && <p className="text-sm text-text-muted">Loading issue…</p>}
         {error && <p className="text-sm text-danger-text">{error}</p>}
         {stale && !error && (
           <p className="mb-3 text-sm text-warning-text">Detail may be stale. Use Refresh.</p>

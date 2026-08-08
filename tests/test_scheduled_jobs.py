@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -81,6 +81,50 @@ def test_schedule_store_claim_and_due(tmp_path):
     assert claimed is not None
     assert claimed["status"] == "dispatching"
     assert store.claim_due(a["schedule_id"]) is None
+
+
+def test_list_due_zulu_future_is_not_due_against_local_now(tmp_path):
+    """UTC Z must not be compared by labeling naive local now as UTC."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future_utc = datetime.now().astimezone() + timedelta(hours=2)
+    scheduled_at = (
+        future_utc.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    rec = store.create(
+        title="zulu-future",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=scheduled_at,
+        issue_key="KAN-Z1",
+        issue_description="x",
+    )
+    assert store.list_due() == []
+    later = datetime.now() + timedelta(hours=3)
+    due = store.list_due(now=later)
+    assert len(due) == 1
+    assert due[0]["schedule_id"] == rec["schedule_id"]
+
+
+def test_list_due_naive_local_still_uses_wall_clock(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future_local = (datetime.now() + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    store.create(
+        title="naive-future",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future_local,
+        issue_key="KAN-N1",
+        issue_description="x",
+    )
+    assert store.list_due() == []
 
 
 def test_create_scheduled_job_hard_fails_without_issue(tmp_path):

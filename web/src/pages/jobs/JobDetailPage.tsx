@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { cancelTask, deleteJob, fetchJobById } from '../../api/client'
+import { cancelTask, deleteJob, fetchJobArtifacts, fetchJobById } from '../../api/client'
 import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
+import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import { jobIsCancellable, jobIsDeletable } from '../../util/status'
 import { useElapsedLabel } from '../../util/time'
@@ -19,11 +20,13 @@ export function JobDetailPage() {
   const { jobId = '' } = useParams()
   const navigate = useNavigate()
   const live = useLive()
-  const [job, setJob] = useState<JobItem | null>(null)
+  const cached = peekJob(jobId.trim())
+  const [job, setJob] = useState<JobItem | null>(cached)
   const [prompts, setPrompts] = useState<TextArtifact[]>([])
   const [sessionLogs, setSessionLogs] = useState<TextArtifact[]>([])
   const [systemLogs, setSystemLogs] = useState<SystemLogLine[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!cached)
+  const [artsLoading, setArtsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
   const [tab, setTab] = useState<JobTab>('overview')
@@ -31,13 +34,30 @@ export function JobDetailPage() {
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
+  const artsFor = useRef('')
+
+  const loadArtifacts = useCallback(async (id: string, force = false) => {
+    if (!id || (!force && artsFor.current === id)) return
+    setArtsLoading(true)
+    try {
+      const arts = await fetchJobArtifacts(id)
+      artsFor.current = id
+      setPrompts(arts.prompts || [])
+      setSessionLogs(arts.session_logs || [])
+    } catch {
+      /* tab shows its own empty/warning */
+    } finally {
+      setArtsLoading(false)
+    }
+  }, [])
 
   const load = useCallback(
     async (soft = false) => {
       const id = jobId.trim()
       if (!id) return
       const req = ++reqId.current
-      if (!soft) {
+      const haveRow = Boolean(peekJob(id))
+      if (!soft && !haveRow) {
         setLoading(true)
         setError(null)
       }
@@ -45,14 +65,14 @@ export function JobDetailPage() {
         const body = await fetchJobById(id)
         if (req !== reqId.current) return
         if (!body.job.job_id) throw new Error(`Job ${id} not found`)
+        rememberJob(body.job)
         setJob(body.job)
-        setPrompts(body.issue?.prompts?.captured_prompt_files || [])
-        setSessionLogs(body.issue?.session_logs || [])
         setSystemLogs(Array.isArray(body.system_logs) ? body.system_logs : [])
         setStale(false)
+        void loadArtifacts(id, !soft)
       } catch (e) {
         if (req !== reqId.current) return
-        if (soft) setStale(true)
+        if (soft || haveRow) setStale(true)
         else {
           setJob(null)
           setError(e instanceof Error ? e.message : 'Failed to load job')
@@ -61,13 +81,22 @@ export function JobDetailPage() {
         if (req === reqId.current) setLoading(false)
       }
     },
-    [jobId],
+    [jobId, loadArtifacts],
   )
 
   useEffect(() => {
     setTab('overview')
-    void load(false)
-  }, [load])
+    artsFor.current = ''
+    lastSoft.current = Date.now()
+    setPrompts([])
+    setSessionLogs([])
+    const seed = peekJob(jobId.trim())
+    if (seed) {
+      setJob(seed)
+      setLoading(false)
+    }
+    void load(Boolean(seed))
+  }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps — remount seed per id
 
   useEffect(() => {
     const now = Date.now()
@@ -107,6 +136,7 @@ export function JobDetailPage() {
     setError(null)
     try {
       await deleteJob(job.job_id, { deleteArtifacts: true })
+      forgetJob(job.job_id)
       navigate('/jobs')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Delete failed')
@@ -193,7 +223,7 @@ export function JobDetailPage() {
       />
 
       <div className="vd-panel min-h-[50vh] p-5">
-        {loading && <p className="text-sm text-text-muted">Loading job…</p>}
+        {loading && !job && <p className="text-sm text-text-muted">Loading job…</p>}
         {error && <p className="text-sm text-danger-text">{error}</p>}
         {stale && !error && (
           <p className="mb-3 text-sm text-warning-text">May be stale — refresh if this looks wrong.</p>
@@ -205,11 +235,17 @@ export function JobDetailPage() {
         )}
         {job && tab === 'prompt' && (
           <div key="prompt" className="vd-fade">
+            {artsLoading && prompts.length === 0 && (
+              <p className="mb-3 text-sm text-text-muted">Loading prompt…</p>
+            )}
             <JobPromptTab job={job} prompts={prompts} />
           </div>
         )}
         {job && tab === 'opencode' && (
           <div key="opencode" className="vd-fade">
+            {artsLoading && sessionLogs.length === 0 && (
+              <p className="mb-3 text-sm text-text-muted">Loading output…</p>
+            )}
             <JobSessionTab job={job} sessionLogs={sessionLogs} />
           </div>
         )}

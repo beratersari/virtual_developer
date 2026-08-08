@@ -64,7 +64,8 @@ def test_cors_not_wildcard(tmp_path, monkeypatch):
     assert acao != "*"
 
 
-def test_poller_skips_terminal_on_cold_start(tmp_path, monkeypatch):
+def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
+    """To Do + trigger label must run even if local status is completed."""
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("COLD-1", "done already", "d")
     sm.update_state("COLD-1", status=TaskStatus.COMPLETED)
@@ -73,6 +74,7 @@ def test_poller_skips_terminal_on_cold_start(tmp_path, monkeypatch):
     poller.state_manager = sm
     poller.client = MagicMock()
     poller.interval = 30
+    poller._seen_issues.add("COLD-1")
 
     issue = {
         "key": "COLD-1",
@@ -93,8 +95,37 @@ def test_poller_skips_terminal_on_cold_start(tmp_path, monkeypatch):
     result = poller.poll_board()
 
     keys = [i["key"] for i in result]
-    assert "COLD-1" not in keys
-    assert "COLD-1" in poller._seen_issues
+    assert "COLD-1" in keys
+
+
+def test_poller_skips_in_flight_on_todo_with_trigger(tmp_path, monkeypatch):
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("LIVE-1", "running", "d")
+    sm.update_state("LIVE-1", status=TaskStatus.EXECUTING)
+
+    poller = JiraPoller(board_id="1")
+    poller.state_manager = sm
+    poller.client = MagicMock()
+    poller.interval = 30
+
+    issue = {
+        "key": "LIVE-1",
+        "fields": {
+            "summary": "running",
+            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            "labels": ["bot"],
+            "assignee": None,
+        },
+    }
+    poller.client.get_active_sprint.return_value = None
+    poller.client.get_board_issues.return_value = [issue]
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_labels", "bot")
+    monkeypatch.setattr(settings, "trigger_on_assignment", False)
+    result = poller.poll_board()
+    assert [i["key"] for i in result] == []
 
 
 def test_fail_issue_finishes_job_and_sets_requeue(tmp_path, monkeypatch):
