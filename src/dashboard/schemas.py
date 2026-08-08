@@ -154,6 +154,8 @@ class JobItem(BaseModel):
     # delivered | no_new_commits | etc. (soft completion when no new commits)
     delivery_status: Optional[str] = None
     delivery_note: Optional[str] = None
+    # Temp clone used for this run (job record or session bind)
+    working_directory: Optional[str] = None
 
 
 class JobsResponse(BaseModel):

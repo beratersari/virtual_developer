@@ -590,7 +590,33 @@ def job_dict_to_item(
         commit_url=j.get("commit_url") or None,
         delivery_status=j.get("delivery_status") or None,
         delivery_note=j.get("delivery_note") or None,
+        working_directory=(j.get("working_directory") or None),
     )
+
+
+def _job_working_directory(j: Dict[str, Any]) -> str:
+    """Clone path stored on the job, else the matching OpenCode session bind."""
+    raw = (j.get("working_directory") or "").strip()
+    if raw:
+        return raw
+    jid = (j.get("job_id") or "").strip()
+    sid = (j.get("opencode_session_id") or "").strip()
+    if not jid and not sid:
+        return ""
+    try:
+        from src.state.session_bind_store import session_bind_store
+
+        for rec in session_bind_store.list_binds(limit=500):
+            wd = (rec.get("working_directory") or "").strip()
+            if not wd:
+                continue
+            if jid and rec.get("job_id") == jid:
+                return wd
+            if sid and rec.get("session_id") == sid:
+                return wd
+    except Exception:
+        return ""
+    return ""
 
 
 def build_one_job(
@@ -616,7 +642,7 @@ def build_one_job(
         st = state_manager.get_state(ik)
         if st and st.issue_summary:
             summaries[st.issue_key] = st.issue_summary
-    return job_dict_to_item(
+    item = job_dict_to_item(
         raw,
         summaries=summaries,
         live_keys=live_keys,
@@ -624,6 +650,18 @@ def build_one_job(
         store=js,
         include_description=True,
     )
+    wd = _job_working_directory({**raw, "opencode_session_id": item.opencode_session_id})
+    if not wd and processor is not None and ik:
+        try:
+            git = processor._git_for(ik)
+            got = git.get_working_directory() if git is not None else None
+            if got:
+                wd = str(got)
+        except Exception:
+            wd = ""
+    if wd and wd != item.working_directory:
+        item = item.model_copy(update={"working_directory": wd})
+    return item
 
 
 def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:

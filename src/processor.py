@@ -871,6 +871,25 @@ class JobProcessor:
             job_id=job_id,
             working_directory=wd,
         )
+        self._record_job_working_directory(issue_key, wd)
+
+    def _record_job_working_directory(
+        self, issue_key: str, working_dir: Any
+    ) -> None:
+        """Persist the temp clone path on the active job record."""
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id or not working_dir:
+            return
+        try:
+            path = str(Path(str(working_dir)).resolve())
+        except OSError:
+            path = str(working_dir).strip()
+        if not path:
+            return
+        try:
+            self.job_store.update_job(job_id, working_directory=path)
+        except Exception:
+            pass
 
     def _link_job_session_paths(
         self,
@@ -2217,6 +2236,11 @@ class JobProcessor:
                 f"Work branch ready: {branch_name} "
                 f"(based on target={git.target_branch}; MR {branch_name} → {git.target_branch})"
             )
+            try:
+                wd = git.get_working_directory()
+            except Exception:
+                wd = None
+            self._record_job_working_directory(state.issue_key, wd)
             return git
         except IssueGitConfigError as e:
             logger.warning(

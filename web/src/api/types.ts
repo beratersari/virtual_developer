@@ -164,6 +164,7 @@ export type JobItem = {
   commit_url?: string | null
   delivery_status?: string | null
   delivery_note?: string | null
+  working_directory?: string | null
 }
 
 export type JobsPayload = {
