@@ -75,6 +75,18 @@ def test_settings_view_hides_secrets(monkeypatch):
     assert "models" not in dumped
 
 
+def test_settings_update_rejects_non_numeric_board_id():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_board_id="`")
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_board_id="board-1")
+    # Accidental markdown/quotes around a real id
+    assert SettingsUpdate(jira_board_id="`1`").jira_board_id == "1"
+    assert SettingsUpdate(jira_board_id=" 42 ").jira_board_id == "42"
+
+
 def test_apply_settings_update_runtime(monkeypatch):
     from src.config import settings
 

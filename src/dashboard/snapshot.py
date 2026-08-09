@@ -98,6 +98,12 @@ class PollSnapshotStore:
             self._data["phase"] = "idle"
         self._notify()
 
+    def set_board_id(self, board_id: Optional[str]) -> None:
+        """Update displayed board id immediately (settings save; next poll will confirm)."""
+        with self._lock:
+            self._data["board_id"] = board_id
+        self._notify()
+
     def snapshot(self) -> Dict[str, Any]:
         """Return a copy including computed seconds_until_next_poll."""
         with self._lock:

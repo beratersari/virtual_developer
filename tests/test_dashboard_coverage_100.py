@@ -587,6 +587,15 @@ def test_api_settings_patch_updates_poller_and_semaphore(tmp_path, monkeypatch):
     assert poller.interval == 99
     assert poller.board_id == "42"
     proc.resize_job_semaphore.assert_called_with(4)
+    from src.dashboard.snapshot import poll_snapshot_store
+
+    assert poll_snapshot_store.snapshot().get("board_id") == "42"
+
+    bad = client.patch("/api/settings", json={"jira_board_id": "`"})
+    assert bad.status_code == 422
+    wrapped = client.patch("/api/settings", json={"jira_board_id": "`1`"})
+    assert wrapped.status_code == 200
+    assert wrapped.json()["jira_board_id"] == "1"
 
     # poller attribute errors swallowed
     type(poller).interval = property(

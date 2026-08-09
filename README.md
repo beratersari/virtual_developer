@@ -338,7 +338,7 @@ Repo URL and branches always come from the issue `{params}` block.
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
 | `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
-| `TEMP_DIR_BASE` | `.temp` | Temp clone root |
+| `TEMP_DIR_BASE` | `.temp` | Temp clone root. On Windows keep this short (e.g. `C:\vd\t`) — clones use `{remote12}_{hash12}` so nested `build/.../Debug` trees stay under MAX_PATH. |
 | `TEMP_CLEANUP_POLICY` | `age` / `never` | Cleanup policy (see `.env.example`) |
 
 List or set models:

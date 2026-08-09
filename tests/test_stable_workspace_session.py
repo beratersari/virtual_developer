@@ -41,6 +41,27 @@ def test_shared_source_different_target_uses_new_temp_dir(tmp_path, monkeypatch)
     assert a.temp_dir.resolve() != b.temp_dir.resolve()
 
 
+def test_workspace_folder_name_fits_windows_path_budget(tmp_path, monkeypatch):
+    """Clone folder stays short so nested MSBuild paths fit under MAX_PATH."""
+    monkeypatch.chdir(tmp_path)
+    url = "https://gitlab.example.com/acme/test_project.git"
+    gm = _gm(
+        tmp_path,
+        issue_key="KAN-1905",
+        source="feature/KAN-1905",
+        target="feature/KAN-21",
+        url=url,
+    )
+    name = gm.temp_dir.name
+    assert len(name) <= 25
+    assert "feature-KAN-1905" not in name
+    assert "feature-KAN-21" not in name
+    # Full Windows-style prefix + nested Debug tree stays under 260
+    prefix = rf"C:\Users\BERAT\virtual_developer\.temp\{name}"
+    nested = r"\build\proje1\src\Debug\proje1.tlog\CL.read.1.tlog"
+    assert len(prefix + nested) < 260
+
+
 def test_shared_source_reuses_same_temp_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     url = "https://gitlab.example.com/acme/app.git"

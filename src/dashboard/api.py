@@ -578,11 +578,17 @@ def create_dashboard_app(
                 poller.interval = int(body.poll_interval_seconds)
             except Exception as e:
                 logger.warning(f"Could not update poller interval: {e}")
-        if poller is not None and body.jira_board_id is not None:
+        if body.jira_board_id is not None:
+            board = str(body.jira_board_id).strip()
+            if poller is not None:
+                try:
+                    poller.board_id = board
+                except Exception as e:
+                    logger.warning(f"Could not update poller board_id: {e}")
             try:
-                poller.board_id = str(body.jira_board_id).strip()
+                poll_snapshot_store.set_board_id(board)
             except Exception as e:
-                logger.warning(f"Could not update poller board_id: {e}")
+                logger.warning(f"Could not update poll snapshot board_id: {e}")
         # Resize live job semaphore when concurrency setting changes
         if (
             proc is not None

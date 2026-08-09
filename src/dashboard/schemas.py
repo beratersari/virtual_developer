@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MetaResponse(BaseModel):
@@ -347,7 +347,29 @@ class SettingsUpdate(BaseModel):
         max_length=2000,
         description="Legacy comma-separated hosts for single GITLAB_PAT",
     )
-    jira_board_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    jira_board_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Jira Agile board id (digits only, e.g. 1)",
+    )
+
+    @field_validator("jira_board_id", mode="before")
+    @classmethod
+    def _jira_board_id_digits(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        # Strip accidental markdown wrapping: `1` or ``1``
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+            text = text[1:-1].strip()
+        if not text.isdigit():
+            raise ValueError(
+                "Jira board ID must be a number (Agile board id from the board URL, e.g. 1)"
+            )
+        return text
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None

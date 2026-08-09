@@ -91,6 +91,83 @@ def test_create_temp_directory_reuses_stable_path(tmp_path, monkeypatch):
         g.target_branch = "main"
         fourth = g._create_temp_directory()
         assert fourth != first
+        # Short name: no branch tokens (Windows MAX_PATH budget)
+        assert "feature-shared" not in first.name
+        assert "develop" not in first.name
+        assert len(first.name) <= 32
+
+
+def test_workspace_folder_name_is_short_and_stable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        g = GitManager(issue_key="C-1")
+    g.remote_name = "test_project"
+    g.issue_key = "KAN-1905"
+    g.remote_url = "https://gitlab.example.com/g/test_project.git"
+    g.source_branch = "feature/KAN-1905"
+    g.target_branch = "feature/KAN-21"
+    g.work_branch = "feature/KAN-1905"
+    short = g._workspace_folder_name()
+    legacy = g._legacy_workspace_folder_name()
+    assert short.startswith("test_project_")
+    assert len(short) <= 25  # 12 + 1 + 12
+    assert "feature-KAN-1905" not in short
+    assert "feature-KAN-21" in legacy
+    assert short.split("_")[-1] == legacy.split("_")[-1]
+    # Same identity → same digest; different target → different short name
+    g.target_branch = "develop"
+    other = g._workspace_folder_name()
+    assert other != short
+    assert other.split("_")[-1] != short.split("_")[-1]
+
+
+def test_create_temp_directory_renames_legacy_long_folder(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        g = GitManager(issue_key="C-1")
+    g.remote_name = "test_project"
+    g.issue_key = "KAN-21"
+    g.remote_url = "https://gitlab.example.com/g/test_project.git"
+    g.source_branch = "feature/KAN-1905"
+    g.target_branch = "feature/KAN-21"
+    g.work_branch = "feature/KAN-1905"
+    with patch("src.git_manager.settings") as s:
+        s.temp_dir_base = Path(".temp")
+        base = (tmp_path / ".temp").resolve()
+        base.mkdir()
+        legacy = base / g._legacy_workspace_folder_name()
+        legacy.mkdir()
+        (legacy / "marker.txt").write_text("keep", encoding="utf-8")
+        got = g._create_temp_directory()
+        short = base / g._workspace_folder_name()
+        assert got.resolve() == short.resolve()
+        assert "feature-KAN" not in got.name
+        assert (got / "marker.txt").read_text(encoding="utf-8") == "keep"
+        assert not legacy.exists()
+
+
+def test_enable_git_longpaths_sets_local_config(gm, tmp_path):
+    git_dir = gm.temp_dir / ".git"
+    git_dir.mkdir()
+    with patch.object(gm, "_run_git") as run:
+        gm._enable_git_longpaths()
+    run.assert_called_once_with(["config", "core.longpaths", "true"], check=False)
+
+    # No .git → no-op
+    import shutil
+
+    shutil.rmtree(git_dir)
+    with patch.object(gm, "_run_git") as run2:
+        gm._enable_git_longpaths()
+    run2.assert_not_called()
+
+
+def test_run_git_passes_core_longpaths(gm):
+    with patch("src.git_manager.subprocess.run", return_value=_cp(returncode=0)) as run:
+        gm._run_git(["status"])
+    cmd = run.call_args.args[0]
+    assert cmd[:3] == ["git", "-c", "core.longpaths=true"]
+    assert cmd[3:] == ["status"]
 
 
 def test_clone_into_temp_success_and_fail(gm, tmp_path):
@@ -112,10 +189,16 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
                     gm._clone_into_temp()
         upd.assert_called_once()
         clone_cmds = [
-            c.args[0] for c in run.call_args_list if c.args and c.args[0][:2] == ["git", "clone"]
+            c.args[0]
+            for c in run.call_args_list
+            if c.args and c.args[0] and c.args[0][0] == "git" and "clone" in c.args[0]
         ]
         assert clone_cmds, "expected a git clone subprocess call"
-        assert clone_cmds[0][:3] == ["git", "clone", "--no-single-branch"]
+        cmd = clone_cmds[0]
+        assert cmd[0] == "git"
+        assert "-c" in cmd and "core.longpaths=true" in cmd
+        i = cmd.index("clone")
+        assert cmd[i : i + 2] == ["clone", "--no-single-branch"]
     with patch(
         "src.git_manager.subprocess.run",
         return_value=_cp(returncode=1, stderr="fail"),
