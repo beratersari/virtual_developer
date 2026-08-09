@@ -219,23 +219,149 @@ def test_source_lock_key_matches_bind_identity(tmp_path, monkeypatch):
     with patch("src.processor.create_jira_client", return_value=MagicMock()):
         proc = JobProcessor()
     a = proc._source_lock_key(
-        "https://gitlab.com/Group/Repo.git", "refs/heads/feature/shared"
+        "https://gitlab.com/Group/Repo.git",
+        "refs/heads/feature/shared",
+        "refs/heads/develop",
     )
-    b = proc._source_lock_key("https://gitlab.com/group/repo", "feature/shared")
+    b = proc._source_lock_key(
+        "https://gitlab.com/group/repo", "feature/shared", "develop"
+    )
     c = proc._source_lock_key(
-        "git@gitlab.com:group/repo.git", "feature/shared"
+        "git@gitlab.com:group/repo.git", "feature/shared", "develop"
     )
     assert a == b == c
     assert proc._claim_source_branch(
-        "A-1", "https://gitlab.com/g/r.git", "feature/x"
+        "A-1", "https://gitlab.com/g/r.git", "feature/x", "develop"
     )
     assert proc._claim_source_branch(
-        "A-1", "https://gitlab.com/g/r.git", "feature/x"
+        "A-1", "https://gitlab.com/g/r.git", "feature/x", "develop"
     )
     assert (
-        proc._claim_source_branch("B-2", "https://gitlab.com/g/r", "feature/x")
+        proc._claim_source_branch(
+            "B-2", "https://gitlab.com/g/r", "feature/x", "develop"
+        )
         is False
     )
+    # Different Target is a different clone — allowed concurrently.
+    assert proc._claim_source_branch(
+        "B-2", "https://gitlab.com/g/r", "feature/x", "main"
+    )
+
+
+def test_develop_job_and_named_feature_key_share_lock(tmp_path, monkeypatch):
+    """Source=develop → feature/{KEY} must serialize with Source=feature/{KEY}."""
+    from src.git_manager import resolve_work_branch_name
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    url = "https://gitlab.com/g/r.git"
+    work_a = resolve_work_branch_name("KAN-23", "develop", "develop")
+    work_b = resolve_work_branch_name("KAN-24", "feature/KAN-23", "develop")
+    assert work_a == "feature/KAN-23"
+    assert work_b == "feature/KAN-23"
+    assert proc._source_lock_key(url, work_a, "develop") == proc._source_lock_key(
+        url, work_b, "develop"
+    )
+    assert proc._claim_source_branch("KAN-23", url, work_a, "develop")
+    assert proc._claim_source_branch("KAN-24", url, work_b, "develop") is False
+    proc._release_source_branch("KAN-23")
+    assert proc._claim_source_branch("KAN-24", url, work_b, "develop")
+
+
+def test_two_develop_tickets_do_not_share_lock(tmp_path, monkeypatch):
+    from src.git_manager import resolve_work_branch_name
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    url = "https://gitlab.com/g/r.git"
+    w1 = resolve_work_branch_name("KAN-1", "develop", "develop")
+    w2 = resolve_work_branch_name("KAN-2", "develop", "develop")
+    assert w1 == "feature/KAN-1"
+    assert w2 == "feature/KAN-2"
+    assert proc._claim_source_branch("KAN-1", url, w1, "develop")
+    assert proc._claim_source_branch("KAN-2", url, w2, "develop")
+
+
+def test_source_claim_is_thread_safe(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    url = "https://gitlab.com/g/r.git"
+    winners: list[str] = []
+    barrier = threading.Barrier(16)
+
+    def try_claim(key: str) -> None:
+        barrier.wait()
+        if proc._claim_source_branch(key, url, "feature/shared", "develop"):
+            winners.append(key)
+
+    threads = [
+        threading.Thread(target=try_claim, args=(f"I-{i}",)) for i in range(16)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(winners) == 1
+
+
+def test_init_git_refuses_named_source_while_develop_job_holds_feature(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
+    """KAN-23 (Source=develop) in-flight blocks KAN-24 (Source=feature/KAN-23)."""
+    from src.git_manager import GitSourceBranchError
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    params_a = (
+        "{params}\n"
+        "Repository: https://gitlab.com/g/r.git\n"
+        "Source branch: develop\n"
+        "Target branch: develop\n"
+        "Mode: plan\n"
+        "{params}\n"
+    )
+    params_b = (
+        "{params}\n"
+        "Repository: https://gitlab.com/g/r.git\n"
+        "Source branch: feature/KAN-23\n"
+        "Target branch: develop\n"
+        "Mode: plan\n"
+        "{params}\n"
+    )
+    sm.create_state("KAN-23", "a", params_a)
+    sm.create_state("KAN-24", "b", params_b)
+    proc._refresh_issue_text_from_jira = lambda issue_key, st: (
+        (st.issue_summary if st else ""),
+        (st.description if st else ""),
+    )
+
+    class FakeGM:
+        def __init__(self, issue_key=None, **kwargs):
+            self.issue_key = issue_key
+            self.temp_dir = tmp_path / str(issue_key)
+            self.temp_dir.mkdir(exist_ok=True)
+            self.source_branch = kwargs.get("source_branch")
+            self.target_branch = kwargs.get("target_branch")
+            self.remote_url = kwargs.get("remote_url")
+            self.work_branch = "feature/KAN-23"
+
+        def get_working_directory(self):
+            return self.temp_dir
+
+    with patch("src.processor.GitManager", side_effect=lambda **kw: FakeGM(**kw)):
+        with patch("src.processor.AgentRunner", return_value=MagicMock()):
+            first = proc._init_git_manager("KAN-23")
+            assert first is not None
+            with pytest.raises(GitSourceBranchError, match="feature/KAN-23"):
+                proc._init_git_manager("KAN-24")
 
 
 def test_attach_db_error_matching_bind_wd_resumes(tmp_path, monkeypatch):

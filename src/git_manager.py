@@ -52,6 +52,37 @@ class GitTargetBranchError(RuntimeError):
 _PRIMARY_BASES = frozenset({"main", "master", "develop", "trunk", "dev"})
 
 
+def _is_primary_base_name(branch: str) -> bool:
+    name = (branch or "").strip().lower()
+    if not name:
+        return False
+    if name in _PRIMARY_BASES:
+        return True
+    return name.startswith("release/")
+
+
+def resolve_work_branch_name(
+    issue_key: Optional[str],
+    source_branch: str,
+    target_branch: str,
+) -> str:
+    """Work / MR-source branch for this issue (no clone, no logging).
+
+    Same rules as ``GitManager._resolve_work_branch_name``: a real named
+    Source is used as-is; a primary base / empty / Source==Target becomes
+    ``feature/{ISSUE_KEY}``.
+    """
+    safe_key = re.sub(
+        r"[^A-Za-z0-9\-]", "-", issue_key or "issue"
+    )
+    feature = f"feature/{safe_key}"
+    source = (source_branch or "").strip()
+    target = (target_branch or "").strip()
+    if source and source != target and not _is_primary_base_name(source):
+        return source
+    return feature
+
+
 class GitManager:
     """Manages git operations in isolated temp directories per JIRA issue.
 
@@ -1046,12 +1077,7 @@ class GitManager:
 
     @staticmethod
     def _is_primary_base(branch: str) -> bool:
-        name = (branch or "").strip().lower()
-        if not name:
-            return False
-        if name in _PRIMARY_BASES:
-            return True
-        return name.startswith("release/")
+        return _is_primary_base_name(branch)
 
     def _resolve_work_branch_name(self, issue_key: Optional[str] = None) -> str:
         """Pick the branch agents commit on (MR source side).
@@ -1068,26 +1094,24 @@ class GitManager:
         existing remote source is checked out; missing source is created from
         target.
         """
-        safe_key = re.sub(
-            r"[^A-Za-z0-9\-]", "-", issue_key or self.issue_key or "issue"
-        )
-        feature = f"feature/{safe_key}"
+        key = issue_key or self.issue_key
         source = (self.source_branch or "").strip()
         target = (self.target_branch or "").strip()
+        work = resolve_work_branch_name(key, source, target)
 
         if source and source != target and not self._is_primary_base(source):
             logger.info(
                 f"Using params source as work branch: {source} "
                 f"(MR will be {source} → {target or '(target)'}; "
-                f"issue key for commits is {issue_key or self.issue_key})"
+                f"issue key for commits is {key})"
             )
-            return source
+            return work
 
         logger.info(
-            f"Using isolated work branch {feature} "
+            f"Using isolated work branch {work} "
             f"(params source was '{source or '(none)'}'; MR → {target or '(target)'})"
         )
-        return feature
+        return work
 
     def _require_target_on_remote(self) -> str:
         """Target must exist on origin before any work. Returns target name."""

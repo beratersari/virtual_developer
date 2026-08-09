@@ -1,6 +1,7 @@
 """Job processor for handling JIRA events."""
 
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,7 @@ from src.git_manager import (
     GitManager,
     GitSourceBranchError,
     GitTargetBranchError,
+    resolve_work_branch_name,
 )
 from src.issue_git_spec import (
     IssueGitConfigError,
@@ -109,8 +111,10 @@ class JobProcessor:
         self._active_jobs: Dict[str, str] = {}
         # Per-issue locks prevent double-start races under concurrent events
         self._issue_locks: Dict[str, asyncio.Lock] = {}
-        # Serialize concurrent jobs that share (repo, source_branch)
-        self._source_branch_locks: Dict[str, asyncio.Lock] = {}
+        # Serialize concurrent jobs that share a clone / session bind
+        # (repository + resolved work branch + target). threading.Lock: claim
+        # runs inside asyncio.to_thread, not on the event loop.
+        self._source_branch_guard = threading.Lock()
         self._source_branch_holders: Dict[str, str] = {}
         # Issue keys whose session bind must not be overwritten (uncertain lookup)
         self._freeze_session_binds: set[str] = set()
@@ -575,31 +579,51 @@ class JobProcessor:
         if self.git_manager is not None and git is self.git_manager:
             self.git_manager = None
 
-    def _source_lock_key(self, repository_url: str, source_branch: str) -> str:
+    def _source_lock_key(
+        self,
+        repository_url: str,
+        work_branch: str,
+        target_branch: str = "",
+    ) -> str:
+        """Same triple as clone folder + session bind: repo + work + target."""
         from src.state.session_bind_store import normalize_branch, normalize_repo_key
 
         repo = normalize_repo_key(repository_url)
-        branch = normalize_branch(source_branch).lower()
-        return f"{repo}::{branch}"
+        work = normalize_branch(work_branch).lower()
+        tgt = normalize_branch(target_branch).lower()
+        if not repo or not work or not tgt:
+            return ""
+        return f"{repo}::{work}::{tgt}"
 
-    def _claim_source_branch(self, issue_key: str, repository_url: str, source_branch: str) -> bool:
-        """Refuse a second concurrent job on the same (repo, source) pair."""
-        key = self._source_lock_key(repository_url, source_branch)
-        if not key.strip(":"):
+    def _claim_source_branch(
+        self,
+        issue_key: str,
+        repository_url: str,
+        work_branch: str,
+        target_branch: str = "",
+    ) -> bool:
+        """Refuse a second concurrent job on the same (repo, work, target) clone."""
+        key = self._source_lock_key(repository_url, work_branch, target_branch)
+        if not key:
             return True
-        holder = self._source_branch_holders.get(key)
-        if holder and holder != issue_key:
-            logger.warning(
-                f"{issue_key}: source branch {source_branch} already in use by {holder}"
-            )
-            return False
-        self._source_branch_holders[key] = issue_key
-        return True
+        with self._source_branch_guard:
+            holder = self._source_branch_holders.get(key)
+            if holder and holder != issue_key:
+                logger.warning(
+                    f"{issue_key}: work branch {work_branch} → {target_branch} "
+                    f"already in use by {holder}"
+                )
+                return False
+            self._source_branch_holders[key] = issue_key
+            return True
 
     def _release_source_branch(self, issue_key: str) -> None:
-        dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
-        for k in dead:
-            self._source_branch_holders.pop(k, None)
+        with self._source_branch_guard:
+            dead = [
+                k for k, v in self._source_branch_holders.items() if v == issue_key
+            ]
+            for k in dead:
+                self._source_branch_holders.pop(k, None)
 
     def _finish_after_git_missing(self, issue_key: str) -> None:
         """Close live job + context when git prep returns None after begin."""
@@ -2183,19 +2207,21 @@ class JobProcessor:
                 },
             )
 
-        # Only serialize custom shared Source branches. Primary bases
-        # (develop/main/…) use isolated feature/{KEY} work branches.
+        # Claim the resolved clone identity (repo + work + target) *before*
+        # GitManager creates/reuses the temp folder. Primary-base Source
+        # still isolates to feature/{KEY}; a follow-up ticket that names
+        # that same work branch must wait (same bind / same checkout).
         src = (spec.source_branch or "").strip()
         tgt = (spec.target_branch or "").strip()
-        if src and src != tgt and not GitManager._is_primary_base(src):
-            if not self._claim_source_branch(
-                issue_key, spec.repository_url, spec.source_branch
-            ):
-                raise GitSourceBranchError(
-                    f"{issue_key}: another job is already using source branch "
-                    f"`{spec.source_branch}` on this repository. Wait for it to "
-                    f"finish or use a distinct Source branch."
-                )
+        work = resolve_work_branch_name(issue_key, src, tgt)
+        if not self._claim_source_branch(
+            issue_key, spec.repository_url, work, tgt
+        ):
+            raise GitSourceBranchError(
+                f"{issue_key}: another job is already using work branch "
+                f"`{work}` → `{tgt}` on this repository. Wait for it to "
+                f"finish or use a distinct Source / Target."
+            )
 
         git = GitManager(
             issue_key=issue_key,
