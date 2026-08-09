@@ -858,6 +858,7 @@ class JobProcessor:
             )
         except Exception:
             pass
+        self._link_job_opencode_session(issue_key, sid)
         logger.info(
             f"{issue_key}: resuming OpenCode session {sid} for "
             f"{repo}@{branch}→{target}"
@@ -937,6 +938,19 @@ class JobProcessor:
             return
         try:
             self.job_store.update_job(job_id, **patch)
+        except Exception:
+            pass
+
+    def _link_job_opencode_session(self, issue_key: str, session_id: Optional[str]) -> None:
+        """Publish ses_* onto the live job as soon as OpenCode has it."""
+        sid = (session_id or "").strip()
+        if not sid or not sid.startswith("ses_"):
+            return
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id:
+            return
+        try:
+            self.job_store.update_job(job_id, opencode_session_id=sid)
         except Exception:
             pass
 
@@ -2453,6 +2467,9 @@ class JobProcessor:
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
             ),
+            on_session_id=lambda sid: self._link_job_opencode_session(
+                state.issue_key, sid
+            ),
             timeout_seconds=_timeout,
             max_retries=_retries,
             should_abort=lambda: self._is_aborted(state.issue_key),
@@ -2749,6 +2766,9 @@ class JobProcessor:
             on_retry=on_retry,
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
+            ),
+            on_session_id=lambda sid: self._link_job_opencode_session(
+                state.issue_key, sid
             ),
             timeout_seconds=_timeout,
             max_retries=_retries,
@@ -3570,6 +3590,9 @@ class JobProcessor:
                 task,
                 on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                     state.issue_key, sp, pp
+                ),
+                on_session_id=lambda sid: self._link_job_opencode_session(
+                    state.issue_key, sid
                 ),
             )
             self._apply_agent_result_session(state.issue_key, result)

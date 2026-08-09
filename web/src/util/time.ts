@@ -7,6 +7,24 @@ export function parseTimeMs(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null
 }
 
+/** Local wall-clock label for chat bubbles (ISO from API is UTC). */
+export function formatChatTime(iso: string | null | undefined): string {
+  const ms = parseTimeMs(iso)
+  if (ms == null) return ''
+  try {
+    return new Date(ms).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+  } catch {
+    return String(iso)
+  }
+}
+
 export function elapsedSecondsBetween(
   startedAt: string | null | undefined,
   completedAt: string | null | undefined,

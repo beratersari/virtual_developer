@@ -4,7 +4,7 @@ import { cancelTask, deleteJob, fetchJobArtifacts, fetchJobById } from '../../ap
 import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
 import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
-import { jobIsCancellable, jobIsDeletable } from '../../util/status'
+import { IN_FLIGHT_STATUSES, jobIsCancellable, jobIsDeletable } from '../../util/status'
 import { useElapsedLabel } from '../../util/time'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { Spinner } from '../../ui/Spinner'
@@ -242,7 +242,13 @@ export function JobDetailPage() {
         )}
         {job && tab === 'chat' && (
           <div key="chat" className="vd-fade">
-            <JobChatTab jobId={job.job_id} />
+            <JobChatTab
+              jobId={job.job_id}
+              liveRun={
+                Boolean(job.live) ||
+                IN_FLIGHT_STATUSES.has((job.status || '').toLowerCase())
+              }
+            />
           </div>
         )}
         {job && tab === 'opencode' && (

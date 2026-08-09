@@ -145,6 +145,23 @@ def test_list_session_chat_joins_parts(tmp_path: Path):
     assert "ls" in (tool.get("input") or {}).get("command", "")
 
 
+def test_list_session_chat_thinking_alias_is_reasoning(tmp_path: Path):
+    db = _chat_db(
+        tmp_path / "think.db",
+        messages=[
+            (
+                "msg_t",
+                {"role": "assistant"},
+                [{"type": "thinking", "text": "ponder"}],
+            ),
+        ],
+    )
+    chat = list_session_chat("ses_chat1", db_path=db)
+    part = chat["messages"][0]["parts"][0]
+    assert part["type"] == "reasoning"
+    assert part["text"] == "ponder"
+
+
 def test_list_session_chat_embedded_parts_without_part_table(tmp_path: Path):
     db = _chat_db(tmp_path / "emb.db", messages=[])
     con = sqlite3.connect(db)
@@ -177,6 +194,41 @@ def test_list_session_chat_missing_db(tmp_path: Path):
     chat = list_session_chat("ses_x", db_path=tmp_path / "nope.db")
     assert chat["messages"] == []
     assert chat["error"]
+
+
+def test_collect_job_chat_discovers_session_by_working_directory(tmp_path: Path):
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    db = _chat_db(
+        tmp_path / "wd.db",
+        messages=[
+            ("msg_u", {"role": "user"}, [{"type": "text", "text": "live"}]),
+        ],
+    )
+    # Point the session row at this clone
+    import sqlite3
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE session SET directory=?, time_created=?, time_updated=?",
+        (str(clone), 1_786_291_458_797, 1_786_291_458_797),
+    )
+    con.commit()
+    con.close()
+    job = {
+        "job_id": "job_live",
+        "issue_key": "KAN-7",
+        "started_at": "2026-08-09T19:04:00",
+        "working_directory": str(clone),
+        "opencode_session_id": None,
+        "opencode_session_ids": [],
+        "retry_attempts": [],
+        "session_log_paths": [],
+    }
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        out = collect_job_chat(job)
+    assert "ses_chat1" in out["session_ids"]
+    assert out["messages"][0]["parts"][0]["text"] == "live"
 
 
 def test_collect_job_chat_uses_job_session_ids(tmp_path: Path):

@@ -221,6 +221,76 @@ def find_sessions_for_issue(
     return filtered[: max(1, int(limit))]
 
 
+def find_sessions_for_directory(
+    working_directory: Any,
+    *,
+    limit: int = 20,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Sessions whose ``directory`` is this clone path (newest first)."""
+    if working_directory is None:
+        return []
+    try:
+        raw = str(working_directory).strip()
+    except Exception:
+        return []
+    if not raw:
+        return []
+    variants: List[str] = [raw]
+    try:
+        resolved = str(Path(raw).resolve())
+        if resolved not in variants:
+            variants.append(resolved)
+    except OSError:
+        pass
+    path = db_path or _default_db_path()
+    if not path.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        placeholders = ",".join("?" * len(variants))
+        rows = cur.execute(
+            f"""
+            SELECT {_SESSION_SELECT}
+            FROM session
+            WHERE directory IN ({placeholders})
+            ORDER BY time_updated DESC
+            LIMIT ?
+            """,
+            (*variants, max(1, int(limit))),
+        ).fetchall()
+        con.close()
+    except Exception as e:
+        logger.debug(f"OpenCode directory session lookup failed: {e}")
+        return []
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in rows:
+        sid = r["id"]
+        directory = r["directory"] or ""
+        if not sid or sid in seen:
+            continue
+        if not any(paths_equivalent(directory, v) for v in variants):
+            continue
+        seen.add(sid)
+        out.append(
+            {
+                "id": sid,
+                "title": r["title"],
+                "directory": r["directory"],
+                "agent": r["agent"],
+                "time_created": r["time_created"],
+                "time_updated": r["time_updated"],
+                "cost": r["cost"],
+                "tokens_input": r["tokens_input"],
+                "tokens_output": r["tokens_output"],
+            }
+        )
+    return out
+
+
 def resolve_session_id(
     issue_key: str,
     *,
@@ -405,8 +475,9 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
         text, trunc = _cap_text(raw.get("text") or "")
         out["text"] = text
         out["truncated"] = trunc
-    elif ptype == "reasoning":
+    elif ptype in {"reasoning", "thinking"}:
         text, trunc = _cap_text(raw.get("text") or "")
+        out["type"] = "reasoning"
         out["text"] = text
         out["truncated"] = trunc
     elif ptype == "tool":
