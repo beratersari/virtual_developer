@@ -14,6 +14,7 @@ from src.git_manager import (
 )
 from src.issue_git_spec import (
     IssueGitConfigError,
+    parse_issue_git_spec,
     parse_issue_mode,
     require_issue_git_spec,
 )
@@ -24,6 +25,7 @@ from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.reporter.jira_reporter import JiraReporter
 from src.state.job_store import JobStore, job_store
+from src.state.queue_store import WorkQueueStore, work_queue_store, workspace_lock_key
 from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
@@ -105,6 +107,9 @@ class JobProcessor:
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._job_semaphore: Optional[asyncio.Semaphore] = None
         self.job_store: JobStore = job_store
+        self.queue_store: WorkQueueStore = work_queue_store
+        self._queue_dispatch_lock: Optional[asyncio.Lock] = None
+        self._queue_dispatch_again = False
         # issue_key -> active job_id for this process
         self._active_jobs: Dict[str, str] = {}
         # Per-issue locks prevent double-start races under concurrent events
@@ -114,6 +119,8 @@ class JobProcessor:
         self._source_branch_holders: Dict[str, str] = {}
         # Issue keys whose session bind must not be overwritten (uncertain lookup)
         self._freeze_session_binds: set[str] = set()
+        # GitLab note ids already accepted (webhook retries)
+        self._gitlab_seen_notes: set[str] = set()
         
         logger.info("Initializing JobProcessor")
         
@@ -176,6 +183,10 @@ class JobProcessor:
         Returns True only when Jira accepted an In Progress transition (so the
         poller tracker may honestly record ``in progress``).
         """
+        from src.gitlab.keys import is_gitlab_issue_key
+
+        if is_gitlab_issue_key(issue_key):
+            return False
         try:
             client = self.jira_client
             if client is None:
@@ -265,9 +276,12 @@ class JobProcessor:
         """
         error_text = (error_message or "Unknown error")[:2000]
         try:
+            from src.gitlab.keys import is_gitlab_issue_key
+
+            gitlab_job = is_gitlab_issue_key(issue_key)
             # Leave To Do when work fails (missing Mode / {params}, agent crash).
             # Poller + workflow also try this; fail path is the last guarantee.
-            moved_ip = self._mark_jira_in_progress(issue_key)
+            moved_ip = False if gitlab_job else self._mark_jira_in_progress(issue_key)
             # process_issue may already have transitioned + set tracker before
             # the workflow failed; keep that real IP marker for leave→return.
             already_tracked_ip = self._poller_tracks_in_progress(issue_key)
@@ -302,11 +316,12 @@ class JobProcessor:
                 cur = self.state_manager.get_state(issue_key)
                 if cur is None:
                     # No local state file — still surface the error on Jira
-                    self.reporter.post_comment_response(
-                        issue_key,
-                        f"An error occurred while processing this issue:\n\n"
-                        f"{{code}}\n{error_text}\n{{code}}",
-                    )
+                    if not gitlab_job:
+                        self.reporter.post_comment_response(
+                            issue_key,
+                            f"An error occurred while processing this issue:\n\n"
+                            f"{{code}}\n{error_text}\n{{code}}",
+                        )
                     return
                 logger.info(
                     f"_fail_issue CAS skip for {issue_key}: "
@@ -319,9 +334,19 @@ class JobProcessor:
             )
             # Only force tracker In Progress when the board actually left To Do
             # (or process_issue already recorded a successful transition).
-            if moved_ip or already_tracked_ip:
+            if (not gitlab_job) and (moved_ip or already_tracked_ip):
                 self._nudge_poller_after_terminal(issue_key, marker="in progress")
             state = updated
+            if gitlab_job:
+                self._post_gitlab_mr_reply(
+                    state,
+                    (
+                        "*Virtual Developer* hit an error on this MR comment:\n\n"
+                        f"```\n{error_text}\n```\n"
+                        + (f"\n{suggestion}" if suggestion else "")
+                    ),
+                )
+                return
             # Default suggestion for config errors if caller did not pass one
             effective_suggestion = suggestion
             if not effective_suggestion:
@@ -569,6 +594,7 @@ class JobProcessor:
                 logger.warning(f"Cleanup failed for {issue_key}: {e}")
         self._release_source_branch(issue_key)
         self._freeze_session_binds.discard(issue_key)
+        self._kick_queue()
         # Drop leftover legacy mirrors so oracle/comment cannot adopt a dead clone
         if self.agent_runner is not None and ctx and ctx.get("runner") is self.agent_runner:
             self.agent_runner = None
@@ -1110,6 +1136,7 @@ class JobProcessor:
             # Still create a history row marked terminal so operators see the
             # aborted attempt, then leave no live job pointer.
             term = live_now.status.value
+            tmeta = dict((live_now.metadata or {}) if live_now else {})
             job = self.job_store.create_job(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
@@ -1118,6 +1145,10 @@ class JobProcessor:
                 agent=agent,
                 task_id=task_id,
                 status=term,
+                source=str(tmeta.get("source") or "jira"),
+                merge_request_url=tmeta.get("merge_request_url") or None,
+                gitlab_project=tmeta.get("gitlab_project") or None,
+                gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
             )
             job_id = job["job_id"]
             self._active_jobs[state.issue_key] = job_id
@@ -1145,6 +1176,7 @@ class JobProcessor:
             )
             return job_id
 
+        meta0 = dict((state.metadata or {}) if state else {})
         job = self.job_store.create_job(
             issue_key=state.issue_key,
             summary=state.issue_summary or "",
@@ -1154,6 +1186,10 @@ class JobProcessor:
             agent=agent,
             task_id=task_id,
             status=status,
+            source=str(meta0.get("source") or "jira"),
+            merge_request_url=meta0.get("merge_request_url") or None,
+            gitlab_project=meta0.get("gitlab_project") or None,
+            gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
         )
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id
@@ -2158,11 +2194,18 @@ class JobProcessor:
         self,
         issue_key: str,
         state: Optional[JiraAgentState] = None,
+        *,
+        repository_url: Optional[str] = None,
+        source_branch: Optional[str] = None,
+        target_branch: Optional[str] = None,
     ) -> Optional[GitManager]:
         """Clone from the issue template (Repository + Source + Target).
 
         Always re-reads summary/description from Jira when possible so
         ``{params}`` matches the current ticket, not a stale state snapshot.
+
+        When ``repository_url`` + source + target are passed (GitLab MR webhook),
+        Jira ``{params}`` are skipped.
 
         Returns ``None`` when the issue was cancelled/errored during clone
         (workspace discarded; no live context registered).
@@ -2175,13 +2218,25 @@ class JobProcessor:
             logger.info(f"{issue_key}: aborted before git init; skipping clone")
             return None
         st = state or self.state_manager.get_state(issue_key)
-        summary, description = self._refresh_issue_text_from_jira(issue_key, st)
-        # Re-load state after refresh (update may have persisted)
-        st = self.state_manager.get_state(issue_key) or st
-        if self._is_aborted(issue_key):
-            logger.info(f"{issue_key}: aborted after Jira refresh; skipping clone")
-            return None
-        spec = require_issue_git_spec(summary=summary, description=description)
+        repo = (repository_url or "").strip()
+        src_b = (source_branch or "").strip()
+        tgt_b = (target_branch or "").strip()
+        if repo and src_b and tgt_b:
+            from types import SimpleNamespace
+
+            spec = SimpleNamespace(
+                repository_url=repo,
+                source_branch=src_b,
+                target_branch=tgt_b,
+            )
+        else:
+            summary, description = self._refresh_issue_text_from_jira(issue_key, st)
+            # Re-load state after refresh (update may have persisted)
+            st = self.state_manager.get_state(issue_key) or st
+            if self._is_aborted(issue_key):
+                logger.info(f"{issue_key}: aborted after Jira refresh; skipping clone")
+                return None
+            spec = require_issue_git_spec(summary=summary, description=description)
         logger.info(
             f"{issue_key} git from issue: repo={spec.repository_url} "
             f"source_branch={spec.source_branch} target_branch={spec.target_branch} "
@@ -2354,6 +2409,605 @@ class JobProcessor:
         uvicorn). Offload clone/checkout to a worker thread.
         """
         return await asyncio.to_thread(self._prepare_git_workspace_blocking, state)
+
+    def _kick_queue(self) -> None:
+        """Schedule a queue dispatch on the running loop (safe from sync code)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.create_task(self.dispatch_queue())
+        except Exception:
+            pass
+
+    async def enqueue_gitlab_note(self, event: Any) -> Dict[str, Any]:
+        """Persist a GitLab MR comment and try to start it (or leave it queued)."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        if not isinstance(event, GitlabMrNoteEvent):
+            return {"ok": False, "reason": "invalid event"}
+        existing = self.queue_store.find_note(event.note_id)
+        if existing:
+            return {
+                "ok": True,
+                "queued": existing.get("status") == "queued",
+                "duplicate": True,
+                "queue_id": existing.get("queue_id"),
+                "issue_key": existing.get("issue_key"),
+                "status": existing.get("status"),
+            }
+        work = GitManager.resolve_work_branch_name(
+            event.issue_key, event.source_branch, event.target_branch
+        )
+        lock = workspace_lock_key(
+            event.repository_url, work, event.target_branch
+        )
+        rec = self.queue_store.enqueue(
+            source="gitlab",
+            issue_key=event.issue_key,
+            summary=event.mr_title or f"MR !{event.mr_iid}",
+            message=event.prompt or event.note_body,
+            repository_url=event.repository_url,
+            source_branch=event.source_branch,
+            work_branch=work,
+            target_branch=event.target_branch,
+            lock_key=lock,
+            gitlab_note_id=event.note_id,
+            merge_request_url=event.mr_url,
+            payload=event.to_dict(),
+        )
+        await self.dispatch_queue()
+        live = self.queue_store.get(rec["queue_id"]) or rec
+        return {
+            "ok": True,
+            "queued": live.get("status") == "queued",
+            "started": live.get("status") == "running",
+            "queue_id": live.get("queue_id"),
+            "issue_key": live.get("issue_key"),
+            "status": live.get("status"),
+        }
+
+    async def enqueue_jira_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist a Jira intake event and try to start it (or leave it queued)."""
+        issue = event.get("issue") or {}
+        key = (issue.get("key") or "").strip()
+        fields = issue.get("fields") or {}
+        summary = fields.get("summary") or ""
+        desc = fields.get("description") or ""
+        if not isinstance(desc, str):
+            desc = str(desc) if desc is not None else ""
+        if not key:
+            return {"ok": False, "reason": "missing issue key"}
+        existing = self.queue_store.find_open_jira(key)
+        if existing:
+            logger.info(
+                f"{key}: already {existing.get('status')} on queue "
+                f"{existing.get('queue_id')}; not re-enqueueing"
+            )
+            return {
+                "ok": True,
+                "queued": existing.get("status") == "queued",
+                "duplicate": True,
+                "queue_id": existing.get("queue_id"),
+                "issue_key": key,
+                "status": existing.get("status"),
+            }
+        spec, _err = parse_issue_git_spec(summary, desc)
+        repo = (spec.repository_url if spec else "") or ""
+        src = (spec.source_branch if spec else "") or ""
+        tgt = (spec.target_branch if spec else "") or ""
+        work = GitManager.resolve_work_branch_name(key, src, tgt) if (src or tgt) else ""
+        lock = workspace_lock_key(repo, work, tgt)
+        rec = self.queue_store.enqueue(
+            source="jira",
+            issue_key=key,
+            summary=summary,
+            message=desc,
+            repository_url=repo,
+            source_branch=src,
+            work_branch=work,
+            target_branch=tgt,
+            lock_key=lock,
+            payload=event,
+        )
+        await self.dispatch_queue()
+        live = self.queue_store.get(rec["queue_id"]) or rec
+        return {
+            "ok": True,
+            "queued": live.get("status") == "queued",
+            "started": live.get("status") == "running",
+            "queue_id": live.get("queue_id"),
+            "issue_key": key,
+            "status": live.get("status"),
+        }
+
+    async def dispatch_queue(self) -> int:
+        """Claim and start every currently runnable queue item."""
+        started = 0
+        if self._queue_dispatch_lock is None:
+            self._queue_dispatch_lock = asyncio.Lock()
+        if self._queue_dispatch_lock.locked():
+            self._queue_dispatch_again = True
+            return 0
+        async with self._queue_dispatch_lock:
+            while True:
+                self._queue_dispatch_again = False
+                max_jobs = max(1, int(settings.max_concurrent_jobs or 1))
+                blocked = set(self.list_live_processing_keys())
+                item = self.queue_store.claim_next(
+                    blocked_issue_keys=blocked,
+                    max_running=max_jobs,
+                )
+                if item is None:
+                    if self._queue_dispatch_again:
+                        continue
+                    break
+                asyncio.create_task(self._run_queue_item(item))
+                started += 1
+        return started
+
+    async def _run_queue_item(self, rec: Dict[str, Any]) -> None:
+        qid = rec.get("queue_id") or ""
+        source = (rec.get("source") or "jira").strip().lower()
+        job_id = None
+        try:
+            if source == "gitlab":
+                from src.gitlab.webhook import GitlabMrNoteEvent
+
+                event = GitlabMrNoteEvent.from_dict(rec.get("payload") or {})
+                ran = await self._run_gitlab_mr_comment(event)
+                if not ran:
+                    self.queue_store.requeue(
+                        qid, reason="workspace or issue still in-flight"
+                    )
+                    return
+            else:
+                await self.process_event(rec.get("payload") or {})
+            st = self.state_manager.get_state(rec.get("issue_key") or "")
+            if st:
+                job_id = (st.metadata or {}).get("current_job_id") or (
+                    (st.metadata or {}).get("job_ids") or [None]
+                )[-1]
+            job_id = self._active_jobs.get(rec.get("issue_key") or "") or job_id
+            status = "completed"
+            if st and st.status == TaskStatus.ERROR:
+                status = "error"
+            elif st and st.status == TaskStatus.CANCELLED:
+                status = "cancelled"
+            self.queue_store.finish(
+                qid,
+                status=status,
+                error_message=(st.error_message if st else None),
+                job_id=job_id if isinstance(job_id, str) else None,
+            )
+        except Exception as e:
+            logger.exception(f"Queue item {qid} failed: {e}", e)
+            self.queue_store.finish(qid, status="error", error_message=str(e))
+        finally:
+            await self.dispatch_queue()
+
+    def _post_gitlab_mr_reply(self, state: JiraAgentState, body: str) -> bool:
+        """Post *body* on the GitLab MR stored in issue metadata (CE + EE)."""
+        meta = dict(state.metadata or {})
+        host = (meta.get("gitlab_host") or "").strip()
+        project = meta.get("gitlab_project_id") or meta.get("gitlab_project")
+        iid = meta.get("gitlab_mr_iid")
+        if not host or not project or not iid:
+            logger.error(
+                f"{state.issue_key}: cannot post GitLab note "
+                f"(host={host!r} project={project!r} iid={iid!r})"
+            )
+            return False
+        from src.gitlab.client import GitlabClient
+
+        client = GitlabClient(host=host)
+        posted = client.post_mr_note(
+            project=project,
+            mr_iid=int(iid),
+            body=body,
+            discussion_id=str(meta.get("gitlab_discussion_id") or ""),
+        )
+        return posted is not None
+
+    async def handle_gitlab_mr_comment(self, event: Any) -> None:
+        """Clone the MR source branch, run a build, push if needed, reply on the MR."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        if not isinstance(event, GitlabMrNoteEvent):
+            logger.warning("handle_gitlab_mr_comment: invalid event")
+            return
+        issue_key = event.issue_key
+        from src.log_context import set_issue_key
+
+        set_issue_key(issue_key)
+        if self._job_semaphore is None:
+            limit = max(1, int(settings.max_concurrent_jobs or 1))
+            self._job_semaphore = _JobSlotLimiter(limit)
+
+        async with self._job_semaphore:
+            async with self._get_issue_lock(issue_key):
+                await self._run_gitlab_mr_comment(event)
+
+    async def _run_gitlab_mr_comment(self, event: Any) -> bool:
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        assert isinstance(event, GitlabMrNoteEvent)
+        issue_key = event.issue_key
+        note_id = (event.note_id or "").strip()
+        if note_id:
+            if note_id in self._gitlab_seen_notes:
+                logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
+                return True
+            self._gitlab_seen_notes.add(note_id)
+            if len(self._gitlab_seen_notes) > 500:
+                # drop arbitrary old ids; retries are near-term
+                self._gitlab_seen_notes = set(list(self._gitlab_seen_notes)[-250:])
+
+        if self._is_live_processing(issue_key):
+            logger.info(f"{issue_key}: already in-flight; deferring GitLab note")
+            return False
+
+        st = self.state_manager.get_state(issue_key)
+        summary = event.mr_title or f"MR !{event.mr_iid}"
+        description = event.prompt
+        meta = {
+            "source": "gitlab",
+            "gitlab_host": event.host,
+            "gitlab_project": event.project_path,
+            "gitlab_project_id": event.project_id or None,
+            "gitlab_mr_iid": event.mr_iid,
+            "merge_request_url": event.mr_url,
+            "gitlab_discussion_id": event.discussion_id,
+            "repository_url": event.repository_url,
+            "source_branch": event.source_branch,
+            "target_branch": event.target_branch,
+            "feature_branch": event.source_branch,
+            "workflow_type": "gitlab_mr",
+            "requeue_eligible": False,
+        }
+        if st is None:
+            st = self.state_manager.create_state(
+                issue_key, summary, description
+            )
+            self.state_manager.update_state(issue_key, metadata=meta)
+        else:
+            if st.status in self.IN_FLIGHT_STATUSES:
+                logger.info(
+                    f"{issue_key}: local status {st.status.value}; "
+                    f"deferring GitLab note"
+                )
+                return False
+            self.state_manager.update_state(
+                issue_key,
+                force=True,
+                status=TaskStatus.PENDING,
+                issue_summary=summary,
+                description=description,
+                error_message=None,
+                progress_percentage=0,
+                completed_at=None,
+                current_task_id=None,
+                current_opencode_session_id=None,
+                metadata=meta,
+            )
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return False
+        await self._start_gitlab_mr_workflow(st, event)
+        return True
+
+    def _gitlab_mr_reply_body(
+        self,
+        stdout: str,
+        *,
+        pushed: bool,
+        branch: str = "",
+        commit_sha: str = "",
+        commit_url: str = "",
+        delivery_note: str = "",
+    ) -> str:
+        """Format the Virtual Developer note posted back on the MR."""
+        answer = (stdout or "").strip() or "(no output)"
+        # GitLab notes are large, but keep the dashboard/job comment readable.
+        if len(answer) > 8000:
+            answer = answer[:8000].rstrip() + "\n\n…(truncated)"
+        parts = ["*Virtual Developer*", "", answer]
+        if pushed:
+            extra = ["", "---", ""]
+            br = (branch or "").strip()
+            extra.append(
+                f"Pushed new commits to the existing MR source branch"
+                + (f" `{br}`." if br else ".")
+            )
+            sha = (commit_sha or "").strip()
+            url = (commit_url or "").strip()
+            if url:
+                extra.append(f"Commit: {url}")
+            elif sha:
+                extra.append(f"Commit: `{sha[:12]}`")
+            parts.extend(extra)
+        elif delivery_note:
+            parts.extend(["", "---", "", delivery_note.strip()])
+        return "\n".join(parts)
+
+    async def _start_gitlab_mr_workflow(
+        self, state: JiraAgentState, event: Any
+    ) -> None:
+        """Build on the MR source branch, push if the agent committed, reply on the MR."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        assert isinstance(event, GitlabMrNoteEvent)
+        logger.info(
+            f"Starting GitLab MR build workflow for {state.issue_key} "
+            f"(MR !{event.mr_iid})"
+        )
+        success: Optional[bool] = False
+        try:
+            task = AgentTask(
+                description=f"GitLab MR build: {state.issue_key}",
+                prompt=PromptBuilder.build_gitlab_comment_prompt(
+                    issue_key=state.issue_key,
+                    mr_title=event.mr_title,
+                    mr_url=event.mr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    work_branch=event.source_branch,
+                ),
+                agent=settings.default_agent,
+                issue_key=state.issue_key,
+            )
+            job_id = self._begin_workflow_run(
+                state,
+                status=TaskStatus.EXECUTING,
+                task=task,
+                workflow_type="gitlab_mr",
+                agent=settings.default_agent,
+                job_status="executing",
+            )
+            if job_id is None:
+                logger.info(
+                    f"GitLab MR job not started for {state.issue_key}: "
+                    f"begin claim rejected"
+                )
+                return
+
+            try:
+                git = await asyncio.to_thread(
+                    self._init_git_manager,
+                    state.issue_key,
+                    state,
+                    repository_url=event.repository_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                )
+            except (IssueGitConfigError, GitCloneError, GitSourceBranchError, GitTargetBranchError) as e:
+                msg = getattr(e, "user_message", None) or str(e)
+                self._fail_issue(
+                    state.issue_key,
+                    msg,
+                    suggestion="Check repository URL, PAT, and that the MR source/target exist.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            if git is None:
+                self._finish_after_git_missing(state.issue_key)
+                return
+            if self._is_aborted(state.issue_key):
+                self._release_context(state.issue_key, success=False)
+                return
+            try:
+                await asyncio.to_thread(
+                    git.ensure_feature_branch, state.issue_key
+                )
+            except Exception as e:
+                logger.exception(
+                    f"{state.issue_key} GitLab branch setup failed: {e}", e
+                )
+                self._fail_issue(
+                    state.issue_key,
+                    f"*Virtual Developer* could not check out `{event.source_branch}`.\n\n`{e}`",
+                    suggestion="Check that the MR source branch exists and the PAT can clone.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            self._record_job_working_directory(
+                state.issue_key, git.get_working_directory()
+            )
+            in_workspace = self._materialize_plan_into_workspace(state.issue_key)
+            plan_path_for_agent = str(in_workspace) if in_workspace else None
+            raw_wb = getattr(git, "work_branch", None)
+            work_branch = (
+                raw_wb.strip()
+                if isinstance(raw_wb, str) and raw_wb.strip()
+                else event.source_branch
+            )
+            task.prompt = PromptBuilder.build_gitlab_comment_prompt(
+                issue_key=state.issue_key,
+                mr_title=event.mr_title,
+                mr_url=event.mr_url,
+                source_branch=event.source_branch,
+                target_branch=event.target_branch,
+                author=event.author_username or event.author_name,
+                comment=event.prompt,
+                work_branch=work_branch,
+                plan_path=plan_path_for_agent,
+            )
+            if work_branch:
+                try:
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={"feature_branch": work_branch},
+                    )
+                except Exception:
+                    pass
+            self._snapshot_delivery_baseline(state.issue_key, git)
+            runner = self._runner_for(state.issue_key)
+            if runner is None:
+                self._fail_issue(
+                    state.issue_key,
+                    "Agent runner was not initialized for this GitLab job.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            self._attach_bound_opencode_session(state.issue_key, task, git)
+
+            result = await runner.run_agent_with_retry(
+                task,
+                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                    state.issue_key, sp, pp
+                ),
+                on_session_id=lambda sid: self._link_job_opencode_session(
+                    state.issue_key, sid
+                ),
+                timeout_seconds=(
+                    state.timeout_seconds
+                    if state.timeout_seconds is not None
+                    else settings.agent_task_timeout_seconds
+                ),
+                max_retries=(
+                    state.max_retries
+                    if state.max_retries is not None
+                    else settings.agent_task_max_retries
+                ),
+                should_abort=lambda: self._is_aborted(state.issue_key),
+            )
+            self._apply_agent_result_session(state.issue_key, result)
+
+            if self._is_aborted(state.issue_key) or result.get("aborted"):
+                logger.info(
+                    f"GitLab MR job aborted for {state.issue_key}; "
+                    f"skipping MR reply"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            if result.get("returncode") == 0:
+                answer = (result.get("stdout") or "").strip() or "(no output)"
+                pushed = False
+                delivery_note = ""
+                delivery_err = self._assert_build_delivery(state.issue_key)
+                if delivery_err:
+                    if self._is_noop_delivery_message(delivery_err):
+                        logger.info(
+                            f"{state.issue_key}: GitLab MR build finished "
+                            f"with no new commits — still posting MR reply"
+                        )
+                        delivery_note = (
+                            "No new commits on this run; existing MR was not "
+                            "re-attributed."
+                        )
+                        self.state_manager.update_state(
+                            state.issue_key,
+                            metadata={
+                                "delivery_status": "no_new_commits",
+                                "delivery_note": delivery_err[:2000],
+                            },
+                        )
+                    else:
+                        self._fail_issue(
+                            state.issue_key,
+                            delivery_err,
+                            suggestion=(
+                                "Ensure the agent commits on the MR source "
+                                "branch, then comment again."
+                            ),
+                        )
+                        self._release_context(state.issue_key, success=False)
+                        return
+                else:
+                    if self._is_aborted(state.issue_key):
+                        logger.info(
+                            f"GitLab MR job aborted for {state.issue_key} "
+                            f"before push; skipping delivery"
+                        )
+                        self._release_context(state.issue_key, success=False)
+                        return
+                    push_ok = await self._push_and_create_mr(
+                        state, existing_mr_url=event.mr_url or None
+                    )
+                    if self._is_aborted(state.issue_key):
+                        logger.info(
+                            f"GitLab MR job aborted for {state.issue_key} "
+                            f"during/after push; not marking completed"
+                        )
+                        self._release_context(state.issue_key, success=False)
+                        return
+                    if not push_ok:
+                        self._fail_issue(
+                            state.issue_key,
+                            "Agent finished but git push failed; "
+                            "work was not delivered to the existing MR.",
+                            suggestion=(
+                                "Check GitLab remote/credentials, then comment "
+                                "on the MR again."
+                            ),
+                        )
+                        self._release_context(state.issue_key, success=False)
+                        return
+                    pushed = True
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": None,
+                        },
+                    )
+
+                live = self.state_manager.get_state(state.issue_key) or state
+                meta = dict(live.metadata or {})
+                posted = self._post_gitlab_mr_reply(
+                    live,
+                    self._gitlab_mr_reply_body(
+                        answer,
+                        pushed=pushed,
+                        branch=str(meta.get("feature_branch") or work_branch or ""),
+                        commit_sha=str(meta.get("last_commit_sha") or ""),
+                        commit_url=str(meta.get("last_commit_url") or ""),
+                        delivery_note=delivery_note,
+                    ),
+                )
+                if not posted:
+                    logger.error(
+                        f"{state.issue_key}: agent succeeded but MR note failed"
+                    )
+                updated = self.state_manager.update_state_if(
+                    state.issue_key,
+                    expected_statuses={TaskStatus.EXECUTING},
+                    reject_statuses=self.ABORTED_STATUSES,
+                    status=TaskStatus.COMPLETED,
+                    completed_at=datetime.now(),
+                    progress_percentage=100,
+                    current_task_id=None,
+                )
+                if updated is None:
+                    success = False
+                else:
+                    self._finish_job_record(
+                        state.issue_key,
+                        status="completed",
+                        progress_percentage=100,
+                    )
+                    success = True
+            else:
+                self._fail_issue(
+                    state.issue_key,
+                    result.get("stderr") or "GitLab MR comment job failed",
+                    suggestion="Check the job session log on the ops dashboard.",
+                )
+        except Exception as e:
+            logger.exception(
+                f"GitLab MR workflow crashed for {state.issue_key}: {e}", e
+            )
+            self._fail_issue(
+                state.issue_key,
+                f"GitLab MR comment job failed: {e}",
+            )
+        finally:
+            self._release_context(state.issue_key, success=success)
 
     async def _start_planning_workflow(self, state: JiraAgentState):
         logger.info(f"Starting planning workflow for {state.issue_key}")
@@ -3147,7 +3801,12 @@ class JobProcessor:
             logger.warning(f"Could not materialize plan into workspace for {issue_key}: {e}")
             return durable if durable.exists() else None
 
-    async def _push_and_create_mr(self, state: JiraAgentState) -> bool:
+    async def _push_and_create_mr(
+        self,
+        state: JiraAgentState,
+        *,
+        existing_mr_url: Optional[str] = None,
+    ) -> bool:
         """Push prepared work_branch and open MR.
 
         Returns True if the branch was pushed (MR is best-effort after push).
@@ -3157,6 +3816,10 @@ class JobProcessor:
         Checks cancel/watchdog abort before expensive git work and before
         recording delivery so cancel after agent success does not stamp
         ``delivery_status=delivered`` or open an MR after terminal cancel.
+
+        When ``existing_mr_url`` is set (GitLab MR comment jobs), push onto
+        that branch and reuse the URL — do not open a second MR, and do not
+        post Jira progress (the caller replies on the MR).
         """
         if self._is_aborted(state.issue_key):
             logger.info(
@@ -3293,12 +3956,20 @@ class JobProcessor:
                 f"{state.issue_key}: abort before MR — not recording delivery"
             )
             return False
-        mr_url = await asyncio.to_thread(
-            git.create_merge_request,
-            title=mr_title,
-            body=mr_body,
-            target_branch=target_branch,
-        )
+        reuse_mr = (existing_mr_url or "").strip() or None
+        if reuse_mr:
+            mr_url = reuse_mr
+            logger.info(
+                f"{state.issue_key}: reusing existing MR {mr_url} "
+                f"(not opening a new one)"
+            )
+        else:
+            mr_url = await asyncio.to_thread(
+                git.create_merge_request,
+                title=mr_title,
+                body=mr_body,
+                target_branch=target_branch,
+            )
         if self._is_aborted(state.issue_key):
             logger.warning(
                 f"{state.issue_key}: abort after MR attempt — not recording delivery"
@@ -3324,7 +3995,11 @@ class JobProcessor:
             commit_url=commit_url,
         )
 
-        if mr_url:
+        if reuse_mr:
+            logger.info(
+                f"{state.issue_key}: pushed `{branch_name}` onto existing MR {mr_url}"
+            )
+        elif mr_url:
             logger.info(f"Merge request created: {mr_url}")
             try:
                 self.reporter.post_progress_update(

@@ -4,6 +4,7 @@ import { useLive } from './live'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
+  { to: '/queue', label: 'Queue', match: (p: string) => p.startsWith('/queue') },
   { to: '/scheduled', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
   { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
   { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
@@ -16,6 +17,15 @@ function IconJobs() {
       <rect x="2" y="3" width="12" height="3" rx="1" fill="currentColor" opacity="0.9" />
       <rect x="2" y="8" width="12" height="2" rx="1" fill="currentColor" opacity="0.55" />
       <rect x="2" y="12" width="8" height="2" rx="1" fill="currentColor" opacity="0.35" />
+    </svg>
+  )
+}
+function IconQueue() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="2" y="2.5" width="12" height="2.5" rx="1" fill="currentColor" opacity="0.9" />
+      <rect x="2" y="6.75" width="12" height="2.5" rx="1" fill="currentColor" opacity="0.55" />
+      <rect x="2" y="11" width="8" height="2.5" rx="1" fill="currentColor" opacity="0.35" />
     </svg>
   )
 }
@@ -59,12 +69,13 @@ function IconGear() {
   )
 }
 
-const ICONS = [IconJobs, IconClock, IconSession, IconBoard, IconGear]
+const ICONS = [IconJobs, IconQueue, IconClock, IconSession, IconBoard, IconGear]
 
 export function Shell() {
   const live = useLive()
   const location = useLocation()
   const queued = live.poll?.will_process_count ?? 0
+  const workQueued = live.queueQueued ?? 0
 
   return (
     <div className="vd-app">
@@ -93,6 +104,11 @@ export function Shell() {
                 {item.to === '/poll' && queued > 0 && (
                   <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]">
                     {queued}
+                  </span>
+                )}
+                {item.to === '/queue' && workQueued > 0 && (
+                  <span className="rounded-full bg-accent px-1.5 py-0.5 text-[10px] font-bold text-[#1a0d08]">
+                    {workQueued}
                   </span>
                 )}
               </NavLink>

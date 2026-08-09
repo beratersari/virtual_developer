@@ -155,6 +155,26 @@ class Settings(BaseSettings):
         default="",
         description="Legacy comma-separated hosts for single GITLAB_PAT (fail-closed when PAT is set)",
     )
+    # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
+    gitlab_webhook_enabled: bool = Field(
+        default=True,
+        description="Accept GitLab Note webhooks on /webhooks/gitlab",
+    )
+    gitlab_webhook_secret: str = Field(
+        default="",
+        description="Shared secret; must match GitLab hook X-Gitlab-Token (empty = accept all)",
+    )
+    gitlab_bot_mentions: str = Field(
+        default="@berat_ai",
+        description="Comma-separated @names that trigger a job (e.g. @berat_ai,@DevBot)",
+    )
+    gitlab_bot_usernames: str = Field(
+        default="",
+        description=(
+            "GitLab usernames of this bot (ignore its own notes to prevent loops). "
+            "Defaults to GITLAB_BOT_MENTIONS without @"
+        ),
+    )
     
     # OpenCode agent name for plan + build runs (oracle consult uses "oracle").
     # Mode (plan vs build) selects the prompt file; agent name does not change prompts.
@@ -467,6 +487,19 @@ class Settings(BaseSettings):
         if not self.trigger_mentions:
             return ["@DevBot", "@AI"]
         return [item.strip() for item in self.trigger_mentions.split(",") if item.strip()]
+
+    @property
+    def gitlab_bot_mentions_list(self) -> List[str]:
+        from src.gitlab.mentions import parse_mention_list
+
+        return parse_mention_list(self.gitlab_bot_mentions)
+
+    @property
+    def gitlab_bot_usernames_list(self) -> List[str]:
+        from src.gitlab.mentions import parse_mention_list
+
+        names = parse_mention_list(self.gitlab_bot_usernames)
+        return names or list(self.gitlab_bot_mentions_list)
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""

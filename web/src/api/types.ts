@@ -101,6 +101,10 @@ export type SettingsPayload = {
   gitlab_allowed_hosts?: string
   gitlab_credentials?: GitlabHostCredential[]
   default_model: string
+  gitlab_webhook_enabled?: boolean
+  gitlab_bot_mentions?: string
+  gitlab_webhook_secret_configured?: boolean
+  gitlab_webhook_path?: string
 }
 
 export type GitlabHostCredentialDraft = {
@@ -165,6 +169,38 @@ export type JobItem = {
   delivery_status?: string | null
   delivery_note?: string | null
   working_directory?: string | null
+  source?: string
+  gitlab_project?: string | null
+  gitlab_mr_iid?: number | null
+}
+
+export type QueueItem = {
+  queue_id: string
+  status: string
+  source: string
+  issue_key: string
+  summary: string
+  message: string
+  repository_url?: string
+  source_branch?: string
+  work_branch?: string
+  target_branch?: string
+  lock_key?: string
+  job_id?: string | null
+  merge_request_url?: string
+  gitlab_note_id?: string
+  error_message?: string | null
+  created_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+export type QueuePayload = {
+  items: QueueItem[]
+  queued_count: number
+  running_count: number
+  total: number
+  server_time: string
 }
 
 export type JobsPayload = {

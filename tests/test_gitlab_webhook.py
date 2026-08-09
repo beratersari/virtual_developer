@@ -1,0 +1,406 @@
+"""GitLab MR comment webhook — parse, mention, client, processor, dashboard."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.gitlab.keys import gitlab_issue_key, is_gitlab_issue_key
+from src.gitlab.mentions import (
+    note_mentions_bot,
+    parse_mention_list,
+    strip_bot_mentions,
+)
+from src.gitlab.webhook import decide_gitlab_note_webhook, validate_webhook_token
+from src.state.manager import JiraStateManager
+from src.state.models import TaskStatus
+
+
+def _mr_payload(
+    *,
+    note: str = "@berat_ai what does login do?",
+    username: str = "alice",
+    notable: str = "MergeRequest",
+    source: str = "feature/login",
+    target: str = "develop",
+    note_id: int = 77,
+) -> dict:
+    return {
+        "object_kind": "note",
+        "event_type": "note",
+        "user": {"username": username, "name": "Alice"},
+        "project": {
+            "id": 1,
+            "path_with_namespace": "acme/demo",
+            "http_url_to_repo": "https://gitlab.example.com/acme/demo.git",
+            "web_url": "https://gitlab.example.com/acme/demo",
+        },
+        "object_attributes": {
+            "id": note_id,
+            "note": note,
+            "noteable_type": notable,
+            "project_id": 1,
+            "discussion_id": "disc-1",
+        },
+        "merge_request": {
+            "iid": 4,
+            "title": "Add login",
+            "description": "desc",
+            "source_branch": source,
+            "target_branch": target,
+            "web_url": "https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        },
+        "repository": {"url": "https://gitlab.example.com/acme/demo.git"},
+    }
+
+
+def test_gitlab_issue_key_stable():
+    assert gitlab_issue_key("acme/demo", 4) == "GL-ACME-DEMO-4"
+    assert gitlab_issue_key("Group/Sub/Repo.git", 12) == "GL-GROUP-SUB-REPO-GIT-12"
+    assert is_gitlab_issue_key("GL-ACME-DEMO-4")
+    assert not is_gitlab_issue_key("KAN-1")
+
+
+def test_mention_detection_and_strip():
+    assert parse_mention_list("@berat_ai, DevBot") == ["berat_ai", "devbot"]
+    assert note_mentions_bot("@berat_ai please look", ["berat_ai"])
+    assert note_mentions_bot("hey @Berat_AI!", ["@berat_ai"])
+    assert not note_mentions_bot("no one tagged", ["berat_ai"])
+    assert (
+        strip_bot_mentions("@berat_ai explain this fn", ["berat_ai"])
+        == "explain this fn"
+    )
+
+
+def test_webhook_token():
+    assert validate_webhook_token("abc", "abc")
+    assert validate_webhook_token("x", "")
+    assert not validate_webhook_token("nope", "secret")
+
+
+def test_decide_accepts_mr_mention():
+    d = decide_gitlab_note_webhook(
+        _mr_payload(),
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
+        bot_mentions=["@berat_ai"],
+    )
+    assert d.accepted
+    assert d.event is not None
+    assert d.event.issue_key == "GL-ACME-DEMO-4"
+    assert d.event.source_branch == "feature/login"
+    assert d.event.prompt == "what does login do?"
+
+
+def test_decide_ignores_non_mr_and_no_mention():
+    d = decide_gitlab_note_webhook(
+        _mr_payload(notable="Issue"),
+        headers={"X-Gitlab-Event": "Note Hook"},
+        bot_mentions=["@berat_ai"],
+    )
+    assert not d.accepted
+    d2 = decide_gitlab_note_webhook(
+        _mr_payload(note="lgtm"),
+        headers={"X-Gitlab-Event": "Note Hook"},
+        bot_mentions=["@berat_ai"],
+    )
+    assert not d2.accepted
+    d3 = decide_gitlab_note_webhook(
+        _mr_payload(note="@berat_ai ping", username="berat_ai"),
+        headers={"X-Gitlab-Event": "Note Hook"},
+        bot_mentions=["@berat_ai"],
+        bot_usernames=["berat_ai"],
+    )
+    assert not d3.accepted
+    d4 = decide_gitlab_note_webhook(
+        _mr_payload(),
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "bad"},
+        secret="good",
+        bot_mentions=["@berat_ai"],
+    )
+    assert d4.http_status == 401
+
+
+def test_gitlab_client_posts_note(monkeypatch):
+    from src.gitlab.client import GitlabClient
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 201
+        content = b'{"id": 9}'
+        text = '{"id": 9}'
+
+        def json(self):
+            return {"id": 9}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
+    c = GitlabClient(host="gitlab.example.com", pat="glpat-test")
+    out = c.post_mr_note(project=1, mr_iid=4, body="*Virtual Developer*\n\nhi", discussion_id="d1")
+    assert out and out["id"] == 9
+    assert "/projects/1/merge_requests/4/notes" in captured["url"]
+    assert captured["headers"]["PRIVATE-TOKEN"] == "glpat-test"
+    assert captured["json"]["in_reply_to_discussion_id"] == "d1"
+
+
+@pytest.mark.asyncio
+async def test_processor_gitlab_job_reuses_session_and_posts_mr(
+    tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts
+):
+    from src.gitlab.webhook import decide_gitlab_note_webhook
+    from src.processor import JobProcessor
+    from src.state.session_bind_store import SessionBindStore
+    from tests.test_opencode_sessions import _make_session_db
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    binds = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", binds)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    db = _make_session_db(
+        tmp_path / "oc.db",
+        [{"id": "ses_gl1", "directory": str(clone), "title": "GL-ACME-DEMO-4: x"}],
+    )
+    monkeypatch.setattr("src.opencode_sessions._default_db_path", lambda: db)
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/demo.git"
+    git.work_branch = "feature/login"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    git.ensure_feature_branch.return_value = "feature/login"
+    git.ensure_on_work_branch.return_value = True
+    git.get_last_commit_sha.return_value = "abc123deadbeef"
+    git.commits_ahead_of_target.return_value = 2
+    git.push.return_value = True
+
+    runner = MagicMock()
+    runner.run_agent_with_retry = AsyncMock(
+        return_value={
+            "returncode": 0,
+            "stdout": "Login is wired in src/auth.cpp",
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_gl1",
+        }
+    )
+
+    posted = {}
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 99}
+
+    decision = decide_gitlab_note_webhook(
+        _mr_payload(),
+        headers={"X-Gitlab-Event": "Note Hook"},
+        bot_mentions=["@berat_ai"],
+    )
+    assert decision.event
+
+    binds.upsert(
+        repository_url=git.remote_url,
+        branch="feature/login",
+        target_branch="develop",
+        session_id="ses_gl1",
+        working_directory=str(clone),
+    )
+
+    def fake_init(*_a, **_k):
+        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc.git_manager = git
+        proc.agent_runner = runner
+        return git
+
+    with patch.object(proc, "_init_git_manager", side_effect=fake_init), patch.object(
+        proc, "_runner_for", return_value=runner
+    ), patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
+        await proc.handle_gitlab_mr_comment(decision.event)
+
+    st = sm.get_state("GL-ACME-DEMO-4")
+    assert st is not None
+    assert st.status == TaskStatus.COMPLETED
+    assert runner.run_agent_with_retry.await_count == 1
+    task = runner.run_agent_with_retry.await_args.args[0]
+    assert task.session_id == "ses_gl1"
+    assert posted.get("mr_iid") == 4
+    assert "*Virtual Developer*" in (posted.get("body") or "")
+    jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
+    assert jobs
+    assert jobs[0]["source"] == "gitlab"
+    assert jobs[0]["status"] == "completed"
+    assert jobs[0]["workflow_type"] == "gitlab_mr"
+    # Same SHA before/after → no new commits; still reply, do not push.
+    git.push.assert_not_called()
+    assert "what does login do?" in task.prompt
+    assert "build" in task.prompt.lower()
+    assert "existing MR" in task.prompt or "existing merge request" in task.prompt.lower()
+    assert "Do **not** push" in task.prompt or "Do not push" in task.prompt
+
+
+@pytest.mark.asyncio
+async def test_processor_gitlab_build_pushes_existing_mr(
+    tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts
+):
+    from src.gitlab.webhook import decide_gitlab_note_webhook
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/demo.git"
+    git.work_branch = "feature/login"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    git.ensure_feature_branch.return_value = "feature/login"
+    git.ensure_on_work_branch.return_value = True
+    git.get_last_commit_sha.side_effect = [
+        "aaa111baseline",  # snapshot
+        "bbb222newhead",  # assert delivery
+        "bbb222newhead",  # record after push
+    ]
+    git.commits_ahead_of_target.return_value = 1
+    git.push.return_value = True
+    git.get_last_commit_subject.return_value = "[GL-ACME-DEMO-4] fix: login"
+    git.get_last_commit_message.return_value = "fix login"
+    git.build_commit_url.return_value = (
+        "https://gitlab.example.com/acme/demo/-/commit/bbb222newhead"
+    )
+
+    runner = MagicMock()
+    runner.run_agent_with_retry = AsyncMock(
+        return_value={
+            "returncode": 0,
+            "stdout": "Fixed the login bug.",
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+        }
+    )
+
+    posted = {}
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 101}
+
+    decision = decide_gitlab_note_webhook(
+        _mr_payload(note="@berat_ai please fix the login bug"),
+        headers={"X-Gitlab-Event": "Note Hook"},
+        bot_mentions=["@berat_ai"],
+    )
+    assert decision.event
+
+    def fake_init(*_a, **_k):
+        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc.git_manager = git
+        proc.agent_runner = runner
+        return git
+
+    with patch.object(proc, "_init_git_manager", side_effect=fake_init), patch.object(
+        proc, "_runner_for", return_value=runner
+    ), patch.object(reporter, "post_progress_update") as jira_progress, patch(
+        "src.gitlab.client.GitlabClient.post_mr_note", fake_post
+    ):
+        await proc.handle_gitlab_mr_comment(decision.event)
+
+    st = sm.get_state("GL-ACME-DEMO-4")
+    assert st is not None
+    assert st.status == TaskStatus.COMPLETED
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+    jira_progress.assert_not_called()
+    body = posted.get("body") or ""
+    assert "*Virtual Developer*" in body
+    assert "Fixed the login bug." in body
+    assert "Pushed new commits" in body
+    assert (st.metadata or {}).get("merge_request_url") == (
+        "https://gitlab.example.com/acme/demo/-/merge_requests/4"
+    )
+    assert (st.metadata or {}).get("delivery_status") == "delivered"
+
+
+def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira):
+    from src.dashboard.api import create_dashboard_app
+    from src.processor import JobProcessor
+
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.gitlab_bot_mentions", "@berat_ai")
+    monkeypatch.setattr("src.config.settings.gitlab_bot_usernames", "berat_ai")
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.enqueue_gitlab_note = AsyncMock(
+        return_value={
+            "ok": True,
+            "queued": True,
+            "queue_id": "q_test",
+            "issue_key": "GL-ACME-DEMO-4",
+            "status": "queued",
+        }
+    )
+    app = create_dashboard_app(processor=proc)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhooks/gitlab",
+            json=_mr_payload(),
+            headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["issue_key"] == "GL-ACME-DEMO-4"
+    assert body["queue_id"] == "q_test"
+    assert proc.enqueue_gitlab_note.await_count == 1
+
+
+def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
+    from src.dashboard.api import create_dashboard_app
+    from src.processor import JobProcessor
+
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_bot_mentions", "@berat_ai")
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    app = create_dashboard_app(processor=proc)
+    client = TestClient(app)
+    resp = client.post(
+        "/webhooks/gitlab",
+        json=_mr_payload(),
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "nope"},
+    )
+    assert resp.status_code == 401

@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Set
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,7 @@ from src.dashboard.service import (
     build_tasks,
     collect_job_chat,
     collect_job_text_artifacts,
+    build_queue,
     delete_job_record,
     delete_job_records,
     refresh_runtime_jira_clients,
@@ -159,9 +160,93 @@ def create_dashboard_app(
     def health() -> dict:
         return {"status": "ok", "version": build_meta().version}
 
+    @app.post("/webhooks/gitlab")
+    async def gitlab_webhook(request: Request) -> dict:
+        """GitLab Note Hook (MR comments). CE and EE / all plans.
+
+        Register on the **project**: Comments only. Secret → X-Gitlab-Token.
+        """
+        from fastapi.responses import JSONResponse
+
+        from src.gitlab.webhook import decide_gitlab_note_webhook
+
+        headers = {k: v for k, v in request.headers.items()}
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "reason": "invalid json"}, status_code=400
+            )
+        decision = decide_gitlab_note_webhook(
+            payload,
+            headers=headers,
+            enabled=bool(getattr(settings, "gitlab_webhook_enabled", True)),
+            secret=str(getattr(settings, "gitlab_webhook_secret", "") or ""),
+            bot_mentions=list(settings.gitlab_bot_mentions_list),
+            bot_usernames=list(settings.gitlab_bot_usernames_list),
+        )
+        if not decision.accepted:
+            status = int(decision.http_status or 200)
+            return JSONResponse(
+                {"ok": False, "reason": decision.reason},
+                status_code=status,
+            )
+        proc = app.state.processor
+        if proc is None or decision.event is None:
+            raise HTTPException(
+                status_code=503, detail="processor not bound; start the daemon"
+            )
+        result = await proc.enqueue_gitlab_note(decision.event)
+        return {
+            "ok": True,
+            "issue_key": decision.event.issue_key,
+            "queue_id": result.get("queue_id"),
+            "queued": result.get("queued"),
+            "started": result.get("started"),
+            "status": result.get("status"),
+            "reason": "queued" if result.get("queued") else "accepted",
+            "server_time": build_meta().server_time,
+        }
+
     @app.get("/api/meta")
     def meta() -> dict:
         return build_meta().model_dump()
+
+    @app.get("/api/queue")
+    def queue_list(
+        status: Optional[str] = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> dict:
+        """Jira + GitLab messages waiting or running on the work queue."""
+        from src.state.queue_store import work_queue_store as qstore
+
+        proc = app.state.processor
+        store = getattr(proc, "queue_store", None) if proc is not None else qstore
+        return build_queue(status=status, limit=limit, store=store).model_dump()
+
+    @app.delete("/api/queue/{queue_id}")
+    def queue_cancel(queue_id: str) -> dict:
+        """Cancel a queued item (running jobs must be cancelled via Jobs)."""
+        from src.state.queue_store import work_queue_store as qstore
+
+        proc = app.state.processor
+        store = getattr(proc, "queue_store", None) if proc is not None else qstore
+        rec = store.get(queue_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail=f"No queue item {queue_id}")
+        if rec.get("status") != "queued":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot cancel {queue_id} (status={rec.get('status')})",
+            )
+        if not store.cancel(queue_id):
+            raise HTTPException(status_code=409, detail="Cancel failed")
+        return {
+            "ok": True,
+            "queue_id": queue_id,
+            "status": "cancelled",
+            "server_time": build_meta().server_time,
+        }
 
     @app.get("/api/tasks")
     def tasks() -> dict:

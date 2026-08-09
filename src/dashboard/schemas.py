@@ -156,6 +156,10 @@ class JobItem(BaseModel):
     delivery_note: Optional[str] = None
     # Temp clone used for this run (job record or session bind)
     working_directory: Optional[str] = None
+    # jira (default) | gitlab — same job/chat UI, different intake
+    source: str = "jira"
+    gitlab_project: Optional[str] = None
+    gitlab_mr_iid: Optional[int] = None
 
 
 class JobsResponse(BaseModel):
@@ -262,6 +266,10 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
+    gitlab_webhook_enabled: bool = True
+    gitlab_bot_mentions: str = ""
+    gitlab_webhook_secret_configured: bool = False
+    gitlab_webhook_path: str = "/webhooks/gitlab"
 
 
 class GitlabHostCredentialView(BaseModel):
@@ -384,6 +392,37 @@ class SettingsUpdate(BaseModel):
     default_model: Optional[str] = Field(default=None, max_length=200)
 
 
+class QueueItem(BaseModel):
+    """One waiting or running intake message (Jira issue or GitLab MR comment)."""
+
+    queue_id: str
+    status: str = "queued"
+    source: str = "jira"
+    issue_key: str = ""
+    summary: str = ""
+    message: str = ""
+    repository_url: str = ""
+    source_branch: str = ""
+    work_branch: str = ""
+    target_branch: str = ""
+    lock_key: str = ""
+    job_id: Optional[str] = None
+    merge_request_url: str = ""
+    gitlab_note_id: str = ""
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class QueueResponse(BaseModel):
+    items: List[QueueItem] = Field(default_factory=list)
+    queued_count: int = 0
+    running_count: int = 0
+    total: int = 0
+    server_time: str = ""
+
+
 class DashboardEnvelope(BaseModel):
     """Full snapshot pushed over WebSocket."""
 
@@ -393,3 +432,4 @@ class DashboardEnvelope(BaseModel):
     jobs: Optional[JobsResponse] = None
     poll: PollStatusResponse
     settings: SettingsView
+    queue: Optional[QueueResponse] = None

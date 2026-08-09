@@ -17,6 +17,7 @@ import type {
   SettingsPatch,
   SettingsPayload,
   TaskDetail,
+  QueuePayload,
 } from './types'
 
 export class ApiError extends Error {
@@ -127,6 +128,21 @@ export function fetchMeta() {
 
 export function fetchPoll() {
   return request<PollPayload>('/api/poll')
+}
+
+export function fetchQueue(opts?: { status?: string; limit?: number }) {
+  const params = new URLSearchParams()
+  if (opts?.status) params.set('status', opts.status)
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return request<QueuePayload>(`/api/queue${q}`)
+}
+
+export function cancelQueueItem(queueId: string) {
+  return request<{ ok: boolean; queue_id: string; status: string }>(
+    `/api/queue/${encodeURIComponent(queueId)}`,
+    { method: 'DELETE' },
+  )
 }
 
 export async function fetchJobs(opts?: {

@@ -112,12 +112,17 @@ class JobStore:
         agent: str = "",
         task_id: Optional[str] = None,
         status: str = "running",
+        source: str = "jira",
+        merge_request_url: Optional[str] = None,
+        gitlab_project: Optional[str] = None,
+        gitlab_mr_iid: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Create a job snapshot for one agent run.
 
         ``summary`` and ``description`` are frozen at start time so later Jira
         edits / reprocess do not rewrite history for this job.
         """
+        src = (source or "jira").strip().lower() or "jira"
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat(timespec="seconds")
         job: Dict[str, Any] = {
@@ -128,6 +133,9 @@ class JobStore:
             "workflow_type": workflow_type or "direct",
             "agent": agent or "",
             "status": status,
+            "source": src,
+            "gitlab_project": gitlab_project or None,
+            "gitlab_mr_iid": gitlab_mr_iid,
             "task_id": task_id,
             "task_ids": [task_id] if task_id else [],
             "opencode_session_id": None,
@@ -145,8 +153,13 @@ class JobStore:
             "completed_at": None,
             "updated_at": now,
         }
+        if merge_request_url:
+            job["merge_request_url"] = merge_request_url
         self._write(job)
-        logger.info(f"Job created: {job_id} issue={issue_key} workflow={workflow_type}")
+        logger.info(
+            f"Job created: {job_id} issue={issue_key} workflow={workflow_type} "
+            f"source={src}"
+        )
         return job
 
     def update_job(self, job_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
