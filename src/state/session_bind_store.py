@@ -207,6 +207,52 @@ class SessionBindStore:
         items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
         return items[: max(1, int(limit))]
 
+    def relocate_working_directory(self, old_dir: Any, new_dir: Any) -> int:
+        """Point binds at *new_dir* after a clone folder was renamed in place."""
+        try:
+            old_r = Path(old_dir).resolve()
+            new_s = str(Path(new_dir).resolve())
+        except (OSError, TypeError):
+            return 0
+        if not new_s:
+            return 0
+        try:
+            if old_r == Path(new_s).resolve():
+                return 0
+        except OSError:
+            pass
+        updated = 0
+        with self._lock:
+            if not self.binds_dir.is_dir():
+                return 0
+            now = _now_iso()
+            for path in self.binds_dir.glob("osb_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                raw = rec.get("working_directory")
+                if not raw or not isinstance(raw, str):
+                    continue
+                try:
+                    if Path(raw).resolve() != old_r:
+                        continue
+                except OSError:
+                    continue
+                rec["working_directory"] = new_s
+                rec["updated_at"] = now
+                self._write(rec)
+                updated += 1
+        if updated:
+            logger.info(
+                f"Relocated {updated} session bind working_directory "
+                f"{old_r} → {new_s}"
+            )
+        return updated
+
     def working_directories(self) -> List[Path]:
         """Clone paths still referenced by a session bind (protect from purge)."""
         out: List[Path] = []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from src.state.session_bind_store import (
     SessionBindStore,
@@ -64,7 +65,62 @@ def test_empty_timeout_retries_cold(tmp_path):
         stdout="",
     )
     assert task.session_id is None
+    assert task.abandoned_session_id == "ses_old"
     assert task.prompt == "ORIGINAL BUILD PROMPT"
+
+
+def test_retry_missing_db_row_keeps_session_for_same_job(tmp_path):
+    """SQLite may not have flushed the just-created session yet — keep --session."""
+    from src.orchestrator.agent_runner import AgentRunner, AgentTask
+    from tests.test_opencode_sessions import _make_session_db
+
+    runner = AgentRunner(working_directory=tmp_path)
+    db = _make_session_db(tmp_path / "empty.db", [])
+    task = AgentTask(
+        description="t",
+        prompt="ORIGINAL",
+        agent="atlas",
+        issue_key="KAN-8",
+        session_id="ses_new",
+    )
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        runner._resume_opencode_session_for_retry(
+            task,
+            "ses_new",
+            why="incomplete_session",
+            session_file=str(tmp_path / "x.log"),
+            timed_out=False,
+            stdout="partial",
+        )
+    assert task.session_id == "ses_new"
+    assert (task.prompt or "").lower().startswith("continue")
+
+
+def test_retry_db_error_keeps_session(tmp_path):
+    from src.orchestrator.agent_runner import AgentRunner, AgentTask
+
+    runner = AgentRunner(working_directory=tmp_path)
+    task = AgentTask(
+        description="t",
+        prompt="ORIGINAL",
+        agent="atlas",
+        issue_key="KAN-8",
+        session_id="ses_keep",
+    )
+    with patch(
+        "src.opencode_sessions.lookup_session_directory",
+        return_value=(None, False),
+    ):
+        runner._resume_opencode_session_for_retry(
+            task,
+            "ses_keep",
+            why="error",
+            session_file=str(tmp_path / "x.log"),
+            timed_out=False,
+            stdout="partial",
+        )
+    assert task.session_id == "ses_keep"
+    assert (task.prompt or "").lower().startswith("continue")
 
 
 def test_bind_store_upsert_get_delete(tmp_path):
@@ -137,3 +193,33 @@ def test_bind_store_isolates_sessions_by_target(tmp_path):
         target_branch="",
         session_id="ses_no_tgt",
     ) is None
+
+
+def test_bind_store_relocate_working_directory(tmp_path):
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    old = tmp_path / "legacy"
+    new = tmp_path / "short"
+    old.mkdir()
+    new.mkdir()
+    store.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_move",
+        working_directory=str(old),
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    store.upsert(
+        repository_url="https://gitlab.com/g/other.git",
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_stay",
+        working_directory=str(other),
+    )
+    n = store.relocate_working_directory(old, new)
+    assert n == 1
+    moved = store.get("https://gitlab.com/g/r.git", "feature/shared", "develop")
+    assert Path(moved["working_directory"]).resolve() == new.resolve()
+    stayed = store.get("https://gitlab.com/g/other.git", "feature/shared", "develop")
+    assert Path(stayed["working_directory"]).resolve() == other.resolve()

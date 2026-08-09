@@ -212,3 +212,97 @@ def test_attach_resumes_when_second_job_reuses_folder(tmp_path, monkeypatch):
         sid = proc._attach_bound_opencode_session("KAN-B", task, git)
     assert sid == "ses_shared"
     assert task.session_id == "ses_shared"
+
+
+def test_source_lock_key_matches_bind_identity(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    a = proc._source_lock_key(
+        "https://gitlab.com/Group/Repo.git", "refs/heads/feature/shared"
+    )
+    b = proc._source_lock_key("https://gitlab.com/group/repo", "feature/shared")
+    c = proc._source_lock_key(
+        "git@gitlab.com:group/repo.git", "feature/shared"
+    )
+    assert a == b == c
+    assert proc._claim_source_branch(
+        "A-1", "https://gitlab.com/g/r.git", "feature/x"
+    )
+    assert proc._claim_source_branch(
+        "A-1", "https://gitlab.com/g/r.git", "feature/x"
+    )
+    assert (
+        proc._claim_source_branch("B-2", "https://gitlab.com/g/r", "feature/x")
+        is False
+    )
+
+
+def test_attach_db_error_matching_bind_wd_resumes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    clone = tmp_path / "shared_clone"
+    clone.mkdir()
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "feature/shared"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    sm.create_state("KAN-A", "s", "d")
+    proc._contexts["KAN-A"] = {"git": git, "runner": None}
+    proc._upsert_session_bind("KAN-A", "ses_shared")
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-A")
+    with patch(
+        "src.opencode_sessions.lookup_session_directory",
+        return_value=(None, False),
+    ):
+        sid = proc._attach_bound_opencode_session("KAN-A", task, git)
+    assert sid == "ses_shared"
+    assert task.session_id == "ses_shared"
+    assert "KAN-A" not in proc._freeze_session_binds
+
+
+def test_attach_db_error_mismatch_freezes_bind(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    clone = tmp_path / "shared_clone"
+    clone.mkdir()
+    other = tmp_path / "other_clone"
+    other.mkdir()
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "feature/shared"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = other
+    sm.create_state("KAN-A", "s", "d")
+    proc._contexts["KAN-A"] = {"git": git, "runner": None}
+    store.upsert(
+        repository_url=git.remote_url,
+        branch="feature/shared",
+        target_branch="develop",
+        session_id="ses_shared",
+        issue_key="KAN-A",
+        working_directory=str(clone),
+    )
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-A")
+    with patch(
+        "src.opencode_sessions.lookup_session_directory",
+        return_value=(None, False),
+    ):
+        sid = proc._attach_bound_opencode_session("KAN-A", task, git)
+    assert sid is None
+    assert task.session_id is None
+    assert "KAN-A" in proc._freeze_session_binds
+    proc._upsert_session_bind("KAN-A", "ses_new_should_not_stick")
+    bound = store.get(git.remote_url, "feature/shared", "develop")
+    assert bound["session_id"] == "ses_shared"

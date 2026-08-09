@@ -62,6 +62,13 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         lambda: sessions_dir,
         raising=False,
     )
+    # Never let tests read/write the developer's real OpenCode SQLite DB
+    # (rename relocate would otherwise UPDATE session.directory there).
+    fake_opencode_db = runtime / "opencode.db"
+    monkeypatch.setattr(
+        "src.opencode_sessions._default_db_path",
+        lambda: fake_opencode_db,
+    )
 
     yield {
         "runtime": runtime,

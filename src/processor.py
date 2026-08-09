@@ -112,6 +112,8 @@ class JobProcessor:
         # Serialize concurrent jobs that share (repo, source_branch)
         self._source_branch_locks: Dict[str, asyncio.Lock] = {}
         self._source_branch_holders: Dict[str, str] = {}
+        # Issue keys whose session bind must not be overwritten (uncertain lookup)
+        self._freeze_session_binds: set[str] = set()
         
         logger.info("Initializing JobProcessor")
         
@@ -566,6 +568,7 @@ class JobProcessor:
             except Exception as e:
                 logger.warning(f"Cleanup failed for {issue_key}: {e}")
         self._release_source_branch(issue_key)
+        self._freeze_session_binds.discard(issue_key)
         # Drop leftover legacy mirrors so oracle/comment cannot adopt a dead clone
         if self.agent_runner is not None and ctx and ctx.get("runner") is self.agent_runner:
             self.agent_runner = None
@@ -573,8 +576,10 @@ class JobProcessor:
             self.git_manager = None
 
     def _source_lock_key(self, repository_url: str, source_branch: str) -> str:
-        repo = (repository_url or "").strip().lower().rstrip("/")
-        branch = (source_branch or "").strip().lower()
+        from src.state.session_bind_store import normalize_branch, normalize_repo_key
+
+        repo = normalize_repo_key(repository_url)
+        branch = normalize_branch(source_branch).lower()
         return f"{repo}::{branch}"
 
     def _claim_source_branch(self, issue_key: str, repository_url: str, source_branch: str) -> bool:
@@ -808,20 +813,35 @@ class JobProcessor:
         if wd is None:
             runner = self._runner_for(issue_key)
             wd = getattr(runner, "working_directory", None) if runner else None
+        bind_wd = (rec or {}).get("working_directory")
         try:
             from src.opencode_sessions import (
-                get_session_directory,
+                lookup_session_directory,
+                paths_equivalent,
                 session_matches_workdir,
             )
 
-            stored_dir = get_session_directory(sid)
-            if not stored_dir:
+            stored_dir, ok = lookup_session_directory(sid)
+            if not ok:
+                if bind_wd and wd and paths_equivalent(bind_wd, wd):
+                    logger.warning(
+                        f"{issue_key}: OpenCode DB unreadable; resuming {sid} "
+                        f"because bind working_directory matches live clone"
+                    )
+                else:
+                    logger.warning(
+                        f"{issue_key}: OpenCode DB unreadable; not resuming "
+                        f"{sid} and not replacing the bind"
+                    )
+                    self._freeze_session_binds.add(issue_key)
+                    return None
+            elif not stored_dir:
                 logger.info(
                     f"{issue_key}: bound session {sid} not in OpenCode DB; "
                     f"starting a new session"
                 )
                 return None
-            if not session_matches_workdir(sid, Path(wd) if wd else None):
+            elif not session_matches_workdir(sid, Path(wd) if wd else None):
                 logger.info(
                     f"{issue_key}: bound session {sid} is for another clone "
                     f"({stored_dir}); starting a new OpenCode session"
@@ -829,6 +849,7 @@ class JobProcessor:
                 return None
         except Exception as e:
             logger.debug(f"{issue_key}: session dir check failed: {e}")
+            self._freeze_session_binds.add(issue_key)
             return None
         task.session_id = sid
         try:
@@ -846,6 +867,12 @@ class JobProcessor:
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
         sid = (session_id or "").strip()
         if not sid:
+            return
+        if issue_key in self._freeze_session_binds:
+            logger.info(
+                f"{issue_key}: skipping session bind upsert "
+                f"(OpenCode DB lookup was uncertain)"
+            )
             return
         git = self._git_for(issue_key)
         repo, branch, target = self._session_bind_key(issue_key, git)
@@ -916,8 +943,14 @@ class JobProcessor:
     def _apply_agent_result_session(self, issue_key: str, result: Dict[str, Any]) -> None:
         """Pull session id from agent result (and retry_info) into state."""
         sid = result.get("opencode_session_id")
-        if not sid and result.get("retry_info"):
-            sid = result["retry_info"].get("last_opencode_session_id")
+        retry = result.get("retry_info") or {}
+        if not sid and retry:
+            last = retry.get("last_opencode_session_id")
+            abandoned = retry.get("abandoned_session_id")
+            # Empty-timeout / wrong-dir cold retries must not rebind the
+            # session they just abandoned when the final attempt has no id.
+            if last and last != abandoned:
+                sid = last
         self._record_opencode_session(
             issue_key,
             sid,

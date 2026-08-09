@@ -11,7 +11,10 @@ from src.opencode_sessions import (
     assess_session_completeness,
     detect_compact_in_output,
     find_sessions_for_issue,
+    lookup_session_directory,
     path_contains_issue_key,
+    paths_equivalent,
+    relocate_session_directories,
     resolve_session_id,
 )
 
@@ -109,6 +112,73 @@ def session_db(tmp_path: Path) -> Path:
 
 
 # --- path token helper ---
+
+
+def test_title_prefix_match_is_case_insensitive(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "case.db",
+        [
+            {
+                "id": "ses_lower",
+                "title": "proj-1: implement feature",
+                "directory": "/tmp/other",
+                "time_updated": 10,
+            }
+        ],
+    )
+    rows = find_sessions_for_issue("PROJ-1", db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["id"] == "ses_lower"
+
+
+def test_like_underscore_in_issue_key_is_literal(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "us.db",
+        [
+            {
+                "id": "ses_wild",
+                "title": "noise",
+                "directory": "/tmp/PROJX1_extra_clone",
+                "time_updated": 20,
+            },
+            {
+                "id": "ses_real",
+                "title": "agent run",
+                "directory": "/tmp/vd/.temp/repo_PROJ_1_20260101",
+                "time_updated": 10,
+            },
+        ],
+    )
+    rows = find_sessions_for_issue("PROJ_1", db_path=db)
+    ids = {r["id"] for r in rows}
+    assert "ses_real" in ids
+    assert "ses_wild" not in ids
+
+
+def test_substring_flood_does_not_hide_real_issue(tmp_path: Path):
+    """PROJ-10 rows must not crowd PROJ-1 out of the SQL candidate window."""
+    rows = [
+        {
+            "id": f"ses_other_{i}",
+            "title": "not ours",
+            "directory": f"/tmp/PROJ-10_clone_{i}",
+            "time_updated": 1000 + i,
+        }
+        for i in range(80)
+    ]
+    rows.append(
+        {
+            "id": "ses_real_proj1",
+            "title": "PROJ-1: the real one",
+            "directory": "/tmp/unrelated_dir",
+            "time_updated": 1,
+        }
+    )
+    db = _make_session_db(tmp_path / "flood.db", rows)
+    found = find_sessions_for_issue("PROJ-1", db_path=db, limit=5)
+    ids = {r["id"] for r in found}
+    assert "ses_real_proj1" in ids
+    assert all(not i.startswith("ses_other_") for i in ids)
 
 
 def test_path_contains_issue_key_boundaries():
@@ -260,6 +330,45 @@ def test_resolve_returns_none_when_nothing(tmp_path: Path):
     assert resolve_session_id("ZZZ-99", db_path=empty) is None
 
 
+def test_lookup_session_directory_distinguishes_missing_and_error(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "ok.db",
+        [{"id": "ses_here", "title": "t", "directory": "/tmp/x"}],
+    )
+    d, ok = lookup_session_directory("ses_here", db_path=db)
+    assert ok is True
+    assert d == "/tmp/x"
+    d, ok = lookup_session_directory("ses_missing", db_path=db)
+    assert ok is True
+    assert d is None
+    bad = tmp_path / "bad.db"
+    bad.write_text("not sqlite", encoding="utf-8")
+    d, ok = lookup_session_directory("ses_here", db_path=bad)
+    assert ok is False
+    assert d is None
+
+
+def test_relocate_session_directories_rewrites_matching_rows(tmp_path: Path):
+    old = tmp_path / "legacy_clone"
+    new = tmp_path / "short_clone"
+    old.mkdir()
+    new.mkdir()
+    db = _make_session_db(
+        tmp_path / "rel.db",
+        [
+            {"id": "ses_move", "title": "KAN-1: x", "directory": str(old)},
+            {"id": "ses_keep", "title": "other", "directory": str(tmp_path / "other")},
+        ],
+    )
+    n = relocate_session_directories(old, new, db_path=db)
+    assert n == 1
+    d, ok = lookup_session_directory("ses_move", db_path=db)
+    assert ok is True
+    assert paths_equivalent(d, new)
+    keep, _ = lookup_session_directory("ses_keep", db_path=db)
+    assert paths_equivalent(keep, tmp_path / "other")
+
+
 def test_resolve_uses_path_segment_when_no_preferred(session_db: Path):
     sid = resolve_session_id(
         "PROJ-1",
@@ -279,6 +388,7 @@ def _make_full_session_db(
     session_id: str = "ses_test1",
     todos: list[tuple[str, str]] | None = None,
     last_message: dict | None = None,
+    messages: list[dict] | None = None,
 ) -> Path:
     """Session + optional todo + message tables matching real OpenCode layout."""
     import json
@@ -343,18 +453,21 @@ def _make_full_session_db(
             """,
             (session_id, content, status, "high", i, 1, 1),
         )
-    if last_message is not None:
+    to_insert = messages if messages is not None else (
+        [last_message] if last_message is not None else []
+    )
+    for i, msg in enumerate(to_insert):
         con.execute(
             """
             INSERT INTO message (id, session_id, time_created, time_updated, data)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
-                "msg_last",
+                f"msg_{i}",
                 session_id,
-                99,
-                99,
-                json.dumps(last_message),
+                i + 1,
+                i + 1,
+                json.dumps(msg),
             ),
         )
     con.commit()
@@ -471,6 +584,29 @@ def test_assess_compact_output_plus_finish_stop_empty_todos_is_premature(
     assert r["premature"] is True, r
     assert r["compact_in_output"] is True
     assert any("compaction" in x.lower() for x in r["reasons"])
+
+
+def test_assess_sqlite_compact_then_stop_sequence_is_premature(tmp_path: Path):
+    """CLI/DB path must see compaction → assistant stop, not only last row."""
+    db = _make_full_session_db(
+        tmp_path / "seq.db",
+        todos=[("All", "completed")],
+        messages=[
+            {
+                "role": "user",
+                "parts": [{"type": "compaction", "auto": True}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+                "parts": [{"type": "text", "text": "All todos complete."}],
+            },
+        ],
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["premature"] is True, r
+    assert any("compact-then-stop" in x for x in r["reasons"])
 
 
 def test_assess_compact_then_stop_message_sequence_is_premature():

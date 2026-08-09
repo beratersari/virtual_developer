@@ -13,8 +13,9 @@ import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
+import { JobChatTab } from './JobChatTab'
 
-type JobTab = 'overview' | 'prompt' | 'opencode' | 'logs'
+type JobTab = 'overview' | 'prompt' | 'chat' | 'opencode' | 'logs'
 
 export function JobDetailPage() {
   const { jobId = '' } = useParams()
@@ -153,12 +154,9 @@ export function JobDetailPage() {
           </Link>
           <div className="flex flex-wrap items-center gap-2">
             {job?.issue_key && (
-              <Link
-                to={`/tasks/${encodeURIComponent(job.issue_key)}`}
-                className="font-mono text-lg font-semibold text-accent-text hover:underline"
-              >
+              <span className="font-mono text-lg font-semibold text-text">
                 {job.issue_key}
-              </Link>
+              </span>
             )}
             {job && <StatusBadge status={job.status} />}
             {job?.live && <LiveDot />}
@@ -215,6 +213,7 @@ export function JobDetailPage() {
         tabs={[
           { id: 'overview', label: 'Details' },
           { id: 'prompt', label: 'Prompt' },
+          { id: 'chat', label: 'Chat' },
           { id: 'opencode', label: 'Output' },
           { id: 'logs', label: 'Daemon', count: systemLogs.length },
         ]}
@@ -239,6 +238,11 @@ export function JobDetailPage() {
               <p className="mb-3 text-sm text-text-muted">Loading prompt…</p>
             )}
             <JobPromptTab job={job} prompts={prompts} />
+          </div>
+        )}
+        {job && tab === 'chat' && (
+          <div key="chat" className="vd-fade">
+            <JobChatTab jobId={job.job_id} />
           </div>
         )}
         {job && tab === 'opencode' && (

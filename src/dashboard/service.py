@@ -28,7 +28,7 @@ from src.dashboard.schemas import (
 )
 from src.opencode_models import list_available_models
 from src.dashboard.snapshot import PollSnapshotStore, poll_snapshot_store
-from src.opencode_sessions import find_sessions_for_issue
+from src.opencode_sessions import find_sessions_for_issue, list_session_chat
 from src.orchestrator.workflow_router import WorkflowType
 from src.state.job_store import (
     JobStore,
@@ -1171,6 +1171,67 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
         seen_l.add(p)
         logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, root=root))
     return {"prompts": prompts, "session_logs": logs}
+
+
+def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
+    """Session ids recorded on this job (history + sidecar files)."""
+    ids: List[str] = []
+
+    def _add(raw: Any) -> None:
+        sid = str(raw or "").strip()
+        if sid and sid.startswith("ses_") and sid not in ids:
+            ids.append(sid)
+
+    for sid in job.get("opencode_session_ids") or []:
+        _add(sid)
+    _add(job.get("opencode_session_id"))
+    for attempt in job.get("retry_attempts") or []:
+        if isinstance(attempt, dict):
+            _add(attempt.get("opencode_session_id"))
+    for path in _job_session_log_paths(job):
+        try:
+            marker = Path(str(path) + ".session_id")
+            if marker.is_file():
+                _add(marker.read_text(encoding="utf-8").splitlines()[0])
+        except OSError:
+            continue
+    return ids
+
+
+def collect_job_chat(job: Any) -> Dict[str, Any]:
+    """Full OpenCode chat history for sessions linked to this job."""
+    if hasattr(job, "model_dump"):
+        job = job.model_dump()
+    if not isinstance(job, dict):
+        return {
+            "job_id": "",
+            "session_ids": [],
+            "sessions": [],
+            "messages": [],
+        }
+    sids = _job_opencode_session_ids(job)
+    sessions: List[Dict[str, Any]] = []
+    messages: List[Dict[str, Any]] = []
+    for sid in sids:
+        chat = list_session_chat(sid)
+        sessions.append(
+            {
+                "session_id": sid,
+                "title": chat.get("title"),
+                "directory": chat.get("directory"),
+                "message_count": len(chat.get("messages") or []),
+                "truncated": bool(chat.get("truncated")),
+                "error": chat.get("error"),
+            }
+        )
+        for msg in chat.get("messages") or []:
+            messages.append(msg)
+    return {
+        "job_id": job.get("job_id") or "",
+        "session_ids": sids,
+        "sessions": sessions,
+        "messages": messages,
+    }
 
 
 def _reconstruct_prompts(state) -> Dict[str, Any]:
