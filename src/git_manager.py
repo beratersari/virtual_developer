@@ -57,7 +57,8 @@ class GitManager:
 
     Flow (GitLab MR: source → target):
     1. Repository URL + source/target from the Jira ``{params}`` block
-    2. Temp folder ``{remote_name}_{jira_issue_id}_{timestamp}``
+    2. Temp folder ``{remote12}_{digest12}`` (short for Windows MAX_PATH;
+       digest is sha256(repo+work+target))
     3. Clone remote repo
     4. **Require** ``origin/{target}`` exists
     5. Resolve work branch: params **Source** (unless Source is a primary base
@@ -165,8 +166,8 @@ class GitManager:
         cleaned = cleaned.strip("._-") or "unknown"
         return cleaned[:max_len]
 
-    def _workspace_folder_name(self) -> str:
-        """Stable folder for this repo + work branch + target (OpenCode dir)."""
+    def _workspace_identity(self) -> Dict[str, str]:
+        """Stable repo + work + target identity used for folder naming."""
         from src.state.session_bind_store import normalize_branch, normalize_repo_key
 
         work = (
@@ -179,10 +180,47 @@ class GitManager:
         digest = hashlib.sha256(
             f"{repo_key}\0{branch}\0{target}".encode("utf-8")
         ).hexdigest()[:12]
+        return {
+            "repo_key": repo_key,
+            "work": branch,
+            "target": target,
+            "digest": digest,
+        }
+
+    def _workspace_folder_name(self) -> str:
+        """Short stable folder: ``{remote12}_{digest12}``.
+
+        Branch names are *not* in the path. Uniqueness is the hash of
+        repo+work+target. Keeping the folder short leaves budget for nested
+        Windows build trees (``build/proj/src/Debug/...``) under MAX_PATH.
+        """
+        ident = self._workspace_identity()
+        remote = self._safe_fs_token(self.remote_name or "repo", max_len=12)
+        return f"{remote}_{ident['digest']}"
+
+    def _legacy_workspace_folder_name(self) -> str:
+        """Pre-shortening folder name (repo_work_target_digest).
+
+        Kept so an upgrade can reuse an existing clone / OpenCode ``--dir``
+        until the age-based temp cleanup removes it.
+        """
+        ident = self._workspace_identity()
         remote = self._safe_fs_token(self.remote_name or "repo", max_len=32)
-        branch_tok = self._safe_fs_token(branch.replace("/", "-"), max_len=40)
-        target_tok = self._safe_fs_token(target.replace("/", "-"), max_len=24)
-        return f"{remote}_{branch_tok}_{target_tok}_{digest}"
+        branch_tok = self._safe_fs_token(
+            ident["work"].replace("/", "-"), max_len=40
+        )
+        target_tok = self._safe_fs_token(
+            ident["target"].replace("/", "-"), max_len=24
+        )
+        return f"{remote}_{branch_tok}_{target_tok}_{ident['digest']}"
+
+    def _safe_under_temp_base(self, base_temp: Path, folder_name: str) -> Path:
+        temp_path = base_temp / folder_name
+        try:
+            temp_path.resolve().relative_to(base_temp)
+        except ValueError as e:
+            raise RuntimeError(f"Unsafe temp path rejected: {temp_path}") from e
+        return temp_path
 
     def _create_temp_directory(self) -> Path:
         """Return the stable temp clone dir for this repo + work + target.
@@ -191,27 +229,53 @@ class GitManager:
         continue (same ``--dir``). Isolated ``feature/{KEY}`` work branches still
         get their own directory. Same Source with a **different Target** gets a
         new folder (different MR base / branch point).
-        """
-        folder_name = self._workspace_folder_name()
 
+        Always uses the short ``{remote12}_{digest12}`` name. A leftover
+        long legacy folder is renamed onto that short path (never kept as
+        the working dir — Windows MAX_PATH).
+        """
         base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
         base_temp.mkdir(parents=True, exist_ok=True)
         logger.debug(f"Base temp directory: {base_temp}")
 
-        temp_path = base_temp / folder_name
-        # Ensure path stays under base_temp (no traversal via issue_key/branch)
+        short_path = self._safe_under_temp_base(
+            base_temp, self._workspace_folder_name()
+        )
+        if short_path.exists():
+            logger.info(f"Reusing temp directory: {short_path}")
+            return short_path
+
+        legacy_path = self._safe_under_temp_base(
+            base_temp, self._legacy_workspace_folder_name()
+        )
+        if legacy_path.exists():
+            try:
+                os.replace(str(legacy_path), str(short_path))
+                logger.info(
+                    f"Renamed legacy temp dir {legacy_path.name} → {short_path.name}"
+                )
+                return short_path
+            except OSError as e:
+                logger.warning(
+                    f"Could not rename legacy temp dir {legacy_path.name} "
+                    f"to {short_path.name}: {e}; creating short path"
+                )
+
+        short_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Created temp directory: {short_path}")
+        return short_path
+
+    def _enable_git_longpaths(self) -> None:
+        """Persist ``core.longpaths`` so Windows git/MSBuild trees can exceed 260.
+
+        Harmless on Linux/macOS. Best-effort — never fail clone/setup.
+        """
+        if not self.temp_dir or not (self.temp_dir / ".git").exists():
+            return
         try:
-            temp_path.resolve().relative_to(base_temp)
-        except ValueError as e:
-            raise RuntimeError(f"Unsafe temp path rejected: {temp_path}") from e
-
-        if temp_path.exists():
-            logger.info(f"Reusing temp directory: {temp_path}")
-            return temp_path
-
-        temp_path.mkdir(parents=True)
-        logger.info(f"Created temp directory: {temp_path}")
-        return temp_path
+            self._run_git(["config", "core.longpaths", "true"], check=False)
+        except Exception as e:
+            logger.debug(f"Could not set core.longpaths in {self.temp_dir}: {e}")
 
     def _existing_clone_usable(self) -> bool:
         """True when temp_dir is a git checkout of this remote."""
@@ -264,6 +328,7 @@ class GitManager:
             self._run_git(["fetch", "origin", "--prune"], check=False, auth=True)
         finally:
             self._scrub_remote_credentials()
+        self._enable_git_longpaths()
         self._update_submodules(reason="after reuse fetch")
         self._materialize_job_remote_refs()
 
@@ -445,7 +510,15 @@ class GitManager:
 
         try:
             result = subprocess.run(
-                ["git", "clone", "--no-single-branch", clone_url, str(self.temp_dir)],
+                [
+                    "git",
+                    "-c",
+                    "core.longpaths=true",
+                    "clone",
+                    "--no-single-branch",
+                    clone_url,
+                    str(self.temp_dir),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=clone_timeout,
@@ -493,6 +566,7 @@ class GitManager:
         logger.info(f"Clone finished for {issue_tag} in {elapsed:.1f}s")
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
+        self._enable_git_longpaths()
 
         # Init nested modules on the default tip from clone.
         # ensure_feature_branch re-runs after work-branch checkout so pins match.
@@ -778,7 +852,7 @@ class GitManager:
             logger.error(f"Git operations locked: temp directory '{cwd}' does not exist")
             raise RuntimeError(f"Git operations locked: temp directory '{cwd}' does not exist")
 
-        cmd = ["git"] + args
+        cmd = ["git", "-c", "core.longpaths=true"] + args
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
 

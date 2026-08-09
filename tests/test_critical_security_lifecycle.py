@@ -97,12 +97,17 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
                     gm._clone_into_temp()
                     scrub.assert_called()
 
-    assert captured["cmd"][0:3] == ["git", "clone", "--no-single-branch"]
+    cmd = captured["cmd"]
+    assert cmd[0] == "git"
+    assert "clone" in cmd
+    i = cmd.index("clone")
+    assert cmd[i : i + 2] == ["clone", "--no-single-branch"]
+    clone_url = cmd[i + 2]
     # PAT must not appear in argv (askpass + disabled helper instead)
-    assert "oauth2:super-secret-pat-xyz@" not in captured["cmd"][3]
+    assert "oauth2:super-secret-pat-xyz@" not in clone_url
     env = captured.get("env") or {}
     # fake_run may not have captured kwargs — check clone URL is clean
-    assert captured["cmd"][3] == "https://gitlab.example.com/group/repo.git"
+    assert clone_url == "https://gitlab.example.com/group/repo.git"
 
 
 def test_push_applies_settings_pat_to_origin_without_clearing_helpers(

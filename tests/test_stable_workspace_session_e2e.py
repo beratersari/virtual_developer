@@ -665,8 +665,10 @@ def test_e2e_workspace_folder_name_is_stable_across_issue_keys(tmp_path, monkeyp
             target_branch="develop",
         )
     assert a.temp_dir.resolve() == b.temp_dir.resolve()
-    assert "feature-shared" in a.temp_dir.name or "feature_shared" in a.temp_dir.name.replace(
-        "-", "_"
-    )
+    # Short Windows-safe name: {remote12}_{digest12} — no branch tokens
+    assert len(a.temp_dir.name) <= 32
+    assert a.temp_dir.name.count("_") >= 1
     assert a.issue_key not in a.temp_dir.name
     assert b.issue_key not in b.temp_dir.name
+    assert "feature-shared" not in a.temp_dir.name
+    assert "feature-KAN" not in a.temp_dir.name

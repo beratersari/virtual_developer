@@ -212,11 +212,12 @@ class Settings(BaseSettings):
         description="Base directory for temp working folders (relative to agent root)"
     )
     temp_dir_format: str = Field(
-        default="{remote_name}_{work_branch}_{repo_branch_hash}",
+        default="{remote_name}_{repo_branch_hash}",
         description=(
-            "Legacy description only — clones use a stable "
-            "{remote}_{work}_{target}_{hash(repo+work+target)} folder so "
-            "OpenCode sessions resume only for the same Source and Target."
+            "Legacy description only — clones use a short stable "
+            "{remote12}_{hash12(repo+work+target)} folder so Windows MAX_PATH "
+            "has room for nested build trees. OpenCode sessions resume only "
+            "for the same Source and Target."
         ),
     )
     temp_cleanup_policy: str = Field(
@@ -591,6 +592,17 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
     for key, value in data.items():
         if not hasattr(settings_obj, key):
             continue
+        if key == "jira_board_id":
+            text = str(value or "").strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+                text = text[1:-1].strip()
+            if not text.isdigit():
+                logger.warning(
+                    f"Ignoring invalid runtime jira_board_id={value!r} "
+                    f"(need digits, e.g. 1); keeping {getattr(settings_obj, key, None)!r}"
+                )
+                continue
+            value = text
         try:
             setattr(settings_obj, key, value)
         except Exception as e:

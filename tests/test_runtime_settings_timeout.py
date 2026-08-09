@@ -43,6 +43,21 @@ def test_timeout_update_persists_and_reloads(tmp_path, monkeypatch):
     assert build_settings_view().agent_task_timeout_seconds == 120
 
 
+def test_runtime_settings_ignore_invalid_board_id(tmp_path, monkeypatch):
+    from src import config as config_mod
+    from src.config import apply_runtime_settings_to, save_runtime_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_mod.settings, "jira_board_id", "1")
+    save_runtime_settings({"jira_board_id": "`"})
+    apply_runtime_settings_to(config_mod.settings)
+    assert config_mod.settings.jira_board_id == "1"
+
+    save_runtime_settings({"jira_board_id": "99"})
+    apply_runtime_settings_to(config_mod.settings)
+    assert config_mod.settings.jira_board_id == "99"
+
+
 def test_begin_workflow_uses_live_timeout(tmp_path, monkeypatch, state_manager):
     """_begin_workflow_run freezes current settings.agent_task_timeout_seconds."""
     from src.config import settings
