@@ -25,6 +25,8 @@ from src.dashboard.schemas import (
     SettingsView,
     TaskItem,
     TasksResponse,
+    QueueItem,
+    QueueResponse,
 )
 from src.opencode_models import list_available_models
 from src.dashboard.snapshot import PollSnapshotStore, poll_snapshot_store
@@ -229,6 +231,16 @@ def build_settings_view() -> SettingsView:
             for h in settings.gitlab_allowed_hosts_list
         ],
         default_model=(settings.default_model or "").strip(),
+        gitlab_webhook_enabled=bool(
+            getattr(settings, "gitlab_webhook_enabled", True)
+        ),
+        gitlab_bot_mentions=(
+            getattr(settings, "gitlab_bot_mentions", "") or ""
+        ).strip(),
+        gitlab_webhook_secret_configured=bool(
+            (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
+        ),
+        gitlab_webhook_path="/webhooks/gitlab",
     )
 
 
@@ -591,6 +603,9 @@ def job_dict_to_item(
         delivery_status=j.get("delivery_status") or None,
         delivery_note=j.get("delivery_note") or None,
         working_directory=(j.get("working_directory") or None),
+        source=str(j.get("source") or "jira"),
+        gitlab_project=j.get("gitlab_project") or None,
+        gitlab_mr_iid=j.get("gitlab_mr_iid"),
     )
 
 
@@ -756,6 +771,71 @@ def build_jobs(
     )
 
 
+def build_queue(
+    *,
+    status: Optional[str] = None,
+    limit: int = 200,
+    store: Any = None,
+) -> QueueResponse:
+    """List work-queue items for the dashboard (Jira + GitLab)."""
+    from src.state.queue_store import work_queue_store as default_queue
+
+    qs = store or default_queue
+    raw = qs.list_items(status=status, limit=limit)
+    items: List[QueueItem] = []
+    queued = 0
+    running = 0
+    for rec in raw:
+        st = rec.get("status") or "queued"
+        if st == "queued":
+            queued += 1
+        elif st == "running":
+            running += 1
+        try:
+            items.append(
+                QueueItem(
+                    queue_id=rec.get("queue_id") or "",
+                    status=st,
+                    source=rec.get("source") or "jira",
+                    issue_key=rec.get("issue_key") or "",
+                    summary=rec.get("summary") or "",
+                    message=rec.get("message") or "",
+                    repository_url=rec.get("repository_url") or "",
+                    source_branch=rec.get("source_branch") or "",
+                    work_branch=rec.get("work_branch") or "",
+                    target_branch=rec.get("target_branch") or "",
+                    lock_key=rec.get("lock_key") or "",
+                    job_id=rec.get("job_id"),
+                    merge_request_url=rec.get("merge_request_url") or "",
+                    gitlab_note_id=rec.get("gitlab_note_id") or "",
+                    error_message=rec.get("error_message"),
+                    created_at=rec.get("created_at"),
+                    started_at=rec.get("started_at"),
+                    finished_at=rec.get("finished_at"),
+                )
+            )
+        except Exception:
+            continue
+    items.sort(
+        key=lambda i: (
+            {"queued": 0, "running": 1}.get(i.status, 9),
+            i.created_at or "",
+        )
+    )
+    # When filtered, recount from unfiltered for header badges
+    if status:
+        all_open = qs.list_items(limit=500)
+        queued = sum(1 for r in all_open if r.get("status") == "queued")
+        running = sum(1 for r in all_open if r.get("status") == "running")
+    return QueueResponse(
+        items=items,
+        queued_count=queued,
+        running_count=running,
+        total=len(items),
+        server_time=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
 def build_dashboard_payload(
     *,
     state_manager: Optional[JiraStateManager] = None,
@@ -776,6 +856,7 @@ def build_dashboard_payload(
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "settings": build_settings_view().model_dump(),
+        "queue": build_queue().model_dump(),
     }
 
 

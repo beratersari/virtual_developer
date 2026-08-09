@@ -23,13 +23,15 @@ export function JobOverview({
     <div className="space-y-6 text-sm">
       <div className="rounded border border-border bg-bg px-4 py-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-          Jira description
+          {(job.source || 'jira') === 'gitlab' ? 'GitLab MR comment' : 'Jira description'}
         </div>
         {job.description?.trim() ? (
           <p className="whitespace-pre-wrap text-sm text-text-secondary">{job.description}</p>
         ) : (
           <p className="text-sm italic text-text-muted">
-            No Jira description was stored when this job started.
+            {(job.source || 'jira') === 'gitlab'
+              ? 'No MR comment body was stored when this job started.'
+              : 'No Jira description was stored when this job started.'}
           </p>
         )}
       </div>
@@ -41,6 +43,21 @@ export function JobOverview({
         <MetaCard label="Workflow" value={job.workflow_type || '—'} />
         <MetaCard label="Agent" value={job.agent || '—'} />
         <MetaCard label="Issue" mono value={job.issue_key || '—'} />
+        <MetaCard
+          label="Source"
+          value={(job.source || 'jira') === 'gitlab' ? 'GitLab MR' : 'Jira'}
+        />
+        {job.gitlab_project && (
+          <MetaCard
+            label="GitLab project"
+            mono
+            value={
+              job.gitlab_mr_iid
+                ? `${job.gitlab_project}!${job.gitlab_mr_iid}`
+                : job.gitlab_project
+            }
+          />
+        )}
         <MetaCard
           label="Working folder"
           mono

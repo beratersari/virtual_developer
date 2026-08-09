@@ -9,6 +9,7 @@ export type LiveValue = {
   generation: number
   pollCountdown: number | null
   error: string | null
+  queueQueued: number
 }
 
 export const LiveContext = createContext<LiveValue | null>(null)

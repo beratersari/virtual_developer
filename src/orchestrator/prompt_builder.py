@@ -212,5 +212,68 @@ class PromptBuilder:
             return marker + body.split(marker, 1)[1]
         return f"## Git policy\n\nCommit as `[{issue_key}] <type>: <short description>`."
 
+    @staticmethod
+    def build_gitlab_comment_prompt(
+        *,
+        issue_key: str,
+        mr_title: str,
+        mr_url: str,
+        source_branch: str,
+        target_branch: str,
+        author: str,
+        comment: str,
+        work_branch: Optional[str] = None,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Build-mode prompt for a GitLab MR @mention.
+
+        Same ``BUILD_PROMPT.md`` as Jira execution: the agent may edit, build,
+        test, and commit. The orchestrator pushes onto the **existing** MR
+        source branch and posts the reply as a note.
+        """
+        from src.issue_git_spec import strip_params_block
+
+        comment_body = strip_params_block(comment or "").strip()
+        title = strip_params_block(mr_title or "").strip()
+        who = (author or "").strip() or "someone"
+        branch = (work_branch or source_branch or "").strip()
+        plan = (plan_path or "").strip() or f".sisyphus/plans/{issue_key}.md"
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=branch or source_branch,
+            plan_path=plan,
+        )
+        parts = [
+            system,
+            f"## GitLab merge request: {issue_key}",
+            (
+                "This run is a **build** follow-up on an existing GitLab merge "
+                "request (not a new Jira ticket). The repository is already "
+                f"checked out on `{source_branch}` (MR into `{target_branch}`). "
+                "Resume any existing OpenCode session for this repo + branch + "
+                "target. Treat the MR comment below as the request."
+            ),
+            f"## MR title\n\n{title or '(no title)'}",
+        ]
+        if mr_url:
+            parts.append(f"## MR URL\n\n{mr_url}")
+        parts.append(
+            f"## Branches\n\n* Source (checked out): `{source_branch}`\n"
+            f"* Target: `{target_branch}`\n"
+            f"* Work branch: `{branch or source_branch}`"
+        )
+        parts.append(f"## Comment from {who}\n\n{comment_body or '(empty comment)'}")
+        parts.append(
+            "## GitLab delivery\n\n"
+            "Implement the comment when it asks for code changes, or when a "
+            "code change is the correct answer. Stay on the prepared work "
+            "branch. Commit if you change files. Do **not** push and do **not** "
+            "open a new merge request — the orchestrator will push onto this "
+            "existing MR. Write a clear final answer for the reviewer; it will "
+            "be posted back on the MR as a note."
+        )
+        return PromptBuilder._join_blocks(*parts)
+
 
 __all__ = ["PromptBuilder"]

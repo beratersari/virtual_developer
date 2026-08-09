@@ -254,7 +254,7 @@ class JiraAgentDaemon:
                 pass
             try:
                 fut = asyncio.run_coroutine_threadsafe(
-                    self.processor.process_event(event),
+                    self.processor.enqueue_jira_event(event),
                     main,
                 )
             except RuntimeError as e:

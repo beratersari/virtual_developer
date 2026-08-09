@@ -253,6 +253,30 @@ export function SettingsPage() {
 
       {section === 'gitlab' && (
       <div key="gitlab" className="vd-fade space-y-3">
+      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
+        <div className="text-sm font-semibold text-text">MR comment webhook</div>
+        <p className="mt-1 text-xs text-text-muted">
+          Project hook (GitLab.com / CE / EE). Event: Comments only. Secret is{' '}
+          <span className="font-mono">X-Gitlab-Token</span>.
+        </p>
+        <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
+          <div>
+            Enabled:{' '}
+            {settings?.gitlab_webhook_enabled === false ? 'no' : 'yes'}
+          </div>
+          <div>
+            Mentions: {settings?.gitlab_bot_mentions || '(none)'}
+          </div>
+          <div>
+            Secret:{' '}
+            {settings?.gitlab_webhook_secret_configured ? 'configured' : 'empty (dev)'}
+          </div>
+          <div>
+            URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
+            {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
+          </div>
+        </dl>
+      </div>
       <div className="text-sm font-semibold text-text">GitLab credentials</div>
       <p className="text-xs text-text-muted">
         One row per host. Empty PAT keeps the stored token (including after a host rename).

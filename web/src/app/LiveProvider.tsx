@@ -11,6 +11,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<SettingsPayload | null>(null)
   const [generation, setGeneration] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [queueQueued, setQueueQueued] = useState(0)
   const countdownRef = useRef<{ secs: number; atMs: number } | null>(null)
   const lastServerMs = useRef<number | null>(null)
 
@@ -18,6 +19,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     meta?: Meta
     poll?: PollPayload
     settings?: SettingsPayload
+    queue?: { queued_count?: number }
   }) => {
     const st = payload.poll?.server_time || payload.meta?.server_time || null
     const nextMs = st ? Date.parse(st) : Number.NaN
@@ -41,6 +43,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       }
     }
     if (payload.settings) setSettings(payload.settings)
+    if (payload.queue && typeof payload.queue.queued_count === 'number') {
+      setQueueQueued(payload.queue.queued_count)
+    }
     setGeneration((g) => g + 1)
     setError(null)
   }
@@ -97,6 +102,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
               meta?: Meta
               poll?: PollPayload
               settings?: SettingsPayload
+              queue?: { queued_count?: number }
             })
           } catch {
             /* ignore malformed frames */
@@ -135,8 +141,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       generation,
       pollCountdown,
       error,
+      queueQueued,
     }),
-    [connected, meta, poll, settings, generation, pollCountdown, error],
+    [connected, meta, poll, settings, generation, pollCountdown, error, queueQueued],
   )
 
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>

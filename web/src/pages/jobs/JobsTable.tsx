@@ -51,6 +51,11 @@ export function JobsTable({
                 <span className="font-mono text-sm font-semibold text-text">
                   {j.issue_key}
                 </span>
+                {(j.source || 'jira') === 'gitlab' && (
+                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                    GitLab
+                  </span>
+                )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
               </div>

@@ -17,6 +17,30 @@ def test_substitute_plan_path():
     assert out == "Write to .sisyphus/plans/K-1.md"
 
 
+def test_gitlab_comment_prompt_has_mr_context():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_gitlab_comment_prompt(
+        issue_key="GL-ACME-DEMO-4",
+        mr_title="Add login",
+        mr_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        source_branch="feature/login",
+        target_branch="develop",
+        author="alice",
+        comment="@berat_ai what does login do?",
+    )
+    assert "GL-ACME-DEMO-4" in p
+    assert "feature/login" in p
+    assert "develop" in p
+    assert "what does login do?" in p
+    assert "Add login" in p
+    # Build mode (same BUILD_PROMPT.md as Jira execution)
+    assert "Build mode" in p or "delivery" in p.lower()
+    assert "Git policy" in p
+    assert "existing" in p.lower() and "merge request" in p.lower()
+    assert "Do **not** push" in p or "Do not push" in p
+    assert "new merge request" in p.lower()
+
+
 def test_plan_path_includes_title_and_description():
     PromptBuilder.clear_prompt_file_cache()
     p = PromptBuilder.build_plan_prompt("A-1", "sum title", "full description body")
