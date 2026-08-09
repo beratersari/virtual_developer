@@ -10,7 +10,6 @@ export function JobsTable({
   selectedIds,
   onToggleSelect,
   onOpenJob,
-  onOpenIssue,
 }: {
   jobs: JobItem[]
   compact?: boolean
@@ -18,7 +17,6 @@ export function JobsTable({
   selectedIds?: Set<string>
   onToggleSelect?: (jobId: string) => void
   onOpenJob: (issueKey: string, jobId: string) => void
-  onOpenIssue?: (issueKey: string) => void
 }) {
   if (jobs.length === 0) {
     return (
@@ -50,17 +48,9 @@ export function JobsTable({
             <div className={`vd-job-bar ${statusToneClass(j.status)}`} />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="font-mono text-sm font-semibold text-accent-text hover:underline"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (onOpenIssue) onOpenIssue(j.issue_key)
-                    else onOpenJob(j.issue_key, j.job_id)
-                  }}
-                >
+                <span className="font-mono text-sm font-semibold text-text">
                   {j.issue_key}
-                </button>
+                </span>
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
               </div>

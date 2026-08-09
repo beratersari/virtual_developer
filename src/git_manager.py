@@ -201,8 +201,8 @@ class GitManager:
     def _legacy_workspace_folder_name(self) -> str:
         """Pre-shortening folder name (repo_work_target_digest).
 
-        Kept so an upgrade can reuse an existing clone / OpenCode ``--dir``
-        until the age-based temp cleanup removes it.
+        Kept so an upgrade can rename the leftover long folder onto the
+        short path and relocate bind + OpenCode ``session.directory``.
         """
         ident = self._workspace_identity()
         remote = self._safe_fs_token(self.remote_name or "repo", max_len=32)
@@ -232,7 +232,9 @@ class GitManager:
 
         Always uses the short ``{remote12}_{digest12}`` name. A leftover
         long legacy folder is renamed onto that short path (never kept as
-        the working dir — Windows MAX_PATH).
+        the working dir — Windows MAX_PATH). Bind ``working_directory`` and
+        OpenCode ``session.directory`` are rewritten so ``--session`` still
+        matches the live ``--dir``.
         """
         base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
         base_temp.mkdir(parents=True, exist_ok=True)
@@ -250,9 +252,13 @@ class GitManager:
         )
         if legacy_path.exists():
             try:
+                old_resolved = legacy_path.resolve()
                 os.replace(str(legacy_path), str(short_path))
                 logger.info(
                     f"Renamed legacy temp dir {legacy_path.name} → {short_path.name}"
+                )
+                self._relocate_workspace_after_rename(
+                    old_resolved, short_path.resolve()
                 )
                 return short_path
             except OSError as e:
@@ -264,6 +270,27 @@ class GitManager:
         short_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Created temp directory: {short_path}")
         return short_path
+
+    def _relocate_workspace_after_rename(self, old_dir: Path, new_dir: Path) -> None:
+        """Keep session binds + OpenCode DB in sync after an in-place rename."""
+        try:
+            from src.state.session_bind_store import session_bind_store
+
+            session_bind_store.relocate_working_directory(old_dir, new_dir)
+        except Exception as e:
+            logger.warning(
+                f"Could not relocate session binds after rename "
+                f"{old_dir} → {new_dir}: {e}"
+            )
+        try:
+            from src.opencode_sessions import relocate_session_directories
+
+            relocate_session_directories(old_dir, new_dir)
+        except Exception as e:
+            logger.warning(
+                f"Could not relocate OpenCode session dirs after rename "
+                f"{old_dir} → {new_dir}: {e}"
+            )
 
     def _enable_git_longpaths(self) -> None:
         """Persist ``core.longpaths`` so Windows git/MSBuild trees can exceed 260.

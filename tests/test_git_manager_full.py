@@ -146,6 +146,64 @@ def test_create_temp_directory_renames_legacy_long_folder(tmp_path, monkeypatch)
         assert not legacy.exists()
 
 
+def test_create_temp_directory_rename_relocates_bind_and_opencode_dir(
+    tmp_path, monkeypatch
+):
+    from src.opencode_sessions import (
+        lookup_session_directory,
+        session_matches_workdir,
+    )
+    from src.state.session_bind_store import SessionBindStore
+    from tests.test_opencode_sessions import _make_session_db
+
+    monkeypatch.chdir(tmp_path)
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        g = GitManager(issue_key="C-1")
+    g.remote_name = "test_project"
+    g.issue_key = "KAN-21"
+    g.remote_url = "https://gitlab.example.com/g/test_project.git"
+    g.source_branch = "feature/KAN-1905"
+    g.target_branch = "feature/KAN-21"
+    g.work_branch = "feature/KAN-1905"
+
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+
+    with patch("src.git_manager.settings") as s:
+        s.temp_dir_base = Path(".temp")
+        base = (tmp_path / ".temp").resolve()
+        base.mkdir()
+        legacy = base / g._legacy_workspace_folder_name()
+        legacy.mkdir()
+        (legacy / "marker.txt").write_text("keep", encoding="utf-8")
+        db = _make_session_db(
+            tmp_path / "opencode.db",
+            [{"id": "ses_legacy", "directory": str(legacy), "title": "KAN-21: x"}],
+        )
+        monkeypatch.setattr("src.opencode_sessions._default_db_path", lambda: db)
+        store.upsert(
+            repository_url=g.remote_url,
+            branch=g.work_branch,
+            target_branch=g.target_branch,
+            session_id="ses_legacy",
+            issue_key="KAN-21",
+            working_directory=str(legacy),
+        )
+        got = g._create_temp_directory()
+        short = base / g._workspace_folder_name()
+        assert got.resolve() == short.resolve()
+        bound = store.get(g.remote_url, g.work_branch, g.target_branch)
+        assert bound is not None
+        assert Path(bound["working_directory"]).resolve() == short.resolve()
+        d, ok = lookup_session_directory("ses_legacy", db_path=db)
+        assert ok is True
+        assert Path(d).resolve() == short.resolve()
+        assert session_matches_workdir("ses_legacy", short, db_path=db) is True
+        from src.git_manager import session_bound_workspace_paths
+
+        assert short.resolve() in session_bound_workspace_paths()
+
+
 def test_enable_git_longpaths_sets_local_config(gm, tmp_path):
     git_dir = gm.temp_dir / ".git"
     git_dir.mkdir()

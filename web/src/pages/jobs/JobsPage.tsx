@@ -157,7 +157,7 @@ export function JobsPage() {
         title="Jobs"
         description={
           live.connected
-            ? 'Each card is one agent run. Open a card for logs; the issue key opens the ticket.'
+            ? 'Each card is one agent run. Open a card for logs and prompts.'
             : 'Disconnected — list may be stale.'
         }
         actions={
@@ -262,7 +262,6 @@ export function JobsPage() {
         selectedIds={selectedIds}
         onToggleSelect={toggleSelect}
         onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
-        onOpenIssue={(key) => navigate(`/tasks/${encodeURIComponent(key)}`)}
       />
 
       {selectedCount > 0 && (

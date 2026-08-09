@@ -1,6 +1,7 @@
 import type {
   BulkDeleteJobsResult,
   GitlabConnectionTestResult,
+  JobChatPayload,
   JobDetailResponse,
   JobItem,
   JobsPayload,
@@ -168,6 +169,10 @@ export async function fetchJobArtifacts(jobId: string): Promise<{
   session_logs: import('./types').TextArtifact[]
 }> {
   return request(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`)
+}
+
+export function fetchJobChat(jobId: string) {
+  return request<JobChatPayload>(`/api/jobs/${encodeURIComponent(jobId)}/chat`)
 }
 
 export function fetchTaskDetail(

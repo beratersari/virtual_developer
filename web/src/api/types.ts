@@ -276,6 +276,49 @@ export type DashboardPayload = {
   settings: SettingsPayload
 }
 
+export type ChatPart = {
+  id: string
+  type: string
+  created_at?: string | null
+  text?: string
+  truncated?: boolean
+  tool?: string
+  call_id?: string | null
+  status?: string
+  title?: string
+  input?: Record<string, unknown>
+  output?: string
+  reason?: string
+  auto?: boolean
+}
+
+export type ChatMessage = {
+  id: string
+  session_id: string
+  role: string
+  finish?: string | null
+  agent?: string | null
+  created_at?: string | null
+  parts: ChatPart[]
+}
+
+export type ChatSessionInfo = {
+  session_id: string
+  title?: string | null
+  directory?: string | null
+  message_count: number
+  truncated?: boolean
+  error?: string | null
+}
+
+export type JobChatPayload = {
+  job_id: string
+  session_ids: string[]
+  sessions: ChatSessionInfo[]
+  messages: ChatMessage[]
+  server_time?: string
+}
+
 export type TextArtifact = {
   path: string
   name?: string

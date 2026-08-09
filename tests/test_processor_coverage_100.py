@@ -315,6 +315,24 @@ def test_link_and_apply_session_paths(processor, state_manager, tmp_path):
     loaded = processor.job_store.get_job(job["job_id"])
     assert loaded is not None
 
+    # Abandoned cold-retry id must not be rebound when the final attempt
+    # produced no session id.
+    processor._apply_agent_result_session(
+        "LK-1",
+        {
+            "opencode_session_id": None,
+            "session_file": str(sess),
+            "retry_info": {
+                "last_opencode_session_id": "ses_old",
+                "abandoned_session_id": "ses_old",
+            },
+        },
+    )
+    st = state_manager.get_state("LK-1")
+    assert st is not None
+    # current stays ses_new from the previous successful apply
+    assert st.current_opencode_session_id == "ses_new"
+
     # no session id
     processor._record_opencode_session("LK-1", None)
     processor._record_opencode_session("GHOST", "ses_y")

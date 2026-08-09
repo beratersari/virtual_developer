@@ -31,6 +31,7 @@ from src.dashboard.service import (
     build_settings_view,
     build_task_detail,
     build_tasks,
+    collect_job_chat,
     collect_job_text_artifacts,
     delete_job_record,
     delete_job_records,
@@ -379,6 +380,27 @@ def create_dashboard_app(
             "session_logs": arts["session_logs"],
             "server_time": build_meta().server_time,
         }
+
+    @app.get("/api/jobs/{job_id}/chat")
+    def job_chat(job_id: str) -> dict:
+        """OpenCode session transcript (user/assistant/tool parts) for this job."""
+        jid = (job_id or "").strip()
+        if not jid or jid.startswith("legacy_"):
+            raise HTTPException(
+                status_code=404,
+                detail="Legacy session jobs are not supported; open a real job_* id",
+            )
+        item = build_one_job(
+            jid,
+            processor=app.state.processor,
+            store=job_store,
+            state_manager=app.state.state_manager,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"No job {job_id}")
+        chat = collect_job_chat(item)
+        chat["server_time"] = build_meta().server_time
+        return chat
 
     @app.get("/api/jobs/{job_id}")
     def job_detail(job_id: str) -> dict:

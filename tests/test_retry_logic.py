@@ -256,12 +256,15 @@ async def test_timeout_retries_when_retry_on_timeout_true():
         calls["n"] += 1
         snapshots.append((task.session_id, (task.prompt or "")[:40]))
         if calls["n"] == 1:
-            return _fail_result(
+            out = _fail_result(
                 returncode=-1,
                 stderr="\n[TIMEOUT] Task exceeded 30 seconds",
                 timed_out=True,
                 session_id="ses_to",
             )
+            # Non-empty stdout so this is not the empty-timeout cold path
+            out["stdout"] = "Session: ses_to\nworking..."
+            return out
         return _ok_result(session_id="ses_to")
 
     with patch.object(runner, "run_agent", side_effect=timeout_then_ok):
@@ -850,6 +853,7 @@ async def test_stuck_monitor_aborts_only_past_limit(state_manager, tmp_path, mon
     daemon.processor._kill_children_for_issue = MagicMock()
     daemon.processor._fail_issue = MagicMock()
     daemon.processor._release_context = MagicMock()
+    daemon.processor._is_live_processing = MagicMock(return_value=False)
 
     async def stop_after_first(_seconds):
         daemon._running = False

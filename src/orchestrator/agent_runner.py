@@ -164,6 +164,7 @@ class AgentTask:
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
     task_type: Optional[str] = None
+    abandoned_session_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
@@ -509,23 +510,33 @@ class AgentRunner:
                 f"Retry after {why}: empty session log — not resuming "
                 f"{sid or '(unknown)'}; starting cold"
             )
+            if sid:
+                task.abandoned_session_id = sid
             task.session_id = None
             return
         if sid and self.working_directory:
             try:
                 from src.opencode_sessions import (
-                    get_session_directory,
+                    lookup_session_directory,
                     session_matches_workdir,
                 )
 
-                stored_dir = get_session_directory(sid)
-                if stored_dir and not session_matches_workdir(
+                stored_dir, ok = lookup_session_directory(sid)
+                if not ok:
+                    # Same job / same clone: keep --session. The row may not
+                    # be flushed yet; a transient DB error must not drop Continue.
+                    logger.warning(
+                        f"Retry after {why}: OpenCode DB unreadable; "
+                        f"keeping session {sid} on current clone"
+                    )
+                elif stored_dir and not session_matches_workdir(
                     sid, self.working_directory
                 ):
                     logger.warning(
                         f"Retry after {why}: session {sid} is not for "
                         f"{self.working_directory}; starting cold"
                     )
+                    task.abandoned_session_id = sid
                     task.session_id = None
                     return
             except Exception as e:
@@ -1250,14 +1261,7 @@ class AgentRunner:
                 "session_file": all_session_files[-1] if all_session_files else None,
                 "opencode_session_id": last_session_id,
                 "aborted": True,
-                "retry_info": {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "aborted": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,
-                },
+                "retry_info": _retry_info(aborted=True),
             }
             if extra:
                 base.update(extra)
@@ -1267,6 +1271,20 @@ class AgentRunner:
         last_session_id = None
         attempt = 0
         all_session_files = []
+
+        def _retry_info(**extra: Any) -> Dict[str, Any]:
+            info: Dict[str, Any] = {
+                "attempts": attempt + 1,
+                "max_retries": effective_max_retries,
+                "retried": attempt > 0,
+                "all_session_files": all_session_files,
+                "last_opencode_session_id": last_session_id,
+                "abandoned_session_id": getattr(
+                    task, "abandoned_session_id", None
+                ),
+            }
+            info.update(extra)
+            return info
 
         while attempt <= effective_max_retries:
             if _aborted():
@@ -1302,26 +1320,13 @@ class AgentRunner:
                 )
                 result = dict(result)
                 result["aborted"] = True
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "aborted": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,
-                }
+                result["retry_info"] = _retry_info(aborted=True)
                 return result
 
             # Check if successful
             if result.get("returncode") == 0:
                 logger.info(f"Agent succeeded on attempt {attempt + 1}: task_id={task.task_id}")
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
-                }
+                result["retry_info"] = _retry_info()
                 return result
 
             # Determine if we should retry
@@ -1417,28 +1422,14 @@ class AgentRunner:
             else:
                 # No more retries - include session ID from last attempt
                 logger.info(f"All retry attempts exhausted: task_id={task.task_id}, total_attempts={attempt + 1}")
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "final_failure": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
-                }
+                result["retry_info"] = _retry_info(final_failure=True)
                 return result
 
         # Should not reach here with normal control flow (loop always returns).
         # Defensive fallback kept for safety; last_result branch is effectively dead.
         logger.error(f"Unexpected fallback reached in run_agent_with_retry: task_id={task.task_id}")
         if last_result:  # pragma: no cover
-            last_result["retry_info"] = {
-                "attempts": attempt + 1,
-                "max_retries": effective_max_retries,
-                "retried": True,
-                "final_failure": True,
-                "all_session_files": all_session_files,
-                "last_opencode_session_id": last_session_id,
-            }
+            last_result["retry_info"] = _retry_info(retried=True, final_failure=True)
             logger.warning(f"Returning last result due to unexpected state: task_id={task.task_id}")
             return last_result
 
@@ -1450,12 +1441,5 @@ class AgentRunner:
             "stderr": "Max retries exceeded",
             "session_file": all_session_files[-1] if all_session_files else None,
             "opencode_session_id": last_session_id,
-            "retry_info": {
-                "attempts": attempt + 1,
-                "max_retries": effective_max_retries,
-                "retried": True,
-                "final_failure": True,
-                "all_session_files": all_session_files,
-                "last_opencode_session_id": last_session_id,
-            },
+            "retry_info": _retry_info(retried=True, final_failure=True),
         }

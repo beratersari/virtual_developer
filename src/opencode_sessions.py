@@ -2,16 +2,58 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.logger import logger
 
+_SESSION_SELECT = (
+    "id, title, directory, agent, time_created, time_updated, cost, "
+    "tokens_input, tokens_output"
+)
+
 
 def _default_db_path() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+
+def paths_equivalent(left: Any, right: Any) -> bool:
+    """True when two filesystem paths resolve to the same location."""
+    if left is None or right is None:
+        return False
+    try:
+        a = str(left).strip()
+        b = str(right).strip()
+    except Exception:
+        return False
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
+
+
+def _like_escape(value: str) -> str:
+    """Escape ``LIKE`` wildcards so issue keys with ``_`` match literally."""
+    return (
+        (value or "")
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def _title_matches_issue(title: str, issue_key: str) -> bool:
+    t = (title or "").strip()
+    key = (issue_key or "").strip()
+    if not t or not key:
+        return False
+    return t.lower().startswith(f"{key.lower()}:")
 
 
 def path_contains_issue_key(directory: str, issue_key: str) -> bool:
@@ -43,9 +85,9 @@ def _rank_session(
     """Lower sort key = better match (exact dir, then title prefix, then path)."""
     directory = row.get("directory") or ""
     title = row.get("title") or ""
-    if working_directory and directory == working_directory:
+    if working_directory and paths_equivalent(directory, working_directory):
         tier = 0
-    elif title.startswith(f"{issue_key}:"):
+    elif _title_matches_issue(title, issue_key):
         tier = 1
     elif path_contains_issue_key(directory, issue_key):
         tier = 2
@@ -82,46 +124,30 @@ def find_sessions_for_issue(
     if not path.is_file():
         return []
 
-    wd = str(working_directory.resolve()) if working_directory else None
+    wd: Optional[str] = None
+    wd_variants: List[str] = []
+    if working_directory:
+        raw = str(working_directory)
+        wd_variants.append(raw)
+        try:
+            wd = str(working_directory.resolve())
+            if wd not in wd_variants:
+                wd_variants.append(wd)
+        except OSError:
+            wd = raw
+
     rows: List[Dict[str, Any]] = []
-    try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        # Broad SQL candidate set; precise filtering/ranking in Python
-        # (SQL LIKE treats ``_`` as a single-char wildcard — unsafe for keys).
-        title_prefix = f"{key}:%"
-        if wd:
-            cur.execute(
-                """
-                SELECT id, title, directory, agent, time_created, time_updated, cost,
-                       tokens_input, tokens_output
-                FROM session
-                WHERE directory = ?
-                   OR IFNULL(title, '') LIKE ?
-                   OR IFNULL(directory, '') LIKE ?
-                ORDER BY time_updated DESC
-                LIMIT ?
-                """,
-                (wd, title_prefix, f"%{key}%", max(limit * 5, 50)),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT id, title, directory, agent, time_created, time_updated, cost,
-                       tokens_input, tokens_output
-                FROM session
-                WHERE IFNULL(title, '') LIKE ?
-                   OR IFNULL(directory, '') LIKE ?
-                ORDER BY time_updated DESC
-                LIMIT ?
-                """,
-                (title_prefix, f"%{key}%", max(limit * 5, 50)),
-            )
-        for r in cur.fetchall():
+    seen_ids: set[str] = set()
+
+    def _take(fetched: Any) -> None:
+        for r in fetched:
+            sid = r["id"]
+            if not sid or sid in seen_ids:
+                continue
+            seen_ids.add(sid)
             rows.append(
                 {
-                    "id": r["id"],
+                    "id": sid,
                     "title": r["title"],
                     "directory": r["directory"],
                     "agent": r["agent"],
@@ -132,6 +158,49 @@ def find_sessions_for_issue(
                     "tokens_output": r["tokens_output"],
                 }
             )
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        # Precise queries first so a flood of PROJ-10 substring hits cannot
+        # crowd PROJ-1 out of a small LIKE window. Escape LIKE wildcards.
+        title_like = f"{_like_escape(key)}:%"
+        dir_like = f"%{_like_escape(key)}%"
+        if wd_variants:
+            placeholders = ",".join("?" * len(wd_variants))
+            cur.execute(
+                f"""
+                SELECT {_SESSION_SELECT}
+                FROM session
+                WHERE directory IN ({placeholders})
+                ORDER BY time_updated DESC
+                """,
+                tuple(wd_variants),
+            )
+            _take(cur.fetchall())
+        cur.execute(
+            f"""
+            SELECT {_SESSION_SELECT}
+            FROM session
+            WHERE LOWER(IFNULL(title, '')) LIKE LOWER(?) ESCAPE '\\'
+            ORDER BY time_updated DESC
+            LIMIT ?
+            """,
+            (title_like, max(int(limit) * 10, 100)),
+        )
+        _take(cur.fetchall())
+        cur.execute(
+            f"""
+            SELECT {_SESSION_SELECT}
+            FROM session
+            WHERE IFNULL(directory, '') LIKE ? ESCAPE '\\'
+            ORDER BY time_updated DESC
+            LIMIT ?
+            """,
+            (dir_like, max(int(limit) * 50, 500)),
+        )
+        _take(cur.fetchall())
         con.close()
     except Exception as e:
         logger.debug(f"OpenCode session lookup failed for {key}: {e}")
@@ -141,9 +210,9 @@ def find_sessions_for_issue(
     for row in rows:
         directory = row.get("directory") or ""
         title = row.get("title") or ""
-        if wd and directory == wd:
+        if wd and paths_equivalent(directory, wd):
             filtered.append(row)
-        elif title.startswith(f"{key}:"):
+        elif _title_matches_issue(title, key):
             filtered.append(row)
         elif path_contains_issue_key(directory, key):
             filtered.append(row)
@@ -173,18 +242,24 @@ def resolve_session_id(
     return preferred
 
 
-def get_session_directory(
+def lookup_session_directory(
     session_id: str,
     *,
     db_path: Optional[Path] = None,
-) -> Optional[str]:
-    """Return OpenCode ``session.directory`` for this id, or None."""
+) -> tuple[Optional[str], bool]:
+    """Return ``(directory, ok)`` for an OpenCode session id.
+
+    * ``ok=False`` — DB missing-as-unreadable query failed (transient).
+    * ``ok=True`` and ``directory is None`` — id is absent (or empty).
+    * ``ok=True`` and ``directory`` set — found.
+    """
     sid = (session_id or "").strip()
     if not sid:
-        return None
+        return None, True
     path = db_path or _default_db_path()
     if not path.is_file():
-        return None
+        # No OpenCode DB yet — treat as "not found", not a read error.
+        return None, True
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         cur = con.cursor()
@@ -193,11 +268,69 @@ def get_session_directory(
         con.close()
     except Exception as e:
         logger.debug(f"OpenCode session dir lookup failed for {sid}: {e}")
-        return None
+        return None, False
     if not row:
-        return None
+        return None, True
     d = row[0]
-    return str(d) if d else None
+    return (str(d) if d else None), True
+
+
+def get_session_directory(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Return OpenCode ``session.directory`` for this id, or None."""
+    directory, ok = lookup_session_directory(session_id, db_path=db_path)
+    return directory if ok else None
+
+
+def relocate_session_directories(
+    old_dir: Any,
+    new_dir: Any,
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Rewrite ``session.directory`` after a clone folder was renamed in place.
+
+    OpenCode ``--session`` + ``--dir`` requires the stored directory to match
+    the live clone path. A MAX_PATH short-folder rename would otherwise force
+    a cold start (and can hang if we resume against the old string).
+    """
+    path = db_path or _default_db_path()
+    if not path.is_file():
+        return 0
+    try:
+        old_r = Path(old_dir).resolve()
+        new_s = str(Path(new_dir).resolve())
+    except (OSError, TypeError):
+        return 0
+    if not new_s or paths_equivalent(old_r, new_s):
+        return 0
+    try:
+        con = sqlite3.connect(str(path), timeout=1.0)
+        cur = con.cursor()
+        rows = cur.execute("SELECT id, directory FROM session").fetchall()
+        n = 0
+        for sid, directory in rows:
+            if not directory or not paths_equivalent(directory, old_r):
+                continue
+            cur.execute(
+                "UPDATE session SET directory = ? WHERE id = ?",
+                (new_s, sid),
+            )
+            n += 1
+        con.commit()
+        con.close()
+        if n:
+            logger.info(
+                f"Relocated {n} OpenCode session directory(ies) "
+                f"{old_r} → {new_s}"
+            )
+        return n
+    except Exception as e:
+        logger.warning(f"Could not relocate OpenCode session directories: {e}")
+        return 0
 
 
 def session_matches_workdir(
@@ -213,13 +346,227 @@ def session_matches_workdir(
     """
     if not working_directory:
         return False
-    stored = get_session_directory(session_id, db_path=db_path)
-    if not stored:
+    stored, ok = lookup_session_directory(session_id, db_path=db_path)
+    if not ok or not stored:
         return False
+    return paths_equivalent(stored, working_directory)
+
+
+_MAX_CHAT_MESSAGES = 2000
+_MAX_CHAT_PARTS = 20_000
+_MAX_CHAT_PART_TEXT = 32_000
+
+
+def _epoch_to_iso(raw: Any) -> Optional[str]:
+    """OpenCode stores epoch ms (sometimes seconds) on message/part rows."""
     try:
-        return Path(stored).resolve() == Path(working_directory).resolve()
-    except OSError:
-        return False
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if n > 10_000_000_000:  # ms
+        n = n / 1000.0
+    if n <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(n, tz=timezone.utc).isoformat(timespec="seconds")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _cap_text(value: Any, *, limit: int = _MAX_CHAT_PART_TEXT) -> tuple[str, bool]:
+    if value is None:
+        return "", False
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        except TypeError:
+            value = str(value)
+    if len(value) <= limit:
+        return value, False
+    return value[:limit] + "\n…(truncated)", True
+
+
+def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> Optional[Dict[str, Any]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    ptype = str(raw.get("type") or "unknown")
+    time_obj = raw.get("time") if isinstance(raw.get("time"), dict) else {}
+    out: Dict[str, Any] = {
+        "id": part_id or raw.get("id") or "",
+        "type": ptype,
+        "created_at": _epoch_to_iso(created_at or time_obj.get("start")),
+    }
+    if ptype == "text":
+        text, trunc = _cap_text(raw.get("text") or "")
+        out["text"] = text
+        out["truncated"] = trunc
+    elif ptype == "reasoning":
+        text, trunc = _cap_text(raw.get("text") or "")
+        out["text"] = text
+        out["truncated"] = trunc
+    elif ptype == "tool":
+        state = raw.get("state") if isinstance(raw.get("state"), dict) else {}
+        inp = state.get("input")
+        out["tool"] = raw.get("tool") or state.get("title") or "tool"
+        out["call_id"] = raw.get("callID") or raw.get("call_id")
+        out["status"] = state.get("status") or raw.get("status") or ""
+        out["title"] = state.get("title") or ""
+        if isinstance(inp, dict):
+            out["input"] = {
+                k: (v if isinstance(v, (str, int, float, bool, type(None))) else str(v))
+                for k, v in list(inp.items())[:20]
+            }
+        elif inp is not None:
+            out["input"] = {"value": str(inp)[:2000]}
+        else:
+            out["input"] = {}
+        output, trunc = _cap_text(state.get("output") or raw.get("output") or "")
+        out["output"] = output
+        out["truncated"] = trunc
+    elif ptype == "compaction":
+        out["text"] = "Session compacted"
+        out["auto"] = bool(raw.get("auto"))
+    elif ptype in {"step-start", "step-finish"}:
+        out["reason"] = raw.get("reason") or ""
+    else:
+        text, trunc = _cap_text(raw.get("text") or raw.get("content") or "")
+        if text:
+            out["text"] = text
+            out["truncated"] = trunc
+    return out
+
+
+def list_session_chat(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+    limit: int = _MAX_CHAT_MESSAGES,
+) -> Dict[str, Any]:
+    """Load full OpenCode chat (messages + parts) for a session id.
+
+    Parts live in a separate ``part`` table in current OpenCode DBs. Older
+    snapshots may embed ``parts`` on the message JSON — both are accepted.
+    """
+    sid = (session_id or "").strip()
+    result: Dict[str, Any] = {
+        "session_id": sid,
+        "title": None,
+        "directory": None,
+        "messages": [],
+        "db_checked": False,
+        "error": None,
+        "truncated": False,
+    }
+    if not sid:
+        result["error"] = "missing session id"
+        return result
+    path = db_path or _default_db_path()
+    if not path.is_file():
+        result["error"] = "OpenCode session database not found"
+        return result
+    cap = max(1, min(int(limit or _MAX_CHAT_MESSAGES), _MAX_CHAT_MESSAGES))
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        result["db_checked"] = True
+        try:
+            srow = cur.execute(
+                "SELECT title, directory FROM session WHERE id = ? LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if srow is not None:
+                result["title"] = srow["title"]
+                result["directory"] = srow["directory"]
+        except sqlite3.Error:
+            pass
+
+        msg_rows = cur.execute(
+            """
+            SELECT id, time_created, data
+            FROM message
+            WHERE session_id = ?
+            ORDER BY time_created ASC
+            LIMIT ?
+            """,
+            (sid, cap + 1),
+        ).fetchall()
+        if len(msg_rows) > cap:
+            result["truncated"] = True
+            msg_rows = msg_rows[:cap]
+
+        parts_by_msg: Dict[str, List[Dict[str, Any]]] = {r["id"]: [] for r in msg_rows}
+        if msg_rows:
+            try:
+                part_rows = cur.execute(
+                    """
+                    SELECT id, message_id, time_created, data
+                    FROM part
+                    WHERE session_id = ?
+                    ORDER BY time_created ASC
+                    LIMIT ?
+                    """,
+                    (sid, _MAX_CHAT_PARTS),
+                ).fetchall()
+                for prow in part_rows:
+                    mid = prow["message_id"]
+                    if mid not in parts_by_msg:
+                        continue
+                    parsed = _normalize_part(
+                        prow["data"],
+                        part_id=prow["id"] or "",
+                        created_at=prow["time_created"],
+                    )
+                    if parsed:
+                        parts_by_msg[mid].append(parsed)
+            except sqlite3.Error as e:
+                logger.debug(f"part table unavailable for {sid}: {e}")
+
+        messages: List[Dict[str, Any]] = []
+        for row in msg_rows:
+            raw = row["data"]
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            if not isinstance(data, dict):
+                data = {}
+            info = data.get("info") if isinstance(data.get("info"), dict) else {}
+            role = data.get("role") or info.get("role") or "unknown"
+            finish = data.get("finish")
+            if finish is None:
+                finish = info.get("finish")
+            time_obj = data.get("time") if isinstance(data.get("time"), dict) else {}
+            created_at = _epoch_to_iso(
+                row["time_created"] or time_obj.get("created") or info.get("time")
+            )
+            parts = list(parts_by_msg.get(row["id"]) or [])
+            if not parts:
+                embedded = data.get("parts") or data.get("_parts") or info.get("parts") or []
+                if isinstance(embedded, list):
+                    for i, ep in enumerate(embedded):
+                        parsed = _normalize_part(ep, part_id=f"{row['id']}:p{i}")
+                        if parsed:
+                            parts.append(parsed)
+            messages.append(
+                {
+                    "id": row["id"],
+                    "session_id": sid,
+                    "role": str(role),
+                    "finish": finish,
+                    "agent": data.get("agent") or info.get("agent") or data.get("mode"),
+                    "created_at": created_at,
+                    "parts": parts,
+                }
+            )
+        result["messages"] = messages
+        con.close()
+    except Exception as e:
+        logger.debug(f"OpenCode chat load failed for {sid}: {e}")
+        result["error"] = str(e)
+    return result
 
 
 # Patterns seen when OpenCode is mid-compaction or just finished compact without
@@ -313,6 +660,67 @@ def _apply_last_assistant(
             )
 
 
+def _apply_message_list(
+    result: Dict[str, Any], messages: List[Dict[str, Any]]
+) -> None:
+    """Walk a chronological message list for premature-exit signals."""
+    indexed: List[Dict[str, Any]] = [m for m in messages if isinstance(m, dict)]
+    last_assistant: Optional[Dict[str, Any]] = None
+    last_assistant_idx: Optional[int] = None
+    last_any: Optional[Dict[str, Any]] = None
+    for i, m in enumerate(indexed):
+        last_any = m
+        role = m.get("role")
+        if role is None and isinstance(m.get("info"), dict):
+            role = m["info"].get("role")
+        if role == "assistant":
+            last_assistant = m
+            last_assistant_idx = i
+    target = last_assistant or last_any
+    if target is None:
+        return
+    info = target.get("info") if isinstance(target.get("info"), dict) else {}
+    role = target.get("role") or info.get("role")
+    finish = target.get("finish")
+    if finish is None:
+        finish = info.get("finish")
+    summary = target.get("summary")
+    if summary is None:
+        summary = info.get("summary")
+    parts = target.get("_parts") or target.get("parts") or []
+    _apply_last_assistant(
+        result,
+        role=role,
+        finish=finish,
+        summary=summary,
+        parts=parts if isinstance(parts, list) else None,
+    )
+    # If the absolute last message is a compaction *user* part with no
+    # following assistant, treat as mid-compact incomplete.
+    if last_any is not None and last_assistant is not last_any:
+        if _message_has_compaction_part(last_any):
+            result["reasons"].append(
+                "session ended on compaction user part (no follow-up)"
+            )
+    # Compact-then-stop: last assistant immediately follows a compaction
+    # message (classic auto-compact exit that still looks like finish=stop).
+    if last_assistant_idx is not None and last_assistant_idx > 0:
+        prev = indexed[last_assistant_idx - 1]
+        prev_info = (
+            prev.get("info") if isinstance(prev.get("info"), dict) else prev
+        )
+        prev_summary = prev.get("summary")
+        if prev_summary is None and isinstance(prev_info, dict):
+            prev_summary = prev_info.get("summary")
+        if _message_has_compaction_part(prev) or _is_compaction_summary(
+            prev_summary
+        ):
+            result["reasons"].append(
+                "last assistant followed a compaction message "
+                "(compact-then-stop)"
+            )
+
+
 def assess_session_completeness(
     session_id: Optional[str],
     *,
@@ -365,65 +773,7 @@ def assess_session_completeness(
 
     if messages is not None:
         result["api_checked"] = True
-        # Walk from the end to find the last assistant (or last message)
-        indexed: List[Dict[str, Any]] = [
-            m for m in messages if isinstance(m, dict)
-        ]
-        last_assistant: Optional[Dict[str, Any]] = None
-        last_assistant_idx: Optional[int] = None
-        last_any: Optional[Dict[str, Any]] = None
-        last_any_idx: Optional[int] = None
-        for i, m in enumerate(indexed):
-            last_any = m
-            last_any_idx = i
-            role = m.get("role")
-            if role is None and isinstance(m.get("info"), dict):
-                role = m["info"].get("role")
-            if role == "assistant":
-                last_assistant = m
-                last_assistant_idx = i
-        target = last_assistant or last_any
-        if target is not None:
-            info = target.get("info") if isinstance(target.get("info"), dict) else {}
-            role = target.get("role") or info.get("role")
-            finish = target.get("finish")
-            if finish is None:
-                finish = info.get("finish")
-            summary = target.get("summary")
-            if summary is None:
-                summary = info.get("summary")
-            parts = target.get("_parts") or target.get("parts") or []
-            _apply_last_assistant(
-                result,
-                role=role,
-                finish=finish,
-                summary=summary,
-                parts=parts if isinstance(parts, list) else None,
-            )
-            # If the absolute last message is a compaction *user* part with no
-            # following assistant, treat as mid-compact incomplete.
-            if last_any is not None and last_assistant is not last_any:
-                if _message_has_compaction_part(last_any):
-                    result["reasons"].append(
-                        "session ended on compaction user part (no follow-up)"
-                    )
-            # Compact-then-stop: last assistant immediately follows a compaction
-            # message (classic auto-compact exit that still looks like finish=stop).
-            if last_assistant_idx is not None and last_assistant_idx > 0:
-                prev = indexed[last_assistant_idx - 1]
-                prev_info = (
-                    prev.get("info") if isinstance(prev.get("info"), dict) else prev
-                )
-                prev_summary = prev.get("summary")
-                if prev_summary is None and isinstance(prev_info, dict):
-                    prev_summary = prev_info.get("summary")
-                if _message_has_compaction_part(prev) or _is_compaction_summary(
-                    prev_summary
-                ):
-                    result["reasons"].append(
-                        "last assistant followed a compaction message "
-                        "(compact-then-stop)"
-                    )
+        _apply_message_list(result, list(messages))
 
     sid = (session_id or "").strip()
     path = db_path or _default_db_path()
@@ -460,38 +810,28 @@ def assess_session_completeness(
 
             if use_db_messages:
                 try:
-                    last = cur.execute(
+                    import json
+
+                    msg_rows = cur.execute(
                         """
                         SELECT id, data
                         FROM message
                         WHERE session_id = ?
                         ORDER BY time_created DESC
-                        LIMIT 1
+                        LIMIT 100
                         """,
                         (sid,),
-                    ).fetchone()
-                    if last is not None:
-                        import json
-
-                        raw = last["data"]
-                        data = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                        if not isinstance(data, dict):
-                            data = {}
-                        info = (
-                            data.get("info")
-                            if isinstance(data.get("info"), dict)
-                            else {}
+                    ).fetchall()
+                    parsed: List[Dict[str, Any]] = []
+                    for row in reversed(list(msg_rows)):
+                        raw = row["data"]
+                        data = (
+                            json.loads(raw) if isinstance(raw, str) else (raw or {})
                         )
-                        role = data.get("role") or info.get("role")
-                        finish = data.get("finish")
-                        if finish is None:
-                            finish = info.get("finish")
-                        summary = data.get("summary")
-                        if summary is None:
-                            summary = info.get("summary")
-                        _apply_last_assistant(
-                            result, role=role, finish=finish, summary=summary
-                        )
+                        if isinstance(data, dict):
+                            parsed.append(data)
+                    if parsed:
+                        _apply_message_list(result, parsed)
                 except (sqlite3.Error, ValueError, TypeError) as e:
                     logger.debug(
                         f"message completeness check skipped for {sid}: {e}"
