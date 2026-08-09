@@ -4,6 +4,7 @@
 import {
   datetimeLocalToNaiveIso,
   elapsedSecondsBetween,
+  formatChatTime,
   formatElapsedBetween,
   formatElapsedSeconds,
   parseTimeMs,
@@ -34,5 +35,9 @@ assert(datetimeLocalToNaiveIso('2026-08-08T15:29') === '2026-08-08T15:29:00', 'l
 assert(datetimeLocalToNaiveIso('2026-08-08T15:29:00') === '2026-08-08T15:29:00', 'already naive')
 assert(datetimeLocalToNaiveIso('') === '', 'empty local')
 assert(formatElapsedBetween(start, null, now) === '30s', 'running format')
+
+const chatLabel = formatChatTime('2026-08-09T16:04:18+00:00')
+assert(chatLabel.length > 8, `chat time formatted: ${chatLabel}`)
+assert(!chatLabel.includes('+00:00'), 'chat time is local, not raw UTC offset')
 
 console.log('time.test.ts: ok')

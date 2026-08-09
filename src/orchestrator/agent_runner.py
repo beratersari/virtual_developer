@@ -6,6 +6,7 @@ import os
 import platform
 import shlex
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -202,6 +203,7 @@ class AgentRunner:
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
         on_session_file: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         attempt_number: int = 0,
     ) -> Dict[str, Any]:
@@ -213,6 +215,7 @@ class AgentRunner:
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
             on_session_file: Callback (session_path, prompt_path) when log/prompt files are created
+            on_session_id: Callback (ses_*) as soon as the OpenCode session is known
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
@@ -264,6 +267,29 @@ class AgentRunner:
 
         # Serve mode: HTTP control loop (compact-aware continue) instead of CLI
         run_mode = (getattr(settings, "opencode_run_mode", None) or "cli").strip().lower()
+        published_sid = {"id": None, "last_db": 0.0}
+        run_started_ms = time.time() * 1000.0
+
+        def _publish_session(sid: Optional[str]) -> None:
+            sid = (sid or "").strip()
+            if not sid or not sid.startswith("ses_") or sid == published_sid["id"]:
+                return
+            published_sid["id"] = sid
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    sid + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+            if on_session_id is not None:
+                try:
+                    on_session_id(sid)
+                except Exception:
+                    pass
+
+        if getattr(task, "session_id", None):
+            _publish_session(str(task.session_id))
+
         if run_mode == "serve":
             return await self._run_agent_via_serve(
                 task,
@@ -271,6 +297,7 @@ class AgentRunner:
                 on_output=on_output,
                 on_complete=on_complete,
                 on_progress=on_progress,
+                on_session_id=_publish_session,
                 timeout_seconds=effective_timeout,
                 start_time=start_time,
             )
@@ -327,7 +354,15 @@ class AgentRunner:
                             timeout=1.0  # 1 second check interval
                         )
                     except asyncio.TimeoutError:
-                        # No data available, check timeout and continue
+                        # No data — still try to discover the OpenCode session
+                        # so dashboard chat can attach before the process exits.
+                        self._try_discover_session(
+                            task,
+                            stdout_lines + stderr_lines,
+                            publish=_publish_session,
+                            published=published_sid,
+                            run_started_ms=run_started_ms,
+                        )
                         continue
 
                     if not line:
@@ -348,6 +383,14 @@ class AgentRunner:
 
                     if on_output:
                         on_output(callback_name, decoded)
+
+                    self._try_discover_session(
+                        task,
+                        stdout_lines + stderr_lines,
+                        publish=_publish_session,
+                        published=published_sid,
+                        run_started_ms=run_started_ms,
+                    )
 
             try:
                 logger.info(
@@ -583,6 +626,7 @@ class AgentRunner:
         on_output: Optional[callable] = None,
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
         timeout_seconds: int = 1800,
         start_time: float = 0.0,
     ) -> Dict[str, Any]:
@@ -637,6 +681,11 @@ class AgentRunner:
                 )
             except Exception:
                 pass
+            if on_session_id is not None:
+                try:
+                    on_session_id(sid)
+                except Exception:
+                    pass
 
         orch = ServeOrchestrator(
             client=client,
@@ -847,6 +896,47 @@ class AgentRunner:
         cmd_parts.append(strip_params_block(task.prompt or ""))
         
         return cmd_parts
+
+    def _try_discover_session(
+        self,
+        task: AgentTask,
+        output_lines: List[str],
+        *,
+        publish,
+        published: Dict[str, Any],
+        run_started_ms: float,
+    ) -> None:
+        """Attach ses_* mid-run from CLI text or the OpenCode session DB."""
+        parsed = self._parse_session_id(output_lines)
+        if parsed:
+            publish(parsed)
+            return
+        now = time.time()
+        if now - float(published.get("last_db") or 0) < 2.0:
+            return
+        published["last_db"] = now
+        if not self.working_directory:
+            return
+        try:
+            from src.opencode_sessions import find_sessions_for_directory
+
+            found = find_sessions_for_directory(self.working_directory, limit=8)
+        except Exception:
+            return
+        launched = (getattr(task, "session_id", None) or "").strip()
+        if launched:
+            publish(launched)
+            return
+        for rec in found:
+            raw = rec.get("time_created") or rec.get("time_updated") or 0
+            try:
+                n = float(raw)
+            except (TypeError, ValueError):
+                continue
+            created_ms = n if n > 10_000_000_000 else n * 1000.0
+            if created_ms >= run_started_ms - 15_000:
+                publish(rec.get("id"))
+                return
 
     def _resolve_session_id(
         self,
@@ -1207,6 +1297,7 @@ class AgentRunner:
         on_progress: Optional[callable] = None,
         on_retry: Optional[callable] = None,
         on_session_file: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
         should_abort: Optional[callable] = None,
@@ -1302,6 +1393,7 @@ class AgentRunner:
                 on_complete=on_complete,
                 on_progress=on_progress,
                 on_session_file=on_session_file,
+                on_session_id=on_session_id,
                 timeout_seconds=timeout_seconds,
                 attempt_number=attempt,
             )

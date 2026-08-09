@@ -1173,8 +1173,31 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
     return {"prompts": prompts, "session_logs": logs}
 
 
+def _job_started_ms(job: Dict[str, Any]) -> Optional[int]:
+    raw = job.get("started_at")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).strip())
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return int(dt.timestamp() * 1000)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _session_time_ms(raw: Any) -> int:
+    try:
+        n = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    if n > 10_000_000_000:
+        return int(n)
+    return int(n * 1000)
+
+
 def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
-    """Session ids recorded on this job (history + sidecar files)."""
+    """Session ids recorded on this job (history + sidecar + live OpenCode DB)."""
     ids: List[str] = []
 
     def _add(raw: Any) -> None:
@@ -1195,6 +1218,26 @@ def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
                 _add(marker.read_text(encoding="utf-8").splitlines()[0])
         except OSError:
             continue
+    # Live / early chat: OpenCode may have created the session before we
+    # parsed ses_* from CLI output. Prefer sessions created around job start
+    # in this clone so we do not dump an older run from a reused folder.
+    wd = (job.get("working_directory") or "").strip()
+    if wd:
+        try:
+            from src.opencode_sessions import find_sessions_for_directory
+
+            started_ms = _job_started_ms(job)
+            found = find_sessions_for_directory(wd, limit=20)
+            for rec in found:
+                created_ms = _session_time_ms(rec.get("time_created"))
+                updated_ms = _session_time_ms(rec.get("time_updated"))
+                if started_ms is None:
+                    _add(rec.get("id"))
+                    break
+                if max(created_ms, updated_ms) >= started_ms - 15_000:
+                    _add(rec.get("id"))
+        except Exception:
+            pass
     return ids
 
 
