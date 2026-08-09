@@ -282,7 +282,11 @@ def _normalize_gitlab_host(raw: Any) -> str:
 
 
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
-    """Apply runtime settings (including write-only secrets). Does not rewrite .env.
+    """Apply runtime settings (including write-only secrets).
+
+    Non-secret fields go to ``.jira-agent/runtime_settings.json``. Board id is
+    also written to ``JIRA_BOARD_ID`` in the project ``.env`` so a restart
+    that only reads env still keeps the dashboard value.
 
     Returns a safe projection (no token values). Callers should refresh live
     Jira clients when host/token/email change (see ``refresh_runtime_jira_clients``).

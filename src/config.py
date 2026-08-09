@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -544,6 +545,77 @@ def load_runtime_settings() -> Dict[str, Any]:
         return {}
 
 
+def dotenv_file_path() -> Path:
+    """Project ``.env`` (``VD_DOTENV_PATH`` override for tests)."""
+    override = (os.environ.get("VD_DOTENV_PATH") or "").strip()
+    if override:
+        return Path(override)
+    return (Path.cwd() / ".env").resolve()
+
+
+def update_dotenv_key(key: str, value: str, *, path: Optional[Path] = None) -> bool:
+    """Set ``KEY=value`` in ``.env`` without dropping comments or other keys.
+
+    Does not create a new ``.env`` (operators already have one). Returns True
+    when the file was written.
+    """
+    name = (key or "").strip()
+    if not name or any(c.isspace() for c in name) or "=" in name:
+        return False
+    env_path = path or dotenv_file_path()
+    try:
+        env_path = Path(env_path)
+        if not env_path.is_file():
+            return False
+        raw = env_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not read dotenv to update {name}: {e}")
+        return False
+
+    rendered = str(value).replace("\r", "").replace("\n", "").strip()
+    if rendered == "" or any(c in rendered for c in " \t#\"'"):
+        rendered = json.dumps(rendered)
+
+    line_re = re.compile(
+        rf"^(\s*{re.escape(name)}\s*=\s*)([^#\r\n]*?)(\s*(?:#.*)?)?(\r?\n)?$"
+    )
+    found = False
+    out: List[str] = []
+    for line in raw.splitlines(keepends=True):
+        match = line_re.match(line)
+        if match and not found:
+            prefix, comment, nl = match.group(1), match.group(3) or "", match.group(4) or ""
+            out.append(f"{prefix}{rendered}{comment}{nl}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        nl = "\r\n" if raw.endswith("\r\n") else "\n"
+        if raw and not raw.endswith(("\n", "\r")):
+            out.append(nl)
+        out.append(f"{name}={rendered}{nl}")
+
+    try:
+        tmp = env_path.with_name(env_path.name + ".tmp")
+        payload = "".join(out)
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, env_path)
+        logger.info(f"Updated {name} in {env_path}")
+        return True
+    except OSError as e:
+        logger.warning(f"Could not update {name} in dotenv: {e}")
+        try:
+            tmp = env_path.with_name(env_path.name + ".tmp")
+            if tmp.is_file():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 def save_runtime_settings(updates: Dict[str, Any]) -> None:
     """Merge *updates* into runtime settings file and mirror into os.environ."""
     path = runtime_settings_path()
@@ -564,6 +636,11 @@ def save_runtime_settings(updates: Dict[str, Any]) -> None:
             os.fsync(f.fileno())
         os.replace(tmp, path)
         _mirror_runtime_to_environ(current)
+        board = current.get("jira_board_id")
+        if "jira_board_id" in updates and board is not None:
+            bid = str(board).strip()
+            if bid.isdigit():
+                update_dotenv_key("JIRA_BOARD_ID", bid)
         logger.info(
             f"Persisted runtime settings to {path}: "
             + ", ".join(f"{k}={current[k]!r}" for k in sorted(updates) if k in current)

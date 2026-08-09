@@ -58,6 +58,39 @@ def test_runtime_settings_ignore_invalid_board_id(tmp_path, monkeypatch):
     assert config_mod.settings.jira_board_id == "99"
 
 
+def test_update_dotenv_key_preserves_comments_and_other_keys(tmp_path):
+    from src.config import update_dotenv_key
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "# header\n"
+        "JIRA_HOST=https://example.atlassian.net\n"
+        "JIRA_BOARD_ID=1                                          #EDIT HERE\n"
+        "POLL_INTERVAL_SECONDS=30\n",
+        encoding="utf-8",
+    )
+    assert update_dotenv_key("JIRA_BOARD_ID", "2", path=env) is True
+    text = env.read_text(encoding="utf-8")
+    assert "JIRA_BOARD_ID=2                                          #EDIT HERE\n" in text
+    assert "JIRA_HOST=https://example.atlassian.net\n" in text
+    assert "POLL_INTERVAL_SECONDS=30\n" in text
+    assert "# header\n" in text
+
+
+def test_settings_board_id_also_writes_dotenv(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
+    from src import config as config_mod
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    monkeypatch.setattr(config_mod.settings, "jira_board_id", "1")
+    view = apply_settings_update(SettingsUpdate(jira_board_id="7"))
+    assert view.jira_board_id == "7"
+    env = isolate_jira_agent_artifacts["dotenv_path"]
+    assert "JIRA_BOARD_ID=7\n" in env.read_text(encoding="utf-8")
+
+
 def test_begin_workflow_uses_live_timeout(tmp_path, monkeypatch, state_manager):
     """_begin_workflow_run freezes current settings.agent_task_timeout_seconds."""
     from src.config import settings

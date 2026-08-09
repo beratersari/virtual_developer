@@ -69,6 +69,18 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "src.opencode_sessions._default_db_path",
         lambda: fake_opencode_db,
     )
+    # Never let settings PATCH rewrite the developer's real .env
+    fake_dotenv = runtime / ".env"
+    fake_dotenv.write_text("JIRA_BOARD_ID=1\n", encoding="utf-8")
+    monkeypatch.setenv("VD_DOTENV_PATH", str(fake_dotenv))
+    import src.config as config_mod
+
+    monkeypatch.setattr(config_mod, "dotenv_file_path", lambda: fake_dotenv)
+    # Dashboard settings tests must not rewrite live runtime_settings.json
+    fake_runtime_settings = runtime / "runtime_settings.json"
+    monkeypatch.setattr(
+        config_mod, "runtime_settings_path", lambda: fake_runtime_settings
+    )
 
     yield {
         "runtime": runtime,
@@ -76,6 +88,8 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "sessions_dir": sessions_dir,
         "job_store": isolated_store,
         "session_bind_store": isolated_binds,
+        "dotenv_path": fake_dotenv,
+        "runtime_settings_path": fake_runtime_settings,
         "binds_dir": binds_dir,
     }
 
