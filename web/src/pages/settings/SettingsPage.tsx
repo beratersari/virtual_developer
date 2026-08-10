@@ -11,6 +11,7 @@ import type {
   GitlabHostCredentialDraft,
   JiraConnectionTestResult,
   ModelsPayload,
+  ProjectRepository,
   SettingsPayload,
 } from '../../api/types'
 import { PageHeader } from '../../ui/PageHeader'
@@ -31,6 +32,7 @@ type Draft = {
   opencode_serve_max_compact_continues: number
   default_model: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
+  project_repositories: ProjectRepository[]
 }
 
 function fromSettings(s: SettingsPayload): Draft {
@@ -55,6 +57,12 @@ function fromSettings(s: SettingsPayload): Draft {
       pat_configured: Boolean(c.pat_configured),
       original_host: c.host,
     })),
+    project_repositories: (s.project_repositories ?? []).map((p) => ({
+      label: p.label || '',
+      url: p.url || '',
+      target_branch: p.target_branch || '',
+      source_branch: p.source_branch || '',
+    })),
   }
 }
 
@@ -65,7 +73,7 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [models, setModels] = useState<ModelsPayload | null>(null)
-  const [section, setSection] = useState<'jira' | 'gitlab' | 'model' | 'runtime'>('jira')
+  const [section, setSection] = useState<'jira' | 'gitlab' | 'projects' | 'model' | 'runtime'>('jira')
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
@@ -143,6 +151,14 @@ export function SettingsPage() {
             return row
           })
           .filter((r) => r.host),
+        project_repositories: draft.project_repositories
+          .map((p) => ({
+            label: p.label.trim(),
+            url: p.url.trim(),
+            target_branch: (p.target_branch || '').trim(),
+            source_branch: (p.source_branch || '').trim(),
+          }))
+          .filter((p) => p.url),
       }
       if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
       const updated = await patchSettings(body)
@@ -175,6 +191,7 @@ export function SettingsPage() {
           [
             ['jira', 'Jira'],
             ['gitlab', 'GitLab'],
+            ['projects', 'Projects'],
             ['model', 'Model'],
             ['runtime', 'Runtime'],
           ] as const
@@ -425,6 +442,134 @@ export function SettingsPage() {
           Add GitLab host
         </button>
       </p>
+      </div>
+      )}
+
+      {section === 'projects' && (
+      <div key="projects" className="vd-fade space-y-3">
+        <div>
+          <div className="text-sm font-semibold text-text">Saved projects</div>
+          <p className="mt-1 text-xs text-text-muted">
+            Pick these by name on Scheduled → New issue instead of pasting the
+            git URL every time.
+          </p>
+        </div>
+        {draft.project_repositories.map((row, idx) => (
+          <div key={idx} className="space-y-2 rounded-lg border border-border p-3">
+            <label className="field">
+              <span>Label</span>
+              <input
+                value={row.label}
+                placeholder="demo"
+                onChange={(e) => {
+                  const label = e.target.value
+                  setDirty(true)
+                  setDraft((d) => {
+                    if (!d) return d
+                    const next = d.project_repositories.slice()
+                    next[idx] = { ...next[idx], label }
+                    return { ...d, project_repositories: next }
+                  })
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Git URL</span>
+              <input
+                value={row.url}
+                placeholder="https://gitlab.com/group/repo.git"
+                onChange={(e) => {
+                  const url = e.target.value
+                  setDirty(true)
+                  setDraft((d) => {
+                    if (!d) return d
+                    const next = d.project_repositories.slice()
+                    next[idx] = { ...next[idx], url }
+                    return { ...d, project_repositories: next }
+                  })
+                }}
+              />
+            </label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="field">
+                <span>Default target</span>
+                <input
+                  value={row.target_branch || ''}
+                  placeholder="develop"
+                  onChange={(e) => {
+                    const target_branch = e.target.value
+                    setDirty(true)
+                    setDraft((d) => {
+                      if (!d) return d
+                      const next = d.project_repositories.slice()
+                      next[idx] = { ...next[idx], target_branch }
+                      return { ...d, project_repositories: next }
+                    })
+                  }}
+                />
+              </label>
+              <label className="field">
+                <span>Default source</span>
+                <input
+                  value={row.source_branch || ''}
+                  placeholder="optional"
+                  onChange={(e) => {
+                    const source_branch = e.target.value
+                    setDirty(true)
+                    setDraft((d) => {
+                      if (!d) return d
+                      const next = d.project_repositories.slice()
+                      next[idx] = { ...next[idx], source_branch }
+                      return { ...d, project_repositories: next }
+                    })
+                  }}
+                />
+              </label>
+            </div>
+            <p className="actions">
+              <button
+                type="button"
+                className="vd-btn-ghost text-danger-text"
+                onClick={() => {
+                  setDirty(true)
+                  setDraft((d) =>
+                    d
+                      ? {
+                          ...d,
+                          project_repositories: d.project_repositories.filter(
+                            (_, i) => i !== idx,
+                          ),
+                        }
+                      : d,
+                  )
+                }}
+              >
+                Remove
+              </button>
+            </p>
+          </div>
+        ))}
+        <p className="actions">
+          <button
+            type="button"
+            onClick={() => {
+              setDirty(true)
+              setDraft((d) =>
+                d
+                  ? {
+                      ...d,
+                      project_repositories: [
+                        ...d.project_repositories,
+                        { label: '', url: '', target_branch: 'develop', source_branch: '' },
+                      ],
+                    }
+                  : d,
+              )
+            }}
+          >
+            Add project
+          </button>
+        </p>
       </div>
       )}
 

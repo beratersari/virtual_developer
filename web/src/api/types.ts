@@ -82,6 +82,13 @@ export type GitlabHostCredential = {
   pat_configured: boolean
 }
 
+export type ProjectRepository = {
+  label: string
+  url: string
+  target_branch?: string
+  source_branch?: string
+}
+
 export type SettingsPayload = {
   jira_host: string
   jira_board_id: string
@@ -108,6 +115,7 @@ export type SettingsPayload = {
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
   gitlab_webhook_path?: string
+  project_repositories?: ProjectRepository[]
 }
 
 export type GitlabHostCredentialDraft = {
@@ -492,6 +500,7 @@ export type SettingsPatch = Partial<
     | 'opencode_serve_max_compact_continues'
     | 'default_model'
     | 'gitlab_allowed_hosts'
+    | 'project_repositories'
   >
 > & {
   jira_api_token?: string

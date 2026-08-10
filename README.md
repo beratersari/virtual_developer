@@ -268,7 +268,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/dashboard` | Full envelope |
 | WS | `/ws` | Live pushes |
 
-Writable runtime settings (examples): board id, poll interval, trigger labels, `trigger_on_assignment`, `max_concurrent_jobs`, default model.  
+Writable runtime settings (examples): board id, poll interval, trigger labels, `trigger_on_assignment`, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
 `DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
 
 ### Building the UI

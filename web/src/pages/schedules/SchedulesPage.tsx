@@ -1,20 +1,30 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   cancelSchedule,
   createSchedule,
   fetchIssueTypes,
   fetchSchedules,
+  fetchSettings,
+  patchSettings,
   previewScheduleIssue,
   scheduleExistingIssue,
 } from '../../api/client'
-import type { JiraIssueType, ScheduleItem, SchedulePreview } from '../../api/types'
+import type {
+  JiraIssueType,
+  ProjectRepository,
+  ScheduleItem,
+  SchedulePreview,
+} from '../../api/types'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { datetimeLocalToNaiveIso } from '../../util/time'
+
+const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
+const CUSTOM_REPO = '__custom__'
 
 function defaultWhen(): string {
   const d = new Date()
@@ -212,10 +222,27 @@ function Existing({ onDone }: { onDone: () => void }) {
   )
 }
 
+function applyProject(
+  p: ProjectRepository,
+  setRepo: (v: string) => void,
+  setTarget: (v: string) => void,
+  setSource: (v: string) => void,
+) {
+  setRepo(p.url)
+  if (p.target_branch) setTarget(p.target_branch)
+  if (p.source_branch) setSource(p.source_branch)
+}
+
 function CreateNew({ onDone }: { onDone: () => void }) {
+  const live = useLive()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [repo, setRepo] = useState('')
+  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
+  const [rememberRepo, setRememberRepo] = useState(false)
+  const [projects, setProjects] = useState<ProjectRepository[]>(
+    live.settings?.project_repositories || [],
+  )
   const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
   const [source, setSource] = useState('develop')
   const [target, setTarget] = useState('develop')
@@ -225,6 +252,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [when, setWhen] = useState(defaultWhen)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const seeded = useRef(false)
 
   useEffect(() => {
     void fetchIssueTypes()
@@ -232,17 +260,48 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       .catch(() => undefined)
   }, [])
 
+  useEffect(() => {
+    const rows = live.settings?.project_repositories
+    if (rows) setProjects(rows)
+  }, [live.settings])
+
+  useEffect(() => {
+    void fetchSettings()
+      .then((s) => {
+        const rows = s.project_repositories || []
+        setProjects(rows)
+        if (seeded.current) return
+        seeded.current = true
+        const last = (() => {
+          try {
+            return window.localStorage.getItem(LAST_REPO_KEY) || ''
+          } catch {
+            return ''
+          }
+        })()
+        const preferred =
+          rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
+        if (preferred) {
+          setRepoPick(preferred.url)
+          applyProject(preferred, setRepo, setTarget, setSource)
+        }
+      })
+      .catch(() => undefined)
+  }, [])
+
   const selectable = useMemo(() => types.filter((t) => !t.subtask), [types])
+  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setBusy(true)
     setErr(null)
     try {
+      const url = repo.trim()
       await createSchedule({
         title: title.trim(),
         description: description.trim(),
-        repository_url: repo.trim(),
+        repository_url: url,
         source_branch: srcMode === 'custom' ? source.trim() : undefined,
         source_branch_mode: srcMode,
         target_branch: target.trim(),
@@ -250,9 +309,31 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         issue_type: issueType.trim(),
         scheduled_at: datetimeLocalToNaiveIso(when),
       })
+      try {
+        window.localStorage.setItem(LAST_REPO_KEY, url)
+      } catch {
+        /* ignore quota / private mode */
+      }
+      if (rememberRepo && url && !projects.some((p) => p.url === url)) {
+        const next = [
+          ...projects,
+          {
+            label: '',
+            url,
+            target_branch: target.trim(),
+            source_branch: srcMode === 'custom' ? source.trim() : '',
+          },
+        ]
+        try {
+          const updated = await patchSettings({ project_repositories: next })
+          setProjects(updated.project_repositories || next)
+        } catch {
+          /* schedule already created; remember is best-effort */
+        }
+      }
       setTitle('')
       setDescription('')
-      setRepo('')
+      setRememberRepo(false)
       onDone()
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : 'Create failed')
@@ -271,10 +352,62 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         <span>Description</span>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
-      <label className="field">
-        <span>Repository</span>
-        <input value={repo} onChange={(e) => setRepo(e.target.value)} required />
-      </label>
+      {projects.length > 0 && (
+        <label className="field">
+          <span>Project</span>
+          <select
+            value={repoPick}
+            onChange={(e) => {
+              const v = e.target.value
+              setRepoPick(v)
+              if (v === CUSTOM_REPO) {
+                setRepo('')
+                return
+              }
+              const hit = projects.find((p) => p.url === v)
+              if (hit) applyProject(hit, setRepo, setTarget, setSource)
+            }}
+          >
+            {projects.map((p) => (
+              <option key={p.url} value={p.url}>
+                {p.label || p.url}
+              </option>
+            ))}
+            <option value={CUSTOM_REPO}>Other URL…</option>
+          </select>
+        </label>
+      )}
+      {(isCustom || projects.length === 0) && (
+        <>
+          <label className="field">
+            <span>Repository</span>
+            <input
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder="https://gitlab.com/group/repo.git"
+              required
+            />
+          </label>
+          <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={rememberRepo}
+              onChange={(e) => setRememberRepo(e.target.checked)}
+            />
+            <span style={{ margin: 0 }}>Remember this project</span>
+          </label>
+        </>
+      )}
+      {!isCustom && repo ? (
+        <p className="quiet font-mono text-xs">{repo}</p>
+      ) : null}
+      <p className="quiet text-xs">
+        Saved remotes live in{' '}
+        <Link to="/settings" className="text-accent-text hover:underline">
+          Settings → Projects
+        </Link>
+        .
+      </p>
       <label className="field">
         <span>Source</span>
         <select value={srcMode} onChange={(e) => setSrcMode(e.target.value === 'custom' ? 'custom' : 'issue_key')}>
