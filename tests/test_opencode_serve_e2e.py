@@ -18,9 +18,11 @@ import httpx
 
 from src.opencode_serve import (
     DEFAULT_CONTINUE_PROMPT,
+    DEFAULT_MAX_COMPACT_CONTINUES,
     OpenCodeServeClient,
     ServeOrchestrator,
     assess_serve_turn,
+    compaction_marker_keys,
     count_compaction_signals,
     format_serve_error,
     is_serve_timeout,
@@ -55,6 +57,11 @@ class FakeServeBackend:
         self.message_calls = 0
         self.prompts: List[str] = []
         self.aborted = False
+        self._seq = 0
+
+    def _next_id(self, prefix: str) -> str:
+        self._seq += 1
+        return f"{prefix}_{self._seq}"
 
     async def health(self) -> Dict[str, Any]:
         return {"healthy": True, "version": "fake-1.18"}
@@ -73,7 +80,12 @@ class FakeServeBackend:
         # User message
         self.messages.append(
             {
-                "info": {"role": "user", "finish": None, "summary": {"diffs": []}},
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "user",
+                    "finish": None,
+                    "summary": {"diffs": []},
+                },
                 "parts": [{"type": "text", "text": text}],
             }
         )
@@ -84,6 +96,7 @@ class FakeServeBackend:
             self.messages.append(
                 {
                     "info": {
+                        "id": self._next_id("msg"),
                         "role": "user",
                         "finish": None,
                         "summary": {"diffs": []},
@@ -94,6 +107,7 @@ class FakeServeBackend:
             self.messages.append(
                 {
                     "info": {
+                        "id": self._next_id("msg"),
                         "role": "assistant",
                         "finish": "stop",
                         "summary": True,
@@ -131,6 +145,7 @@ class FakeServeBackend:
         ]
         final = {
             "info": {
+                "id": self._next_id("msg"),
                 "role": "assistant",
                 "finish": "stop",
                 "summary": None,
@@ -148,9 +163,12 @@ class FakeServeBackend:
         return final
 
     async def list_messages(
-        self, session_id: str, *, limit: int = 50
+        self, session_id: str, *, limit: int = 500
     ) -> List[Dict[str, Any]]:
         return list(self.messages[-limit:])
+
+    async def list_all_messages(self, session_id: str, **kwargs) -> List[Dict[str, Any]]:
+        return list(self.messages)
 
     async def list_todos(self, session_id: str) -> List[Dict[str, Any]]:
         return list(self.todos)
@@ -190,8 +208,11 @@ class FakeServeClient(OpenCodeServeClient):
     async def send_message(self, session_id, text, **kw):
         return await self._backend.send_message(session_id, text, **kw)
 
-    async def list_messages(self, session_id, *, limit=50):
+    async def list_messages(self, session_id, *, limit=500):
         return await self._backend.list_messages(session_id, limit=limit)
+
+    async def list_all_messages(self, session_id, **kw):
+        return await self._backend.list_all_messages(session_id, **kw)
 
     async def list_todos(self, session_id):
         return await self._backend.list_todos(session_id)
@@ -245,14 +266,18 @@ def test_assess_serve_turn_open_todos_and_summary():
 
 
 def test_assess_serve_turn_new_compact_this_turn_not_success():
-    """Empty todos + finish=stop after a *new* compact must not be complete."""
+    """Empty todos + finish=stop after a *new* compact must not be complete.
+
+    Caught by compact-then-stop (last assistant follows a compaction part),
+    not by a blanket "any compact this turn ⇒ fail".
+    """
     messages = [
         {
-            "info": {"role": "user", "finish": None},
+            "info": {"id": "c1", "role": "user", "finish": None},
             "parts": [{"type": "compaction", "auto": True}],
         },
         {
-            "info": {"role": "assistant", "finish": "stop", "summary": None},
+            "info": {"id": "a1", "role": "assistant", "finish": "stop", "summary": None},
             "parts": [{"type": "text", "text": "All todos complete."}],
         },
     ]
@@ -265,6 +290,59 @@ def test_assess_serve_turn_new_compact_this_turn_not_success():
     )
     assert r["premature"] is True, r
     assert r["complete"] is False
+    assert any("compact-then-stop" in x for x in (r.get("reasons") or []))
+
+
+def test_assess_work_after_compact_summary_is_success():
+    """Agent continued after compact summary in the same turn → complete."""
+    messages = [
+        {
+            "info": {"id": "c1", "role": "user", "finish": None},
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "info": {
+                "id": "sum1",
+                "role": "assistant",
+                "finish": "stop",
+                "summary": True,
+            },
+            "parts": [{"type": "text", "text": "Compacted earlier work."}],
+        },
+        {
+            "info": {
+                "id": "a2",
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+            },
+            "parts": [{"type": "text", "text": "Implemented and committed."}],
+        },
+    ]
+    r = assess_serve_turn(
+        "ses_real_ok",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+        compact_events_seen=1,
+        new_compacts_this_turn=1,
+    )
+    assert r["complete"] is True, r
+    assert r["premature"] is False
+
+
+def test_compaction_marker_keys_survive_sliding_window():
+    """New compact id is visible even when an old marker drops out of the window."""
+    old = [
+        {"info": {"id": "old_c"}, "parts": [{"type": "compaction"}]},
+        {"info": {"id": "m1"}, "parts": [{"type": "text", "text": "x"}]},
+    ]
+    new = [
+        {"info": {"id": "m1"}, "parts": [{"type": "text", "text": "x"}]},
+        {"info": {"id": "new_c"}, "parts": [{"type": "compaction"}]},
+    ]
+    assert compaction_marker_keys(old) == {"old_c"}
+    assert compaction_marker_keys(new) == {"new_c"}
+    assert compaction_marker_keys(new) - compaction_marker_keys(old) == {"new_c"}
 
 
 def test_assess_serve_turn_old_compact_markers_do_not_loop():
@@ -337,7 +415,12 @@ class FakeSilentCompactStopBackend(FakeServeBackend):
         self.prompts.append(text)
         self.messages.append(
             {
-                "info": {"role": "user", "finish": None, "summary": None},
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "user",
+                    "finish": None,
+                    "summary": None,
+                },
                 "parts": [{"type": "text", "text": text}],
             }
         )
@@ -348,11 +431,16 @@ class FakeSilentCompactStopBackend(FakeServeBackend):
                 {"content": "Implement", "status": "completed"},
             ]
             compact_user = {
-                "info": {"role": "user", "finish": None},
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "user",
+                    "finish": None,
+                },
                 "parts": [{"type": "compaction", "auto": True}],
             }
             stop = {
                 "info": {
+                    "id": self._next_id("msg"),
                     "role": "assistant",
                     "finish": "stop",
                     "summary": None,
@@ -373,7 +461,12 @@ class FakeSilentCompactStopBackend(FakeServeBackend):
             {"content": "Commit", "status": "completed"},
         ]
         final = {
-            "info": {"role": "assistant", "finish": "stop", "summary": None},
+            "info": {
+                "id": self._next_id("msg"),
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+            },
             "parts": [
                 {
                     "type": "text",
@@ -544,6 +637,40 @@ async def test_e2e_three_compacts_with_budget_three():
     assert result.returncode == 0
     assert result.continue_count == 3
     assert backend.message_calls == 4  # 1 initial + 3 continues
+
+
+@pytest.mark.asyncio
+async def test_e2e_twenty_compacts_then_success():
+    """Real-world long job: 20 compact-then-stop cycles must not ERROR.
+
+    Default budget used to be 3, so the 4th compact posted Jira Error.
+    """
+    backend = FakeServeBackend(required_compacts=20)
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client, max_compact_continues=DEFAULT_MAX_COMPACT_CONTINUES
+    )
+
+    result = await orch.run(prompt="very long task", title="KAN-20C")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert result.continue_count == 20
+    assert backend.message_calls == 21  # 1 initial + 20 continues
+    assert result.compact_events >= 20
+    assert DEFAULT_MAX_COMPACT_CONTINUES >= 256
+
+
+@pytest.mark.asyncio
+async def test_e2e_twenty_compacts_budget_three_is_incomplete_not_crash():
+    """Exhausted compact budget is incomplete (returncode 2), not a crash."""
+    backend = FakeServeBackend(required_compacts=20)
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(client=client, max_compact_continues=3)
+    result = await orch.run(prompt="very long task", title="KAN-20C-LOW")
+    assert result.returncode == 2
+    assert result.incomplete is True
+    assert result.continue_count == 3
+    assert "INCOMPLETE" in (result.stderr or "")
 
 
 @pytest.mark.asyncio

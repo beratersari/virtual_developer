@@ -390,8 +390,21 @@ class JiraAgentDaemon:
                         if state.max_retries is not None
                         else settings.agent_task_max_retries
                     )
-                    # Allow full retry budget plus 50% headroom for backoff/overhead
-                    limit_seconds = timeout * (retries + 1) * 1.5
+                    meta = state.metadata or {}
+                    extra = 0
+                    try:
+                        extra = max(
+                            int(meta.get("max_incomplete_retries") or 0),
+                            int(meta.get("max_compact_continues") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        extra = 0
+                    # Allow full retry + compact-continue budget plus 50% headroom
+                    from src.config import compute_stuck_limit_seconds
+
+                    limit_seconds = compute_stuck_limit_seconds(
+                        timeout, retries, extra_attempts=extra
+                    )
                     # Clone phase (live context, no agent task id yet) uses git budget
                     live = False
                     try:

@@ -374,6 +374,58 @@ async def test_run_agent_with_retry_retries_incomplete_compact_exit(
 
 
 @pytest.mark.asyncio
+async def test_run_agent_with_retry_twenty_incomplete_compacts(
+    runner, tmp_path, monkeypatch
+):
+    """20 compact-then-stop cycles must resume, not exhaust generic max_retries=3."""
+    monkeypatch.chdir(tmp_path)
+    calls = {"n": 0}
+
+    async def fake_run(task, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 20:
+            return {
+                "task_id": task.task_id,
+                "returncode": 2,
+                "stdout": f"Compacting #{calls['n']}",
+                "stderr": "[INCOMPLETE] compact stop",
+                "session_file": str(tmp_path / f"s{calls['n']}.log"),
+                "opencode_session_id": "ses_c20",
+                "incomplete": True,
+                "incomplete_reasons": ["compaction summary"],
+            }
+        return {
+            "task_id": task.task_id,
+            "returncode": 0,
+            "stdout": "done after 20 compacts",
+            "stderr": "",
+            "session_file": str(tmp_path / "s_ok.log"),
+            "opencode_session_id": "ses_c20",
+        }
+
+    with patch.object(runner, "run_agent", side_effect=fake_run):
+        with patch("src.orchestrator.agent_runner.settings") as s:
+            s.agent_task_max_retries = 3
+            s.agent_task_max_incomplete_retries = 256
+            s.agent_task_retry_delay_seconds = 0
+            s.agent_task_retry_backoff_multiplier = 1
+            s.agent_task_retry_on_timeout = True
+            s.agent_task_retry_on_error = False
+            task = AgentTask(description="d", prompt="BUILD", agent="a")
+            result = await runner.run_agent_with_retry(
+                task,
+                max_retries=3,
+                max_incomplete_retries=256,
+            )
+
+    assert calls["n"] == 21
+    assert result["returncode"] == 0
+    assert result["retry_info"]["retried"] is True
+    assert result["retry_info"]["incomplete_retries_used"] == 20
+    assert result.get("opencode_session_id") == "ses_c20"
+
+
+@pytest.mark.asyncio
 async def test_run_agent_timeout(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 

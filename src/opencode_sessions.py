@@ -653,6 +653,17 @@ _COMPACT_OUTPUT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Our Continue prompt mentions "context compaction" — that is not a live compact.
+_CONTINUE_PROMPT_NOISE_RE = re.compile(
+    r"(?:"
+    r"last turn stopped early\s*\(\s*context compaction"
+    r"|Continue the previous OpenCode session"
+    r"|\[serve\] incomplete \(likely compact"
+    r"|\[INCOMPLETE\].*auto-compaction"
+    r")",
+    re.IGNORECASE,
+)
+
 # Finish values that mean the agent was still mid-tool-loop when the process
 # stopped (not a clean terminal answer).
 _UNFINISHED_FINISH = frozenset({"tool-calls", "unknown", ""})
@@ -663,6 +674,28 @@ def detect_compact_in_output(text: str) -> bool:
     if not text:
         return False
     return bool(_COMPACT_OUTPUT_RE.search(text))
+
+
+def compact_output_indicates_premature_exit(text: str, *, last_lines: int = 12) -> bool:
+    """True when the *end* of a CLI run is a compact event, not a finished answer.
+
+    A 2k-char tail match is too broad: the Continue prompt (and echoed user
+    text) contains the word ``compaction``, which previously marked successful
+    resume turns as incomplete / error.
+    """
+    if not text:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    tail = lines[-max(1, int(last_lines or 12)) :]
+    saw_compact = False
+    for ln in tail:
+        if _CONTINUE_PROMPT_NOISE_RE.search(ln):
+            continue
+        if _COMPACT_OUTPUT_RE.search(ln):
+            saw_compact = True
+    return saw_compact
 
 
 def _apply_todo_counts(result: Dict[str, Any], todos: List[Dict[str, Any]]) -> None:
@@ -774,18 +807,12 @@ def _apply_message_list(
                 "session ended on compaction user part (no follow-up)"
             )
     # Compact-then-stop: last assistant immediately follows a compaction
-    # message (classic auto-compact exit that still looks like finish=stop).
+    # *user part* (classic auto-compact exit that still looks like finish=stop).
+    # Do **not** treat "summary assistant then more work" as premature — that is
+    # the agent continuing after compaction in the same turn (success).
     if last_assistant_idx is not None and last_assistant_idx > 0:
         prev = indexed[last_assistant_idx - 1]
-        prev_info = (
-            prev.get("info") if isinstance(prev.get("info"), dict) else prev
-        )
-        prev_summary = prev.get("summary")
-        if prev_summary is None and isinstance(prev_info, dict):
-            prev_summary = prev_info.get("summary")
-        if _message_has_compaction_part(prev) or _is_compaction_summary(
-            prev_summary
-        ):
+        if _message_has_compaction_part(prev):
             result["reasons"].append(
                 "last assistant followed a compaction message "
                 "(compact-then-stop)"
@@ -912,15 +939,14 @@ def assess_session_completeness(
         except Exception as e:
             logger.debug(f"OpenCode completeness lookup failed for {sid}: {e}")
 
-    # Output-only signal: compacting near the end of the transcript.
+    # Output-only signal: compacting as the *last* event in the transcript.
     # Do **not** treat empty todos + finish=stop as all-clear — that is the
     # upstream compact-then-exit-0 false success (opencode#13946).
-    if result["compact_in_output"]:
-        tail = (output_text or "")[-2048:]
-        if detect_compact_in_output(tail):
-            result["reasons"].append(
-                "CLI output indicates compaction near end of run"
-            )
+    # Do **not** flag the Continue prompt's mention of "compaction".
+    if compact_output_indicates_premature_exit(output_text or ""):
+        result["reasons"].append(
+            "CLI output indicates compaction near end of run"
+        )
 
     if result["reasons"]:
         result["complete"] = False

@@ -75,6 +75,33 @@ def bootstrap_dotenv_into_environ(
 bootstrap_dotenv_into_environ()
 
 
+def compute_stuck_limit_seconds(
+    timeout_seconds: float,
+    max_retries: int,
+    *,
+    extra_attempts: int = 0,
+) -> float:
+    """Wall-clock stuck-watchdog budget for one in-flight issue.
+
+    ``extra_attempts`` covers compact/incomplete continues that are *not*
+    generic error retries (CLI incomplete resumes + serve compact continues).
+    Formula: ``timeout * (retries + extra + 1) * 1.5``.
+    """
+    try:
+        timeout = float(timeout_seconds or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    try:
+        retries = int(max_retries or 0)
+    except (TypeError, ValueError):
+        retries = 0
+    try:
+        extra = int(extra_attempts or 0)
+    except (TypeError, ValueError):
+        extra = 0
+    return timeout * (max(0, retries) + max(0, extra) + 1) * 1.5
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
@@ -121,10 +148,11 @@ class Settings(BaseSettings):
         description="Base URL for opencode serve when opencode_run_mode=serve",
     )
     opencode_serve_max_compact_continues: int = Field(
-        default=3,
+        default=256,
         description=(
             "When serve mode detects incomplete/compact-stop, how many "
-            "Continue prompts to send on the same session (0 = fail immediately)"
+            "Continue prompts to send on the same session (0 = fail immediately). "
+            "Long jobs compact many times; a low budget treats later compacts as ERROR."
         ),
     )
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
@@ -284,6 +312,15 @@ class Settings(BaseSettings):
     agent_task_retry_on_error: bool = Field(
         default=True,
         description="Whether to retry tasks that fail with errors"
+    )
+    agent_task_max_incomplete_retries: int = Field(
+        default=256,
+        description=(
+            "Extra CLI/retry budget when OpenCode exits 0 after compaction "
+            "(incomplete session). Independent of agent_task_max_retries so a "
+            "compact-then-stop is resumed, not treated as a generic error. "
+            "0 = do not retry incomplete beyond max_retries."
+        ),
     )
     # Git clone hard timeout — large monorepos + many remotes need a high ceiling
     git_clone_timeout_seconds: int = Field(

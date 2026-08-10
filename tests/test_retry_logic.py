@@ -814,17 +814,22 @@ def test_processor_retry_count_minus_one_when_attempts_missing():
 
 
 def test_stuck_limit_formula_matches_daemon_code():
-    """limit_seconds = timeout * (retries + 1) * 1.5"""
+    """limit_seconds = timeout * (retries + extra + 1) * 1.5"""
+    from src.config import compute_stuck_limit_seconds
+
     timeout = 100
     retries = 2
-    limit_seconds = timeout * (retries + 1) * 1.5
+    limit_seconds = compute_stuck_limit_seconds(timeout, retries)
     assert limit_seconds == 450.0
 
     # Defaults from config fields: 1800 * (3+1) * 1.5
-    assert 1800 * (3 + 1) * 1.5 == 10800.0
+    assert compute_stuck_limit_seconds(1800, 3) == 10800.0
 
     # max_retries=0 → one attempt budget with 50% headroom
-    assert 60 * (0 + 1) * 1.5 == 90.0
+    assert compute_stuck_limit_seconds(60, 0) == 90.0
+
+    # 20 compact continues must not use the tiny 3-retry error budget
+    assert compute_stuck_limit_seconds(60, 0, extra_attempts=20) == 60 * 21 * 1.5
 
 
 @pytest.mark.asyncio

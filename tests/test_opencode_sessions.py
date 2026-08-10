@@ -9,6 +9,7 @@ import pytest
 
 from src.opencode_sessions import (
     assess_session_completeness,
+    compact_output_indicates_premature_exit,
     detect_compact_in_output,
     find_sessions_for_issue,
     lookup_session_directory,
@@ -17,6 +18,7 @@ from src.opencode_sessions import (
     relocate_session_directories,
     resolve_session_id,
 )
+from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
 
 
 def _make_session_db(path: Path, rows: list[dict]) -> Path:
@@ -607,6 +609,60 @@ def test_assess_sqlite_compact_then_stop_sequence_is_premature(tmp_path: Path):
     r = assess_session_completeness("ses_test1", db_path=db)
     assert r["premature"] is True, r
     assert any("compact-then-stop" in x for x in r["reasons"])
+
+
+def test_continue_prompt_echo_is_not_premature_compact():
+    """Resume prompt mentions 'compaction' but a finished answer must succeed."""
+    out = (
+        DEFAULT_CONTINUE_PROMPT
+        + "\nImplemented the feature and committed on the work branch.\n"
+    )
+    assert detect_compact_in_output(out) is True  # word appears
+    assert compact_output_indicates_premature_exit(out) is False
+    r = assess_session_completeness(
+        None,
+        output_text=out,
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+                "parts": [{"type": "text", "text": "Implemented and committed."}],
+            }
+        ],
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["complete"] is True, r
+    assert r["premature"] is False
+
+
+def test_assess_work_after_summary_assistant_is_complete():
+    """Last assistant after a compact *summary* is resumed work, not stop."""
+    messages = [
+        {
+            "role": "user",
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": True,
+            "parts": [{"type": "text", "text": "Compacted."}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": None,
+            "parts": [{"type": "text", "text": "Finished remaining work."}],
+        },
+    ]
+    r = assess_session_completeness(
+        "ses_ok",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["complete"] is True, r
+    assert r["premature"] is False
 
 
 def test_assess_compact_then_stop_message_sequence_is_premature():

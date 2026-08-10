@@ -640,7 +640,7 @@ class AgentRunner:
             getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
         )
         max_cont = int(
-            getattr(settings, "opencode_serve_max_compact_continues", 3) or 0
+            getattr(settings, "opencode_serve_max_compact_continues", 256) or 0
         )
         work_dir = str(self.working_directory) if self.working_directory else None
         agent_name = resolve_opencode_agent_name(task.agent)
@@ -693,6 +693,10 @@ class AgentRunner:
         )
         turn = None
         try:
+            # Each serve turn already has an HTTP timeout. The outer wait must
+            # cover initial + compact continues — otherwise the 4th compact
+            # on a 30-min budget looks like a timeout/error.
+            outer_timeout = float(timeout_seconds) * float(max(1, 1 + max_cont))
             turn = await asyncio.wait_for(
                 orch.run(
                     prompt=task.prompt or "",
@@ -704,7 +708,7 @@ class AgentRunner:
                     on_session=_remember_session,
                     log_lines=log_lines,
                 ),
-                timeout=float(timeout_seconds),
+                timeout=outer_timeout,
             )
             if turn.session_id:
                 _remember_session(turn.session_id)
@@ -1300,6 +1304,7 @@ class AgentRunner:
         on_session_id: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
+        max_incomplete_retries: Optional[int] = None,
         should_abort: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """Run an agent task with automatic retry on failure.
@@ -1317,6 +1322,10 @@ class AgentRunner:
             on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
+            max_incomplete_retries: Compact/incomplete resume budget (CLI).
+                Independent of ``max_retries`` so compaction is not treated as
+                a generic error. ``None`` uses settings. When the caller
+                passes ``max_retries=0``, incomplete retries are also 0.
             should_abort: Optional zero-arg callable; when true, stop retrying
                 immediately (cancel / stuck watchdog). Result includes
                 ``aborted=True``.
@@ -1324,12 +1333,30 @@ class AgentRunner:
         Returns:
             Dict with task result including retry information and all session files
         """
+        def _safe_int(val: Any, default: int = 0) -> int:
+            try:
+                if val is None or isinstance(val, bool):
+                    return int(default)
+                return int(val)
+            except (TypeError, ValueError):
+                return int(default)
+
         # Allow max_retries=0 to mean "no retries" (do not treat 0 as unset)
         effective_max_retries = (
             settings.agent_task_max_retries
             if max_retries is None
             else max_retries
         )
+        effective_max_retries = _safe_int(effective_max_retries, 0)
+        if max_incomplete_retries is not None:
+            incomplete_cap = _safe_int(max_incomplete_retries, 0)
+        elif max_retries == 0:
+            # Explicit "no retries" from caller (tests / one-shot)
+            incomplete_cap = 0
+        else:
+            incomplete_cap = _safe_int(
+                getattr(settings, "agent_task_max_incomplete_retries", 0), 0
+            )
         retry_delay = settings.agent_task_retry_delay_seconds
         backoff_multiplier = settings.agent_task_retry_backoff_multiplier
         retry_on_timeout = settings.agent_task_retry_on_timeout
@@ -1361,12 +1388,17 @@ class AgentRunner:
         last_result = None
         last_session_id = None
         attempt = 0
+        incomplete_used = 0
+        error_used = 0
+        timeout_used = 0
         all_session_files = []
 
         def _retry_info(**extra: Any) -> Dict[str, Any]:
             info: Dict[str, Any] = {
                 "attempts": attempt + 1,
                 "max_retries": effective_max_retries,
+                "max_incomplete_retries": incomplete_cap,
+                "incomplete_retries_used": incomplete_used,
                 "retried": attempt > 0,
                 "all_session_files": all_session_files,
                 "last_opencode_session_id": last_session_id,
@@ -1377,14 +1409,23 @@ class AgentRunner:
             info.update(extra)
             return info
 
-        while attempt <= effective_max_retries:
+        # Error/timeout still use max_retries. Incomplete/compact uses its own
+        # cap so a 20-compact job is not killed after 3 generic retries.
+        max_total_attempts = (
+            1 + int(effective_max_retries) + int(incomplete_cap)
+        )
+
+        while attempt < max_total_attempts:
             if _aborted():
                 logger.info(
                     f"Abort before attempt {attempt + 1}: task_id={task.task_id}"
                 )
                 return _abort_result()
 
-            logger.info(f"Agent attempt {attempt + 1}/{effective_max_retries + 1}: task_id={task.task_id}")
+            logger.info(
+                f"Agent attempt {attempt + 1}/{max_total_attempts}: "
+                f"task_id={task.task_id}"
+            )
             
             # Run the task with attempt number (0 = first attempt, 1+ = retries)
             result = await self.run_agent(
@@ -1426,19 +1467,28 @@ class AgentRunner:
             retry_reason = ""
 
             if result.get("timed_out"):
-                if retry_on_timeout and attempt < effective_max_retries:
+                if retry_on_timeout and timeout_used < effective_max_retries:
                     should_retry = True
                     retry_reason = "timeout"
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
-            elif result.get("incomplete") and attempt < effective_max_retries:
-                # Compact-then-exit-0 (or mid-turn stop): same session + Continue.
-                should_retry = True
-                retry_reason = "incomplete_session"
-                logger.warning(
-                    f"Incomplete session on attempt {attempt + 1}: "
-                    f"task_id={task.task_id}"
+            elif result.get("incomplete"):
+                # Compact-then-exit-0 is not a crash. Use the incomplete
+                # budget when set; otherwise the shared max_retries cap
+                # (legacy tests / explicit max_retries=N).
+                incomplete_budget = (
+                    incomplete_cap
+                    if incomplete_cap > 0
+                    else effective_max_retries
                 )
-            elif retry_on_error and attempt < effective_max_retries:
+                if incomplete_used < incomplete_budget:
+                    should_retry = True
+                    retry_reason = "incomplete_session"
+                    logger.warning(
+                        f"Incomplete session on attempt {attempt + 1}: "
+                        f"task_id={task.task_id} "
+                        f"(compact resume {incomplete_used + 1}/{incomplete_budget})"
+                    )
+            elif retry_on_error and error_used < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
                 logger.warning(f"Agent failed with error on attempt {attempt + 1}, will retry: task_id={task.task_id}, returncode={result.get('returncode')}")
@@ -1466,6 +1516,12 @@ class AgentRunner:
                         }
                     )
 
+                if retry_reason == "incomplete_session":
+                    incomplete_used += 1
+                elif retry_reason == "timeout":
+                    timeout_used += 1
+                else:
+                    error_used += 1
                 attempt += 1
 
                 # Calculate delay with exponential backoff

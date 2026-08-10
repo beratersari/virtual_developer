@@ -138,6 +138,21 @@ def test_post_error_with_suggestion(state):
     assert "Suggestion" in client.comments[-1]["body"]
 
 
+def test_post_incomplete_compaction_is_not_generic_error(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] compact-then-stop",
+        suggestion="raise compact continue budget",
+        category="incomplete",
+    )
+    body = client.comments[-1]["body"]
+    assert "Incomplete session (context compaction)" in body
+    assert "not* a crash" in body or "not a crash" in body.lower()
+    assert "AI Agent — Error" not in body
+
+
 def test_post_error_not_timed_out_not_exhausted(state):
     state.timed_out = False
     state.retry_count = 0

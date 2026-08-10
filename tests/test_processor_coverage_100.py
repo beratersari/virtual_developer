@@ -260,6 +260,25 @@ def test_fail_issue_exception_swallowed(processor, state_manager):
     processor._fail_issue("FE-2", "x")
 
 
+def test_fail_from_agent_result_incomplete_is_not_crash(processor, state_manager, fake_jira):
+    """Compact/incomplete agent result must not use the generic Error heading."""
+    state_manager.create_state("FE-C", "compact", "d")
+    processor._fail_from_agent_result(
+        "FE-C",
+        {
+            "returncode": 2,
+            "stderr": "[INCOMPLETE] compact-then-stop",
+            "incomplete": True,
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Incomplete session (context compaction)" in b for b in bodies)
+    assert not any(
+        "h3. AI Agent — Error" in b and "compact-then-stop" in b for b in bodies
+    )
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")

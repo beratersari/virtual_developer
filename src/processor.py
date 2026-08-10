@@ -30,6 +30,22 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 
+def _plain_int(val: Any, default: int = 0) -> int:
+    """Coerce settings/mocks to int (MagicMock is not JSON-serializable)."""
+    try:
+        if val is None or isinstance(val, bool):
+            return int(default)
+        return int(val)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _plain_str(val: Any, default: str = "") -> str:
+    if isinstance(val, str) and val and not val.startswith("<MagicMock"):
+        return val
+    return default
+
+
 class _JobSlotLimiter:
     """Async concurrency limiter that supports live resize without over-admit.
 
@@ -260,6 +276,7 @@ class JobProcessor:
         error_message: str,
         *,
         suggestion: Optional[str] = None,
+        category: str = "error",
     ) -> None:
         """Mark issue ERROR, finish job record, allow re-queue, notify Jira.
 
@@ -363,12 +380,52 @@ class JobProcessor:
                         "away and back to *To Do*, to re-queue."
                     )
             comment_id = self.reporter.post_error(
-                state, error_text, suggestion=effective_suggestion
+                state,
+                error_text,
+                suggestion=effective_suggestion,
+                category=category,
             )
             if not comment_id:
                 logger.error(f"Jira post_error returned no comment for {issue_key}")
         except Exception as e:
             logger.exception(f"Failed to report error for {issue_key}: {e}", e)
+
+    def _fail_from_agent_result(
+        self,
+        issue_key: str,
+        result: Optional[Dict[str, Any]],
+        *,
+        fallback: str,
+        suggestion: Optional[str] = None,
+    ) -> None:
+        """Fail a job from an agent result; compaction is not a crash."""
+        data = result if isinstance(result, dict) else {}
+        incomplete = bool(data.get("incomplete"))
+        stderr = (data.get("stderr") or "").strip() or fallback
+        if incomplete:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode stopped after context compaction (not a crash). "
+                    "The same session can be resumed. Raise "
+                    "OPENCODE_SERVE_MAX_COMPACT_CONTINUES or "
+                    "AGENT_TASK_MAX_INCOMPLETE_RETRIES, then re-queue from To Do."
+                ),
+                category="incomplete",
+            )
+            return
+        self._fail_issue(
+            issue_key,
+            stderr,
+            suggestion=suggestion
+            or (
+                "Check agent/session logs, then move the issue back to To Do "
+                "to retry."
+            ),
+            category="error",
+        )
 
     def _archive_run_identifiers(
         self,
@@ -1062,8 +1119,21 @@ class JobProcessor:
         from src.config import get_settings
 
         live = get_settings()
-        timeout_s = int(live.agent_task_timeout_seconds or 1800)
-        max_retries = int(live.agent_task_max_retries or 0)
+        timeout_s = _plain_int(
+            getattr(live, "agent_task_timeout_seconds", None), 1800
+        )
+        max_retries = _plain_int(getattr(live, "agent_task_max_retries", None), 0)
+        max_incomplete = _plain_int(
+            getattr(live, "agent_task_max_incomplete_retries", None), 0
+        )
+        max_compacts = _plain_int(
+            getattr(live, "opencode_serve_max_compact_continues", None), 0
+        )
+        archive["max_incomplete_retries"] = max_incomplete
+        archive["max_compact_continues"] = max_compacts
+        archive["opencode_run_mode"] = _plain_str(
+            getattr(live, "opencode_run_mode", None), "cli"
+        )
         claimed = self.state_manager.update_state_if(
             state.issue_key,
             reject_statuses=self.TERMINAL_STATUSES,
@@ -1081,10 +1151,18 @@ class JobProcessor:
                 f"status is terminal (cancel/fail/complete won the race)"
             )
             return None
+        from src.config import compute_stuck_limit_seconds
+
+        stuck_s = compute_stuck_limit_seconds(
+            timeout_s,
+            max_retries,
+            extra_attempts=max(max_incomplete, max_compacts),
+        )
         logger.info(
             f"{state.issue_key} job budget: timeout={timeout_s}s "
-            f"max_retries={max_retries} "
-            f"(stuck limit ≈ {int(timeout_s * (max_retries + 1) * 1.5)}s)"
+            f"max_retries={max_retries} incomplete={max_incomplete} "
+            f"compacts={max_compacts} "
+            f"(stuck limit ≈ {int(stuck_s)}s)"
         )
         state.current_task_id = task.task_id
         state.current_opencode_session_id = None
@@ -2873,6 +2951,10 @@ class JobProcessor:
                     if state.max_retries is not None
                     else settings.agent_task_max_retries
                 ),
+                max_incomplete_retries=_plain_int(
+                    getattr(settings, "agent_task_max_incomplete_retries", 0),
+                    0,
+                ),
                 should_abort=lambda: self._is_aborted(state.issue_key),
             )
             self._apply_agent_result_session(state.issue_key, result)
@@ -2993,9 +3075,10 @@ class JobProcessor:
                     )
                     success = True
             else:
-                self._fail_issue(
+                self._fail_from_agent_result(
                     state.issue_key,
-                    result.get("stderr") or "GitLab MR comment job failed",
+                    result,
+                    fallback="GitLab MR comment job failed",
                     suggestion="Check the job session log on the ops dashboard.",
                 )
         except Exception as e:
@@ -3126,6 +3209,9 @@ class JobProcessor:
             ),
             timeout_seconds=_timeout,
             max_retries=_retries,
+            max_incomplete_retries=_plain_int(
+                getattr(_live, "agent_task_max_incomplete_retries", 0), 0
+            ),
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
@@ -3260,10 +3346,10 @@ class JobProcessor:
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
-            self._fail_issue(
+            self._fail_from_agent_result(
                 state.issue_key,
-                result.get("stderr") or "Planning agent failed",
-                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
+                result,
+                fallback="Planning agent failed",
             )
             self._release_context(state.issue_key, success=False)
 
@@ -3426,6 +3512,9 @@ class JobProcessor:
             ),
             timeout_seconds=_timeout,
             max_retries=_retries,
+            max_incomplete_retries=_plain_int(
+                getattr(_live, "agent_task_max_incomplete_retries", 0), 0
+            ),
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
@@ -3550,10 +3639,10 @@ class JobProcessor:
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
-            self._fail_issue(
+            self._fail_from_agent_result(
                 state.issue_key,
-                result.get("stderr") or "Execution agent failed",
-                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
+                result,
+                fallback="Execution agent failed",
             )
             self._release_context(state.issue_key, success=False)
 

@@ -67,6 +67,13 @@ DEFAULT_CONTINUE_PROMPT = (
     "implementation, verification, and commit steps as required."
 )
 
+# Long agent jobs compact many times. A default of 3 treated the 4th compact
+# as a hard ERROR (returncode 2 → Jira "AI Agent — Error").
+DEFAULT_MAX_COMPACT_CONTINUES = 256
+# OpenCode /session/{id}/message?limit= used to be 80 — after ~15–20 compact
+# cycles the sliding window dropped old markers and mis-counted "new this turn".
+DEFAULT_MESSAGE_LIST_LIMIT = 500
+
 
 @dataclass
 class ServeTurnResult:
@@ -198,16 +205,33 @@ class OpenCodeServeClient:
         return r.json() if r.content else {}
 
     async def list_messages(
-        self, session_id: str, *, limit: int = 50
+        self, session_id: str, *, limit: int = DEFAULT_MESSAGE_LIST_LIMIT
     ) -> List[Dict[str, Any]]:
         r = await self._client.get(
             f"/session/{session_id}/message",
-            params={"limit": limit},
+            params={"limit": int(limit)},
             headers=self._headers(),
         )
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else []
+
+    async def list_all_messages(
+        self,
+        session_id: str,
+        *,
+        page_size: int = DEFAULT_MESSAGE_LIST_LIMIT,
+        max_messages: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """Fetch as much session history as the API will give (newest-biased).
+
+        OpenCode 1.18.x ``GET /session/{id}/message?limit=N`` returns the
+        newest N rows. We request a large page so 20+ compact cycles still
+        have stable marker ids for ``new_this_turn`` accounting.
+        """
+        cap = max(1, int(max_messages or 2000))
+        size = max(1, min(int(page_size or DEFAULT_MESSAGE_LIST_LIMIT), cap))
+        return await self.list_messages(session_id, limit=size)
 
     async def list_todos(self, session_id: str) -> List[Dict[str, Any]]:
         r = await self._client.get(
@@ -280,26 +304,55 @@ def messages_from_api(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _is_compaction_message(m: Dict[str, Any]) -> bool:
+    parts = m.get("parts") or m.get("_parts") or []
+    if any(isinstance(p, dict) and p.get("type") == "compaction" for p in parts):
+        return True
+    info = m.get("info") if isinstance(m.get("info"), dict) else m
+    if isinstance(info, dict):
+        summary = info.get("summary")
+        if summary is True or (
+            isinstance(summary, dict) and summary.get("compaction")
+        ):
+            return True
+    return False
+
+
+def compaction_marker_keys(messages: Sequence[Dict[str, Any]]) -> set[str]:
+    """Stable ids for compaction markers (survives a sliding list window)."""
+    keys: set[str] = set()
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict) or not _is_compaction_message(m):
+            continue
+        info = m.get("info") if isinstance(m.get("info"), dict) else m
+        mid = ""
+        if isinstance(info, dict):
+            mid = str(info.get("id") or "").strip()
+        if not mid:
+            mid = str(m.get("id") or "").strip()
+        if not mid and isinstance(info, dict):
+            time_obj = info.get("time") if isinstance(info.get("time"), dict) else {}
+            raw_t = (
+                time_obj.get("created")
+                or time_obj.get("start")
+                or info.get("time_created")
+                or m.get("time_created")
+            )
+            if raw_t is not None:
+                mid = f"t:{raw_t}"
+        if not mid:
+            # Last resort: content fingerprint (index alone shifts in a window)
+            parts = m.get("parts") or m.get("_parts") or []
+            mid = f"fp:{i}:{info.get('role') if isinstance(info, dict) else ''}:{len(parts)}"
+        keys.add(mid)
+    return keys
+
+
 def count_compaction_signals(
     messages: Sequence[Dict[str, Any]],
 ) -> int:
     """Count compaction markers in API message list (parts or summary)."""
-    n = 0
-    for m in messages:
-        parts = m.get("parts") or m.get("_parts") or []
-        if any(
-            isinstance(p, dict) and p.get("type") == "compaction" for p in parts
-        ):
-            n += 1
-            continue
-        info = m.get("info") if isinstance(m.get("info"), dict) else m
-        if isinstance(info, dict):
-            summary = info.get("summary")
-            if summary is True or (
-                isinstance(summary, dict) and summary.get("compaction")
-            ):
-                n += 1
-    return n
+    return sum(1 for m in messages if isinstance(m, dict) and _is_compaction_message(m))
 
 
 def assess_serve_turn(
@@ -328,17 +381,11 @@ def assess_serve_turn(
         todos=api_todos if api_todos else None,
     )
 
-    # Compaction *this turn* + finish=stop / empty todos is the false-success
-    # case. Historical compact markers from earlier turns must not loop forever.
-    if int(new_compacts_this_turn or 0) > 0 and result.get("complete"):
-        reasons = list(result.get("reasons") or [])
-        reasons.append(
-            "compaction occurred this turn; not treating exit as success"
-        )
-        result["reasons"] = reasons
-        result["complete"] = False
-        result["premature"] = True
-
+    # Do **not** force incomplete just because a compact happened this turn.
+    # Compact-then-stop (last assistant immediately after a compaction part, or
+    # last assistant is a compaction summary) is already flagged by
+    # assess_session_completeness. Forcing "any compact ⇒ not success" treated
+    # a finished turn that compacted mid-loop as an ERROR.
     result["compact_events_seen"] = compact_events_seen
     result["new_compacts_this_turn"] = int(new_compacts_this_turn or 0)
     return result
@@ -349,7 +396,7 @@ class ServeOrchestrator:
     """Run one agent task against OpenCode serve with multi-compact continue."""
 
     client: OpenCodeServeClient
-    max_compact_continues: int = 3
+    max_compact_continues: int = DEFAULT_MAX_COMPACT_CONTINUES
     continue_prompt: str = DEFAULT_CONTINUE_PROMPT
     # Optional: force summarize after each turn (tests / stress). Production: False.
     force_summarize_after_turn: bool = False
@@ -458,10 +505,10 @@ class ServeOrchestrator:
             # Markers already in the session (resume / prior turn) must not count
             # as "new this turn" or every retry after compact looks premature.
             try:
-                messages_before = await self.client.list_messages(sid, limit=80)
+                messages_before = await self.client.list_all_messages(sid)
             except Exception:
                 messages_before = []
-            markers_before = count_compaction_signals(messages_before)
+            keys_before = compaction_marker_keys(messages_before)
 
             _emit("stdout", f"[serve] turn={label} sending message…")
             t0 = time.time()
@@ -536,9 +583,9 @@ class ServeOrchestrator:
                 except Exception as e:
                     _emit("stderr", f"[serve] force summarize failed: {e}")
 
-            # Snapshot state
+            # Snapshot state (full-ish history — do not use a 80-row window)
             try:
-                messages = await self.client.list_messages(sid, limit=80)
+                messages = await self.client.list_all_messages(sid)
             except Exception as e:
                 messages = []
                 _emit("stderr", f"[serve] list messages failed: {e}")
@@ -548,8 +595,9 @@ class ServeOrchestrator:
                 todos = []
                 _emit("stderr", f"[serve] list todos failed: {e}")
 
-            compact_in_msgs = count_compaction_signals(messages)
-            new_this_turn = max(0, int(compact_in_msgs) - int(markers_before))
+            keys_after = compaction_marker_keys(messages)
+            compact_in_msgs = len(keys_after)
+            new_this_turn = len(keys_after - keys_before)
             if forced_compact:
                 new_this_turn = max(new_this_turn, 1)
             compact_total = max(

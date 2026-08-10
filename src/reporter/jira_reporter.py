@@ -285,8 +285,10 @@ _Completed by the AI agent. Please review and verify before merging or closing._
         state: Optional[JiraAgentState],
         error_message: str,
         suggestion: Optional[str] = None,
+        *,
+        category: str = "error",
     ) -> Optional[str]:
-        """Post error message."""
+        """Post error (or incomplete/compaction) message."""
         if state is None:
             logger.error("Cannot post error: state is None")
             return None
@@ -313,9 +315,21 @@ _Completed by the AI agent. Please review and verify before merging or closing._
 
         session_id = state.current_opencode_session_id or "N/A"
 
-        body = f"""h3. AI Agent — Error
+        kind = (category or "error").strip().lower()
+        if kind == "incomplete":
+            heading = "AI Agent — Incomplete session (context compaction)"
+            lead = (
+                "The OpenCode session stopped after context compaction or a "
+                "mid-turn idle. This is *not* a crash — the agent ran out of "
+                "compact-continue budget before finishing."
+            )
+        else:
+            heading = "AI Agent — Error"
+            lead = "An error occurred while processing this issue:"
 
-An error occurred while processing this issue:
+        body = f"""h3. {heading}
+
+{lead}
 
 {{code}}
 {err}
