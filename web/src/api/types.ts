@@ -335,7 +335,9 @@ export type ChatMessage = {
   id: string
   session_id: string
   role: string
+  raw_role?: string
   finish?: string | null
+  summary?: boolean | Record<string, unknown> | null
   agent?: string | null
   created_at?: string | null
   parts: ChatPart[]

@@ -67,6 +67,24 @@ function MessageBubble({ group }: { group: ChatGroup }) {
   const role = group.role
   const isUser = role === 'user'
   const isAssistant = role === 'assistant'
+  const isCompact = role === 'compaction'
+
+  if (isCompact) {
+    return (
+      <div className="flex justify-center">
+        <div className="max-w-[min(40rem,90%)] rounded-full border border-border bg-bg px-3 py-1 text-center">
+          <span className="text-[11px] italic text-warning-text">
+            {group.parts.some((p) => p.auto) ? 'Session auto-compacted' : 'Session compacted'}
+          </span>
+          {group.created_at ? (
+            <span className="ml-2 font-mono text-[10px] text-text-muted">
+              {formatChatTime(group.created_at) || group.created_at}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>

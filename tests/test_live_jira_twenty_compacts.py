@@ -81,20 +81,22 @@ async def test_live_jira_twenty_compacts_not_posted_as_error():
     print(f"\n[live jira] created {key} on {client.host}", flush=True)
 
     backend = FakeServeBackend(required_compacts=20)
+    backend.auto_complete_on_idle = True
     orch = ServeOrchestrator(
         client=FakeServeClient(backend),
-        max_compact_continues=DEFAULT_MAX_COMPACT_CONTINUES,
+        compact_wait_seconds=2.0,
+        compact_poll_seconds=0.05,
     )
     result = await orch.run(
-        prompt="Implement a long task that will compact 20 times, then finish.",
-        title=f"{key}: 20 compact e2e",
+        prompt="Implement a long task that will auto-compact, then finish.",
+        title=f"{key}: auto-compact wait e2e",
         agent="atlas",
     )
     assert result.returncode == 0, result.stderr
     assert result.incomplete is False
-    assert result.continue_count == 20
-    assert result.compact_events >= 20
-    assert backend.message_calls == 21
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
+    assert all("Continue the previous" not in p for p in backend.prompts)
 
     state = JiraAgentState(
         issue_key=key,
@@ -110,10 +112,9 @@ async def test_live_jira_twenty_compacts_not_posted_as_error():
     progress_id = reporter.post_progress_update(
         state,
         (
-            f"OpenCode session {result.session_id} survived "
-            f"{result.compact_events} compaction event(s) with "
-            f"{result.continue_count} Continue turn(s). "
-            "Compaction was treated as resume, not as an error."
+            f"OpenCode session {result.session_id} waited out auto-compact "
+            f"(compacts={result.compact_events}, continues={result.continue_count}). "
+            "No Continue user message was injected."
         ),
         progress_percentage=80,
     )
@@ -124,11 +125,11 @@ async def test_live_jira_twenty_compacts_not_posted_as_error():
     complete_id = reporter.post_completion(
         state,
         (
-            f"20-compact e2e succeeded. continues={result.continue_count} "
-            f"compacts={result.compact_events} returncode={result.returncode}."
+            f"Auto-compact wait e2e succeeded. continues={result.continue_count} "
+            f"prompts={backend.message_calls} returncode={result.returncode}."
         ),
         changes_made=[
-            "Serve orchestrator continued through 20 compact-then-stop cycles",
+            "Orchestrator waited for OpenCode auto-compact (no Continue prompt)",
             "Same OpenCode session reused (no cold restart)",
             "Jira Error heading not used for compaction",
         ],

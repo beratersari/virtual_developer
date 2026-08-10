@@ -535,8 +535,9 @@ export function SettingsPage() {
       </label>
       <div className="text-sm font-semibold text-text">Retries &amp; compaction</div>
       <p className="text-xs text-text-muted">
-        Context compaction is a resume, not a crash. Raise these if long jobs stop
-        after compacting. Next job uses the saved values.
+        OpenCode auto-compacts in-session. The orchestrator waits for that to
+        finish — it does not inject a Continue user message. Next job uses the
+        saved values.
       </p>
       <label className="field">
         <span>Error / timeout retries</span>
@@ -563,8 +564,8 @@ export function SettingsPage() {
           }
         />
         <span className="text-xs text-text-muted">
-          Resume the same OpenCode session after compact-then-stop. Independent of
-          error retries. Default 256.
+          Extra CLI attempts only when the session is incomplete for a non-compact
+          reason. Compact is waited out; no extra prompt. Default 256.
         </span>
       </label>
       <label className="field">
@@ -579,8 +580,8 @@ export function SettingsPage() {
           }
         />
         <span className="text-xs text-text-muted">
-          Continue prompts on the same session when OPENCODE_RUN_MODE=serve. Default
-          256.
+          Legacy serve budget (unused for compact). Auto-compact is waited out on
+          the same session. Default 256.
         </span>
       </label>
 

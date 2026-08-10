@@ -58,6 +58,10 @@ class FakeServeBackend:
         self.prompts: List[str] = []
         self.aborted = False
         self._seq = 0
+        self.status_polls = 0
+        self.auto_complete_on_idle = False
+        self._auto_completed = False
+        self.busy_polls_remaining = 0
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -170,11 +174,38 @@ class FakeServeBackend:
     async def list_all_messages(self, session_id: str, **kwargs) -> List[Dict[str, Any]]:
         return list(self.messages)
 
+    async def session_status(self) -> Dict[str, Any]:
+        self.status_polls += 1
+        if self.busy_polls_remaining > 0:
+            self.busy_polls_remaining -= 1
+            return {self.session_id: {"type": "busy"}}
+        if self.auto_complete_on_idle and not self._auto_completed:
+            self._auto_completed = True
+            self.todos = [
+                {"content": "Explore", "status": "completed"},
+                {"content": "Implement", "status": "completed"},
+                {"content": "Commit", "status": "completed"},
+            ]
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "Auto-resumed after compact; committed.",
+                        }
+                    ],
+                }
+            )
+        return {self.session_id: {"type": "idle"}}
+
     async def list_todos(self, session_id: str) -> List[Dict[str, Any]]:
         return list(self.todos)
-
-    async def session_status(self) -> Dict[str, Any]:
-        return {}
 
     async def abort(self, session_id: str) -> bool:
         self.aborted = True
@@ -479,11 +510,13 @@ class FakeSilentCompactStopBackend(FakeServeBackend):
 
 
 @pytest.mark.asyncio
-async def test_e2e_silent_compact_stop_does_not_false_complete():
-    """finish=stop + empty open todos after compact must Continue, not succeed."""
+async def test_e2e_silent_compact_waits_without_continue():
+    """Auto-compact with completed todos: wait, do not POST Continue."""
     backend = FakeSilentCompactStopBackend()
     client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    orch = ServeOrchestrator(
+        client=client, compact_wait_seconds=1.0, compact_poll_seconds=0.05
+    )
     result = await orch.run(
         prompt="implement 5+4",
         title="E2E-COMPACT: silent stop",
@@ -491,48 +524,39 @@ async def test_e2e_silent_compact_stop_does_not_false_complete():
     )
     assert result.returncode == 0, result.stderr
     assert result.incomplete is False
-    assert result.continue_count >= 1
-    assert len(backend.prompts) >= 2
-    assert result.turns[0]["assessment"]["premature"] is True
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
+    assert backend.prompts == ["implement 5+4"]
+    assert "Continue the previous" not in "\n".join(backend.prompts)
 
 
 @pytest.mark.asyncio
-async def test_e2e_double_compact_then_success():
-    """Task needs 2 compact cycles; orchestrator continues twice then succeeds."""
-    backend = FakeServeBackend(required_compacts=2)
+async def test_e2e_compact_auto_resume_without_continue_prompt():
+    """OpenCode auto-resumes after compact; orchestrator must not inject Continue."""
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = True
     client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=3)
-
+    orch = ServeOrchestrator(
+        client=client, compact_wait_seconds=1.0, compact_poll_seconds=0.05
+    )
     result = await orch.run(
         prompt="Implement feature X end-to-end and commit.",
-        title="KAN-99: double compact e2e",
+        title="KAN-99: auto compact",
         agent="Sisyphus - ultraworker",
     )
-
     assert result.returncode == 0, result.stderr
-    assert result.incomplete is False
-    assert result.session_id == "ses_fake_double_compact"
-    # initial + 2 continues
-    assert backend.message_calls == 3
-    assert result.continue_count == 2
-    assert result.compact_events >= 2
-    # Second and third prompts are continue prompts
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
     assert backend.prompts[0].startswith("Implement feature")
-    assert "compaction" in backend.prompts[1].lower() or "Continue" in backend.prompts[1]
-    assert "Continue" in backend.prompts[2] or "compaction" in backend.prompts[2].lower()
-    # Turn log shows premature then success
-    assert len(result.turns) == 3
-    assert result.turns[0]["assessment"]["premature"] is True
-    assert result.turns[1]["assessment"]["premature"] is True
-    assert result.turns[2]["assessment"]["complete"] is True
+    assert all("Continue the previous" not in p for p in backend.prompts)
 
 
 @pytest.mark.asyncio
-async def test_on_session_fires_before_first_continue_message():
+async def test_on_session_fires_before_first_message():
     """Session id must be known before the first POST /session/{id}/message."""
-    backend = FakeServeBackend(required_compacts=1)
+    backend = FakeServeBackend(required_compacts=0)
     client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    orch = ServeOrchestrator(client=client)
     seen: list = []
 
     def on_session(sid: str) -> None:
@@ -546,44 +570,43 @@ async def test_on_session_fires_before_first_continue_message():
     assert result.returncode == 0
     assert seen == [("ses_fake_double_compact", 0)]
     assert result.session_id == "ses_fake_double_compact"
-    assert backend.message_calls >= 2
+    assert backend.message_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_e2e_double_compact_fails_if_max_continues_too_low():
-    """With max_compact_continues=1, two required compacts → incomplete failure."""
+async def test_e2e_open_todos_after_compact_wait_no_extra_prompt():
+    """If work is still open after compact wait, do not send another user message."""
     backend = FakeServeBackend(required_compacts=2)
     client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=1)
-
-    result = await orch.run(
-        prompt="Do the work",
-        title="KAN-99: insufficient continues",
+    orch = ServeOrchestrator(
+        client=client, compact_wait_seconds=0.4, compact_poll_seconds=0.05
     )
-
+    result = await orch.run(prompt="Do the work", title="KAN-99")
     assert result.returncode == 2
     assert result.incomplete is True
-    assert result.continue_count == 1
-    # initial + 1 continue only
-    assert backend.message_calls == 2
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
     assert "INCOMPLETE" in (result.stderr or "")
+    assert "Continue the previous" not in "\n".join(backend.prompts)
 
 
 @pytest.mark.asyncio
-async def test_e2e_agent_runner_serve_mode_double_compact(tmp_path, monkeypatch):
-    """AgentRunner with OPENCODE_RUN_MODE=serve uses orchestrator (2 compacts)."""
+async def test_e2e_agent_runner_serve_mode_waits_compact(tmp_path, monkeypatch):
+    """AgentRunner serve mode waits out compact; one prompt only."""
     monkeypatch.chdir(tmp_path)
-    backend = FakeServeBackend(required_compacts=2)
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = True
     client = FakeServeClient(backend)
 
     runner = AgentRunner(working_directory=tmp_path)
 
     async def fake_run_via_serve(task, **kwargs):
-        # Mirror production path but inject fake client
         from src.opencode_serve import ServeOrchestrator
 
         session_file = kwargs["session_file"]
-        orch = ServeOrchestrator(client=client, max_compact_continues=3)
+        orch = ServeOrchestrator(
+            client=client, compact_wait_seconds=1.0, compact_poll_seconds=0.05
+        )
         lines: List[str] = []
         turn = await orch.run(
             prompt=task.prompt or "",
@@ -606,71 +629,56 @@ async def test_e2e_agent_runner_serve_mode_double_compact(tmp_path, monkeypatch)
             s.default_model = "opencode/deepseek-v4-flash-free"
             s.agent_task_timeout_seconds = 60
             task = AgentTask(
-                description="double compact work",
+                description="compact wait",
                 prompt="Implement and commit everything.",
                 agent="sisyphus",
                 issue_key="KAN-99",
             )
-            # Force serve branch without real HTTP by patching mode check path
-            # We call fake_run_via_serve directly through patch of the method
-            # that run_agent invokes when mode==serve.
             result = await runner.run_agent(task)
 
     assert result["returncode"] == 0
-    assert result.get("continue_count") == 2
-    assert result.get("compact_events", 0) >= 2
+    assert result.get("continue_count") == 0
     assert result.get("mode") == "serve"
-    assert backend.message_calls == 3
-    # Session log written
+    assert backend.message_calls == 1
     assert result.get("session_file")
     assert Path(result["session_file"]).exists()
 
 
 @pytest.mark.asyncio
-async def test_e2e_three_compacts_with_budget_three():
-    """Stress: exactly 3 compacts required and max_continues=3 → success."""
-    backend = FakeServeBackend(required_compacts=3)
-    client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=3)
-
-    result = await orch.run(prompt="long task", title="T")
-    assert result.returncode == 0
-    assert result.continue_count == 3
-    assert backend.message_calls == 4  # 1 initial + 3 continues
-
-
-@pytest.mark.asyncio
-async def test_e2e_twenty_compacts_then_success():
-    """Real-world long job: 20 compact-then-stop cycles must not ERROR.
-
-    Default budget used to be 3, so the 4th compact posted Jira Error.
-    """
-    backend = FakeServeBackend(required_compacts=20)
+async def test_e2e_waits_while_session_busy_then_auto_resumes():
+    """Compact-then-stop + busy status: wait until idle; one prompt only."""
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = True
+    backend.busy_polls_remaining = 4
     client = FakeServeClient(backend)
     orch = ServeOrchestrator(
-        client=client, max_compact_continues=DEFAULT_MAX_COMPACT_CONTINUES
+        client=client,
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.1,
     )
-
-    result = await orch.run(prompt="very long task", title="KAN-20C")
+    result = await orch.run(prompt="long task", title="KAN-BUSY")
     assert result.returncode == 0, result.stderr
-    assert result.incomplete is False
-    assert result.continue_count == 20
-    assert backend.message_calls == 21  # 1 initial + 20 continues
-    assert result.compact_events >= 20
-    assert DEFAULT_MAX_COMPACT_CONTINUES >= 256
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
+    assert backend.status_polls >= 4
+    assert all("Continue the previous" not in p for p in backend.prompts)
 
 
 @pytest.mark.asyncio
-async def test_e2e_twenty_compacts_budget_three_is_incomplete_not_crash():
-    """Exhausted compact budget is incomplete (returncode 2), not a crash."""
+async def test_e2e_does_not_send_twenty_continues():
+    """A long compacting job must not inject 20 Continue user messages."""
     backend = FakeServeBackend(required_compacts=20)
+    backend.auto_complete_on_idle = True
     client = FakeServeClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=3)
-    result = await orch.run(prompt="very long task", title="KAN-20C-LOW")
-    assert result.returncode == 2
-    assert result.incomplete is True
-    assert result.continue_count == 3
-    assert "INCOMPLETE" in (result.stderr or "")
+    orch = ServeOrchestrator(
+        client=client, compact_wait_seconds=1.0, compact_poll_seconds=0.05
+    )
+    result = await orch.run(prompt="very long task", title="KAN-20C")
+    assert result.returncode == 0, result.stderr
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
+    assert all("Continue the previous" not in p for p in backend.prompts)
 
 
 @pytest.mark.asyncio
@@ -689,8 +697,10 @@ async def test_serve_health_failure():
     ).lower()
 
 
-def test_default_continue_prompt_mentions_compaction():
-    assert "compaction" in DEFAULT_CONTINUE_PROMPT.lower()
+def test_default_continue_prompt_not_used_for_compact():
+    """Continue text is for timeout/error only — must not mention compaction."""
+    assert "timeout" in DEFAULT_CONTINUE_PROMPT.lower()
+    assert "compaction" not in DEFAULT_CONTINUE_PROMPT.lower()
 
 
 def test_format_serve_error_empty_read_timeout():
@@ -714,8 +724,12 @@ def test_format_serve_error_http_status_includes_body():
 
 
 @pytest.mark.asyncio
-async def test_e2e_serve_http_timeout_aborts_and_marks_timed_out():
-    """ReadTimeout → timed_out, abort session, one readable error line."""
+async def test_e2e_serve_http_timeout_marks_timed_out_without_abort():
+    """Idle ReadTimeout → timed_out so error retry may Continue; do not abort.
+
+    Aborting a timed-out idle session then injecting Continue made chat messy
+    when the real cause was auto-compact. Compact/busy timeouts wait instead.
+    """
 
     class TimeoutOnce(FakeServeBackend):
         async def send_message(self, session_id, text, **kwargs):
@@ -726,17 +740,18 @@ async def test_e2e_serve_http_timeout_aborts_and_marks_timed_out():
     backend.session_id = "ses_timeout_busy"
     client = FakeServeClient(backend)
     client.timeout_seconds = 30.0
-    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    orch = ServeOrchestrator(
+        client=client, max_compact_continues=2, compact_wait_seconds=0.4
+    )
     result = await orch.run(prompt="do work", title="KAN-TO")
 
     assert result.timed_out is True
     assert result.returncode == -1
-    assert result.incomplete is True
-    assert backend.aborted is True
+    assert result.incomplete is False
+    assert backend.aborted is False
     assert result.stderr.count("[serve] message failed:") == 1
     assert "ReadTimeout" in (result.stderr or "")
     assert "30s" in (result.stderr or "")
-    assert "aborted session" in (result.stderr or "")
     out = result.to_agent_result("task_to")
     assert out.get("timed_out") is True
     assert out.get("opencode_session_id") == "ses_timeout_busy"

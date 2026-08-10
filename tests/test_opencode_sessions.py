@@ -9,8 +9,12 @@ import pytest
 
 from src.opencode_sessions import (
     assess_session_completeness,
+    chat_display_role,
     compact_output_indicates_premature_exit,
+    compact_related_reasons,
     detect_compact_in_output,
+    reasons_are_compact_only,
+    strip_compact_reasons,
     find_sessions_for_issue,
     lookup_session_directory,
     path_contains_issue_key,
@@ -611,13 +615,42 @@ def test_assess_sqlite_compact_then_stop_sequence_is_premature(tmp_path: Path):
     assert any("compact-then-stop" in x for x in r["reasons"])
 
 
+def test_strip_compact_reasons_clears_compact_only():
+    r = {
+        "complete": False,
+        "premature": True,
+        "reasons": [
+            "last assistant followed a compaction message (compact-then-stop)",
+            "CLI output indicates compaction near end of run",
+        ],
+    }
+    assert reasons_are_compact_only(r["reasons"]) is True
+    strip_compact_reasons(r)
+    assert r["complete"] is True
+    assert r["premature"] is False
+    assert r["reasons"] == []
+
+
+def test_strip_compact_reasons_keeps_open_todos():
+    r = {
+        "complete": False,
+        "premature": True,
+        "reasons": [
+            "open todos: 1 pending, 0 in_progress",
+            "last assistant followed a compaction message (compact-then-stop)",
+        ],
+    }
+    strip_compact_reasons(r)
+    assert r["premature"] is True
+    assert r["reasons"] == ["open todos: 1 pending, 0 in_progress"]
+
+
 def test_continue_prompt_echo_is_not_premature_compact():
     """Resume prompt mentions 'compaction' but a finished answer must succeed."""
     out = (
         DEFAULT_CONTINUE_PROMPT
         + "\nImplemented the feature and committed on the work branch.\n"
     )
-    assert detect_compact_in_output(out) is True  # word appears
     assert compact_output_indicates_premature_exit(out) is False
     r = assess_session_completeness(
         None,
@@ -686,6 +719,83 @@ def test_assess_compact_then_stop_message_sequence_is_premature():
     )
     assert r["premature"] is True, r
     assert any("compact-then-stop" in x for x in r["reasons"])
+
+
+def test_chat_display_role_compaction_is_not_user():
+    assert (
+        chat_display_role(
+            "user",
+            parts=[{"type": "compaction", "auto": True}],
+        )
+        == "compaction"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {"type": "compaction", "auto": True},
+                {"type": "text", "text": "Session compacted to free context."},
+            ],
+        )
+        == "compaction"
+    )
+    assert (
+        chat_display_role(
+            "assistant",
+            agent="compaction",
+            summary=True,
+            parts=[{"type": "text", "text": "## Compaction summary"}],
+        )
+        == "compaction"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "Continue the previous OpenCode session. The last turn stopped early",
+                }
+            ],
+        )
+        == "skip"
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": "implement KAN-1"}])
+        == "user"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "[restore checkpointed session agent configuration after compaction]\n<!-- OMO_INTERNAL_INITIATOR -->",
+                }
+            ],
+        )
+        == "skip"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+                }
+            ],
+        )
+        == "skip"
+    )
+
+
+def test_compact_related_reasons_detects_markers():
+    assert compact_related_reasons(["compaction summary"]) is True
+    assert compact_related_reasons(["open todos: 1 pending, 0 in_progress"]) is False
+    assert compact_related_reasons(
+        ["last assistant followed a compaction message (compact-then-stop)"]
+    )
 
 
 def test_live_incomplete_session_if_present():

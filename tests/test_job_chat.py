@@ -196,6 +196,69 @@ def test_list_session_chat_missing_db(tmp_path: Path):
     assert chat["error"]
 
 
+def test_list_session_chat_compaction_is_not_user_role(tmp_path: Path):
+    """OpenCode stores compact as role=user; dashboard must not show You."""
+    db = _chat_db(
+        tmp_path / "compact.db",
+        messages=[
+            (
+                "msg_u",
+                {"role": "user"},
+                [{"type": "text", "text": "Please implement KAN-1"}],
+            ),
+            (
+                "msg_c",
+                {"role": "user"},
+                [{"type": "compaction", "auto": True}],
+            ),
+            (
+                "msg_sum",
+                {"role": "assistant", "agent": "compaction", "summary": True},
+                [{"type": "text", "text": "## Compaction summary\nWork so far"}],
+            ),
+            (
+                "msg_cont",
+                {"role": "user"},
+                [
+                    {
+                        "type": "text",
+                        "text": "Continue the previous OpenCode session. The last turn stopped early (timeout or error).",
+                    }
+                ],
+            ),
+            (
+                "msg_restore",
+                {"role": "user"},
+                [
+                    {
+                        "type": "text",
+                        "text": "[restore checkpointed session agent configuration after compaction]\n<!-- OMO_INTERNAL_INITIATOR -->\n<!-- OMO_INTERNAL_NOREPLY -->",
+                    }
+                ],
+            ),
+            (
+                "msg_oc_cont",
+                {"role": "user"},
+                [
+                    {
+                        "type": "text",
+                        "text": "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+                    }
+                ],
+            ),
+            (
+                "msg_a",
+                {"role": "assistant", "finish": "stop", "agent": "Atlas"},
+                [{"type": "text", "text": "Done."}],
+            ),
+        ],
+    )
+    chat = list_session_chat("ses_chat1", db_path=db)
+    roles = [(m["role"], (m["parts"][0].get("text") or "")[:40]) for m in chat["messages"]]
+    assert [r[0] for r in roles] == ["user", "compaction", "compaction", "assistant"], roles
+    assert all(m["role"] != "user" or "Continue the previous" not in (m["parts"][0].get("text") or "") for m in chat["messages"])
+
+
 def test_collect_job_chat_discovers_session_by_working_directory(tmp_path: Path):
     clone = tmp_path / "clone"
     clone.mkdir()

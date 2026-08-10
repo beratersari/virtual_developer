@@ -57,4 +57,74 @@ assert(groups[0].role === 'user' && groups[1].role === 'assistant' && groups[2].
 assert(groups[1].parts.filter((p) => p.type === 'reasoning').length === 2, 'thinking stays in order not dumped first')
 assert(groups[1].parts.map((p) => p.type).join(',') === 'reasoning,tool,reasoning,text', 'assistant turn chronological')
 
+const compactMsgs: ChatMessage[] = [
+  {
+    id: 'c1',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [{ id: 'cp', type: 'compaction', auto: true, text: 'Session compacted' }],
+  },
+  {
+    id: 'c2',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [
+      { id: 'cp2', type: 'compaction', auto: true },
+      { id: 'ct2', type: 'text', text: 'Session compacted to free context.' },
+    ],
+  },
+  {
+    id: 'c3',
+    session_id: 'ses_a',
+    role: 'assistant',
+    agent: 'compaction',
+    summary: true,
+    parts: [{ id: 'sum', type: 'text', text: '## Compaction summary\nWork so far…' }],
+  },
+  {
+    id: 'cont',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [
+      {
+        id: 'ct',
+        type: 'text',
+        text: 'Continue the previous OpenCode session. The last turn stopped early',
+      },
+    ],
+  },
+  {
+    id: 'restore',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [
+      {
+        id: 'rst',
+        type: 'text',
+        text: '[restore checkpointed session agent configuration after compaction]\n<!-- OMO_INTERNAL_INITIATOR -->',
+      },
+    ],
+  },
+  {
+    id: 'occont',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [
+      {
+        id: 'occ',
+        type: 'text',
+        text: 'Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.',
+      },
+    ],
+  },
+  { id: 'u3', session_id: 'ses_a', role: 'user', parts: [{ id: 'u3p', type: 'text', text: 'real ask' }] },
+]
+const compactGroups = groupChatMessages(compactMsgs)
+assert(compactGroups.length === 4, `compact groups ${compactGroups.length}`)
+assert(compactGroups.every((g) => g.role !== 'user' || g.parts[0].text === 'real ask'), 'compact is not You')
+assert(compactGroups[0].role === 'compaction', 'compact part is not You')
+assert(compactGroups[1].role === 'compaction', 'compact+text is not You')
+assert(compactGroups[2].role === 'compaction', 'summary assistant is compact chip')
+assert(compactGroups[3].role === 'user' && compactGroups[3].parts[0].text === 'real ask', 'continue prompt hidden')
+
 console.log('chatParts.test.ts ok')

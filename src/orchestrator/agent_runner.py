@@ -477,21 +477,46 @@ class AgentRunner:
                 output_text=combined_output,
             )
             if incomplete_meta and incomplete_meta.get("premature"):
-                reasons = incomplete_meta.get("reasons") or ["incomplete session"]
-                reason_txt = "; ".join(str(r) for r in reasons)
-                logger.warning(
-                    f"Agent exited 0 but session looks incomplete: "
-                    f"task_id={task.task_id}, session={session_id}, "
-                    f"reasons={reason_txt}"
+                from src.opencode_sessions import (
+                    reasons_are_compact_only,
+                    strip_compact_reasons,
                 )
-                # Non-zero so run_agent_with_retry / processor fail paths run.
-                returncode = 2
-                note = (
-                    f"[INCOMPLETE] OpenCode exited 0 but the session is not "
-                    f"finished ({reason_txt}). Often caused by auto-compaction "
-                    f"stopping `opencode run` without continuing the task."
-                )
-                stderr_text = (stderr_text + "\n" + note).strip()
+
+                reasons = list(incomplete_meta.get("reasons") or [])
+                if reasons_are_compact_only(reasons) or any(
+                    "compact" in str(r).lower() for r in reasons
+                ):
+                    # Auto-compact is still finishing. Wait; do not POST Continue.
+                    logger.warning(
+                        f"Agent exited 0 during compact; waiting: "
+                        f"task_id={task.task_id}, session={session_id}"
+                    )
+                    incomplete_meta = await self._wait_out_cli_compact(
+                        session_id=session_id,
+                        output_text=combined_output,
+                    )
+                    reasons = list(
+                        (incomplete_meta or {}).get("reasons") or reasons
+                    )
+                    if incomplete_meta:
+                        strip_compact_reasons(incomplete_meta)
+                        reasons = list(incomplete_meta.get("reasons") or [])
+                if incomplete_meta and incomplete_meta.get("premature"):
+                    reason_txt = "; ".join(str(r) for r in reasons) or "incomplete"
+                    logger.warning(
+                        f"Agent exited 0 but session looks incomplete: "
+                        f"task_id={task.task_id}, session={session_id}, "
+                        f"reasons={reason_txt}"
+                    )
+                    returncode = 2
+                    note = (
+                        f"[INCOMPLETE] OpenCode exited 0 but the session is not "
+                        f"finished ({reason_txt})."
+                    )
+                    stderr_text = (stderr_text + "\n" + note).strip()
+                else:
+                    incomplete_meta = incomplete_meta or {}
+                    incomplete_meta["premature"] = False
 
         elapsed = asyncio.get_event_loop().time() - start_time
         result = {
@@ -590,6 +615,13 @@ class AgentRunner:
             )
             return
         task.session_id = sid
+        if why == "incomplete_session":
+            # Compact is waited out in run_agent. Do not inject a Continue
+            # user message — it shows up in chat as if the operator typed it.
+            logger.warning(
+                f"Retry after {why}: resume session {sid} without Continue prompt"
+            )
+            return
         from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
 
         prev = (task.prompt or "").lstrip()
@@ -618,6 +650,53 @@ class AgentRunner:
             logger.debug(f"Session completeness assessment failed: {e}")
             return None
 
+    async def _wait_out_cli_compact(
+        self,
+        *,
+        session_id: Optional[str],
+        output_text: str,
+        wait_seconds: float = 2.0,
+        poll_seconds: float = 0.4,
+    ) -> Optional[Dict[str, Any]]:
+        """Re-read session DB after auto-compact. No new user message."""
+        from src.opencode_sessions import (
+            reasons_are_compact_only,
+            strip_compact_reasons,
+        )
+
+        last = self._assess_incomplete_run(
+            session_id=session_id, output_text=output_text
+        )
+        if last:
+            compact_only = reasons_are_compact_only(last.get("reasons"))
+            strip_compact_reasons(last)
+            if not last.get("premature"):
+                return last
+            if not compact_only:
+                return last
+        deadline = time.time() + max(0.2, float(wait_seconds))
+        while time.time() < deadline:
+            await asyncio.sleep(max(0.05, float(poll_seconds)))
+            last = self._assess_incomplete_run(
+                session_id=session_id, output_text=""
+            )
+            if not last:
+                break
+            if reasons_are_compact_only(last.get("reasons")):
+                strip_compact_reasons(last)
+            if not last.get("premature"):
+                logger.info(
+                    f"Session {session_id} complete after compact wait"
+                )
+                break
+            if not reasons_are_compact_only(last.get("reasons")):
+                # Open todos / unfinished — auto-compact will not clear these
+                # by waiting; do not inject Continue either.
+                break
+        if last:
+            strip_compact_reasons(last)
+        return last
+
     async def _run_agent_via_serve(
         self,
         task: AgentTask,
@@ -630,9 +709,10 @@ class AgentRunner:
         timeout_seconds: int = 1800,
         start_time: float = 0.0,
     ) -> Dict[str, Any]:
-        """Drive OpenCode over HTTP serve with multi-compact continue.
+        """Drive OpenCode over HTTP serve and wait out auto-compact.
 
         Requires a running ``opencode serve`` at ``settings.opencode_serve_url``.
+        Compaction is never resumed by posting a user Continue prompt.
         """
         from src.opencode_serve import OpenCodeServeClient, ServeOrchestrator
 
@@ -690,6 +770,10 @@ class AgentRunner:
         orch = ServeOrchestrator(
             client=client,
             max_compact_continues=max_cont,
+            # Cover the rest of the job: auto-compact then auto-resume can
+            # take as long as the original turn. Never inject Continue.
+            compact_wait_seconds=float(timeout_seconds) or 180.0,
+            compact_poll_seconds=2.0,
         )
         turn = None
         try:
@@ -1467,27 +1551,46 @@ class AgentRunner:
             retry_reason = ""
 
             if result.get("timed_out"):
-                if retry_on_timeout and timeout_used < effective_max_retries:
+                from src.opencode_sessions import compact_related_reasons
+
+                to_reasons = list(result.get("incomplete_reasons") or [])
+                if compact_related_reasons(to_reasons):
+                    logger.warning(
+                        f"Timeout during compact wait — not sending Continue: "
+                        f"task_id={task.task_id} reasons={to_reasons}"
+                    )
+                elif retry_on_timeout and timeout_used < effective_max_retries:
                     should_retry = True
                     retry_reason = "timeout"
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
             elif result.get("incomplete"):
-                # Compact-then-exit-0 is not a crash. Use the incomplete
-                # budget when set; otherwise the shared max_retries cap
-                # (legacy tests / explicit max_retries=N).
-                incomplete_budget = (
-                    incomplete_cap
-                    if incomplete_cap > 0
-                    else effective_max_retries
-                )
-                if incomplete_used < incomplete_budget:
-                    should_retry = True
-                    retry_reason = "incomplete_session"
+                # Compact/incomplete was already waited out inside run_agent.
+                # Another prompt (Continue or the original BUILD text) shows
+                # up as a user chat turn and races OpenCode auto-compact.
+                from src.opencode_sessions import compact_related_reasons
+
+                reasons = list(result.get("incomplete_reasons") or [])
+                if compact_related_reasons(reasons) or any(
+                    "compact" in str(r).lower() for r in reasons
+                ):
                     logger.warning(
-                        f"Incomplete session on attempt {attempt + 1}: "
-                        f"task_id={task.task_id} "
-                        f"(compact resume {incomplete_used + 1}/{incomplete_budget})"
+                        f"Incomplete after compact wait — not sending another "
+                        f"user message: task_id={task.task_id} reasons={reasons}"
                     )
+                else:
+                    incomplete_budget = (
+                        incomplete_cap
+                        if incomplete_cap > 0
+                        else effective_max_retries
+                    )
+                    if incomplete_used < incomplete_budget:
+                        should_retry = True
+                        retry_reason = "incomplete_session"
+                        logger.warning(
+                            f"Incomplete session on attempt {attempt + 1}: "
+                            f"task_id={task.task_id} "
+                            f"(resume {incomplete_used + 1}/{incomplete_budget})"
+                        )
             elif retry_on_error and error_used < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"

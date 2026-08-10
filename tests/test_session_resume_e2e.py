@@ -1,4 +1,6 @@
-"""E2E: retry after timeout / error / compact resumes the same OpenCode session.
+"""E2E: retry after timeout / error resumes the same OpenCode session.
+
+Compact is waited out in-session — no extra user prompt.
 
 Covers the operator path ``run_agent_with_retry`` → real ``run_agent`` (CLI
 subprocess argv, or serve FakeServe backend), not a stub that skips
@@ -7,11 +9,11 @@ subprocess argv, or serve FakeServe backend), not a stub that skips
 Conditions:
   1. timed_out + ses_id     → second CLI has ``--session`` + Continue prompt
   2. returncode 1 + ses_id  → same
-  3. compact exit-0 + ses_id → same (incomplete)
+  3. compact exit-0 + ses_id → wait/strip; do not send Continue
   4. error without ses_id   → cold retry (no ``--session``)
-  5. serve compact / HTTP timeout / send error: create_session once; retry
+  5. serve HTTP timeout / send error: create_session once; retry
      reuses ses_ and Continue text
-  6. processor execution: timeout / error / incomplete keep the same session
+  6. processor execution: timeout / error keep the same session; compact does not
 
 Run::
 
@@ -167,13 +169,12 @@ def _cli_settings(s, *, timeout: float = 30.0):
     [
         ("timeout", lambda: _TimeoutAfterSessionProc("ses_e2e_to"), "ses_e2e_to", 0.2),
         ("error", lambda: _ErrorProc("ses_e2e_err"), "ses_e2e_err", None),
-        ("compact", lambda: _CompactProc("ses_e2e_cmp"), "ses_e2e_cmp", None),
     ],
 )
 async def test_e2e_cli_retry_resumes_session(
     runner, tmp_path, monkeypatch, label, first_factory, expect_session, timeout_s
 ):
-    """Timeout / error / compact → second argv has --session + Continue prompt."""
+    """Timeout / error → second argv has --session + Continue prompt."""
     monkeypatch.chdir(tmp_path)
     cmds: List[List[str]] = []
 
@@ -210,6 +211,38 @@ async def test_e2e_cli_retry_resumes_session(
     assert result["returncode"] == 0
     assert result["retry_info"]["retried"] is True
     assert result.get("opencode_session_id") == expect_session
+
+
+@pytest.mark.asyncio
+async def test_e2e_cli_compact_does_not_inject_continue(
+    runner, tmp_path, monkeypatch
+):
+    """Compact-then-exit-0: wait/strip auto-compact; do not send Continue."""
+    monkeypatch.chdir(tmp_path)
+    cmds: List[List[str]] = []
+
+    async def spawn(*cmd, **kwargs):
+        cmds.append([str(c) for c in cmd])
+        return _CompactProc("ses_e2e_cmp")
+
+    with patch("src.orchestrator.agent_runner.settings") as s:
+        _cli_settings(s, timeout=30.0)
+        with patch("asyncio.create_subprocess_exec", new=spawn):
+            task = AgentTask(
+                description="e2e compact",
+                prompt="ORIGINAL BUILD PROMPT do the work",
+                agent="atlas",
+                issue_key="E2E-COMPACT",
+            )
+            result = await runner.run_agent_with_retry(task, max_retries=1)
+
+    assert len(cmds) == 1, cmds
+    assert "--session" not in cmds[0]
+    assert "ORIGINAL BUILD PROMPT" in cmds[0][-1]
+    assert not cmds[0][-1].lstrip().lower().startswith("continue")
+    assert result["returncode"] == 0
+    assert result["retry_info"]["retried"] is False
+    assert result.get("opencode_session_id") == "ses_e2e_cmp"
 
 
 @pytest.mark.asyncio
@@ -290,12 +323,10 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
             )
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
-    assert create_calls["n"] == 1, "retry must not create a second session"
-    assert len(backend.prompts) >= 2
-    assert backend.prompts[0] == "ORIGINAL SERVE BUILD PROMPT"
-    assert backend.prompts[1].lstrip().lower().startswith("continue")
+    assert create_calls["n"] == 1, "must not create a second session"
+    assert backend.prompts == ["ORIGINAL SERVE BUILD PROMPT"]
     assert result["returncode"] == 0
-    assert result["retry_info"]["retried"] is True
+    assert result["retry_info"]["retried"] is False
     assert (result.get("opencode_session_id") or "").startswith("ses_")
 
 
@@ -411,17 +442,6 @@ def _params(repo: str, key: str) -> str:
             {"returncode": 1, "stderr": "agent boom"},
             "error",
         ),
-        (
-            "compact",
-            "ses_prc_cmp",
-            {
-                "returncode": 2,
-                "stderr": "[INCOMPLETE] compact-then-stop",
-                "incomplete": True,
-                "incomplete_reasons": ["compaction occurred this turn"],
-            },
-            "incomplete",
-        ),
     ],
 )
 async def test_e2e_processor_retry_keeps_session(
@@ -522,3 +542,79 @@ async def test_e2e_processor_retry_keeps_session(
             a.get("reason") for a in job["retry_attempts"] if isinstance(a, dict)
         ]
         assert any(expect_reason in str(r) for r in reasons), reasons
+
+
+@pytest.mark.asyncio
+async def test_e2e_processor_compact_does_not_send_another_prompt(
+    tmp_path,
+    monkeypatch,
+    fake_jira,
+    reporter,
+    isolate_jira_agent_artifacts,
+):
+    """Compact incomplete: wait already happened; do not POST another user turn."""
+    monkeypatch.chdir(tmp_path)
+    key = "E2E-PRC-CMP"
+    sid = "ses_prc_cmp"
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state(
+        key,
+        "compact no extra prompt",
+        _params("https://gitlab.example.com/g/r.git", key),
+    )
+    sm.update_state(key, timeout_seconds=30, max_retries=3)
+
+    mock_git = MagicMock()
+    mock_git.work_branch = f"feature/{key}"
+    mock_git.target_branch = "develop"
+    mock_git.get_working_directory.return_value = tmp_path
+    mock_git.ensure_on_work_branch.return_value = True
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+    proc._mark_jira_in_progress = MagicMock(return_value=True)
+    proc._push_and_create_mr = AsyncMock(return_value=True)
+    proc._assert_build_delivery = MagicMock(return_value=None)
+    proc._snapshot_delivery_baseline = MagicMock()
+
+    real_runner = AgentRunner(working_directory=tmp_path)
+    seen: List[tuple] = []
+
+    async def fake_run(task, **kwargs):
+        seen.append((task.session_id, (task.prompt or "")[:80]))
+        return {
+            "task_id": task.task_id,
+            "returncode": 2,
+            "stdout": f"Session: {sid}\n",
+            "stderr": "[INCOMPLETE] compact-then-stop",
+            "session_file": str(tmp_path / "t1.log"),
+            "opencode_session_id": sid,
+            "progress": 5,
+            "incomplete": True,
+            "incomplete_reasons": ["compaction occurred this turn"],
+        }
+
+    monkeypatch.setattr(real_runner, "run_agent", fake_run)
+
+    async def fake_prepare(state):
+        proc._contexts[state.issue_key] = {"git": mock_git, "runner": real_runner}
+        return mock_git
+
+    monkeypatch.setattr(proc, "_prepare_git_workspace", fake_prepare)
+
+    live = MagicMock()
+    live.agent_task_timeout_seconds = 30
+    live.agent_task_max_retries = 3
+    live.default_agent = "atlas"
+    monkeypatch.setattr("src.config.get_settings", lambda: live)
+
+    with patch("src.orchestrator.agent_runner.settings") as s:
+        _cli_settings(s)
+        await proc._start_execution_workflow(sm.get_state(key))
+
+    assert len(seen) == 1, seen
+    assert seen[0][0] is None
+    assert "continue" not in seen[0][1].lower()

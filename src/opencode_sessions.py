@@ -464,7 +464,8 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
             return None
     if not isinstance(raw, dict):
         return None
-    ptype = str(raw.get("type") or "unknown")
+    ptype_raw = str(raw.get("type") or "unknown")
+    ptype = ptype_raw.lower()
     time_obj = raw.get("time") if isinstance(raw.get("time"), dict) else {}
     out: Dict[str, Any] = {
         "id": part_id or raw.get("id") or "",
@@ -499,9 +500,10 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
         output, trunc = _cap_text(state.get("output") or raw.get("output") or "")
         out["output"] = output
         out["truncated"] = trunc
-    elif ptype == "compaction":
+    elif ptype in {"compaction", "compact"}:
+        out["type"] = "compaction"
         out["text"] = "Session compacted"
-        out["auto"] = bool(raw.get("auto"))
+        out["auto"] = bool(raw.get("auto", True) if "auto" in raw else True)
     elif ptype in {"step-start", "step-finish"}:
         out["reason"] = raw.get("reason") or ""
     else:
@@ -510,6 +512,77 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
             out["text"] = text
             out["truncated"] = trunc
     return out
+
+
+_CONTINUE_PROMPT_PREFIX = "continue the previous opencode session"
+_OPENCODE_AUTO_CONTINUE_PREFIX = "continue if you have next steps"
+_COMPACT_USER_TEXT_RE = re.compile(
+    r"(?:"
+    r"session\s+compacted"
+    r"|compacting\s+session"
+    r"|compaction\s+summary"
+    r"|context\s+(?:was\s+)?compacted"
+    r"|auto[- ]?compact(?:ed|ing)?"
+    r")",
+    re.IGNORECASE,
+)
+_INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"omo_internal"
+    r"|restore\s+checkpointed\s+session"
+    r"|checkpointed\s+session\s+agent\s+configuration"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_orchestrator_continue_text(text: str) -> bool:
+    return (text or "").strip().lower().startswith(_CONTINUE_PROMPT_PREFIX)
+
+
+def is_internal_compact_followup_text(text: str) -> bool:
+    """True for OpenCode/oh-my-openagent post-compact synthetic user turns."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if low.startswith(_OPENCODE_AUTO_CONTINUE_PREFIX):
+        return True
+    return bool(_INTERNAL_COMPACT_FOLLOWUP_RE.search(t))
+
+
+def chat_display_role(
+    role: Any,
+    *,
+    agent: Any = None,
+    summary: Any = None,
+    parts: Optional[List[Any]] = None,
+) -> str:
+    """Map an OpenCode message to a dashboard role.
+
+    Compaction is stored as ``role=user`` in the OpenCode DB. Those rows must
+    not render as "You". Orchestrator Continue prompts are skipped.
+    """
+    items = [p for p in (parts or []) if isinstance(p, dict)]
+    types = {(p.get("type") or "").lower() for p in items}
+    if "compaction" in types or "compact" in types:
+        return "compaction"
+    if str(agent or "").strip().lower() == "compaction":
+        return "compaction"
+    if _is_compaction_summary(summary):
+        return "compaction"
+    text = "\n".join(
+        str(p.get("text") or "")
+        for p in items
+        if (p.get("type") or "text").lower() == "text"
+    )
+    if is_orchestrator_continue_text(text) or is_internal_compact_followup_text(text):
+        return "skip"
+    raw = str(role or "unknown").strip().lower() or "unknown"
+    if raw == "user" and text.strip() and len(text.strip()) < 400:
+        if _COMPACT_USER_TEXT_RE.search(text):
+            return "compaction"
+    return raw
 
 
 def list_session_chat(
@@ -609,6 +682,10 @@ def list_session_chat(
             finish = data.get("finish")
             if finish is None:
                 finish = info.get("finish")
+            summary = data.get("summary")
+            if summary is None:
+                summary = info.get("summary")
+            agent = data.get("agent") or info.get("agent") or data.get("mode")
             time_obj = data.get("time") if isinstance(data.get("time"), dict) else {}
             created_at = _epoch_to_iso(
                 row["time_created"] or time_obj.get("created") or info.get("time")
@@ -621,13 +698,20 @@ def list_session_chat(
                         parsed = _normalize_part(ep, part_id=f"{row['id']}:p{i}")
                         if parsed:
                             parts.append(parsed)
+            display_role = chat_display_role(
+                role, agent=agent, summary=summary, parts=parts
+            )
+            if display_role == "skip":
+                continue
             messages.append(
                 {
                     "id": row["id"],
                     "session_id": sid,
-                    "role": str(role),
+                    "role": display_role,
+                    "raw_role": str(role),
                     "finish": finish,
-                    "agent": data.get("agent") or info.get("agent") or data.get("mode"),
+                    "summary": bool(_is_compaction_summary(summary)),
+                    "agent": agent,
                     "created_at": created_at,
                     "parts": parts,
                 }
@@ -674,6 +758,55 @@ def detect_compact_in_output(text: str) -> bool:
     if not text:
         return False
     return bool(_COMPACT_OUTPUT_RE.search(text))
+
+
+_COMPACT_REASON_MARKERS = (
+    "compact-then-stop",
+    "compaction summary",
+    "compaction user part",
+    "compaction near end",
+    "compaction occurred this turn",
+    "cli output indicates compaction",
+)
+
+
+def is_compact_reason(reason: Any) -> bool:
+    """True when an assessment reason is only about auto-compaction."""
+    s = str(reason or "").lower()
+    return any(m in s for m in _COMPACT_REASON_MARKERS)
+
+
+def reasons_are_compact_only(reasons: Optional[List[Any]]) -> bool:
+    """True when every incompleteness reason is a compact/idle marker."""
+    items = [r for r in (reasons or []) if str(r).strip()]
+    if not items:
+        return False
+    return all(is_compact_reason(r) for r in items)
+
+
+def compact_related_reasons(reasons: Optional[List[Any]]) -> bool:
+    """True when any reason is about auto-compaction (not a hard crash)."""
+    for reason in reasons or []:
+        if is_compact_reason(reason) or "compact" in str(reason or "").lower():
+            return True
+    return False
+
+
+def strip_compact_reasons(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop compact-then-stop flags after we waited for auto-compact to finish.
+
+    OpenCode already auto-compacts; leftover compact markers must not keep
+    the orchestrator injecting Continue user messages.
+    """
+    kept = [r for r in (result.get("reasons") or []) if not is_compact_reason(r)]
+    result["reasons"] = kept
+    if kept:
+        result["complete"] = False
+        result["premature"] = True
+    else:
+        result["complete"] = True
+        result["premature"] = False
+    return result
 
 
 def compact_output_indicates_premature_exit(text: str, *, last_lines: int = 12) -> bool:

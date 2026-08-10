@@ -93,7 +93,9 @@ def test_retry_missing_db_row_keeps_session_for_same_job(tmp_path):
             stdout="partial",
         )
     assert task.session_id == "ses_new"
-    assert (task.prompt or "").lower().startswith("continue")
+    # Compact/incomplete resume must not inject a Continue user message
+    assert not (task.prompt or "").lower().startswith("continue")
+    assert task.prompt == "ORIGINAL"
 
 
 def test_retry_db_error_keeps_session(tmp_path):

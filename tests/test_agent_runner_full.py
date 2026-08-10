@@ -258,13 +258,12 @@ async def test_run_agent_exit0_after_compacting_treated_as_failure(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_exit0_compact_cli_without_open_todos_still_fails(
+async def test_run_agent_exit0_compact_cli_without_open_todos_is_success(
     runner, tmp_path, monkeypatch
 ):
-    """CLI mode: compact in transcript + finish=stop + no todos ≠ success.
+    """CLI: compact in transcript + no open todos → wait/strip, treat as success.
 
-    Do not mock ``_assess_incomplete_run`` — that was the production hole:
-    empty todos + last finish=stop bypassed the compact-output signal.
+    Auto-compact is OpenCode's job. We must not inject Continue or fail the run.
     """
     monkeypatch.chdir(tmp_path)
 
@@ -304,43 +303,33 @@ async def test_run_agent_exit0_compact_cli_without_open_todos_still_fails(
             )
             result = await runner.run_agent(task)
 
-    assert result["returncode"] == 2
-    assert result.get("incomplete") is True
-    assert "INCOMPLETE" in (result.get("stderr") or "")
+    assert result["returncode"] == 0
+    assert not result.get("incomplete")
 
 
 @pytest.mark.asyncio
-async def test_run_agent_with_retry_retries_incomplete_compact_exit(
+async def test_run_agent_with_retry_does_not_resend_after_compact(
     runner, tmp_path, monkeypatch
 ):
-    """Incomplete compact exit should resume the same OpenCode session.
+    """Compact incomplete must not send another user prompt (Continue or BUILD).
 
-    CLI already supports ``opencode run --session``. A cold retry (new session +
-    original BUILD prompt) throws away compacted history — same idea as serve.
+    OpenCode auto-compacts in-session. A second POST pollutes chat and races
+    the built-in compact loop.
     """
     monkeypatch.chdir(tmp_path)
     seen: list[tuple[str | None, str, str]] = []
 
     async def fake_run(task, **kwargs):
         seen.append((task.session_id, task.prompt or "", task.task_id))
-        if len(seen) == 1:
-            return {
-                "task_id": task.task_id,
-                "returncode": 2,
-                "stdout": "Compacting...",
-                "stderr": "[INCOMPLETE] compact stop",
-                "session_file": str(tmp_path / "s1.log"),
-                "opencode_session_id": "ses_c1",
-                "incomplete": True,
-                "incomplete_reasons": ["compaction summary"],
-            }
         return {
             "task_id": task.task_id,
-            "returncode": 0,
-            "stdout": "done",
-            "stderr": "",
-            "session_file": str(tmp_path / "s2.log"),
+            "returncode": 2,
+            "stdout": "Compacting...",
+            "stderr": "[INCOMPLETE] compact stop",
+            "session_file": str(tmp_path / "s1.log"),
             "opencode_session_id": "ses_c1",
+            "incomplete": True,
+            "incomplete_reasons": ["compaction summary"],
         }
 
     with patch.object(runner, "run_agent", side_effect=fake_run):
@@ -349,58 +338,37 @@ async def test_run_agent_with_retry_retries_incomplete_compact_exit(
             s.agent_task_retry_delay_seconds = 0
             s.agent_task_retry_backoff_multiplier = 1
             s.agent_task_retry_on_timeout = True
-            s.agent_task_retry_on_error = False  # resume must not depend on this
+            s.agent_task_retry_on_error = False
             task = AgentTask(description="d", prompt="full BUILD prompt", agent="a")
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
-    assert len(seen) == 2
+    assert len(seen) == 1
     assert seen[0][0] is None
     assert seen[0][1] == "full BUILD prompt"
-    assert seen[1][0] == "ses_c1"
-    assert seen[1][1].lstrip().lower().startswith("continue")
-    cmd = runner._build_command(
-        AgentTask(
-            description="d",
-            prompt=seen[1][1],
-            agent="a",
-            session_id=seen[1][0],
-        ),
-        tmp_path / "x.log",
-    )
-    assert "--session" in cmd
-    assert "ses_c1" in cmd
-    assert result["returncode"] == 0
-    assert result["retry_info"]["retried"] is True
+    assert result["returncode"] == 2
+    assert result.get("incomplete") is True
+    assert not result["retry_info"]["retried"]
 
 
 @pytest.mark.asyncio
-async def test_run_agent_with_retry_twenty_incomplete_compacts(
+async def test_run_agent_with_retry_does_not_loop_twenty_compact_prompts(
     runner, tmp_path, monkeypatch
 ):
-    """20 compact-then-stop cycles must resume, not exhaust generic max_retries=3."""
+    """A 20-compact job must not send 20 extra user messages."""
     monkeypatch.chdir(tmp_path)
     calls = {"n": 0}
 
     async def fake_run(task, **kwargs):
         calls["n"] += 1
-        if calls["n"] <= 20:
-            return {
-                "task_id": task.task_id,
-                "returncode": 2,
-                "stdout": f"Compacting #{calls['n']}",
-                "stderr": "[INCOMPLETE] compact stop",
-                "session_file": str(tmp_path / f"s{calls['n']}.log"),
-                "opencode_session_id": "ses_c20",
-                "incomplete": True,
-                "incomplete_reasons": ["compaction summary"],
-            }
         return {
             "task_id": task.task_id,
-            "returncode": 0,
-            "stdout": "done after 20 compacts",
-            "stderr": "",
-            "session_file": str(tmp_path / "s_ok.log"),
+            "returncode": 2,
+            "stdout": f"Compacting #{calls['n']}",
+            "stderr": "[INCOMPLETE] compact stop",
+            "session_file": str(tmp_path / f"s{calls['n']}.log"),
             "opencode_session_id": "ses_c20",
+            "incomplete": True,
+            "incomplete_reasons": ["compaction summary"],
         }
 
     with patch.object(runner, "run_agent", side_effect=fake_run):
@@ -418,11 +386,11 @@ async def test_run_agent_with_retry_twenty_incomplete_compacts(
                 max_incomplete_retries=256,
             )
 
-    assert calls["n"] == 21
-    assert result["returncode"] == 0
-    assert result["retry_info"]["retried"] is True
-    assert result["retry_info"]["incomplete_retries_used"] == 20
-    assert result.get("opencode_session_id") == "ses_c20"
+    assert calls["n"] == 1
+    assert result["returncode"] == 2
+    assert result.get("incomplete") is True
+    assert not result["retry_info"]["retried"]
+    assert result["retry_info"]["incomplete_retries_used"] == 0
 
 
 @pytest.mark.asyncio

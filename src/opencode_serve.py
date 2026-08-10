@@ -6,14 +6,15 @@ Why this exists
 without continuing the agent (upstream #13946). Virtual Developer then marked
 jobs completed while sessions still had open todos.
 
-``opencode serve`` exposes a long-lived API + event bus. The control loop here:
+``opencode serve`` exposes a long-lived API. The control loop here:
 
 1. Create (or resume) a session
-2. ``POST /session/{id}/message`` with the task prompt (sync wait for that turn)
-3. Inspect messages + todos (and optional SSE signals)
-4. If the turn looks like **compact-then-stop** or otherwise incomplete,
-   send a **Continue** prompt on the *same* session (up to N times)
-5. Only then report success to the daemon
+2. ``POST /session/{id}/message`` with the **task prompt only**
+3. If the turn looks like compact-then-stop (or the HTTP wait ended while
+   OpenCode is still compacting), **wait** for auto-compact / auto-resume
+4. Re-assess. Never inject a user "Continue" for compaction — that shows
+   up in chat as the operator and races OpenCode's own compact loop
+5. Timeout/error resume may still send Continue; compact never does
 
 TLS: all clients use ``verify=False`` (product requirement for on-prem/intercept).
 """
@@ -28,7 +29,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import httpx
 
 from src.logger import logger
-from src.opencode_sessions import assess_session_completeness
+from src.opencode_sessions import (
+    assess_session_completeness,
+    reasons_are_compact_only,
+    strip_compact_reasons,
+)
 
 
 def is_serve_timeout(exc: BaseException) -> bool:
@@ -59,13 +64,22 @@ def format_serve_error(
     msg = str(exc).strip() or repr(exc)
     return f"{type(exc).__name__}: {msg}"
 
-# Injected after compaction / premature idle so the agent loop resumes work.
+# Used only for timeout/error resume — never injected because of auto-compact.
 DEFAULT_CONTINUE_PROMPT = (
     "Continue the previous OpenCode session. The last turn stopped early "
-    "(context compaction, timeout, or error). Finish all remaining todos and "
-    "complete the original task. Do not restart from scratch; resume "
-    "implementation, verification, and commit steps as required."
+    "(timeout or error). Finish all remaining todos and complete the original "
+    "task. Do not restart from scratch; resume implementation, verification, "
+    "and commit steps as required."
 )
+
+# How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
+# Do not POST a user "Continue" while compact is running — that pollutes chat
+# and fights the built-in compact loop.
+DEFAULT_COMPACT_WAIT_SECONDS = 180.0
+DEFAULT_COMPACT_POLL_SECONDS = 2.0
+# After the session goes idle, wait this long for auto-resume to start.
+# Compact-then-stop often idles briefly before OpenCode replays the last turn.
+DEFAULT_COMPACT_SETTLE_SECONDS = 2.0
 
 # Long agent jobs compact many times. A default of 3 treated the 4th compact
 # as a hard ERROR (returncode 2 → Jira "AI Agent — Error").
@@ -289,6 +303,33 @@ class OpenCodeServeClient:
             return True
 
 
+def session_is_busy(status: Any, session_id: Optional[str]) -> bool:
+    """True when OpenCode reports this session still running or compacting."""
+    if not isinstance(status, dict) or not session_id:
+        return False
+    row = status.get(session_id)
+    if row is None and isinstance(status.get("data"), dict):
+        row = status["data"].get(session_id) or status.get("data")
+    if not isinstance(row, dict):
+        # Sometimes {type: idle} at top level
+        row = status if "type" in status or "status" in status else {}
+    if not isinstance(row, dict):
+        return False
+    kind = str(row.get("type") or row.get("status") or "").strip().lower()
+    if kind in {
+        "busy",
+        "busy_compacting",
+        "compacting",
+        "running",
+        "in_progress",
+        "in-progress",
+    }:
+        return True
+    if row.get("busy") is True:
+        return True
+    return "compact" in kind
+
+
 def messages_from_api(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalize list_messages() payloads into assess_session_completeness shape."""
     out: List[Dict[str, Any]] = []
@@ -393,15 +434,116 @@ def assess_serve_turn(
 
 @dataclass
 class ServeOrchestrator:
-    """Run one agent task against OpenCode serve with multi-compact continue."""
+    """Run one agent task against OpenCode serve; wait out auto-compact."""
 
     client: OpenCodeServeClient
     max_compact_continues: int = DEFAULT_MAX_COMPACT_CONTINUES
     continue_prompt: str = DEFAULT_CONTINUE_PROMPT
+    compact_wait_seconds: float = DEFAULT_COMPACT_WAIT_SECONDS
+    compact_poll_seconds: float = DEFAULT_COMPACT_POLL_SECONDS
+    compact_settle_seconds: float = DEFAULT_COMPACT_SETTLE_SECONDS
     # Optional: force summarize after each turn (tests / stress). Production: False.
     force_summarize_after_turn: bool = False
     force_summarize_provider: str = "opencode"
     force_summarize_model: str = "deepseek-v4-flash-free"
+
+    def _compact_wait_budget(self) -> float:
+        explicit = float(self.compact_wait_seconds or 0)
+        if explicit > 0:
+            return max(0.2, explicit)
+        client_budget = float(getattr(self.client, "timeout_seconds", 0) or 0)
+        return max(1.0, client_budget or DEFAULT_COMPACT_WAIT_SECONDS)
+
+    async def _wait_for_auto_compact(
+        self,
+        sid: str,
+        *,
+        _emit: Callable[[str, str], None],
+        _aborted: Callable[[], bool],
+    ) -> Dict[str, Any]:
+        """Poll until OpenCode finishes auto-compact / auto-resume.
+
+        Compact-then-stop often returns the HTTP turn while the session is
+        briefly idle; OpenCode then auto-resumes. We require a short idle
+        settle so we do not POST another user message into that window.
+        """
+        wait_s = self._compact_wait_budget()
+        poll_s = max(0.05, float(self.compact_poll_seconds or DEFAULT_COMPACT_POLL_SECONDS))
+        settle_s = min(
+            max(0.05, float(self.compact_settle_seconds or DEFAULT_COMPACT_SETTLE_SECONDS)),
+            max(0.05, wait_s / 3.0),
+        )
+        deadline = time.time() + wait_s
+        polls = 0
+        last_busy = False
+        idle_since: Optional[float] = None
+        while time.time() < deadline:
+            if _aborted():
+                return {"aborted": True, "polls": polls}
+            status: Dict[str, Any] = {}
+            poll_failed = False
+            try:
+                status = await self.client.session_status()
+            except Exception as e:
+                poll_failed = True
+                _emit("stderr", f"[serve] status poll failed: {e}")
+            # A failed poll must not look like "compact finished".
+            busy = True if poll_failed else session_is_busy(status, sid)
+            last_busy = busy
+            polls += 1
+            now = time.time()
+            if busy:
+                idle_since = None
+                _emit("stdout", f"[serve] waiting for auto-compact (poll {polls}, busy)")
+                await asyncio.sleep(poll_s)
+                continue
+            if idle_since is None:
+                idle_since = now
+                _emit(
+                    "stdout",
+                    f"[serve] session idle — settling {settle_s:.1f}s for auto-resume",
+                )
+            if (now - idle_since) >= settle_s:
+                _emit(
+                    "stdout",
+                    f"[serve] auto-compact settled after {polls} poll(s)",
+                )
+                return {"settled": True, "polls": polls, "busy": False}
+            await asyncio.sleep(min(poll_s, settle_s))
+        _emit(
+            "stderr",
+            f"[serve] auto-compact still busy after {wait_s:.0f}s ({polls} polls)",
+        )
+        return {"timeout": True, "polls": polls, "busy": last_busy}
+
+    async def _snapshot_assess(
+        self,
+        sid: str,
+        *,
+        compact_total: int,
+        output_text: str = "",
+        _emit: Callable[[str, str], None],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any], int]:
+        try:
+            messages = await self.client.list_all_messages(sid)
+        except Exception as e:
+            messages = []
+            _emit("stderr", f"[serve] list messages failed: {e}")
+        try:
+            todos = await self.client.list_todos(sid)
+        except Exception as e:
+            todos = []
+            _emit("stderr", f"[serve] list todos failed: {e}")
+        compact_total = max(compact_total, len(compaction_marker_keys(messages)))
+        assessment = assess_serve_turn(
+            sid,
+            messages=messages,
+            todos=todos,
+            compact_events_seen=compact_total,
+            new_compacts_this_turn=0,
+            output_text=output_text,
+        )
+        return messages, assessment, compact_total
 
     async def run(
         self,
@@ -483,8 +625,9 @@ class ServeOrchestrator:
                 pass
 
         current_prompt = prompt
-        # Initial prompt + up to max_compact_continues continues
-        max_turns = 1 + max(0, int(self.max_compact_continues))
+        # One task prompt. Compact is waited out — we do not POST Continue
+        # for auto-compact (that looked like the user typed it and broke the loop).
+        max_turns = 1
 
         for turn_idx in range(max_turns):
             if _aborted():
@@ -523,32 +666,110 @@ class ServeOrchestrator:
                 err = format_serve_error(
                     e, timeout_seconds=getattr(self.client, "timeout_seconds", None)
                 )
-                timed_out = is_serve_timeout(e)
+                timed_out_send = is_serve_timeout(e)
                 note = f"[serve] message failed: {err}"
-                if timed_out:
-                    # Dropping the HTTP wait does not stop OpenCode. Abort so a
-                    # Continue retry is not posted into a still-running turn.
-                    try:
+                _emit("stderr", note)
+                if not timed_out_send:
+                    # Hard send error — retry may Continue. Do not abort a
+                    # session we never successfully started a turn on.
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=1,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=False,
+                        incomplete_reasons=[f"message error: {err}"],
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        timed_out=False,
+                    )
+                # HTTP wait ended. If OpenCode is still compacting / running,
+                # wait it out — do not abort and do not Continue.
+                try:
+                    status = await self.client.session_status()
+                except Exception:
+                    status = {}
+                try:
+                    msgs_now = await self.client.list_all_messages(sid)
+                except Exception:
+                    msgs_now = []
+                still_running = session_is_busy(status, sid)
+                compact_seen = bool(compaction_marker_keys(msgs_now) - keys_before)
+                if still_running or compact_seen:
+                    _emit(
+                        "stdout",
+                        "[serve] HTTP wait ended while session "
+                        f"{'busy' if still_running else 'compacted'} — "
+                        "waiting (no abort, no Continue prompt)",
+                    )
+                    wait_info = await self._wait_for_auto_compact(
+                        sid, _emit=_emit, _aborted=_aborted
+                    )
+                    if wait_info.get("aborted"):
                         await self.client.abort(sid)
-                        note = note + "\n[serve] aborted session after HTTP timeout"
-                    except Exception as abort_exc:
-                        note = (
-                            note
-                            + f"\n[serve] abort after timeout failed: {abort_exc}"
+                        return ServeTurnResult(
+                            session_id=sid,
+                            returncode=-1,
+                            stdout="\n".join(lines),
+                            stderr="Aborted while waiting for auto-compact",
+                            incomplete=True,
+                            incomplete_reasons=["aborted"],
+                            compact_events=compact_total,
+                            continue_count=continue_count,
+                            turns=turns,
+                            timed_out=True,
                         )
+                    _messages, assessment, compact_total = await self._snapshot_assess(
+                        sid, compact_total=compact_total, output_text="", _emit=_emit
+                    )
+                    strip_compact_reasons(assessment)
+                    _emit(
+                        "stdout",
+                        "[serve] after timeout wait "
+                        f"complete={assessment.get('complete')} "
+                        f"premature={assessment.get('premature')} "
+                        f"reasons={assessment.get('reasons')}",
+                    )
+                    if not assessment.get("premature"):
+                        return ServeTurnResult(
+                            session_id=sid,
+                            returncode=0,
+                            stdout="\n".join(lines),
+                            stderr="",
+                            incomplete=False,
+                            compact_events=compact_total,
+                            continue_count=continue_count,
+                            turns=turns,
+                            session_completeness=assessment,
+                            progress=100,
+                        )
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=-1,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=True,
+                        incomplete_reasons=list(
+                            assessment.get("reasons") or ["http timeout"]
+                        ),
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        timed_out=True,
+                    )
                 return ServeTurnResult(
                     session_id=sid,
-                    returncode=-1 if timed_out else 1,
+                    returncode=-1,
                     stdout="\n".join(lines),
                     stderr=note,
-                    incomplete=True,
-                    incomplete_reasons=[
-                        "http timeout" if timed_out else f"message error: {err}"
-                    ],
+                    incomplete=False,
+                    incomplete_reasons=["http timeout"],
                     compact_events=compact_total,
                     continue_count=continue_count,
                     turns=turns,
-                    timed_out=timed_out,
+                    timed_out=True,
                 )
             elapsed = time.time() - t0
             info = msg.get("info") if isinstance(msg.get("info"), dict) else msg
@@ -651,38 +872,79 @@ class ServeOrchestrator:
                     progress=100,
                 )
 
-            # Incomplete — try continue if budget remains
-            remaining = max_turns - turn_idx - 1
-            if remaining <= 0:
-                reasons = assessment.get("reasons") or ["incomplete after max continues"]
-                note = (
-                    f"[INCOMPLETE] serve session still incomplete after "
-                    f"{continue_count} continue(s): {'; '.join(map(str, reasons))}"
+            reasons = list(assessment.get("reasons") or [])
+            compact_only = reasons_are_compact_only(reasons) or int(new_this_turn or 0) > 0
+            if compact_only or any(
+                "compact" in str(r).lower() for r in reasons
+            ):
+                # Auto-compact is in-session. Wait; do not POST a Continue user msg.
+                _emit(
+                    "stdout",
+                    "[serve] compact detected — waiting for auto-compact "
+                    "(no Continue prompt)",
                 )
-                _emit("stderr", note)
-                return ServeTurnResult(
-                    session_id=sid,
-                    returncode=2,
-                    stdout="\n".join(lines),
-                    stderr=note,
-                    incomplete=True,
-                    incomplete_reasons=list(reasons),
-                    compact_events=compact_total,
-                    continue_count=continue_count,
-                    turns=turns,
-                    session_completeness=assessment,
-                    progress=50,
+                wait_info = await self._wait_for_auto_compact(
+                    sid, _emit=_emit, _aborted=_aborted
                 )
+                if wait_info.get("aborted"):
+                    await self.client.abort(sid)
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=-1,
+                        stdout="\n".join(lines),
+                        stderr="Aborted while waiting for auto-compact",
+                        incomplete=True,
+                        incomplete_reasons=["aborted"],
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                    )
+                _messages, assessment, compact_total = await self._snapshot_assess(
+                    sid, compact_total=compact_total, output_text="", _emit=_emit
+                )
+                strip_compact_reasons(assessment)
+                _emit(
+                    "stdout",
+                    f"[serve] after compact wait complete={assessment.get('complete')} "
+                    f"premature={assessment.get('premature')} "
+                    f"reasons={assessment.get('reasons')}",
+                )
+                if not assessment.get("premature"):
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=0,
+                        stdout="\n".join(lines),
+                        stderr="",
+                        incomplete=False,
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=100,
+                    )
+                reasons = list(assessment.get("reasons") or reasons)
 
-            continue_count += 1
-            _emit(
-                "stdout",
-                f"[serve] incomplete (likely compact/mid-work); "
-                f"continue {continue_count}/{self.max_compact_continues}",
+            # Still incomplete after wait (or non-compact failure). Do not
+            # inject Continue — that shows up as a user chat turn.
+            note = (
+                f"[INCOMPLETE] session still incomplete after auto-compact wait: "
+                f"{'; '.join(map(str, reasons))}"
             )
-            current_prompt = self.continue_prompt
+            _emit("stderr", note)
+            return ServeTurnResult(
+                session_id=sid,
+                returncode=2,
+                stdout="\n".join(lines),
+                stderr=note,
+                incomplete=True,
+                incomplete_reasons=list(reasons),
+                compact_events=compact_total,
+                continue_count=continue_count,
+                turns=turns,
+                session_completeness=assessment,
+                progress=50,
+            )
 
-        # Should not reach
         return ServeTurnResult(
             session_id=sid,
             returncode=2,

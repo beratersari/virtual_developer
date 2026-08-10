@@ -412,7 +412,8 @@ class SettingsUpdate(BaseModel):
         ge=0,
         le=256,
         description=(
-            "Serve-mode Continue turns after auto-compaction on the same session"
+            "Legacy serve compact budget. Auto-compact is waited out; "
+            "Continue is not injected for compaction."
         ),
     )
     default_model: Optional[str] = Field(default=None, max_length=200)

@@ -4,9 +4,9 @@ Not a fake backend. Starts a real ``opencode serve`` whose project
 ``opencode.json`` sets ``provider.opencode.models.*.limit.context`` far below
 the free-tier default (200k) so auto-compact fires during one Atlas turn.
 
-Then asserts Virtual Developer does **not** treat compact-then-stop as success:
-``ServeOrchestrator`` must continue (or fail incomplete), not returncode=0
-with zero continues after compaction markers.
+Then asserts Virtual Developer **waits** for auto-compact and does **not**
+inject a Continue user message. Compact-then-stop + wait may finish as
+success (OpenCode auto-resumed) or incomplete — never as a second prompt.
 
 Opt-in (hits the real model; slow)::
 
@@ -232,6 +232,9 @@ async def test_live_auto_compact_via_reduced_context_is_not_false_complete(
         orch = ServeOrchestrator(
             client=client,
             max_compact_continues=3,
+            compact_wait_seconds=180.0,
+            compact_poll_seconds=2.0,
+            compact_settle_seconds=2.0,
         )
         t_run = time.monotonic()
         result = await orch.run(
@@ -284,20 +287,41 @@ async def test_live_auto_compact_via_reduced_context_is_not_false_complete(
             "Tiny context did not produce a compaction or premature assessment. "
             f"report={report}"
         )
-        # The bug: compact happened and we still returned success with 0 continues.
-        false_complete = (
-            result.returncode == 0
-            and result.continue_count == 0
-            and int(report.get("compact_events") or 0) >= 1
+        assert result.continue_count == 0, (
+            "Orchestrator injected Continue after auto-compact: "
+            f"continue_count={result.continue_count} report={report}"
         )
-        assert not false_complete, (
-            "FALSE COMPLETE: compaction occurred but orchestrator returned "
-            f"returncode=0 with continue_count=0. report={report}"
-        )
-        # Accept either: continued then finished, or exhausted continues as incomplete.
+        stdout = result.stdout or ""
+        assert "Continue the previous OpenCode session" not in stdout
         assert result.returncode in (0, 2), report
-        if result.returncode == 0:
-            assert result.continue_count >= 1, report
+
+        # Chat: compact rows must not look like the operator typed them.
+        if result.session_id:
+            from src.opencode_sessions import list_session_chat
+
+            chat = list_session_chat(result.session_id)
+            report["chat_roles"] = [
+                {
+                    "role": m.get("role"),
+                    "raw_role": m.get("raw_role"),
+                    "agent": m.get("agent"),
+                    "part_types": [p.get("type") for p in (m.get("parts") or [])],
+                }
+                for m in (chat.get("messages") or [])
+            ]
+            user_texts = []
+            for m in chat.get("messages") or []:
+                if m.get("role") == "user":
+                    for p in m.get("parts") or []:
+                        if (p.get("type") or "") == "text":
+                            user_texts.append(p.get("text") or "")
+                assert m.get("role") != "user" or not any(
+                    (p.get("type") or "") == "compaction"
+                    for p in (m.get("parts") or [])
+                ), m
+            assert all(
+                "Continue the previous OpenCode session" not in t for t in user_texts
+            ), user_texts
     finally:
         try:
             if proc is not None:

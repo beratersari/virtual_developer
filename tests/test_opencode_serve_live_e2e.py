@@ -32,7 +32,6 @@ import httpx
 import pytest
 
 from src.opencode_serve import (
-    DEFAULT_CONTINUE_PROMPT,
     OpenCodeServeClient,
     ServeOrchestrator,
     assess_serve_turn,
@@ -308,17 +307,15 @@ async def test_live_opencode_serve_two_real_compactions(tmp_path: Path):
             "last_is_summary": assessment.get("last_is_summary"),
         }
 
-        # --- real follow-up on same session (continue path material) ---
-        # Always send a real follow-up; wording depends on measured assessment.
-        if assessment.get("premature"):
-            follow_text = DEFAULT_CONTINUE_PROMPT
-            report["follow_mode"] = "continue_after_incomplete"
-        else:
-            follow_text = (
-                "After two context compactions on this session, reply with exactly "
-                "LIVE-E2E-AFTER-2-COMPACTS. One line, no tools."
-            )
-            report["follow_mode"] = "probe_after_complete_assessment"
+        # Probe that the session still accepts a real turn after compact.
+        # Do not inject the orchestrator Continue prompt — that is the bug.
+        follow_text = (
+            "After two context compactions on this session, reply with exactly "
+            "LIVE-E2E-AFTER-2-COMPACTS. One line, no tools."
+        )
+        report["follow_mode"] = (
+            "probe_after_incomplete" if assessment.get("premature") else "probe_after_complete"
+        )
 
         msg_follow = await client.send_message(sid, follow_text)
         info_f = (
@@ -363,6 +360,9 @@ async def test_live_opencode_serve_two_real_compactions(tmp_path: Path):
             orch = ServeOrchestrator(
                 client=orch_client,
                 max_compact_continues=2,
+                compact_wait_seconds=120.0,
+                compact_poll_seconds=2.0,
+                compact_settle_seconds=2.0,
                 force_summarize_after_turn=True,
                 force_summarize_provider=provider_id,
                 force_summarize_model=model_id,
@@ -392,6 +392,10 @@ async def test_live_opencode_serve_two_real_compactions(tmp_path: Path):
             assert orch_result.compact_events >= 1 or any(
                 (t.get("compact_markers") or 0) >= 1 for t in orch_result.turns
             ), report["orchestrator"]
+            assert orch_result.continue_count == 0, report["orchestrator"]
+            assert "Continue the previous OpenCode session" not in (
+                orch_result.stdout or ""
+            )
         finally:
             await orch_client.aclose()
 
