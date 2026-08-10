@@ -269,7 +269,7 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
-    gitlab_webhook_enabled: bool = True
+    gitlab_webhook_enabled: bool = False
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
     gitlab_webhook_path: str = "/webhooks/gitlab"

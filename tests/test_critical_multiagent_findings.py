@@ -312,10 +312,10 @@ def test_p1_plan_start_must_not_reemit_every_poll(poller, state_manager, monkeyp
 
 
 def test_p1b_completed_still_todo_poller_does_not_reemit(poller, state_manager):
-    """Poller must not fire COMPLETED every cycle while the ticket stays To Do.
+    """check_status_changes alone does not reopen stay-on-To-Do COMPLETED.
 
-    Processor trusts poller reopen events (so old COMPLETED tickets can still
-    leave→return To Do). The firehose guard belongs here, not in process_event.
+    Primary rework is poll_board new_issues (To Do + trigger). This helper
+    only handles leave→return / ERROR text edit.
     """
     state_manager.create_state("PS-3", "s", "d")
     state_manager.update_state(

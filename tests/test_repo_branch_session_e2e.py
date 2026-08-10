@@ -172,10 +172,14 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     assert reset.json()["ok"] is True
     empty = client.get("/api/opencode-sessions").json()
     assert empty["total"] == 0
-    assert binds.get(repo, branch, "develop") is None
+    tomb = binds.get(repo, branch, "develop")
+    assert tomb is not None
+    assert not (tomb.get("session_id") or "").strip()
+    assert first_sid in (tomb.get("forgotten_session_ids") or [])
 
+    # Tombstone remains so discovery cannot rebind; reset again is idempotent.
     gone = client.delete(f"/api/opencode-sessions/{bind_id}")
-    assert gone.status_code == 404
+    assert gone.status_code == 200
 
     await run_issue("KAN-C")
     assert seen[2]["issue_key"] == "KAN-C"

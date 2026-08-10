@@ -522,8 +522,10 @@ async def test_e2e_silent_compact_waits_without_continue():
         title="E2E-COMPACT: silent stop",
         agent="atlas",
     )
-    assert result.returncode == 0, result.stderr
-    assert result.incomplete is False
+    # Compact-then-stop with no follow-up assistant is incomplete (not success).
+    # Must not POST Continue either.
+    assert result.returncode == 2, result.stderr
+    assert result.incomplete is True
     assert result.continue_count == 0
     assert backend.message_calls == 1
     assert backend.prompts == ["implement 5+4"]

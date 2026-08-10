@@ -149,13 +149,15 @@ All of the following roughly apply **for first intake**:
 - Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and/or** assignee name looks like the bot (when `TRIGGER_ON_ASSIGNMENT=true`)  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-**Trigger labels only mean “allowed to pick up work.”** They do **not** mean the bot
-re-runs the same ticket on every poll after work has already finished (see
-[Plans never auto-start](#plans-never-auto-start-intentional) below).
+**To Do + trigger = rework (intentional).** A ticket in a To Do-like column with
+`bot` / `ai-assist` (or bot assignee) is eligible, including after a previous
+`completed` / `error` / `cancelled` run. The poller **re-queues** that work
+(reset and run again). After accept, the bot moves the board to **In Progress**
+so the next poll does not start another job until the issue is To Do again.
 
-Terminal issues (`error` / `cancelled` / `completed`) reprocess only when moved
-back to **To Do** (or another rework signal such as editing the description after
-an ERROR). A successful **plan** ends in `plan_ready`, which is different — see below.
+The exception is a successful **plan** (`plan_ready`): sitting on To Do with only
+`bot` does **not** auto-build — see
+[Plans never auto-start](#plans-never-auto-start-intentional).
 
 ---
 
@@ -230,9 +232,9 @@ pending → planning | executing → (plan_ready) → completed | error | cancel
 |--------|------------------------|
 | `planning` / `executing` | Agent running — poller will not restart from board noise |
 | `plan_ready` | Plan finished; **not** an error. Needs start label or new `Mode: build` issue |
-| `completed` | Done (build delivered or soft no-op completion) |
-| `error` | Failed; fix description / params, then return to To Do (or edit text) to requeue |
-| `cancelled` | Operator cancel; not auto-retried while still To Do |
+| `completed` | Done (build delivered or soft no-op completion). Move back to **To Do** (with trigger) to rework. |
+| `error` | Failed; fix description / params, then return to **To Do** (or edit text) to rework. |
+| `cancelled` | Operator cancel. **To Do + trigger is still rework** — move it back to To Do (or leave it there) to run again. |
 
 Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned disk `planning`/`executing` states to `error`.
 
@@ -466,7 +468,7 @@ logs/             # optional log file (LOG_FILE)
 | Symptom | What to check |
 |---------|----------------|
 | Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
-| Ticket on To Do with `bot` but bot does nothing | Local status may be **`plan_ready`** (plan finished). `bot` alone does not re-run or auto-build — add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). |
+| Ticket on To Do with `bot` but bot does nothing | If local status is **`plan_ready`**, that wait is intentional (`bot` alone does not auto-build). Add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). If local status is `completed` / `error` / `cancelled`, To Do + trigger **is** rework — check the poll snapshot `will_process` and logs. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |

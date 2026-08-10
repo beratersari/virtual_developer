@@ -626,9 +626,12 @@ def test_strip_compact_reasons_clears_compact_only():
     }
     assert reasons_are_compact_only(r["reasons"]) is True
     strip_compact_reasons(r)
-    assert r["complete"] is True
-    assert r["premature"] is False
-    assert r["reasons"] == []
+    # Transient CLI compact noise is dropped; compact-then-stop stays incomplete.
+    assert r["complete"] is False
+    assert r["premature"] is True
+    assert r["reasons"] == [
+        "last assistant followed a compaction message (compact-then-stop)",
+    ]
 
 
 def test_strip_compact_reasons_keeps_open_todos():
@@ -642,7 +645,10 @@ def test_strip_compact_reasons_keeps_open_todos():
     }
     strip_compact_reasons(r)
     assert r["premature"] is True
-    assert r["reasons"] == ["open todos: 1 pending, 0 in_progress"]
+    assert r["reasons"] == [
+        "open todos: 1 pending, 0 in_progress",
+        "last assistant followed a compaction message (compact-then-stop)",
+    ]
 
 
 def test_continue_prompt_echo_is_not_premature_compact():

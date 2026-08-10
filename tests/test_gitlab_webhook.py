@@ -218,7 +218,8 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
 
     decision = decide_gitlab_note_webhook(
         _mr_payload(),
-        headers={"X-Gitlab-Event": "Note Hook"},
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
         bot_mentions=["@berat_ai"],
     )
     assert decision.event
@@ -319,7 +320,8 @@ async def test_processor_gitlab_build_pushes_existing_mr(
 
     decision = decide_gitlab_note_webhook(
         _mr_payload(note="@berat_ai please fix the login bug"),
-        headers={"X-Gitlab-Event": "Note Hook"},
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
         bot_mentions=["@berat_ai"],
     )
     assert decision.event

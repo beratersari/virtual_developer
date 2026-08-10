@@ -148,6 +148,16 @@ class SessionBindStore:
                 wd = str(wd)
         with self._lock:
             prev = self.get_by_id(bid) or {}
+            forgotten = [
+                str(x).strip()
+                for x in (prev.get("forgotten_session_ids") or [])
+                if str(x).strip()
+            ]
+            if sid in forgotten:
+                logger.info(
+                    f"OpenCode session bind {bid}: refusing forgotten session {sid}"
+                )
+                return prev or None
             rec: Dict[str, Any] = {
                 "bind_id": bid,
                 "repository_url": repo,
@@ -158,9 +168,12 @@ class SessionBindStore:
                 "issue_key": (issue_key or "").strip().upper(),
                 "job_id": job_id or prev.get("job_id"),
                 "working_directory": wd or prev.get("working_directory"),
+                "forgotten_session_ids": forgotten[-50:],
                 "created_at": prev.get("created_at") or now,
                 "updated_at": now,
             }
+            if prev.get("reset_at"):
+                rec["reset_at"] = prev.get("reset_at")
             self._write(rec)
         logger.info(
             f"OpenCode session bind {bid}: {normalize_repo_key(repo)}"
@@ -184,12 +197,68 @@ class SessionBindStore:
         logger.info(f"OpenCode session bind reset: {bid}")
         return True
 
+    def forget_session(
+        self,
+        bind_id: str,
+        *,
+        session_id: str = "",
+        reason: str = "reset",
+    ) -> Optional[Dict[str, Any]]:
+        """Drop the resume pointer but remember the id so discovery cannot rebind it.
+
+        Dashboard Reset and empty-timeout abandon use this instead of unlink so
+        ``find_sessions_for_directory`` cannot restore the same ``ses_*``.
+        """
+        bid = (bind_id or "").strip()
+        if not bid:
+            return None
+        with self._lock:
+            rec = self.get_by_id(bid)
+            if not rec:
+                return None
+            now = _now_iso()
+            forgotten = [
+                str(x).strip()
+                for x in (rec.get("forgotten_session_ids") or [])
+                if str(x).strip()
+            ]
+            sid = (session_id or rec.get("session_id") or "").strip()
+            if sid and sid not in forgotten:
+                forgotten.append(sid)
+            rec["session_id"] = ""
+            rec["forgotten_session_ids"] = forgotten[-50:]
+            rec["reset_at"] = now
+            rec["forget_reason"] = reason
+            rec["updated_at"] = now
+            self._write(rec)
+        logger.info(
+            f"OpenCode session bind forgotten {bid}: {sid or '(none)'} ({reason})"
+        )
+        return rec
+
     def delete_for(
         self, repository_url: str, branch: str, target_branch: str = ""
     ) -> bool:
         if not normalize_branch(target_branch):
             return False
         return self.delete(bind_id_for(repository_url, branch, target_branch))
+
+    def forget_for(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str,
+        *,
+        session_id: str = "",
+        reason: str = "abandoned",
+    ) -> Optional[Dict[str, Any]]:
+        if not normalize_branch(target_branch):
+            return None
+        return self.forget_session(
+            bind_id_for(repository_url, branch, target_branch),
+            session_id=session_id,
+            reason=reason,
+        )
 
     def list_binds(self, *, limit: int = 200) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []

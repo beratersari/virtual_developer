@@ -65,7 +65,11 @@ def test_cors_not_wildcard(tmp_path, monkeypatch):
 
 
 def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
-    """To Do + trigger label must run even if local status is completed."""
+    """To Do + trigger is rework: completed local state is still re-queued.
+
+    Intentional (AGENTS.md / README). plan_ready is the exception, not
+    completed/error/cancelled.
+    """
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("COLD-1", "done already", "d")
     sm.update_state("COLD-1", status=TaskStatus.COMPLETED)

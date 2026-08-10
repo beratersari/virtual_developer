@@ -40,7 +40,8 @@ def _note(note_id: int, prompt: str = "look at this"):
     }
     d = decide_gitlab_note_webhook(
         payload,
-        headers={"X-Gitlab-Event": "Note Hook"},
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
         bot_mentions=["@berat_ai"],
     )
     assert d.event

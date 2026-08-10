@@ -166,11 +166,16 @@ class AgentTask:
     model: Optional[str] = None
     task_type: Optional[str] = None
     abandoned_session_id: Optional[str] = None
+    forgotten_session_ids: List[str] = field(default_factory=list)
+    original_prompt: Optional[str] = None
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
 
-        object.__setattr__(self, "prompt", strip_params_block(self.prompt or ""))
+        cleaned = strip_params_block(self.prompt or "")
+        object.__setattr__(self, "prompt", cleaned)
+        if not (self.original_prompt or "").strip():
+            object.__setattr__(self, "original_prompt", cleaned)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -273,6 +278,20 @@ class AgentRunner:
         def _publish_session(sid: Optional[str]) -> None:
             sid = (sid or "").strip()
             if not sid or not sid.startswith("ses_") or sid == published_sid["id"]:
+                return
+            forgotten = {
+                str(x).strip()
+                for x in (getattr(task, "forgotten_session_ids", None) or [])
+                if str(x).strip()
+            }
+            abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
+            if abandoned:
+                forgotten.add(abandoned)
+            if sid in forgotten:
+                logger.warning(
+                    f"Not publishing forgotten/abandoned session {sid} "
+                    f"for task_id={task.task_id}"
+                )
                 return
             published_sid["id"] = sid
             try:
@@ -491,9 +510,14 @@ class AgentRunner:
                         f"Agent exited 0 during compact; waiting: "
                         f"task_id={task.task_id}, session={session_id}"
                     )
+                    wait_s = max(
+                        2.0,
+                        min(float(timeout_seconds or 30.0), 30.0),
+                    )
                     incomplete_meta = await self._wait_out_cli_compact(
                         session_id=session_id,
                         output_text=combined_output,
+                        wait_seconds=wait_s,
                     )
                     reasons = list(
                         (incomplete_meta or {}).get("reasons") or reasons
@@ -580,7 +604,14 @@ class AgentRunner:
             )
             if sid:
                 task.abandoned_session_id = sid
+                forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
+                if sid not in forgotten:
+                    forgotten.append(sid)
+                task.forgotten_session_ids = forgotten
             task.session_id = None
+            orig = (getattr(task, "original_prompt", None) or "").strip()
+            if orig:
+                task.prompt = orig
             return
         if sid and self.working_directory:
             try:
@@ -605,7 +636,14 @@ class AgentRunner:
                         f"{self.working_directory}; starting cold"
                     )
                     task.abandoned_session_id = sid
+                    forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
+                    if sid not in forgotten:
+                        forgotten.append(sid)
+                    task.forgotten_session_ids = forgotten
                     task.session_id = None
+                    orig = (getattr(task, "original_prompt", None) or "").strip()
+                    if orig:
+                        task.prompt = orig
                     return
             except Exception as e:
                 logger.debug(f"session dir check failed: {e}")
@@ -616,10 +654,13 @@ class AgentRunner:
             return
         task.session_id = sid
         if why == "incomplete_session":
-            # Compact is waited out in run_agent. Do not inject a Continue
-            # user message — it shows up in chat as if the operator typed it.
+            from src.opencode_serve import DEFAULT_FINISH_TODOS_PROMPT
+
+            # Short finish-todos nudge — not the original BUILD/PLAN kit and
+            # not a fake operator "Continue" during compact.
+            task.prompt = DEFAULT_FINISH_TODOS_PROMPT
             logger.warning(
-                f"Retry after {why}: resume session {sid} without Continue prompt"
+                f"Retry after {why}: resume session {sid} with finish-todos prompt"
             )
             return
         from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
@@ -669,12 +710,13 @@ class AgentRunner:
         )
         if last:
             compact_only = reasons_are_compact_only(last.get("reasons"))
-            strip_compact_reasons(last)
             if not last.get("premature"):
                 return last
             if not compact_only:
                 return last
         deadline = time.time() + max(0.2, float(wait_seconds))
+        stable_since: Optional[float] = None
+        last_sig: Optional[tuple] = None
         while time.time() < deadline:
             await asyncio.sleep(max(0.05, float(poll_seconds)))
             last = self._assess_incomplete_run(
@@ -692,6 +734,14 @@ class AgentRunner:
             if not reasons_are_compact_only(last.get("reasons")):
                 # Open todos / unfinished — auto-compact will not clear these
                 # by waiting; do not inject Continue either.
+                break
+            sig = tuple(str(r) for r in (last.get("reasons") or []))
+            now = time.time()
+            if sig != last_sig:
+                last_sig = sig
+                stable_since = now
+            elif stable_since is not None and (now - stable_since) >= 2.0:
+                # Compact-then-stop unchanged — auto-resume did not continue.
                 break
         if last:
             strip_compact_reasons(last)
@@ -746,6 +796,7 @@ class AgentRunner:
             "mode": "serve",
             "client": client,
             "session_id": task.session_id,
+            "cancel": False,
         }
         self._running_tasks[task.task_id] = serve_handle
 
@@ -787,10 +838,11 @@ class AgentRunner:
         )
         turn = None
         try:
-            # Each serve turn already has an HTTP timeout. The outer wait must
-            # cover initial + compact continues — otherwise the 4th compact
-            # on a 30-min budget looks like a timeout/error.
-            outer_timeout = float(timeout_seconds) * float(max(1, 1 + max_cont))
+            # One user turn + one compact wait. max_compact_continues no longer
+            # POSTs Continue; do not multiply the outer wait by 256.
+            outer_timeout = float(timeout_seconds) + float(
+                orch.compact_wait_seconds or 0
+            )
             turn = await asyncio.wait_for(
                 orch.run(
                     prompt=task.prompt or "",
@@ -800,6 +852,7 @@ class AgentRunner:
                     session_id=task.session_id,
                     on_output=_on_out,
                     on_session=_remember_session,
+                    should_abort=lambda: bool(serve_handle.get("cancel")),
                     log_lines=log_lines,
                 ),
                 timeout=outer_timeout,
@@ -1022,10 +1075,21 @@ class AgentRunner:
         except Exception:
             return
         launched = (getattr(task, "session_id", None) or "").strip()
-        if launched:
+        forgotten = {
+            str(x).strip()
+            for x in (getattr(task, "forgotten_session_ids", None) or [])
+            if str(x).strip()
+        }
+        abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
+        if abandoned:
+            forgotten.add(abandoned)
+        if launched and launched not in forgotten:
             publish(launched)
             return
         for rec in found:
+            found_id = str(rec.get("id") or "").strip()
+            if not found_id or found_id in forgotten:
+                continue
             raw = rec.get("time_created") or rec.get("time_updated") or 0
             try:
                 n = float(raw)
@@ -1033,7 +1097,7 @@ class AgentRunner:
                 continue
             created_ms = n if n > 10_000_000_000 else n * 1000.0
             if created_ms >= run_started_ms - 15_000:
-                publish(rec.get("id"))
+                publish(found_id)
                 return
 
     def _resolve_session_id(
@@ -1046,9 +1110,19 @@ class AgentRunner:
         """Parse CLI output; keep launched session; only then SQLite by dir."""
         session_id = self._parse_session_id(output_lines)
         launched = (task.session_id or "").strip() or None
+        forgotten = {
+            str(x).strip()
+            for x in (getattr(task, "forgotten_session_ids", None) or [])
+            if str(x).strip()
+        }
+        abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
+        if abandoned:
+            forgotten.add(abandoned)
+        if session_id and session_id in forgotten:
+            session_id = None
         # Empty timeout must not pick an unrelated historical ses_* for this
         # issue key (that is what hung KAN-7 on Continue + old session).
-        if not session_id and launched:
+        if not session_id and launched and launched not in forgotten:
             session_id = launched
         if not session_id and task.issue_key and output_lines:
             try:
@@ -1057,8 +1131,10 @@ class AgentRunner:
                 session_id = resolve_session_id(
                     task.issue_key,
                     working_directory=self.working_directory,
-                    preferred=launched,
+                    preferred=launched if launched not in forgotten else None,
                 )
+                if session_id and session_id in forgotten:
+                    session_id = None
             except Exception as e:
                 logger.debug(f"Session DB lookup failed: {e}")
         if session_id and session_file is not None:
@@ -1324,6 +1400,7 @@ class AgentRunner:
 
         # Serve mode: POST /session/{id}/abort (best effort, sync wrapper)
         if isinstance(process, dict) and process.get("mode") == "serve":
+            process["cancel"] = True
             sid = process.get("session_id")
             client = process.get("client")
             logger.info(f"Cancelling serve task: task_id={task_id}, session={sid}")

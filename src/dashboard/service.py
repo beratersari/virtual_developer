@@ -162,7 +162,7 @@ def build_poll_status(
         # snapshot for counts / debug; UI must not show noise.
         matched_label = bool(row.get("matched_label"))
         matched_assignee = bool(row.get("matched_assignee"))
-        if not (matched_label or matched_assignee):
+        if not (matched_label or matched_assignee or row.get("will_process")):
             continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
@@ -245,7 +245,7 @@ def build_settings_view() -> SettingsView:
         ],
         default_model=(settings.default_model or "").strip(),
         gitlab_webhook_enabled=bool(
-            getattr(settings, "gitlab_webhook_enabled", True)
+            getattr(settings, "gitlab_webhook_enabled", False)
         ),
         gitlab_bot_mentions=(
             getattr(settings, "gitlab_bot_mentions", "") or ""
