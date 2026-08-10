@@ -430,6 +430,7 @@ echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%
 echo.
 echo Already have OpenCode? Next time you can use install-dashboard.bat
+echo System Python ^(no .venv^): install-dashboard-system-python.bat
 echo ^(venv + start scripts only; does not touch .opencode^).
 echo.
 call :maybe_pause

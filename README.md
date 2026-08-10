@@ -101,6 +101,8 @@ CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.m
 install.bat
 :: Or, if OpenCode is already installed on this PC (skip OpenCode install):
 install-dashboard.bat
+:: Or, use the Python already on PATH (does not create .venv):
+install-dashboard-system-python.bat
 :: Edit .env, then:
 start.bat
 ::   or: start-backend.bat / start-frontend.bat

@@ -252,6 +252,7 @@ $copyItems = @(
     ".env.example",
     "install.bat",
     "install-dashboard.bat",
+    "install-dashboard-system-python.bat",
     "install-opencode-online.bat",
     "VERSION",
     "README.md",
@@ -763,7 +764,7 @@ PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat (full offline), install-dashboard.bat (app only), or install-opencode-online.bat (OpenCode via network + vendor\node).
+NOTE=Run install.bat (full offline), install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), or install-opencode-online.bat (OpenCode via network + vendor\node).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -777,7 +778,8 @@ JIRA Virtual Developer — Windows offline package
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
 4. Install (pick one):
       install.bat                 — full OFFLINE: Python + OpenCode + plugins + glab
-      install-dashboard.bat       — backend + frontend only (no OpenCode)
+      install-dashboard.bat                 — backend + frontend only (no OpenCode; creates .venv)
+      install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
       install-opencode-online.bat — ONLINE OpenCode only (requires vendor\node;
                                     edit vendor\npm-online.npmrc registry= for your mirror;
                                     does NOT replace offline install.bat)

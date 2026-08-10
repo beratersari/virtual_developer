@@ -16,6 +16,13 @@ set "FRONTEND_HOST=0.0.0.0"
 set "FRONTEND_PORT=5173"
 set "BACKEND_URL=http://127.0.0.1:8080"
 set "VENV_PY=%SCRIPT_DIR%\.venv\Scripts\python.exe"
+set "VD_PY="
+if exist "%VENV_PY%" (
+    set "VD_PY=%VENV_PY%"
+) else (
+    where python >nul 2>&1
+    if not errorlevel 1 set "VD_PY=python"
+)
 set "VD_WEB_DIST=%SCRIPT_DIR%\web\dist"
 set "SERVE_PY=%SCRIPT_DIR%\packaging\windows\serve_frontend.py"
 
@@ -27,11 +34,14 @@ echo UI       : http://0.0.0.0:%FRONTEND_PORT%/  ^(open http://127.0.0.1:%FRONTE
 echo Proxies  : /api and /ws  -^>  %BACKEND_URL%
 echo.
 
-if not exist "%VENV_PY%" (
-    echo [ERROR] Missing .venv - run install-dashboard.bat ^(or full install.bat^) first.
+if not defined VD_PY (
+    echo [ERROR] No project .venv and python is not on PATH.
+    echo Run install-dashboard.bat ^(creates .venv^) or
+    echo install-dashboard-system-python.bat ^(uses system python^).
     call :maybe_pause
     exit /b 1
 )
+echo Python   : %VD_PY%
 
 if not exist "%VD_WEB_DIST%\index.html" (
     echo [ERROR] Missing %VD_WEB_DIST%\index.html
@@ -72,7 +82,7 @@ if errorlevel 1 (
 echo [OK] Backend still up.
 
 echo Starting frontend in window "VD-Frontend"...
-start "VD-Frontend" /D "%SCRIPT_DIR%" cmd /c "set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& set VD_BACKEND_URL=%BACKEND_URL%&& set VD_FRONTEND_HOST=%FRONTEND_HOST%&& set VD_FRONTEND_PORT=%FRONTEND_PORT%&& .venv\Scripts\python.exe packaging\windows\serve_frontend.py --dist web\dist --backend %BACKEND_URL% --host %FRONTEND_HOST% --port %FRONTEND_PORT% & echo. & echo Frontend exited. & pause"
+start "VD-Frontend" /D "%SCRIPT_DIR%" cmd /c "set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& set VD_BACKEND_URL=%BACKEND_URL%&& set VD_FRONTEND_HOST=%FRONTEND_HOST%&& set VD_FRONTEND_PORT=%FRONTEND_PORT%&& %VD_PY% packaging\windows\serve_frontend.py --dist web\dist --backend %BACKEND_URL% --host %FRONTEND_HOST% --port %FRONTEND_PORT% & echo. & echo Frontend exited. & pause"
 
 echo Waiting for UI http://127.0.0.1:%FRONTEND_PORT%/ ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "http://127.0.0.1:%FRONTEND_PORT%/" -TimeoutSec 60 -OkPattern "id=.root"

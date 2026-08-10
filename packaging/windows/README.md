@@ -34,6 +34,9 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install-dashboard.bat`** — **backend + frontend only** (no OpenCode):
      - Creates `.venv` + deps, start scripts, `.env`, `cli.py init`
      - Does **not** touch `%USERPROFILE%\.opencode` (use when OpenCode is already installed)
+   - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
+     - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
+     - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
    - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network; does **not** replace offline `install.bat`):
      - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)
      - Edit **`vendor\npm-online.npmrc`** (or `packaging\windows\npm-online.npmrc`) → set `registry=` to your npm mirror

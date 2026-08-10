@@ -15,6 +15,13 @@ cd /d "%SCRIPT_DIR%"
 set "DASH_PORT=8080"
 set "FRONTEND_PORT=5173"
 set "VENV_PY=%SCRIPT_DIR%\.venv\Scripts\python.exe"
+set "VD_PY="
+if exist "%VENV_PY%" (
+    set "VD_PY=%VENV_PY%"
+) else (
+    where python >nul 2>&1
+    if not errorlevel 1 set "VD_PY=python"
+)
 
 REM Bind all interfaces (LAN access). Browser: http://127.0.0.1:8080/ or http://THIS-PC:8080/
 set "DASHBOARD_HOST=0.0.0.0"
@@ -30,11 +37,14 @@ echo Project : %SCRIPT_DIR%
 echo API+SPA : http://0.0.0.0:%DASH_PORT%/  ^(open http://127.0.0.1:%DASH_PORT%/ ^)
 echo.
 
-if not exist "%VENV_PY%" (
-    echo [ERROR] Missing .venv - run install-dashboard.bat ^(or full install.bat^) first.
+if not defined VD_PY (
+    echo [ERROR] No project .venv and python is not on PATH.
+    echo Run install-dashboard.bat ^(creates .venv^) or
+    echo install-dashboard-system-python.bat ^(uses system python^).
     call :maybe_pause
     exit /b 1
 )
+echo Python  : %VD_PY%
 
 if not exist "%SCRIPT_DIR%\.env" (
     if exist "%SCRIPT_DIR%\.env.example" (
@@ -53,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\wind
 timeout /t 1 /nobreak >nul
 
 echo Starting daemon in window "VD-Backend"...
-start "VD-Backend" /D "%SCRIPT_DIR%" cmd /c "set DASHBOARD_HOST=0.0.0.0&& set DASHBOARD_ALLOW_REMOTE=true&& set DASHBOARD_PORT=%DASH_PORT%&& set DASHBOARD_ENABLED=true&& set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& .venv\Scripts\python.exe -m src.daemon & echo. & echo Backend exited. & pause"
+start "VD-Backend" /D "%SCRIPT_DIR%" cmd /c "set DASHBOARD_HOST=0.0.0.0&& set DASHBOARD_ALLOW_REMOTE=true&& set DASHBOARD_PORT=%DASH_PORT%&& set DASHBOARD_ENABLED=true&& set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& %VD_PY% -m src.daemon & echo. & echo Backend exited. & pause"
 
 echo Waiting for API http://127.0.0.1:%DASH_PORT%/api/meta ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "http://127.0.0.1:%DASH_PORT%/api/meta" -TimeoutSec 90
