@@ -48,8 +48,13 @@ JIRA Virtual Developer is a Python daemon that:
 
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
-- Terminal reprocess only when the user moves the issue back to **To Do** (or an explicit rework signal).
-- **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled.
+- **To Do + trigger = rework** (intentional). Local `completed` / `error` /
+  `cancelled` on a To Do-like ticket with `bot` / `ai-assist` (or bot assignee)
+  is re-queued: reset and run again. Putting the issue back on To Do *or*
+  leaving it on To Do after a finished run is the operator rework signal.
+  After accept the bot moves the board to In Progress so the next poll does
+  not start another job until the ticket is To Do again.
+- **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled. `plan_ready` is **not** rework.
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
@@ -90,11 +95,17 @@ To Do + bot (or ai-assist)
 | Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
 | Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
 | Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
-| Local `error` / `cancelled` / `completed` + To Do + trigger label | **Re-queue** (reset and run again) |
+| Local `error` / `cancelled` / `completed` + To Do + trigger label | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
 **Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
 only `bot`. Operators will see “stuck on To Do with bot label” after a successful
 plan; that is the waiting state until an explicit start signal.
+
+**Do not “fix”** by skipping `completed` / `error` / `cancelled` that are still
+To Do with a trigger label. That is the rework loop: To Do means “run again.”
+The bot then moves the issue to In Progress. If In Progress transition fails
+and the ticket stays To Do, the next poll will try again — same rule, not a
+poller bug.
 
 ### Fail → In Progress → fix → To Do requeue (**intentional**)
 
@@ -110,24 +121,25 @@ UX is **not** “leave it sitting on To Do as if nothing happened”:
    step 1). This is so a later operator action **In Progress → To Do** is detected
    as a leave→return (`force_after_in_progress` / `entered_todo_from_elsewhere`).
 4. Operator **fixes** the description (`Mode`, `{params}`, etc.), then **moves the
-   ticket back to To Do** → next poll requeues (`requeue_eligible` + status change).
+   ticket back to To Do** → next poll requeues. **To Do itself is the rework
+   signal** (also if the ticket never left To Do and still has a trigger label).
 
-Secondary reprocess path while still on To Do after ERROR: user **edits**
-summary/description (fingerprint change) without leaving the column — still
-requeues once (`text_changed_retry`). Cancelled tickets while still To Do do
-**not** auto-retry.
+Secondary path while still on To Do after ERROR: user **edits**
+summary/description (fingerprint change) without leaving the column
+(`text_changed_retry`). Cancelled + still To Do + trigger is also rework
+(same To Do rule).
 
 **Do not treat the following as a bug:** after a *successful* fail path that
 moved the board to In Progress, the poller remembering `in progress` and
 reprocessing when the user returns the issue to To Do. That is the designed
-recovery loop.
+recovery loop. Also not a bug: To Do + trigger re-queue after completed /
+error / cancelled.
 
 **Do treat as a bug:** inventing tracker `in progress` when the Jira transition
 **failed** (no matching transition name, locale/workflow without “In Progress”)
-while the board is still To Do — that would re-fire every poll without a user
-move. Fail path must keep tracker aligned with reality in that case; recovery
-then uses description edit fingerprint and/or a real board status change once
-workflows allow In Progress.
+while the board is still To Do — the tracker must stay aligned with the board.
+Rework in that case still happens because the ticket is To Do + trigger
+(primary intake), not because of a fake leave→return.
 
 ### Error handling
 
@@ -203,7 +215,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, opencode_serve_max_compact_continues. Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, opencode_serve_max_compact_continues, project_repositories (saved git remotes for the New-issue picker). Plans never auto-start (see §2).
 - **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
 - Version is read from repo root `VERSION`.
 

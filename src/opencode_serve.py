@@ -72,6 +72,12 @@ DEFAULT_CONTINUE_PROMPT = (
     "and commit steps as required."
 )
 
+# Incomplete (open todos) resume — short nudge, not the original BUILD kit.
+DEFAULT_FINISH_TODOS_PROMPT = (
+    "Finish remaining todos and complete the original task in this session. "
+    "Do not restart from scratch."
+)
+
 # How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
 # Do not POST a user "Continue" while compact is running — that pollutes chat
 # and fights the built-in compact loop.
@@ -320,6 +326,7 @@ def session_is_busy(status: Any, session_id: Optional[str]) -> bool:
         "busy",
         "busy_compacting",
         "compacting",
+        "retry",
         "running",
         "in_progress",
         "in-progress",
@@ -688,13 +695,16 @@ class ServeOrchestrator:
                 # wait it out — do not abort and do not Continue.
                 try:
                     status = await self.client.session_status()
+                    status_ok = True
                 except Exception:
                     status = {}
+                    status_ok = False
                 try:
                     msgs_now = await self.client.list_all_messages(sid)
                 except Exception:
                     msgs_now = []
-                still_running = session_is_busy(status, sid)
+                # Failed status poll must not look idle (same as compact wait).
+                still_running = (not status_ok) or session_is_busy(status, sid)
                 compact_seen = bool(compaction_marker_keys(msgs_now) - keys_before)
                 if still_running or compact_seen:
                     _emit(
@@ -724,6 +734,13 @@ class ServeOrchestrator:
                         sid, compact_total=compact_total, output_text="", _emit=_emit
                     )
                     strip_compact_reasons(assessment)
+                    if wait_info.get("timeout") or wait_info.get("busy"):
+                        reasons = list(
+                            assessment.get("reasons") or ["auto-compact wait timed out"]
+                        )
+                        assessment["premature"] = True
+                        assessment["complete"] = False
+                        assessment["reasons"] = reasons
                     _emit(
                         "stdout",
                         "[serve] after timeout wait "
@@ -903,6 +920,14 @@ class ServeOrchestrator:
                     sid, compact_total=compact_total, output_text="", _emit=_emit
                 )
                 strip_compact_reasons(assessment)
+                if wait_info.get("timeout") or wait_info.get("busy"):
+                    reasons = list(
+                        assessment.get("reasons")
+                        or ["auto-compact wait timed out"]
+                    )
+                    assessment["premature"] = True
+                    assessment["complete"] = False
+                    assessment["reasons"] = reasons
                 _emit(
                     "stdout",
                     f"[serve] after compact wait complete={assessment.get('complete')} "

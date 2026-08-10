@@ -114,6 +114,9 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     delivery_status: j.delivery_status ?? null,
     delivery_note: j.delivery_note ?? null,
     working_directory: j.working_directory ?? null,
+    source: j.source || 'jira',
+    gitlab_project: j.gitlab_project ?? null,
+    gitlab_mr_iid: j.gitlab_mr_iid ?? null,
   }
 }
 

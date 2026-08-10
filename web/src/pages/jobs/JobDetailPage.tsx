@@ -4,6 +4,11 @@ import { cancelTask, deleteJob, fetchJobArtifacts, fetchJobById } from '../../ap
 import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
 import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
+import {
+  artifactsHaveContent,
+  jobArtifactPathSignature,
+  shouldRefetchJobArtifacts,
+} from '../../util/artifacts'
 import { IN_FLIGHT_STATUSES, jobIsCancellable, jobIsDeletable } from '../../util/status'
 import { useElapsedLabel } from '../../util/time'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
@@ -36,18 +41,42 @@ export function JobDetailPage() {
   const reqId = useRef(0)
   const lastSoft = useRef(0)
   const artsFor = useRef('')
+  const artsSig = useRef('')
+  const artsHad = useRef(false)
+  const artsInFlight = useRef(false)
 
-  const loadArtifacts = useCallback(async (id: string, force = false) => {
-    if (!id || (!force && artsFor.current === id)) return
+  const loadArtifacts = useCallback(async (id: string, force = false, sig = '') => {
+    if (!id) return
+    if (artsInFlight.current && !force) return
+    const nextSig = sig || artsSig.current
+    if (
+      !shouldRefetchJobArtifacts({
+        jobId: id,
+        lastJobId: artsFor.current,
+        force,
+        live: false,
+        pathSignature: nextSig,
+        lastPathSignature: artsSig.current,
+        lastHadContent: artsHad.current,
+      })
+    ) {
+      return
+    }
+    artsInFlight.current = true
     setArtsLoading(true)
     try {
       const arts = await fetchJobArtifacts(id)
       artsFor.current = id
-      setPrompts(arts.prompts || [])
-      setSessionLogs(arts.session_logs || [])
+      if (sig) artsSig.current = sig
+      const nextPrompts = arts.prompts || []
+      const nextLogs = arts.session_logs || []
+      artsHad.current = artifactsHaveContent(nextPrompts, nextLogs)
+      setPrompts(nextPrompts)
+      setSessionLogs(nextLogs)
     } catch {
       /* tab shows its own empty/warning */
     } finally {
+      artsInFlight.current = false
       setArtsLoading(false)
     }
   }, [])
@@ -70,7 +99,7 @@ export function JobDetailPage() {
         setJob(body.job)
         setSystemLogs(Array.isArray(body.system_logs) ? body.system_logs : [])
         setStale(false)
-        void loadArtifacts(id, !soft)
+        void loadArtifacts(id, !soft, jobArtifactPathSignature(body.job))
       } catch (e) {
         if (req !== reqId.current) return
         if (soft || haveRow) setStale(true)
@@ -88,6 +117,8 @@ export function JobDetailPage() {
   useEffect(() => {
     setTab('overview')
     artsFor.current = ''
+    artsSig.current = ''
+    artsHad.current = false
     lastSoft.current = Date.now()
     setPrompts([])
     setSessionLogs([])
@@ -105,6 +136,30 @@ export function JobDetailPage() {
     lastSoft.current = now
     void load(true)
   }, [live.generation, load])
+
+  const liveRun =
+    Boolean(job?.live) || IN_FLIGHT_STATUSES.has((job?.status || '').toLowerCase())
+  const artifactSig = job ? jobArtifactPathSignature(job) : ''
+
+  // Chat polls OpenCode on its own. Output reads session files — refetch when
+  // the path appears after the first empty snapshot, or while the log grows.
+  useEffect(() => {
+    const id = job?.job_id
+    if (!id || id !== jobId.trim()) return
+    if (artifactSig !== artsSig.current || (!artsHad.current && artifactSig)) {
+      void loadArtifacts(id, true, artifactSig)
+    }
+  }, [artifactSig, job?.job_id, jobId, loadArtifacts])
+
+  useEffect(() => {
+    const id = job?.job_id
+    if (!id || !liveRun) return
+    const tick = () => {
+      void loadArtifacts(id, true, artifactSig)
+    }
+    const timer = window.setInterval(tick, 2000)
+    return () => window.clearInterval(timer)
+  }, [artifactSig, job?.job_id, liveRun, loadArtifacts])
 
   const elapsed = useElapsedLabel(
     job?.started_at,
@@ -244,10 +299,7 @@ export function JobDetailPage() {
           <div key="chat" className="vd-fade">
             <JobChatTab
               jobId={job.job_id}
-              liveRun={
-                Boolean(job.live) ||
-                IN_FLIGHT_STATUSES.has((job.status || '').toLowerCase())
-              }
+              liveRun={liveRun}
             />
           </div>
         )}

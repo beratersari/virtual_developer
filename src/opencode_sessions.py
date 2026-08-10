@@ -805,12 +805,25 @@ _COMPACT_REASON_MARKERS = (
     "compaction occurred this turn",
     "cli output indicates compaction",
 )
+# Safe to drop after we waited for auto-compact. Compact-then-stop / summary
+# / user-part mean the session still ended on compact — that is incomplete.
+_TRANSIENT_COMPACT_REASON_MARKERS = (
+    "compaction near end",
+    "compaction occurred this turn",
+    "cli output indicates compaction",
+)
 
 
 def is_compact_reason(reason: Any) -> bool:
     """True when an assessment reason is only about auto-compaction."""
     s = str(reason or "").lower()
     return any(m in s for m in _COMPACT_REASON_MARKERS)
+
+
+def is_transient_compact_reason(reason: Any) -> bool:
+    """True for compact log noise that wait-then-reassess may clear."""
+    s = str(reason or "").lower()
+    return any(m in s for m in _TRANSIENT_COMPACT_REASON_MARKERS)
 
 
 def reasons_are_compact_only(reasons: Optional[List[Any]]) -> bool:
@@ -830,12 +843,16 @@ def compact_related_reasons(reasons: Optional[List[Any]]) -> bool:
 
 
 def strip_compact_reasons(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop compact-then-stop flags after we waited for auto-compact to finish.
+    """Drop transient compact *log* flags after we waited for auto-compact.
 
-    OpenCode already auto-compacts; leftover compact markers must not keep
-    the orchestrator injecting Continue user messages.
+    Compact-then-stop / summary-stop / compaction user part stay: those mean
+    the session still ended on compact (opencode#13946 false success).
     """
-    kept = [r for r in (result.get("reasons") or []) if not is_compact_reason(r)]
+    kept = [
+        r
+        for r in (result.get("reasons") or [])
+        if not is_transient_compact_reason(r)
+    ]
     result["reasons"] = kept
     if kept:
         result["complete"] = False

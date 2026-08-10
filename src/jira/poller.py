@@ -179,6 +179,9 @@ class JiraPoller:
         logger.debug(f"Found {len(issues)} issues from {source}")
 
         trigger_labels = set(settings.trigger_labels_list)
+        trigger_labels_l = {
+            str(x).strip().lower() for x in trigger_labels if str(x).strip()
+        }
         logger.debug(f"Trigger labels: {trigger_labels}")
 
         new_issues = []
@@ -208,7 +211,9 @@ class JiraPoller:
             # Track Jira status for all issues so we can detect real To Do re-entry
             self._last_jira_status[issue_key] = status
 
-            matched_labels = sorted(trigger_labels & label_set)
+            matched_labels = sorted(
+                str(x) for x in labels if str(x).strip().lower() in trigger_labels_l
+            )
             has_label = bool(matched_labels)
             is_assigned_to_bot = self._is_assigned_to_jira_ai_bot(issue_key, fields)
             if is_assigned_to_bot:
@@ -242,11 +247,17 @@ class JiraPoller:
 
             if should_process and is_todo:
                 local_st = local.status if local else None
-                # Never restart in-flight work. plan_ready still waits for
-                # ai-start-work / ai-execute (or a new Mode: build issue).
-                # Terminal (completed/error/cancelled) + To Do + trigger label
-                # is intake again — operator expectation: bot/ai-assist on To Do
-                # means run, including after a finished job.
+                # INTENTIONAL: Jira **To Do** + trigger is the rework signal.
+                # completed / error / cancelled on To Do are re-queued (reset +
+                # run again). Do not "fix" that by skipping terminal stay-on-To-Do.
+                # After accept the bot moves the board to In Progress so the
+                # next poll does not start another job; if the ticket is put
+                # back on To Do (or never left), that is another rework.
+                #
+                # Exceptions (not rework):
+                #   * in-flight planning/executing — never restart from poll noise
+                #   * plan_ready — waits for ai-start-work / ai-execute (or a
+                #     new Mode: build issue). bot/ai-assist alone does not build.
                 in_flight = local_st in {
                     TaskStatus.PLANNING,
                     TaskStatus.EXECUTING,
@@ -376,10 +387,12 @@ class JiraPoller:
         }
 
     def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
-        """Re-queue terminal issues that should run again.
+        """Secondary reopen path (leave→return / ERROR text edit).
 
-        Never re-queue in-flight work (PLANNING/EXECUTING) just because
-        Jira still says To Do — that caused infinite re-execution loops.
+        Primary rework is ``poll_board`` new_issues: **To Do + trigger** after
+        completed/error/cancelled is intentional re-queue. This helper covers
+        cases that did not go through that list (e.g. pending-schedule skip
+        then a later status change). Never restart in-flight work.
 
         Reprocess when:
         * user moves ticket back to To Do (leave → return), or
@@ -411,6 +424,9 @@ class JiraPoller:
                 continue
 
             if state.status not in terminal:
+                continue
+
+            if self._issue_has_pending_schedule(issue_key):
                 continue
 
             prev_before = getattr(self, "_status_before_poll", {}).get(issue_key)

@@ -181,6 +181,12 @@ def decide_gitlab_note_webhook(
     if not enabled:
         return WebhookDecision(False, "gitlab webhook disabled")
 
+    want = (secret or "").strip()
+    if not want:
+        return WebhookDecision(
+            False, "webhook secret required", http_status=401
+        )
+
     token = header_map.get("x-gitlab-token") or ""
     if not validate_webhook_token(token, secret):
         return WebhookDecision(False, "invalid webhook token", http_status=401)

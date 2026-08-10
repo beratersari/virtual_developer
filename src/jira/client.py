@@ -8,6 +8,22 @@ from src.config import settings
 from src.logger import logger
 
 
+def _comment_body_to_adf(body: str) -> Dict[str, Any]:
+    """ADF doc for Cloud 400 fallback. Text nodes cannot contain raw newlines."""
+    text = body or ""
+    paragraphs: List[Dict[str, Any]] = []
+    for line in text.split("\n"):
+        content: List[Dict[str, Any]] = []
+        if line:
+            content.append({"type": "text", "text": line})
+        else:
+            content.append({"type": "hardBreak"})
+        paragraphs.append({"type": "paragraph", "content": content})
+    if not paragraphs:
+        paragraphs = [{"type": "paragraph", "content": [{"type": "text", "text": " "}]}]
+    return {"version": 1, "type": "doc", "content": paragraphs}
+
+
 def _jira_fields_query(fields: Union[str, Iterable[str], None]) -> Optional[str]:
     """Normalize ``fields`` to a Jira ``fields=a,b,c`` query value.
 
@@ -313,6 +329,12 @@ class JiraClient:
         
         try:
             response = self.client.get("/search", params=params)
+            # Cloud removed GET /rest/api/2/search (HTTP 410). On-prem still uses it.
+            if response.status_code == 410:
+                response = self.client.get(
+                    f"{self.host}/rest/api/3/search/jql",
+                    params=params,
+                )
             response.raise_for_status()
             data = response.json()
             return data.get("issues", [])
@@ -421,14 +443,19 @@ class JiraClient:
                 response = self.client.get(url, params=params)
                 response.raise_for_status()
                 data = response.json()
-                issues = data.get("issues", [])
-                all_issues.extend(issues)
-                
-                # Check if there are more issues
-                total = data.get("total", 0)
-                if start_at + max_results >= total:
+                batch = data.get("issues") or []
+                all_issues.extend(batch)
+                if not batch:
                     break
-                start_at += max_results
+                # Agile often returns fewer than maxResults (e.g. 50 of 100).
+                # Advance by page length, not the requested size.
+                start_at += len(batch)
+                total = int(data.get("total") or 0)
+                if total and start_at >= total:
+                    break
+                # Short page is final only when the server did not advertise more.
+                if len(batch) < max_results and (not total or start_at >= total):
+                    break
                 
             except httpx.HTTPError as e:
                 logger.error(f"Error getting sprint issues: {e}")
@@ -463,25 +490,16 @@ class JiraClient:
     def transition_to_in_progress(self, issue_key: str) -> bool:
         """Transition an issue toward an In Progress-like status.
 
-        * **On-prem (unchanged):** transition whose name contains ``in progress``.
-        * **Cloud (atlassian.net):** also match locale names (e.g. Turkish
-          ``Devam Ediyor``) and prefer destination statusCategory
-          ``indeterminate``, skipping review-like transitions.
+        * Match transition **names** (``In Progress``, ``Start Progress``,
+          locale equivalents) then destination ``statusCategory=indeterminate``.
+        * Same matcher for Cloud and on-prem — classic Jira Software names
+          the transition ``Start Progress``, not ``In Progress``.
         """
         transitions = self.get_transitions(issue_key)
         if not transitions:
             logger.warning(f"No transitions available for {issue_key}")
             return False
 
-        # --- On-prem / default: exact previous behaviour ---
-        if not self.is_cloud:
-            for t in transitions:
-                if "in progress" in t["name"].lower():
-                    return self.do_transition(issue_key, t["id"])
-            logger.warning(f"No 'In Progress' transition found for {issue_key}")
-            return False
-
-        # --- Cloud: locale-safe matching ---
         name_hints = (
             "in progress",
             "devam ediyor",
@@ -512,7 +530,8 @@ class JiraClient:
                 continue
             if any(h in name for h in name_hints):
                 logger.info(
-                    f"Cloud transition for {issue_key}: '{t.get('name')}' (id={t.get('id')})"
+                    f"In Progress transition for {issue_key}: "
+                    f"'{t.get('name')}' (id={t.get('id')})"
                 )
                 return self.do_transition(issue_key, t["id"])
 
@@ -525,15 +544,15 @@ class JiraClient:
             cat = ((to.get("statusCategory") or {}).get("key") or "").lower()
             if cat == "indeterminate":
                 logger.info(
-                    f"Cloud transition for {issue_key}: '{t.get('name')}' "
+                    f"In Progress transition for {issue_key}: '{t.get('name')}' "
                     f"(id={t.get('id')}, category=indeterminate)"
                 )
                 return self.do_transition(issue_key, t["id"])
 
         names = [t.get("name") for t in transitions]
         logger.warning(
-            f"No In Progress-like transition found for {issue_key} "
-            f"(cloud). Available: {names}"
+            f"No In Progress-like transition found for {issue_key}. "
+            f"Available: {names}"
         )
         return False
     
@@ -547,7 +566,7 @@ class JiraClient:
             )
             logger.debug(f"Comment status: {response.status_code}")
             if response.status_code == 400:
-                alt_body = {"body": {"version": 1, "type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": body}]}]}}
+                alt_body = {"body": _comment_body_to_adf(body)}
                 logger.warning(f"Trying alternate comment format for {issue_key}")
                 response = self.client.post(
                     f"/issue/{issue_key}/comment",
@@ -607,8 +626,15 @@ class JiraClient:
                     f"Cannot append description on {issue_key}: get_issue failed"
                 )
                 return False
+            fields = issue.get("fields") or {}
+            if "description" not in fields:
+                logger.error(
+                    f"Cannot append description on {issue_key}: "
+                    "description field missing from get_issue"
+                )
+                return False
             old = ""
-            raw = (issue.get("fields") or {}).get("description")
+            raw = fields.get("description")
             if isinstance(raw, str):
                 old = raw
             elif raw is not None:
@@ -625,13 +651,20 @@ class JiraClient:
         if not labels:
             return True
 
-        existing: List[str] = []
-        issue = self.get_issue(issue_key)
-        if issue and isinstance(issue, dict):
-            raw = (issue.get("fields") or {}).get("labels") or []
-            if isinstance(raw, list):
-                existing = [str(x) for x in raw]
-
+        issue = self.get_issue(issue_key, fields=["labels"])
+        # Fail closed: never PUT only the new labels when we could not read
+        # the current set (would drop bot / ai-assist).
+        if not issue or not isinstance(issue, dict):
+            logger.error(f"Cannot add labels on {issue_key}: get_issue failed")
+            return False
+        fields = issue.get("fields") or {}
+        if "labels" not in fields:
+            logger.error(
+                f"Cannot add labels on {issue_key}: labels field missing from get_issue"
+            )
+            return False
+        raw = fields.get("labels") or []
+        existing = [str(x) for x in raw] if isinstance(raw, list) else []
         merged = list(dict.fromkeys([*existing, *labels]))
         return self.update_issue(issue_key, labels=merged)
     

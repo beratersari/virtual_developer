@@ -269,10 +269,33 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
-    gitlab_webhook_enabled: bool = True
+    gitlab_webhook_enabled: bool = False
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
     gitlab_webhook_path: str = "/webhooks/gitlab"
+    # Saved remotes for the schedule New-issue picker (not secrets)
+    project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+
+
+class ProjectRepositoryItem(BaseModel):
+    """One bookmarked git remote for the New-issue form."""
+
+    label: str = Field(default="", max_length=80)
+    url: str = Field(..., min_length=3, max_length=500)
+    target_branch: str = Field(default="", max_length=255)
+    source_branch: str = Field(default="", max_length=255)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _git_url(cls, value: Any) -> str:
+        from src.issue_git_spec import _looks_like_git_url, _normalize_repo_url
+
+        url = _normalize_repo_url(str(value or ""))
+        if not _looks_like_git_url(url):
+            raise ValueError(
+                "Must be an http(s), ssh, or git@ repository URL (e.g. https://gitlab.com/g/r.git)"
+            )
+        return url
 
 
 class GitlabHostCredentialView(BaseModel):
@@ -417,6 +440,11 @@ class SettingsUpdate(BaseModel):
         ),
     )
     default_model: Optional[str] = Field(default=None, max_length=200)
+    project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
+        default=None,
+        max_length=40,
+        description="Full replace of saved git remotes for the New-issue form",
+    )
 
 
 class QueueItem(BaseModel):

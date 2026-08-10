@@ -180,7 +180,7 @@ def create_dashboard_app(
         decision = decide_gitlab_note_webhook(
             payload,
             headers=headers,
-            enabled=bool(getattr(settings, "gitlab_webhook_enabled", True)),
+            enabled=bool(getattr(settings, "gitlab_webhook_enabled", False)),
             secret=str(getattr(settings, "gitlab_webhook_secret", "") or ""),
             bot_mentions=list(settings.gitlab_bot_mentions_list),
             bot_usernames=list(settings.gitlab_bot_usernames_list),
@@ -409,14 +409,22 @@ def create_dashboard_app(
 
         bid = (bind_id or "").strip()
         rec = binds.get_by_id(bid)
-        if not rec or not binds.delete(bid):
+        if not rec:
+            raise HTTPException(status_code=404, detail=f"No session bind {bind_id}")
+        forgotten = binds.forget_session(
+            bid,
+            session_id=str(rec.get("session_id") or ""),
+            reason="dashboard-reset",
+        )
+        if not forgotten:
             raise HTTPException(status_code=404, detail=f"No session bind {bind_id}")
         return {
             "ok": True,
             "bind_id": bid,
             "message": (
                 f"Reset OpenCode session for {rec.get('repository_key') or rec.get('repository_url')}"
-                f"@{rec.get('branch')}. Next job on that branch starts a new session."
+                f"@{rec.get('branch')}→{rec.get('target_branch')}. "
+                "Next job on that bind starts a new session."
             ),
             "server_time": build_meta().server_time,
         }

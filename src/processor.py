@@ -884,8 +884,23 @@ class JobProcessor:
         import src.state.session_bind_store as session_binds
 
         rec = session_binds.session_bind_store.get(repo, branch, target)
+        forgotten = [
+            str(x).strip()
+            for x in ((rec or {}).get("forgotten_session_ids") or [])
+            if str(x).strip()
+        ]
+        if forgotten:
+            task.forgotten_session_ids = list(
+                dict.fromkeys(
+                    list(getattr(task, "forgotten_session_ids", None) or [])
+                    + forgotten
+                )
+            )
+            task.abandoned_session_id = (
+                getattr(task, "abandoned_session_id", None) or forgotten[-1]
+            )
         sid = (rec or {}).get("session_id") if rec else None
-        if not sid:
+        if not sid or sid in forgotten:
             return None
         wd = None
         if git is not None and hasattr(git, "get_working_directory"):
@@ -948,9 +963,39 @@ class JobProcessor:
         )
         return sid
 
+    def _should_bind_opencode_session(self, issue_key: str) -> bool:
+        """Oracle/sandbox must not overwrite the plan/build session bind."""
+        ctx = self._contexts.get(issue_key) or {}
+        if ctx.get("git") is None and issue_key in self._contexts:
+            return False
+        st = self.state_manager.get_state(issue_key)
+        wf = str(((st.metadata if st else None) or {}).get("workflow_type") or "")
+        if wf.lower() == "oracle":
+            return False
+        return True
+
+    def _forget_bound_session(self, issue_key: str, session_id: Optional[str]) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        git = self._git_for(issue_key)
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        if not repo or not branch or not target:
+            return
+        import src.state.session_bind_store as session_binds
+
+        session_binds.session_bind_store.forget_for(
+            repo, branch, target, session_id=sid, reason="abandoned"
+        )
+
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
         sid = (session_id or "").strip()
         if not sid:
+            return
+        if not self._should_bind_opencode_session(issue_key):
+            logger.info(
+                f"{issue_key}: skipping session bind upsert (oracle/sandbox)"
+            )
             return
         if issue_key in self._freeze_session_binds:
             logger.info(
@@ -1049,13 +1094,17 @@ class JobProcessor:
         """Pull session id from agent result (and retry_info) into state."""
         sid = result.get("opencode_session_id")
         retry = result.get("retry_info") or {}
+        abandoned = retry.get("abandoned_session_id") if retry else None
+        if abandoned:
+            self._forget_bound_session(issue_key, str(abandoned))
         if not sid and retry:
             last = retry.get("last_opencode_session_id")
-            abandoned = retry.get("abandoned_session_id")
             # Empty-timeout / wrong-dir cold retries must not rebind the
             # session they just abandoned when the final attempt has no id.
             if last and last != abandoned:
                 sid = last
+        if sid and abandoned and sid == abandoned:
+            sid = None
         self._record_opencode_session(
             issue_key,
             sid,
@@ -2028,11 +2077,11 @@ class JobProcessor:
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        # Terminal → reprocess only when Jira is To Do (operator reopen).
-        # ERROR/CANCELLED require requeue_eligible (set by cancel/fail).
-        # COMPLETED may reprocess when poller detected a real To Do return.
-        # Do NOT auto-reprocess while board is still In Progress (that caused
-        # infinite "no new commits" job loops every poll).
+        # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
+        # (poller already required a trigger) resets and runs again.
+        # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
+        # Do NOT auto-reprocess while the board is still In Progress (that
+        # caused infinite "no new commits" loops). plan_ready is not rework.
         if state.status in self.TERMINAL_STATUSES:
             if is_todo:
                 meta = state.metadata or {}
@@ -2649,7 +2698,16 @@ class JobProcessor:
                     )
                     return
             else:
-                await self.process_event(rec.get("payload") or {})
+                outcome = await self.process_event(rec.get("payload") or {})
+                if not outcome.get("work_started"):
+                    self.queue_store.finish(
+                        qid,
+                        status="skipped",
+                        error_message=str(
+                            outcome.get("skipped") or "process_event did not start work"
+                        )[:2000],
+                    )
+                    return
             st = self.state_manager.get_state(rec.get("issue_key") or "")
             if st:
                 job_id = (st.metadata or {}).get("current_job_id") or (

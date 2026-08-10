@@ -361,6 +361,22 @@ def test_prepare_work_branch_creates_from_target_when_missing(gm):
                     existing.assert_not_called()
 
 
+def test_prepare_work_branch_local_only_does_not_use_origin(gm):
+    """Local leftover from a previous run is not origin/{work} (KAN-24)."""
+    with patch.object(gm, "_remote_head_exists", return_value=False):
+        with patch.object(gm, "_branch_exists", return_value=True):
+            with patch.object(
+                gm, "_checkout_local_work_branch", return_value="feature/KAN-23"
+            ) as local:
+                with patch.object(gm, "_checkout_existing_remote_branch") as existing:
+                    with patch.object(gm, "_checkout_work_branch_from_target") as create:
+                        out = gm._prepare_work_branch("feature/KAN-23", "develop")
+                        assert out == "feature/KAN-23"
+                        local.assert_called_once_with("feature/KAN-23")
+                        existing.assert_not_called()
+                        create.assert_not_called()
+
+
 def test_ensure_feature_branch_prepares_not_always_from_target(gm):
     gm.source_branch = "feature/legacy"
     gm.target_branch = "develop"

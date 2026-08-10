@@ -325,7 +325,9 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
 
     assert create_calls["n"] == 1, "must not create a second session"
     assert backend.prompts == ["ORIGINAL SERVE BUILD PROMPT"]
-    assert result["returncode"] == 0
+    # Compact-then-stop after wait is incomplete; do not POST Continue.
+    assert result["returncode"] == 2
+    assert result.get("incomplete") is True
     assert result["retry_info"]["retried"] is False
     assert (result.get("opencode_session_id") or "").startswith("ses_")
 

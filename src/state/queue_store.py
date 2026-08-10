@@ -248,6 +248,19 @@ class WorkQueueStore:
             logger.info(f"Queue finish {queue_id} status={status}")
         return rec
 
+    def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
+        """Re-queue durable ``running`` rows after a crash (no live worker)."""
+        n = 0
+        for rec in list(self.list_items(status="running", limit=500)):
+            qid = rec.get("queue_id")
+            if not qid:
+                continue
+            if self.requeue(str(qid), reason=reason):
+                n += 1
+        if n:
+            logger.info(f"Re-queued {n} orphaned running queue item(s)")
+        return n
+
     def requeue(self, queue_id: str, *, reason: str = "") -> Optional[Dict[str, Any]]:
         """Put a running item back to queued (in-flight collision)."""
         rec = self.update(

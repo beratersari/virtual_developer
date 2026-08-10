@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from src.config import save_runtime_settings, settings, upsert_dotenv_keys
 from src.dashboard.issue_logs import issue_log_ring
 from src.logger import logger
+from src.dashboard.project_repos import (
+    parse_project_repositories,
+    project_repositories_to_json,
+)
 from src.dashboard.schemas import (
     GitDeliveryItem,
     GitlabHostCredentialView,
@@ -21,6 +25,7 @@ from src.dashboard.schemas import (
     ModelsResponse,
     PolledIssueItem,
     PollStatusResponse,
+    ProjectRepositoryItem,
     SettingsUpdate,
     SettingsView,
     TaskItem,
@@ -162,7 +167,7 @@ def build_poll_status(
         # snapshot for counts / debug; UI must not show noise.
         matched_label = bool(row.get("matched_label"))
         matched_assignee = bool(row.get("matched_assignee"))
-        if not (matched_label or matched_assignee):
+        if not (matched_label or matched_assignee or row.get("will_process")):
             continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
@@ -200,6 +205,11 @@ def build_poll_status(
         server_time=raw.get("server_time")
         or datetime.now().isoformat(timespec="seconds"),
     )
+
+
+def _settings_project_repositories() -> List[ProjectRepositoryItem]:
+    raw = getattr(settings, "project_repositories", "") or ""
+    return [ProjectRepositoryItem(**item) for item in parse_project_repositories(raw)]
 
 
 def build_settings_view() -> SettingsView:
@@ -245,7 +255,7 @@ def build_settings_view() -> SettingsView:
         ],
         default_model=(settings.default_model or "").strip(),
         gitlab_webhook_enabled=bool(
-            getattr(settings, "gitlab_webhook_enabled", True)
+            getattr(settings, "gitlab_webhook_enabled", False)
         ),
         gitlab_bot_mentions=(
             getattr(settings, "gitlab_bot_mentions", "") or ""
@@ -254,6 +264,7 @@ def build_settings_view() -> SettingsView:
             (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
         ),
         gitlab_webhook_path="/webhooks/gitlab",
+        project_repositories=_settings_project_repositories(),
     )
 
 
@@ -472,6 +483,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         if model:
             settings.default_model = model
             runtime_persist["default_model"] = settings.default_model
+    if "project_repositories" in data and data["project_repositories"] is not None:
+        encoded = project_repositories_to_json(data["project_repositories"])
+        settings.project_repositories = encoded
+        runtime_persist["project_repositories"] = encoded
 
     if runtime_persist:
         # Persist so the next job (and process restart) does not fall back to .env

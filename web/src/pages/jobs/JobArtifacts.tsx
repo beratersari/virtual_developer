@@ -66,7 +66,8 @@ export function JobSessionTab({
       const label = sessionLogRetryLabel(path)
       const match =
         findLogForJobPath(sessionLogs, path) ||
-        findLogForJobPath(sessionLogs, byBase.get(pathBasename(path)) || null)
+        findLogForJobPath(sessionLogs, byBase.get(pathBasename(path)) || null) ||
+        (sessionLogs.length === 1 && paths.length === 1 ? sessionLogs[0] : undefined)
       const failedAs =
         retries.find(
           (r) =>
@@ -89,7 +90,9 @@ export function JobSessionTab({
     setOpenKeys(next)
   }, [sessionKey])
 
-  const fallback = findLogForJobPath(sessionLogs, job.session_log_path)
+  const fallback =
+    findLogForJobPath(sessionLogs, job.session_log_path) ||
+    (sessionLogs || []).find((log) => (log.content || log.error || '').trim())
   if (entries.length === 0 && fallback) {
     return (
       <PromptBlock
@@ -105,7 +108,7 @@ export function JobSessionTab({
       <div className="vd-alert vd-alert-warning">
         {job.session_log_path
           ? `Could not load session log (${pathBasename(job.session_log_path)}).`
-          : 'No OpenCode session logs linked to this job yet.'}
+          : 'No OpenCode session logs linked to this job yet. Chat can still fill from the OpenCode database before a .log file is attached.'}
       </div>
     )
   }
@@ -180,7 +183,7 @@ export function JobSessionTab({
               </summary>
               <div className="border-t border-border">
                 {entry.match ? (
-                  <pre className="max-h-[min(60vh,36rem)] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed">
+                  <pre className="max-h-[min(60vh,36rem)] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed text-text">
                     {body}
                   </pre>
                 ) : (

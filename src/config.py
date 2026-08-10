@@ -235,6 +235,14 @@ class Settings(BaseSettings):
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
+    project_repositories: str = Field(
+        default="",
+        description=(
+            "JSON list of saved git remotes for the dashboard New-issue form. "
+            'Example: [{"label":"demo","url":"https://gitlab.com/g/r.git",'
+            '"target_branch":"develop"}]'
+        ),
+    )
     
     # Git Configuration (for commits in target project folder)
     git_user_name: str = Field(default="DevBot", description="Git user name for commits")
@@ -262,7 +270,7 @@ class Settings(BaseSettings):
     )
     # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
     gitlab_webhook_enabled: bool = Field(
-        default=True,
+        default=False,
         description="Accept GitLab Note webhooks on /webhooks/gitlab",
     )
     gitlab_webhook_secret: str = Field(
@@ -660,6 +668,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "trigger_labels",
         "trigger_on_assignment",
         "default_model",
+        "project_repositories",
     }
 )
 
@@ -760,6 +769,10 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 )
                 continue
             value = text
+        if key == "project_repositories":
+            from src.dashboard.project_repos import project_repositories_to_json
+
+            value = project_repositories_to_json(value)
         try:
             setattr(settings_obj, key, value)
         except Exception as e:
