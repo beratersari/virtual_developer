@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Alert } from '../ui/Alert'
+import { formatChatTime, formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
 
 const NAV = [
@@ -74,8 +75,11 @@ const ICONS = [IconJobs, IconQueue, IconClock, IconSession, IconBoard, IconGear]
 export function Shell() {
   const live = useLive()
   const location = useLocation()
+  const now = useNow(true, 1000)
   const queued = live.poll?.will_process_count ?? 0
   const workQueued = live.queueQueued ?? 0
+  const localClock = formatDashboardClock(now)
+  const serverClock = formatChatTime(live.meta?.server_time)
 
   return (
     <div className="vd-app">
@@ -116,15 +120,23 @@ export function Shell() {
           })}
         </nav>
 
-        <div className="mt-3 hidden items-center gap-2 px-2 text-xs md:flex">
-          <span
-            className={`h-2 w-2 rounded-full ${
-              live.connected ? 'vd-pulse bg-live' : 'bg-warning'
-            }`}
-          />
-          <span className={live.connected ? 'text-success-text' : 'text-warning-text'}>
-            {live.connected ? 'Connected' : 'Reconnecting'}
-          </span>
+        <div className="mt-3 space-y-2 px-2 text-xs">
+          <div className="hidden font-mono text-[11px] leading-snug text-text-secondary md:block">
+            <div className="text-text">{localClock || '—'}</div>
+            {serverClock && (
+              <div className="mt-0.5 text-text-muted">Server {serverClock}</div>
+            )}
+          </div>
+          <div className="hidden items-center gap-2 md:flex">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                live.connected ? 'vd-pulse bg-live' : 'bg-warning'
+              }`}
+            />
+            <span className={live.connected ? 'text-success-text' : 'text-warning-text'}>
+              {live.connected ? 'Connected' : 'Reconnecting'}
+            </span>
+          </div>
         </div>
       </aside>
 

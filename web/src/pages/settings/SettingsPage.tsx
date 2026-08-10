@@ -18,6 +18,7 @@ import { Spinner } from '../../ui/Spinner'
 
 type Draft = {
   jira_host: string
+  jira_email: string
   jira_api_token: string
   jira_board_id: string
   poll_interval_seconds: number
@@ -35,6 +36,7 @@ type Draft = {
 function fromSettings(s: SettingsPayload): Draft {
   return {
     jira_host: s.jira_host,
+    jira_email: s.jira_email ?? '',
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
@@ -116,6 +118,7 @@ export function SettingsPage() {
       }
       const body: Parameters<typeof patchSettings>[0] = {
         jira_host: draft.jira_host.trim(),
+        jira_email: draft.jira_email.trim(),
         jira_board_id: draft.jira_board_id.trim(),
         poll_interval_seconds: Number(draft.poll_interval_seconds),
         trigger_labels: draft.trigger_labels,
@@ -196,11 +199,24 @@ export function SettingsPage() {
       <div key="jira" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Jira connection</div>
       <p className="text-xs text-text-muted">
-        Host + API token / PAT. Test calls /myself and lists projects.
+        Host + API token / PAT. Test uses the values below; a blank token tests
+        the last saved token. Cloud needs email (Basic); on-prem PAT leaves email empty.
       </p>
       <label className="field">
         <span>Host</span>
         <input value={draft.jira_host} onChange={(e) => mark('jira_host', e.target.value)} />
+      </label>
+      <label className="field">
+        <span>
+          Email {settings.jira_email_configured ? '(saved)' : '(optional — Cloud Basic)'}
+        </span>
+        <input
+          type="email"
+          autoComplete="off"
+          value={draft.jira_email}
+          onChange={(e) => mark('jira_email', e.target.value)}
+          placeholder="Cloud: account email · on-prem: leave empty"
+        />
       </label>
       <label className="field">
         <span>Board ID</span>
@@ -231,9 +247,14 @@ export function SettingsPage() {
           disabled={jiraTesting}
           onClick={() => {
             setJiraTesting(true)
+            const host = draft.jira_host.trim()
+            const email = draft.jira_email.trim()
+            const token = draft.jira_api_token.trim()
+            // Omit blank fields so the API uses the last saved host/email/token.
             void testJiraConnection({
-              host: draft.jira_host.trim(),
-              api_token: draft.jira_api_token.trim() || undefined,
+              ...(host ? { host } : {}),
+              ...(email ? { email } : {}),
+              ...(token ? { api_token: token } : {}),
             })
               .then(setJiraResult)
               .catch((e: Error) => setJiraResult({ ok: false, error: e.message }))

@@ -133,6 +133,54 @@ def test_jira_probe_timeout():
     assert "Timed out" in out["error"]
 
 
+def test_api_jira_test_empty_body_uses_saved(tmp_path, monkeypatch):
+    """Settings Test with a blank token must probe the stored host/token."""
+    from fastapi.testclient import TestClient
+
+    from src.config import settings
+    from src.dashboard.api import create_dashboard_app
+    from src.state.manager import JiraStateManager
+
+    monkeypatch.setattr(settings, "jira_host", "https://saved.example.com")
+    monkeypatch.setattr(settings, "jira_email", "saved@ex.com")
+    monkeypatch.setattr(settings, "jira_api_token", "saved-token")
+    seen: dict = {}
+
+    def _probe(**kwargs):
+        seen.update(kwargs)
+        return {
+            "ok": True,
+            "host": kwargs.get("host") or settings.jira_host,
+            "message": "used saved",
+            "projects": [],
+            "project_count": 0,
+        }
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    with monkeypatch.context() as m:
+        m.setattr("src.dashboard.api.probe_jira_connection", _probe)
+        app = create_dashboard_app(processor=None, state_manager=sm)
+        tc = TestClient(app)
+        r = tc.post("/api/settings/jira/test", json={})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert seen.get("host") in (None, "")
+    assert seen.get("api_token") in (None, "")
+    # Probe itself still authenticates with the stored token
+    with patch("src.jira_connection.httpx.Client") as C:
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        client.get.side_effect = [
+            _resp(200, {"displayName": "Saved", "emailAddress": "saved@ex.com"}),
+            _resp(200, []),
+        ]
+        C.return_value = client
+        out = probe_jira_connection()
+    assert out["ok"] is True
+    assert C.call_args.kwargs.get("auth") == ("saved@ex.com", "saved-token")
+
+
 def test_api_jira_test_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 

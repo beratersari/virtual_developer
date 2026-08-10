@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +74,82 @@ def bootstrap_dotenv_into_environ(
 
 # Ensure .env tokens exist in os.environ before Settings() and agent children run.
 bootstrap_dotenv_into_environ()
+
+
+def _dotenv_quote(value: str) -> str:
+    """Quote a .env value when it contains whitespace or shell-ish characters."""
+    raw = "" if value is None else str(value)
+    if raw == "":
+        return ""
+    if re.search(r'[\s#"\'\\$`]', raw):
+        escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return raw
+
+
+def upsert_dotenv_keys(
+    updates: Dict[str, str],
+    *,
+    path: Optional[Path] = None,
+) -> int:
+    """Insert or replace KEY=value lines in ``.env`` without dropping other keys.
+
+    Used so dashboard-saved Jira host/email/token survive process restart.
+    Never logs secret values. Returns the number of keys written.
+    """
+    if not updates:
+        return 0
+    dest = path or (Path.cwd() / ".env")
+    try:
+        dest = dest.resolve()
+    except OSError:
+        dest = Path(dest)
+    if not dest.is_file():
+        example = dest.with_name(".env.example")
+        try:
+            if example.is_file():
+                dest.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+            else:
+                dest.write_text("", encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Could not create dotenv {dest}: {e}")
+            return 0
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not read dotenv {dest}: {e}")
+        return 0
+    wanted = {str(k).strip(): ("" if v is None else str(v)) for k, v in updates.items() if str(k).strip()}
+    if not wanted:
+        return 0
+    found: set[str] = set()
+    out_lines: List[str] = []
+    for line in text.splitlines(keepends=True):
+        core = line[:-1] if line.endswith("\n") else line
+        if core.endswith("\r"):
+            core = core[:-1]
+        stripped = core.lstrip()
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=", stripped)
+        if m and m.group(1) in wanted:
+            key = m.group(1)
+            out_lines.append(f"{key}={_dotenv_quote(wanted[key])}\n")
+            found.add(key)
+        else:
+            out_lines.append(line if line.endswith("\n") else line + "\n")
+    for key, val in wanted.items():
+        if key not in found:
+            out_lines.append(f"{key}={_dotenv_quote(val)}\n")
+    try:
+        dest.write_text("".join(out_lines), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not write dotenv {dest}: {e}")
+        return 0
+    for key, val in wanted.items():
+        os.environ[key] = val
+    logger.info(
+        "Updated .env keys: " + ", ".join(sorted(wanted))
+    )
+    return len(wanted)
 
 
 def compute_stuck_limit_seconds(
@@ -578,6 +655,8 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "poll_interval_seconds",
         "max_concurrent_jobs",
         "jira_board_id",
+        "jira_host",
+        "jira_email",
         "trigger_labels",
         "trigger_on_assignment",
         "default_model",
@@ -593,6 +672,8 @@ _RUNTIME_ENV_MIRROR = {
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
     "jira_board_id": "JIRA_BOARD_ID",
+    "jira_host": "JIRA_HOST",
+    "jira_email": "JIRA_EMAIL",
     "trigger_labels": "TRIGGER_LABELS",
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",

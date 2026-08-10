@@ -5,6 +5,7 @@ import {
   datetimeLocalToNaiveIso,
   elapsedSecondsBetween,
   formatChatTime,
+  formatDashboardClock,
   formatElapsedBetween,
   formatElapsedSeconds,
   parseTimeMs,
@@ -38,6 +39,8 @@ assert(formatElapsedBetween(start, null, now) === '30s', 'running format')
 
 const chatLabel = formatChatTime('2026-08-09T16:04:18+00:00')
 assert(chatLabel.length > 8, `chat time formatted: ${chatLabel}`)
+const clock = formatDashboardClock(Date.parse('2026-08-10T12:30:00Z'))
+assert(clock.length > 8, `dashboard clock formatted: ${clock}`)
 assert(!chatLabel.includes('+00:00'), 'chat time is local, not raw UTC offset')
 
 console.log('time.test.ts: ok')

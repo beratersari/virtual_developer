@@ -656,6 +656,7 @@ def create_dashboard_app(
         Token only → Bearer; email + token → Cloud Basic. Empty token uses the
         stored runtime token. Never echoes secrets.
         """
+        # Omit/blank fields use saved runtime settings (host, email, token).
         result = probe_jira_connection(
             host=body.host,
             email=body.email,

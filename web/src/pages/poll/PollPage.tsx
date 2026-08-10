@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useLive } from '../../app/live'
-import { formatCountdown } from '../../util/time'
+import { formatChatTime, formatCountdown } from '../../util/time'
 import { PageHeader } from '../../ui/PageHeader'
 import { StatusBadge } from '../../ui/StatusBadge'
 
@@ -44,7 +44,11 @@ export function PollPage() {
           <div className="mt-2 text-lg font-medium">{poll.source ?? '—'}</div>
           <div className="mt-1 text-sm text-text-secondary">Board {poll.board_id ?? '—'}</div>
           <div className="mt-3 text-xs text-text-muted">
-            Last {poll.last_poll_at ?? '—'} · cycle {poll.cycle}
+            Last {formatChatTime(poll.last_poll_at) || poll.last_poll_at || '—'}
+            {poll.next_poll_at
+              ? ` · next ${formatChatTime(poll.next_poll_at) || poll.next_poll_at}`
+              : ''}
+            {' · '}cycle {poll.cycle}
           </div>
         </div>
       </div>

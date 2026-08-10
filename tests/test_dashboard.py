@@ -121,6 +121,26 @@ def test_settings_view_includes_agent_timeout(monkeypatch):
     assert "agent_task_timeout_seconds" in view.model_dump()
 
 
+def test_upsert_dotenv_keys_preserves_other_lines(tmp_path):
+    from src.config import upsert_dotenv_keys
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "# keep comment\nJIRA_HOST=https://old\nOTHER=keep-me\n",
+        encoding="utf-8",
+    )
+    n = upsert_dotenv_keys(
+        {"JIRA_HOST": "https://new.example.com", "JIRA_API_TOKEN": "tok"},
+        path=path,
+    )
+    assert n == 2
+    text = path.read_text(encoding="utf-8")
+    assert "# keep comment" in text
+    assert "OTHER=keep-me" in text
+    assert "JIRA_HOST=https://new.example.com" in text
+    assert "JIRA_API_TOKEN=tok" in text
+
+
 def test_apply_settings_retry_counts(tmp_path, monkeypatch):
     from src.config import settings
 
@@ -143,9 +163,14 @@ def test_apply_settings_retry_counts(tmp_path, monkeypatch):
     assert view.opencode_serve_max_compact_continues == 128
 
 
-def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
+def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://old.example.com\nJIRA_API_TOKEN=old-token\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(settings, "jira_host", "https://old.example.com")
     monkeypatch.setattr(settings, "jira_email", "old@ex.com")
     monkeypatch.setattr(settings, "jira_api_token", "old-token")
@@ -195,6 +220,10 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     assert settings.jira_api_token == "new-secret-token"
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == ""
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "JIRA_API_TOKEN=new-secret-token" in env_text
+    assert "JIRA_HOST=https://new.example.com" in env_text
+    assert "JIRA_EMAIL=new@ex.com" in env_text
 
 
 def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(monkeypatch):
