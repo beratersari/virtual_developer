@@ -327,9 +327,28 @@ export function createSchedule(body: ScheduleCreateBody) {
   }
   if (body.project_key) payload.project_key = body.project_key
   if (body.issue_type) payload.issue_type = body.issue_type
-  return request<{ ok: boolean; schedule: ScheduleItem; issue_key?: string }>(
+  if (body.dispatch_now) payload.dispatch_now = true
+  return request<{
+    ok: boolean
+    schedule: ScheduleItem
+    issue_key?: string
+    dispatched?: boolean
+    dispatch_error?: string
+  }>(
     '/api/schedules',
     { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
+export function dispatchSchedule(scheduleId: string) {
+  return request<{
+    ok: boolean
+    message?: string
+    schedule?: ScheduleItem
+    issue_key?: string
+  }>(
+    `/api/schedules/${encodeURIComponent(scheduleId)}/dispatch`,
+    { method: 'POST' },
   )
 }
 
@@ -348,8 +367,15 @@ export function previewScheduleIssue(issueKey: string) {
 export function scheduleExistingIssue(body: {
   issue_key: string
   scheduled_at: string
+  dispatch_now?: boolean
 }) {
-  return request<{ ok: boolean; schedule: ScheduleItem; issue_key?: string }>(
+  return request<{
+    ok: boolean
+    schedule: ScheduleItem
+    issue_key?: string
+    dispatched?: boolean
+    dispatch_error?: string
+  }>(
     '/api/schedules/from-issue',
     { method: 'POST', body: JSON.stringify(body) },
   )

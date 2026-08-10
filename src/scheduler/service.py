@@ -780,6 +780,104 @@ def _finish_schedule_dispatch(
     ss.update(schedule_id, expected_status="dispatching", **fields)
 
 
+def _start_claimed_worker(
+    claimed_rec: Dict[str, Any],
+    *,
+    processor: "JobProcessor",
+    store: ScheduleStore,
+    jira_client: Any = None,
+) -> None:
+    """Build the jira event and start ``process_event`` on the running loop."""
+    sid = claimed_rec.get("schedule_id") or ""
+    issue_key = (claimed_rec.get("issue_key") or "").upper()
+    issue = _issue_payload_for_dispatch(claimed_rec, jira_client=jira_client)
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "issue": issue,
+        "timestamp": int(time.time() * 1000),
+        "scheduled_job": True,
+        "schedule_id": sid,
+    }
+    coro = _dispatch_claimed_schedule(
+        processor=processor,
+        store=store,
+        schedule_id=sid,
+        issue_key=issue_key,
+        event=event,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+        return
+    task = loop.create_task(coro, name=f"vd-sched-{sid}")
+    _INFLIGHT_DISPATCHES[sid] = task
+    if task.done():
+        _INFLIGHT_DISPATCHES.pop(sid, None)
+
+
+def dispatch_schedule_now(
+    schedule_id: str,
+    *,
+    processor: "JobProcessor",
+    store: Optional[ScheduleStore] = None,
+    jira_client: Any = None,
+) -> Dict[str, Any]:
+    """Claim a future or failed schedule and start work immediately.
+
+    Ignores ``scheduled_at``. Allowed from ``scheduled`` or ``error``.
+    ``dispatching`` / ``dispatched`` / ``cancelled`` are refused.
+    """
+    ss = store or schedule_store
+    sid = (schedule_id or "").strip()
+    rec = ss.get(sid)
+    if not rec:
+        return {"ok": False, "error": f"No schedule {sid}"}
+    st = (rec.get("status") or "").lower()
+    if sid in inflight_dispatch_ids() or st == "dispatching":
+        return {
+            "ok": False,
+            "error": f"Cannot dispatch schedule in status {st or 'dispatching'}",
+            "schedule": rec,
+        }
+    if st not in ("scheduled", "error"):
+        return {
+            "ok": False,
+            "error": f"Cannot dispatch schedule in status {st}",
+            "schedule": rec,
+        }
+    if processor is None:
+        return {"ok": False, "error": "Processor is not available", "schedule": rec}
+    claimed = ss.claim_for_dispatch(sid)
+    if not claimed:
+        latest = ss.get(sid) or rec
+        return {
+            "ok": False,
+            "error": f"Could not claim schedule in status {latest.get('status')}",
+            "schedule": latest,
+        }
+    try:
+        _start_claimed_worker(
+            claimed,
+            processor=processor,
+            store=ss,
+            jira_client=jira_client,
+        )
+    except Exception as e:
+        logger.exception(f"Schedule {sid} instant dispatch failed: {e}", e)
+        ss.update(sid, status="error", error_message=str(e)[:1000])
+        return {"ok": False, "error": str(e)[:1000], "schedule": ss.get(sid)}
+    logger.info(
+        f"Schedule {sid} dispatched now for {(claimed.get('issue_key') or '').upper()}"
+    )
+    return {
+        "ok": True,
+        "schedule": claimed,
+        "issue_key": (claimed.get("issue_key") or "").upper(),
+        "message": "Dispatch started",
+    }
+
+
 async def _dispatch_claimed_schedule(
     *,
     processor: "JobProcessor",
@@ -875,29 +973,12 @@ async def dispatch_due_schedules(
             claimed += 1
             issue_key = (claimed_rec.get("issue_key") or "").upper()
             try:
-                issue = _issue_payload_for_dispatch(claimed_rec, jira_client=client)
-                event = {
-                    "webhookEvent": "jira:issue_created",
-                    "issue": issue,
-                    "timestamp": int(time.time() * 1000),
-                    "scheduled_job": True,
-                    "schedule_id": sid,
-                }
-                task = asyncio.create_task(
-                    _dispatch_claimed_schedule(
-                        processor=processor,
-                        store=ss,
-                        schedule_id=sid,
-                        issue_key=issue_key,
-                        event=event,
-                    ),
-                    name=f"vd-sched-{sid}",
+                _start_claimed_worker(
+                    claimed_rec,
+                    processor=processor,
+                    store=ss,
+                    jira_client=client,
                 )
-                _INFLIGHT_DISPATCHES[sid] = task
-                # Instant-complete mocks can finish before the dict write;
-                # finally already popped — drop the stale completed handle.
-                if task.done():
-                    _INFLIGHT_DISPATCHES.pop(sid, None)
                 launched += 1
             except Exception as e:
                 failed += 1
