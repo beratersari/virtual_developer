@@ -1219,7 +1219,7 @@ class GitManager:
             self._scrub_remote_credentials()
 
         start_point = f"origin/{work_branch}"
-        if not self._branch_exists(work_branch, check_remote=True):
+        if not self._origin_ref_is_commit(work_branch):
             # ls-remote said yes but no tracking ref — last-chance fetch
             self._with_auth_remote()
             try:
@@ -1230,14 +1230,15 @@ class GitManager:
                 )
             finally:
                 self._scrub_remote_credentials()
-        if not self._branch_exists(work_branch, check_remote=True):
-            raise GitSourceBranchError(
-                (
-                    f"*Virtual Developer* could not checkout source branch `{work_branch}`: "
-                    f"`origin/{work_branch}` missing after fetch even though ls-remote "
-                    f"reported it.\n\n"
-                    f"*Repository:* `{self.remote_url or '(unknown)'}`"
-                )
+        if not self._origin_ref_is_commit(work_branch):
+            logger.warning(
+                f"origin/{work_branch} is not a usable commit after fetch; "
+                f"falling back to local branch or target"
+            )
+            if self._branch_exists(work_branch, check_remote=False):
+                return self._checkout_local_work_branch(work_branch)
+            return self._checkout_work_branch_from_target(
+                work_branch, (self.target_branch or "").strip()
             )
 
         self._delete_local_branch(work_branch)
@@ -1245,6 +1246,33 @@ class GitManager:
         logger.info(
             f"Checked out existing work branch '{work_branch}' from '{start_point}'"
         )
+        self.work_branch = work_branch
+        self.source_branch = work_branch
+        return work_branch
+
+    def _origin_ref_is_commit(self, branch: str) -> bool:
+        """True when ``refs/remotes/origin/{branch}`` resolves to a commit."""
+        name = (branch or "").strip()
+        if not name:
+            return False
+        result = self._run_git(
+            ["rev-parse", "--verify", f"refs/remotes/origin/{name}^{{commit}}"],
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _checkout_local_work_branch(self, work_branch: str) -> str:
+        """Checkout a local-only work branch (unpushed previous run)."""
+        work_branch = (work_branch or "").strip()
+        if not work_branch:
+            raise GitSourceBranchError(
+                "*Virtual Developer* could not checkout work branch: empty name."
+            )
+        logger.info(
+            f"Source branch '{work_branch}' exists locally but not on remote — "
+            f"checking out the local tip (not origin/{work_branch})"
+        )
+        self._run_git(["checkout", work_branch])
         self.work_branch = work_branch
         self.source_branch = work_branch
         return work_branch
@@ -1271,15 +1299,20 @@ class GitManager:
                 )
             )
 
-        # 1) Prefer existing remote source tip
+        # 1) Prefer existing remote source tip (ls-remote). Do **not** treat
+        # a leftover local branch as "exists on remote" — that called
+        # checkout -B origin/{work} when the branch was never pushed
+        # (scheduled rework / shared Source). Git then fails:
+        #   fatal: 'origin/feature/…' is not a commit
         if self._remote_head_exists(work_branch):
             return self._checkout_existing_remote_branch(work_branch)
 
-        # 2) After target fetch, origin/{work} may already be present
-        if self._branch_exists(work_branch, check_remote=True):
-            return self._checkout_existing_remote_branch(work_branch)
+        # 2) Previous run created the work branch locally but did not push.
+        # Rework must keep that tip, not invent origin/{work}.
+        if self._branch_exists(work_branch, check_remote=False):
+            return self._checkout_local_work_branch(work_branch)
 
-        # 3) Missing on remote → create from target
+        # 3) Missing locally and on remote → create from target
         return self._checkout_work_branch_from_target(work_branch, target)
 
     def _checkout_or_create_branch(self, branch_name: str) -> str:
