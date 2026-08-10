@@ -251,6 +251,9 @@ class SettingsView(BaseModel):
     max_concurrent_jobs: int = 3
     # Single wall-clock budget for agent runner + OpenCode process (same value)
     agent_task_timeout_seconds: int = 1800
+    agent_task_max_retries: int = 3
+    agent_task_max_incomplete_retries: int = 256
+    opencode_serve_max_compact_continues: int = 256
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
@@ -388,6 +391,29 @@ class SettingsUpdate(BaseModel):
         ge=30,
         le=86400,
         description="Wall-clock seconds per OpenCode/agent attempt (30s–24h)",
+    )
+    agent_task_max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=64,
+        description="Retries after timeout or hard error (0 = no retry)",
+    )
+    agent_task_max_incomplete_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=256,
+        description=(
+            "CLI resumes after compact-then-stop / incomplete session "
+            "(independent of error retries)"
+        ),
+    )
+    opencode_serve_max_compact_continues: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=256,
+        description=(
+            "Serve-mode Continue turns after auto-compaction on the same session"
+        ),
     )
     default_model: Optional[str] = Field(default=None, max_length=200)
 

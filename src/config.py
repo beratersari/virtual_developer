@@ -572,6 +572,9 @@ _RUNTIME_SETTINGS_REL = Path(".jira-agent") / "runtime_settings.json"
 _RUNTIME_PERSIST_KEYS = frozenset(
     {
         "agent_task_timeout_seconds",
+        "agent_task_max_retries",
+        "agent_task_max_incomplete_retries",
+        "opencode_serve_max_compact_continues",
         "poll_interval_seconds",
         "max_concurrent_jobs",
         "jira_board_id",
@@ -584,6 +587,9 @@ _RUNTIME_PERSIST_KEYS = frozenset(
 # Map Settings field → env var name for os.environ mirror (so re-reads stay consistent).
 _RUNTIME_ENV_MIRROR = {
     "agent_task_timeout_seconds": "AGENT_TASK_TIMEOUT_SECONDS",
+    "agent_task_max_retries": "AGENT_TASK_MAX_RETRIES",
+    "agent_task_max_incomplete_retries": "AGENT_TASK_MAX_INCOMPLETE_RETRIES",
+    "opencode_serve_max_compact_continues": "OPENCODE_SERVE_MAX_COMPACT_CONTINUES",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
     "jira_board_id": "JIRA_BOARD_ID",

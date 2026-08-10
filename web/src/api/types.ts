@@ -91,6 +91,9 @@ export type SettingsPayload = {
   trigger_on_assignment: boolean
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
+  agent_task_max_retries: number
+  agent_task_max_incomplete_retries: number
+  opencode_serve_max_compact_continues: number
   default_branch: string
   dashboard_host: string
   dashboard_port: number
@@ -482,6 +485,9 @@ export type SettingsPatch = Partial<
     | 'trigger_on_assignment'
     | 'max_concurrent_jobs'
     | 'agent_task_timeout_seconds'
+    | 'agent_task_max_retries'
+    | 'agent_task_max_incomplete_retries'
+    | 'opencode_serve_max_compact_continues'
     | 'default_model'
     | 'gitlab_allowed_hosts'
   >

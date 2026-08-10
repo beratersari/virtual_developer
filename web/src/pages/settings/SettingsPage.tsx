@@ -25,6 +25,9 @@ type Draft = {
   trigger_on_assignment: boolean
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
+  agent_task_max_retries: number
+  agent_task_max_incomplete_retries: number
+  opencode_serve_max_compact_continues: number
   default_model: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
 }
@@ -39,6 +42,10 @@ function fromSettings(s: SettingsPayload): Draft {
     trigger_on_assignment: s.trigger_on_assignment,
     max_concurrent_jobs: s.max_concurrent_jobs,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
+    agent_task_max_retries: s.agent_task_max_retries ?? 3,
+    agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
+    opencode_serve_max_compact_continues:
+      s.opencode_serve_max_compact_continues ?? 256,
     default_model: s.default_model,
     gitlab_cred_rows: (s.gitlab_credentials ?? []).map((c) => ({
       host: c.host,
@@ -115,6 +122,11 @@ export function SettingsPage() {
         trigger_on_assignment: draft.trigger_on_assignment,
         max_concurrent_jobs: Number(draft.max_concurrent_jobs),
         agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
+        agent_task_max_retries: Number(draft.agent_task_max_retries),
+        agent_task_max_incomplete_retries: Number(draft.agent_task_max_incomplete_retries),
+        opencode_serve_max_compact_continues: Number(
+          draft.opencode_serve_max_compact_continues,
+        ),
         default_model: draft.default_model.trim(),
         gitlab_credentials: draft.gitlab_cred_rows
           .map((r) => {
@@ -494,9 +506,61 @@ export function SettingsPage() {
         <span>Agent timeout (seconds)</span>
         <input
           type="number"
+          min={30}
+          max={86400}
           value={draft.agent_task_timeout_seconds}
           onChange={(e) => mark('agent_task_timeout_seconds', Number(e.target.value))}
         />
+      </label>
+      <div className="text-sm font-semibold text-text">Retries &amp; compaction</div>
+      <p className="text-xs text-text-muted">
+        Context compaction is a resume, not a crash. Raise these if long jobs stop
+        after compacting. Next job uses the saved values.
+      </p>
+      <label className="field">
+        <span>Error / timeout retries</span>
+        <input
+          type="number"
+          min={0}
+          max={64}
+          value={draft.agent_task_max_retries}
+          onChange={(e) => mark('agent_task_max_retries', Number(e.target.value))}
+        />
+        <span className="text-xs text-text-muted">
+          Extra attempts after a hard error or timeout (0 = no retry). Default 3.
+        </span>
+      </label>
+      <label className="field">
+        <span>Compact resume retries (CLI)</span>
+        <input
+          type="number"
+          min={0}
+          max={256}
+          value={draft.agent_task_max_incomplete_retries}
+          onChange={(e) =>
+            mark('agent_task_max_incomplete_retries', Number(e.target.value))
+          }
+        />
+        <span className="text-xs text-text-muted">
+          Resume the same OpenCode session after compact-then-stop. Independent of
+          error retries. Default 256.
+        </span>
+      </label>
+      <label className="field">
+        <span>Serve compact continues</span>
+        <input
+          type="number"
+          min={0}
+          max={256}
+          value={draft.opencode_serve_max_compact_continues}
+          onChange={(e) =>
+            mark('opencode_serve_max_compact_continues', Number(e.target.value))
+          }
+        />
+        <span className="text-xs text-text-muted">
+          Continue prompts on the same session when OPENCODE_RUN_MODE=serve. Default
+          256.
+        </span>
       </label>
 
       <p className="quiet">

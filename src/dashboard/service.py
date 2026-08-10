@@ -214,6 +214,15 @@ def build_settings_view() -> SettingsView:
         agent_task_timeout_seconds=int(
             getattr(settings, "agent_task_timeout_seconds", 1800) or 1800
         ),
+        agent_task_max_retries=int(
+            getattr(settings, "agent_task_max_retries", 3) or 0
+        ),
+        agent_task_max_incomplete_retries=int(
+            getattr(settings, "agent_task_max_incomplete_retries", 256) or 0
+        ),
+        opencode_serve_max_compact_continues=int(
+            getattr(settings, "opencode_serve_max_compact_continues", 256) or 0
+        ),
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
         dashboard_port=int(getattr(settings, "dashboard_port", 8080) or 8080),
@@ -404,6 +413,41 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         logger.info(
             f"Agent/OpenCode timeout set to "
             f"{settings.agent_task_timeout_seconds}s (next job uses this)"
+        )
+    if "agent_task_max_retries" in data and data["agent_task_max_retries"] is not None:
+        settings.agent_task_max_retries = int(data["agent_task_max_retries"])
+        runtime_persist["agent_task_max_retries"] = settings.agent_task_max_retries
+        logger.info(
+            f"Agent max error retries set to {settings.agent_task_max_retries} "
+            f"(next job uses this)"
+        )
+    if (
+        "agent_task_max_incomplete_retries" in data
+        and data["agent_task_max_incomplete_retries"] is not None
+    ):
+        settings.agent_task_max_incomplete_retries = int(
+            data["agent_task_max_incomplete_retries"]
+        )
+        runtime_persist["agent_task_max_incomplete_retries"] = (
+            settings.agent_task_max_incomplete_retries
+        )
+        logger.info(
+            f"Agent compact/incomplete retries set to "
+            f"{settings.agent_task_max_incomplete_retries} (next job uses this)"
+        )
+    if (
+        "opencode_serve_max_compact_continues" in data
+        and data["opencode_serve_max_compact_continues"] is not None
+    ):
+        settings.opencode_serve_max_compact_continues = int(
+            data["opencode_serve_max_compact_continues"]
+        )
+        runtime_persist["opencode_serve_max_compact_continues"] = (
+            settings.opencode_serve_max_compact_continues
+        )
+        logger.info(
+            f"Serve compact continues set to "
+            f"{settings.opencode_serve_max_compact_continues} (next job uses this)"
         )
     if "default_model" in data and data["default_model"] is not None:
         model = str(data["default_model"]).strip()

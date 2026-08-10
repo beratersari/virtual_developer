@@ -894,6 +894,8 @@ def test_config_retry_defaults_match_source():
     s = Settings.model_construct(
         agent_task_timeout_seconds=1800,
         agent_task_max_retries=3,
+        agent_task_max_incomplete_retries=256,
+        opencode_serve_max_compact_continues=256,
         agent_task_retry_delay_seconds=5,
         agent_task_retry_backoff_multiplier=2.0,
         agent_task_retry_on_timeout=True,
@@ -901,6 +903,8 @@ def test_config_retry_defaults_match_source():
     )
     assert s.agent_task_timeout_seconds == 1800
     assert s.agent_task_max_retries == 3
+    assert s.agent_task_max_incomplete_retries == 256
+    assert s.opencode_serve_max_compact_continues == 256
     assert s.agent_task_retry_delay_seconds == 5
     assert s.agent_task_retry_backoff_multiplier == 2.0
     assert s.agent_task_retry_on_timeout is True

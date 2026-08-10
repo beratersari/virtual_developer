@@ -121,6 +121,28 @@ def test_settings_view_includes_agent_timeout(monkeypatch):
     assert "agent_task_timeout_seconds" in view.model_dump()
 
 
+def test_apply_settings_retry_counts(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "agent_task_max_retries", 3)
+    monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 256)
+    monkeypatch.setattr(settings, "opencode_serve_max_compact_continues", 256)
+    view = apply_settings_update(
+        SettingsUpdate(
+            agent_task_max_retries=5,
+            agent_task_max_incomplete_retries=64,
+            opencode_serve_max_compact_continues=128,
+        )
+    )
+    assert settings.agent_task_max_retries == 5
+    assert settings.agent_task_max_incomplete_retries == 64
+    assert settings.opencode_serve_max_compact_continues == 128
+    assert view.agent_task_max_retries == 5
+    assert view.agent_task_max_incomplete_retries == 64
+    assert view.opencode_serve_max_compact_continues == 128
+
+
 def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     from src.config import settings
 

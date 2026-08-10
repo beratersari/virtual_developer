@@ -58,6 +58,46 @@ def test_runtime_settings_ignore_invalid_board_id(tmp_path, monkeypatch):
     assert config_mod.settings.jira_board_id == "99"
 
 
+def test_retry_counts_persist_and_reloads(tmp_path, monkeypatch):
+    from src import config as config_mod
+    from src.config import apply_runtime_settings_to, load_runtime_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_mod.settings, "agent_task_max_retries", 3)
+    monkeypatch.setattr(config_mod.settings, "agent_task_max_incomplete_retries", 256)
+    monkeypatch.setattr(
+        config_mod.settings, "opencode_serve_max_compact_continues", 256
+    )
+
+    view = apply_settings_update(
+        SettingsUpdate(
+            agent_task_max_retries=7,
+            agent_task_max_incomplete_retries=40,
+            opencode_serve_max_compact_continues=90,
+        )
+    )
+    assert view.agent_task_max_retries == 7
+    assert view.agent_task_max_incomplete_retries == 40
+    assert view.opencode_serve_max_compact_continues == 90
+
+    data = load_runtime_settings()
+    assert data["agent_task_max_retries"] == 7
+    assert data["agent_task_max_incomplete_retries"] == 40
+    assert data["opencode_serve_max_compact_continues"] == 90
+
+    config_mod.settings.agent_task_max_retries = 1
+    config_mod.settings.agent_task_max_incomplete_retries = 2
+    config_mod.settings.opencode_serve_max_compact_continues = 3
+    apply_runtime_settings_to(config_mod.settings)
+    assert config_mod.settings.agent_task_max_retries == 7
+    assert config_mod.settings.agent_task_max_incomplete_retries == 40
+    assert config_mod.settings.opencode_serve_max_compact_continues == 90
+    dumped = build_settings_view()
+    assert dumped.agent_task_max_retries == 7
+    assert dumped.agent_task_max_incomplete_retries == 40
+    assert dumped.opencode_serve_max_compact_continues == 90
+
+
 def test_begin_workflow_uses_live_timeout(tmp_path, monkeypatch, state_manager):
     """_begin_workflow_run freezes current settings.agent_task_timeout_seconds."""
     from src.config import settings
