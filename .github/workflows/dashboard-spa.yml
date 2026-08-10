@@ -1,0 +1,96 @@
+# Fast job: build the ops dashboard SPA and publish web/dist as its own artifact.
+# The Windows offline zip also includes web/dist, but that artifact is ~300MB.
+# Operators who only need to refresh the UI can download dashboard-web-dist.
+name: Dashboard SPA
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "web/**"
+      - ".github/workflows/dashboard-spa.yml"
+      - "packaging/windows/versions.env"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "web/**"
+      - ".github/workflows/dashboard-spa.yml"
+      - "packaging/windows/versions.env"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-spa:
+    name: Build web/dist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install and build
+        working-directory: web
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: Assert current dashboard bundle
+        run: |
+          set -euo pipefail
+          test -f web/dist/index.html
+          test -d web/dist/assets
+          js=$(ls web/dist/assets/index-*.js | head -n 1)
+          css=$(ls web/dist/assets/index-*.css | head -n 1)
+          if [ -z "${js:-}" ] || [ -z "${css:-}" ]; then
+            echo "Missing hashed index JS/CSS under web/dist/assets"
+            ls -la web/dist web/dist/assets || true
+            exit 1
+          fi
+          echo "Bundle JS : $js ($(wc -c < "$js") bytes)"
+          echo "Bundle CSS: $css"
+          # Fail if CI shipped a stale SPA that predates Settings → Runtime retries.
+          for needle in \
+            agent_task_max_retries \
+            agent_task_max_incomplete_retries \
+            opencode_serve_max_compact_continues
+          do
+            if ! grep -q "$needle" "$js"; then
+              echo "Stale dashboard bundle: $needle not found in $js"
+              exit 1
+            fi
+            echo "OK $needle"
+          done
+          mkdir -p dist-out
+          {
+            echo "virtual_developer ops dashboard SPA"
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "js=$(basename "$js")"
+            echo "css=$(basename "$css")"
+          } > web/dist/BUILD.txt
+          (cd web/dist && zip -r ../../dist-out/dashboard-web-dist.zip .)
+          ls -la web/dist web/dist/assets dist-out
+
+      - name: Upload web/dist folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-web-dist
+          path: web/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload web/dist zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-web-dist-zip
+          path: dist-out/dashboard-web-dist.zip
+          if-no-files-found: error
+          retention-days: 30

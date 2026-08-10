@@ -364,8 +364,17 @@ $payloadWebDist = Join-Path $payloadWeb "dist"
 if (Test-Path -LiteralPath $payloadWebDist) {
     Remove-Item -LiteralPath $payloadWebDist -Recurse -Force
 }
-Copy-Item -LiteralPath $webDist -Destination $payloadWebDist -Recurse -Force
+Ensure-Dir $payloadWebDist
+# Copy *contents* so we never nest web/dist/dist on PowerShell
+Copy-Item -Path (Join-Path $webDist "*") -Destination $payloadWebDist -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $webDir "package.json") -Destination (Join-Path $payloadWeb "package.json") -Force
+$builtJs = @(Get-ChildItem -LiteralPath (Join-Path $webDist "assets") -Filter "index-*.js" -File)
+$builtCss = @(Get-ChildItem -LiteralPath (Join-Path $webDist "assets") -Filter "index-*.css" -File)
+if ($builtJs.Count -lt 1 -or $builtCss.Count -lt 1) {
+    throw "npm run build did not produce hashed index JS/CSS under web/dist/assets"
+}
+Write-Host "  SPA JS : $($builtJs[0].Name)"
+Write-Host "  SPA CSS: $($builtCss[0].Name)"
 # Marker so install/start can prove SPA was packaged
 $spaMarker = @"
 virtual_developer ops dashboard SPA (production build)

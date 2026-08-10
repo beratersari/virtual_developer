@@ -130,6 +130,23 @@ jobs:
           if (Test-Path -LiteralPath (Join-Path $p "vendor/opencode-home/node_modules")) {
             throw "expanded vendor/opencode-home/node_modules must not be in the zip"
           }
+          $spa = Join-Path $p "web/dist"
+          $js = @(Get-ChildItem -LiteralPath (Join-Path $spa "assets") -Filter "index-*.js" -File -ErrorAction SilentlyContinue)
+          $css = @(Get-ChildItem -LiteralPath (Join-Path $spa "assets") -Filter "index-*.css" -File -ErrorAction SilentlyContinue)
+          if ($js.Count -lt 1) { throw "web/dist/assets/index-*.js missing (SPA not built)" }
+          if ($css.Count -lt 1) { throw "web/dist/assets/index-*.css missing (SPA not built)" }
+          $jsText = Get-Content -LiteralPath $js[0].FullName -Raw -ErrorAction Stop
+          foreach ($needle in @(
+              "agent_task_max_retries",
+              "agent_task_max_incomplete_retries",
+              "opencode_serve_max_compact_continues"
+            )) {
+            if ($jsText -notmatch [regex]::Escape($needle)) {
+              throw "Stale dashboard SPA: '$needle' not in $($js[0].Name)"
+            }
+            Write-Host "OK SPA contains $needle"
+          }
+          Write-Host "OK SPA bundle $($js[0].Name) + $($css[0].Name)"
           Write-Host "Payload layout OK (no full install smoke)"
 
       # Folder upload: one extract → install.bat at top level
@@ -149,6 +166,14 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.dist_name }}-zip
           path: dist/${{ steps.meta.outputs.dist_name }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload dashboard SPA (web/dist only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-web-dist
+          path: dist/stage/${{ steps.meta.outputs.dist_name }}/web/dist/
           if-no-files-found: error
           retention-days: 30
 
@@ -172,6 +197,8 @@ jobs:
 
           Download the **Actions artifact** named after the dist, extract once, run ``install.bat``,
           then start the product with ``start.bat`` (backend + ops dashboard on http://127.0.0.1:8080).
+          Dashboard UI only: download the **dashboard-web-dist** artifact (``web/dist``) and copy it
+          over ``web\\dist`` on an existing install, then restart the backend.
           Optional TUI: ``start-opencode.bat`` (never from your user home folder).
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
