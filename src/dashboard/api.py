@@ -43,6 +43,7 @@ from src.jira_connection import probe_jira_connection
 from src.scheduler.service import (
     cancel_scheduled_job,
     create_scheduled_job,
+    dispatch_schedule_now,
     list_project_issue_types,
     list_scheduled_jobs,
     preview_existing_issue,
@@ -301,8 +302,29 @@ def create_dashboard_app(
             "server_time": build_meta().server_time,
         }
 
+    def _maybe_dispatch_now(result: dict, dispatch_now: bool) -> dict:
+        if not dispatch_now or not result.get("ok"):
+            result["dispatched"] = False
+            return result
+        rec = result.get("schedule") or {}
+        sid = (rec.get("schedule_id") or "").strip()
+        if not sid:
+            result["dispatched"] = False
+            return result
+        launched = dispatch_schedule_now(
+            sid,
+            processor=app.state.processor,
+            store=schedule_store,
+        )
+        if launched.get("schedule"):
+            result["schedule"] = launched["schedule"]
+        result["dispatched"] = bool(launched.get("ok"))
+        if not launched.get("ok"):
+            result["dispatch_error"] = launched.get("error")
+        return result
+
     @app.post("/api/schedules")
-    def schedules_create(body: ScheduleCreateRequest) -> dict:
+    async def schedules_create(body: ScheduleCreateRequest) -> dict:
         """Create Jira issue + schedule. Hard-fails only if issue create fails."""
         result = create_scheduled_job(
             title=body.title,
@@ -321,10 +343,13 @@ def create_dashboard_app(
                 status_code=400,
                 detail=result.get("error") or "Failed to create scheduled job",
             )
+        result = _maybe_dispatch_now(result, body.dispatch_now)
         return {
             "ok": True,
             "schedule": result.get("schedule"),
             "issue_key": result.get("issue_key"),
+            "dispatched": bool(result.get("dispatched")),
+            "dispatch_error": result.get("dispatch_error"),
             "server_time": build_meta().server_time,
         }
 
@@ -347,7 +372,7 @@ def create_dashboard_app(
         return result
 
     @app.post("/api/schedules/from-issue")
-    def schedules_from_issue(body: ScheduleExistingRequest) -> dict:
+    async def schedules_from_issue(body: ScheduleExistingRequest) -> dict:
         """Schedule an existing Jira issue (no new issue created).
 
         Hard-fails if issue cannot be loaded or template is invalid.
@@ -363,11 +388,35 @@ def create_dashboard_app(
                 status_code=400,
                 detail=result.get("error") or "Failed to schedule existing issue",
             )
+        result = _maybe_dispatch_now(result, body.dispatch_now)
         return {
             "ok": True,
             "schedule": result.get("schedule"),
             "issue_key": result.get("issue_key"),
             "message": result.get("message"),
+            "dispatched": bool(result.get("dispatched")),
+            "dispatch_error": result.get("dispatch_error"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.post("/api/schedules/{schedule_id}/dispatch")
+    async def schedules_dispatch(schedule_id: str) -> dict:
+        """Start a scheduled (or failed) job immediately, ignoring scheduled_at."""
+        result = dispatch_schedule_now(
+            schedule_id,
+            processor=app.state.processor,
+            store=schedule_store,
+        )
+        if not result.get("ok"):
+            err = result.get("error") or "Dispatch failed"
+            if "No schedule" in err:
+                raise HTTPException(status_code=404, detail=err)
+            raise HTTPException(status_code=409, detail=err)
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "message": result.get("message") or "Dispatch started",
             "server_time": build_meta().server_time,
         }
 
@@ -884,6 +933,7 @@ def create_dashboard_app(
                     "job_delete": "DELETE /api/jobs/{job_id}",
                     "jobs_bulk_delete": "POST /api/jobs/bulk-delete",
                     "schedules": "GET|POST /api/schedules",
+                    "schedule_dispatch": "POST /api/schedules/{id}/dispatch",
                     "schedule_cancel": "POST /api/schedules/{id}/cancel",
                     "poll": "/api/poll",
                     "settings": "/api/settings",

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   cancelSchedule,
   createSchedule,
+  dispatchSchedule,
   fetchIssueTypes,
   fetchSchedules,
   fetchSettings,
@@ -38,6 +39,7 @@ export function SchedulesPage() {
   const [rows, setRows] = useState<ScheduleItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [cancelId, setCancelId] = useState<string | null>(null)
+  const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<'existing' | 'new'>('existing')
 
@@ -103,6 +105,18 @@ export function SchedulesPage() {
               '—'
             )}{' '}
             {s.title} · {s.mode} · {s.scheduled_at} · <StatusBadge status={s.status} size="sm" />
+            {(s.status === 'scheduled' || s.status === 'error') && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  className="vd-btn-ghost text-accent-text"
+                  onClick={() => setRunId(s.schedule_id)}
+                >
+                  run now
+                </button>
+              </>
+            )}
             {(s.status === 'scheduled' || s.status === 'error' || s.status === 'dispatching') && (
               <>
                 {' '}
@@ -119,6 +133,25 @@ export function SchedulesPage() {
         ))}
         {rows.length === 0 && <li className="py-6 text-text-muted">Nothing scheduled.</li>}
       </ul>
+      <ConfirmDialog
+        open={Boolean(runId)}
+        title="Run this job now?"
+        body="Starts agent work immediately. Does not wait for the scheduled time."
+        confirmLabel="Run now"
+        busy={busy}
+        onConfirm={async () => {
+          if (!runId) return
+          setBusy(true)
+          try {
+            await dispatchSchedule(runId)
+            setRunId(null)
+            await reload()
+          } finally {
+            setBusy(false)
+          }
+        }}
+        onCancel={() => setRunId(null)}
+      />
       <ConfirmDialog
         open={Boolean(cancelId)}
         title="Cancel this schedule?"
@@ -166,7 +199,7 @@ function Existing({ onDone }: { onDone: () => void }) {
     }
   }
 
-  const submit = async (e: FormEvent) => {
+  const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
     if (!preview?.ok) return
     setBusy(true)
@@ -175,6 +208,7 @@ function Existing({ onDone }: { onDone: () => void }) {
       await scheduleExistingIssue({
         issue_key: preview.issue_key,
         scheduled_at: datetimeLocalToNaiveIso(when),
+        dispatch_now: dispatchNow,
       })
       setPreview(null)
       setKey('')
@@ -206,15 +240,25 @@ function Existing({ onDone }: { onDone: () => void }) {
             <span>Run at</span>
             <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
           </label>
-          <button type="submit" className="go" disabled={busy}>
-            {busy ? (
-              <>
-                <Spinner /> Scheduling…
-              </>
-            ) : (
-              'Schedule'
-            )}
-          </button>
+          <p className="actions">
+            <button type="submit" className="go" disabled={busy}>
+              {busy ? (
+                <>
+                  <Spinner /> Scheduling…
+                </>
+              ) : (
+                'Schedule'
+              )}
+            </button>
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={busy}
+              onClick={(e) => void submit(e, true)}
+            >
+              Run now
+            </button>
+          </p>
         </>
       )}
       {err && <p className="err">{err}</p>}
@@ -292,7 +336,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const selectable = useMemo(() => types.filter((t) => !t.subtask), [types])
   const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
 
-  const submit = async (e: FormEvent) => {
+  const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
     setBusy(true)
     setErr(null)
@@ -308,6 +352,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         mode,
         issue_type: issueType.trim(),
         scheduled_at: datetimeLocalToNaiveIso(when),
+        dispatch_now: dispatchNow,
       })
       try {
         window.localStorage.setItem(LAST_REPO_KEY, url)
@@ -451,15 +496,25 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
       </label>
       {err && <p className="err">{err}</p>}
-      <button type="submit" className="go" disabled={busy}>
-        {busy ? (
-          <>
-            <Spinner /> Creating…
-          </>
-        ) : (
-          'Create schedule'
-        )}
-      </button>
+      <p className="actions">
+        <button type="submit" className="go" disabled={busy}>
+          {busy ? (
+            <>
+              <Spinner /> Creating…
+            </>
+          ) : (
+            'Create schedule'
+          )}
+        </button>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={busy}
+          onClick={(e) => void submit(e, true)}
+        >
+          Create & run now
+        </button>
+      </p>
     </form>
   )
 }

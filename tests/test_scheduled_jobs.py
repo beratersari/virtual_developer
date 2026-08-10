@@ -869,3 +869,131 @@ def test_api_schedules(tmp_path, monkeypatch):
         )
         assert r_ex.status_code == 200, r_ex.text
         assert r_ex.json()["schedule"]["source"] == "existing"
+
+
+def test_claim_for_dispatch_ignores_due_time_and_retries_error(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future = (datetime.now() + timedelta(hours=5)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="later",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-NOW",
+        issue_description="x",
+    )
+    assert store.list_due() == []
+    claimed = store.claim_for_dispatch(rec["schedule_id"])
+    assert claimed is not None
+    assert claimed["status"] == "dispatching"
+    assert store.claim_for_dispatch(rec["schedule_id"]) is None
+
+    err = store.create(
+        title="failed",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-ERR",
+        issue_description="x",
+    )
+    store.update(err["schedule_id"], status="error", error_message="boom")
+    retried = store.claim_for_dispatch(err["schedule_id"])
+    assert retried["status"] == "dispatching"
+    assert retried.get("error_message") is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_schedule_now_fires_future_job(tmp_path):
+    from src.scheduler.service import dispatch_schedule_now
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future = (datetime.now() + timedelta(hours=4)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="soon",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-INSTANT",
+        issue_description="x",
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    out = dispatch_schedule_now(
+        rec["schedule_id"], processor=processor, store=store, jira_client=None
+    )
+    assert out["ok"] is True
+    assert out["schedule"]["status"] == "dispatching"
+    await wait_inflight_dispatches()
+    processor.process_event.assert_awaited_once()
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["key"] == "KAN-INSTANT"
+    assert event["scheduled_job"] is True
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+def test_dispatch_schedule_now_refuses_cancelled(tmp_path):
+    from src.scheduler.service import dispatch_schedule_now
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="no",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2026-12-01T00:00:00",
+        issue_key="KAN-NO",
+        issue_description="x",
+    )
+    cancel_scheduled_job(rec["schedule_id"], store=store)
+    out = dispatch_schedule_now(
+        rec["schedule_id"],
+        processor=MagicMock(),
+        store=store,
+    )
+    assert out["ok"] is False
+    assert "cancelled" in (out.get("error") or "")
+
+
+def test_api_dispatch_now(tmp_path, monkeypatch):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    future = (datetime.now() + timedelta(hours=6)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="api-now",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-API-NOW",
+        issue_description="x",
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    monkeypatch.setattr("src.dashboard.api.schedule_store", store)
+    app = create_dashboard_app(processor=processor, state_manager=sm)
+    tc = TestClient(app)
+    r = tc.post(f"/api/schedules/{rec['schedule_id']}/dispatch")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert r.json()["schedule"]["status"] == "dispatching"
+    r_bad = tc.post(f"/api/schedules/{rec['schedule_id']}/dispatch")
+    assert r_bad.status_code == 409
+    r_miss = tc.post("/api/schedules/sched_missing/dispatch")
+    assert r_miss.status_code == 404

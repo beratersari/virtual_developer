@@ -298,6 +298,7 @@ export type ScheduleCreateBody = {
   project_key?: string
   issue_type?: string
   source_branch_mode?: 'custom' | 'issue_key'
+  dispatch_now?: boolean
 }
 
 export type JiraIssueType = {

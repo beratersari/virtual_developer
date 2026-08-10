@@ -159,6 +159,20 @@ class ScheduleStore:
             self._write(rec)
             return rec
 
+    def claim_for_dispatch(self, schedule_id: str) -> Optional[Dict[str, Any]]:
+        """Claim a scheduled or error row now (ignores ``scheduled_at``)."""
+        with self._lock:
+            rec = self.get(schedule_id)
+            if not rec:
+                return None
+            if (rec.get("status") or "") not in ("scheduled", "error"):
+                return None
+            rec["status"] = "dispatching"
+            rec["error_message"] = None
+            rec["updated_at"] = _now_iso()
+            self._write(rec)
+            return rec
+
     def recover_stuck_dispatching(
         self,
         *,

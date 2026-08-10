@@ -36,6 +36,8 @@ class ScheduleCreateRequest(BaseModel):
     issue_type: str = "Task"
     # custom = use source_branch; issue_key = feature/{NEW_JIRA_KEY} after create
     source_branch_mode: str = "custom"
+    # Start process_event immediately (does not wait for scheduled_at)
+    dispatch_now: bool = False
 
 
 class ScheduleExistingRequest(BaseModel):
@@ -43,6 +45,7 @@ class ScheduleExistingRequest(BaseModel):
 
     issue_key: str
     scheduled_at: str
+    dispatch_now: bool = False
 
 
 class ScheduleItem(BaseModel):
