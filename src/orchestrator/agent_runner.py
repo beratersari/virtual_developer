@@ -732,6 +732,10 @@ class AgentRunner:
         )[:120]
 
         log_lines: List[str] = []
+        try:
+            session_file.write_text("", encoding="utf-8")
+        except OSError:
+            pass
         client = OpenCodeServeClient(
             base,
             timeout_seconds=float(timeout_seconds),
@@ -746,6 +750,12 @@ class AgentRunner:
         self._running_tasks[task.task_id] = serve_handle
 
         def _on_out(stream: str, line: str) -> None:
+            try:
+                with open(session_file, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+            except OSError:
+                pass
             if on_output:
                 on_output(stream, line)
 
@@ -1000,7 +1010,7 @@ class AgentRunner:
             publish(parsed)
             return
         now = time.time()
-        if now - float(published.get("last_db") or 0) < 2.0:
+        if now - float(published.get("last_db") or 0) < 0.5:
             return
         published["last_db"] = now
         if not self.working_directory:

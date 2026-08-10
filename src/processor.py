@@ -1029,6 +1029,14 @@ class JobProcessor:
         sid = (session_id or "").strip()
         if not sid or not sid.startswith("ses_"):
             return
+        try:
+            self._record_opencode_session(issue_key, sid)
+        except Exception:
+            pass
+        try:
+            self._upsert_session_bind(issue_key, sid)
+        except Exception:
+            pass
         job_id = self._active_jobs.get(issue_key)
         if not job_id:
             return

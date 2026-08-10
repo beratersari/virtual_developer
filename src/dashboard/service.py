@@ -30,7 +30,11 @@ from src.dashboard.schemas import (
 )
 from src.opencode_models import list_available_models
 from src.dashboard.snapshot import PollSnapshotStore, poll_snapshot_store
-from src.opencode_sessions import find_sessions_for_issue, list_session_chat
+from src.opencode_sessions import (
+    extract_session_ids_from_text,
+    find_sessions_for_issue,
+    list_session_chat,
+)
 from src.orchestrator.workflow_router import WorkflowType
 from src.state.job_store import (
     JobStore,
@@ -714,11 +718,21 @@ def build_one_job(
         live_keys = set(processor.list_live_processing_keys())
         active_job_ids = set((processor._active_jobs or {}).values())
     summaries: Dict[str, str] = {}
+    live_sid = ""
     ik = (raw.get("issue_key") or "").strip()
     if state_manager is not None and ik:
         st = state_manager.get_state(ik)
         if st and st.issue_summary:
             summaries[st.issue_key] = st.issue_summary
+        if st:
+            live_sid = (st.current_opencode_session_id or "").strip()
+            if not live_sid:
+                live_sid = str((st.metadata or {}).get("last_opencode_session_id") or "").strip()
+    if live_sid and live_sid.startswith("ses_") and not (raw.get("opencode_session_id") or "").strip():
+        raw = {**raw, "opencode_session_id": live_sid}
+        ids = list(raw.get("opencode_session_ids") or [])
+        if live_sid not in ids:
+            raw = {**raw, "opencode_session_ids": ids + [live_sid]}
     item = job_dict_to_item(
         raw,
         summaries=summaries,
@@ -1359,6 +1373,16 @@ def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
             marker = Path(str(path) + ".session_id")
             if marker.is_file():
                 _add(marker.read_text(encoding="utf-8").splitlines()[0])
+        except OSError:
+            pass
+        try:
+            log_path = Path(str(path))
+            if log_path.is_file() and log_path.stat().st_size > 0:
+                raw = log_path.read_text(encoding="utf-8", errors="replace")
+                if len(raw) > 16_000:
+                    raw = raw[:8_000] + "\n" + raw[-8_000:]
+                for sid in extract_session_ids_from_text(raw):
+                    _add(sid)
         except OSError:
             continue
     # Live / early chat: OpenCode may have created the session before we

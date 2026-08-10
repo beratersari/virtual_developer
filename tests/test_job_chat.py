@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
 from src.dashboard.service import collect_job_chat
-from src.opencode_sessions import list_session_chat
+from src.opencode_sessions import extract_session_ids_from_text, list_session_chat
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
 
@@ -292,6 +292,45 @@ def test_collect_job_chat_discovers_session_by_working_directory(tmp_path: Path)
         out = collect_job_chat(job)
     assert "ses_chat1" in out["session_ids"]
     assert out["messages"][0]["parts"][0]["text"] == "live"
+
+
+def test_extract_session_ids_prefers_serve_created_line():
+    text = (
+        "[serve] health={'healthy': True}\n"
+        "[serve] session created: ses_0140b26d4ffe3Xjzh7CZL40VyH\n"
+        "[serve] turn=initial sending message…\n"
+    )
+    assert extract_session_ids_from_text(text) == ["ses_0140b26d4ffe3Xjzh7CZL40VyH"]
+
+
+def test_collect_job_chat_discovers_session_from_serve_log(tmp_path: Path):
+    """Output tab has the log; chat must parse ses_* from it during the run."""
+    sid = "ses_chat1abcdef"
+    db = _chat_db(
+        tmp_path / "fromlog.db",
+        session_id=sid,
+        messages=[
+            ("msg_u", {"role": "user"}, [{"type": "text", "text": "from log"}]),
+        ],
+    )
+    log = tmp_path / "KAN-1_20260810_120000.log"
+    log.write_text(
+        f"[serve] session created: {sid}\n[serve] turn=initial sending message…\n",
+        encoding="utf-8",
+    )
+    job = {
+        "job_id": "job_log",
+        "opencode_session_id": None,
+        "opencode_session_ids": [],
+        "retry_attempts": [],
+        "session_log_path": str(log),
+        "session_log_paths": [str(log)],
+        "working_directory": None,
+    }
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        out = collect_job_chat(job)
+    assert out["session_ids"] == [sid]
+    assert out["messages"][0]["parts"][0]["text"] == "from log"
 
 
 def test_collect_job_chat_uses_job_session_ids(tmp_path: Path):

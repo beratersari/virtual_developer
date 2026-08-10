@@ -16,6 +16,32 @@ _SESSION_SELECT = (
     "tokens_input, tokens_output"
 )
 
+_SES_ID_RE = re.compile(r"(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)")
+_SES_LABELED_RE = re.compile(
+    r"(?:session created:|session resumed:|Session(?:\s*ID)?[:\s]+)"
+    r"\s*(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)",
+    re.IGNORECASE,
+)
+
+
+def extract_session_ids_from_text(text: str) -> List[str]:
+    """ses_* ids from a session log (prefer labeled serve/CLI lines)."""
+    if not text:
+        return []
+    labeled = _SES_LABELED_RE.findall(text)
+    if labeled:
+        out: List[str] = []
+        for sid in labeled:
+            if sid not in out:
+                out.append(sid)
+        return out
+    out = []
+    for match in _SES_ID_RE.finditer(text):
+        sid = match.group(1)
+        if sid not in out:
+            out.append(sid)
+    return out
+
 
 def _default_db_path() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
@@ -247,7 +273,7 @@ def find_sessions_for_directory(
     if not path.is_file():
         return []
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         placeholders = ",".join("?" * len(variants))
@@ -261,6 +287,17 @@ def find_sessions_for_directory(
             """,
             (*variants, max(1, int(limit))),
         ).fetchall()
+        if not rows:
+            # Windows / slash / casing: SQL IN misses, resolve-compare instead.
+            rows = cur.execute(
+                f"""
+                SELECT {_SESSION_SELECT}
+                FROM session
+                ORDER BY time_updated DESC
+                LIMIT ?
+                """,
+                (max(80, int(limit) * 4),),
+            ).fetchall()
         con.close()
     except Exception as e:
         logger.debug(f"OpenCode directory session lookup failed: {e}")
@@ -615,7 +652,7 @@ def list_session_chat(
         return result
     cap = max(1, min(int(limit or _MAX_CHAT_MESSAGES), _MAX_CHAT_MESSAGES))
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         result["db_checked"] = True

@@ -242,7 +242,7 @@ export function JobChatTab({
             <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
             live
           </span>
-          Waiting for OpenCode session id…
+          Waiting for OpenCode chat (session id + first message)…
         </p>
       )
     }
