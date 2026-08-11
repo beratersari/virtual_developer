@@ -502,9 +502,12 @@ class AgentRunner:
                 )
 
                 reasons = list(incomplete_meta.get("reasons") or [])
-                if reasons_are_compact_only(reasons) or any(
-                    "compact" in str(r).lower() for r in reasons
-                ):
+                saw_compact = (
+                    reasons_are_compact_only(reasons)
+                    or any("compact" in str(r).lower() for r in reasons)
+                    or bool(incomplete_meta.get("compact_in_output"))
+                )
+                if saw_compact:
                     # Auto-compact is still finishing. Wait; do not POST Continue.
                     logger.warning(
                         f"Agent exited 0 during compact; waiting: "
@@ -525,6 +528,8 @@ class AgentRunner:
                     if incomplete_meta:
                         strip_compact_reasons(incomplete_meta)
                         reasons = list(incomplete_meta.get("reasons") or [])
+                    if incomplete_meta is not None:
+                        incomplete_meta["had_compact"] = True
                 if incomplete_meta and incomplete_meta.get("premature"):
                     reason_txt = "; ".join(str(r) for r in reasons) or "incomplete"
                     logger.warning(
@@ -556,6 +561,8 @@ class AgentRunner:
             result["incomplete"] = True
             result["incomplete_reasons"] = list(incomplete_meta.get("reasons") or [])
             result["session_completeness"] = incomplete_meta
+            if incomplete_meta.get("had_compact"):
+                result["had_compact"] = True
 
         if returncode == 0:
             logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
@@ -1648,7 +1655,13 @@ class AgentRunner:
                 from src.opencode_sessions import compact_related_reasons
 
                 to_reasons = list(result.get("incomplete_reasons") or [])
-                if compact_related_reasons(to_reasons):
+                compact_followup = (
+                    bool(result.get("had_compact"))
+                    or int(result.get("compact_events") or 0) > 0
+                    or compact_related_reasons(to_reasons)
+                    or any("compact" in str(r).lower() for r in to_reasons)
+                )
+                if compact_followup:
                     logger.warning(
                         f"Timeout during compact wait — not sending Continue: "
                         f"task_id={task.task_id} reasons={to_reasons}"
@@ -1659,14 +1672,18 @@ class AgentRunner:
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
             elif result.get("incomplete"):
                 # Compact/incomplete was already waited out inside run_agent.
-                # Another prompt (Continue or the original BUILD text) shows
-                # up as a user chat turn and races OpenCode auto-compact.
+                # Another prompt (Continue, Finish-todos, or the original BUILD)
+                # shows up as a user chat turn and races OpenCode auto-compact.
                 from src.opencode_sessions import compact_related_reasons
 
                 reasons = list(result.get("incomplete_reasons") or [])
-                if compact_related_reasons(reasons) or any(
-                    "compact" in str(r).lower() for r in reasons
-                ):
+                compact_followup = (
+                    bool(result.get("had_compact"))
+                    or int(result.get("compact_events") or 0) > 0
+                    or compact_related_reasons(reasons)
+                    or any("compact" in str(r).lower() for r in reasons)
+                )
+                if compact_followup:
                     logger.warning(
                         f"Incomplete after compact wait — not sending another "
                         f"user message: task_id={task.task_id} reasons={reasons}"

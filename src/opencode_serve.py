@@ -36,6 +36,18 @@ from src.opencode_sessions import (
 )
 
 
+def coerce_json_list(data: Any) -> List[Dict[str, Any]]:
+    """Normalize serve list payloads (raw array or ``{data|messages|todos: [...]}``)."""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ("data", "messages", "items", "todos"):
+            inner = data.get(key)
+            if isinstance(inner, list):
+                return [x for x in inner if isinstance(x, dict)]
+    return []
+
+
 def is_serve_timeout(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.TimeoutException, TimeoutError))
 
@@ -128,9 +140,12 @@ class ServeTurnResult:
         }
         if self.incomplete:
             out["incomplete"] = True
+        if self.incomplete_reasons:
             out["incomplete_reasons"] = list(self.incomplete_reasons)
         if self.timed_out:
             out["timed_out"] = True
+        if int(self.compact_events or 0) > 0:
+            out["had_compact"] = True
         if self.session_completeness is not None:
             out["session_completeness"] = self.session_completeness
         return out
@@ -233,8 +248,7 @@ class OpenCodeServeClient:
             headers=self._headers(),
         )
         r.raise_for_status()
-        data = r.json()
-        return data if isinstance(data, list) else []
+        return coerce_json_list(r.json())
 
     async def list_all_messages(
         self,
@@ -261,8 +275,7 @@ class OpenCodeServeClient:
         if r.status_code == 404:
             return []
         r.raise_for_status()
-        data = r.json()
-        return data if isinstance(data, list) else []
+        return coerce_json_list(r.json())
 
     async def session_status(self) -> Dict[str, Any]:
         r = await self._client.get("/session/status", headers=self._headers())
@@ -467,12 +480,14 @@ class ServeOrchestrator:
         *,
         _emit: Callable[[str, str], None],
         _aborted: Callable[[], bool],
+        compact_total: int = 0,
     ) -> Dict[str, Any]:
         """Poll until OpenCode finishes auto-compact / auto-resume.
 
         Compact-then-stop often returns the HTTP turn while the session is
-        briefly idle; OpenCode then auto-resumes. We require a short idle
-        settle so we do not POST another user message into that window.
+        briefly idle; OpenCode then auto-resumes. A short idle is **not**
+        done: we re-assess and keep waiting (no user POST) until the session
+        is actually complete, auto-resume goes busy again, or the budget ends.
         """
         wait_s = self._compact_wait_budget()
         poll_s = max(0.05, float(self.compact_poll_seconds or DEFAULT_COMPACT_POLL_SECONDS))
@@ -484,6 +499,7 @@ class ServeOrchestrator:
         polls = 0
         last_busy = False
         idle_since: Optional[float] = None
+        last_reasons: List[Any] = []
         while time.time() < deadline:
             if _aborted():
                 return {"aborted": True, "polls": polls}
@@ -510,18 +526,93 @@ class ServeOrchestrator:
                     "stdout",
                     f"[serve] session idle — settling {settle_s:.1f}s for auto-resume",
                 )
-            if (now - idle_since) >= settle_s:
+            if (now - idle_since) < settle_s:
+                await asyncio.sleep(min(poll_s, settle_s))
+                continue
+            # Idle long enough to snapshot. Do **not** treat this as terminal:
+            # auto-resume often starts a few seconds after compact-then-stop.
+            _messages, assessment, compact_total = await self._snapshot_assess(
+                sid, compact_total=compact_total, output_text="", _emit=_emit
+            )
+            strip_compact_reasons(assessment)
+            last_reasons = list(assessment.get("reasons") or [])
+            if not assessment.get("premature"):
                 _emit(
                     "stdout",
-                    f"[serve] auto-compact settled after {polls} poll(s)",
+                    f"[serve] auto-compact settled after {polls} poll(s) "
+                    f"(session complete)",
                 )
-                return {"settled": True, "polls": polls, "busy": False}
-            await asyncio.sleep(min(poll_s, settle_s))
+                return {
+                    "settled": True,
+                    "complete": True,
+                    "polls": polls,
+                    "busy": False,
+                    "assessment": assessment,
+                    "compact_total": compact_total,
+                }
+            if polls == 1 or polls % 5 == 0:
+                _emit(
+                    "stdout",
+                    f"[serve] idle after compact but still incomplete "
+                    f"(poll {polls}, reasons={last_reasons}) — "
+                    "waiting for auto-resume (no user message)",
+                )
+            await asyncio.sleep(poll_s)
         _emit(
             "stderr",
-            f"[serve] auto-compact still busy after {wait_s:.0f}s ({polls} polls)",
+            f"[serve] auto-compact still unfinished after {wait_s:.0f}s "
+            f"({polls} polls, reasons={last_reasons})",
         )
-        return {"timeout": True, "polls": polls, "busy": last_busy}
+        return {
+            "timeout": True,
+            "polls": polls,
+            "busy": last_busy,
+            "reasons": last_reasons,
+            "compact_total": compact_total,
+        }
+
+    async def _fetch_session_lists(
+        self,
+        sid: str,
+        *,
+        _emit: Callable[[str, str], None],
+    ) -> tuple[Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]], bool]:
+        """Load messages/todos. Empty or failed message lists are None (DB fallback)."""
+        messages: Optional[List[Dict[str, Any]]] = None
+        todos: Optional[List[Dict[str, Any]]] = None
+        messages_failed = False
+        try:
+            fetched = await self.client.list_all_messages(sid)
+            messages = fetched if fetched else None
+        except Exception as e:
+            messages_failed = True
+            _emit("stderr", f"[serve] list messages failed: {e}")
+        try:
+            todos = await self.client.list_todos(sid)
+        except Exception as e:
+            todos = None
+            _emit("stderr", f"[serve] list todos failed: {e}")
+        return messages, todos, messages_failed
+
+    @staticmethod
+    def _fail_closed_if_no_evidence(
+        assessment: Dict[str, Any],
+        *,
+        messages: Optional[List[Dict[str, Any]]],
+        messages_failed: bool,
+    ) -> Dict[str, Any]:
+        """Do not treat a missing snapshot as COMPLETED."""
+        if messages or assessment.get("last_role") or assessment.get("open_todos"):
+            return assessment
+        if assessment.get("reasons"):
+            return assessment
+        if messages_failed or messages is None:
+            assessment["complete"] = False
+            assessment["premature"] = True
+            reasons = list(assessment.get("reasons") or [])
+            reasons.append("completeness snapshot unavailable")
+            assessment["reasons"] = reasons
+        return assessment
 
     async def _snapshot_assess(
         self,
@@ -530,27 +621,98 @@ class ServeOrchestrator:
         compact_total: int,
         output_text: str = "",
         _emit: Callable[[str, str], None],
+        new_compacts_this_turn: int = 0,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any], int]:
-        try:
-            messages = await self.client.list_all_messages(sid)
-        except Exception as e:
-            messages = []
-            _emit("stderr", f"[serve] list messages failed: {e}")
-        try:
-            todos = await self.client.list_todos(sid)
-        except Exception as e:
-            todos = []
-            _emit("stderr", f"[serve] list todos failed: {e}")
-        compact_total = max(compact_total, len(compaction_marker_keys(messages)))
+        messages, todos, messages_failed = await self._fetch_session_lists(
+            sid, _emit=_emit
+        )
+        raw = list(messages or [])
+        compact_total = max(compact_total, len(compaction_marker_keys(raw)))
         assessment = assess_serve_turn(
             sid,
             messages=messages,
             todos=todos,
             compact_events_seen=compact_total,
-            new_compacts_this_turn=0,
+            new_compacts_this_turn=new_compacts_this_turn,
             output_text=output_text,
         )
-        return messages, assessment, compact_total
+        self._fail_closed_if_no_evidence(
+            assessment, messages=messages, messages_failed=messages_failed
+        )
+        return raw, assessment, compact_total
+
+    async def _turn_after_compact_wait(
+        self,
+        sid: str,
+        *,
+        wait_info: Dict[str, Any],
+        compact_total: int,
+        continue_count: int,
+        turns: List[Dict[str, Any]],
+        lines: List[str],
+        http_note: str = "",
+        _emit: Callable[[str, str], None],
+    ) -> ServeTurnResult:
+        """Map a compact-wait outcome to a turn result. Never POSTs a user message."""
+        compact_total = int(wait_info.get("compact_total") or compact_total or 0)
+        if wait_info.get("aborted"):
+            await self.client.abort(sid)
+            return ServeTurnResult(
+                session_id=sid,
+                returncode=-1,
+                stdout="\n".join(lines),
+                stderr="Aborted while waiting for auto-compact",
+                incomplete=True,
+                incomplete_reasons=["aborted"],
+                compact_events=compact_total,
+                continue_count=continue_count,
+                turns=turns,
+                timed_out=bool(wait_info.get("timeout")),
+            )
+        assessment = wait_info.get("assessment")
+        if not isinstance(assessment, dict) or wait_info.get("timeout"):
+            _messages, assessment, compact_total = await self._snapshot_assess(
+                sid, compact_total=compact_total, output_text="", _emit=_emit
+            )
+            strip_compact_reasons(assessment)
+        if wait_info.get("complete") or not assessment.get("premature"):
+            return ServeTurnResult(
+                session_id=sid,
+                returncode=0,
+                stdout="\n".join(lines),
+                stderr="",
+                incomplete=False,
+                compact_events=compact_total,
+                continue_count=continue_count,
+                turns=turns,
+                session_completeness=assessment,
+                progress=100,
+            )
+        reasons = list(
+            assessment.get("reasons")
+            or wait_info.get("reasons")
+            or ["auto-compact wait timed out"]
+        )
+        # Full wait budget used — this is a timeout, not a "compaction error"
+        # and not a signal to inject Finish-todos / Continue.
+        note = http_note or (
+            "[TIMEOUT] still incomplete after waiting for auto-compact: "
+            + "; ".join(map(str, reasons))
+        )
+        _emit("stderr", note)
+        return ServeTurnResult(
+            session_id=sid,
+            returncode=-1,
+            stdout="\n".join(lines),
+            stderr=note,
+            incomplete=False,
+            incomplete_reasons=reasons,
+            compact_events=compact_total,
+            continue_count=continue_count,
+            turns=turns,
+            session_completeness=assessment,
+            timed_out=True,
+        )
 
     async def run(
         self,
@@ -714,67 +876,20 @@ class ServeOrchestrator:
                         "waiting (no abort, no Continue prompt)",
                     )
                     wait_info = await self._wait_for_auto_compact(
-                        sid, _emit=_emit, _aborted=_aborted
+                        sid,
+                        _emit=_emit,
+                        _aborted=_aborted,
+                        compact_total=compact_total,
                     )
-                    if wait_info.get("aborted"):
-                        await self.client.abort(sid)
-                        return ServeTurnResult(
-                            session_id=sid,
-                            returncode=-1,
-                            stdout="\n".join(lines),
-                            stderr="Aborted while waiting for auto-compact",
-                            incomplete=True,
-                            incomplete_reasons=["aborted"],
-                            compact_events=compact_total,
-                            continue_count=continue_count,
-                            turns=turns,
-                            timed_out=True,
-                        )
-                    _messages, assessment, compact_total = await self._snapshot_assess(
-                        sid, compact_total=compact_total, output_text="", _emit=_emit
-                    )
-                    strip_compact_reasons(assessment)
-                    if wait_info.get("timeout") or wait_info.get("busy"):
-                        reasons = list(
-                            assessment.get("reasons") or ["auto-compact wait timed out"]
-                        )
-                        assessment["premature"] = True
-                        assessment["complete"] = False
-                        assessment["reasons"] = reasons
-                    _emit(
-                        "stdout",
-                        "[serve] after timeout wait "
-                        f"complete={assessment.get('complete')} "
-                        f"premature={assessment.get('premature')} "
-                        f"reasons={assessment.get('reasons')}",
-                    )
-                    if not assessment.get("premature"):
-                        return ServeTurnResult(
-                            session_id=sid,
-                            returncode=0,
-                            stdout="\n".join(lines),
-                            stderr="",
-                            incomplete=False,
-                            compact_events=compact_total,
-                            continue_count=continue_count,
-                            turns=turns,
-                            session_completeness=assessment,
-                            progress=100,
-                        )
-                    return ServeTurnResult(
-                        session_id=sid,
-                        returncode=-1,
-                        stdout="\n".join(lines),
-                        stderr=note,
-                        incomplete=True,
-                        incomplete_reasons=list(
-                            assessment.get("reasons") or ["http timeout"]
-                        ),
-                        compact_events=compact_total,
+                    return await self._turn_after_compact_wait(
+                        sid,
+                        wait_info=wait_info,
+                        compact_total=compact_total,
                         continue_count=continue_count,
                         turns=turns,
-                        session_completeness=assessment,
-                        timed_out=True,
+                        lines=lines,
+                        http_note=note,
+                        _emit=_emit,
                     )
                 return ServeTurnResult(
                     session_id=sid,
@@ -822,18 +937,11 @@ class ServeOrchestrator:
                     _emit("stderr", f"[serve] force summarize failed: {e}")
 
             # Snapshot state (full-ish history — do not use a 80-row window)
-            try:
-                messages = await self.client.list_all_messages(sid)
-            except Exception as e:
-                messages = []
-                _emit("stderr", f"[serve] list messages failed: {e}")
-            try:
-                todos = await self.client.list_todos(sid)
-            except Exception as e:
-                todos = []
-                _emit("stderr", f"[serve] list todos failed: {e}")
-
-            keys_after = compaction_marker_keys(messages)
+            messages, todos, messages_failed = await self._fetch_session_lists(
+                sid, _emit=_emit
+            )
+            raw_messages = list(messages or [])
+            keys_after = compaction_marker_keys(raw_messages)
             compact_in_msgs = len(keys_after)
             new_this_turn = len(keys_after - keys_before)
             if forced_compact:
@@ -852,6 +960,9 @@ class ServeOrchestrator:
                 # still contains earlier "Compacting…" lines and would false-
                 # flag every later continue as incomplete.
                 output_text=reply_text,
+            )
+            self._fail_closed_if_no_evidence(
+                assessment, messages=messages, messages_failed=messages_failed
             )
             turn_rec = {
                 "turn": label,
@@ -890,67 +1001,36 @@ class ServeOrchestrator:
                 )
 
             reasons = list(assessment.get("reasons") or [])
-            compact_only = reasons_are_compact_only(reasons) or int(new_this_turn or 0) > 0
-            if compact_only or any(
-                "compact" in str(r).lower() for r in reasons
-            ):
-                # Auto-compact is in-session. Wait; do not POST a Continue user msg.
+            had_compact = (
+                reasons_are_compact_only(reasons)
+                or int(new_this_turn or 0) > 0
+                or int(compact_total or 0) > 0
+                or any("compact" in str(r).lower() for r in reasons)
+            )
+            if assessment.get("premature") and had_compact:
+                # Auto-compact is in-session. Wait; do not POST a user message.
                 _emit(
                     "stdout",
                     "[serve] compact detected — waiting for auto-compact "
-                    "(no Continue prompt)",
+                    "(no Continue / Finish-todos prompt)",
                 )
                 wait_info = await self._wait_for_auto_compact(
-                    sid, _emit=_emit, _aborted=_aborted
+                    sid,
+                    _emit=_emit,
+                    _aborted=_aborted,
+                    compact_total=compact_total,
                 )
-                if wait_info.get("aborted"):
-                    await self.client.abort(sid)
-                    return ServeTurnResult(
-                        session_id=sid,
-                        returncode=-1,
-                        stdout="\n".join(lines),
-                        stderr="Aborted while waiting for auto-compact",
-                        incomplete=True,
-                        incomplete_reasons=["aborted"],
-                        compact_events=compact_total,
-                        continue_count=continue_count,
-                        turns=turns,
-                    )
-                _messages, assessment, compact_total = await self._snapshot_assess(
-                    sid, compact_total=compact_total, output_text="", _emit=_emit
+                return await self._turn_after_compact_wait(
+                    sid,
+                    wait_info=wait_info,
+                    compact_total=compact_total,
+                    continue_count=continue_count,
+                    turns=turns,
+                    lines=lines,
+                    _emit=_emit,
                 )
-                strip_compact_reasons(assessment)
-                if wait_info.get("timeout") or wait_info.get("busy"):
-                    reasons = list(
-                        assessment.get("reasons")
-                        or ["auto-compact wait timed out"]
-                    )
-                    assessment["premature"] = True
-                    assessment["complete"] = False
-                    assessment["reasons"] = reasons
-                _emit(
-                    "stdout",
-                    f"[serve] after compact wait complete={assessment.get('complete')} "
-                    f"premature={assessment.get('premature')} "
-                    f"reasons={assessment.get('reasons')}",
-                )
-                if not assessment.get("premature"):
-                    return ServeTurnResult(
-                        session_id=sid,
-                        returncode=0,
-                        stdout="\n".join(lines),
-                        stderr="",
-                        incomplete=False,
-                        compact_events=compact_total,
-                        continue_count=continue_count,
-                        turns=turns,
-                        session_completeness=assessment,
-                        progress=100,
-                    )
-                reasons = list(assessment.get("reasons") or reasons)
 
-            # Still incomplete after wait (or non-compact failure). Do not
-            # inject Continue — that shows up as a user chat turn.
+            # Still incomplete (non-compact). Do not inject Continue.
             note = (
                 f"[INCOMPLETE] session still incomplete after auto-compact wait: "
                 f"{'; '.join(map(str, reasons))}"

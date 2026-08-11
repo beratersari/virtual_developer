@@ -387,6 +387,53 @@ async def test_run_agent_with_retry_does_not_loop_twenty_compact_prompts(
             )
 
     assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_retry_open_todos_after_compact_no_finish_prompt(
+    runner, tmp_path, monkeypatch
+):
+    """After compact wait, leftover open todos must not inject Finish-todos."""
+    monkeypatch.chdir(tmp_path)
+    seen: list[str] = []
+
+    async def fake_run(task, **kwargs):
+        seen.append(task.prompt or "")
+        return {
+            "task_id": task.task_id,
+            "returncode": 2,
+            "stdout": "Compacting…",
+            "stderr": "[INCOMPLETE] open todos after compact",
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_todos",
+            "incomplete": True,
+            "incomplete_reasons": ["open todos: 2 pending, 1 in_progress"],
+            "compact_events": 3,
+            "had_compact": True,
+        }
+
+    with patch.object(runner, "run_agent", side_effect=fake_run):
+        with patch("src.orchestrator.agent_runner.settings") as s:
+            s.agent_task_max_retries = 2
+            s.agent_task_max_incomplete_retries = 256
+            s.agent_task_retry_delay_seconds = 0
+            s.agent_task_retry_backoff_multiplier = 1
+            s.agent_task_retry_on_timeout = True
+            s.agent_task_retry_on_error = False
+            task = AgentTask(
+                description="d",
+                prompt="Write a README for every file",
+                agent="a",
+            )
+            result = await runner.run_agent_with_retry(
+                task,
+                max_retries=2,
+                max_incomplete_retries=256,
+            )
+
+    assert seen == ["Write a README for every file"]
+    assert result.get("incomplete") is True
+    assert not result["retry_info"]["retried"]
     assert result["returncode"] == 2
     assert result.get("incomplete") is True
     assert not result["retry_info"]["retried"]

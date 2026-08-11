@@ -552,6 +552,7 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
 
 
 _CONTINUE_PROMPT_PREFIX = "continue the previous opencode session"
+_FINISH_TODOS_PREFIX = "finish remaining todos and complete the original task"
 _OPENCODE_AUTO_CONTINUE_PREFIX = "continue if you have next steps"
 _COMPACT_USER_TEXT_RE = re.compile(
     r"(?:"
@@ -568,13 +569,20 @@ _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"omo_internal"
     r"|restore\s+checkpointed\s+session"
     r"|checkpointed\s+session\s+agent\s+configuration"
+    r"|todo\s+continuation"
+    r"|background task completed"
+    r"|system directive:\s*oh-my-opencode"
+    r"|system-reminder"
     r")",
     re.IGNORECASE,
 )
 
 
 def is_orchestrator_continue_text(text: str) -> bool:
-    return (text or "").strip().lower().startswith(_CONTINUE_PROMPT_PREFIX)
+    low = (text or "").strip().lower()
+    return low.startswith(_CONTINUE_PROMPT_PREFIX) or low.startswith(
+        _FINISH_TODOS_PREFIX
+    )
 
 
 def is_internal_compact_followup_text(text: str) -> bool:
@@ -584,6 +592,8 @@ def is_internal_compact_followup_text(text: str) -> bool:
         return False
     low = t.lower()
     if low.startswith(_OPENCODE_AUTO_CONTINUE_PREFIX):
+        return True
+    if low.startswith(_FINISH_TODOS_PREFIX):
         return True
     return bool(_INTERNAL_COMPACT_FOLLOWUP_RE.search(t))
 
@@ -1052,20 +1062,25 @@ def assess_session_completeness(
     }
 
     # --- Live API snapshots (serve mode) ---
-    if todos is not None:
+    # An empty list is *not* "API checked, nothing to see": list failures and
+    # wrapped/non-list payloads used to arrive as [] and skip SQLite, which
+    # then defaulted to complete=True (false COMPLETE after compact).
+    api_todos = list(todos) if todos else []
+    api_messages = list(messages) if messages else []
+    if todos:
         result["api_checked"] = True
-        _apply_todo_counts(result, list(todos))
+        _apply_todo_counts(result, api_todos)
 
-    if messages is not None:
+    if api_messages:
         result["api_checked"] = True
-        _apply_message_list(result, list(messages))
+        _apply_message_list(result, api_messages)
 
     sid = (session_id or "").strip()
     path = db_path or _default_db_path()
 
-    # --- SQLite fallback when API snapshots not supplied ---
-    use_db_todos = todos is None
-    use_db_messages = messages is None
+    # --- SQLite fallback when API snapshots not supplied *or* empty ---
+    use_db_todos = not api_todos
+    use_db_messages = not api_messages
     if sid and path.is_file() and (use_db_todos or use_db_messages):
         try:
             con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)

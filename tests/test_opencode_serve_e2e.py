@@ -62,6 +62,9 @@ class FakeServeBackend:
         self.auto_complete_on_idle = False
         self._auto_completed = False
         self.busy_polls_remaining = 0
+        # Stay idle (incomplete) for this many status polls, then auto-complete.
+        self.idle_polls_before_auto_complete = 1
+        self._idle_polls = 0
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -180,28 +183,31 @@ class FakeServeBackend:
             self.busy_polls_remaining -= 1
             return {self.session_id: {"type": "busy"}}
         if self.auto_complete_on_idle and not self._auto_completed:
-            self._auto_completed = True
-            self.todos = [
-                {"content": "Explore", "status": "completed"},
-                {"content": "Implement", "status": "completed"},
-                {"content": "Commit", "status": "completed"},
-            ]
-            self.messages.append(
-                {
-                    "info": {
-                        "id": self._next_id("msg"),
-                        "role": "assistant",
-                        "finish": "stop",
-                        "summary": None,
-                    },
-                    "parts": [
-                        {
-                            "type": "text",
-                            "text": "Auto-resumed after compact; committed.",
-                        }
-                    ],
-                }
-            )
+            self._idle_polls += 1
+            need = max(1, int(self.idle_polls_before_auto_complete or 1))
+            if self._idle_polls >= need:
+                self._auto_completed = True
+                self.todos = [
+                    {"content": "Explore", "status": "completed"},
+                    {"content": "Implement", "status": "completed"},
+                    {"content": "Commit", "status": "completed"},
+                ]
+                self.messages.append(
+                    {
+                        "info": {
+                            "id": self._next_id("msg"),
+                            "role": "assistant",
+                            "finish": "stop",
+                            "summary": None,
+                        },
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": "Auto-resumed after compact; committed.",
+                            }
+                        ],
+                    }
+                )
         return {self.session_id: {"type": "idle"}}
 
     async def list_todos(self, session_id: str) -> List[Dict[str, Any]]:
@@ -522,14 +528,14 @@ async def test_e2e_silent_compact_waits_without_continue():
         title="E2E-COMPACT: silent stop",
         agent="atlas",
     )
-    # Compact-then-stop with no follow-up assistant is incomplete (not success).
-    # Must not POST Continue either.
-    assert result.returncode == 2, result.stderr
-    assert result.incomplete is True
+    # Compact-then-stop: wait out the budget, never POST Continue / Finish-todos.
+    assert result.returncode != 0, result.stderr
     assert result.continue_count == 0
     assert backend.message_calls == 1
     assert backend.prompts == ["implement 5+4"]
-    assert "Continue the previous" not in "\n".join(backend.prompts)
+    blob = "\n".join(backend.prompts)
+    assert "Continue the previous" not in blob
+    assert "Finish remaining todos" not in blob
 
 
 @pytest.mark.asyncio
@@ -584,12 +590,12 @@ async def test_e2e_open_todos_after_compact_wait_no_extra_prompt():
         client=client, compact_wait_seconds=0.4, compact_poll_seconds=0.05
     )
     result = await orch.run(prompt="Do the work", title="KAN-99")
-    assert result.returncode == 2
-    assert result.incomplete is True
+    assert result.returncode != 0
     assert result.continue_count == 0
     assert backend.message_calls == 1
-    assert "INCOMPLETE" in (result.stderr or "")
-    assert "Continue the previous" not in "\n".join(backend.prompts)
+    blob = "\n".join(backend.prompts)
+    assert "Continue the previous" not in blob
+    assert "Finish remaining todos" not in blob
 
 
 @pytest.mark.asyncio
@@ -664,6 +670,31 @@ async def test_e2e_waits_while_session_busy_then_auto_resumes():
     assert result.continue_count == 0
     assert backend.message_calls == 1
     assert backend.status_polls >= 4
+    assert all("Continue the previous" not in p for p in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_e2e_waits_through_idle_for_delayed_auto_resume():
+    """Idle after compact is not done — wait until auto-resume completes.
+
+    Old bug: 2s settle → leftover open todos → inject Finish-todos / ERROR.
+    """
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = True
+    backend.idle_polls_before_auto_complete = 8
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=2.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.08,
+    )
+    result = await orch.run(prompt="long readme job", title="KAN-DELAY")
+    assert result.returncode == 0, result.stderr
+    assert result.continue_count == 0
+    assert backend.message_calls == 1
+    assert backend._auto_completed is True
+    assert all("Finish remaining todos" not in p for p in backend.prompts)
     assert all("Continue the previous" not in p for p in backend.prompts)
 
 

@@ -2628,8 +2628,13 @@ class JobProcessor:
                 "issue_key": existing.get("issue_key"),
                 "status": existing.get("status"),
             }
+        # GitLab checks out the MR source as-is (keep_source=True), including
+        # main/develop. The queue lock must use that same folder identity.
         work = GitManager.resolve_work_branch_name(
-            event.issue_key, event.source_branch, event.target_branch
+            event.issue_key,
+            event.source_branch,
+            event.target_branch,
+            keep_source=True,
         )
         lock = workspace_lock_key(
             event.repository_url, work, event.target_branch
@@ -2836,14 +2841,9 @@ class JobProcessor:
         assert isinstance(event, GitlabMrNoteEvent)
         issue_key = event.issue_key
         note_id = (event.note_id or "").strip()
-        if note_id:
-            if note_id in self._gitlab_seen_notes:
-                logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
-                return True
-            self._gitlab_seen_notes.add(note_id)
-            if len(self._gitlab_seen_notes) > 500:
-                # drop arbitrary old ids; retries are near-term
-                self._gitlab_seen_notes = set(list(self._gitlab_seen_notes)[-250:])
+        if note_id and note_id in self._gitlab_seen_notes:
+            logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
+            return True
 
         if self._is_live_processing(issue_key):
             logger.info(f"{issue_key}: already in-flight; deferring GitLab note")
@@ -2895,6 +2895,11 @@ class JobProcessor:
         st = self.state_manager.get_state(issue_key)
         if st is None:
             return False
+        # Mark seen only after accept — a defer must not poison retries.
+        if note_id:
+            self._gitlab_seen_notes.add(note_id)
+            if len(self._gitlab_seen_notes) > 500:
+                self._gitlab_seen_notes = set(list(self._gitlab_seen_notes)[-250:])
         await self._start_gitlab_mr_workflow(st, event)
         return True
 
@@ -4331,7 +4336,7 @@ class JobProcessor:
 
         When ``require_exists`` is True, never return a missing path (B2).
         Preference order: durable host → ``.sisyphus/plans`` → ``.omo/plans``
-        → non-empty ``.omo/drafts`` (Prometheus ULW draft fallback).
+        → ``.omo/drafts/{issue_key}.md``. Never adopt another issue's markdown.
         """
         candidates: list[Path] = []
         # Prefer durable host path (survives temp cleanup)
@@ -4352,28 +4357,6 @@ class JobProcessor:
                 except Exception:
                     continue
         if require_exists:
-            # Last resort: any non-empty markdown under workspace plans/omo
-            if working:
-                base = Path(working)
-                for sub in (
-                    base / ".sisyphus" / "plans",
-                    base / ".omo" / "plans",
-                    base / ".omo" / "drafts",
-                ):
-                    if not sub.is_dir():
-                        continue
-                    try:
-                        for path in sorted(sub.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
-                            try:
-                                if path.read_text(encoding="utf-8", errors="replace").strip():
-                                    logger.info(
-                                        f"Resolved plan for {issue_key} via scan: {path}"
-                                    )
-                                    return path
-                            except Exception:
-                                continue
-                    except Exception:
-                        continue
             return None
         # Prefer durable / sisyphus path even if missing (executor materializes later)
         if working:
