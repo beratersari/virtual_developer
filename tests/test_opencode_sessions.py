@@ -809,10 +809,11 @@ def test_chat_display_role_compaction_is_not_user():
     )
     search = (
         "[search-mode] MAXIMIZE SEARCH EFFORT. Launch multiple background "
-        "agents IN PARALLEL:\n\n# Build mode\n"
+        "agents IN PARALLEL:\n\n# Build mode\nYou run unattended\n"
     )
+    # First task prompt is wrapped by the plugin — still the operator message.
     assert (
-        chat_display_role("user", parts=[{"type": "text", "text": search}]) == "skip"
+        chat_display_role("user", parts=[{"type": "text", "text": search}]) == "user"
     )
 
 

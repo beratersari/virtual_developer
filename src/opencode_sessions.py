@@ -565,6 +565,8 @@ _COMPACT_USER_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 # OpenCode / oh-my-openagent post these as role=user. They are not the operator.
+# Do NOT include [search-mode] / [analyze-mode] here: those wrap the *first*
+# real task prompt too, and hiding them emptied the chat of the user's message.
 _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"(?:"
     r"omo_internal"
@@ -579,10 +581,15 @@ _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"|conversation was compacted"
     r"|media (?:files|attachments) were removed"
     r"|large media attachments"
-    r"|\[search-mode\]"
-    r"|\[analyze-mode\]"
-    r"|maximize search effort"
     r")",
+    re.IGNORECASE,
+)
+_OMO_MODE_WRAP_RE = re.compile(
+    r"\[(?:search|analyze|build|plan)-mode\]|maximize search effort",
+    re.IGNORECASE,
+)
+_OMO_MODE_LINE_RE = re.compile(
+    r"^\[(?:search|analyze|build|plan)-mode\]",
     re.IGNORECASE,
 )
 _ASSISTANT_QUESTION_RE = re.compile(
@@ -616,6 +623,35 @@ def is_internal_compact_followup_text(text: str) -> bool:
     if low.startswith(_FINISH_TODOS_PREFIX):
         return True
     return bool(_INTERNAL_COMPACT_FOLLOWUP_RE.search(t))
+
+
+def is_omo_mode_wrap_text(text: str) -> bool:
+    """True when oh-my-openagent wrapped a user turn with [search-mode] etc."""
+    return bool(_OMO_MODE_WRAP_RE.search(text or ""))
+
+
+def strip_omo_mode_wrap(text: str) -> str:
+    """Drop leading [search-mode]/[analyze-mode] banners; keep the real prompt."""
+    raw = text or ""
+    lines = raw.splitlines()
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if _OMO_MODE_LINE_RE.match(s):
+            i += 1
+            while i < len(lines):
+                nxt = lines[i].strip()
+                if _OMO_MODE_LINE_RE.match(nxt):
+                    break
+                if nxt.startswith("#"):
+                    return "\n".join(lines[i:]).strip() or raw
+                i += 1
+            continue
+        if s:
+            break
+        i += 1
+    stripped = "\n".join(lines[i:]).strip()
+    return stripped or raw
 
 
 def assistant_asked_question(text: str) -> bool:
@@ -778,6 +814,7 @@ def list_session_chat(
                 logger.debug(f"part table unavailable for {sid}: {e}")
 
         messages: List[Dict[str, Any]] = []
+        shown_user = False
         for row in msg_rows:
             raw = row["data"]
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -807,8 +844,27 @@ def list_session_chat(
             display_role = chat_display_role(
                 role, agent=agent, summary=summary, parts=parts
             )
+            text_blob = "\n".join(
+                str(p.get("text") or "")
+                for p in parts
+                if isinstance(p, dict) and (p.get("type") or "text").lower() == "text"
+            )
             if display_role == "skip":
                 continue
+            # Plugin wraps the first task prompt with [search-mode]. Show that
+            # once; later wraps are retries / auto-injects, not the operator.
+            if (
+                display_role == "user"
+                and shown_user
+                and is_omo_mode_wrap_text(text_blob)
+            ):
+                continue
+            if display_role == "user" and is_omo_mode_wrap_text(text_blob):
+                for p in parts:
+                    if isinstance(p, dict) and (p.get("type") or "text").lower() == "text":
+                        p["text"] = strip_omo_mode_wrap(str(p.get("text") or ""))
+            if display_role == "user":
+                shown_user = True
             messages.append(
                 {
                     "id": row["id"],
