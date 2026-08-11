@@ -148,6 +148,8 @@ class ServeTurnResult:
             out["had_compact"] = True
         if self.session_completeness is not None:
             out["session_completeness"] = self.session_completeness
+            if self.session_completeness.get("assistant_asked_question"):
+                out["assistant_asked_question"] = True
         return out
 
 
@@ -853,55 +855,37 @@ class ServeOrchestrator:
                         turns=turns,
                         timed_out=False,
                     )
-                # HTTP wait ended. If OpenCode is still compacting / running,
-                # wait it out — do not abort and do not Continue.
+                # HTTP wait ended. Compact often idles the session for a few
+                # seconds before auto-resume. Always wait — do not treat idle
+                # as a hard timeout and retry with the original BUILD prompt.
                 try:
                     status = await self.client.session_status()
                     status_ok = True
                 except Exception:
                     status = {}
                     status_ok = False
-                try:
-                    msgs_now = await self.client.list_all_messages(sid)
-                except Exception:
-                    msgs_now = []
-                # Failed status poll must not look idle (same as compact wait).
                 still_running = (not status_ok) or session_is_busy(status, sid)
-                compact_seen = bool(compaction_marker_keys(msgs_now) - keys_before)
-                if still_running or compact_seen:
-                    _emit(
-                        "stdout",
-                        "[serve] HTTP wait ended while session "
-                        f"{'busy' if still_running else 'compacted'} — "
-                        "waiting (no abort, no Continue prompt)",
-                    )
-                    wait_info = await self._wait_for_auto_compact(
-                        sid,
-                        _emit=_emit,
-                        _aborted=_aborted,
-                        compact_total=compact_total,
-                    )
-                    return await self._turn_after_compact_wait(
-                        sid,
-                        wait_info=wait_info,
-                        compact_total=compact_total,
-                        continue_count=continue_count,
-                        turns=turns,
-                        lines=lines,
-                        http_note=note,
-                        _emit=_emit,
-                    )
-                return ServeTurnResult(
-                    session_id=sid,
-                    returncode=-1,
-                    stdout="\n".join(lines),
-                    stderr=note,
-                    incomplete=False,
-                    incomplete_reasons=["http timeout"],
-                    compact_events=compact_total,
+                _emit(
+                    "stdout",
+                    "[serve] HTTP wait ended "
+                    f"({'busy' if still_running else 'idle'}) — "
+                    "waiting for auto-compact/auto-resume (no user prompt)",
+                )
+                wait_info = await self._wait_for_auto_compact(
+                    sid,
+                    _emit=_emit,
+                    _aborted=_aborted,
+                    compact_total=compact_total,
+                )
+                return await self._turn_after_compact_wait(
+                    sid,
+                    wait_info=wait_info,
+                    compact_total=compact_total,
                     continue_count=continue_count,
                     turns=turns,
-                    timed_out=True,
+                    lines=lines,
+                    http_note=note,
+                    _emit=_emit,
                 )
             elapsed = time.time() - t0
             info = msg.get("info") if isinstance(msg.get("info"), dict) else msg
@@ -1006,6 +990,7 @@ class ServeOrchestrator:
                 or int(new_this_turn or 0) > 0
                 or int(compact_total or 0) > 0
                 or any("compact" in str(r).lower() for r in reasons)
+                or bool(assessment.get("assistant_asked_question"))
             )
             if assessment.get("premature") and had_compact:
                 # Auto-compact is in-session. Wait; do not POST a user message.

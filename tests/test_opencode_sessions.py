@@ -794,6 +794,55 @@ def test_chat_display_role_compaction_is_not_user():
         )
         == "skip"
     )
+    media = (
+        "The previous request exceeded the provider's size limit due to "
+        "large media attachments. The conversation was compacted and media "
+        "files were removed from context. If the user was asking about "
+        "attached images or files, explain that the attachments were too "
+        "large to process and suggest they try again with smaller or fewer "
+        "files.\n\n"
+        "Continue if you have next steps, or stop and ask for clarification "
+        "if you are unsure how to proceed."
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": media}]) == "skip"
+    )
+    search = (
+        "[search-mode] MAXIMIZE SEARCH EFFORT. Launch multiple background "
+        "agents IN PARALLEL:\n\n# Build mode\n"
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": search}]) == "skip"
+    )
+
+
+def test_assistant_asked_question_is_not_a_crash():
+    from src.opencode_sessions import (
+        assess_session_completeness,
+        assistant_asked_question,
+    )
+
+    q = (
+        "All module READMEs already exist.\n\n"
+        "Shall I continue with the remaining work?"
+    )
+    assert assistant_asked_question(q) is True
+    assert assistant_asked_question("Implemented the parser and committed.") is False
+    result = assess_session_completeness(
+        "ses_q",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": q}],
+            }
+        ],
+        todos=[{"status": "completed"}],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result["premature"] is True
+    assert any("clarifying question" in str(r) for r in result["reasons"])
+    assert not any("unfinished" in str(r) for r in result["reasons"])
 
 
 def test_compact_related_reasons_detects_markers():

@@ -434,6 +434,54 @@ async def test_run_agent_with_retry_open_todos_after_compact_no_finish_prompt(
     assert seen == ["Write a README for every file"]
     assert result.get("incomplete") is True
     assert not result["retry_info"]["retried"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_retry_question_does_not_resend_build(
+    runner, tmp_path, monkeypatch
+):
+    """Model asked 'Shall I continue?' — do not retry with the BUILD kit."""
+    monkeypatch.chdir(tmp_path)
+    seen: list[str] = []
+
+    async def fake_run(task, **kwargs):
+        seen.append(task.prompt or "")
+        return {
+            "task_id": task.task_id,
+            "returncode": 2,
+            "stdout": "Shall I continue with the remaining work?",
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_q",
+            "incomplete": True,
+            "incomplete_reasons": ["assistant asked a clarifying question"],
+            "assistant_asked_question": True,
+            "had_compact": True,
+            "compact_events": 2,
+        }
+
+    with patch.object(runner, "run_agent", side_effect=fake_run):
+        with patch("src.orchestrator.agent_runner.settings") as s:
+            s.agent_task_max_retries = 3
+            s.agent_task_max_incomplete_retries = 256
+            s.agent_task_retry_delay_seconds = 0
+            s.agent_task_retry_backoff_multiplier = 1
+            s.agent_task_retry_on_timeout = True
+            s.agent_task_retry_on_error = True
+            task = AgentTask(
+                description="d",
+                prompt="# Build mode\nYou run unattended inside a daemon",
+                agent="a",
+            )
+            result = await runner.run_agent_with_retry(
+                task,
+                max_retries=3,
+                max_incomplete_retries=256,
+            )
+
+    assert len(seen) == 1
+    assert seen[0].startswith("# Build mode")
+    assert not result["retry_info"]["retried"]
     assert result["returncode"] == 2
     assert result.get("incomplete") is True
     assert not result["retry_info"]["retried"]

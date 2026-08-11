@@ -563,6 +563,8 @@ class AgentRunner:
             result["session_completeness"] = incomplete_meta
             if incomplete_meta.get("had_compact"):
                 result["had_compact"] = True
+            if incomplete_meta.get("assistant_asked_question"):
+                result["assistant_asked_question"] = True
 
         if returncode == 0:
             logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
@@ -604,21 +606,11 @@ class AgentRunner:
         sid = (session_id or "").strip()
         empty_log = self._session_log_is_empty(session_file)
         no_stdout = not (stdout or "").strip()
-        if timed_out and empty_log and no_stdout:
+        if timed_out and empty_log and no_stdout and not sid:
             logger.warning(
-                f"Retry after {why}: empty session log — not resuming "
-                f"{sid or '(unknown)'}; starting cold"
+                f"Retry after {why}: empty session log and no session id; "
+                "starting cold"
             )
-            if sid:
-                task.abandoned_session_id = sid
-                forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
-                if sid not in forgotten:
-                    forgotten.append(sid)
-                task.forgotten_session_ids = forgotten
-            task.session_id = None
-            orig = (getattr(task, "original_prompt", None) or "").strip()
-            if orig:
-                task.prompt = orig
             return
         if sid and self.working_directory:
             try:
@@ -640,17 +632,10 @@ class AgentRunner:
                 ):
                     logger.warning(
                         f"Retry after {why}: session {sid} is not for "
-                        f"{self.working_directory}; starting cold"
+                        f"{self.working_directory}; keeping session, not "
+                        "re-sending the original BUILD/PLAN kit"
                     )
-                    task.abandoned_session_id = sid
-                    forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
-                    if sid not in forgotten:
-                        forgotten.append(sid)
-                    task.forgotten_session_ids = forgotten
-                    task.session_id = None
-                    orig = (getattr(task, "original_prompt", None) or "").strip()
-                    if orig:
-                        task.prompt = orig
+                    task.session_id = sid
                     return
             except Exception as e:
                 logger.debug(f"session dir check failed: {e}")
@@ -1657,14 +1642,16 @@ class AgentRunner:
                 to_reasons = list(result.get("incomplete_reasons") or [])
                 compact_followup = (
                     bool(result.get("had_compact"))
+                    or bool(result.get("assistant_asked_question"))
                     or int(result.get("compact_events") or 0) > 0
                     or compact_related_reasons(to_reasons)
                     or any("compact" in str(r).lower() for r in to_reasons)
+                    or any("clarifying question" in str(r).lower() for r in to_reasons)
                 )
                 if compact_followup:
                     logger.warning(
-                        f"Timeout during compact wait — not sending Continue: "
-                        f"task_id={task.task_id} reasons={to_reasons}"
+                        f"Timeout after compact/question — not sending another "
+                        f"user prompt: task_id={task.task_id} reasons={to_reasons}"
                     )
                 elif retry_on_timeout and timeout_used < effective_max_retries:
                     should_retry = True
@@ -1679,13 +1666,15 @@ class AgentRunner:
                 reasons = list(result.get("incomplete_reasons") or [])
                 compact_followup = (
                     bool(result.get("had_compact"))
+                    or bool(result.get("assistant_asked_question"))
                     or int(result.get("compact_events") or 0) > 0
                     or compact_related_reasons(reasons)
                     or any("compact" in str(r).lower() for r in reasons)
+                    or any("clarifying question" in str(r).lower() for r in reasons)
                 )
                 if compact_followup:
                     logger.warning(
-                        f"Incomplete after compact wait — not sending another "
+                        f"Incomplete after compact/question — not sending another "
                         f"user message: task_id={task.task_id} reasons={reasons}"
                     )
                 else:
