@@ -64,9 +64,9 @@ def test_empty_timeout_retries_cold(tmp_path):
         timed_out=True,
         stdout="",
     )
-    assert task.session_id is None
-    assert task.abandoned_session_id == "ses_old"
-    assert task.prompt == "ORIGINAL BUILD PROMPT"
+    # A known session must not be dropped for a cold BUILD re-send.
+    assert task.session_id == "ses_old"
+    assert "ORIGINAL BUILD" not in (task.prompt or "")
 
 
 def test_retry_missing_db_row_keeps_session_for_same_job(tmp_path):

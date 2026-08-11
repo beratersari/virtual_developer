@@ -242,7 +242,14 @@ def test_list_session_chat_compaction_is_not_user_role(tmp_path: Path):
                 [
                     {
                         "type": "text",
-                        "text": "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+                        "text": (
+                            "The previous request exceeded the provider's size "
+                            "limit due to large media attachments. The "
+                            "conversation was compacted and media files were "
+                            "removed from context.\n\n"
+                            "Continue if you have next steps, or stop and ask "
+                            "for clarification if you are unsure how to proceed."
+                        ),
                     }
                 ],
             ),

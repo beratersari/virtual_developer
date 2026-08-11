@@ -564,6 +564,7 @@ _COMPACT_USER_TEXT_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# OpenCode / oh-my-openagent post these as role=user. They are not the operator.
 _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"(?:"
     r"omo_internal"
@@ -573,6 +574,25 @@ _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"|background task completed"
     r"|system directive:\s*oh-my-opencode"
     r"|system-reminder"
+    r"|continue if you have next steps"
+    r"|exceeded the provider's size limit"
+    r"|conversation was compacted"
+    r"|media (?:files|attachments) were removed"
+    r"|large media attachments"
+    r"|\[search-mode\]"
+    r"|\[analyze-mode\]"
+    r"|maximize search effort"
+    r")",
+    re.IGNORECASE,
+)
+_ASSISTANT_QUESTION_RE = re.compile(
+    r"(?:"
+    r"shall i (?:continue|proceed|keep going)"
+    r"|should i (?:continue|proceed|keep going)"
+    r"|do you want me to"
+    r"|want me to (?:continue|proceed|keep)"
+    r"|continue with the remaining"
+    r"|please (?:confirm|advise|let me know)"
     r")",
     re.IGNORECASE,
 )
@@ -596,6 +616,45 @@ def is_internal_compact_followup_text(text: str) -> bool:
     if low.startswith(_FINISH_TODOS_PREFIX):
         return True
     return bool(_INTERNAL_COMPACT_FOLLOWUP_RE.search(t))
+
+
+def assistant_asked_question(text: str) -> bool:
+    """True when the last assistant turn is waiting on the operator."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _ASSISTANT_QUESTION_RE.search(t):
+        return True
+    tail = t[-500:]
+    if "?" not in tail:
+        return False
+    low = tail.lower()
+    return any(
+        p in low
+        for p in (
+            "shall i",
+            "should i",
+            "continue",
+            "proceed",
+            "confirm",
+            "let me know",
+        )
+    )
+
+
+def _message_text(msg: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    parts = msg.get("_parts") or msg.get("parts") or []
+    bits = [
+        str(p.get("text") or "")
+        for p in parts
+        if isinstance(p, dict) and (p.get("type") or "text").lower() == "text"
+    ]
+    if bits:
+        return "\n".join(bits)
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    return str(msg.get("text") or info.get("text") or "")
 
 
 def chat_display_role(
@@ -951,7 +1010,11 @@ def _apply_last_assistant(
 
     if role == "assistant":
         finish_s = "" if finish is None else str(finish).strip().lower()
-        if finish is None or finish_s in _UNFINISHED_FINISH:
+        asked = bool(result.get("assistant_asked_question"))
+        if asked:
+            # Clarifying question is a clean stop, not a crashed turn.
+            pass
+        elif finish is None or finish_s in _UNFINISHED_FINISH:
             result["reasons"].append(
                 f"last assistant finish is unfinished ({finish!r})"
             )
@@ -989,6 +1052,10 @@ def _apply_message_list(
     if summary is None:
         summary = info.get("summary")
     parts = target.get("_parts") or target.get("parts") or []
+    if last_assistant is not None and assistant_asked_question(
+        _message_text(last_assistant)
+    ):
+        result["assistant_asked_question"] = True
     _apply_last_assistant(
         result,
         role=role,
@@ -1056,6 +1123,7 @@ def assess_session_completeness(
         "last_finish": None,
         "last_role": None,
         "last_is_summary": False,
+        "assistant_asked_question": False,
         "compact_in_output": detect_compact_in_output(output_text or ""),
         "db_checked": False,
         "api_checked": False,
@@ -1149,6 +1217,9 @@ def assess_session_completeness(
         result["reasons"].append(
             "CLI output indicates compaction near end of run"
         )
+
+    if result.get("assistant_asked_question"):
+        result["reasons"].append("assistant asked a clarifying question")
 
     if result["reasons"]:
         result["complete"] = False

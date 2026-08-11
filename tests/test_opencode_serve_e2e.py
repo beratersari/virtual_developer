@@ -788,3 +788,31 @@ async def test_e2e_serve_http_timeout_marks_timed_out_without_abort():
     out = result.to_agent_result("task_to")
     assert out.get("timed_out") is True
     assert out.get("opencode_session_id") == "ses_timeout_busy"
+
+
+@pytest.mark.asyncio
+async def test_e2e_http_timeout_idle_waits_for_auto_resume_no_second_prompt():
+    """Idle after HTTP timeout is compact/auto-resume, not a BUILD retry."""
+
+    class TimeoutThenResume(FakeServeBackend):
+        async def send_message(self, session_id, text, **kwargs):
+            self.prompts.append(text)
+            self.message_calls += 1
+            raise httpx.ReadTimeout("")
+
+    backend = TimeoutThenResume(required_compacts=1)
+    backend.auto_complete_on_idle = True
+    backend.idle_polls_before_auto_complete = 4
+    client = FakeServeClient(backend)
+    client.timeout_seconds = 30.0
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=1.5,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.08,
+    )
+    result = await orch.run(prompt="# Build mode\ndo the work", title="KAN-TO2")
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 1
+    assert backend.prompts == ["# Build mode\ndo the work"]
+    assert all("Finish remaining todos" not in p for p in backend.prompts)
