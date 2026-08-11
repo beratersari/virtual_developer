@@ -66,6 +66,7 @@ export function JobDetailPage() {
     setArtsLoading(true)
     try {
       const arts = await fetchJobArtifacts(id)
+      if (id !== jobId.trim()) return
       artsFor.current = id
       if (sig) artsSig.current = sig
       const nextPrompts = arts.prompts || []
@@ -79,7 +80,7 @@ export function JobDetailPage() {
       artsInFlight.current = false
       setArtsLoading(false)
     }
-  }, [])
+  }, [jobId])
 
   const load = useCallback(
     async (soft = false) => {
@@ -123,10 +124,9 @@ export function JobDetailPage() {
     setPrompts([])
     setSessionLogs([])
     const seed = peekJob(jobId.trim())
-    if (seed) {
-      setJob(seed)
-      setLoading(false)
-    }
+    setJob(seed)
+    setSystemLogs([])
+    setLoading(!seed)
     void load(Boolean(seed))
   }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps — remount seed per id
 
@@ -172,7 +172,7 @@ export function JobDetailPage() {
   const canDelete = Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
 
   const onCancel = async () => {
-    if (!job?.issue_key) return
+    if (!job?.issue_key || job.job_id !== jobId.trim()) return
     setBusy(true)
     setError(null)
     try {
@@ -187,7 +187,7 @@ export function JobDetailPage() {
   }
 
   const onDelete = async () => {
-    if (!job?.job_id) return
+    if (!job?.job_id || job.job_id !== jobId.trim()) return
     setBusy(true)
     setError(null)
     try {
@@ -298,8 +298,9 @@ export function JobDetailPage() {
         {job && tab === 'chat' && (
           <div key="chat" className="vd-fade">
             <JobChatTab
-              jobId={job.job_id}
-              liveRun={liveRun}
+              key={jobId.trim()}
+              jobId={jobId.trim()}
+              liveRun={liveRun && job.job_id === jobId.trim()}
             />
           </div>
         )}

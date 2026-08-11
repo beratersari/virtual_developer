@@ -133,6 +133,8 @@ class JobProcessor:
         # Serialize concurrent jobs that share (repo, source_branch)
         self._source_branch_locks: Dict[str, asyncio.Lock] = {}
         self._source_branch_holders: Dict[str, str] = {}
+        # lock_key -> issue_key for in-flight schedule/git work (queue claim)
+        self._workspace_lock_holders: Dict[str, str] = {}
         # Issue keys whose session bind must not be overwritten (uncertain lookup)
         self._freeze_session_binds: set[str] = set()
         # GitLab note ids already accepted (webhook retries)
@@ -683,6 +685,40 @@ class JobProcessor:
         dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
         for k in dead:
             self._source_branch_holders.pop(k, None)
+        self.drop_workspace_lock(issue_key)
+
+    def note_workspace_lock(
+        self,
+        issue_key: str,
+        *,
+        repository_url: str = "",
+        work_branch: str = "",
+        target_branch: str = "",
+        lock_key: str = "",
+    ) -> str:
+        """Remember a live clone lock so the queue will not admit a collision."""
+        from src.state.queue_store import workspace_lock_key
+
+        key = (issue_key or "").strip()
+        lk = (lock_key or "").strip() or workspace_lock_key(
+            repository_url, work_branch, target_branch
+        )
+        if not key or not lk:
+            return ""
+        self._workspace_lock_holders[lk] = key
+        return lk
+
+    def drop_workspace_lock(self, issue_key: str) -> None:
+        dead = [
+            k
+            for k, v in self._workspace_lock_holders.items()
+            if v == (issue_key or "").strip()
+        ]
+        for k in dead:
+            self._workspace_lock_holders.pop(k, None)
+
+    def live_workspace_lock_keys(self) -> set:
+        return {k for k in self._workspace_lock_holders if k}
 
     def _finish_after_git_missing(self, issue_key: str) -> None:
         """Close live job + context when git prep returns None after begin."""
@@ -1411,10 +1447,12 @@ class JobProcessor:
             # Still allow progress/session fill-in if missing — never overwrite ids
             fill: Dict[str, Any] = {}
             st = self.state_manager.get_state(issue_key)
+            current_jid = str((st.metadata or {}).get("current_job_id") or "").strip() if st else ""
             if (
                 st
                 and st.current_opencode_session_id
                 and not existing.get("opencode_session_id")
+                and (not current_jid or current_jid == job_id)
             ):
                 fill["opencode_session_id"] = st.current_opencode_session_id
             if st and st.current_task_id and not existing.get("task_id"):
@@ -1433,9 +1471,10 @@ class JobProcessor:
             fields["progress_percentage"] = progress_percentage
         st = self.state_manager.get_state(issue_key)
         # Prefer ids already on the job (supersede must not stamp the new run's ids)
+        current_jid = str((st.metadata or {}).get("current_job_id") or "").strip() if st else ""
         if st and st.current_opencode_session_id and not (
             existing and existing.get("opencode_session_id")
-        ):
+        ) and (not current_jid or current_jid == job_id):
             fields["opencode_session_id"] = st.current_opencode_session_id
         if st and st.current_task_id and not (existing and existing.get("task_id")):
             fields["task_id"] = st.current_task_id
@@ -2333,6 +2372,7 @@ class JobProcessor:
         repository_url: Optional[str] = None,
         source_branch: Optional[str] = None,
         target_branch: Optional[str] = None,
+        keep_source_work_branch: bool = False,
     ) -> Optional[GitManager]:
         """Clone from the issue template (Repository + Source + Target).
 
@@ -2406,7 +2446,23 @@ class JobProcessor:
             remote_url=spec.repository_url,
             source_branch=spec.source_branch,
             target_branch=spec.target_branch,
+            keep_source_work_branch=keep_source_work_branch,
         )
+        try:
+            work = git.work_branch or git.resolve_work_branch_name(
+                issue_key,
+                spec.source_branch,
+                spec.target_branch,
+                keep_source=keep_source_work_branch,
+            )
+            self.note_workspace_lock(
+                issue_key,
+                repository_url=spec.repository_url,
+                work_branch=work,
+                target_branch=spec.target_branch,
+            )
+        except Exception:
+            pass
         # Cancel may have won while clone ran (no runner registered yet).
         # Do not re-arm live context after terminal status.
         if self._is_aborted(issue_key):
@@ -2672,6 +2728,7 @@ class JobProcessor:
                 blocked = set(self.list_live_processing_keys())
                 item = self.queue_store.claim_next(
                     blocked_issue_keys=blocked,
+                    blocked_locks=self.live_workspace_lock_keys(),
                     max_running=max_jobs,
                 )
                 if item is None:
@@ -2926,6 +2983,7 @@ class JobProcessor:
                     repository_url=event.repository_url,
                     source_branch=event.source_branch,
                     target_branch=event.target_branch,
+                    keep_source_work_branch=True,
                 )
             except (IssueGitConfigError, GitCloneError, GitSourceBranchError, GitTargetBranchError) as e:
                 msg = getattr(e, "user_message", None) or str(e)

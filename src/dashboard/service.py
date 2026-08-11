@@ -743,6 +743,9 @@ def build_one_job(
             live_sid = (st.current_opencode_session_id or "").strip()
             if not live_sid:
                 live_sid = str((st.metadata or {}).get("last_opencode_session_id") or "").strip()
+            current_jid = str((st.metadata or {}).get("current_job_id") or "").strip()
+            if current_jid and current_jid != (raw.get("job_id") or "").strip():
+                live_sid = ""
     if live_sid and live_sid.startswith("ses_") and not (raw.get("opencode_session_id") or "").strip():
         raw = {**raw, "opencode_session_id": live_sid}
         ids = list(raw.get("opencode_session_ids") or [])
@@ -1383,6 +1386,7 @@ def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
     for attempt in job.get("retry_attempts") or []:
         if isinstance(attempt, dict):
             _add(attempt.get("opencode_session_id"))
+    recorded = list(ids)
     for path in _job_session_log_paths(job):
         try:
             marker = Path(str(path) + ".session_id")
@@ -1400,24 +1404,30 @@ def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
                     _add(sid)
         except OSError:
             continue
-    # Live / early chat: OpenCode may have created the session before we
-    # parsed ses_* from CLI output. Prefer sessions created around job start
-    # in this clone so we do not dump an older run from a reused folder.
+    # Directory scan only when this job has no recorded ses_* (live / early
+    # chat). Never pull a later job's session from a reused clone folder.
+    if recorded:
+        return ids
     wd = (job.get("working_directory") or "").strip()
     if wd:
         try:
             from src.opencode_sessions import find_sessions_for_directory
 
             started_ms = _job_started_ms(job)
+            completed_ms = _job_started_ms(
+                {"started_at": job.get("completed_at")}
+            )
             found = find_sessions_for_directory(wd, limit=20)
             for rec in found:
                 created_ms = _session_time_ms(rec.get("time_created"))
-                updated_ms = _session_time_ms(rec.get("time_updated"))
                 if started_ms is None:
                     _add(rec.get("id"))
                     break
-                if max(created_ms, updated_ms) >= started_ms - 15_000:
-                    _add(rec.get("id"))
+                if created_ms < started_ms - 15_000:
+                    continue
+                if completed_ms and created_ms > completed_ms:
+                    continue
+                _add(rec.get("id"))
         except Exception:
             pass
     return ids

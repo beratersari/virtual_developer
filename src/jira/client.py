@@ -376,7 +376,8 @@ class JiraClient:
                 if len(batch) < max_results:
                     break
             return all_issues
-        except httpx.HTTPError as e:
+        except Exception as e:
+            self.last_error = str(e)
             logger.error(f"Error getting board issues: {e}")
             return all_issues
     
@@ -403,7 +404,8 @@ class JiraClient:
             if values:
                 return values[0]
             return None
-        except httpx.HTTPError as e:
+        except Exception as e:
+            self.last_error = str(e)
             logger.error(f"Error getting active sprint: {e}")
             return None
 
@@ -457,7 +459,8 @@ class JiraClient:
                 if len(batch) < max_results and (not total or start_at >= total):
                     break
                 
-            except httpx.HTTPError as e:
+            except Exception as e:
+                self.last_error = str(e)
                 logger.error(f"Error getting sprint issues: {e}")
                 break
         

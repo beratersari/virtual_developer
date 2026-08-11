@@ -787,23 +787,16 @@ def _start_claimed_worker(
     store: ScheduleStore,
     jira_client: Any = None,
 ) -> None:
-    """Build the jira event and start ``process_event`` on the running loop."""
+    """Register inflight first, then fetch Jira and run ``process_event``."""
     sid = claimed_rec.get("schedule_id") or ""
     issue_key = (claimed_rec.get("issue_key") or "").upper()
-    issue = _issue_payload_for_dispatch(claimed_rec, jira_client=jira_client)
-    event = {
-        "webhookEvent": "jira:issue_created",
-        "issue": issue,
-        "timestamp": int(time.time() * 1000),
-        "scheduled_job": True,
-        "schedule_id": sid,
-    }
     coro = _dispatch_claimed_schedule(
         processor=processor,
         store=store,
         schedule_id=sid,
         issue_key=issue_key,
-        event=event,
+        claimed_rec=claimed_rec,
+        jira_client=jira_client,
     )
     try:
         loop = asyncio.get_running_loop()
@@ -878,16 +871,59 @@ def dispatch_schedule_now(
     }
 
 
+def _register_schedule_workspace(processor: Any, rec: Dict[str, Any]) -> None:
+    """Expose this schedule's clone lock so the work queue will not collide."""
+    note = getattr(processor, "note_workspace_lock", None)
+    if not callable(note):
+        return
+    from src.git_manager import GitManager
+
+    issue_key = (rec.get("issue_key") or "").upper()
+    repo = rec.get("repository_url") or ""
+    src = rec.get("source_branch") or ""
+    tgt = rec.get("target_branch") or ""
+    work = GitManager.resolve_work_branch_name(issue_key, src, tgt)
+    note(issue_key, repository_url=repo, work_branch=work, target_branch=tgt)
+
+
 async def _dispatch_claimed_schedule(
     *,
     processor: "JobProcessor",
     store: ScheduleStore,
     schedule_id: str,
     issue_key: str,
-    event: Dict[str, Any],
+    claimed_rec: Optional[Dict[str, Any]] = None,
+    jira_client: Any = None,
+    event: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Run ``process_event`` and record dispatched / error (background worker)."""
     try:
+        live = store.get(schedule_id) or claimed_rec or {}
+        if (live.get("status") or "").lower() != "dispatching":
+            logger.info(
+                f"Schedule {schedule_id} no longer dispatching "
+                f"({live.get('status')}); not starting work"
+            )
+            return
+        _register_schedule_workspace(processor, live)
+        if event is None:
+            issue = _issue_payload_for_dispatch(
+                claimed_rec or live, jira_client=jira_client
+            )
+            live = store.get(schedule_id) or live
+            if (live.get("status") or "").lower() != "dispatching":
+                logger.info(
+                    f"Schedule {schedule_id} cancelled during Jira fetch; "
+                    "not starting work"
+                )
+                return
+            event = {
+                "webhookEvent": "jira:issue_created",
+                "issue": issue,
+                "timestamp": int(time.time() * 1000),
+                "scheduled_job": True,
+                "schedule_id": schedule_id,
+            }
         outcome = await processor.process_event(event)
         work_started, skip_reason = _outcome_work_started(outcome)
         if not work_started:
@@ -901,6 +937,9 @@ async def _dispatch_claimed_schedule(
             return
         _finish_schedule_dispatch(store, schedule_id, status="dispatched")
         logger.info(f"Schedule {schedule_id} dispatched for {issue_key}")
+    except asyncio.CancelledError:
+        logger.info(f"Schedule {schedule_id} dispatch task cancelled")
+        raise
     except Exception as e:
         logger.exception(
             f"Schedule {schedule_id} dispatch failed for {issue_key}: {e}", e
@@ -909,6 +948,12 @@ async def _dispatch_claimed_schedule(
             store, schedule_id, status="error", error_message=str(e)[:1000]
         )
     finally:
+        drop = getattr(processor, "drop_workspace_lock", None)
+        if callable(drop):
+            try:
+                drop(issue_key)
+            except Exception:
+                pass
         _INFLIGHT_DISPATCHES.pop(schedule_id, None)
 
 
