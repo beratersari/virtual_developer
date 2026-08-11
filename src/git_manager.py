@@ -1155,11 +1155,29 @@ class GitManager:
         logger.info(f"Target branch confirmed on remote: origin/{target}")
         return target
 
-    def _working_tree_dirty(self) -> bool:
+    def _working_tree_status(self) -> str:
         if not self.temp_dir or not (Path(self.temp_dir) / ".git").is_dir():
-            return False
+            return ""
         result = self._run_git(["status", "--porcelain"], check=False)
-        return bool((result.stdout or "").strip())
+        return (result.stdout or "").strip()
+
+    def _working_tree_dirty(self) -> bool:
+        return bool(self._working_tree_status())
+
+    def _dirty_paths_summary(self, porcelain: str, *, limit: int = 8) -> str:
+        paths: list[str] = []
+        for line in (porcelain or "").splitlines():
+            name = line[3:].strip() if len(line) > 3 else line.strip()
+            if name:
+                paths.append(name)
+        if not paths:
+            return "(none)"
+        shown = paths[: max(1, limit)]
+        extra = len(paths) - len(shown)
+        text = ", ".join(shown)
+        if extra > 0:
+            text += f" (+{extra} more)"
+        return text
 
     def _stash_uncommitted(self, reason: str) -> bool:
         """Stash tracked + untracked edits so a branch switch can proceed.
@@ -1167,20 +1185,34 @@ class GitManager:
         Never ``reset --hard``: leftover work may be intentional. The stash
         stays in the clone (``git stash list``) for recovery.
         """
-        if not self._working_tree_dirty():
+        porcelain = self._working_tree_status()
+        if not porcelain:
+            logger.info(
+                f"Working tree clean; no stash ({reason})"
+            )
             return False
         msg = f"vd: preserve uncommitted {reason}".strip()
+        summary = self._dirty_paths_summary(porcelain)
+        logger.info(
+            f"Git command: git stash push -u -m {msg!r} "
+            f"({reason}; files: {summary})"
+        )
         result = self._run_git(
             ["stash", "push", "-u", "-m", msg],
             check=False,
         )
         if result.returncode != 0:
+            safe_err = self._redact_secret_text(
+                (result.stderr or result.stdout or "").strip()
+            )
             logger.warning(
-                f"Could not stash uncommitted work ({reason}): "
-                f"{(result.stderr or result.stdout or '')[:300]}"
+                f"Git command failed: git stash push -u -m {msg!r}\n{safe_err[:300]}"
             )
             return False
-        logger.info(f"Stashed uncommitted work ({reason}); recover with git stash pop")
+        logger.info(
+            f"Git command succeeded: git stash push -u -m {msg!r}; "
+            f"recover with git stash pop"
+        )
         return True
 
     def _checkout_work_branch_from_target(self, work_branch: str, target: str) -> str:
@@ -1286,16 +1318,27 @@ class GitManager:
         if current == work_branch:
             # Reused clone already on this MR source — keep commits and
             # intentional uncommitted edits (GitLab comment / rework).
-            if not self._working_tree_dirty():
+            porcelain = self._working_tree_status()
+            if porcelain:
+                logger.info(
+                    f"Already on '{work_branch}'; skip checkout/stash — "
+                    f"preserving uncommitted files: "
+                    f"{self._dirty_paths_summary(porcelain)}"
+                )
+            else:
+                logger.info(
+                    f"Already on '{work_branch}'; skip checkout — "
+                    f"fast-forward to {start_point} if possible"
+                )
                 self._run_git(["merge", "--ff-only", start_point], check=False)
-            logger.info(
-                f"Already on '{work_branch}'; keeping local tree "
-                f"(uncommitted work preserved)"
-            )
             self.work_branch = work_branch
             self.source_branch = work_branch
             return work_branch
 
+        logger.info(
+            f"Switching to existing work branch '{work_branch}' "
+            f"(currently '{current or '(detached)'}')"
+        )
         self._stash_uncommitted(f"before checkout {work_branch}")
         if self._branch_exists(work_branch, check_remote=False):
             self._run_git(["checkout", work_branch])
