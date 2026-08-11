@@ -467,6 +467,16 @@ def create_dashboard_app(
         )
         if not forgotten:
             raise HTTPException(status_code=404, detail=f"No session bind {bind_id}")
+        sid = str(rec.get("session_id") or "").strip()
+        ik = str(rec.get("issue_key") or "").strip()
+        sm = getattr(app.state, "state_manager", None)
+        if sm is not None and ik and sid:
+            try:
+                st = sm.get_state(ik)
+                if st and (st.current_opencode_session_id or "") == sid:
+                    sm.update_state(ik, current_opencode_session_id=None)
+            except Exception:
+                pass
         return {
             "ok": True,
             "bind_id": bid,

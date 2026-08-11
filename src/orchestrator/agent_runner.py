@@ -984,22 +984,29 @@ class AgentRunner:
         """
         import re
 
+        created = [
+            r'session created:\s*(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
+            r'session resumed:\s*(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
+        ]
         labeled = [
-            r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
-            r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
-            r'"sessionID"\s*:\s*"(ses_[a-zA-Z0-9_-]+)"',
+            r'Session:\s*(ses_[a-zA-Z0-9_-]+)',
+            r'Session\s+ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
         ]
         bare = r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)'
 
+        last_created: Optional[str] = None
         last_labeled: Optional[str] = None
         last_bare: Optional[str] = None
         for line in lines:
+            for pattern in created:
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    last_created = match.group(1)
             for pattern in labeled:
                 for match in re.finditer(pattern, line, re.IGNORECASE):
                     last_labeled = match.group(1)
             for match in re.finditer(bare, line, re.IGNORECASE):
                 last_bare = match.group(1)
-        return last_labeled or last_bare
+        return last_created or last_labeled or last_bare
     
     def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
         """Build the opencode CLI command as a list (cross-platform).

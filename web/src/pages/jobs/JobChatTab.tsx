@@ -185,6 +185,8 @@ export function JobChatTab({
   useEffect(() => {
     loadedFor.current = ''
     stickToBottom.current = true
+    setData(null)
+    setError(null)
     load(false)
     return () => {
       fetchGen.current += 1

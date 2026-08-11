@@ -147,36 +147,65 @@ class WorkQueueStore:
         items.sort(key=lambda r: (r.get("created_at") or "", r.get("queue_id") or ""))
         return items[: max(1, int(limit))]
 
+    def _iter_records(self) -> List[Dict[str, Any]]:
+        """All queue JSON rows (no oldest-N cap). Caller should hold ``_lock``."""
+        items: List[Dict[str, Any]] = []
+        if not self.queue_dir.is_dir():
+            return items
+        for path in self.queue_dir.glob("q_*.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if isinstance(rec, dict) and rec.get("queue_id"):
+                items.append(rec)
+        return items
+
     def find_open_jira(self, issue_key: str) -> Optional[Dict[str, Any]]:
         key = (issue_key or "").strip().upper()
         if not key:
             return None
-        for rec in self.list_items(limit=500):
-            if rec.get("status") not in _OPEN:
-                continue
-            if rec.get("source") != "jira":
-                continue
-            if (rec.get("issue_key") or "").strip().upper() == key:
-                return rec
-        return None
+        best: Optional[Dict[str, Any]] = None
+        with self._lock:
+            for rec in self._iter_records():
+                if rec.get("status") not in _OPEN:
+                    continue
+                if rec.get("source") != "jira":
+                    continue
+                if (rec.get("issue_key") or "").strip().upper() != key:
+                    continue
+                if best is None or (rec.get("created_at") or "") >= (
+                    best.get("created_at") or ""
+                ):
+                    best = rec
+        return best
 
     def find_note(self, note_id: str) -> Optional[Dict[str, Any]]:
         nid = (note_id or "").strip()
         if not nid:
             return None
-        for rec in self.list_items(limit=500):
-            if str(rec.get("gitlab_note_id") or "") == nid:
-                return rec
-        return None
+        best: Optional[Dict[str, Any]] = None
+        with self._lock:
+            for rec in self._iter_records():
+                if str(rec.get("gitlab_note_id") or "") != nid:
+                    continue
+                if best is None or (rec.get("created_at") or "") >= (
+                    best.get("created_at") or ""
+                ):
+                    best = rec
+        return best
 
     def claim_next(
         self,
         *,
         blocked_issue_keys: Optional[set] = None,
+        blocked_locks: Optional[set] = None,
         max_running: int = 6,
     ) -> Optional[Dict[str, Any]]:
         """FIFO claim of the next item whose workspace/issue is free."""
         blocked = {(k or "").strip().upper() for k in (blocked_issue_keys or set()) if k}
+        extra_locks = {(k or "").strip() for k in (blocked_locks or set()) if k}
         with self._lock:
             running = [
                 r
@@ -186,7 +215,7 @@ class WorkQueueStore:
                 return None
             blocked_locks = {
                 (r.get("lock_key") or "") for r in running if r.get("lock_key")
-            }
+            } | extra_locks
             blocked_issues = {
                 (r.get("issue_key") or "").strip().upper() for r in running
             } | blocked

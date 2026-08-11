@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote, urlparse, urlunparse
 
 from src.config import settings, set_current_temp_dir
@@ -76,6 +76,7 @@ class GitManager:
         remote_url: Optional[str] = None,
         source_branch: Optional[str] = None,
         target_branch: Optional[str] = None,
+        keep_source_work_branch: bool = False,
     ):
         self.issue_key = issue_key
         self.temp_dir: Optional[Path] = None
@@ -86,6 +87,8 @@ class GitManager:
         self.source_branch: str = (source_branch or "").strip()
         # Params "target" = MR destination; work branches are created from it
         self.target_branch: str = (target_branch or source_branch or "").strip()
+        # GitLab MR comments must stay on the MR source even when it is develop/main
+        self.keep_source_work_branch: bool = bool(keep_source_work_branch)
         # Actual branch checked out for agent work (set by ensure_feature_branch)
         self.work_branch: Optional[str] = None
 
@@ -1058,14 +1061,18 @@ class GitManager:
         issue_key: Optional[str],
         source_branch: str = "",
         target_branch: str = "",
+        *,
+        keep_source: bool = False,
     ) -> str:
         """Resolved work branch (no clone). Same rules as instance resolver."""
+        source = (source_branch or "").strip()
+        target = (target_branch or "").strip()
+        if keep_source and source:
+            return source
         safe_key = re.sub(
             r"[^A-Za-z0-9\-]", "-", issue_key or "issue"
         )
         feature = f"feature/{safe_key}"
-        source = (source_branch or "").strip()
-        target = (target_branch or "").strip()
         if source and source != target and not GitManager._is_primary_base(source):
             return source
         return feature
@@ -1088,7 +1095,12 @@ class GitManager:
         key = issue_key or self.issue_key
         source = (self.source_branch or "").strip()
         target = (self.target_branch or "").strip()
-        work = self.resolve_work_branch_name(key, source, target)
+        work = self.resolve_work_branch_name(
+            key,
+            source,
+            target,
+            keep_source=bool(getattr(self, "keep_source_work_branch", False)),
+        )
         if source and source != target and not self._is_primary_base(source):
             logger.info(
                 f"Using params source as work branch: {source} "
@@ -1143,6 +1155,34 @@ class GitManager:
         logger.info(f"Target branch confirmed on remote: origin/{target}")
         return target
 
+    def _working_tree_dirty(self) -> bool:
+        if not self.temp_dir or not (Path(self.temp_dir) / ".git").is_dir():
+            return False
+        result = self._run_git(["status", "--porcelain"], check=False)
+        return bool((result.stdout or "").strip())
+
+    def _stash_uncommitted(self, reason: str) -> bool:
+        """Stash tracked + untracked edits so a branch switch can proceed.
+
+        Never ``reset --hard``: leftover work may be intentional. The stash
+        stays in the clone (``git stash list``) for recovery.
+        """
+        if not self._working_tree_dirty():
+            return False
+        msg = f"vd: preserve uncommitted {reason}".strip()
+        result = self._run_git(
+            ["stash", "push", "-u", "-m", msg],
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                f"Could not stash uncommitted work ({reason}): "
+                f"{(result.stderr or result.stdout or '')[:300]}"
+            )
+            return False
+        logger.info(f"Stashed uncommitted work ({reason}); recover with git stash pop")
+        return True
+
     def _checkout_work_branch_from_target(self, work_branch: str, target: str) -> str:
         """Create or reset *work_branch* from origin/target tip, then checkout it.
 
@@ -1169,6 +1209,7 @@ class GitManager:
             f"Source branch '{work_branch}' not on remote — creating from "
             f"origin/{target} (MR will be {work_branch} → {target})"
         )
+        self._stash_uncommitted(f"before creating {work_branch} from {target}")
         self._delete_local_branch(work_branch)
 
         start_point = f"origin/{target}"
@@ -1241,10 +1282,28 @@ class GitManager:
                 work_branch, (self.target_branch or "").strip()
             )
 
-        self._delete_local_branch(work_branch)
-        self._run_git(["checkout", "-B", work_branch, start_point])
+        current = (self.get_current_branch() or "").strip()
+        if current == work_branch:
+            # Reused clone already on this MR source — keep commits and
+            # intentional uncommitted edits (GitLab comment / rework).
+            if not self._working_tree_dirty():
+                self._run_git(["merge", "--ff-only", start_point], check=False)
+            logger.info(
+                f"Already on '{work_branch}'; keeping local tree "
+                f"(uncommitted work preserved)"
+            )
+            self.work_branch = work_branch
+            self.source_branch = work_branch
+            return work_branch
+
+        self._stash_uncommitted(f"before checkout {work_branch}")
+        if self._branch_exists(work_branch, check_remote=False):
+            self._run_git(["checkout", work_branch])
+        else:
+            self._run_git(["checkout", "-B", work_branch, start_point])
         logger.info(
-            f"Checked out existing work branch '{work_branch}' from '{start_point}'"
+            f"Checked out existing work branch '{work_branch}' "
+            f"(local commits kept; origin tip is {start_point})"
         )
         self.work_branch = work_branch
         self.source_branch = work_branch
@@ -1272,6 +1331,9 @@ class GitManager:
             f"Source branch '{work_branch}' exists locally but not on remote — "
             f"checking out the local tip (not origin/{work_branch})"
         )
+        current = (self.get_current_branch() or "").strip()
+        if current != work_branch:
+            self._stash_uncommitted(f"before checkout {work_branch}")
         self._run_git(["checkout", work_branch])
         self.work_branch = work_branch
         self.source_branch = work_branch
@@ -1354,6 +1416,7 @@ class GitManager:
         """Checkout target tip (read-only base) for cleanup helpers."""
         try:
             target = self._require_target_on_remote()
+            self._stash_uncommitted(f"before checkout {target}")
             self._run_git(["checkout", "-B", target, f"origin/{target}"], check=False)
             if self._branch_exists(target, check_remote=False):
                 return True
@@ -1714,16 +1777,34 @@ class GitManager:
             logger.error(f"GitLab API MR create error: {e}")
             return None
 
-    def _get_existing_mr_url(self, branch: str) -> Optional[str]:
+    def _mr_matches_target(self, mr: Any, target_branch: str) -> bool:
+        want = (target_branch or self.target_branch or "").strip().lower()
+        if not want or not isinstance(mr, dict):
+            return True
+        got = str(
+            mr.get("target_branch")
+            or mr.get("targetBranch")
+            or ""
+        ).strip().lower()
+        return not got or got == want
+
+    def _get_existing_mr_url(
+        self, branch: str, target_branch: Optional[str] = None
+    ) -> Optional[str]:
+        want_tgt = (target_branch or self.target_branch or "").strip()
         # 1) glab with token env
         try:
-            result = self._run_glab(
-                ["mr", "list", "--source-branch", branch, "--json"]
-            )
+            cmd = ["mr", "list", "--source-branch", branch]
+            if want_tgt:
+                cmd.extend(["--target-branch", want_tgt])
+            cmd.append("--json")
+            result = self._run_glab(cmd)
             if result.returncode == 0 and result.stdout.strip():
                 mrs = json.loads(result.stdout)
-                if mrs and len(mrs) > 0:
-                    return mrs[0].get("web_url") or mrs[0].get("url")
+                if isinstance(mrs, list):
+                    for mr in mrs:
+                        if self._mr_matches_target(mr, want_tgt):
+                            return mr.get("web_url") or mr.get("url")
         except Exception:
             pass
 
@@ -1736,16 +1817,22 @@ class GitManager:
             import httpx
 
             enc = quote(project, safe="")
-            url = (
-                f"https://{host}/api/v4/projects/{enc}/merge_requests"
+            q = (
                 f"?source_branch={quote(branch)}&state=opened"
+            )
+            if want_tgt:
+                q += f"&target_branch={quote(want_tgt)}"
+            url = (
+                f"https://{host}/api/v4/projects/{enc}/merge_requests{q}"
             )
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.get(url, headers={"PRIVATE-TOKEN": pat})
                 if resp.status_code == 200:
                     mrs = resp.json()
-                    if mrs:
-                        return mrs[0].get("web_url")
+                    if isinstance(mrs, list):
+                        for mr in mrs:
+                            if self._mr_matches_target(mr, want_tgt):
+                                return mr.get("web_url")
         except Exception as e:
             logger.debug(f"API MR list failed: {e}")
         return None
@@ -1766,13 +1853,12 @@ class GitManager:
             )
             return None
 
-        existing_mr = self._get_existing_mr_url(branch)
+        if not target_branch:
+            target_branch = (self.target_branch or self.source_branch or "").strip()
+        existing_mr = self._get_existing_mr_url(branch, target_branch=target_branch)
         if existing_mr:
             logger.info(f"MR already exists: {existing_mr}")
             return existing_mr
-
-        if not target_branch:
-            target_branch = (self.target_branch or self.source_branch or "").strip()
         if not target_branch:
             logger.error("Cannot create MR: no target branch on GitManager")
             return None

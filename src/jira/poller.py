@@ -143,6 +143,8 @@ class JiraPoller:
         ]
 
         logger.debug(f"Polling board {self.board_id}")
+        if hasattr(self.client, "last_error"):
+            self.client.last_error = None
         sprint = self.client.get_active_sprint(self.board_id)
         if sprint:
             sprint_id = sprint["id"]
@@ -167,11 +169,16 @@ class JiraPoller:
             source = f"board {self.board_id}"
 
         if not issues:
-            logger.debug(f"No issues found from {source}")
+            fetch_error = getattr(self.client, "last_error", None)
+            logger.debug(
+                f"No issues found from {source}"
+                + (f" ({fetch_error})" if fetch_error else "")
+            )
             poll_snapshot_store.end_poll(
                 source=source,
                 issues=[],
                 interval_seconds=self.interval,
+                error=fetch_error,
             )
             self._last_check = datetime.now()
             return []
@@ -579,6 +586,27 @@ class JiraPoller:
             logger.warning(f"Could not enrich {issue_key} from Jira: {e}")
         return issue
 
+    def dispatch_as_update(self, issue_key: str) -> bool:
+        """True when this key must use the issue_updated handler.
+
+        After a daemon restart ``_seen_issues`` is empty, but disk state and
+        plan-start latches still mean this is not a create. plan_ready +
+        ai-start-work only starts on the update path.
+        """
+        key = (issue_key or "").strip()
+        if not key:
+            return False
+        if key in self._seen_issues or key in getattr(self, "_plan_start_emitted", ()):
+            return True
+        sm = getattr(self, "state_manager", None)
+        if sm is not None:
+            try:
+                if sm.get_state(key) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def process_issue(self, issue: dict, is_update: bool = False) -> None:
         issue = self._enrich_issue_for_work(issue)
         issue_key = issue["key"]
@@ -641,8 +669,7 @@ class JiraPoller:
                     # (agent work itself is capped by max_concurrent_jobs)
                     def _one(issue: dict) -> str:
                         key = issue["key"]
-                        is_update = key in self._seen_issues
-                        self.process_issue(issue, is_update)
+                        self.process_issue(issue, self.dispatch_as_update(key))
                         return key
 
                     if len(issues) == 1 or workers == 1:
