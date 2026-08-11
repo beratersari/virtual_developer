@@ -266,6 +266,44 @@ def test_list_session_chat_compaction_is_not_user_role(tmp_path: Path):
     assert all(m["role"] != "user" or "Continue the previous" not in (m["parts"][0].get("text") or "") for m in chat["messages"])
 
 
+def test_list_session_chat_keeps_first_search_mode_prompt(tmp_path: Path):
+    """OMO wraps the first user turn; that is still the operator's message."""
+    first = (
+        "[search-mode] MAXIMIZE SEARCH EFFORT. Launch multiple background agents.\n\n"
+        "[analyze-mode] ANALYSIS MODE.\n\n"
+        "# Build mode\n\nYou run unattended inside a daemon.\n"
+    )
+    retry = (
+        "[search-mode] MAXIMIZE SEARCH EFFORT.\n\n"
+        "# Build mode\n\nRetry kit must be hidden.\n"
+    )
+    db = _chat_db(
+        tmp_path / "first.db",
+        messages=[
+            ("msg_u1", {"role": "user"}, [{"type": "text", "text": first}]),
+            (
+                "msg_a1",
+                {"role": "assistant", "finish": "stop"},
+                [{"type": "text", "text": "Shall I continue with the remaining work?"}],
+            ),
+            ("msg_u2", {"role": "user"}, [{"type": "text", "text": retry}]),
+            (
+                "msg_a2",
+                {"role": "assistant", "finish": "stop"},
+                [{"type": "text", "text": "Working."}],
+            ),
+        ],
+    )
+    chat = list_session_chat("ses_chat1", db_path=db)
+    users = [m for m in chat["messages"] if m["role"] == "user"]
+    assert len(users) == 1, [m["role"] for m in chat["messages"]]
+    body = users[0]["parts"][0].get("text") or ""
+    assert body.startswith("# Build mode")
+    assert "[search-mode]" not in body
+    assert "Retry kit must be hidden" not in body
+    assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "assistant"]
+
+
 def test_collect_job_chat_discovers_session_by_working_directory(tmp_path: Path):
     clone = tmp_path / "clone"
     clone.mkdir()
