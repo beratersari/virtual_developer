@@ -379,7 +379,11 @@ def lookup_session_directory(
     if not row:
         return None, True
     d = row[0]
-    return (str(d) if d else None), True
+    # Empty string: row exists but directory was never stored.
+    # None: no row. Callers must not treat those the same.
+    if d is None or str(d).strip() == "":
+        return "", True
+    return str(d), True
 
 
 def get_session_directory(

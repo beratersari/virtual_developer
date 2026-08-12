@@ -260,6 +260,23 @@ class SessionBindStore:
             reason=reason,
         )
 
+    def find_by_issue_key(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """Newest bind that still points at a session for this Jira issue."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        for rec in self.list_binds(limit=500):
+            if (rec.get("issue_key") or "").strip().upper() != key:
+                continue
+            if not str(rec.get("session_id") or "").strip():
+                continue
+            if best is None or (rec.get("updated_at") or "") >= (
+                best.get("updated_at") or ""
+            ):
+                best = rec
+        return best
+
     def list_binds(self, *, limit: int = 200) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         if not self.binds_dir.is_dir():

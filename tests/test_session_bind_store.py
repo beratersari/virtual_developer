@@ -20,6 +20,28 @@ def test_normalize_repo_key_collapses_url_shapes():
     assert a == b == c == "gitlab.com/group/repo"
 
 
+def test_find_by_issue_key_returns_newest_live_bind(tmp_path):
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    store.upsert(
+        repository_url="https://gitlab.example.com/a/r.git",
+        branch="feature/old",
+        target_branch="develop",
+        session_id="ses_old",
+        issue_key="KAN-9",
+    )
+    store.upsert(
+        repository_url="https://gitlab.example.com/a/r.git",
+        branch="feature/KAN-9",
+        target_branch="develop",
+        session_id="ses_new",
+        issue_key="KAN-9",
+    )
+    hit = store.find_by_issue_key("kan-9")
+    assert hit is not None
+    assert hit["session_id"] == "ses_new"
+    assert store.find_by_issue_key("KAN-OTHER") is None
+
+
 def test_normalize_branch_strips_refs():
     assert normalize_branch("refs/heads/feature/KAN-1") == "feature/KAN-1"
     assert normalize_branch("  develop  ") == "develop"

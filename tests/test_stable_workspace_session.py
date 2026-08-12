@@ -306,3 +306,116 @@ def test_attach_db_error_mismatch_freezes_bind(tmp_path, monkeypatch):
     proc._upsert_session_bind("KAN-A", "ses_new_should_not_stick")
     bound = store.get(git.remote_url, "feature/shared", "develop")
     assert bound["session_id"] == "ses_shared"
+
+
+def test_attach_empty_session_dir_resumes_when_bind_wd_matches(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    clone = tmp_path / "shared_clone"
+    clone.mkdir()
+    db = _make_session_db(
+        tmp_path / "opencode.db",
+        [{"id": "ses_shared", "directory": "", "title": "KAN-A: x"}],
+    )
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "feature/KAN-A"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    sm.create_state("KAN-A", "s", "d")
+    proc._contexts["KAN-A"] = {"git": git, "runner": None}
+    proc._upsert_session_bind("KAN-A", "ses_shared")
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-A")
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        sid = proc._attach_bound_opencode_session("KAN-A", task, git)
+    assert sid == "ses_shared"
+    assert task.session_id == "ses_shared"
+
+
+def test_attach_after_reprocess_uses_issue_history_when_bind_key_differs(
+    tmp_path, monkeypatch
+):
+    """Schedule re-queue looks up feature/KEY; first bind may have been source."""
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    db = _make_session_db(
+        tmp_path / "opencode.db",
+        [{"id": "ses_first", "directory": str(clone), "title": "KAN-9: x"}],
+    )
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "develop"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    sm.create_state("KAN-9", "s", "d")
+    proc._contexts["KAN-9"] = {"git": git, "runner": None}
+    proc._active_jobs["KAN-9"] = "job_1"
+    sm.update_state(
+        "KAN-9",
+        current_opencode_session_id="ses_first",
+        metadata={"last_opencode_session_id": "ses_first"},
+    )
+    proc._upsert_session_bind("KAN-9", "ses_first")
+    proc._reset_for_reprocess("KAN-9")
+    git.work_branch = "feature/KAN-9"
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-9")
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        sid = proc._attach_bound_opencode_session("KAN-9", task, git)
+    assert sid == "ses_first"
+    assert task.session_id == "ses_first"
+
+
+def test_attach_relocates_session_dir_after_reclone(tmp_path, monkeypatch):
+    """Cancel + re-schedule often reclones at a new absolute path."""
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
+    old = tmp_path / "old_clone"
+    new = tmp_path / "new_clone"
+    old.mkdir()
+    new.mkdir()
+    db = _make_session_db(
+        tmp_path / "opencode.db",
+        [{"id": "ses_first", "directory": str(old), "title": "KAN-9: x"}],
+    )
+    with patch("src.processor.create_jira_client", return_value=MagicMock()):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/app.git"
+    git.work_branch = "feature/KAN-9"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = new
+    sm.create_state("KAN-9", "s", "d")
+    proc._contexts["KAN-9"] = {"git": git, "runner": None}
+    proc._upsert_session_bind("KAN-9", "ses_first")
+    store.upsert(
+        repository_url=git.remote_url,
+        branch="feature/KAN-9",
+        target_branch="develop",
+        session_id="ses_first",
+        issue_key="KAN-9",
+        working_directory=str(old),
+    )
+    task = AgentTask(description="t", prompt="p", agent="atlas", issue_key="KAN-9")
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        sid = proc._attach_bound_opencode_session("KAN-9", task, git)
+        from src.opencode_sessions import get_session_directory
+
+        assert get_session_directory("ses_first", db_path=db) == str(new.resolve())
+    assert sid == "ses_first"
+    assert task.session_id == "ses_first"
