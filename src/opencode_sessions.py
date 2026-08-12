@@ -25,7 +25,7 @@ _SES_LABELED_RE = re.compile(
 
 
 def extract_session_ids_from_text(text: str) -> List[str]:
-    """ses_* ids from a session log (prefer labeled serve/CLI lines)."""
+    """ses_* ids from a session log (prefer labeled serve lines)."""
     if not text:
         return []
     labeled = _SES_LABELED_RE.findall(text)
@@ -404,9 +404,9 @@ def relocate_session_directories(
 ) -> int:
     """Rewrite ``session.directory`` after a clone folder was renamed in place.
 
-    OpenCode ``--session`` + ``--dir`` requires the stored directory to match
-    the live clone path. A MAX_PATH short-folder rename would otherwise force
-    a cold start (and can hang if we resume against the old string).
+    OpenCode serve requires the stored directory to match the live clone
+    path. A MAX_PATH short-folder rename would otherwise force a cold start
+    (and can hang if we resume against the old string).
     """
     path = db_path or _default_db_path()
     if not path.is_file():
@@ -452,8 +452,8 @@ def session_matches_workdir(
 ) -> bool:
     """True when OpenCode stored this session under *working_directory*.
 
-    ``opencode run --session`` + ``--dir`` on a *new* temp clone hangs or
-    no-ops; only resume when the clone path still matches.
+    Resuming a session on a *new* temp clone hangs or no-ops; only resume
+    when the clone path still matches.
     """
     if not working_directory:
         return False
@@ -974,7 +974,7 @@ def list_session_chat(
 
 
 # Patterns seen when OpenCode is mid-compaction or just finished compact without
-# continuing the agent loop (headless `opencode run` exit-0 bug).
+# continuing the agent loop.
 _COMPACT_OUTPUT_RE = re.compile(
     r"(?:"
     r"\bcompacting\b"
@@ -1003,7 +1003,7 @@ _UNFINISHED_FINISH = frozenset({"tool-calls", "unknown", ""})
 
 
 def detect_compact_in_output(text: str) -> bool:
-    """True if CLI transcript mentions an in-progress / just-finished compact."""
+    """True if the session log mentions an in-progress / just-finished compact."""
     if not text:
         return False
     return bool(_COMPACT_OUTPUT_RE.search(text))
@@ -1237,9 +1237,9 @@ def assess_session_completeness(
     """Decide whether an OpenCode session looks finished after a run/turn.
 
     Background (upstream + production):
-    - ``opencode run`` can exit **0** after auto-compaction without continuing
-      the task (anomalyco/opencode#13946, #3560). Transcripts often end on a
-      "compacting" step; Virtual Developer previously treated that as success.
+    - A turn can look finished after auto-compaction without the task
+      continuing (anomalyco/opencode#13946, #3560). Transcripts often end on
+      a "compacting" step; Virtual Developer previously treated that as success.
     - Sessions also die mid-turn (``finish`` null, only ``step-start``) while
       todos remain ``pending`` / ``in_progress`` — still exit 0 sometimes.
 
@@ -1248,7 +1248,7 @@ def assess_session_completeness(
     2. Last assistant message has no terminal ``finish`` (or is mid tool-calls)
     3. Last assistant is a compaction **summary** (``summary`` truthy) with
        finish ``stop`` — classic compact-then-exit without "Continue..."
-    4. CLI output ends with compacting markers (when no stronger state signal)
+    4. Session log ends with compacting markers (when no stronger state signal)
 
     ``messages`` / ``todos``: optional live snapshots from ``opencode serve``
     HTTP (preferred when provided; skips SQLite for those fields).
@@ -1358,7 +1358,7 @@ def assess_session_completeness(
     # Do **not** flag the Continue prompt's mention of "compaction".
     if compact_output_indicates_premature_exit(output_text or ""):
         result["reasons"].append(
-            "CLI output indicates compaction near end of run"
+            "session log indicates compaction near end of run"
         )
 
     if result.get("assistant_asked_question"):

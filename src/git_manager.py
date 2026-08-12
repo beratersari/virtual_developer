@@ -228,16 +228,16 @@ class GitManager:
     def _create_temp_directory(self) -> Path:
         """Return the stable temp clone dir for this repo + work + target.
 
-        Reuses the folder when it already exists so OpenCode ``--session`` can
-        continue (same ``--dir``). Isolated ``feature/{KEY}`` work branches still
+        Reuses the folder when it already exists so OpenCode serve can
+        continue the same session. Isolated ``feature/{KEY}`` work branches still
         get their own directory. Same Source with a **different Target** gets a
         new folder (different MR base / branch point).
 
         Always uses the short ``{remote12}_{digest12}`` name. A leftover
         long legacy folder is renamed onto that short path (never kept as
         the working dir — Windows MAX_PATH). Bind ``working_directory`` and
-        OpenCode ``session.directory`` are rewritten so ``--session`` still
-        matches the live ``--dir``.
+        OpenCode ``session.directory`` are rewritten so serve resume still
+        matches the live clone.
         """
         base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
         base_temp.mkdir(parents=True, exist_ok=True)

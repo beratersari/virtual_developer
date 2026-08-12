@@ -593,7 +593,7 @@ def test_assess_compact_output_plus_finish_stop_empty_todos_is_premature(
 
 
 def test_assess_sqlite_compact_then_stop_sequence_is_premature(tmp_path: Path):
-    """CLI/DB path must see compaction → assistant stop, not only last row."""
+    """Session log/DB path must see compaction → assistant stop, not only last row."""
     db = _make_full_session_db(
         tmp_path / "seq.db",
         todos=[("All", "completed")],
@@ -621,7 +621,7 @@ def test_strip_compact_reasons_clears_compact_only():
         "premature": True,
         "reasons": [
             "last assistant followed a compaction message (compact-then-stop)",
-            "CLI output indicates compaction near end of run",
+            "session log indicates compaction near end of run",
         ],
     }
     assert reasons_are_compact_only(r["reasons"]) is True

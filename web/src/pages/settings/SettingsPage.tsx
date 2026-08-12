@@ -698,7 +698,7 @@ export function SettingsPage() {
         </span>
       </label>
       <label className="field">
-        <span>Compact resume retries (CLI)</span>
+        <span>Incomplete-session retries</span>
         <input
           type="number"
           min={0}
@@ -709,8 +709,8 @@ export function SettingsPage() {
           }
         />
         <span className="text-xs text-text-muted">
-          Extra CLI attempts only when the session is incomplete for a non-compact
-          reason. Compact is waited out; no extra prompt. Default 256.
+          Extra serve attempts only when the session is incomplete for a
+          non-compact reason. Compact is waited out; no extra prompt. Default 256.
         </span>
       </label>
       <label className="field">

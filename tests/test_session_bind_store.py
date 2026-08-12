@@ -92,7 +92,7 @@ def test_empty_timeout_retries_cold(tmp_path):
 
 
 def test_retry_missing_db_row_keeps_session_for_same_job(tmp_path):
-    """SQLite may not have flushed the just-created session yet — keep --session."""
+    """SQLite may not have flushed the just-created session yet — keep it."""
     from src.orchestrator.agent_runner import AgentRunner, AgentTask
     from tests.test_opencode_sessions import _make_session_db
 

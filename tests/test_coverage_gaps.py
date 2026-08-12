@@ -308,10 +308,18 @@ async def test_agent_runner_windows_subprocess_and_fallback(tmp_path, monkeypatc
             s.opencode_cli = "opencode"
             s.default_model = "m"
             s.agent_task_timeout_seconds = 30
-            with patch(
-                "asyncio.create_subprocess_exec",
-                new=AsyncMock(return_value=FakeProc()),
-            ):
+            async def fake_serve(task, **kwargs):
+                return {
+                    "task_id": task.task_id,
+                    "returncode": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "session_file": str(kwargs.get("session_file") or ""),
+                    "opencode_session_id": None,
+                    "progress": 100,
+                }
+
+            with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
                 task = AgentTask(description="d", prompt="p", agent="a", issue_key="W-1")
                 result = await runner.run_agent(task)
                 assert result["returncode"] == 0
@@ -370,10 +378,18 @@ async def test_run_agent_no_on_complete(tmp_path, monkeypatch):
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "err\n",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "progress": 0,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a")
             r = await runner.run_agent(task)
             assert r["returncode"] == 1

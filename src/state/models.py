@@ -27,7 +27,7 @@ class RetryAttempt:
     session_log_path: Optional[str] = None
     error_message: Optional[str] = None
     return_code: Optional[int] = None
-    opencode_session_id: Optional[str] = None  # opencode session ID from CLI output
+    opencode_session_id: Optional[str] = None  # OpenCode serve session id
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert retry attempt to dictionary."""
@@ -82,7 +82,7 @@ class JiraAgentState:
     
     # Agent tracking
     current_task_id: Optional[str] = None
-    current_opencode_session_id: Optional[str] = None  # opencode session ID from CLI output
+    current_opencode_session_id: Optional[str] = None  # OpenCode serve session id
     
     # Error handling
     error_message: Optional[str] = None

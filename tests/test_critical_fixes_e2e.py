@@ -392,7 +392,6 @@ async def test_e2e_plan_workflow_rejects_foreign_markdown(
         s.agent_task_max_retries = 0
         s.agent_task_max_incomplete_retries = 0
         s.opencode_serve_max_compact_continues = 0
-        s.opencode_run_mode = "cli"
         await proc._start_planning_workflow(state)
 
     live = state_manager.get_state("KAN-2")

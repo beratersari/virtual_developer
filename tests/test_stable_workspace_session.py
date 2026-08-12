@@ -267,7 +267,8 @@ def test_attach_db_error_matching_bind_wd_resumes(tmp_path, monkeypatch):
     assert "KAN-A" not in proc._freeze_session_binds
 
 
-def test_attach_db_error_mismatch_freezes_bind(tmp_path, monkeypatch):
+def test_attach_db_error_mismatch_still_resumes_bind(tmp_path, monkeypatch):
+    """A live bind must be resumed even when SQLite is unreadable / path differs."""
     monkeypatch.chdir(tmp_path)
     sm = JiraStateManager(state_dir=tmp_path / "state")
     store = SessionBindStore(binds_dir=tmp_path / "binds")
@@ -300,10 +301,9 @@ def test_attach_db_error_mismatch_freezes_bind(tmp_path, monkeypatch):
         return_value=(None, False),
     ):
         sid = proc._attach_bound_opencode_session("KAN-A", task, git)
-    assert sid is None
-    assert task.session_id is None
-    assert "KAN-A" in proc._freeze_session_binds
-    proc._upsert_session_bind("KAN-A", "ses_new_should_not_stick")
+    assert sid == "ses_shared"
+    assert task.session_id == "ses_shared"
+    assert "KAN-A" not in proc._freeze_session_binds
     bound = store.get(git.remote_url, "feature/shared", "develop")
     assert bound["session_id"] == "ses_shared"
 

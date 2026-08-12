@@ -2,7 +2,7 @@
 
 Simulates a session that must compact **twice** (incomplete after each compact)
 before a final successful turn — the failure mode Virtual Developer must handle
-when ``opencode run`` would otherwise exit 0 mid-task.
+when a serve turn would otherwise look finished mid-task.
 """
 
 from __future__ import annotations
@@ -630,7 +630,6 @@ async def test_e2e_agent_runner_serve_mode_waits_compact(tmp_path, monkeypatch):
 
     with patch.object(runner, "_run_agent_via_serve", side_effect=fake_run_via_serve):
         with patch("src.orchestrator.agent_runner.settings") as s:
-            s.opencode_run_mode = "serve"
             s.opencode_serve_url = "http://127.0.0.1:4096"
             s.opencode_serve_max_compact_continues = 3
             s.opencode_cli = "opencode"

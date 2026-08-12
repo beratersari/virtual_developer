@@ -1,7 +1,7 @@
 """E2E: stable temp clones + OpenCode session continue.
 
 Product change: jobs with the same Repository + work branch reuse one folder
-so ``opencode run --session`` / serve can continue. Dashboard Reset drops the
+so the OpenCode serve session can continue. Dashboard Reset drops the
 bind and the next job starts cold. Missing folders are recreated at the same
 stable path (then clone).
 """
@@ -112,9 +112,9 @@ def _live_settings(**over):
     return live
 
 
-def _cli_settings(s):
+def _serve_settings(s):
     s.opencode_cli = "opencode"
-    s.opencode_run_mode = "cli"
+    s.opencode_serve_url = "http://127.0.0.1:4096"
     s.default_model = "opencode/x"
     s.agent_task_timeout_seconds = 30
     s.agent_task_max_retries = 0
@@ -219,7 +219,7 @@ class _Harness:
             AgentRunner, "run_agent", fake_run
         ), patch.object(self.proc, "_prepare_git_workspace", wrap_prepare):
             with patch("src.orchestrator.agent_runner.settings") as s:
-                _cli_settings(s)
+                _serve_settings(s)
                 await self.proc._start_execution_workflow(self.sm.get_state(key))
         assert "dir" in captured
         return captured["dir"]
@@ -278,7 +278,7 @@ class _Harness:
             AgentRunner, "run_agent", fake_run
         ), patch.object(self.proc, "_prepare_git_workspace", wrap_prepare):
             with patch("src.orchestrator.agent_runner.settings") as s:
-                _cli_settings(s)
+                _serve_settings(s)
                 await self.proc._start_planning_workflow(self.sm.get_state(key))
         assert "dir" in captured
         return captured["dir"]
@@ -356,14 +356,14 @@ async def test_e2e_missing_directory_recreated_same_path_and_resumes(harness):
 
 
 @pytest.mark.asyncio
-async def test_e2e_missing_directory_and_missing_opencode_row_starts_cold(harness):
+async def test_e2e_missing_directory_and_missing_opencode_row_still_resumes(harness):
+    """Bind key exists → continue even when the clone and SQLite row are gone."""
     d1 = await harness.run_build("COLD-1", agent_sid="ses_gone")
     shutil.rmtree(d1)
-    # bind still points at ses_gone, but OpenCode DB has no row
     d2 = await harness.run_build("COLD-2", agent_sid="ses_fresh")
     assert d2.resolve() == d1.resolve()
-    assert harness.seen[1]["session_id"] is None
-    assert harness.binds.get(REPO, "feature/shared", "develop")["session_id"] == "ses_fresh"
+    assert harness.seen[1]["session_id"] == "ses_gone"
+    assert harness.binds.get(REPO, "feature/shared", "develop")["session_id"] == "ses_gone"
 
 
 @pytest.mark.asyncio
@@ -517,36 +517,19 @@ async def test_e2e_https_and_dot_git_url_share_folder(harness):
 
 
 @pytest.mark.asyncio
-async def test_e2e_cli_argv_includes_shared_dir_and_session(harness):
-    d1 = await harness.run_build("CLI-A", agent_sid="ses_cli")
-    harness.record_session("ses_cli", d1, "CLI-A: x")
-    runner = AgentRunner(working_directory=d1)
-    cmd = runner._build_command(
-        AgentTask(
-            description="c",
-            prompt="do it",
-            agent="atlas",
-            issue_key="CLI-B",
-            session_id="ses_cli",
-        ),
-        harness.tmp / "cmd.log",
-    )
-    assert "--dir" in cmd
-    assert str(d1) in cmd
-    assert "--session" in cmd
-    assert "ses_cli" in cmd
-
-
-@pytest.mark.asyncio
-async def test_e2e_attach_refuses_when_opencode_dir_is_other_clone(harness):
+async def test_e2e_attach_relocates_when_opencode_dir_is_other_clone(harness):
+    """Stale session.directory is rewritten onto the live clone; bind is kept."""
     d1 = await harness.run_build("OTH-A", agent_sid="ses_oth")
     other = harness.tmp / "foreign_clone"
     other.mkdir()
     harness.record_session("ses_oth", other, "OTH-A: x")
     d2 = await harness.run_build("OTH-B", agent_sid="ses_new_oth")
     assert d2.resolve() == d1.resolve()
-    assert harness.seen[1]["session_id"] is None
-    assert harness.binds.get(REPO, "feature/shared", "develop")["session_id"] == "ses_new_oth"
+    assert harness.seen[1]["session_id"] == "ses_oth"
+    assert harness.binds.get(REPO, "feature/shared", "develop")["session_id"] == "ses_oth"
+    from src.opencode_sessions import get_session_directory
+
+    assert get_session_directory("ses_oth") == str(d2.resolve())
 
 
 @pytest.mark.asyncio
@@ -567,7 +550,7 @@ async def test_e2e_first_job_without_session_id_does_not_bind(harness):
     harness.sm.create_state(key, "s", _params(REPO, "feature/shared"))
     with _git_io_patches(), patch.object(AgentRunner, "run_agent", fake_run):
         with patch("src.orchestrator.agent_runner.settings") as s:
-            _cli_settings(s)
+            _serve_settings(s)
             await harness.proc._start_execution_workflow(harness.sm.get_state(key))
     assert harness.binds.get(REPO, "feature/shared", "develop") is None
 

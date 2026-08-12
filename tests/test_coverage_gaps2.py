@@ -148,12 +148,19 @@ async def test_agent_stream_timeout_continue(tmp_path, monkeypatch):
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": 0,
+                "stdout": "ok\n",
+                "stderr": "",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "progress": 100,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a", issue_key="ST-1")
-            # short outer timeout may fire instead - either path is fine
             result = await runner.run_agent(task, timeout_seconds=5)
             assert "returncode" in result
 
@@ -173,14 +180,14 @@ async def test_background_agent_windows(tmp_path, monkeypatch):
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.opencode_cli = "opencode"
             s.default_model = "m"
-            with patch(
-                "asyncio.create_subprocess_exec",
-                new=AsyncMock(return_value=P()),
+            with patch.object(
+                runner, "run_agent", new=AsyncMock(return_value={"returncode": 0})
             ):
                 tid = await runner.run_background_agent(
                     AgentTask(description="d", prompt="p", agent="a")
                 )
                 assert tid
+                await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

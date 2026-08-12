@@ -2,18 +2,8 @@
 
 Compact is waited out in-session — no extra user prompt.
 
-Covers the operator path ``run_agent_with_retry`` → real ``run_agent`` (CLI
-subprocess argv, or serve FakeServe backend), not a stub that skips
-``_resume_opencode_session_for_retry``.
-
-Conditions:
-  1. timed_out + ses_id     → second CLI has ``--session`` + Continue prompt
-  2. returncode 1 + ses_id  → same
-  3. compact exit-0 + ses_id → wait/strip; do not send Continue
-  4. error without ses_id   → cold retry (no ``--session``)
-  5. serve HTTP timeout / send error: create_session once; retry
-     reuses ses_ and Continue text
-  6. processor execution: timeout / error keep the same session; compact does not
+Covers ``run_agent_with_retry`` → real ``run_agent`` via serve (FakeServe),
+not a stub that skips ``_resume_opencode_session_for_retry``.
 
 Run::
 
@@ -22,7 +12,6 @@ Run::
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -45,110 +34,9 @@ def runner(tmp_path):
     return AgentRunner(working_directory=tmp_path)
 
 
-# ---------------------------------------------------------------------------
-# Fake opencode subprocesses
-# ---------------------------------------------------------------------------
-
-
-class _OkProc:
-    def __init__(self, session: str = "ses_ok"):
-        self.returncode = 0
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
-        self.stdout.feed_data(f"Session: {session}\ndone\n".encode())
-        self.stdout.feed_eof()
-        self.stderr.feed_eof()
-
-    async def wait(self):
-        return 0
-
-    def kill(self):
-        pass
-
-    def terminate(self):
-        pass
-
-
-class _ErrorProc:
-    def __init__(self, session: str = "ses_err"):
-        self.returncode = 1
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
-        self.stdout.feed_data(f"Session: {session}\n".encode())
-        self.stdout.feed_eof()
-        self.stderr.feed_data(b"agent boom\n")
-        self.stderr.feed_eof()
-
-    async def wait(self):
-        return 1
-
-    def kill(self):
-        pass
-
-    def terminate(self):
-        pass
-
-
-class _ErrorNoSessionProc(_ErrorProc):
-    def __init__(self):
-        super().__init__(session="ignored")
-        self.stdout = asyncio.StreamReader()
-        self.stdout.feed_data(b"no session token in this log\n")
-        self.stdout.feed_eof()
-
-
-class _CompactProc:
-    def __init__(self, session: str = "ses_cmp"):
-        self.returncode = 0
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
-        self.stdout.feed_data(
-            (
-                f"Session: {session}\n"
-                "All todos complete.\n"
-                "Compacting session to free context...\n"
-            ).encode()
-        )
-        self.stdout.feed_eof()
-        self.stderr.feed_eof()
-
-    async def wait(self):
-        return 0
-
-    def kill(self):
-        pass
-
-    def terminate(self):
-        pass
-
-
-class _TimeoutAfterSessionProc:
-    """Prints session id, closes pipes, then hangs until killed (timed_out)."""
-
-    def __init__(self, session: str = "ses_to"):
-        self.returncode = None
-        self.pid = 4242
-        self.stdout = asyncio.StreamReader()
-        self.stderr = asyncio.StreamReader()
-        self.stdout.feed_data(f"Session: {session}\nstill working...\n".encode())
-        self.stdout.feed_eof()
-        self.stderr.feed_eof()
-
-    async def wait(self):
-        while self.returncode is None:
-            await asyncio.sleep(0.05)
-        return self.returncode
-
-    def kill(self):
-        self.returncode = -9
-
-    def terminate(self):
-        self.returncode = -15
-
-
-def _cli_settings(s, *, timeout: float = 30.0):
+def _serve_settings(s, *, timeout: float = 30.0):
     s.opencode_cli = "opencode"
-    s.opencode_run_mode = "cli"
+    s.opencode_serve_url = "http://127.0.0.1:4096"
     s.default_model = "opencode/deepseek-v4-flash-free"
     s.agent_task_timeout_seconds = timeout
     s.agent_task_max_retries = 1
@@ -156,124 +44,6 @@ def _cli_settings(s, *, timeout: float = 30.0):
     s.agent_task_retry_backoff_multiplier = 1.0
     s.agent_task_retry_on_timeout = True
     s.agent_task_retry_on_error = True
-
-
-# ---------------------------------------------------------------------------
-# CLI e2e: real run_agent_with_retry + real run_agent + fake subprocess
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "label,first_factory,expect_session,timeout_s",
-    [
-        ("timeout", lambda: _TimeoutAfterSessionProc("ses_e2e_to"), "ses_e2e_to", 0.2),
-        ("error", lambda: _ErrorProc("ses_e2e_err"), "ses_e2e_err", None),
-    ],
-)
-async def test_e2e_cli_retry_resumes_session(
-    runner, tmp_path, monkeypatch, label, first_factory, expect_session, timeout_s
-):
-    """Timeout / error → second argv has --session + Continue prompt."""
-    monkeypatch.chdir(tmp_path)
-    cmds: List[List[str]] = []
-
-    async def spawn(*cmd, **kwargs):
-        cmds.append([str(c) for c in cmd])
-        if len(cmds) == 1:
-            return first_factory()
-        return _OkProc(expect_session)
-
-    with patch("src.orchestrator.agent_runner.settings") as s:
-        _cli_settings(s, timeout=30.0)
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=spawn,
-        ):
-            task = AgentTask(
-                description=f"e2e {label}",
-                prompt="ORIGINAL BUILD PROMPT do the work",
-                agent="atlas",
-                issue_key=f"E2E-{label.upper()}",
-            )
-            kwargs: Dict[str, Any] = {"max_retries": 1}
-            if timeout_s is not None:
-                kwargs["timeout_seconds"] = timeout_s
-            result = await runner.run_agent_with_retry(task, **kwargs)
-
-    assert len(cmds) == 2, cmds
-    first, second = cmds
-    assert "--session" not in first
-    assert "ORIGINAL BUILD PROMPT" in first[-1]
-    assert "--session" in second
-    assert expect_session in second
-    assert second[-1].lstrip().lower().startswith("continue"), second[-1]
-    assert result["returncode"] == 0
-    assert result["retry_info"]["retried"] is True
-    assert result.get("opencode_session_id") == expect_session
-
-
-@pytest.mark.asyncio
-async def test_e2e_cli_compact_does_not_inject_continue(
-    runner, tmp_path, monkeypatch
-):
-    """Compact-then-exit-0: wait/strip auto-compact; do not send Continue."""
-    monkeypatch.chdir(tmp_path)
-    cmds: List[List[str]] = []
-
-    async def spawn(*cmd, **kwargs):
-        cmds.append([str(c) for c in cmd])
-        return _CompactProc("ses_e2e_cmp")
-
-    with patch("src.orchestrator.agent_runner.settings") as s:
-        _cli_settings(s, timeout=30.0)
-        with patch("asyncio.create_subprocess_exec", new=spawn):
-            task = AgentTask(
-                description="e2e compact",
-                prompt="ORIGINAL BUILD PROMPT do the work",
-                agent="atlas",
-                issue_key="E2E-COMPACT",
-            )
-            result = await runner.run_agent_with_retry(task, max_retries=1)
-
-    assert len(cmds) == 1, cmds
-    assert "--session" not in cmds[0]
-    assert "ORIGINAL BUILD PROMPT" in cmds[0][-1]
-    assert not cmds[0][-1].lstrip().lower().startswith("continue")
-    assert result["returncode"] == 0
-    assert result["retry_info"]["retried"] is False
-    assert result.get("opencode_session_id") == "ses_e2e_cmp"
-
-
-@pytest.mark.asyncio
-async def test_e2e_cli_error_without_session_is_cold_retry(
-    runner, tmp_path, monkeypatch
-):
-    monkeypatch.chdir(tmp_path)
-    cmds: List[List[str]] = []
-
-    async def spawn(*cmd, **kwargs):
-        cmds.append([str(c) for c in cmd])
-        if len(cmds) == 1:
-            return _ErrorNoSessionProc()
-        return _OkProc("ses_new")
-
-    with patch("src.orchestrator.agent_runner.settings") as s:
-        _cli_settings(s)
-        with patch("asyncio.create_subprocess_exec", new=spawn):
-            task = AgentTask(
-                description="e2e cold",
-                prompt="ORIGINAL BUILD PROMPT",
-                agent="atlas",
-                issue_key="E2E-COLD",
-            )
-            result = await runner.run_agent_with_retry(task, max_retries=1)
-
-    assert len(cmds) == 2
-    assert "--session" not in cmds[1]
-    # No session to resume → keep original prompt (not Continue)
-    assert cmds[1][-1] == "ORIGINAL BUILD PROMPT"
-    assert result["returncode"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +70,6 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
 
     runner = AgentRunner(working_directory=tmp_path)
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_run_mode = "serve"
         s.opencode_serve_url = "http://fake/"
         s.opencode_serve_max_compact_continues = 0
         s.default_model = "opencode/deepseek-v4-flash-free"
@@ -380,7 +149,6 @@ async def test_e2e_serve_retry_reuses_session_after_timeout_or_error(
 
     runner = AgentRunner(working_directory=tmp_path)
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_run_mode = "serve"
         s.opencode_serve_url = "http://fake/"
         s.opencode_serve_max_compact_continues = 0
         s.default_model = "opencode/deepseek-v4-flash-free"
@@ -526,7 +294,7 @@ async def test_e2e_processor_retry_keeps_session(
     monkeypatch.setattr("src.config.get_settings", lambda: live)
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        _cli_settings(s)
+        _serve_settings(s)
         await proc._start_execution_workflow(sm.get_state(key))
 
     assert len(seen) == 2, seen
@@ -614,7 +382,7 @@ async def test_e2e_processor_compact_does_not_send_another_prompt(
     monkeypatch.setattr("src.config.get_settings", lambda: live)
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        _cli_settings(s)
+        _serve_settings(s)
         await proc._start_execution_workflow(sm.get_state(key))
 
     assert len(seen) == 1, seen

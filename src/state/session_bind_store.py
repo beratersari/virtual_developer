@@ -1,7 +1,7 @@
 """Persist OpenCode session ids keyed by repository + work branch + target.
 
 A later issue (or re-run) with the same remote, work/Source branch, **and**
-Target can resume ``opencode run --session`` / serve. A different Target is a
+Target can resume the same OpenCode serve session. A different Target is a
 different MR base — new clone folder + new session so the model is not mixed
 with work aimed at another branch. Dashboard Reset drops the bind.
 """

@@ -437,7 +437,7 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         "agent_task_timeout_seconds" in data
         and data["agent_task_timeout_seconds"] is not None
     ):
-        # Single budget for agent runner + OpenCode CLI process
+        # Single budget for agent runner + OpenCode serve turn
         settings.agent_task_timeout_seconds = int(data["agent_task_timeout_seconds"])
         runtime_persist["agent_task_timeout_seconds"] = (
             settings.agent_task_timeout_seconds

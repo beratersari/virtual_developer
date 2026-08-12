@@ -665,10 +665,19 @@ async def test_c7_run_agent_timeout_covers_process_wait_after_eof(tmp_path, monk
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 1
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=proc),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "[TIMEOUT] hung after EOF",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "timed_out": True,
+                "progress": 0,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a")
             result = await asyncio.wait_for(
                 runner.run_agent(task, timeout_seconds=0.3),
