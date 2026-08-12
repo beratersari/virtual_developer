@@ -124,7 +124,64 @@ assert(compactGroups.length === 4, `compact groups ${compactGroups.length}`)
 assert(compactGroups.every((g) => g.role !== 'user' || g.parts[0].text === 'real ask'), 'compact is not You')
 assert(compactGroups[0].role === 'compaction', 'compact part is not You')
 assert(compactGroups[1].role === 'compaction', 'compact+text is not You')
-assert(compactGroups[2].role === 'compaction', 'summary assistant is compact chip')
+assert(compactGroups[2].role === 'summary', 'summary assistant is Summary, not You')
+assert(compactGroups[2].parts.some((p) => (p.text || '').includes('Work so far')), 'summary text kept')
 assert(compactGroups[3].role === 'user' && compactGroups[3].parts[0].text === 'real ask', 'continue prompt hidden')
+
+const resumeMsgs: ChatMessage[] = [
+  {
+    id: 'old',
+    session_id: 'ses_b',
+    role: 'user',
+    parts: [
+      {
+        id: 'oldp',
+        type: 'text',
+        text: '1. TASK: Implement KAN-1\n\n<!-- OMO_INTERNAL_INITIATOR -->',
+      },
+    ],
+  },
+  {
+    id: 'olda',
+    session_id: 'ses_b',
+    role: 'assistant',
+    parts: [{ id: 'oldat', type: 'text', text: 'Working.' }],
+  },
+  {
+    id: 'cc',
+    session_id: 'ses_b',
+    role: 'user',
+    parts: [{ id: 'ccp', type: 'compaction', auto: true }],
+  },
+  {
+    id: 'sum2',
+    session_id: 'ses_b',
+    role: 'assistant',
+    agent: 'compaction',
+    summary: true,
+    parts: [{ id: 'sum2t', type: 'text', text: '## Objective\n- Implement add' }],
+  },
+  {
+    id: 'after',
+    session_id: 'ses_b',
+    role: 'user',
+    parts: [
+      {
+        id: 'afterp',
+        type: 'text',
+        text: 'Continue after context compaction. Finish all remaining todos and complete the original task.',
+      },
+    ],
+  },
+]
+const resumeGroups = groupChatMessages(resumeMsgs)
+assert(resumeGroups[0].role === 'user', 'resumed first prompt is You')
+assert((resumeGroups[0].parts[0].text || '').includes('Implement KAN-1'), 'resumed prompt text kept')
+assert(!(resumeGroups[0].parts[0].text || '').includes('OMO_INTERNAL'), 'internal tag stripped')
+assert(resumeGroups.some((g) => g.role === 'summary'), 'compact recap visible')
+assert(
+  resumeGroups.every((g) => !(g.parts[0].text || '').includes('Continue after context')),
+  'post-compact continue is not You',
+)
 
 console.log('chatParts.test.ts ok')

@@ -553,30 +553,34 @@ def _normalize_part(raw: Any, *, part_id: str = "", created_at: Any = None) -> O
 
 _CONTINUE_PROMPT_PREFIX = "continue the previous opencode session"
 _FINISH_TODOS_PREFIX = "finish remaining todos and complete the original task"
+_CONTINUE_AFTER_COMPACT_PREFIX = "continue after context compaction"
 _OPENCODE_AUTO_CONTINUE_PREFIX = "continue if you have next steps"
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _COMPACT_USER_TEXT_RE = re.compile(
     r"(?:"
     r"session\s+compacted"
     r"|compacting\s+session"
     r"|compaction\s+summary"
     r"|context\s+(?:was\s+)?compacted"
+    r"|continue after context compaction"
     r"|auto[- ]?compact(?:ed|ing)?"
     r")",
     re.IGNORECASE,
 )
 # OpenCode / oh-my-openagent post these as role=user. They are not the operator.
-# Do NOT include [search-mode] / [analyze-mode] here: those wrap the *first*
-# real task prompt too, and hiding them emptied the chat of the user's message.
+# Do NOT match OMO_INTERNAL / [search-mode] on the raw body: those tags are
+# appended to the *first* real task prompt too, and hiding them emptied chat
+# when continuing an older session.
 _INTERNAL_COMPACT_FOLLOWUP_RE = re.compile(
     r"(?:"
-    r"omo_internal"
-    r"|restore\s+checkpointed\s+session"
+    r"restore\s+checkpointed\s+session"
     r"|checkpointed\s+session\s+agent\s+configuration"
     r"|todo\s+continuation"
     r"|background task completed"
     r"|system directive:\s*oh-my-opencode"
     r"|system-reminder"
     r"|continue if you have next steps"
+    r"|continue after context compaction"
     r"|exceeded the provider's size limit"
     r"|conversation was compacted"
     r"|media (?:files|attachments) were removed"
@@ -605,24 +609,50 @@ _ASSISTANT_QUESTION_RE = re.compile(
 )
 
 
+def strip_internal_markup(text: str) -> str:
+    """Drop HTML comments / OMO_INTERNAL tags so real task text remains."""
+    cleaned = _HTML_COMMENT_RE.sub("", text or "")
+    cleaned = re.sub(r"OMO_INTERNAL\w*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def is_orchestrator_continue_text(text: str) -> bool:
-    low = (text or "").strip().lower()
-    return low.startswith(_CONTINUE_PROMPT_PREFIX) or low.startswith(
-        _FINISH_TODOS_PREFIX
+    low = strip_internal_markup(text or "").lower()
+    return (
+        low.startswith(_CONTINUE_PROMPT_PREFIX)
+        or low.startswith(_FINISH_TODOS_PREFIX)
+        or low.startswith(_CONTINUE_AFTER_COMPACT_PREFIX)
     )
 
 
 def is_internal_compact_followup_text(text: str) -> bool:
-    """True for OpenCode/oh-my-openagent post-compact synthetic user turns."""
-    t = (text or "").strip()
-    if not t:
+    """True for OpenCode/oh-my-openagent post-compact synthetic user turns.
+
+    Real operator / subagent prompts often end with
+    ``<!-- OMO_INTERNAL_INITIATOR -->``. That tag alone must not hide them.
+    """
+    raw = (text or "").strip()
+    if not raw:
         return False
-    low = t.lower()
+    cleaned = strip_internal_markup(raw)
+    if not cleaned:
+        return True
+    low = cleaned.lower()
     if low.startswith(_OPENCODE_AUTO_CONTINUE_PREFIX):
         return True
     if low.startswith(_FINISH_TODOS_PREFIX):
         return True
-    return bool(_INTERNAL_COMPACT_FOLLOWUP_RE.search(t))
+    if low.startswith(_CONTINUE_AFTER_COMPACT_PREFIX):
+        return True
+    if low.startswith("[restore checkpointed"):
+        return True
+    if low.startswith("the previous request exceeded"):
+        return True
+    # Synthetic compact follow-ups are short. A long TASK / BUILD kit that
+    # merely mentions "compact" or a notepad path is the operator's message.
+    if len(cleaned) < 400 and _INTERNAL_COMPACT_FOLLOWUP_RE.search(cleaned):
+        return True
+    return False
 
 
 def is_omo_mode_wrap_text(text: str) -> bool:
@@ -704,15 +734,11 @@ def chat_display_role(
 
     Compaction is stored as ``role=user`` in the OpenCode DB. Those rows must
     not render as "You". Orchestrator Continue prompts are skipped.
+    The compact *summary* (``agent=compaction``, ``## Objective``) is the
+    previous-turn recap — show it as ``summary``, not as the operator.
     """
     items = [p for p in (parts or []) if isinstance(p, dict)]
     types = {(p.get("type") or "").lower() for p in items}
-    if "compaction" in types or "compact" in types:
-        return "compaction"
-    if str(agent or "").strip().lower() == "compaction":
-        return "compaction"
-    if _is_compaction_summary(summary):
-        return "compaction"
     text = "\n".join(
         str(p.get("text") or "")
         for p in items
@@ -720,9 +746,17 @@ def chat_display_role(
     )
     if is_orchestrator_continue_text(text) or is_internal_compact_followup_text(text):
         return "skip"
+    if "compaction" in types or "compact" in types:
+        return "compaction"
+    is_compact_agent = str(agent or "").strip().lower() == "compaction"
+    if is_compact_agent or _is_compaction_summary(summary):
+        if strip_internal_markup(text):
+            return "summary"
+        return "compaction"
     raw = str(role or "unknown").strip().lower() or "unknown"
-    if raw == "user" and text.strip() and len(text.strip()) < 400:
-        if _COMPACT_USER_TEXT_RE.search(text):
+    cleaned = strip_internal_markup(text)
+    if raw == "user" and cleaned and len(cleaned) < 400:
+        if _COMPACT_USER_TEXT_RE.search(cleaned):
             return "compaction"
     return raw
 
@@ -859,10 +893,13 @@ def list_session_chat(
                 and is_omo_mode_wrap_text(text_blob)
             ):
                 continue
-            if display_role == "user" and is_omo_mode_wrap_text(text_blob):
+            if display_role in {"user", "summary"}:
                 for p in parts:
                     if isinstance(p, dict) and (p.get("type") or "text").lower() == "text":
-                        p["text"] = strip_omo_mode_wrap(str(p.get("text") or ""))
+                        cleaned = strip_internal_markup(str(p.get("text") or ""))
+                        if display_role == "user" and is_omo_mode_wrap_text(cleaned):
+                            cleaned = strip_omo_mode_wrap(cleaned)
+                        p["text"] = cleaned
             if display_role == "user":
                 shown_user = True
             messages.append(

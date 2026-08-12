@@ -62,22 +62,43 @@ export type ChatGroup = {
 }
 
 const CONTINUE_PROMPT_PREFIX = 'continue the previous opencode session'
+const FINISH_TODOS_PREFIX = 'finish remaining todos and complete the original task'
+const CONTINUE_AFTER_COMPACT_PREFIX = 'continue after context compaction'
 const OPENCODE_AUTO_CONTINUE_PREFIX = 'continue if you have next steps'
+const HTML_COMMENT = /<!--[\s\S]*?-->/g
 const COMPACT_USER_TEXT =
-  /session compacted|compacting session|compaction summary|context compacted|auto[- ]?compact/i
+  /session compacted|compacting session|compaction summary|context compacted|continue after context compaction|auto[- ]?compact/i
 const INTERNAL_COMPACT_FOLLOWUP =
-  /omo_internal|restore checkpointed session|checkpointed session agent configuration/i
+  /restore checkpointed session|checkpointed session agent configuration|todo continuation|background task completed|system-reminder|continue if you have next steps|continue after context compaction|conversation was compacted|large media attachments/i
+
+export function stripInternalMarkup(text: string): string {
+  return String(text || '')
+    .replace(HTML_COMMENT, '')
+    .replace(/OMO_INTERNAL\w*/gi, '')
+    .trim()
+}
 
 export function isOrchestratorContinueText(text: string): boolean {
-  const t = (text || '').trim().toLowerCase()
-  return t.startsWith(CONTINUE_PROMPT_PREFIX)
+  const t = stripInternalMarkup(text).toLowerCase()
+  return (
+    t.startsWith(CONTINUE_PROMPT_PREFIX) ||
+    t.startsWith(FINISH_TODOS_PREFIX) ||
+    t.startsWith(CONTINUE_AFTER_COMPACT_PREFIX)
+  )
 }
 
 export function isInternalCompactFollowupText(text: string): boolean {
-  const t = (text || '').trim()
-  if (!t) return false
-  if (t.toLowerCase().startsWith(OPENCODE_AUTO_CONTINUE_PREFIX)) return true
-  return INTERNAL_COMPACT_FOLLOWUP.test(t)
+  const raw = (text || '').trim()
+  if (!raw) return false
+  const cleaned = stripInternalMarkup(raw)
+  if (!cleaned) return true
+  const t = cleaned.toLowerCase()
+  if (t.startsWith(OPENCODE_AUTO_CONTINUE_PREFIX)) return true
+  if (t.startsWith(FINISH_TODOS_PREFIX)) return true
+  if (t.startsWith(CONTINUE_AFTER_COMPACT_PREFIX)) return true
+  if (t.startsWith('[restore checkpointed')) return true
+  if (t.startsWith('the previous request exceeded')) return true
+  return cleaned.length < 400 && INTERNAL_COMPACT_FOLLOWUP.test(cleaned)
 }
 
 function isCompactionSummary(summary: unknown): boolean {
@@ -92,16 +113,19 @@ export function chatDisplayRole(msg: ChatMessage, parts: ChatPart[]): string {
   const raw = (msg.role || 'unknown').toLowerCase()
   const visible = parts.filter((p) => p.type !== 'step-start' && p.type !== 'step-finish')
   const types = visible.map((p) => (p.type || '').toLowerCase())
-  if (raw === 'compaction') return 'compaction'
-  if ((msg.agent || '').toLowerCase() === 'compaction') return 'compaction'
-  if (isCompactionSummary(msg.summary)) return 'compaction'
-  if (types.some((t) => t === 'compaction' || t === 'compact')) return 'compaction'
   const text = visible
     .filter((p) => (p.type || 'text') === 'text')
     .map((p) => p.text || '')
     .join('\n')
   if (isOrchestratorContinueText(text) || isInternalCompactFollowupText(text)) return 'skip'
-  if (raw === 'user' && text.trim() && text.trim().length < 400 && COMPACT_USER_TEXT.test(text)) {
+  if (raw === 'compaction') return 'compaction'
+  if (types.some((t) => t === 'compaction' || t === 'compact')) return 'compaction'
+  const compactAgent = (msg.agent || '').toLowerCase() === 'compaction'
+  if (raw === 'summary' || compactAgent || isCompactionSummary(msg.summary)) {
+    return stripInternalMarkup(text) ? 'summary' : 'compaction'
+  }
+  const cleaned = stripInternalMarkup(text)
+  if (raw === 'user' && cleaned && cleaned.length < 400 && COMPACT_USER_TEXT.test(cleaned)) {
     return 'compaction'
   }
   return raw
@@ -110,7 +134,10 @@ export function chatDisplayRole(msg: ChatMessage, parts: ChatPart[]): string {
 export function groupChatMessages(messages: ChatMessage[]): ChatGroup[] {
   const groups: ChatGroup[] = []
   for (const msg of messages || []) {
-    const parts = normalizeChatParts(msg.parts || [])
+    const parts = normalizeChatParts(msg.parts || []).map((p) => {
+      if ((p.type || 'text') !== 'text' || !p.text) return p
+      return { ...p, text: stripInternalMarkup(p.text) }
+    })
     if (parts.length === 0) continue
     const role = chatDisplayRole(msg, parts)
     if (role === 'skip') continue

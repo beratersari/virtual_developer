@@ -67,6 +67,7 @@ function MessageBubble({ group }: { group: ChatGroup }) {
   const role = group.role
   const isUser = role === 'user'
   const isAssistant = role === 'assistant'
+  const isSummary = role === 'summary'
   const isCompact = role === 'compaction'
 
   if (isCompact) {
@@ -92,14 +93,16 @@ function MessageBubble({ group }: { group: ChatGroup }) {
         className={`max-w-[min(52rem,92%)] rounded-2xl border px-4 py-3 ${
           isUser
             ? 'border-accent/35 bg-accent-muted'
-            : isAssistant
-              ? 'border-border bg-surface'
-              : 'border-border bg-bg'
+            : isSummary
+              ? 'border-warning/40 bg-bg'
+              : isAssistant
+                ? 'border-border bg-surface'
+                : 'border-border bg-bg'
         }`}
       >
         <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
           <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">
-            {isUser ? 'You' : isAssistant ? group.agent || 'Assistant' : role}
+            {isUser ? 'You' : isSummary ? 'Summary' : isAssistant ? group.agent || 'Assistant' : role}
           </span>
           {group.created_at ? (
             <span className="font-mono text-[10px] text-text-muted">
