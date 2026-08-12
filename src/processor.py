@@ -908,23 +908,67 @@ class JobProcessor:
         target = target or _s(meta.get("target_branch"))
         return repo, branch, target
 
+    def _resume_session_candidates(
+        self, issue_key: str, git: Any = None
+    ) -> tuple[List[str], List[str], Optional[str]]:
+        """Session ids to try for this issue, plus forgotten ids and bind wd.
+
+        Same Jira issue re-queued from the schedule tab must resume even when
+        the repo/work/target bind key differs from the first upsert.
+        """
+        import src.state.session_bind_store as session_binds
+
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        recs: List[Dict[str, Any]] = []
+        store = session_binds.session_bind_store
+        if repo and branch and target:
+            hit = store.get(repo, branch, target)
+            if hit:
+                recs.append(hit)
+        by_issue = store.find_by_issue_key(issue_key)
+        if by_issue and by_issue not in recs:
+            recs.append(by_issue)
+        forgotten: List[str] = []
+        bind_wd: Optional[str] = None
+        sids: List[str] = []
+
+        def _add_sid(raw: Any) -> None:
+            sid = str(raw or "").strip()
+            if sid.startswith("ses_") and sid not in sids:
+                sids.append(sid)
+
+        for rec in recs:
+            for x in rec.get("forgotten_session_ids") or []:
+                fx = str(x or "").strip()
+                if fx and fx not in forgotten:
+                    forgotten.append(fx)
+            _add_sid(rec.get("session_id"))
+            if not bind_wd:
+                wd0 = rec.get("working_directory")
+                if isinstance(wd0, str) and wd0.strip():
+                    bind_wd = wd0.strip()
+        st = self.state_manager.get_state(issue_key)
+        if st is not None:
+            _add_sid(st.current_opencode_session_id)
+            meta = dict(st.metadata or {})
+            _add_sid(meta.get("last_opencode_session_id"))
+            for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                _add_sid(sid)
+        return sids, forgotten, bind_wd
+
     def _attach_bound_opencode_session(
         self, issue_key: str, task: AgentTask, git: Any = None
     ) -> Optional[str]:
-        """Reuse a stored OpenCode session for this repo + work + target."""
+        """Reuse the OpenCode session for this issue / repo+work+target.
+
+        Schedule cancel + re-dispatch reclones or changes cwd. Resume the last
+        session for the Jira key and relocate ``session.directory`` onto the
+        live clone so ``--session`` + ``--dir`` does not start a new ``ses_*``.
+        """
         if getattr(task, "session_id", None):
             return task.session_id
         repo, branch, target = self._session_bind_key(issue_key, git)
-        if not repo or not branch or not target:
-            return None
-        import src.state.session_bind_store as session_binds
-
-        rec = session_binds.session_bind_store.get(repo, branch, target)
-        forgotten = [
-            str(x).strip()
-            for x in ((rec or {}).get("forgotten_session_ids") or [])
-            if str(x).strip()
-        ]
+        sids, forgotten, bind_wd = self._resume_session_candidates(issue_key, git)
         if forgotten:
             task.forgotten_session_ids = list(
                 dict.fromkeys(
@@ -935,9 +979,6 @@ class JobProcessor:
             task.abandoned_session_id = (
                 getattr(task, "abandoned_session_id", None) or forgotten[-1]
             )
-        sid = (rec or {}).get("session_id") if rec else None
-        if not sid or sid in forgotten:
-            return None
         wd = None
         if git is not None and hasattr(git, "get_working_directory"):
             try:
@@ -947,57 +988,89 @@ class JobProcessor:
         if wd is None:
             runner = self._runner_for(issue_key)
             wd = getattr(runner, "working_directory", None) if runner else None
-        bind_wd = (rec or {}).get("working_directory")
-        try:
-            from src.opencode_sessions import (
-                lookup_session_directory,
-                paths_equivalent,
-                session_matches_workdir,
-            )
 
-            stored_dir, ok = lookup_session_directory(sid)
+        from src.opencode_sessions import (
+            lookup_session_directory,
+            paths_equivalent,
+            relocate_session_directories,
+        )
+
+        chosen: Optional[str] = None
+        for sid in sids:
+            if sid in forgotten:
+                continue
+            try:
+                stored_dir, ok = lookup_session_directory(sid)
+            except Exception as e:
+                logger.debug(f"{issue_key}: session dir check failed: {e}")
+                self._freeze_session_binds.add(issue_key)
+                return None
             if not ok:
                 if bind_wd and wd and paths_equivalent(bind_wd, wd):
                     logger.warning(
                         f"{issue_key}: OpenCode DB unreadable; resuming {sid} "
                         f"because bind working_directory matches live clone"
                     )
-                else:
-                    logger.warning(
-                        f"{issue_key}: OpenCode DB unreadable; not resuming "
-                        f"{sid} and not replacing the bind"
+                    chosen = sid
+                    break
+                logger.warning(
+                    f"{issue_key}: OpenCode DB unreadable; not resuming "
+                    f"{sid} and not replacing the bind"
+                )
+                self._freeze_session_binds.add(issue_key)
+                return None
+            if stored_dir is None:
+                # No SQLite row — try the next candidate
+                if bind_wd and wd and paths_equivalent(bind_wd, wd):
+                    logger.info(
+                        f"{issue_key}: session {sid} not in OpenCode DB; "
+                        f"resuming because bind path matches clone"
                     )
-                    self._freeze_session_binds.add(issue_key)
-                    return None
-            elif not stored_dir:
+                    chosen = sid
+                    break
+                continue
+            if stored_dir and wd and paths_equivalent(stored_dir, wd):
+                chosen = sid
+                break
+            if stored_dir and wd and not paths_equivalent(stored_dir, wd):
+                # Same Jira issue, new clone path (cancel/re-schedule).
+                n = relocate_session_directories(stored_dir, wd)
                 logger.info(
-                    f"{issue_key}: bound session {sid} not in OpenCode DB; "
-                    f"starting a new session"
+                    f"{issue_key}: relocating session {sid} "
+                    f"{stored_dir} → {wd} (updated={n}) to resume after re-clone"
                 )
-                return None
-            elif not session_matches_workdir(sid, Path(wd) if wd else None):
+                try:
+                    import src.state.session_bind_store as session_binds
+
+                    session_binds.session_bind_store.relocate_working_directory(
+                        stored_dir, wd
+                    )
+                except Exception:
+                    pass
+                chosen = sid
+                break
+            if not stored_dir and wd:
                 logger.info(
-                    f"{issue_key}: bound session {sid} is for another clone "
-                    f"({stored_dir}); starting a new OpenCode session"
+                    f"{issue_key}: session {sid} has no stored directory; "
+                    f"resuming on live clone {wd}"
                 )
-                return None
-        except Exception as e:
-            logger.debug(f"{issue_key}: session dir check failed: {e}")
-            self._freeze_session_binds.add(issue_key)
+                chosen = sid
+                break
+        if not chosen:
             return None
-        task.session_id = sid
+        task.session_id = chosen
         try:
             self.state_manager.update_state(
-                issue_key, current_opencode_session_id=sid
+                issue_key, current_opencode_session_id=chosen
             )
         except Exception:
             pass
-        self._link_job_opencode_session(issue_key, sid)
+        self._link_job_opencode_session(issue_key, chosen)
         logger.info(
-            f"{issue_key}: resuming OpenCode session {sid} for "
+            f"{issue_key}: resuming OpenCode session {chosen} for "
             f"{repo}@{branch}→{target}"
         )
-        return sid
+        return chosen
 
     def _should_bind_opencode_session(self, issue_key: str) -> bool:
         """Oracle/sandbox must not overwrite the plan/build session bind."""
