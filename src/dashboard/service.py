@@ -39,6 +39,9 @@ from src.opencode_sessions import (
     extract_session_ids_from_text,
     find_sessions_for_issue,
     list_session_chat,
+    strip_internal_markup,
+    strip_omo_mode_wrap,
+    is_omo_mode_wrap_text,
 )
 from src.orchestrator.workflow_router import WorkflowType
 from src.state.job_store import (
@@ -1433,8 +1436,68 @@ def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
     return ids
 
 
+_CHAT_WRAP_RESTART_SLACK_MS = 2_000
+
+
+def _job_wrap_restart_ms(job: Dict[str, Any]) -> Optional[int]:
+    """Timestamp where this job's prompt may repeat the previous [search-mode] kit."""
+    started = _job_started_ms(job)
+    if started is None:
+        return None
+    return started - _CHAT_WRAP_RESTART_SLACK_MS
+
+
+def _job_prompt_for_chat(job: Dict[str, Any]) -> str:
+    """Best-effort operator prompt when the session window has no user turn."""
+    from src.state.job_store import extract_task_description_from_prompt
+
+    for path in _job_prompt_paths(job):
+        if not path:
+            continue
+        try:
+            raw = Path(str(path)).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = description_from_prompt_path(path)
+        text = (raw or "").strip()
+        if not text:
+            continue
+        cleaned = strip_internal_markup(text)
+        if is_omo_mode_wrap_text(cleaned):
+            cleaned = strip_omo_mode_wrap(cleaned)
+        extracted = extract_task_description_from_prompt(cleaned)
+        body = (extracted or cleaned).strip()
+        if body:
+            return body
+    for key in ("description", "summary"):
+        body = str(job.get(key) or "").strip()
+        if body:
+            return body
+    return ""
+
+
+def _synthetic_user_message(
+    job: Dict[str, Any], *, session_id: str, text: str
+) -> Dict[str, Any]:
+    return {
+        "id": f"{job.get('job_id') or 'job'}:prompt",
+        "session_id": session_id,
+        "role": "user",
+        "raw_role": "user",
+        "finish": None,
+        "summary": False,
+        "agent": None,
+        "created_at": job.get("started_at"),
+        "parts": [{"id": "prompt", "type": "text", "text": text}],
+    }
+
+
 def collect_job_chat(job: Any) -> Dict[str, Any]:
-    """Full OpenCode chat history for sessions linked to this job."""
+    """OpenCode chat for sessions linked to this job.
+
+    Continuing / re-queueing resumes the same ``ses_*``. The dashboard must
+    show the full prompt + model history from that session, including this
+    run's new operator turn (not only the cancelled job's first prompt).
+    """
     if hasattr(job, "model_dump"):
         job = job.model_dump()
     if not isinstance(job, dict):
@@ -1445,10 +1508,11 @@ def collect_job_chat(job: Any) -> Dict[str, Any]:
             "messages": [],
         }
     sids = _job_opencode_session_ids(job)
+    restart_ms = _job_wrap_restart_ms(job)
     sessions: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
     for sid in sids:
-        chat = list_session_chat(sid)
+        chat = list_session_chat(sid, restart_wraps_at_ms=restart_ms)
         sessions.append(
             {
                 "session_id": sid,
@@ -1461,6 +1525,17 @@ def collect_job_chat(job: Any) -> Dict[str, Any]:
         )
         for msg in chat.get("messages") or []:
             messages.append(msg)
+    if not any(m.get("role") == "user" for m in messages):
+        preview = _job_prompt_for_chat(job)
+        if preview:
+            messages.insert(
+                0,
+                _synthetic_user_message(
+                    job, session_id=sids[0] if sids else "", text=preview
+                ),
+            )
+            if sessions:
+                sessions[0]["message_count"] = len(messages)
     return {
         "job_id": job.get("job_id") or "",
         "session_ids": sids,
