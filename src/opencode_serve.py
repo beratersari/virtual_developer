@@ -712,6 +712,45 @@ class ServeOrchestrator:
             timed_out=True,
         )
 
+    async def _ensure_session_idle(
+        self,
+        sid: str,
+        *,
+        _emit: Callable[[str, str], None],
+        _aborted: Callable[[], bool],
+        wait_seconds: float = 30.0,
+    ) -> None:
+        """Abort a leftover turn before posting a new job prompt.
+
+        Cancel often kills our HTTP client without aborting OpenCode. A new
+        POST /message then 500s while the old turn keeps editing files.
+        """
+        try:
+            status = await self.client.session_status()
+        except Exception as e:
+            _emit("stdout", f"[serve] status check failed: {e}")
+            return
+        if not session_is_busy(status, sid):
+            return
+        _emit(
+            "stdout",
+            f"[serve] session {sid} still busy; aborting leftover turn",
+        )
+        await self.client.abort(sid)
+        deadline = time.time() + max(1.0, float(wait_seconds))
+        while time.time() < deadline:
+            if _aborted():
+                return
+            await asyncio.sleep(0.15)
+            try:
+                status = await self.client.session_status()
+            except Exception:
+                return
+            if not session_is_busy(status, sid):
+                _emit("stdout", "[serve] session idle after abort")
+                return
+        _emit("stdout", "[serve] session still busy after abort wait")
+
     async def run(
         self,
         *,
@@ -776,6 +815,9 @@ class ServeOrchestrator:
                 )
         else:
             _emit("stdout", f"[serve] session resumed: {sid}")
+            await self._ensure_session_idle(
+                sid, _emit=_emit, _aborted=_aborted
+            )
         if not sid:
             return ServeTurnResult(
                 session_id=None,
@@ -837,8 +879,36 @@ class ServeOrchestrator:
                 note = f"[serve] message failed: {err}"
                 _emit("stderr", note)
                 if not timed_out_send:
-                    # Hard send error — retry may Continue. Do not abort a
-                    # session we never successfully started a turn on.
+                    # 500 on a resumed/busy session often means OpenCode already
+                    # has a turn running (cancel did not abort). Do not retry
+                    # BUILD — wait that turn out.
+                    try:
+                        st500 = await self.client.session_status()
+                        busy500 = session_is_busy(st500, sid)
+                    except Exception:
+                        busy500 = False
+                    if busy500:
+                        _emit(
+                            "stdout",
+                            "[serve] HTTP error but session is busy — "
+                            "waiting for the in-flight turn (no extra prompt)",
+                        )
+                        wait_info = await self._wait_for_auto_compact(
+                            sid,
+                            _emit=_emit,
+                            _aborted=_aborted,
+                            compact_total=compact_total,
+                        )
+                        return await self._turn_after_compact_wait(
+                            sid,
+                            wait_info=wait_info,
+                            compact_total=compact_total,
+                            continue_count=continue_count,
+                            turns=turns,
+                            lines=lines,
+                            http_note=note,
+                            _emit=_emit,
+                        )
                     return ServeTurnResult(
                         session_id=sid,
                         returncode=1,
