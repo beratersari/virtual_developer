@@ -752,7 +752,7 @@ def test_chat_display_role_compaction_is_not_user():
             summary=True,
             parts=[{"type": "text", "text": "## Compaction summary"}],
         )
-        == "compaction"
+        == "summary"
     )
     assert (
         chat_display_role(
@@ -814,6 +814,22 @@ def test_chat_display_role_compaction_is_not_user():
     # First task prompt is wrapped by the plugin — still the operator message.
     assert (
         chat_display_role("user", parts=[{"type": "text", "text": search}]) == "user"
+    )
+    tagged_task = (
+        "1. TASK: Implement KAN-1 calculator add.\n\n"
+        "<!-- OMO_INTERNAL_INITIATOR -->"
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": tagged_task}])
+        == "user"
+    )
+    after_compact = (
+        "Continue after context compaction. Finish all remaining todos "
+        "and complete the original task."
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": after_compact}])
+        == "skip"
     )
 
 

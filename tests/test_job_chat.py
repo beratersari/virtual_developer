@@ -262,7 +262,9 @@ def test_list_session_chat_compaction_is_not_user_role(tmp_path: Path):
     )
     chat = list_session_chat("ses_chat1", db_path=db)
     roles = [(m["role"], (m["parts"][0].get("text") or "")[:40]) for m in chat["messages"]]
-    assert [r[0] for r in roles] == ["user", "compaction", "compaction", "assistant"], roles
+    assert [r[0] for r in roles] == ["user", "compaction", "summary", "assistant"], roles
+    summary = next(m for m in chat["messages"] if m["role"] == "summary")
+    assert "Work so far" in (summary["parts"][0].get("text") or "")
     assert all(m["role"] != "user" or "Continue the previous" not in (m["parts"][0].get("text") or "") for m in chat["messages"])
 
 
@@ -302,6 +304,72 @@ def test_list_session_chat_keeps_first_search_mode_prompt(tmp_path: Path):
     assert "[search-mode]" not in body
     assert "Retry kit must be hidden" not in body
     assert [m["role"] for m in chat["messages"]] == ["user", "assistant", "assistant"]
+
+
+def test_list_session_chat_keeps_omo_tagged_task_on_resume(tmp_path: Path):
+    """Continuing an older session must still show the original operator prompt.
+
+    oh-my-openagent appends ``<!-- OMO_INTERNAL_INITIATOR -->`` to real TASK
+    text. Matching that tag anywhere used to skip the first user turn.
+    """
+    first = (
+        "1. TASK: Implement KAN-1 calculator add.\n\n"
+        "2. EXPECTED OUTCOME: tests pass.\n\n"
+        "<!-- OMO_INTERNAL_INITIATOR -->\n<!-- OMO_INTERNAL_NOREPLY -->"
+    )
+    db = _chat_db(
+        tmp_path / "resume.db",
+        messages=[
+            ("msg_old", {"role": "user"}, [{"type": "text", "text": first}]),
+            (
+                "msg_a1",
+                {"role": "assistant", "finish": "stop", "agent": "Atlas"},
+                [{"type": "text", "text": "Working on add()."}],
+            ),
+            (
+                "msg_c",
+                {"role": "user"},
+                [{"type": "compaction", "auto": True}],
+            ),
+            (
+                "msg_sum",
+                {"role": "assistant", "agent": "compaction", "summary": True},
+                [{"type": "text", "text": "## Objective\n- Implement add() for KAN-1"}],
+            ),
+            (
+                "msg_cont",
+                {"role": "user"},
+                [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Continue after context compaction. Finish all remaining "
+                            "todos and complete the original task."
+                        ),
+                    }
+                ],
+            ),
+            (
+                "msg_a2",
+                {"role": "assistant", "finish": "stop", "agent": "Atlas"},
+                [{"type": "text", "text": "add() done."}],
+            ),
+        ],
+    )
+    chat = list_session_chat("ses_chat1", db_path=db)
+    roles = [m["role"] for m in chat["messages"]]
+    assert roles == ["user", "assistant", "compaction", "summary", "assistant"], roles
+    user = chat["messages"][0]
+    body = user["parts"][0].get("text") or ""
+    assert "Implement KAN-1" in body
+    assert "OMO_INTERNAL" not in body
+    assert all(
+        "Continue after context" not in (m["parts"][0].get("text") or "")
+        for m in chat["messages"]
+        if m["role"] == "user"
+    )
+    assert chat["messages"][3]["role"] == "summary"
+    assert "Implement add()" in (chat["messages"][3]["parts"][0].get("text") or "")
 
 
 def test_collect_job_chat_discovers_session_by_working_directory(tmp_path: Path):
