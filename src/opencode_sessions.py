@@ -464,18 +464,28 @@ _MAX_CHAT_PARTS = 20_000
 _MAX_CHAT_PART_TEXT = 32_000
 
 
-def _epoch_to_iso(raw: Any) -> Optional[str]:
-    """OpenCode stores epoch ms (sometimes seconds) on message/part rows."""
+def _coerce_epoch_ms(raw: Any) -> Optional[int]:
+    """Normalize OpenCode epoch seconds or milliseconds to milliseconds."""
     try:
         n = float(raw)
     except (TypeError, ValueError):
         return None
-    if n > 10_000_000_000:  # ms
-        n = n / 1000.0
     if n <= 0:
         return None
+    if n > 10_000_000_000:  # already ms
+        return int(n)
+    return int(n * 1000.0)
+
+
+def _epoch_to_iso(raw: Any) -> Optional[str]:
+    """OpenCode stores epoch ms (sometimes seconds) on message/part rows."""
+    ms = _coerce_epoch_ms(raw)
+    if ms is None:
+        return None
     try:
-        return datetime.fromtimestamp(n, tz=timezone.utc).isoformat(timespec="seconds")
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        )
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -766,11 +776,19 @@ def list_session_chat(
     *,
     db_path: Optional[Path] = None,
     limit: int = _MAX_CHAT_MESSAGES,
+    since_ms: Optional[int] = None,
+    until_ms: Optional[int] = None,
+    restart_wraps_at_ms: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Load full OpenCode chat (messages + parts) for a session id.
+    """Load OpenCode chat (messages + parts) for a session id.
 
     Parts live in a separate ``part`` table in current OpenCode DBs. Older
     snapshots may embed ``parts`` on the message JSON — both are accepted.
+
+    Continuing a session must keep the full transcript. ``restart_wraps_at_ms``
+    (this job's start) only resets the "[search-mode] show once" rule so the
+    new run's prompt is not dropped as a retry. ``since_ms`` / ``until_ms``
+    remain optional filters for callers that need a slice.
     """
     sid = (session_id or "").strip()
     result: Dict[str, Any] = {
@@ -814,11 +832,27 @@ def list_session_chat(
             ORDER BY time_created ASC
             LIMIT ?
             """,
-            (sid, cap + 1),
+            (sid, max(cap + 1, 10_000)),
         ).fetchall()
+        if since_ms is not None or until_ms is not None:
+            scoped: List[Any] = []
+            for row in msg_rows:
+                ms = _coerce_epoch_ms(row["time_created"]) or 0
+                if since_ms is not None and ms < int(since_ms):
+                    continue
+                if until_ms is not None and ms > int(until_ms):
+                    continue
+                scoped.append(row)
+            msg_rows = scoped
         if len(msg_rows) > cap:
             result["truncated"] = True
-            msg_rows = msg_rows[:cap]
+            if restart_wraps_at_ms is not None:
+                # Full continued transcript (fetch already capped at 10k).
+                pass
+            elif since_ms is not None:
+                msg_rows = msg_rows[-cap:]
+            else:
+                msg_rows = msg_rows[:cap]
 
         parts_by_msg: Dict[str, List[Dict[str, Any]]] = {r["id"]: [] for r in msg_rows}
         if msg_rows:
@@ -849,6 +883,7 @@ def list_session_chat(
 
         messages: List[Dict[str, Any]] = []
         shown_user = False
+        wraps_restarted = restart_wraps_at_ms is None
         for row in msg_rows:
             raw = row["data"]
             data = json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -885,8 +920,19 @@ def list_session_chat(
             )
             if display_role == "skip":
                 continue
+            row_ms = _coerce_epoch_ms(row["time_created"])
+            if (
+                restart_wraps_at_ms is not None
+                and not wraps_restarted
+                and row_ms is not None
+                and row_ms >= int(restart_wraps_at_ms)
+            ):
+                # New job resumed this session — allow this run's prompt
+                # even when it is the same [search-mode] kit as last time.
+                shown_user = False
+                wraps_restarted = True
             # Plugin wraps the first task prompt with [search-mode]. Show that
-            # once; later wraps are retries / auto-injects, not the operator.
+            # once per run; later wraps in the same run are retries.
             if (
                 display_role == "user"
                 and shown_user

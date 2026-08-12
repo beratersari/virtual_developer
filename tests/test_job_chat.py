@@ -21,7 +21,8 @@ def _chat_db(
     *,
     session_id: str = "ses_chat1",
     title: str = "KAN-1: work",
-    messages: list[tuple[str, dict, list[dict]]] | None = None,
+    messages: list | None = None,
+    base_time_ms: int | None = None,
 ) -> Path:
     """Create session + message + part tables."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,8 +74,19 @@ def _chat_db(
         """,
         (session_id, title, "/tmp/clone", "atlas", 1, 2, 0.0, 0, 0),
     )
-    for i, (mid, msg, parts) in enumerate(messages or []):
-        t = 1000 + i
+    import time as _time
+
+    default_base = (
+        int(base_time_ms)
+        if base_time_ms is not None
+        else int(_time.time() * 1000)
+    )
+    for i, row in enumerate(messages or []):
+        if len(row) == 4:
+            mid, msg, parts, t = row
+        else:
+            mid, msg, parts = row
+            t = default_base + (i * 1000)
         con.execute(
             """
             INSERT INTO message (id, session_id, time_created, time_updated, data)
@@ -495,3 +507,245 @@ def test_api_job_chat(tmp_path: Path, monkeypatch):
         assert body["messages"][0]["parts"][0]["text"] == "build it"
         assert client.get("/api/jobs/missing/chat").status_code == 404
         assert client.get("/api/jobs/legacy_x/chat").status_code == 404
+
+
+def _iso_ms(ms: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(
+        timespec="seconds"
+    )
+
+
+_OMO_WRAP_A = (
+    "[search-mode] MAXIMIZE SEARCH EFFORT.\n\n"
+    "# Build mode\n\nFirst scheduled run: add() for KAN-9\n"
+)
+_OMO_WRAP_B = (
+    "[search-mode] MAXIMIZE SEARCH EFFORT.\n\n"
+    "# Build mode\n\nSecond run after cancel: add() for KAN-9\n"
+)
+
+
+def test_list_session_chat_hides_intra_job_retry_wrap(tmp_path: Path):
+    t0 = 1_786_500_000_000
+    db = _chat_db(
+        tmp_path / "retry.db",
+        messages=[
+            ("u1", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0),
+            (
+                "a1",
+                {"role": "assistant"},
+                [{"type": "text", "text": "working"}],
+                t0 + 2_000,
+            ),
+            ("u2", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0 + 4_000),
+            (
+                "a2",
+                {"role": "assistant"},
+                [{"type": "text", "text": "retrying"}],
+                t0 + 5_000,
+            ),
+        ],
+    )
+    chat = list_session_chat("ses_chat1", db_path=db)
+    users = [m for m in chat["messages"] if m["role"] == "user"]
+    assert len(users) == 1
+    assert "First scheduled run" in (users[0]["parts"][0].get("text") or "")
+
+
+def test_collect_job_chat_continued_session_keeps_full_history(tmp_path: Path):
+    """Continue after cancel: all prior prompts and model replies stay visible."""
+    t0 = 1_786_510_000_000
+    db = _chat_db(
+        tmp_path / "requeue.db",
+        messages=[
+            ("u1", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0 + 1_000),
+            (
+                "a1",
+                {"role": "assistant", "agent": "Atlas"},
+                [{"type": "text", "text": "cancelled mid-run"}],
+                t0 + 60_000,
+            ),
+            (
+                "u2",
+                {"role": "user"},
+                [{"type": "text", "text": _OMO_WRAP_B}],
+                t0 + 8 * 60_000,
+            ),
+            (
+                "a2",
+                {"role": "assistant", "agent": "Atlas"},
+                [{"type": "text", "text": "second run"}],
+                t0 + 8 * 60_000 + 2_000,
+            ),
+        ],
+    )
+    job2 = {
+        "job_id": "job_second",
+        "status": "running",
+        "started_at": _iso_ms(t0 + 8 * 60_000 - 500),
+        "opencode_session_id": "ses_chat1",
+        "opencode_session_ids": ["ses_chat1"],
+        "description": "Second run after cancel: add() for KAN-9",
+        "retry_attempts": [],
+        "session_log_paths": [],
+    }
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        second = collect_job_chat(job2)
+    roles = [(m["role"], (m["parts"][0].get("text") or "")) for m in second["messages"]]
+    users = [t for r, t in roles if r == "user"]
+    assistants = [t for r, t in roles if r == "assistant"]
+    assert len(users) == 2, roles
+    assert "First scheduled run" in users[0]
+    assert "Second run after cancel" in users[1]
+    assert assistants == ["cancelled mid-run", "second run"]
+
+
+def test_collect_job_chat_same_explanation_after_cancel(tmp_path: Path):
+    """Same Jira text on requeue is still a new operator turn for the new job."""
+    t0 = 1_786_520_000_000
+    same = _OMO_WRAP_A
+    db = _chat_db(
+        tmp_path / "same.db",
+        messages=[
+            ("u1", {"role": "user"}, [{"type": "text", "text": same}], t0 + 1_000),
+            (
+                "a1",
+                {"role": "assistant"},
+                [{"type": "text", "text": "old"}],
+                t0 + 2_000,
+            ),
+            ("u2", {"role": "user"}, [{"type": "text", "text": same}], t0 + 400_000),
+            (
+                "a2",
+                {"role": "assistant"},
+                [{"type": "text", "text": "new"}],
+                t0 + 401_000,
+            ),
+        ],
+    )
+    job2 = {
+        "job_id": "job_again",
+        "status": "executing",
+        "started_at": _iso_ms(t0 + 399_000),
+        "opencode_session_id": "ses_chat1",
+        "opencode_session_ids": ["ses_chat1"],
+        "description": "First scheduled run: add() for KAN-9",
+        "retry_attempts": [],
+        "session_log_paths": [],
+    }
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        out = collect_job_chat(job2)
+    users = [m for m in out["messages"] if m["role"] == "user"]
+    assistants = [m for m in out["messages"] if m["role"] == "assistant"]
+    assert len(users) == 2, [m["role"] for m in out["messages"]]
+    assert all("First scheduled run" in (u["parts"][0].get("text") or "") for u in users)
+    assert [m["parts"][0].get("text") for m in assistants] == ["old", "new"]
+
+
+def test_collect_job_chat_synthesizes_prompt_when_window_has_no_user(tmp_path: Path):
+    t0 = 1_786_530_000_000
+    db = _chat_db(
+        tmp_path / "synth.db",
+        messages=[
+            (
+                "cont",
+                {"role": "user"},
+                [
+                    {
+                        "type": "text",
+                        "text": "Continue after context compaction. Finish all remaining todos.",
+                    }
+                ],
+                t0 + 1_000,
+            ),
+            (
+                "a1",
+                {"role": "assistant"},
+                [{"type": "text", "text": "resumed"}],
+                t0 + 2_000,
+            ),
+        ],
+    )
+    prompt = tmp_path / "job.prompt.txt"
+    prompt.write_text(
+        "# Direct\n\n## Task\nRequeued after cancel: implement add\n\n# Instructions\n1. go\n",
+        encoding="utf-8",
+    )
+    job = {
+        "job_id": "job_synth",
+        "status": "running",
+        "started_at": _iso_ms(t0),
+        "opencode_session_id": "ses_chat1",
+        "opencode_session_ids": ["ses_chat1"],
+        "description": "Requeued after cancel: implement add",
+        "prompt_path": str(prompt),
+        "retry_attempts": [],
+        "session_log_paths": [],
+    }
+    with patch("src.opencode_sessions._default_db_path", return_value=db):
+        out = collect_job_chat(job)
+    users = [m for m in out["messages"] if m["role"] == "user"]
+    assert len(users) == 1
+    assert "implement add" in (users[0]["parts"][0].get("text") or "").lower()
+    assert users[0]["id"].endswith(":prompt")
+
+
+def test_list_session_chat_restart_wraps_keeps_history_and_new_prompt(tmp_path: Path):
+    t0 = 1_786_545_000_000
+    db = _chat_db(
+        tmp_path / "wraps.db",
+        messages=[
+            ("u1", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0),
+            (
+                "a1",
+                {"role": "assistant"},
+                [{"type": "text", "text": "old answer"}],
+                t0 + 1_000,
+            ),
+            ("c1", {"role": "user"}, [{"type": "compaction", "auto": True}], t0 + 2_000),
+            (
+                "s1",
+                {"role": "assistant", "agent": "compaction", "summary": True},
+                [{"type": "text", "text": "## Objective\n- old work"}],
+                t0 + 3_000,
+            ),
+            ("u2", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0 + 20_000),
+            (
+                "a2",
+                {"role": "assistant"},
+                [{"type": "text", "text": "new answer"}],
+                t0 + 21_000,
+            ),
+            ("u3", {"role": "user"}, [{"type": "text", "text": _OMO_WRAP_A}], t0 + 22_000),
+        ],
+    )
+    chat = list_session_chat(
+        "ses_chat1", db_path=db, restart_wraps_at_ms=t0 + 15_000
+    )
+    users = [m for m in chat["messages"] if m["role"] == "user"]
+    assistants = [m for m in chat["messages"] if m["role"] == "assistant"]
+    summaries = [m for m in chat["messages"] if m["role"] == "summary"]
+    assert len(users) == 2
+    assert len(assistants) == 2
+    assert assistants[0]["parts"][0]["text"] == "old answer"
+    assert assistants[1]["parts"][0]["text"] == "new answer"
+    assert summaries and "old work" in (summaries[0]["parts"][0].get("text") or "")
+
+
+def test_list_session_chat_since_until_excludes_other_run(tmp_path: Path):
+    t0 = 1_786_540_000_000
+    db = _chat_db(
+        tmp_path / "win.db",
+        messages=[
+            ("u1", {"role": "user"}, [{"type": "text", "text": "old prompt"}], t0),
+            ("u2", {"role": "user"}, [{"type": "text", "text": "new prompt"}], t0 + 50_000),
+        ],
+    )
+    early = list_session_chat(
+        "ses_chat1", db_path=db, since_ms=t0 - 100, until_ms=t0 + 10_000
+    )
+    late = list_session_chat("ses_chat1", db_path=db, since_ms=t0 + 40_000)
+    assert [m["parts"][0]["text"] for m in early["messages"]] == ["old prompt"]
+    assert [m["parts"][0]["text"] for m in late["messages"]] == ["new prompt"]
