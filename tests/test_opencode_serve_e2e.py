@@ -65,6 +65,7 @@ class FakeServeBackend:
         # Stay idle (incomplete) for this many status polls, then auto-complete.
         self.idle_polls_before_auto_complete = 1
         self._idle_polls = 0
+        self.busy_until_aborted = False
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -179,6 +180,8 @@ class FakeServeBackend:
 
     async def session_status(self) -> Dict[str, Any]:
         self.status_polls += 1
+        if self.busy_until_aborted and not self.aborted:
+            return {self.session_id: {"type": "busy"}}
         if self.busy_polls_remaining > 0:
             self.busy_polls_remaining -= 1
             return {self.session_id: {"type": "busy"}}
@@ -815,3 +818,78 @@ async def test_e2e_http_timeout_idle_waits_for_auto_resume_no_second_prompt():
     assert backend.message_calls == 1
     assert backend.prompts == ["# Build mode\ndo the work"]
     assert all("Finish remaining todos" not in p for p in backend.prompts)
+
+
+def _http_500() -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://fake/session/ses_x/message")
+    resp = httpx.Response(
+        500,
+        json={
+            "name": "UnknownError",
+            "data": {
+                "message": "Unexpected server error. Check server logs for details.",
+                "ref": "err_test",
+            },
+        },
+        request=req,
+    )
+    return httpx.HTTPStatusError("500", request=req, response=resp)
+
+
+@pytest.mark.asyncio
+async def test_resume_aborts_leftover_busy_session_before_prompt():
+    """Cancel often leaves serve busy; a new POST 500s unless we abort first."""
+    backend = FakeServeBackend(required_compacts=0)
+    backend.busy_until_aborted = True
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="NEW JOB PROMPT",
+        title="KAN-RESUME",
+        session_id=backend.session_id,
+    )
+    assert backend.aborted is True
+    assert backend.message_calls == 1
+    assert backend.prompts == ["NEW JOB PROMPT"]
+    assert result.returncode == 0, result.stderr
+    assert "still busy; aborting leftover turn" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_http_500_while_busy_waits_does_not_fail_job():
+    """500 + busy means OpenCode is already working — wait, do not retry BUILD."""
+
+    class FailThenBusy(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self._failed = False
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 2
+
+        async def send_message(self, session_id, text, **kwargs):
+            if not self._failed:
+                self._failed = True
+                self.prompts.append(text)
+                self.message_calls += 1
+                self.busy_polls_remaining = 2
+                raise _http_500()
+            return await super().send_message(session_id, text, **kwargs)
+
+    backend = FailThenBusy()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=1.5,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.08,
+    )
+    result = await orch.run(prompt="do the work", title="KAN-500")
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 1
+    assert "session is busy" in result.stdout
+    assert "message failed" in (result.stdout + result.stderr)
