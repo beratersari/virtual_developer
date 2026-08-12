@@ -246,7 +246,6 @@ async def test_live_simple_task_atlas_build_prompt_timing(
     serve_log = tmp_path / "opencode-serve.log"
     proc = None
 
-    monkeypatch.setattr(settings, "opencode_run_mode", "serve")
     monkeypatch.setattr(settings, "opencode_serve_url", base)
     monkeypatch.setattr(settings, "agent_prompts_dir", REPO_ROOT / "agent")
     monkeypatch.setattr(settings, "default_agent", "atlas")

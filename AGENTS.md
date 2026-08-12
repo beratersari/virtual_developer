@@ -507,7 +507,7 @@ When TUI shows nothing, **logs still exist**:
 
 ### 9.7 Agent_runner note
 
-Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI.
+Daemon/agent runs use **opencode serve** with the issue temp clone as the session directory. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI. `start-backend.bat` / `start.bat` probe `:4096/global/health` and start serve if needed (`Ensure-OpencodeServe.ps1`). `start-opencode-serve.bat` still force-restarts serve.
 
 ### 9.8 Product start scripts, SPA, PowerShell — hard-won devops rules
 
@@ -517,7 +517,7 @@ This subsection captures failures paid for while shipping offline **backend + fr
 
 | Launcher | Port | Process | Notes |
 |----------|------|---------|--------|
-| `start-backend.bat` | **8080** | `python -m src.daemon` | Poller + jobs + REST + WS. Also serves SPA from `web\dist` if present. Bind default **`0.0.0.0`**. |
+| `start-backend.bat` | **8080** | `python -m src.daemon` | Ensures OpenCode serve on **:4096** (reuse if healthy), then poller + jobs + REST + WS. Also serves SPA from `web\dist` if present. Bind default **`0.0.0.0`**. |
 | `start-frontend.bat` | **5173** | `serve_frontend.py` (uvicorn) | Prebuilt SPA + **reverse proxy** `/api` and `/ws` → `http://127.0.0.1:8080`. **No Node/Vite** in the offline package. |
 | `start.bat` | both | calls backend then frontend | Prefer this for “everything up.” |
 | `start-opencode.bat` | n/a | OpenCode TUI only | Unrelated to the ops dashboard. |
@@ -578,7 +578,8 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 
 | Path | Role |
 |------|------|
-| `packaging/windows/start-backend.bat` | Backend launcher |
+| `packaging/windows/start-backend.bat` | Backend launcher (ensures OpenCode serve first) |
+| `packaging/windows/Ensure-OpencodeServe.ps1` | Probe/start sibling `opencode serve` without killing the daemon |
 | `packaging/windows/start-frontend.bat` | Frontend launcher |
 | `packaging/windows/start.bat` | Both |
 | `packaging/windows/Stop-VdProcesses.ps1` | Port free + optional daemon kill |

@@ -28,7 +28,7 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
                                         │
                                         ▼
 ┌──────────────────────── JIRA Virtual Developer (one process) ────────────────┐
-│  Board Poller  →  Job Processor  →  Agent Runner (opencode run --dir …)       │
+│  Board Poller  →  Job Processor  →  Agent Runner (opencode serve + --dir)     │
 │        │                  │                                                   │
 │        │                  ├─ temp clone: feature/{ISSUE} from issue {params}  │
 │        │                  ├─ Jira comments (progress / plan / error / done)   │
@@ -336,7 +336,7 @@ Repo URL and branches always come from the issue `{params}` block.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
-| `DEFAULT_MODEL` | (see `.env.example`) | Passed to `opencode run --model` |
+| `DEFAULT_MODEL` | (see `.env.example`) | Passed to OpenCode serve as the job model |
 | `DEFAULT_AGENT` | `atlas` | OpenCode agent for plan and build jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |

@@ -145,7 +145,6 @@ async def test_live_auto_compact_via_reduced_context_is_not_false_complete(
     log_path = tmp_path / "serve-small-ctx.log"
     proc = None
 
-    monkeypatch.setattr(settings, "opencode_run_mode", "serve")
     monkeypatch.setattr(settings, "opencode_serve_url", base)
     monkeypatch.setattr(settings, "agent_prompts_dir", REPO_ROOT / "agent")
     monkeypatch.setattr(settings, "default_model", FULL_MODEL)

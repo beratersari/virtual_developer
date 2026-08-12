@@ -1,8 +1,7 @@
-"""E2E: same git repo + work branch resumes OpenCode session (CLI path).
+"""E2E: same git repo + work branch resumes OpenCode session.
 
 1. First issue on repo@feature/shared creates ses_shared and binds it.
-2. Second issue on the same repo+branch starts with that session_id
-   (CLI would pass ``--session``).
+2. Second issue on the same repo+branch starts with that session_id.
 3. Dashboard DELETE /api/opencode-sessions/{id} clears the bind.
 4. Third issue starts cold (no session_id).
 """
@@ -118,7 +117,7 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
         sm.create_state(key, f"work {key}", _params(repo, branch))
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.opencode_cli = "opencode"
-            s.opencode_run_mode = "cli"
+            s.opencode_serve_url = "http://127.0.0.1:4096"
             s.default_model = "opencode/x"
             s.agent_task_timeout_seconds = 30
             s.agent_task_max_retries = 0
@@ -138,20 +137,6 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     assert bound.get("working_directory")
     # Second issue continues because both jobs use the same clone folder
     # (stable temp dir) and OpenCode still lists ses_new_1 under that dir.
-
-    # CLI argv would include --session for a real run_agent
-    cmd = runner._build_command(
-        AgentTask(
-            description="check",
-            prompt="do it",
-            agent="atlas",
-            issue_key="KAN-B",
-            session_id=first_sid,
-        ),
-        tmp_path / "cmd.log",
-    )
-    assert "--session" in cmd
-    assert first_sid in cmd
 
     await run_issue("KAN-B")
     assert seen[1]["issue_key"] == "KAN-B"

@@ -161,7 +161,7 @@ def compute_stuck_limit_seconds(
     """Wall-clock stuck-watchdog budget for one in-flight issue.
 
     ``extra_attempts`` covers compact/incomplete continues that are *not*
-    generic error retries (CLI incomplete resumes + serve compact continues).
+    generic error retries.
     Formula: ``timeout * (retries + extra + 1) * 1.5``.
     """
     try:
@@ -210,19 +210,13 @@ class Settings(BaseSettings):
     )
 
     # Oh My OpenAgent Configuration
-    opencode_cli: str = Field(default="opencode", description="OpenCode CLI command")
-    # How to drive OpenCode: "cli" = opencode run subprocess (default);
-    # "serve" = HTTP control loop against opencode serve (compact-aware continue).
-    opencode_run_mode: str = Field(
-        default="cli",
-        description=(
-            "OpenCode drive mode: 'cli' (opencode run) or 'serve' "
-            "(HTTP to opencode serve with multi-compact continue)"
-        ),
+    opencode_cli: str = Field(
+        default="opencode",
+        description="OpenCode binary for the TUI and `opencode models`. Jobs use serve.",
     )
     opencode_serve_url: str = Field(
         default="http://127.0.0.1:4096",
-        description="Base URL for opencode serve when opencode_run_mode=serve",
+        description="Base URL for the required opencode serve process",
     )
     opencode_serve_max_compact_continues: int = Field(
         default=256,
@@ -401,9 +395,8 @@ class Settings(BaseSettings):
     agent_task_max_incomplete_retries: int = Field(
         default=256,
         description=(
-            "Extra CLI/retry budget when OpenCode exits 0 after compaction "
-            "(incomplete session). Independent of agent_task_max_retries so a "
-            "compact-then-stop is resumed, not treated as a generic error. "
+            "Extra retry budget when a serve session is incomplete after compact "
+            "is waited out. Independent of agent_task_max_retries. "
             "0 = do not retry incomplete beyond max_retries."
         ),
     )

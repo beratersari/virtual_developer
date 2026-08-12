@@ -297,7 +297,7 @@ foreach ($launcher in @(
     Copy-Item -LiteralPath $srcLauncher -Destination (Join-Path $payload $launcher) -Force
     Write-Host "  + $launcher"
 }
-foreach ($helper in @("Wait-Http.ps1", "Stop-VdProcesses.ps1", "serve_frontend.py")) {
+foreach ($helper in @("Wait-Http.ps1", "Stop-VdProcesses.ps1", "Ensure-OpencodeServe.ps1", "serve_frontend.py")) {
     $hp = Join-Path $root "packaging\windows\$helper"
     if (-not (Test-Path -LiteralPath $hp)) {
         throw "packaging\windows\$helper missing"

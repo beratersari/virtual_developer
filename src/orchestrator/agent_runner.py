@@ -1,10 +1,8 @@
-"""Agent runner that interfaces with Oh My OpenAgent via CLI."""
+"""Agent runner that drives Oh My OpenAgent over ``opencode serve``."""
 
 import asyncio
-import json
 import os
 import platform
-import shlex
 import subprocess
 import time
 import uuid
@@ -190,7 +188,7 @@ class AgentTask:
 
 
 class AgentRunner:
-    """Runs agents using Oh My OpenAgent CLI."""
+    """Runs agents via OpenCode HTTP serve (same session, auto-compact)."""
 
     def __init__(self, working_directory: Optional[Path] = None):
         self.working_directory = working_directory
@@ -270,10 +268,7 @@ class AgentRunner:
             except Exception as e:
                 logger.debug(f"on_session_file callback failed: {e}")
 
-        # Serve mode: HTTP control loop (compact-aware continue) instead of CLI
-        run_mode = (getattr(settings, "opencode_run_mode", None) or "cli").strip().lower()
         published_sid = {"id": None, "last_db": 0.0}
-        run_started_ms = time.time() * 1000.0
 
         def _publish_session(sid: Optional[str]) -> None:
             sid = (sid or "").strip()
@@ -309,272 +304,17 @@ class AgentRunner:
         if getattr(task, "session_id", None):
             _publish_session(str(task.session_id))
 
-        if run_mode == "serve":
-            return await self._run_agent_via_serve(
-                task,
-                session_file=session_file,
-                on_output=on_output,
-                on_complete=on_complete,
-                on_progress=on_progress,
-                on_session_id=_publish_session,
-                timeout_seconds=effective_timeout,
-                start_time=start_time,
-            )
-
-        # Build the command as a list (cross-platform)
-        cmd_list = self._build_command(task, session_file)
-        logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
-        
-        # Open session file for writing output
-        with open(session_file, 'w', encoding='utf-8') as session_fh:
-            # Run the process using exec (no shell) for cross-platform compatibility
-            # On Windows, we need to use shell=False and handle the command differently
-            child_env = _agent_subprocess_env(self.working_directory)
-            if IS_WINDOWS:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd_list,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.working_directory,
-                    env=child_env,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
-                )
-            else:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd_list,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.working_directory,
-                    env=child_env,
-                    start_new_session=True,  # own process group for killpg on cancel/timeout
-                )
-
-            # Register so /cancel and stuck-watchdog can terminate foreground agents
-            self._running_tasks[task.task_id] = process
-            
-            stdout_lines = []
-            stderr_lines = []
-            last_progress = 0
-            
-            # Read output streams with progress tracking and timeout check
-            async def read_stream(stream, lines, callback_name, file_handle):
-                nonlocal last_progress
-                while True:
-                    # Check timeout
-                    elapsed = asyncio.get_event_loop().time() - start_time
-                    if elapsed > effective_timeout:
-                        raise asyncio.TimeoutError(
-                            f"Task exceeded timeout of {effective_timeout} seconds"
-                        )
-
-                    try:
-                        line = await asyncio.wait_for(
-                            stream.readline(),
-                            timeout=1.0  # 1 second check interval
-                        )
-                    except asyncio.TimeoutError:
-                        # No data — still try to discover the OpenCode session
-                        # so dashboard chat can attach before the process exits.
-                        self._try_discover_session(
-                            task,
-                            stdout_lines + stderr_lines,
-                            publish=_publish_session,
-                            published=published_sid,
-                            run_started_ms=run_started_ms,
-                        )
-                        continue
-
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='replace').rstrip()
-                    lines.append(decoded)
-
-                    # Write to session file
-                    file_handle.write(decoded + '\n')
-                    file_handle.flush()
-
-                    # Parse progress from output
-                    progress = self._parse_progress(decoded)
-                    if progress and progress != last_progress:
-                        last_progress = progress
-                        if on_progress:
-                            on_progress(progress, decoded[:100])
-
-                    if on_output:
-                        on_output(callback_name, decoded)
-
-                    self._try_discover_session(
-                        task,
-                        stdout_lines + stderr_lines,
-                        publish=_publish_session,
-                        published=published_sid,
-                        run_started_ms=run_started_ms,
-                    )
-
-            try:
-                logger.info(
-                    f"Waiting for agent/opencode process to complete, "
-                    f"timeout={effective_timeout}s"
-                )
-                # Wall-clock budget covers BOTH stream reads and process.wait().
-                # Previously wait() ran unguarded after stdout/stderr EOF, so a
-                # hung OpenCode child that closed pipes never timed out.
-                async def _drain_and_wait() -> int:
-                    await asyncio.gather(
-                        read_stream(
-                            process.stdout, stdout_lines, "stdout", session_fh
-                        ),
-                        read_stream(
-                            process.stderr, stderr_lines, "stderr", session_fh
-                        ),
-                    )
-                    remaining = effective_timeout - (
-                        asyncio.get_event_loop().time() - start_time
-                    )
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError(
-                            f"Task exceeded timeout of {effective_timeout} seconds"
-                        )
-                    return await asyncio.wait_for(
-                        process.wait(), timeout=remaining
-                    )
-
-                returncode = await asyncio.wait_for(
-                    _drain_and_wait(),
-                    timeout=max(0.01, float(effective_timeout)),
-                )
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(
-                    f"Agent process completed: returncode={returncode}, "
-                    f"elapsed={elapsed:.2f}s, stdout_lines={len(stdout_lines)}, "
-                    f"stderr_lines={len(stderr_lines)}"
-                )
-            except asyncio.TimeoutError:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.error(
-                    f"Agent/opencode task timed out after {elapsed:.2f}s "
-                    f"(limit={effective_timeout}s)"
-                )
-                await self._kill_process_tree_escalating(process, task.task_id)
-                logger.info(f"Killed timed out process: task_id={task.task_id}")
-                # Extract session ID from output collected so far
-                all_output_lines = stdout_lines + stderr_lines
-                session_id = self._resolve_session_id(
-                    task, all_output_lines, session_file=session_file
-                )
-                logger.debug(f"Extracted session ID from partial output: {session_id}")
-                return {
-                    "task_id": task.task_id,
-                    "returncode": -1,
-                    "stdout": "\n".join(stdout_lines),
-                    "stderr": f"\n[TIMEOUT] Task exceeded {effective_timeout} seconds",
-                    "session_file": str(session_file),
-                    "opencode_session_id": session_id,
-                    "progress": last_progress,
-                    "timed_out": True,
-                }
-            finally:
-                self._running_tasks.pop(task.task_id, None)
-        
-        # Extract session ID from output / OpenCode DB
-        all_output_lines = stdout_lines + stderr_lines
-        session_id = self._resolve_session_id(
-            task, all_output_lines, session_file=session_file
+        return await self._run_agent_via_serve(
+            task,
+            session_file=session_file,
+            on_output=on_output,
+            on_complete=on_complete,
+            on_progress=on_progress,
+            on_session_id=_publish_session,
+            timeout_seconds=effective_timeout,
+            start_time=start_time,
         )
-        logger.debug(f"Extracted session ID: {session_id}")
 
-        stdout_text = "\n".join(stdout_lines)
-        stderr_text = "\n".join(stderr_lines)
-        combined_output = stdout_text + "\n" + stderr_text
-
-        # OpenCode headless bug: process can exit 0 after compaction / mid-turn
-        # while todos remain open. Do not treat that as task success.
-        incomplete_meta: Optional[Dict[str, Any]] = None
-        if returncode == 0:
-            incomplete_meta = self._assess_incomplete_run(
-                session_id=session_id,
-                output_text=combined_output,
-            )
-            if incomplete_meta and incomplete_meta.get("premature"):
-                from src.opencode_sessions import (
-                    reasons_are_compact_only,
-                    strip_compact_reasons,
-                )
-
-                reasons = list(incomplete_meta.get("reasons") or [])
-                saw_compact = (
-                    reasons_are_compact_only(reasons)
-                    or any("compact" in str(r).lower() for r in reasons)
-                    or bool(incomplete_meta.get("compact_in_output"))
-                )
-                if saw_compact:
-                    # Auto-compact is still finishing. Wait; do not POST Continue.
-                    logger.warning(
-                        f"Agent exited 0 during compact; waiting: "
-                        f"task_id={task.task_id}, session={session_id}"
-                    )
-                    wait_s = max(
-                        2.0,
-                        min(float(timeout_seconds or 30.0), 30.0),
-                    )
-                    incomplete_meta = await self._wait_out_cli_compact(
-                        session_id=session_id,
-                        output_text=combined_output,
-                        wait_seconds=wait_s,
-                    )
-                    reasons = list(
-                        (incomplete_meta or {}).get("reasons") or reasons
-                    )
-                    if incomplete_meta:
-                        strip_compact_reasons(incomplete_meta)
-                        reasons = list(incomplete_meta.get("reasons") or [])
-                    if incomplete_meta is not None:
-                        incomplete_meta["had_compact"] = True
-                if incomplete_meta and incomplete_meta.get("premature"):
-                    reason_txt = "; ".join(str(r) for r in reasons) or "incomplete"
-                    logger.warning(
-                        f"Agent exited 0 but session looks incomplete: "
-                        f"task_id={task.task_id}, session={session_id}, "
-                        f"reasons={reason_txt}"
-                    )
-                    returncode = 2
-                    note = (
-                        f"[INCOMPLETE] OpenCode exited 0 but the session is not "
-                        f"finished ({reason_txt})."
-                    )
-                    stderr_text = (stderr_text + "\n" + note).strip()
-                else:
-                    incomplete_meta = incomplete_meta or {}
-                    incomplete_meta["premature"] = False
-
-        elapsed = asyncio.get_event_loop().time() - start_time
-        result = {
-            "task_id": task.task_id,
-            "returncode": returncode,
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "session_file": str(session_file),
-            "opencode_session_id": session_id,
-            "progress": 100 if returncode == 0 else last_progress,
-        }
-        if incomplete_meta and incomplete_meta.get("premature"):
-            result["incomplete"] = True
-            result["incomplete_reasons"] = list(incomplete_meta.get("reasons") or [])
-            result["session_completeness"] = incomplete_meta
-            if incomplete_meta.get("had_compact"):
-                result["had_compact"] = True
-            if incomplete_meta.get("assistant_asked_question"):
-                result["assistant_asked_question"] = True
-
-        if returncode == 0:
-            logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
-        else:
-            logger.warning(f"Agent task failed: task_id={task.task_id}, returncode={returncode}, duration={elapsed:.2f}s")
-
-        if on_complete:
-            on_complete(result)
-
-        return result
 
     @staticmethod
     def _session_log_is_empty(session_file: Optional[str]) -> bool:
@@ -596,11 +336,11 @@ class AgentRunner:
         timed_out: bool = False,
         stdout: Optional[str] = None,
     ) -> None:
-        """Point the next CLI/serve attempt at an existing OpenCode session.
+        """Point the next serve attempt at an existing OpenCode session.
 
-        ``opencode run --session`` and serve reuse both use ``task.session_id``.
+        Serve reuse uses ``task.session_id``.
         A cold retry would discard compacted history — but an empty timeout
-        usually means ``--session`` pointed at another clone directory and
+        usually means the session pointed at another clone directory and
         hung; retrying Continue on that id stays stuck.
         """
         sid = (session_id or "").strip()
@@ -621,7 +361,7 @@ class AgentRunner:
 
                 stored_dir, ok = lookup_session_directory(sid)
                 if not ok:
-                    # Same job / same clone: keep --session. The row may not
+                    # Same job / same clone: keep the session. The row may not
                     # be flushed yet; a transient DB error must not drop Continue.
                     logger.warning(
                         f"Retry after {why}: OpenCode DB unreadable; "
@@ -661,8 +401,7 @@ class AgentRunner:
         if not prev.lower().startswith("continue"):
             task.prompt = DEFAULT_CONTINUE_PROMPT
         logger.warning(
-            f"Retry after {why}: resume OpenCode session {sid} "
-            f"(CLI --session / serve reuse)"
+            f"Retry after {why}: resume OpenCode session {sid}"
         )
 
     def _assess_incomplete_run(
@@ -682,62 +421,6 @@ class AgentRunner:
         except Exception as e:
             logger.debug(f"Session completeness assessment failed: {e}")
             return None
-
-    async def _wait_out_cli_compact(
-        self,
-        *,
-        session_id: Optional[str],
-        output_text: str,
-        wait_seconds: float = 2.0,
-        poll_seconds: float = 0.4,
-    ) -> Optional[Dict[str, Any]]:
-        """Re-read session DB after auto-compact. No new user message."""
-        from src.opencode_sessions import (
-            reasons_are_compact_only,
-            strip_compact_reasons,
-        )
-
-        last = self._assess_incomplete_run(
-            session_id=session_id, output_text=output_text
-        )
-        if last:
-            compact_only = reasons_are_compact_only(last.get("reasons"))
-            if not last.get("premature"):
-                return last
-            if not compact_only:
-                return last
-        deadline = time.time() + max(0.2, float(wait_seconds))
-        stable_since: Optional[float] = None
-        last_sig: Optional[tuple] = None
-        while time.time() < deadline:
-            await asyncio.sleep(max(0.05, float(poll_seconds)))
-            last = self._assess_incomplete_run(
-                session_id=session_id, output_text=""
-            )
-            if not last:
-                break
-            if reasons_are_compact_only(last.get("reasons")):
-                strip_compact_reasons(last)
-            if not last.get("premature"):
-                logger.info(
-                    f"Session {session_id} complete after compact wait"
-                )
-                break
-            if not reasons_are_compact_only(last.get("reasons")):
-                # Open todos / unfinished — auto-compact will not clear these
-                # by waiting; do not inject Continue either.
-                break
-            sig = tuple(str(r) for r in (last.get("reasons") or []))
-            now = time.time()
-            if sig != last_sig:
-                last_sig = sig
-                stable_since = now
-            elif stable_since is not None and (now - stable_since) >= 2.0:
-                # Compact-then-stop unchanged — auto-resume did not continue.
-                break
-        if last:
-            strip_compact_reasons(last)
-        return last
 
     async def _run_agent_via_serve(
         self,
@@ -999,180 +682,7 @@ class AgentRunner:
             for match in re.finditer(bare, line, re.IGNORECASE):
                 last_bare = match.group(1)
         return last_created or last_labeled or last_bare
-    
-    def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
-        """Build the opencode CLI command as a list (cross-platform).
-        
-        Command format: bunx oh-my-opencode run [options] <message>
-        The message must be the last argument.
-        
-        Returns:
-            List of command arguments for use with subprocess (no shell needed)
-        """
-        agent_name = resolve_opencode_agent_name(task.agent)
-        logger.debug(
-            f"Building command for task: agent={task.agent} -> {agent_name}, "
-            f"model={task.model or settings.default_model}, session_id={task.session_id}"
-        )
-        
-        # Build base command
-        cmd_parts = self.opencode_cli.split() + ["run"]
 
-        # Force OpenCode into the issue temp clone (otherwise it walks up to the
-        # host git root and edits/commits the wrong repository).
-        if self.working_directory:
-            cmd_parts.extend(["--dir", str(self.working_directory)])
-        
-        # Add agent option (resolved OpenCode / oh-my-openagent ID)
-        cmd_parts.extend(["--agent", agent_name])
-        
-        # Use task-specific model if provided, otherwise use configured default
-        effective_model = task.model or settings.default_model
-        if effective_model:
-            cmd_parts.extend(["--model", effective_model])
-        
-        # Add session continuation if specified
-        if task.session_id:
-            # Current OpenCode CLI uses --session, not --session-id
-            cmd_parts.extend(["--session", task.session_id])
-
-        # Unattended daemon runs: never prompt for permission / tool approval.
-        # (--title omitted on purpose — not needed; sessions keyed by issue/dir.)
-        cmd_parts.append("--auto")
-        
-        # Final gate: never pass {params} git blocks to the agent CLI
-        from src.issue_git_spec import strip_params_block
-
-        cmd_parts.append(strip_params_block(task.prompt or ""))
-        
-        return cmd_parts
-
-    def _try_discover_session(
-        self,
-        task: AgentTask,
-        output_lines: List[str],
-        *,
-        publish,
-        published: Dict[str, Any],
-        run_started_ms: float,
-    ) -> None:
-        """Attach ses_* mid-run from CLI text or the OpenCode session DB."""
-        parsed = self._parse_session_id(output_lines)
-        if parsed:
-            publish(parsed)
-            return
-        now = time.time()
-        if now - float(published.get("last_db") or 0) < 0.5:
-            return
-        published["last_db"] = now
-        if not self.working_directory:
-            return
-        try:
-            from src.opencode_sessions import find_sessions_for_directory
-
-            found = find_sessions_for_directory(self.working_directory, limit=8)
-        except Exception:
-            return
-        launched = (getattr(task, "session_id", None) or "").strip()
-        forgotten = {
-            str(x).strip()
-            for x in (getattr(task, "forgotten_session_ids", None) or [])
-            if str(x).strip()
-        }
-        abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
-        if abandoned:
-            forgotten.add(abandoned)
-        if launched and launched not in forgotten:
-            publish(launched)
-            return
-        for rec in found:
-            found_id = str(rec.get("id") or "").strip()
-            if not found_id or found_id in forgotten:
-                continue
-            raw = rec.get("time_created") or rec.get("time_updated") or 0
-            try:
-                n = float(raw)
-            except (TypeError, ValueError):
-                continue
-            created_ms = n if n > 10_000_000_000 else n * 1000.0
-            if created_ms >= run_started_ms - 15_000:
-                publish(found_id)
-                return
-
-    def _resolve_session_id(
-        self,
-        task: AgentTask,
-        output_lines: List[str],
-        *,
-        session_file: Optional[Path] = None,
-    ) -> Optional[str]:
-        """Parse CLI output; keep launched session; only then SQLite by dir."""
-        session_id = self._parse_session_id(output_lines)
-        launched = (task.session_id or "").strip() or None
-        forgotten = {
-            str(x).strip()
-            for x in (getattr(task, "forgotten_session_ids", None) or [])
-            if str(x).strip()
-        }
-        abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
-        if abandoned:
-            forgotten.add(abandoned)
-        if session_id and session_id in forgotten:
-            session_id = None
-        # Empty timeout must not pick an unrelated historical ses_* for this
-        # issue key (that is what hung KAN-7 on Continue + old session).
-        if not session_id and launched and launched not in forgotten:
-            session_id = launched
-        if not session_id and task.issue_key and output_lines:
-            try:
-                from src.opencode_sessions import resolve_session_id
-
-                session_id = resolve_session_id(
-                    task.issue_key,
-                    working_directory=self.working_directory,
-                    preferred=launched if launched not in forgotten else None,
-                )
-                if session_id and session_id in forgotten:
-                    session_id = None
-            except Exception as e:
-                logger.debug(f"Session DB lookup failed: {e}")
-        if session_id and session_file is not None:
-            try:
-                Path(str(session_file) + ".session_id").write_text(
-                    session_id + "\n", encoding="utf-8"
-                )
-            except Exception:
-                pass
-        return session_id
-    
-    def _build_shell_command(self, task: AgentTask, session_file: Path) -> str:
-        """Build shell command with redirection (fallback for compatibility).
-        
-        Note: This method is kept for backwards compatibility but _build_command
-        is preferred for cross-platform support.
-        """
-        cmd_list = self._build_command(task, session_file)
-        
-        if IS_WINDOWS:
-            # Windows shell escaping
-            escaped_parts = []
-            for part in cmd_list:
-                if ' ' in part or '"' in part:
-                    # Escape quotes and wrap in quotes
-                    escaped = part.replace('"', '"""')
-                    escaped_parts.append(f'"{escaped}"')
-                else:
-                    escaped_parts.append(part)
-            cmd_str = ' '.join(escaped_parts)
-            # Windows redirection
-            session_file_str = str(session_file).replace('"', '"""')
-            return f'{cmd_str} > "{session_file_str}" 2>&1'
-        else:
-            # Unix shell escaping using shlex
-            cmd_str = ' '.join(shlex.quote(part) for part in cmd_list)
-            session_file_str = shlex.quote(str(session_file))
-            return f'{cmd_str} > {session_file_str} 2>&1'
-    
     def _get_session_file(
         self,
         task_id: str,
@@ -1247,42 +757,27 @@ class AgentRunner:
         task: AgentTask,
         on_output: Optional[callable] = None,
     ) -> str:
-        """Start a background agent and return task ID."""
-        # Similar to run_agent but non-blocking
-        # Returns immediately with task ID for polling
+        """Start a serve-backed agent in the background and return task ID."""
         logger.info(f"Starting background agent: task_id={task.task_id}, agent={task.agent}")
-        
-        session_file = self._get_session_file(task.task_id)
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Background agent session file: {session_file}")
-        
-        cmd_list = self._build_command(task, session_file)
-        
-        child_env = _agent_subprocess_env(self.working_directory)
-        if IS_WINDOWS:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.working_directory,
-                env=child_env,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
-            )
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.working_directory,
-                env=child_env,
-                start_new_session=True,
-            )
-        
-        # Store for later monitoring / cancel
-        self._running_tasks[task.task_id] = process
-        logger.info(f"Background agent started: task_id={task.task_id}, pid={process.pid}")
-        
+        self._running_tasks[task.task_id] = {
+            "mode": "serve",
+            "client": None,
+            "session_id": task.session_id,
+            "cancel": False,
+        }
+
+        async def _bg() -> None:
+            try:
+                await self.run_agent(task, on_output=on_output)
+            except Exception as e:
+                logger.warning(f"Background agent failed: task_id={task.task_id}: {e}")
+            finally:
+                self._running_tasks.pop(task.task_id, None)
+
+        asyncio.create_task(_bg())
+        logger.info(f"Background agent scheduled: task_id={task.task_id}")
         return task.task_id
+
     
     async def check_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Check status of a running background task."""
@@ -1492,7 +987,7 @@ class AgentRunner:
             on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
-            max_incomplete_retries: Compact/incomplete resume budget (CLI).
+            max_incomplete_retries: Compact/incomplete resume budget.
                 Independent of ``max_retries`` so compaction is not treated as
                 a generic error. ``None`` uses settings. When the caller
                 passes ``max_retries=0``, incomplete retries are also 0.

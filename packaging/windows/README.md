@@ -46,7 +46,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
      - **Offline OpenCode still uses `install.bat` + `vendor\opencode-home.zip` only**
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
-   - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
+   - **`start-backend.bat`** — ensures OpenCode serve on **:4096**, then daemon on **http://0.0.0.0:8080/** (API + SPA)
    - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
    - **`start.bat`** — both (backend first, then frontend)
 7. Optional OpenCode TUI: **`start-opencode.bat`** (after `install.bat` or `install-opencode-online.bat`; never from your user home folder).
@@ -55,7 +55,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 
 | Launcher | Port | Role |
 |----------|------|------|
-| **start-backend.bat** | **8080** | Daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
+| **start-backend.bat** | **8080** (+ **4096** serve) | Ensures OpenCode serve, then daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
 | **start-frontend.bat** | **5173** | SPA only + reverse proxy to backend (so you can use :5173 without Node) |
 | **start.bat** | both | Calls backend, then frontend |
 

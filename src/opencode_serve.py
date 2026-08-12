@@ -2,11 +2,7 @@
 
 Why this exists
 ---------------
-``opencode run`` is a one-shot process: it can exit 0 after auto-compaction
-without continuing the agent (upstream #13946). Virtual Developer then marked
-jobs completed while sessions still had open todos.
-
-``opencode serve`` exposes a long-lived API. The control loop here:
+Agent jobs use ``opencode serve``. The control loop here:
 
 1. Create (or resume) a session
 2. ``POST /session/{id}/message`` with the **task prompt only**

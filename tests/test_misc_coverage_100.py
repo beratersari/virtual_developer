@@ -141,10 +141,18 @@ async def test_run_agent_prompt_write_and_session_callback_errors(tmp_path, monk
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": 0,
+                "stdout": "ok\n",
+                "stderr": "",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "progress": 100,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             with patch.object(Path, "write_text", boom_write):
                 task = AgentTask(description="d", prompt="p", agent="a", issue_key="CB-1")
                 result = await runner.run_agent(
@@ -370,31 +378,6 @@ def test_cancel_task_and_cancel_all(tmp_path, monkeypatch):
         with patch("time.sleep", side_effect=RuntimeError("sleep bad")):
             n = runner.cancel_all_tasks()
     assert n == 1
-
-
-def test_resolve_session_id_db_fail_and_write_fail(tmp_path):
-    from src.orchestrator.agent_runner import AgentRunner, AgentTask
-
-    runner = AgentRunner(working_directory=tmp_path)
-    task = AgentTask(description="d", prompt="p", agent="a", issue_key="SID-1")
-    session_file = tmp_path / "out.log"
-    session_file.write_text("")
-
-    with patch(
-        "src.opencode_sessions.resolve_session_id",
-        side_effect=RuntimeError("db down"),
-    ):
-        assert (
-            runner._resolve_session_id(task, ["no session"], session_file=session_file)
-            is None
-        )
-
-    # successful parse + write fails
-    with patch.object(Path, "write_text", side_effect=OSError("ro fs")):
-        sid = runner._resolve_session_id(
-            task, ["Session: ses_abc12345"], session_file=session_file
-        )
-    assert sid == "ses_abc12345"
 
 
 def test_get_session_file_path_escape(tmp_path, monkeypatch):

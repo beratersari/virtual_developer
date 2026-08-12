@@ -56,42 +56,6 @@ def test_parse_session_id(runner):
     assert runner._parse_session_id(["Session ID: ses_xyz"]) == "ses_xyz"
 
 
-def test_build_command_with_session_and_model(runner):
-    t = AgentTask(
-        description="d",
-        prompt="hello world",
-        agent="sisyphus",
-        session_id="ses_1",
-        model="custom-model",
-        issue_key="KAN-9",
-    )
-    with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
-        s.default_model = "default-model"
-        cmd = runner._build_command(t, Path("/tmp/x.log"))
-    assert "--agent" in cmd
-    # short key maps to oh-my-openagent OpenCode agent ID
-    assert "Sisyphus - ultraworker" in cmd
-    assert "custom-model" in cmd
-    assert "--session" in cmd
-    assert "ses_1" in cmd
-    # Unattended: auto-approve permissions; no --title
-    assert "--auto" in cmd
-    assert "--title" not in cmd
-    assert cmd[-1] == "hello world"
-
-
-def test_build_command_default_model(runner):
-    t = AgentTask(description="d", prompt="p", agent="a")
-    with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "bunx oh-my-opencode"
-        s.default_model = "m1"
-        cmd = runner._build_command(t, Path("/tmp/x.log"))
-    assert "m1" in cmd
-    assert "--auto" in cmd
-    assert "--title" not in cmd
-
-
 def test_get_session_file_variants(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     p1 = runner._get_session_file("task_abc", issue_key="PROJ-1", attempt_number=0)
@@ -109,75 +73,46 @@ def test_get_session_file_variants(runner, tmp_path, monkeypatch):
     assert p4.name == "task_only_retry2.log"
 
 
-def test_build_shell_command_unix(runner, tmp_path):
-    t = AgentTask(description="d", prompt='say "hi"', agent="a")
-    with patch("src.orchestrator.agent_runner.IS_WINDOWS", False):
-        with patch("src.orchestrator.agent_runner.settings") as s:
-            s.opencode_cli = "opencode"
-            s.default_model = "m"
-            shell = runner._build_shell_command(t, tmp_path / "out.log")
-    assert "opencode" in shell
-    assert ">" in shell
-
-
-def test_build_shell_command_windows(runner, tmp_path):
-    t = AgentTask(description="d", prompt="hello world", agent="a")
-    with patch("src.orchestrator.agent_runner.IS_WINDOWS", True):
-        with patch("src.orchestrator.agent_runner.settings") as s:
-            s.opencode_cli = "opencode"
-            s.default_model = "m"
-            shell = runner._build_shell_command(t, tmp_path / "out.log")
-    assert "opencode" in shell
-
-
 @pytest.mark.asyncio
 async def test_run_agent_success(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class FakeProc:
-        def __init__(self):
-            self.returncode = 0
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            self.stdout.feed_data(b"Session: ses_ok1\nProgress: 50%\nProgress: 100%\n")
-            self.stdout.feed_eof()
-            self.stderr.feed_data(b"")
-            self.stderr.feed_eof()
-
-        async def wait(self):
-            return 0
-
-        def kill(self):
-            pass
-
     outputs = []
     progresses = []
 
+    async def fake_serve(task, **kwargs):
+        if kwargs.get("on_session_id"):
+            kwargs["on_session_id"]("ses_ok1")
+        if kwargs.get("on_progress"):
+            kwargs["on_progress"](50, "halfway")
+            kwargs["on_progress"](100, "done")
+        if kwargs.get("on_output"):
+            kwargs["on_output"]("stdout", "Session: ses_ok1")
+        result = {
+            "task_id": task.task_id,
+            "returncode": 0,
+            "stdout": "Session: ses_ok1\nProgress: 50%\nProgress: 100%\n",
+            "stderr": "",
+            "session_file": str(kwargs.get("session_file") or ""),
+            "opencode_session_id": "ses_ok1",
+            "progress": 100,
+        }
+        if kwargs.get("on_complete"):
+            kwargs["on_complete"](result)
+        return result
+
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
-            # Completeness: complete session (no open todos / clean finish)
-            with patch.object(
-                runner,
-                "_assess_incomplete_run",
-                return_value={
-                    "complete": True,
-                    "premature": False,
-                    "reasons": [],
-                },
-            ):
-                task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-1")
-                result = await runner.run_agent(
-                    task,
-                    on_output=lambda stream, line: outputs.append((stream, line)),
-                    on_complete=lambda r: progresses.append("done"),
-                    on_progress=lambda pct, msg: progresses.append(pct),
-                )
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
+            task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-1")
+            result = await runner.run_agent(
+                task,
+                on_output=lambda stream, line: outputs.append((stream, line)),
+                on_complete=lambda r: progresses.append("done"),
+                on_progress=lambda pct, msg: progresses.append(pct),
+            )
     assert result["returncode"] == 0
     assert result["opencode_session_id"] == "ses_ok1"
     assert "done" in progresses
@@ -188,65 +123,39 @@ async def test_run_agent_success(runner, tmp_path, monkeypatch):
 async def test_run_agent_exit0_after_compacting_treated_as_failure(
     runner, tmp_path, monkeypatch
 ):
-    """Reproduce: OpenCode exits 0 after compaction → must NOT look successful.
-
-    Upstream: opencode run can return exit code 0 when auto-compaction stops
-    the headless loop without continuing the agent (issue #13946 / #3560).
-    Virtual Developer used to mark those jobs completed; session logs end on
-    "compacting" with open work remaining.
-    """
+    """Serve compact-then-stop with open todos must not look successful."""
     monkeypatch.chdir(tmp_path)
 
-    class CompactExitProc:
-        def __init__(self):
-            self.returncode = 0
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            self.stdout.feed_data(
-                b"Session: ses_compact1\n"
-                b"Reading files...\n"
-                b"Compacting session to free context...\n"
-            )
-            self.stdout.feed_eof()
-            self.stderr.feed_data(b"")
-            self.stderr.feed_eof()
-
-        async def wait(self):
-            return 0
-
-        def kill(self):
-            pass
+    async def fake_serve(task, **kwargs):
+        if kwargs.get("on_session_id"):
+            kwargs["on_session_id"]("ses_compact1")
+        return {
+            "task_id": task.task_id,
+            "returncode": 2,
+            "stdout": "Compacting session to free context...\n",
+            "stderr": "[INCOMPLETE] open todos: 1 pending, 1 in_progress",
+            "session_file": str(kwargs.get("session_file") or ""),
+            "opencode_session_id": "ses_compact1",
+            "incomplete": True,
+            "incomplete_reasons": [
+                "open todos: 1 pending, 1 in_progress",
+                "compaction near end of run",
+            ],
+            "progress": 0,
+        }
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=CompactExitProc()),
-        ):
-            # Simulate DB-backed incompleteness (open todos after compact exit)
-            with patch.object(
-                runner,
-                "_assess_incomplete_run",
-                return_value={
-                    "complete": False,
-                    "premature": True,
-                    "reasons": [
-                        "open todos: 1 pending, 1 in_progress",
-                        "CLI output indicates compaction near end of run",
-                    ],
-                    "open_todos": 2,
-                    "compact_in_output": True,
-                },
-            ):
-                task = AgentTask(
-                    description="d",
-                    prompt="implement feature",
-                    agent="sisyphus",
-                    issue_key="KAN-12",
-                )
-                result = await runner.run_agent(task)
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
+            task = AgentTask(
+                description="d",
+                prompt="implement feature",
+                agent="sisyphus",
+                issue_key="KAN-12",
+            )
+            result = await runner.run_agent(task)
 
     assert result["returncode"] != 0
     assert result["returncode"] == 2
@@ -258,43 +167,28 @@ async def test_run_agent_exit0_after_compacting_treated_as_failure(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_exit0_compact_cli_without_open_todos_is_success(
+async def test_run_agent_compact_without_open_todos_is_success(
     runner, tmp_path, monkeypatch
 ):
-    """CLI: compact in transcript + no open todos → wait/strip, treat as success.
-
-    Auto-compact is OpenCode's job. We must not inject Continue or fail the run.
-    """
+    """Serve: compact waited out, no open todos → success, no extra prompt."""
     monkeypatch.chdir(tmp_path)
 
-    class CompactExitProc:
-        def __init__(self):
-            self.returncode = 0
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            self.stdout.feed_data(
-                b"Session: ses_compact2\n"
-                b"All todos complete.\n"
-                b"Compacting session to free context...\n"
-            )
-            self.stdout.feed_eof()
-            self.stderr.feed_data(b"")
-            self.stderr.feed_eof()
-
-        async def wait(self):
-            return 0
-
-        def kill(self):
-            pass
+    async def fake_serve(task, **kwargs):
+        return {
+            "task_id": task.task_id,
+            "returncode": 0,
+            "stdout": "All todos complete.\nCompacting session to free context...\n",
+            "stderr": "",
+            "session_file": str(kwargs.get("session_file") or ""),
+            "opencode_session_id": "ses_compact2",
+            "progress": 100,
+        }
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=CompactExitProc()),
-        ):
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(
                 description="d",
                 prompt="5+4",
@@ -492,31 +386,23 @@ async def test_run_agent_with_retry_question_does_not_resend_build(
 async def test_run_agent_timeout(runner, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    class HangProc:
-        def __init__(self):
-            self.returncode = None
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            # never feed eof — outer timeout should fire
-
-        async def wait(self):
-            await asyncio.sleep(100)
-            return -1
-
-        def kill(self):
-            self.returncode = -9
-
-        def terminate(self):
-            self.returncode = -15
+    async def fake_serve(task, **kwargs):
+        return {
+            "task_id": task.task_id,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"[serve] timed out after {kwargs.get('timeout_seconds')}s",
+            "session_file": str(kwargs.get("session_file") or ""),
+            "opencode_session_id": None,
+            "timed_out": True,
+            "progress": 0,
+        }
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 1
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=HangProc()),
-        ):
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-2")
             result = await runner.run_agent(task, timeout_seconds=0.05)
     assert result["timed_out"] is True
@@ -525,37 +411,26 @@ async def test_run_agent_timeout(runner, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_agent_timeout_after_stream_eof(runner, tmp_path, monkeypatch):
-    """OpenCode can close stdout/stderr while the process hangs — still must time out."""
+    """Serve HTTP timeout still marks the job timed_out."""
     monkeypatch.chdir(tmp_path)
 
-    class EofButAlive:
-        def __init__(self):
-            self.returncode = None
-            self.pid = 9001
-            self.stdout = asyncio.StreamReader()
-            self.stderr = asyncio.StreamReader()
-            self.stdout.feed_eof()
-            self.stderr.feed_eof()
-
-        async def wait(self):
-            while self.returncode is None:
-                await asyncio.sleep(0.05)
-            return self.returncode
-
-        def kill(self):
-            self.returncode = -9
-
-        def terminate(self):
-            self.returncode = -15
+    async def fake_serve(task, **kwargs):
+        return {
+            "task_id": task.task_id,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "[TIMEOUT] Task exceeded 0.25 seconds",
+            "session_file": str(kwargs.get("session_file") or ""),
+            "opencode_session_id": None,
+            "timed_out": True,
+            "progress": 0,
+        }
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=EofButAlive()),
-        ):
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a", issue_key="I-EOF")
             result = await asyncio.wait_for(
                 runner.run_agent(task, timeout_seconds=0.25),
@@ -722,17 +597,17 @@ async def test_background_check_cancel_read(runner, tmp_path, monkeypatch):
             self.returncode = -9
 
     with patch("src.orchestrator.agent_runner.settings") as s:
-        s.opencode_cli = "opencode"
         s.default_model = "m"
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc(done=False)),
+        s.opencode_serve_url = "http://127.0.0.1:4096"
+        with patch.object(
+            runner, "run_agent", new=AsyncMock(return_value={"returncode": 0})
         ):
             task = AgentTask(description="d", prompt="p", agent="a")
             tid = await runner.run_background_agent(task)
             status = await runner.check_task_status(tid)
             assert status["status"] == "running"
             assert runner.cancel_task(tid) is True
+            await asyncio.sleep(0)
 
     # completed background
     runner._running_tasks["done1"] = FakeProc(done=True)

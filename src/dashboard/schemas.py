@@ -411,7 +411,7 @@ class SettingsUpdate(BaseModel):
     trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
-    # Agent and OpenCode share this one timeout (orchestrator kills the CLI at limit)
+    # Agent and OpenCode share this one timeout (orchestrator aborts the serve turn)
     agent_task_timeout_seconds: Optional[int] = Field(
         default=None,
         ge=30,
@@ -429,7 +429,7 @@ class SettingsUpdate(BaseModel):
         ge=0,
         le=256,
         description=(
-            "CLI resumes after compact-then-stop / incomplete session "
+            "Serve retries after compact-then-stop / incomplete session "
             "(independent of error retries)"
         ),
     )

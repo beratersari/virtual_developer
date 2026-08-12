@@ -900,12 +900,19 @@ class JobProcessor:
             branch = _s(getattr(gm, "work_branch", None))
             target = _s(getattr(gm, "target_branch", None))
         repo = repo or _s(meta.get("repository_url"))
-        branch = (
-            branch
-            or _s(meta.get("feature_branch"))
-            or _s(meta.get("source_branch"))
-        )
         target = target or _s(meta.get("target_branch"))
+        if not branch:
+            # Prefer the resolved work branch. Params Source=develop/main is
+            # not the bind key (those jobs isolate as feature/{KEY}).
+            feature = _s(meta.get("feature_branch"))
+            source = _s(meta.get("source_branch"))
+            if feature:
+                branch = feature
+            elif source:
+                from src.git_manager import GitManager
+
+                if source != target and not GitManager._is_primary_base(source):
+                    branch = source
         return repo, branch, target
 
     def _resume_session_candidates(
@@ -961,9 +968,11 @@ class JobProcessor:
     ) -> Optional[str]:
         """Reuse the OpenCode session for this issue / repo+work+target.
 
-        Schedule cancel + re-dispatch reclones or changes cwd. Resume the last
-        session for the Jira key and relocate ``session.directory`` onto the
-        live clone so ``--session`` + ``--dir`` does not start a new ``ses_*``.
+        If the bind map already has a live ``ses_*`` for (repo, work, target),
+        continue that session. Cancel, a missing SQLite row, a locked DB, or a
+        new clone path must not start a cold session. Dashboard Reset is the
+        only forget. Relocate ``session.directory`` onto the live clone so
+        serve resume stays aligned.
         """
         if getattr(task, "session_id", None):
             return task.session_id
@@ -999,65 +1008,51 @@ class JobProcessor:
         for sid in sids:
             if sid in forgotten:
                 continue
-            try:
-                stored_dir, ok = lookup_session_directory(sid)
-            except Exception as e:
-                logger.debug(f"{issue_key}: session dir check failed: {e}")
-                self._freeze_session_binds.add(issue_key)
-                return None
-            if not ok:
-                if bind_wd and wd and paths_equivalent(bind_wd, wd):
-                    logger.warning(
-                        f"{issue_key}: OpenCode DB unreadable; resuming {sid} "
-                        f"because bind working_directory matches live clone"
-                    )
-                    chosen = sid
-                    break
-                logger.warning(
-                    f"{issue_key}: OpenCode DB unreadable; not resuming "
-                    f"{sid} and not replacing the bind"
-                )
-                self._freeze_session_binds.add(issue_key)
-                return None
-            if stored_dir is None:
-                # No SQLite row — try the next candidate
-                if bind_wd and wd and paths_equivalent(bind_wd, wd):
-                    logger.info(
-                        f"{issue_key}: session {sid} not in OpenCode DB; "
-                        f"resuming because bind path matches clone"
-                    )
-                    chosen = sid
-                    break
-                continue
-            if stored_dir and wd and paths_equivalent(stored_dir, wd):
-                chosen = sid
-                break
-            if stored_dir and wd and not paths_equivalent(stored_dir, wd):
-                # Same Jira issue, new clone path (cancel/re-schedule).
-                n = relocate_session_directories(stored_dir, wd)
-                logger.info(
-                    f"{issue_key}: relocating session {sid} "
-                    f"{stored_dir} → {wd} (updated={n}) to resume after re-clone"
-                )
-                try:
-                    import src.state.session_bind_store as session_binds
-
-                    session_binds.session_bind_store.relocate_working_directory(
-                        stored_dir, wd
-                    )
-                except Exception:
-                    pass
-                chosen = sid
-                break
-            if not stored_dir and wd:
-                logger.info(
-                    f"{issue_key}: session {sid} has no stored directory; "
-                    f"resuming on live clone {wd}"
-                )
-                chosen = sid
-                break
+            chosen = sid
+            break
         if not chosen:
             return None
+
+        stored_dir: Optional[str] = None
+        try:
+            stored_dir, ok = lookup_session_directory(chosen)
+        except Exception as e:
+            logger.debug(f"{issue_key}: session dir check failed: {e}")
+            ok = False
+            stored_dir = None
+        relocate_from = None
+        if ok and stored_dir and wd and not paths_equivalent(stored_dir, wd):
+            relocate_from = stored_dir
+        elif bind_wd and wd and not paths_equivalent(bind_wd, wd):
+            relocate_from = bind_wd
+        if relocate_from:
+            try:
+                n = relocate_session_directories(relocate_from, wd)
+                logger.info(
+                    f"{issue_key}: relocating session {chosen} "
+                    f"{relocate_from} → {wd} (updated={n}) to resume"
+                )
+            except Exception as e:
+                logger.debug(f"{issue_key}: session relocate failed: {e}")
+            try:
+                import src.state.session_bind_store as session_binds
+
+                session_binds.session_bind_store.relocate_working_directory(
+                    relocate_from, wd
+                )
+            except Exception:
+                pass
+        elif not ok:
+            logger.warning(
+                f"{issue_key}: OpenCode DB unreadable; still resuming {chosen} "
+                f"(bind key {repo}@{branch}→{target} is live)"
+            )
+        elif stored_dir is None:
+            logger.info(
+                f"{issue_key}: session {chosen} not in OpenCode DB; "
+                f"resuming because bind key exists"
+            )
+
         task.session_id = chosen
         try:
             self.state_manager.update_state(
@@ -1297,9 +1292,6 @@ class JobProcessor:
         )
         archive["max_incomplete_retries"] = max_incomplete
         archive["max_compact_continues"] = max_compacts
-        archive["opencode_run_mode"] = _plain_str(
-            getattr(live, "opencode_run_mode", None), "cli"
-        )
         claimed = self.state_manager.update_state_if(
             state.issue_key,
             reject_statuses=self.TERMINAL_STATUSES,

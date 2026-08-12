@@ -165,7 +165,6 @@ async def test_live_large_repo_readme_prompt_does_not_inject_after_compact(
     )
     proc._vd_log_f = log_f  # type: ignore[attr-defined]
 
-    monkeypatch.setattr(settings, "opencode_run_mode", "serve")
     monkeypatch.setattr(settings, "opencode_serve_url", base)
     monkeypatch.setattr(settings, "default_model", FULL_MODEL)
     monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 256)
