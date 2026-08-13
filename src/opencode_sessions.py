@@ -1248,6 +1248,46 @@ def _apply_last_assistant(
             )
 
 
+def _message_has_open_question_tool(msg: Optional[Dict[str, Any]]) -> bool:
+    """True when *this* message still has an unanswered OpenCode question tool.
+
+    Only the last assistant turn matters. Historical question tools (answered
+    or abandoned) must not mark a later successful stop as incomplete.
+    """
+    if not isinstance(msg, dict):
+        return False
+    parts = msg.get("_parts") or msg.get("parts") or []
+    if not isinstance(parts, list):
+        return False
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        ptype = str(p.get("type") or "").lower()
+        tool = str(p.get("tool") or "").lower()
+        state = p.get("state") if isinstance(p.get("state"), dict) else {}
+        status = str(state.get("status") or p.get("status") or "").lower()
+        if ptype == "question":
+            # Dedicated question part — treat as open unless explicitly done.
+            if status in {"completed", "cancelled", "done", "resolved"}:
+                continue
+            return True
+        if ptype == "tool" and tool == "question":
+            # Only blocked states. Empty/completed/error-after-answer must not
+            # poison a later completion turn.
+            if status in {"pending", "running"}:
+                return True
+    return False
+
+
+def _last_assistant_is_waiting_on_operator(msg: Optional[Dict[str, Any]]) -> bool:
+    """True when the latest assistant turn is waiting for a human answer."""
+    if not isinstance(msg, dict):
+        return False
+    if _message_has_open_question_tool(msg):
+        return True
+    return assistant_asked_question(_message_text(msg))
+
+
 def _apply_message_list(
     result: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> None:
@@ -1276,34 +1316,14 @@ def _apply_message_list(
     if summary is None:
         summary = info.get("summary")
     parts = target.get("_parts") or target.get("parts") or []
-    if last_assistant is not None and assistant_asked_question(
-        _message_text(last_assistant)
+    # Only the *last* assistant turn. Earlier "Shall I…?" or question tools
+    # must not fail a later successful completion (post unattended-nudge).
+    if last_assistant is not None and _last_assistant_is_waiting_on_operator(
+        last_assistant
     ):
         result["assistant_asked_question"] = True
-    # OpenCode structured question tool (permission/tool part) — API-native
-    # signal that the session is blocked on a human answer.
-    for m in reversed(indexed):
-        parts = m.get("_parts") or m.get("parts") or []
-        if not isinstance(parts, list):
-            continue
-        for p in parts:
-            if not isinstance(p, dict):
-                continue
-            ptype = str(p.get("type") or "").lower()
-            tool = str(p.get("tool") or "").lower()
-            state = p.get("state") if isinstance(p.get("state"), dict) else {}
-            status = str(state.get("status") or p.get("status") or "").lower()
-            is_question_tool = ptype == "tool" and tool == "question"
-            is_question_part = ptype == "question"
-            if not (is_question_tool or is_question_part):
-                continue
-            # Pending/running = blocked. Completed means answered already.
-            if status in {"", "pending", "running", "error"} or is_question_part:
-                result["assistant_asked_question"] = True
-                result["question_tool"] = True
-                break
-        if result.get("assistant_asked_question") and result.get("question_tool"):
-            break
+        if _message_has_open_question_tool(last_assistant):
+            result["question_tool"] = True
     _apply_last_assistant(
         result,
         role=role,

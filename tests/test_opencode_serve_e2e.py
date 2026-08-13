@@ -1213,3 +1213,111 @@ async def test_clarifying_question_still_asking_is_incomplete_not_timeout():
     out = result.to_agent_result("task_q")
     assert out.get("assistant_asked_question") is True
     assert out.get("incomplete") is True
+
+
+@pytest.mark.asyncio
+async def test_nudge_then_done_with_stale_todos_is_success_not_error():
+    """Regression (VOLKAN-style): finished after nudge must not ERROR.
+
+    Sequence that failed in production:
+    1. Model asks clarifying question (open todos still pending)
+    2. Unattended nudge
+    3. Model marks work done (finish=stop) but todo API still shows pending
+    4. Old code: incomplete with clarifying question + open todos → dashboard ERROR
+    """
+    from src.opencode_serve import DEFAULT_UNATTENDED_NUDGE_PROMPT
+
+    class QuestionThenDoneStaleTodos(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_stale_todos"
+            self.todos = [
+                {"content": f"T{i}", "status": "pending"} for i in range(15)
+            ] + [{"content": "now", "status": "in_progress"}]
+            self._nudge_seen = False
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Shall I restart the deep exploration and "
+                                "begin rewriting the documentation?"
+                            ),
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            # Nudge turn: work done, but leave todos stale (API lag).
+            self._nudge_seen = True
+            final = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "All 16 tasks are marked complete. The work was "
+                            "finished. There is nothing remaining."
+                        ),
+                    }
+                ],
+            }
+            self.messages.append(final)
+            return final
+
+        async def list_todos(self, session_id):
+            # Stay stale for a couple of post-nudge re-fetches, then clear —
+            # or stay stale forever to hit clean-stop acceptance.
+            if self._nudge_seen and self.message_calls >= 2:
+                # Keep stale on purpose: force clean-stop acceptance path.
+                return list(self.todos)
+            return list(self.todos)
+
+    backend = QuestionThenDoneStaleTodos()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=0.3,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="# Build mode\nwrite docs",
+        title="KAN-STALE",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert backend.prompts[1] == DEFAULT_UNATTENDED_NUDGE_PROMPT
+    assert "After one nudge still incomplete" not in (result.stderr or "")
+    assert "git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT.lower() or (
+        "do **not** git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT.lower()
+        or "Do **not** git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT
+    )

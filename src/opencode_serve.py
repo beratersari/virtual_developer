@@ -94,7 +94,9 @@ DEFAULT_UNATTENDED_NUDGE_PROMPT = (
     "confirmation, or multiple-choice options. Choose the safest defaults "
     "consistent with AGENTS.md, the repository, and the original issue "
     "description. Finish all remaining work (implementation, verification, "
-    "and commit steps as required) without waiting."
+    "and local commit steps as required) without waiting. Do **not** git push "
+    "or open a merge request — the orchestrator delivers the branch after "
+    "you stop. Mark todos completed when the work is done."
 )
 
 # How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
@@ -817,6 +819,94 @@ class ServeOrchestrator:
             assessment["reasons"] = reasons
         return assessment
 
+    async def _assess_after_unattended_nudge(
+        self,
+        sid: str,
+        *,
+        compact_total: int,
+        output_text: str = "",
+        _emit: Callable[[str, str], None],
+    ) -> Dict[str, Any]:
+        """Re-assess after the unattended nudge, tolerating stale todo lag.
+
+        Production failure mode: model finishes work (last assistant
+        ``finish=stop``, no new question) but ``list_todos`` still shows the
+        pre-todowrite pending list, and/or an *earlier* clarifying question
+        poisoned completeness. That wrongly returned incomplete after a
+        successful recovery.
+        """
+        assessment: Dict[str, Any] = {}
+        messages: Optional[List[Dict[str, Any]]] = None
+        messages_failed = False
+        for attempt in range(3):
+            messages, todos, messages_failed = await self._fetch_session_lists(
+                sid, _emit=_emit
+            )
+            assessment = assess_serve_turn(
+                sid,
+                messages=messages,
+                todos=todos,
+                compact_events_seen=compact_total,
+                new_compacts_this_turn=0,
+                # Only this turn's reply — do not re-scan the pre-nudge log
+                # for "compaction near end" false positives.
+                output_text=output_text if attempt == 0 else "",
+            )
+            self._fail_closed_if_no_evidence(
+                assessment, messages=messages, messages_failed=messages_failed
+            )
+            if not assessment.get("premature"):
+                return assessment
+
+            reasons = list(assessment.get("reasons") or [])
+            still_asking = bool(assessment.get("assistant_asked_question")) or any(
+                "clarifying question" in str(r).lower() for r in reasons
+            )
+            finish = str(assessment.get("last_finish") or "").strip().lower()
+            clean_stop = (
+                not still_asking
+                and not assessment.get("last_is_summary")
+                and finish not in {"", "tool-calls", "unknown"}
+                and finish == "stop"
+            )
+            only_stale_todos = clean_stop and reasons and all(
+                "open todos" in str(r).lower()
+                or "clarifying question" in str(r).lower()
+                for r in reasons
+            ) and not still_asking
+
+            if only_stale_todos and attempt < 2:
+                _emit(
+                    "stdout",
+                    f"[serve] post-nudge: last turn looks finished but todos "
+                    f"still open (attempt {attempt + 1}/3) — re-fetching "
+                    f"(reasons={reasons})",
+                )
+                await asyncio.sleep(0.4)
+                continue
+
+            if only_stale_todos:
+                # Todo API lag after todowrite. Last turn is a clean stop and
+                # not waiting on the operator — accept; processor still gates
+                # on plan file / git delivery.
+                _emit(
+                    "stdout",
+                    "[serve] post-nudge: treating clean finish=stop as complete "
+                    f"despite stale open todos (reasons={reasons})",
+                )
+                assessment["complete"] = True
+                assessment["premature"] = False
+                assessment["reasons"] = []
+                assessment["stale_todos_ignored"] = True
+                return assessment
+
+            if still_asking:
+                return assessment
+            # Hard incomplete (unfinished finish, compact-then-stop, etc.)
+            return assessment
+
+        return assessment
+
     async def _snapshot_assess(
         self,
         sid: str,
@@ -1444,19 +1534,11 @@ class ServeOrchestrator:
                         progress=50,
                     )
 
-                messages, todos, messages_failed = await self._fetch_session_lists(
-                    sid, _emit=_emit
-                )
-                assessment = assess_serve_turn(
+                assessment = await self._assess_after_unattended_nudge(
                     sid,
-                    messages=messages,
-                    todos=todos,
-                    compact_events_seen=compact_total,
-                    new_compacts_this_turn=0,
+                    compact_total=compact_total,
                     output_text=nudge_text,
-                )
-                self._fail_closed_if_no_evidence(
-                    assessment, messages=messages, messages_failed=messages_failed
+                    _emit=_emit,
                 )
                 turns.append(
                     {
@@ -1486,11 +1568,22 @@ class ServeOrchestrator:
                         progress=100,
                     )
                 reasons = list(assessment.get("reasons") or reasons)
-                note = (
-                    "[INCOMPLETE] assistant asked a clarifying question "
-                    "(unattended; no human reply path). After one nudge still "
-                    f"incomplete: {'; '.join(map(str, reasons))}"
+                still_asking = bool(
+                    assessment.get("assistant_asked_question")
+                ) or any(
+                    "clarifying question" in str(r).lower() for r in reasons
                 )
+                if still_asking:
+                    note = (
+                        "[INCOMPLETE] assistant asked a clarifying question "
+                        "(unattended; no human reply path). After one nudge "
+                        f"still incomplete: {'; '.join(map(str, reasons))}"
+                    )
+                else:
+                    note = (
+                        "[INCOMPLETE] after unattended nudge still incomplete: "
+                        f"{'; '.join(map(str, reasons))}"
+                    )
                 _emit("stderr", note)
                 return ServeTurnResult(
                     session_id=sid,

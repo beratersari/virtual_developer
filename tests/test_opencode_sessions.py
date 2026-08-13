@@ -952,6 +952,61 @@ def test_question_tool_part_is_detected_as_waiting():
     assert result["premature"] is True
 
 
+def test_earlier_question_does_not_poison_later_completion():
+    """Regression: history 'Shall I…?' must not fail a later clean stop.
+
+    Production: after unattended nudge the model finished all work, but
+    assessment still reported clarifying question + stale open todos → ERROR.
+    """
+    from src.opencode_sessions import assess_session_completeness
+
+    done = (
+        "All 16 tasks are marked complete. The work was finished and pushed "
+        "to origin/feature/VOLKAN-12278 in the previous session. "
+        "There is nothing remaining."
+    )
+    result = assess_session_completeness(
+        "ses_done",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Shall I restart the deep exploration?",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "finish": "tool-calls",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {"status": "running", "input": {}},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "unattended nudge"}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": done}],
+            },
+        ],
+        todos=[{"status": "pending"}] * 15 + [{"status": "in_progress"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("last_finish") == "stop"
+    # Open todos may still flag premature — but NOT clarifying question.
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
 def test_compact_related_reasons_detects_markers():
     assert compact_related_reasons(["compaction summary"]) is True
     assert compact_related_reasons(["open todos: 1 pending, 0 in_progress"]) is False
