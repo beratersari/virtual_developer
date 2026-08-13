@@ -279,6 +279,28 @@ def test_fail_from_agent_result_incomplete_is_not_crash(processor, state_manager
     )
 
 
+def test_fail_from_agent_result_clarifying_question_heading(
+    processor, state_manager, fake_jira
+):
+    """Model asking questions must not look like a compaction budget error."""
+    state_manager.create_state("FE-Q", "question", "d")
+    processor._fail_from_agent_result(
+        "FE-Q",
+        {
+            "returncode": 2,
+            "stderr": "[INCOMPLETE] assistant asked a clarifying question",
+            "incomplete": True,
+            "assistant_asked_question": True,
+            "incomplete_reasons": ["assistant asked a clarifying question"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Clarifying question" in b for b in bodies)
+    assert any("unattended" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")

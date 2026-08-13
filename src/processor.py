@@ -404,6 +404,25 @@ class JobProcessor:
         data = result if isinstance(result, dict) else {}
         incomplete = bool(data.get("incomplete"))
         stderr = (data.get("stderr") or "").strip() or fallback
+        reasons = list(data.get("incomplete_reasons") or [])
+        asked = bool(data.get("assistant_asked_question")) or any(
+            "clarifying question" in str(r).lower() for r in reasons
+        )
+        if incomplete and asked:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "This daemon is unattended (one-pass): the model stopped "
+                    "to ask a clarifying question and there is no human reply "
+                    "path. Put the missing decisions into the issue "
+                    "description (Mode, {params}, constraints), then move the "
+                    "issue back to To Do to re-queue."
+                ),
+                category="question",
+            )
+            return
         if incomplete:
             self._fail_issue(
                 issue_key,

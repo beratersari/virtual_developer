@@ -49,5 +49,27 @@ def test_post_error_none_state_returns_none(reporter):
     assert reporter.post_error(None, "x") is None
 
 
+def test_post_error_clarifying_question_category(reporter, fake_jira):
+    """Question stops must not look like compaction budget failures."""
+    state = JiraAgentState(
+        issue_key="PROJ-Q",
+        issue_summary="Needs decisions",
+        status=TaskStatus.ERROR,
+        current_opencode_session_id="ses_q1",
+    )
+    comment_id = reporter.post_error(
+        state,
+        "assistant asked a clarifying question",
+        suggestion="Add constraints to the description, then re-queue from To Do.",
+        category="question",
+    )
+    assert comment_id is not None
+    body = fake_jira.comments[-1]["body"]
+    assert "Clarifying question" in body
+    assert "unattended" in body.lower()
+    assert "compaction" not in body.lower()
+    assert "ses_q1" in body
+
+
 def test_post_completion_none_state_returns_none(reporter):
     assert reporter.post_completion(None, "x") is None
