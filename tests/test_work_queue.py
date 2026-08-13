@@ -76,6 +76,72 @@ def test_queue_store_fifo_and_cancel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_second_jira_enqueue_while_running_stays_queued(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
+):
+    """Second dispatch of the same issue while first is live → visible queued row."""
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+
+    # First item claimed and "running" (simulates live work)
+    first = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-7",
+        summary="first",
+        message="m1",
+        repository_url="https://gitlab.com/g/r.git",
+        source_branch="develop",
+        work_branch="feature/KAN-7",
+        target_branch="develop",
+        lock_key="lock_test",
+    )
+    claimed = proc.queue_store.claim_next(max_running=4)
+    assert claimed and claimed["queue_id"] == first["queue_id"]
+    assert claimed["status"] == "running"
+
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "issue": {
+            "key": "KAN-7",
+            "fields": {
+                "summary": "second dispatch",
+                "description": (
+                    "{params}\nRepository: https://gitlab.com/g/r.git\n"
+                    "Source branch: develop\nTarget branch: develop\n"
+                    "Mode: build\n{params}\n"
+                ),
+            },
+        },
+    }
+
+    async def no_dispatch():
+        return 0
+
+    proc.dispatch_queue = no_dispatch  # type: ignore[method-assign]
+    r2 = await proc.enqueue_jira_event(event)
+    assert r2.get("ok") is True
+    assert r2.get("status") == "queued"
+    assert r2.get("duplicate") is not True
+    open_rows = [
+        r
+        for r in proc.queue_store.list_items(limit=50)
+        if r.get("status") in ("queued", "running") and r.get("issue_key") == "KAN-7"
+    ]
+    statuses = {r["status"] for r in open_rows}
+    assert "running" in statuses
+    assert "queued" in statuses
+    # API shape used by Jobs page
+    from src.dashboard.service import build_queue
+
+    payload = build_queue(store=proc.queue_store)
+    assert payload.queued_count >= 1
+    waiting = [i for i in payload.items if i.status == "queued" and i.issue_key == "KAN-7"]
+    assert len(waiting) >= 1
+
+
+@pytest.mark.asyncio
 async def test_second_gitlab_message_waits_on_same_work_branch(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
 ):

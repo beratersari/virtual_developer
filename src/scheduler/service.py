@@ -896,7 +896,12 @@ async def _dispatch_claimed_schedule(
     jira_client: Any = None,
     event: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Run ``process_event`` and record dispatched / error (background worker)."""
+    """Hand work to the work queue (same path as poller/GitLab) then finish.
+
+    Uses ``enqueue_jira_event`` so a second dispatch while the issue is live
+    stays ``queued`` and is visible on the Jobs page. Does **not** await the
+    full agent run (queue worker owns that).
+    """
     try:
         live = store.get(schedule_id) or claimed_rec or {}
         if (live.get("status") or "").lower() != "dispatching":
@@ -905,7 +910,6 @@ async def _dispatch_claimed_schedule(
                 f"({live.get('status')}); not starting work"
             )
             return
-        _register_schedule_workspace(processor, live)
         if event is None:
             issue = _issue_payload_for_dispatch(
                 claimed_rec or live, jira_client=jira_client
@@ -924,19 +928,62 @@ async def _dispatch_claimed_schedule(
                 "scheduled_job": True,
                 "schedule_id": schedule_id,
             }
-        outcome = await processor.process_event(event)
-        work_started, skip_reason = _outcome_work_started(outcome)
-        if not work_started:
-            msg = skip_reason or "processor did not start work for this schedule"
+        enqueue = getattr(processor, "enqueue_jira_event", None)
+        # Prefer the work queue so a busy issue leaves a visible ``queued`` row.
+        # Skip MagicMock auto-attrs from unit tests (not real coroutines).
+        use_queue = False
+        if callable(enqueue):
+            import inspect
+
+            use_queue = inspect.iscoroutinefunction(enqueue) or inspect.iscoroutinefunction(
+                getattr(enqueue, "__func__", None)
+            )
+        if use_queue:
+            outcome = await enqueue(event)
+        else:
+            # Older processors / tests without the queue path
+            outcome = await processor.process_event(event)
+            work_started, skip_reason = _outcome_work_started(outcome)
+            if not work_started:
+                msg = skip_reason or "processor did not start work for this schedule"
+                _finish_schedule_dispatch(
+                    store, schedule_id, status="error", error_message=msg[:1000]
+                )
+                logger.warning(
+                    f"Schedule {schedule_id} for {issue_key} did not start work: {msg}"
+                )
+                return
+            _finish_schedule_dispatch(store, schedule_id, status="dispatched")
+            logger.info(f"Schedule {schedule_id} dispatched for {issue_key}")
+            return
+
+        if not isinstance(outcome, dict) or not outcome.get("ok"):
+            msg = (
+                (outcome or {}).get("reason")
+                if isinstance(outcome, dict)
+                else None
+            ) or "enqueue_jira_event failed"
             _finish_schedule_dispatch(
-                store, schedule_id, status="error", error_message=msg[:1000]
+                store, schedule_id, status="error", error_message=str(msg)[:1000]
             )
             logger.warning(
-                f"Schedule {schedule_id} for {issue_key} did not start work: {msg}"
+                f"Schedule {schedule_id} for {issue_key} enqueue failed: {msg}"
             )
             return
+        # Queued (waiting for slot/lock) or started — both count as dispatched
+        qstat = (outcome.get("status") or "").lower()
+        note = ""
+        if outcome.get("queued") or qstat == "queued":
+            note = f"enqueued as {outcome.get('queue_id') or 'queue item'} (waiting)"
+        elif outcome.get("started") or qstat == "running":
+            note = f"started via queue {outcome.get('queue_id') or ''}".strip()
+        elif outcome.get("duplicate"):
+            note = f"already on queue ({outcome.get('queue_id')})"
         _finish_schedule_dispatch(store, schedule_id, status="dispatched")
-        logger.info(f"Schedule {schedule_id} dispatched for {issue_key}")
+        logger.info(
+            f"Schedule {schedule_id} dispatched for {issue_key}"
+            + (f" — {note}" if note else "")
+        )
     except asyncio.CancelledError:
         logger.info(f"Schedule {schedule_id} dispatch task cancelled")
         raise
@@ -948,12 +995,6 @@ async def _dispatch_claimed_schedule(
             store, schedule_id, status="error", error_message=str(e)[:1000]
         )
     finally:
-        drop = getattr(processor, "drop_workspace_lock", None)
-        if callable(drop):
-            try:
-                drop(issue_key)
-            except Exception:
-                pass
         _INFLIGHT_DISPATCHES.pop(schedule_id, None)
 
 

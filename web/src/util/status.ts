@@ -13,6 +13,7 @@ const STATUS_MAP: Record<string, StatusMeta> = {
   plan_ready: { label: 'Plan ready', tone: 'info' },
   executing: { label: 'Executing', tone: 'warning' },
   running: { label: 'Running', tone: 'warning' },
+  queued: { label: 'Queued', tone: 'info' },
   completed: { label: 'Completed', tone: 'success' },
   error: { label: 'Error', tone: 'danger' },
   cancelled: { label: 'Cancelled', tone: 'neutral' },
@@ -37,6 +38,7 @@ export type JobStatusFilter =
   | 'all'
   | 'live'
   | 'active'
+  | 'queue'
   | 'error'
   | 'completed'
   | 'cancelled'
@@ -57,6 +59,9 @@ export function jobMatchesFilter(
         live ||
         ['pending', 'planning', 'executing', 'running', 'plan_ready'].includes(s)
       )
+    case 'queue':
+      // Queue rows are not JobItem records — JobsPage handles this filter.
+      return false
     case 'error':
       return s === 'error' || s === 'unknown'
     case 'completed':

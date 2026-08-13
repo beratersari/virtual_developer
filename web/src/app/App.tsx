@@ -6,7 +6,6 @@ import { PollPage } from '../pages/poll/PollPage'
 import { SchedulesPage } from '../pages/schedules/SchedulesPage'
 import { SessionsPage } from '../pages/sessions/SessionsPage'
 import { SettingsPage } from '../pages/settings/SettingsPage'
-import { QueuePage } from '../pages/queue/QueuePage'
 import { LiveProvider } from './LiveProvider'
 import { Shell } from './Shell'
 
@@ -18,7 +17,8 @@ export default function App() {
           <Route element={<Shell />}>
             <Route path="/" element={<Navigate to="/jobs" replace />} />
             <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/queue" element={<QueuePage />} />
+            {/* Queue is shown on Jobs; keep old path as redirect */}
+            <Route path="/queue" element={<Navigate to="/jobs" replace />} />
             <Route path="/jobs/:jobId" element={<JobDetailPage />} />
             <Route path="/tasks/:issueKey" element={<IssueDetailPage />} />
             <Route path="/poll" element={<PollPage />} />

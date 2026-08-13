@@ -364,6 +364,35 @@ class GitManager:
         self._update_submodules(reason="after reuse fetch")
         self._materialize_job_remote_refs()
 
+    @staticmethod
+    def _base_git_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Process env for all git child processes.
+
+        ``GIT_LFS_SKIP_SMUDGE=1`` keeps LFS pointer files as pointers. Unattended
+        agent clones must not fail when a broken/old git-lfs filter prints
+        ``git version >= 1.8.2 is required… your version:`` (empty) after a
+        successful ``checkout`` — that was aborting otherwise-valid GitLab MR jobs.
+        """
+        env = dict(os.environ)
+        env.setdefault("GIT_LFS_SKIP_SMUDGE", "1")
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        if extra:
+            env.update(extra)
+        return env
+
+    @staticmethod
+    def _looks_like_lfs_filter_noise(text: str) -> bool:
+        low = (text or "").lower()
+        if "git lfs" not in low and "git-lfs" not in low and "lfs" not in low:
+            return False
+        return (
+            "git version" in low
+            or "required for git lfs" in low
+            or "error: failed to filter" in low
+            or "smudge filter" in low
+            or "filter-process" in low
+        )
+
     def _submodule_auth_env(self) -> Dict[str, str]:
         """Env that rewrites https://host/ → oauth2:PAT@host for nested submodule clones.
 
@@ -371,7 +400,7 @@ class GitManager:
         the same GitLab host. ``url.*.insteadOf`` via ``GIT_CONFIG_*`` avoids
         writing the PAT into the repo config file.
         """
-        env = dict(os.environ)
+        env = self._base_git_env()
         base = (self.remote_url or "").strip()
         pat = self._pat_for_remote(base)
         host = self._host_from_url(base)
@@ -523,10 +552,15 @@ class GitManager:
         # Without a settings PAT, use the clean URL (host helpers may apply).
         # Never embed PAT in argv (ps /proc cmdline). Askpass + disabled helper.
         clone_url = clean_url
-        clone_env = self._git_auth_env(url=clean_url)
-        clone_env["GIT_CONFIG_COUNT"] = "1"
-        clone_env["GIT_CONFIG_KEY_0"] = "credential.helper"
-        clone_env["GIT_CONFIG_VALUE_0"] = ""
+        clone_env = self._base_git_env(self._git_auth_env(url=clean_url))
+        # Disable credential helper for this clone only (settings PAT in URL)
+        try:
+            base_count = int(clone_env.get("GIT_CONFIG_COUNT") or "0")
+        except ValueError:
+            base_count = 0
+        clone_env[f"GIT_CONFIG_KEY_{base_count}"] = "credential.helper"
+        clone_env[f"GIT_CONFIG_VALUE_{base_count}"] = ""
+        clone_env["GIT_CONFIG_COUNT"] = str(base_count + 1)
 
         issue_tag = self.issue_key or "(unknown)"
         clone_timeout = max(
@@ -886,12 +920,19 @@ class GitManager:
 
         # Force UTF-8 log/output so commit subjects with Turkish (ğüşıöç…)
         # are not mojibake'd on Windows cp1254 locale when building MR titles.
+        # Disable LFS filter hooks so a broken git-lfs install cannot fail checkout.
         cmd = [
             "git",
             "-c",
             "core.longpaths=true",
             "-c",
             "i18n.logOutputEncoding=utf-8",
+            "-c",
+            "filter.lfs.smudge=",
+            "-c",
+            "filter.lfs.process=",
+            "-c",
+            "filter.lfs.required=false",
         ] + list(args)
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
@@ -905,6 +946,7 @@ class GitManager:
             if timeout is not None
             else self._git_command_timeout()
         )
+        git_env = self._base_git_env()
         try:
             result = subprocess.run(
                 cmd,
@@ -914,6 +956,7 @@ class GitManager:
                 encoding="utf-8",
                 errors="replace",
                 timeout=cmd_timeout,
+                env=git_env,
             )
         except subprocess.TimeoutExpired as e:
             safe_err = f"git command timed out after {cmd_timeout}s: git {' '.join(safe_args)}"
@@ -934,6 +977,7 @@ class GitManager:
                     pass
 
         if result.returncode != 0:
+            combined = (result.stdout or "") + "\n" + (result.stderr or "")
             safe_err = self._redact_secret_text(result.stderr or "")
             # rev-parse --verify is often a "does this ref exist?" probe with
             # check=False; log at debug so missing local branches are not ERROR spam.
@@ -943,6 +987,24 @@ class GitManager:
                 and args[0] == "rev-parse"
                 and "--verify" in args
             )
+            # Checkout often succeeds ("Switched to…") then LFS smudge fails with
+            # a bogus empty git version — treat as soft success when HEAD matches.
+            is_checkout = bool(args) and args[0] == "checkout"
+            if (
+                is_checkout
+                and self._looks_like_lfs_filter_noise(combined)
+                and self._checkout_landed_on_intended_branch(args)
+            ):
+                logger.warning(
+                    f"Git checkout succeeded but LFS filter complained "
+                    f"(ignored): git {' '.join(safe_args)} — {safe_err.strip()[:300]}"
+                )
+                return subprocess.CompletedProcess(
+                    args=cmd,
+                    returncode=0,
+                    stdout=result.stdout or "",
+                    stderr=result.stderr or "",
+                )
             if is_probe:
                 logger.debug(
                     f"Git ref missing (probe): git {' '.join(safe_args)} — {safe_err.strip()}"
@@ -959,6 +1021,32 @@ class GitManager:
             logger.debug(f"Git command succeeded: git {' '.join(safe_args)}")
 
         return result
+
+    def _checkout_landed_on_intended_branch(self, args: list) -> bool:
+        """True when a failed ``git checkout`` still left HEAD on the target branch."""
+        if not args or args[0] != "checkout":
+            return False
+        intended = ""
+        # Patterns: checkout <branch> | checkout -B <branch> <start> | checkout -b <branch>
+        tokens = [a for a in args[1:] if a and not a.startswith("-")]
+        if tokens:
+            intended = tokens[0].strip()
+        # Also handle ``checkout -B name start`` where -B is flag
+        if not intended:
+            for i, a in enumerate(args):
+                if a in ("-B", "-b") and i + 1 < len(args):
+                    intended = (args[i + 1] or "").strip()
+                    break
+        if not intended or intended.startswith("origin/"):
+            # start_point only — resolve current branch name only
+            intended = intended[len("origin/") :] if intended.startswith("origin/") else intended
+        if not intended:
+            return False
+        try:
+            head = self.get_current_branch()
+        except Exception:
+            return False
+        return (head or "").strip() == intended
 
     @staticmethod
     def _redact_secret_text(text: str) -> str:
