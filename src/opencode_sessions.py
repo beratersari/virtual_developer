@@ -774,6 +774,9 @@ def assistant_asked_question(text: str) -> bool:
 
     Virtual Developer is unattended (one-pass). If the model stops to ask,
     the session is incomplete — not a successful job completion.
+    Callers must only pass the **last** assistant text (or use
+    ``assess_session_completeness``, which is last-turn-only for tools too).
+    Historical "Shall I…?" must not fail a later clean stop — see AGENTS.md.
     """
     t = (text or "").strip()
     if not t:

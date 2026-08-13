@@ -153,6 +153,101 @@ Rework in that case still happens because the ticket is To Do + trigger
 - No drive-by refactors or unrelated file churn.
 - Comments only for non-obvious intent (not narration of the code).
 
+### OpenCode serve sessions: one-pass, compact, clarifying questions (**hard-won**)
+
+Jobs run **unattended** over `opencode serve` (HTTP). There is **no human reply
+path** (no Jira-comment intake for agent Q&A, no interactive TUI for the job).
+Prompts (`agent/BUILD_PROMPT.md`, `agent/PLAN_PROMPT.md`) order the model not to
+ask clarifying questions. Treat violations as product failures to recover from —
+not as multi-turn chat.
+
+#### Control loop (intentional)
+
+| Phase | Behaviour | Why |
+|-------|-----------|-----|
+| Task prompt | **One** user POST of BUILD/PLAN kit (`max_turns` style) | One-pass design |
+| Auto-compact | **Wait** for OpenCode idle/auto-resume; **never** inject a user “Continue” for compact | A fake Continue shows up as the operator in chat and races OpenCode’s compact loop |
+| Clarifying question | **Leave compact-wait immediately** (do not spin hundreds of “waiting for auto-resume” polls) | Auto-resume never answers a human; spinning burns the wall-clock budget |
+| After question | **One** short unattended nudge (defaults / finish; **not** the full BUILD kit again) | Recover without human; outer retry must not re-blast BUILD |
+| After nudge | Re-assess **last assistant turn only** for “still asking” | Earlier “Shall I…?” in history must not poison a later clean `finish=stop` |
+| Stale open todos | After nudge, clean `finish=stop` + only open-todo reasons → may accept complete (todo API lag after `todowrite`) | Processor still gates on plan file / **git delivery** |
+| Still asking after nudge | `incomplete` + Jira category **`question`** (not “context compaction”) | Operators need the real failure mode |
+
+Typical log **good** path after a question:
+
+```text
+[serve] assessment … reasons=[…, 'assistant asked a clarifying question']
+[serve] … leaving compact wait for unattended nudge   # or skip wait if no compact
+[serve] assistant asked a clarifying question — sending one unattended nudge
+# then success (returncode 0) or clear incomplete — not poll 700–990 of auto-resume
+```
+
+Typical log **bug** (fixed; do not reintroduce):
+
+```text
+idle after compact but still incomplete (poll 780,
+  reasons=[open todos…, assistant asked a clarifying question])
+  — waiting for auto-resume (no user message)
+```
+
+#### Detection (fail closed, but last-turn only)
+
+- Free-text: last assistant matches “shall I / which DB / please confirm…” heuristics
+  (`assistant_asked_question` in `src/opencode_sessions.py`).
+- Structured: OpenCode **`question` tool** parts with `pending`/`running` on the
+  **last** assistant message only (history tools must not fail a later done turn).
+- `GET /session/status` is only `idle`/`busy`/`retry` — **not** “waiting for human”.
+  Do not use idle alone as success or as “needs clarification”.
+
+#### Delivery after agent success (build)
+
+Orchestrator **always** owns remote delivery when the job returns success:
+
+| Agent did | Orchestrator does |
+|-----------|-------------------|
+| Commit only | `git push` + open MR |
+| Already pushed tip | Treat remote HEAD match as OK; **still open MR** (or reuse existing) |
+| Push fails and tip not on remote | Fail delivery (no fake MR) |
+
+Do **not** skip MR creation because the model ran `git push`. Nudge text tells the
+model not to push; if it still does, delivery must remain correct.
+
+#### MR titles / UTF-8 (Windows)
+
+- MR title often comes from `git log` subject → `glab` or GitLab REST.
+- Always decode git/glab with **`encoding="utf-8"`** and
+  `i18n.logOutputEncoding=utf-8`. Prefer REST JSON for **non-ASCII** titles
+  (Turkish `ğüşıöç`, etc.). Windows console code pages otherwise mojibake titles.
+- This is independent of the clarifying-question path but shows up whenever we
+  reliably open MRs from the orchestrator.
+
+#### Key modules
+
+| Path | Role |
+|------|------|
+| `src/opencode_serve.py` | Serve orchestrator: compact wait, unattended nudge, post-nudge assess |
+| `src/opencode_sessions.py` | Completeness, `assistant_asked_question`, last-turn-only question tools |
+| `src/orchestrator/agent_runner.py` | Retries; do **not** re-send BUILD after question/compact follow-up |
+| `src/processor.py` | `_fail_from_agent_result` category `question`; `_push_and_create_mr` |
+| `src/git_manager.py` | `push` / `head_is_on_remote` / UTF-8 MR create |
+| `src/reporter/jira_reporter.py` | “Clarifying question (unattended)” vs compaction incomplete |
+
+#### Do / don’t
+
+**Do**
+
+- Treat clarifying question + open todos in assessment reasons as a **signal to leave wait**, not to poll forever.
+- Keep one-pass: at most one unattended nudge for questions inside a serve run.
+- Gate real success on **evidence** (plan file / new commits + push+MR), not “assistant finished speaking”.
+
+**Don’t**
+
+- Inject user “Continue” / Finish-todos **because of** auto-compact.
+- Re-post the full BUILD kit on outer retry when the failure was compact or clarifying question.
+- Scan **whole session history** for open `question` tools when the last turn is a clean stop.
+- Mark soft COMPLETE when the model only asked a question and delivered nothing (build: no new commits should not look like a happy delivered job without a clear note).
+- “Fix” by inventing a human Q&A loop over Jira comments unless product explicitly adds that intake path.
+
 ---
 
 ## 3. Jira (on-prem)
@@ -603,6 +698,8 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `agent/PLAN_PROMPT.md` | Plan-mode agent prompt (`Mode: plan`) |
 | `agent/BUILD_PROMPT.md` | Build-mode agent prompt (`Mode: build`) |
+| `src/opencode_serve.py` | Serve loop: compact wait, unattended nudge (see §2 OpenCode serve) |
+| `src/opencode_sessions.py` | Session completeness + clarifying-question detection |
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |

@@ -1156,6 +1156,8 @@ class AgentRunner:
                 # Compact/incomplete was already waited out inside run_agent.
                 # Another prompt (Continue, Finish-todos, or the original BUILD)
                 # shows up as a user chat turn and races OpenCode auto-compact.
+                # Clarifying questions are also one-pass: serve already sent at
+                # most one unattended nudge; do not re-blast BUILD here.
                 from src.opencode_sessions import compact_related_reasons
 
                 reasons = list(result.get("incomplete_reasons") or [])

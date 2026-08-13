@@ -4111,7 +4111,7 @@ class JobProcessor:
     ) -> bool:
         """Push prepared work_branch and open MR.
 
-        Delivery contract (build jobs):
+        Delivery contract (build jobs; see AGENTS.md §2 OpenCode serve):
         - Agent **committed only** → orchestrator pushes and opens MR.
         - Agent **already pushed** → still open MR (push may no-op / already
           on remote); do not skip MR creation.
