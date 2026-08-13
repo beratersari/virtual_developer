@@ -5,12 +5,18 @@ Why this exists
 Agent jobs use ``opencode serve``. The control loop here:
 
 1. Create (or resume) a session
-2. ``POST /session/{id}/message`` with the **task prompt only**
+2. ``POST /session/{id}/message`` with the **task prompt only** (one-pass)
 3. If the turn looks like compact-then-stop (or the HTTP wait ended while
    OpenCode is still compacting), **wait** for auto-compact / auto-resume
 4. Re-assess. Never inject a user "Continue" for compaction — that shows
    up in chat as the operator and races OpenCode's own compact loop
-5. Timeout/error resume may still send Continue; compact never does
+5. If the model asks a **clarifying question**, leave compact-wait immediately
+   and send **one** unattended nudge (not the full BUILD kit). Auto-resume
+   never answers a human; spinning on "waiting for auto-resume" with
+   reasons containing "clarifying question" is a bug (see AGENTS.md §2).
+6. After the nudge, only the **last** assistant turn decides "still asking";
+   stale open todos alone after a clean finish=stop may be accepted
+   (todo API lag). Timeout/error resume may still send Continue; compact never does.
 
 TLS: all clients use ``verify=False`` (product requirement for on-prem/intercept).
 """
