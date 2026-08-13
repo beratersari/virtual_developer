@@ -957,11 +957,24 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.get_current_branch.return_value = ""
     assert await processor._push_and_create_mr(state) is False
 
-    # push fail
+    # push fail and not on remote
     git.work_branch = "feature/PU-1"
     git.get_current_branch.return_value = "feature/PU-1"
     git.push.return_value = False
+    git.head_is_on_remote.return_value = False
+    git.get_last_commit_sha.return_value = "sha_new"
     assert await processor._push_and_create_mr(state) is False
+
+    # Agent already pushed: push fails but origin has HEAD → still open MR
+    git.push.return_value = False
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_subject.return_value = "feat: agent pushed"
+    git.get_last_commit_message.return_value = "body"
+    git.get_last_commit_sha.return_value = "sha_agent"
+    git.create_merge_request.return_value = "http://mr/agent"
+    assert await processor._push_and_create_mr(state) is True
+    git.create_merge_request.assert_called()
+    git.head_is_on_remote.return_value = False
 
     # push ok, MR ok
     git.push.return_value = True

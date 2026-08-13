@@ -1644,7 +1644,68 @@ class GitManager:
             logger.error(f"Could not checkout work branch '{work}': {e}")
             return False
 
+    def head_is_on_remote(self, branch_name: Optional[str] = None) -> bool:
+        """True when ``origin/<branch>`` already points at (or contains) local HEAD.
+
+        Used when the agent pushed itself: orchestrator push may no-op or fail
+        while the remote already has the work — we still open an MR.
+        """
+        if not self.remote_enabled:
+            return False
+        branch = self._safe_git_ref(
+            (branch_name or "").strip()
+            or (self.work_branch or "").strip()
+            or self.get_current_branch()
+        )
+        if not branch:
+            return False
+        try:
+            head = (self.get_last_commit_sha() or "").strip()
+        except Exception:
+            head = ""
+        if not head:
+            return False
+        try:
+            # Refresh remote ref; ignore fetch failures (offline / missing branch).
+            self._run_git(
+                ["fetch", "origin", "--", branch],
+                check=False,
+                auth=True,
+            )
+            result = self._run_git(
+                ["rev-parse", f"refs/remotes/origin/{branch}"],
+                check=False,
+            )
+            # Do not use ``x or 1`` — returncode 0 is success (falsy).
+            rev_rc = getattr(result, "returncode", 1)
+            if rev_rc is None or int(rev_rc) != 0:
+                return False
+            remote = (result.stdout or "").strip()
+            if not remote:
+                return False
+            if remote == head:
+                return True
+            # Abbreviated SHAs / tip already contains HEAD (agent pushed same tip).
+            if remote.startswith(head) or head.startswith(remote):
+                return True
+            # HEAD is an ancestor of origin/branch (agent pushed further commits).
+            anc = self._run_git(
+                ["merge-base", "--is-ancestor", head, f"refs/remotes/origin/{branch}"],
+                check=False,
+            )
+            anc_rc = getattr(anc, "returncode", 1)
+            return anc_rc is not None and int(anc_rc) == 0
+        except Exception as e:
+            logger.debug(f"head_is_on_remote check failed for {branch}: {e}")
+            return False
+
     def push(self, branch_name: Optional[str] = None) -> bool:
+        """Push work branch to origin.
+
+        Returns True when the remote has our commits (fresh push **or** the
+        agent already pushed the same tip). Callers still open the MR after
+        a successful return.
+        """
         if not self.remote_enabled:
             logger.info("Push not available (no remote configured).")
             return False
@@ -1679,6 +1740,14 @@ class GitManager:
                     logger.info(f"Pushed branch '{branch}' after merge.")
                     return True
                 except RuntimeError as e2:
+                    # Agent may have already pushed the same tip (or further).
+                    if self.head_is_on_remote(branch):
+                        logger.info(
+                            f"Push failed but HEAD is already on origin/{branch} "
+                            f"(agent likely pushed); treating push as success so "
+                            f"the orchestrator can open an MR. Detail: {e2}"
+                        )
+                        return True
                     logger.error(f"Push failed after merge attempt: {e2}")
                     return False
         finally:

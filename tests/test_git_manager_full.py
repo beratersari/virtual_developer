@@ -616,16 +616,55 @@ def test_push_paths(gm):
             _cp(),  # scrub
         ]):
             assert gm.push("feature/x") is True
-        # auth ok, push fail, fetch/merge/push fail, scrub
-        with patch.object(gm, "_run_git", side_effect=[
-            _cp(),  # auth
-            RuntimeError("fail"),  # push
-            _cp(),  # fetch
-            _cp(),  # merge
-            RuntimeError("fail2"),  # push retry
-            _cp(),  # scrub
-        ]):
-            assert gm.push("feature/x") is False
+        # push/merge fail and remote tip check fails → False
+        with patch.object(gm, "head_is_on_remote", return_value=False):
+            with patch.object(gm, "_run_git", side_effect=[
+                _cp(),  # set-url
+                RuntimeError("fail"),  # push
+                _cp(),  # fetch
+                _cp(),  # merge
+                RuntimeError("fail2"),  # push retry
+                _cp(),  # scrub
+            ]):
+                assert gm.push("feature/x") is False
+        # Agent already pushed: push fails but head_is_on_remote → True
+        with patch.object(gm, "head_is_on_remote", return_value=True):
+            with patch.object(gm, "_run_git", side_effect=[
+                _cp(),  # set-url
+                RuntimeError("fail"),  # push
+                _cp(),  # fetch
+                _cp(),  # merge
+                RuntimeError("fail2"),  # push retry
+                _cp(),  # scrub
+            ]):
+                assert gm.push("feature/x") is True
+
+
+def test_head_is_on_remote_matches_tip(gm):
+    gm.remote_enabled = True
+    gm.work_branch = "feature/x"
+    gm.remote_url = "https://gitlab.example.com/g/p.git"
+
+    def _run(args, **kwargs):
+        # Ignore auth set-url / scrub / fetch noise; answer rev-parse.
+        if args and args[0] == "rev-parse":
+            return _cp(stdout="deadbeef\n")
+        if args and args[0] == "merge-base":
+            return _cp(returncode=1)
+        return _cp()
+
+    with patch.object(gm, "get_last_commit_sha", return_value="deadbeef"):
+        with patch.object(gm, "_run_git", side_effect=_run):
+            assert gm.head_is_on_remote("feature/x") is True
+
+    def _run_miss(args, **kwargs):
+        if args and args[0] == "rev-parse":
+            return _cp(returncode=1, stdout="")
+        return _cp()
+
+    with patch.object(gm, "get_last_commit_sha", return_value="deadbeef"):
+        with patch.object(gm, "_run_git", side_effect=_run_miss):
+            assert gm.head_is_on_remote("feature/x") is False
 
 
 def test_mr_and_comments(gm):
