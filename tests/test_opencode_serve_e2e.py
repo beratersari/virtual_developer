@@ -891,5 +891,82 @@ async def test_http_500_while_busy_waits_does_not_fail_job():
     result = await orch.run(prompt="do the work", title="KAN-500")
     assert result.returncode == 0, result.stderr
     assert backend.message_calls == 1
-    assert "session is busy" in result.stdout
+    assert "waiting for the in-flight turn" in result.stdout
     assert "message failed" in (result.stdout + result.stderr)
+
+
+@pytest.mark.asyncio
+async def test_http_500_idle_status_still_waits_for_inflight_turn():
+    """OpenCode often returns 500 UnknownError while status still looks idle.
+
+    Dashboard used to hard-fail; OpenCode kept editing files. Wait instead.
+    """
+
+    class Fail500IdleThenComplete(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self._failed = False
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 3
+
+        async def send_message(self, session_id, text, **kwargs):
+            if not self._failed:
+                self._failed = True
+                self.prompts.append(text)
+                self.message_calls += 1
+                # Status stays idle (busy_polls_remaining=0) — real 1.18 race
+                raise _http_500()
+            return await super().send_message(session_id, text, **kwargs)
+
+    backend = Fail500IdleThenComplete()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=1.5,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.08,
+    )
+    result = await orch.run(
+        prompt="do the work",
+        title="KAN-500-IDLE",
+        session_id=backend.session_id,
+    )
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 1  # no BUILD retry that would 500 again
+    assert "in-flight turn" in result.stdout
+    assert "message failed" in (result.stdout + result.stderr)
+
+
+def test_session_is_busy_accepts_alternate_shapes():
+    from src.opencode_serve import session_is_busy
+
+    sid = "ses_alt"
+    assert session_is_busy({sid: {"type": "busy"}}, sid)
+    assert session_is_busy({sid: {"state": "running"}}, sid)
+    assert session_is_busy({"data": {sid: {"status": "in_progress"}}}, sid)
+    assert session_is_busy(
+        {"sessions": [{"id": sid, "type": "busy"}]}, sid
+    )
+    assert not session_is_busy({sid: {"type": "idle"}}, sid)
+    assert not session_is_busy({}, sid)
+
+
+def test_is_message_conflict_error_5xx():
+    from src.opencode_serve import is_message_conflict_error
+
+    assert is_message_conflict_error(_http_500()) is True
+    req = httpx.Request("POST", "http://fake/session/x/message")
+    resp400 = httpx.Response(400, text='{"error":"bad request"}', request=req)
+    assert (
+        is_message_conflict_error(
+            httpx.HTTPStatusError("400", request=req, response=resp400)
+        )
+        is False
+    )
+    resp409 = httpx.Response(409, text="session busy", request=req)
+    assert (
+        is_message_conflict_error(
+            httpx.HTTPStatusError("409", request=req, response=resp409)
+        )
+        is True
+    )

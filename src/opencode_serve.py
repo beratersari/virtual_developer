@@ -321,31 +321,112 @@ class OpenCodeServeClient:
 
 
 def session_is_busy(status: Any, session_id: Optional[str]) -> bool:
-    """True when OpenCode reports this session still running or compacting."""
+    """True when OpenCode reports this session still running or compacting.
+
+    Status payloads vary by OpenCode version. Accept common shapes:
+    ``{ses_…: {type: busy}}``, nested ``data``, top-level ``type``, list
+    of session rows, and ``state`` / ``status`` string fields.
+    """
     if not isinstance(status, dict) or not session_id:
         return False
+
+    def _row_busy(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        kind = str(
+            row.get("type")
+            or row.get("status")
+            or row.get("state")
+            or row.get("phase")
+            or ""
+        ).strip().lower()
+        if kind in {
+            "busy",
+            "busy_compacting",
+            "compacting",
+            "retry",
+            "running",
+            "in_progress",
+            "in-progress",
+            "active",
+            "working",
+            "processing",
+            "message",
+        }:
+            return True
+        if row.get("busy") is True or row.get("running") is True:
+            return True
+        if "compact" in kind or "run" in kind:
+            return True
+        return False
+
     row = status.get(session_id)
     if row is None and isinstance(status.get("data"), dict):
-        row = status["data"].get(session_id) or status.get("data")
-    if not isinstance(row, dict):
-        # Sometimes {type: idle} at top level
-        row = status if "type" in status or "status" in status else {}
-    if not isinstance(row, dict):
+        data = status["data"]
+        row = data.get(session_id)
+        if row is None and _row_busy(data):
+            return True
+        if isinstance(data.get("sessions"), dict):
+            row = data["sessions"].get(session_id)
+    if row is None and isinstance(status.get("sessions"), dict):
+        row = status["sessions"].get(session_id)
+    if _row_busy(row):
+        return True
+    # Sometimes {type: busy} at top level for the only active session
+    if _row_busy(status):
+        return True
+    # List form: [{id|sessionID: ses_…, type: busy}, …]
+    for key in ("data", "sessions", "items", "status"):
+        lst = status.get(key)
+        if not isinstance(lst, list):
+            continue
+        for item in lst:
+            if not isinstance(item, dict):
+                continue
+            sid = str(
+                item.get("id")
+                or item.get("sessionID")
+                or item.get("sessionId")
+                or item.get("session_id")
+                or ""
+            )
+            if sid == session_id and _row_busy(item):
+                return True
+    return False
+
+
+def is_message_conflict_error(exc: BaseException) -> bool:
+    """True when POST /message failed because a turn is already in flight.
+
+    OpenCode 1.18 often returns generic HTTP 500 UnknownError while the
+    session keeps editing files. Treat 5xx (and explicit busy bodies) as
+    conflict so we wait instead of failing the dashboard job.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
         return False
-    kind = str(row.get("type") or row.get("status") or "").strip().lower()
-    if kind in {
-        "busy",
-        "busy_compacting",
-        "compacting",
-        "retry",
-        "running",
-        "in_progress",
-        "in-progress",
-    }:
+    resp = exc.response
+    code = int(getattr(resp, "status_code", 0) or 0)
+    body = ""
+    try:
+        body = (resp.text or "").lower()
+    except Exception:
+        body = ""
+    if code in (409, 423, 429):
         return True
-    if row.get("busy") is True:
+    if any(
+        token in body
+        for token in (
+            "already running",
+            "session busy",
+            "in progress",
+            "in-progress",
+            "active turn",
+            "concurrent",
+        )
+    ):
         return True
-    return "compact" in kind
+    # Generic serve 5xx while a prior turn is still running (common on resume/retry)
+    return code >= 500
 
 
 def messages_from_api(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -879,19 +960,32 @@ class ServeOrchestrator:
                 note = f"[serve] message failed: {err}"
                 _emit("stderr", note)
                 if not timed_out_send:
-                    # 500 on a resumed/busy session often means OpenCode already
-                    # has a turn running (cancel did not abort). Do not retry
-                    # BUILD — wait that turn out.
-                    try:
-                        st500 = await self.client.session_status()
-                        busy500 = session_is_busy(st500, sid)
-                    except Exception:
-                        busy500 = False
-                    if busy500:
+                    # 500/UnknownError on a resumed session often means OpenCode
+                    # already has a turn running (prior retry/cancel did not
+                    # abort). Status may still report idle briefly. Wait for
+                    # the in-flight turn instead of failing the job and
+                    # triggering another BUILD retry that 500s again.
+                    busy500 = False
+                    for _probe in range(8):
+                        try:
+                            st500 = await self.client.session_status()
+                            busy500 = session_is_busy(st500, sid)
+                        except Exception:
+                            busy500 = False
+                        if busy500:
+                            break
+                        await asyncio.sleep(0.25)
+                    conflict = busy500 or is_message_conflict_error(e)
+                    if conflict:
+                        why = (
+                            "session is busy"
+                            if busy500
+                            else "HTTP 5xx/conflict (likely in-flight turn)"
+                        )
                         _emit(
                             "stdout",
-                            "[serve] HTTP error but session is busy — "
-                            "waiting for the in-flight turn (no extra prompt)",
+                            f"[serve] {why} — waiting for the in-flight turn "
+                            "(no extra prompt; OpenCode may still be editing files)",
                         )
                         wait_info = await self._wait_for_auto_compact(
                             sid,
