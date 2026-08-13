@@ -13,6 +13,7 @@ const STATUS_MAP: Record<string, StatusMeta> = {
   plan_ready: { label: 'Plan ready', tone: 'info' },
   executing: { label: 'Executing', tone: 'warning' },
   running: { label: 'Running', tone: 'warning' },
+  queued: { label: 'Queued', tone: 'info' },
   completed: { label: 'Completed', tone: 'success' },
   error: { label: 'Error', tone: 'danger' },
   cancelled: { label: 'Cancelled', tone: 'neutral' },

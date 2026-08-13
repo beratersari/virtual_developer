@@ -2780,19 +2780,22 @@ class JobProcessor:
             desc = str(desc) if desc is not None else ""
         if not key:
             return {"ok": False, "reason": "missing issue key"}
+        # Only collapse into an existing *waiting* row. If one run is already
+        # ``running``, a second dispatch (schedule/rework) must stay ``queued``
+        # so operators can see it on Jobs until the live job finishes.
         existing = self.queue_store.find_open_jira(key)
-        if existing:
+        if existing and (existing.get("status") or "") == "queued":
             logger.info(
-                f"{key}: already {existing.get('status')} on queue "
-                f"{existing.get('queue_id')}; not re-enqueueing"
+                f"{key}: already queued as {existing.get('queue_id')}; "
+                f"not re-enqueueing"
             )
             return {
                 "ok": True,
-                "queued": existing.get("status") == "queued",
+                "queued": True,
                 "duplicate": True,
                 "queue_id": existing.get("queue_id"),
                 "issue_key": key,
-                "status": existing.get("status"),
+                "status": "queued",
             }
         spec, _err = parse_issue_git_spec(summary, desc)
         repo = (spec.repository_url if spec else "") or ""

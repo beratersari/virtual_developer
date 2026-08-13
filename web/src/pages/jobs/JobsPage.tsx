@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { deleteJobs, fetchJobs } from '../../api/client'
-import type { JobsPayload } from '../../api/types'
+import { Link, useNavigate } from 'react-router-dom'
+import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
+import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
 import {
   jobIsDeletable,
@@ -12,6 +12,7 @@ import { Alert } from '../../ui/Alert'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { LiveDot } from '../../ui/LiveDot'
 import { PageHeader } from '../../ui/PageHeader'
+import { StatusBadge } from '../../ui/StatusBadge'
 import { peekJobsPayload, rememberJobsPayload } from '../../app/entityCache'
 import { JobsTable } from './JobsTable'
 
@@ -34,10 +35,13 @@ export function JobsPage() {
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [page, setPage] = useState(1)
   const [payload, setPayload] = useState<JobsPayload | null>(() => peekJobsPayload())
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([])
+  const [queueQueued, setQueueQueued] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [cancelQueueId, setCancelQueueId] = useState<string | null>(null)
   const reqId = useRef(0)
   const lastGenReload = useRef(0)
 
@@ -48,6 +52,32 @@ export function JobsPage() {
     }, 250)
     return () => window.clearTimeout(t)
   }, [issueFilter])
+
+  const loadQueue = useCallback(async () => {
+    try {
+      const q = await fetchQueue({ limit: 200 })
+      const rows = q.items || []
+      // Open work-queue rows: waiting + claimed-but-not-finished
+      const open = rows.filter(
+        (r) => r.status === 'queued' || r.status === 'running',
+      )
+      // Newest first so the operator sees the latest dispatch at the top
+      open.sort((a, b) =>
+        String(b.created_at || '').localeCompare(String(a.created_at || '')),
+      )
+      setQueueItems(open)
+      setQueueQueued(
+        typeof q.queued_count === 'number'
+          ? q.queued_count
+          : open.filter((r) => r.status === 'queued').length,
+      )
+    } catch (e) {
+      // Jobs list still useful if queue endpoint fails
+      setQueueItems([])
+      setQueueQueued(0)
+      setError((prev) => prev || (e instanceof Error ? e.message : 'Queue load failed'))
+    }
+  }, [])
 
   const load = useCallback(
     async (opts?: { filter?: string; page?: number }) => {
@@ -66,8 +96,9 @@ export function JobsPage() {
         if (req !== reqId.current) return
         setError(e instanceof Error ? e.message : 'Failed to load jobs')
       }
+      void loadQueue()
     },
-    [debouncedFilter, page],
+    [debouncedFilter, page, loadQueue],
   )
 
   useEffect(() => {
@@ -88,6 +119,14 @@ export function JobsPage() {
       ),
     [payload, statusFilter],
   )
+
+  const visibleQueue = useMemo(() => {
+    const needle = debouncedFilter.trim().toUpperCase()
+    if (!needle) return queueItems
+    return queueItems.filter((q) =>
+      (q.issue_key || '').toUpperCase().includes(needle),
+    )
+  }, [queueItems, debouncedFilter])
 
   const visibleIdKey = filteredJobs.map((j) => j.job_id).join('|')
   useEffect(() => {
@@ -149,6 +188,7 @@ export function JobsPage() {
   const to = Math.min(currentPage * size, total)
   const selectedCount = selectedIds.size
   const liveJobs = (payload?.jobs ?? []).filter((j) => j.live)
+  const badgeQueued = live.queueQueued ?? queueQueued
 
   return (
     <section className="space-y-5">
@@ -157,7 +197,7 @@ export function JobsPage() {
         title="Jobs"
         description={
           live.connected
-            ? 'Each card is one agent run. Open a card for logs and prompts.'
+            ? 'Agent runs and messages waiting for a free work slot. Open a run for logs and prompts.'
             : 'Disconnected — list may be stale.'
         }
         actions={
@@ -188,6 +228,99 @@ export function JobsPage() {
           ))}
         </div>
       )}
+
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+            Work queue
+            <span className="ml-2 font-mono font-normal normal-case text-text">
+              {visibleQueue.length}
+              {badgeQueued > 0 ? ` · ${badgeQueued} waiting` : ''}
+            </span>
+          </h2>
+          <p className="text-[11px] text-text-muted">
+            Waiting or claimed — FIFO when the issue/workspace is busy
+          </p>
+        </div>
+        {visibleQueue.length === 0 ? (
+          <div className="vd-panel px-4 py-3 text-sm text-text-muted">
+            Nothing waiting. A second dispatch while a run is live shows up here as{' '}
+            <span className="font-mono text-text-secondary">queued</span>.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visibleQueue.map((q) => (
+              <div key={q.queue_id} className="vd-job">
+                <div
+                  className={`vd-job-bar ${
+                    q.status === 'running' ? 'tone-warning' : 'tone-info'
+                  }`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-sm font-semibold text-text">
+                      {q.issue_key || q.queue_id}
+                    </span>
+                    <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                      {q.source === 'gitlab' ? 'GitLab' : 'Jira'}
+                    </span>
+                    <StatusBadge status={q.status} size="sm" />
+                    {q.status === 'running' && <LiveDot />}
+                  </div>
+                  <div className="mt-1 text-[15px] text-text">{q.summary || '(no title)'}</div>
+                  {q.message?.trim() && (
+                    <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-sm text-text-secondary">
+                      {q.message}
+                    </p>
+                  )}
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-text-muted">
+                    <span>{q.queue_id}</span>
+                    {q.work_branch && (
+                      <span>
+                        {q.work_branch}
+                        {q.target_branch ? ` → ${q.target_branch}` : ''}
+                      </span>
+                    )}
+                    <span>{q.created_at ?? ''}</span>
+                    {q.merge_request_url && (
+                      <a
+                        href={q.merge_request_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-accent-text hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Merge request
+                      </a>
+                    )}
+                    {q.job_id && (
+                      <Link
+                        to={`/jobs/${encodeURIComponent(q.job_id)}`}
+                        className="text-accent-text hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {q.job_id}
+                      </Link>
+                    )}
+                  </div>
+                  {q.error_message && (
+                    <div className="mt-1.5 text-xs text-danger-text">{q.error_message}</div>
+                  )}
+                </div>
+                {q.status === 'queued' && (
+                  <button
+                    type="button"
+                    className="shrink-0 text-xs text-danger-text hover:underline"
+                    onClick={() => setCancelQueueId(q.queue_id)}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
@@ -233,7 +366,7 @@ export function JobsPage() {
       {statusFilter !== 'all' && (
         <p className="text-xs text-text-muted">
           Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
-          Issue search hits the server.
+          Issue search hits the server. Queue is listed above.
         </p>
       )}
 
@@ -256,13 +389,18 @@ export function JobsPage() {
         </Alert>
       )}
 
-      <JobsTable
-        jobs={filteredJobs}
-        selectable
-        selectedIds={selectedIds}
-        onToggleSelect={toggleSelect}
-        onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
-      />
+      <div className="space-y-2">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          Runs
+        </h2>
+        <JobsTable
+          jobs={filteredJobs}
+          selectable
+          selectedIds={selectedIds}
+          onToggleSelect={toggleSelect}
+          onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
+        />
+      </div>
 
       {selectedCount > 0 && (
         <div className="sticky bottom-4 z-10 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border-strong bg-bg-elevated px-4 py-3 shadow-lg">
@@ -301,6 +439,25 @@ export function JobsPage() {
         busy={bulkDeleting}
         onConfirm={() => void onConfirmDelete()}
         onCancel={() => setConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(cancelQueueId)}
+        title="Cancel queued message?"
+        body="It will not run. Work already executing is cancelled from a job’s Stop control."
+        confirmLabel="Cancel item"
+        danger
+        onCancel={() => setCancelQueueId(null)}
+        onConfirm={() => {
+          const id = cancelQueueId
+          setCancelQueueId(null)
+          if (!id) return
+          void cancelQueueItem(id)
+            .then(() => loadQueue())
+            .catch((e) => {
+              setError(e instanceof Error ? e.message : 'Cancel queue item failed')
+            })
+        }}
       />
     </section>
   )
