@@ -38,6 +38,7 @@ export type JobStatusFilter =
   | 'all'
   | 'live'
   | 'active'
+  | 'queue'
   | 'error'
   | 'completed'
   | 'cancelled'
@@ -58,6 +59,9 @@ export function jobMatchesFilter(
         live ||
         ['pending', 'planning', 'executing', 'running', 'plan_ready'].includes(s)
       )
+    case 'queue':
+      // Queue rows are not JobItem records — JobsPage handles this filter.
+      return false
     case 'error':
       return s === 'error' || s === 'unknown'
     case 'completed':
