@@ -896,45 +896,63 @@ async def test_http_500_while_busy_waits_does_not_fail_job():
 
 
 @pytest.mark.asyncio
-async def test_http_500_idle_status_still_waits_for_inflight_turn():
-    """OpenCode often returns 500 UnknownError while status still looks idle.
+async def test_http_500_idle_status_fails_fast_not_false_busy_wait():
+    """Generic 500 + idle status is a real failure (missing dir/agent/model).
 
-    Dashboard used to hard-fail; OpenCode kept editing files. Wait instead.
+    Waiting forever for 'completeness snapshot' made dashboard look stuck
+    while OpenCode never started the turn.
     """
 
-    class Fail500IdleThenComplete(FakeServeBackend):
+    class Fail500Idle(FakeServeBackend):
         def __init__(self):
             super().__init__(required_compacts=0)
             self._failed = False
-            self.auto_complete_on_idle = True
-            self.idle_polls_before_auto_complete = 3
 
         async def send_message(self, session_id, text, **kwargs):
             if not self._failed:
                 self._failed = True
                 self.prompts.append(text)
                 self.message_calls += 1
-                # Status stays idle (busy_polls_remaining=0) — real 1.18 race
                 raise _http_500()
             return await super().send_message(session_id, text, **kwargs)
 
-    backend = Fail500IdleThenComplete()
+    backend = Fail500Idle()
     client = FakeServeClient(backend)
     orch = ServeOrchestrator(
         client=client,
-        compact_wait_seconds=1.5,
+        compact_wait_seconds=0.4,
         compact_poll_seconds=0.05,
-        compact_settle_seconds=0.08,
+        compact_settle_seconds=0.05,
     )
     result = await orch.run(
         prompt="do the work",
         title="KAN-500-IDLE",
         session_id=backend.session_id,
     )
-    assert result.returncode == 0, result.stderr
-    assert backend.message_calls == 1  # no BUILD retry that would 500 again
-    assert "in-flight turn" in result.stdout
-    assert "message failed" in (result.stdout + result.stderr)
+    assert result.returncode == 1
+    assert backend.message_calls == 1
+    assert "message failed" in (result.stderr or "")
+    assert "waiting for the in-flight turn" not in result.stdout
+    assert "still incomplete" not in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_missing_workdir_fails_before_message():
+    """Missing x-opencode-directory must fail fast (not OpenCode UnknownError wait)."""
+    from src.opencode_serve import OpenCodeServeClient
+
+    backend = FakeServeBackend(required_compacts=0)
+    # Real client wrapper path: inject missing directory on orchestrator client
+    client = FakeServeClient(backend)
+    client.directory = "/tmp/vd-does-not-exist-e2e-xyz"
+    client.ensure_directory_ready = OpenCodeServeClient.ensure_directory_ready.__get__(
+        client, FakeServeClient
+    )
+    orch = ServeOrchestrator(client=client, compact_wait_seconds=0.3)
+    result = await orch.run(prompt="x", title="KAN-MISS")
+    assert result.returncode == 1
+    assert "does not exist" in (result.stderr or "")
+    assert backend.message_calls == 0
 
 
 def test_session_is_busy_accepts_alternate_shapes():
@@ -951,10 +969,11 @@ def test_session_is_busy_accepts_alternate_shapes():
     assert not session_is_busy({}, sid)
 
 
-def test_is_message_conflict_error_5xx():
+def test_is_message_conflict_error_not_blanket_5xx():
     from src.opencode_serve import is_message_conflict_error
 
-    assert is_message_conflict_error(_http_500()) is True
+    # Generic UnknownError 500 is NOT a conflict (missing dir/agent/model)
+    assert is_message_conflict_error(_http_500()) is False
     req = httpx.Request("POST", "http://fake/session/x/message")
     resp400 = httpx.Response(400, text='{"error":"bad request"}', request=req)
     assert (

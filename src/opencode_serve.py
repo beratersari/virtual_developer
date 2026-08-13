@@ -207,6 +207,33 @@ class OpenCodeServeClient:
             return data["data"]
         raise RuntimeError(f"Unexpected create session response: {data!r}")
 
+    def ensure_directory_ready(self) -> None:
+        """Fail before POST when x-opencode-directory is set but missing on disk.
+
+        OpenCode 1.18 returns HTTP 500 UnknownError for ENOENT workspaces.
+        Catch that here with a clear error instead of a generic serve failure.
+        """
+        raw = (self.directory or "").strip()
+        if not raw:
+            return
+        from pathlib import Path
+
+        path = Path(raw)
+        if not path.is_dir():
+            raise FileNotFoundError(
+                f"OpenCode work directory does not exist: {raw}. "
+                "The temp clone may have been cleaned up or never created. "
+                "Re-queue the issue after git prep succeeds."
+            )
+
+    async def list_agents(self) -> List[Dict[str, Any]]:
+        """GET /agent — registered agent names (oh-my + built-ins)."""
+        r = await self._client.get("/agent", headers=self._headers())
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        return coerce_json_list(r.json())
+
     async def send_message(
         self,
         session_id: str,
@@ -218,6 +245,7 @@ class OpenCodeServeClient:
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """POST /session/{id}/message — blocks until that prompt's loop ends."""
+        self.ensure_directory_ready()
         body: Dict[str, Any] = {
             "parts": [{"type": "text", "text": text}],
         }
@@ -396,11 +424,11 @@ def session_is_busy(status: Any, session_id: Optional[str]) -> bool:
 
 
 def is_message_conflict_error(exc: BaseException) -> bool:
-    """True when POST /message failed because a turn is already in flight.
+    """True when the response body/status clearly means a turn is already running.
 
-    OpenCode 1.18 often returns generic HTTP 500 UnknownError while the
-    session keeps editing files. Treat 5xx (and explicit busy bodies) as
-    conflict so we wait instead of failing the dashboard job.
+    Do **not** treat every HTTP 500 as a conflict. Live OpenCode 1.18 also
+    returns generic ``UnknownError`` 500 for missing workdir, bad agent name,
+    or unknown model — those must fail fast, not wait forever for messages.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
@@ -413,20 +441,73 @@ def is_message_conflict_error(exc: BaseException) -> bool:
         body = ""
     if code in (409, 423, 429):
         return True
-    if any(
+    return any(
         token in body
         for token in (
             "already running",
             "session busy",
-            "in progress",
-            "in-progress",
             "active turn",
             "concurrent",
+            "another message",
+            "turn in progress",
         )
-    ):
-        return True
-    # Generic serve 5xx while a prior turn is still running (common on resume/retry)
-    return code >= 500
+    )
+
+
+def explain_message_http_error(
+    exc: BaseException,
+    *,
+    directory: Optional[str] = None,
+    agent: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
+    """Actionable hint for serve POST /message failures (ref + common causes)."""
+    base = format_serve_error(exc)
+    hints: List[str] = []
+    body = ""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            body = (exc.response.text or "")[:800]
+        except Exception:
+            body = ""
+    low = body.lower()
+    dir_path = (directory or "").strip()
+    if dir_path:
+        try:
+            from pathlib import Path
+
+            if not Path(dir_path).is_dir():
+                hints.append(
+                    f"work directory does not exist: {dir_path} "
+                    "(temp clone missing/cleaned — OpenCode returns UnknownError 500)"
+                )
+        except Exception:
+            pass
+    if "model not found" in low or "providermodelnotfound" in low:
+        hints.append(
+            f"model not found on serve: {model or '(default)'}. "
+            "Set DEFAULT_MODEL / dashboard model to a provider/model OpenCode has."
+        )
+    if "enoent" in low or "notfound" in low or "realpath" in low:
+        hints.append(
+            "OpenCode could not resolve the workspace path "
+            "(x-opencode-directory). Check temp clone still exists."
+        )
+    if agent and not hints:
+        hints.append(
+            f"If agent {agent!r} is not registered on this serve "
+            "(oh-my-openagent missing), OpenCode returns UnknownError 500. "
+            "Check GET /agent and plugin install."
+        )
+    if not hints and isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
+        hints.append(
+            "Common causes of serve 500 on a *new* session: missing workdir, "
+            "unknown agent name, or unknown model. Check opencode serve logs "
+            "for the error ref above."
+        )
+    if hints:
+        return base + " | " + " ".join(hints)
+    return base
 
 
 def messages_from_api(raw: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -878,6 +959,21 @@ class ServeOrchestrator:
                 incomplete_reasons=[f"serve unreachable: {e}"],
             )
 
+        # Workdir before create/resume — OpenCode 500s on missing paths
+        try:
+            self.client.ensure_directory_ready()
+        except FileNotFoundError as e:
+            note = f"[serve] {e}"
+            _emit("stderr", note)
+            return ServeTurnResult(
+                session_id=session_id,
+                returncode=1,
+                stdout="\n".join(lines),
+                stderr=note,
+                incomplete=False,
+                incomplete_reasons=[str(e)],
+            )
+
         # Session — create once, then every Continue POST uses the same id
         sid = session_id
         if not sid:
@@ -913,6 +1009,56 @@ class ServeOrchestrator:
                 on_session(str(sid))
             except Exception:
                 pass
+
+        # Preflight workdir before first message (clear error vs UnknownError 500)
+        try:
+            self.client.ensure_directory_ready()
+        except FileNotFoundError as e:
+            note = f"[serve] {e}"
+            _emit("stderr", note)
+            return ServeTurnResult(
+                session_id=sid,
+                returncode=1,
+                stdout="\n".join(lines),
+                stderr=note,
+                incomplete=False,
+                incomplete_reasons=[str(e)],
+                compact_events=compact_total,
+                continue_count=continue_count,
+                turns=turns,
+            )
+
+        # Soft-check agent is registered (plugin missing → UnknownError 500)
+        if agent:
+            try:
+                agents = await self.client.list_agents()
+                names = {
+                    str(a.get("name") or "").strip()
+                    for a in agents
+                    if isinstance(a, dict) and a.get("name")
+                }
+                if names and agent not in names:
+                    sample = ", ".join(sorted(names)[:12])
+                    note = (
+                        f"[serve] agent {agent!r} is not registered on this "
+                        f"OpenCode serve. Available (sample): {sample}. "
+                        "Install/load oh-my-openagent or use a built-in agent "
+                        "(build/plan)."
+                    )
+                    _emit("stderr", note)
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=1,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=False,
+                        incomplete_reasons=[f"unknown agent: {agent}"],
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                    )
+            except Exception as e:
+                _emit("stdout", f"[serve] agent list check skipped: {e}")
 
         current_prompt = prompt
         # One task prompt. Compact is waited out — we do not POST Continue
@@ -953,20 +1099,28 @@ class ServeOrchestrator:
                     model=model,
                 )
             except Exception as e:
-                err = format_serve_error(
-                    e, timeout_seconds=getattr(self.client, "timeout_seconds", None)
-                )
                 timed_out_send = is_serve_timeout(e)
+                if timed_out_send:
+                    err = format_serve_error(
+                        e,
+                        timeout_seconds=getattr(
+                            self.client, "timeout_seconds", None
+                        ),
+                    )
+                else:
+                    err = explain_message_http_error(
+                        e,
+                        directory=getattr(self.client, "directory", None),
+                        agent=agent,
+                        model=model,
+                    )
                 note = f"[serve] message failed: {err}"
                 _emit("stderr", note)
                 if not timed_out_send:
-                    # 500/UnknownError on a resumed session often means OpenCode
-                    # already has a turn running (prior retry/cancel did not
-                    # abort). Status may still report idle briefly. Wait for
-                    # the in-flight turn instead of failing the job and
-                    # triggering another BUILD retry that 500s again.
+                    # Only wait when status shows busy, or body says conflict.
+                    # Generic 500 (missing dir/agent/model) must fail immediately.
                     busy500 = False
-                    for _probe in range(8):
+                    for _probe in range(6):
                         try:
                             st500 = await self.client.session_status()
                             busy500 = session_is_busy(st500, sid)
@@ -974,18 +1128,12 @@ class ServeOrchestrator:
                             busy500 = False
                         if busy500:
                             break
-                        await asyncio.sleep(0.25)
-                    conflict = busy500 or is_message_conflict_error(e)
-                    if conflict:
-                        why = (
-                            "session is busy"
-                            if busy500
-                            else "HTTP 5xx/conflict (likely in-flight turn)"
-                        )
+                        await asyncio.sleep(0.2)
+                    if busy500 or is_message_conflict_error(e):
                         _emit(
                             "stdout",
-                            f"[serve] {why} — waiting for the in-flight turn "
-                            "(no extra prompt; OpenCode may still be editing files)",
+                            "[serve] session is busy — waiting for the "
+                            "in-flight turn (no extra prompt)",
                         )
                         wait_info = await self._wait_for_auto_compact(
                             sid,
