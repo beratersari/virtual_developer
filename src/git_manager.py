@@ -320,6 +320,8 @@ class GitManager:
                 cwd=self.temp_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._git_command_timeout(),
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -882,7 +884,15 @@ class GitManager:
             logger.error(f"Git operations locked: temp directory '{cwd}' does not exist")
             raise RuntimeError(f"Git operations locked: temp directory '{cwd}' does not exist")
 
-        cmd = ["git", "-c", "core.longpaths=true"] + args
+        # Force UTF-8 log/output so commit subjects with Turkish (ğüşıöç…)
+        # are not mojibake'd on Windows cp1254 locale when building MR titles.
+        cmd = [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "-c",
+            "i18n.logOutputEncoding=utf-8",
+        ] + list(args)
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
 
@@ -901,6 +911,8 @@ class GitManager:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=cmd_timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -1791,6 +1803,12 @@ class GitManager:
         env["GITLAB_HOST"] = host
         # Prefer HTTPS API; git push still uses authenticated remote URL separately
         env.setdefault("GITLAB_PROTOCOL", "https")
+        # Windows glab/console often default to a legacy code page; force UTF-8
+        # so MR titles with Turkish characters are not corrupted.
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("LC_ALL", "C.UTF-8")
+        env.setdefault("LANG", "C.UTF-8")
         return env
 
     def _run_glab(
@@ -1818,6 +1836,8 @@ class GitManager:
                 cwd=self.temp_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=self._glab_env(),
                 timeout=cmd_timeout,
             )
@@ -1867,7 +1887,8 @@ class GitManager:
 
             headers = {
                 "PRIVATE-TOKEN": pat,
-                "Content-Type": "application/json",
+                # Explicit charset — GitLab expects UTF-8 JSON for titles.
+                "Content-Type": "application/json; charset=utf-8",
             }
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=headers, json=payload)
@@ -1978,17 +1999,26 @@ class GitManager:
         # Issue target branch only (no silent fall back to main/develop)
         candidates = [target_branch]
         last_err = ""
+        # Non-ASCII titles (e.g. Turkish ğüşıöç) are often corrupted by glab
+        # on Windows console code pages. Prefer JSON REST (UTF-8) first.
+        title_s = title if isinstance(title, str) else str(title or "")
+        body_s = body if isinstance(body, str) else str(body or "")
+        if any(ord(ch) > 127 for ch in title_s + body_s):
+            for target in candidates:
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
+                if api_url:
+                    return api_url
         try:
             for target in candidates:
                 cmd = [
                     "mr", "create",
-                    "--title", title,
+                    "--title", title_s,
                     "--source-branch", branch,
                     "--target-branch", target,
                     "--yes",
                 ]
-                if body:
-                    cmd.extend(["--description", body])
+                if body_s:
+                    cmd.extend(["--description", body_s])
                 result = self._run_glab(cmd)
                 if result.returncode == 0:
                     output = result.stdout + result.stderr
@@ -2018,7 +2048,7 @@ class GitManager:
                     f"glab MR create failed for target={target}; trying REST API. "
                     f"Detail: {self._redact_secret_text(err)[:300]}"
                 )
-                api_url = self._create_mr_via_api(title, body, branch, target)
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
                 if api_url:
                     return api_url
                 if "target_branch" in err.lower() or "does not exist" in err.lower():
@@ -2028,7 +2058,7 @@ class GitManager:
 
             # Final API pass over candidates if glab missing entirely
             for target in candidates:
-                api_url = self._create_mr_via_api(title, body, branch, target)
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
                 if api_url:
                     return api_url
 
