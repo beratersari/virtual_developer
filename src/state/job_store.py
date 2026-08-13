@@ -116,15 +116,19 @@ class JobStore:
         merge_request_url: Optional[str] = None,
         gitlab_project: Optional[str] = None,
         gitlab_mr_iid: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a job snapshot for one agent run.
 
         ``summary`` and ``description`` are frozen at start time so later Jira
         edits / reprocess do not rewrite history for this job.
+        ``model`` is the OpenCode model id used for this run (e.g. settings
+        ``default_model`` or an explicit task model).
         """
         src = (source or "jira").strip().lower() or "jira"
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat(timespec="seconds")
+        model_id = (model or "").strip() or None
         job: Dict[str, Any] = {
             "job_id": job_id,
             "issue_key": issue_key,
@@ -132,6 +136,7 @@ class JobStore:
             "description": description or "",
             "workflow_type": workflow_type or "direct",
             "agent": agent or "",
+            "model": model_id,
             "status": status,
             "source": src,
             "gitlab_project": gitlab_project or None,

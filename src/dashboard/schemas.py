@@ -130,6 +130,8 @@ class JobItem(BaseModel):
     description: str = ""
     workflow_type: str = "execution"
     agent: str = ""
+    # OpenCode model id used for this run (settings default_model at start)
+    model: Optional[str] = None
     status: str = "running"
     task_id: Optional[str] = None
     task_ids: List[str] = Field(default_factory=list)

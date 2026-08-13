@@ -50,6 +50,116 @@ def test_safe_under_static_rejects_parent(tmp_path):
     assert _safe_under_static(static, "..%2foutside.txt") is None
 
 
+def test_job_artifacts_api_blocks_path_traversal(tmp_path, monkeypatch):
+    """Poisoned job session_log_path / prompt_path must not leak arbitrary files.
+
+    ``GET /api/jobs/{id}/artifacts`` reads paths stored on the job record.
+    Even if those fields point outside ``.jira-agent``, content must stay empty
+    and the secret file body must not appear in the JSON response.
+    """
+    from src.state.job_store import JobStore
+
+    monkeypatch.chdir(tmp_path)
+    agent_root = tmp_path / ".jira-agent"
+    agent_root.mkdir()
+    (agent_root / "sessions").mkdir()
+
+    secret = tmp_path / "secret.env"
+    secret.write_text("JIRA_API_TOKEN=super-secret-leak\n", encoding="utf-8")
+
+    # Absolute + relative traversal styles an attacker might plant on a job row
+    evil_abs = str(secret.resolve())
+    evil_rel = str(Path("..") / "secret.env")
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    job = store.create_job(
+        issue_key="SEC-TRAVERSE-1",
+        summary="s",
+        description="d",
+        workflow_type="execution",
+        agent="a",
+    )
+    store.update_job(
+        job["job_id"],
+        session_log_path=evil_abs,
+        prompt_path=evil_rel,
+        session_log_paths=[evil_abs, str(Path("../../../etc/passwd"))],
+        prompt_paths=[evil_rel],
+    )
+    sm.create_state("SEC-TRAVERSE-1", "s", "d")
+
+    with patch("src.dashboard.api.job_store", store):
+        with patch("src.dashboard.service.default_job_store", store):
+            with patch(
+                "src.dashboard.service._artifacts_root",
+                lambda: agent_root.resolve(),
+            ):
+                app = create_dashboard_app(processor=None, state_manager=sm)
+                client = TestClient(app)
+                r = client.get(f"/api/jobs/{job['job_id']}/artifacts")
+
+    assert r.status_code == 200
+    body = r.json()
+    blob = r.text
+    assert "super-secret-leak" not in blob
+    assert "JIRA_API_TOKEN" not in blob
+    for row in (body.get("session_logs") or []) + (body.get("prompts") or []):
+        assert not (row.get("content") or "").strip()
+        err = (row.get("error") or "").lower()
+        assert "outside" in err or "symlink" in err or err
+
+
+def test_job_artifacts_api_allows_under_jira_agent_only(tmp_path, monkeypatch):
+    """Legitimate session log under .jira-agent is readable; sibling outside is not."""
+    from src.state.job_store import JobStore
+
+    monkeypatch.chdir(tmp_path)
+    agent_root = tmp_path / ".jira-agent"
+    sessions = agent_root / "sessions"
+    sessions.mkdir(parents=True)
+    good = sessions / "SEC-OK-1_run.log"
+    good.write_text("agent session output ok\n", encoding="utf-8")
+    outside = tmp_path / "not-agent.log"
+    outside.write_text("should-not-leak\n", encoding="utf-8")
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    job = store.create_job(
+        issue_key="SEC-OK-1",
+        summary="s",
+        description="d",
+        workflow_type="execution",
+        agent="a",
+    )
+    store.update_job(
+        job["job_id"],
+        session_log_path=str(good),
+        session_log_paths=[str(good), str(outside)],
+    )
+    sm.create_state("SEC-OK-1", "s", "d")
+
+    with patch("src.dashboard.api.job_store", store):
+        with patch("src.dashboard.service.default_job_store", store):
+            with patch(
+                "src.dashboard.service._artifacts_root",
+                lambda: agent_root.resolve(),
+            ):
+                app = create_dashboard_app(processor=None, state_manager=sm)
+                client = TestClient(app)
+                r = client.get(f"/api/jobs/{job['job_id']}/artifacts")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "should-not-leak" not in r.text
+    logs = body.get("session_logs") or []
+    assert any("agent session output ok" in (row.get("content") or "") for row in logs)
+    outside_rows = [row for row in logs if "not-agent" in (row.get("path") or "")]
+    for row in outside_rows:
+        assert "should-not-leak" not in (row.get("content") or "")
+        assert row.get("error")
+
+
 def test_cors_not_wildcard(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "src.dashboard.api._static_dir",

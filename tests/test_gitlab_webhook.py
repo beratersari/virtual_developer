@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.gitlab.keys import gitlab_issue_key, is_gitlab_issue_key
+from src.gitlab.keys import (
+    gitlab_issue_key,
+    is_gitlab_issue_key,
+    jira_key_from_mr_title,
+    resolve_mr_issue_key,
+)
 from src.gitlab.mentions import (
     note_mentions_bot,
     parse_mention_list,
@@ -26,6 +31,8 @@ def _mr_payload(
     source: str = "feature/login",
     target: str = "develop",
     note_id: int = 77,
+    title: str = "Add login",
+    description: str = "desc",
 ) -> dict:
     return {
         "object_kind": "note",
@@ -46,8 +53,8 @@ def _mr_payload(
         },
         "merge_request": {
             "iid": 4,
-            "title": "Add login",
-            "description": "desc",
+            "title": title,
+            "description": description,
             "source_branch": source,
             "target_branch": target,
             "web_url": "https://gitlab.example.com/acme/demo/-/merge_requests/4",
@@ -61,6 +68,47 @@ def test_gitlab_issue_key_stable():
     assert gitlab_issue_key("Group/Sub/Repo.git", 12) == "GL-GROUP-SUB-REPO-GIT-12"
     assert is_gitlab_issue_key("GL-ACME-DEMO-4")
     assert not is_gitlab_issue_key("KAN-1")
+
+
+def test_jira_key_from_mr_title_uses_project_keys():
+    keys = ["KAN", "PROJ"]
+    assert jira_key_from_mr_title("feat(KAN-42): add login", keys) == "KAN-42"
+    assert jira_key_from_mr_title("KAN-7 fix typo", keys) == "KAN-7"
+    assert jira_key_from_mr_title("fix: handle PROJ-99 edge", keys) == "PROJ-99"
+    # Wrong project not configured
+    assert jira_key_from_mr_title("OTHER-1 something", keys) is None
+    # No false positive inside longer words
+    assert jira_key_from_mr_title("XXKAN-1", keys) is None
+    assert (
+        resolve_mr_issue_key(
+            mr_title="feat(KAN-12): x",
+            project_path="acme/demo",
+            mr_iid=4,
+            project_keys=keys,
+        )
+        == "KAN-12"
+    )
+    # Description fallback when title has no key
+    assert (
+        resolve_mr_issue_key(
+            mr_title="Add login",
+            mr_description="Closes KAN-99",
+            project_path="acme/demo",
+            mr_iid=4,
+            project_keys=keys,
+        )
+        == "KAN-99"
+    )
+    # Fallback GL- when neither has a key
+    assert (
+        resolve_mr_issue_key(
+            mr_title="Add login",
+            project_path="acme/demo",
+            mr_iid=4,
+            project_keys=keys,
+        )
+        == "GL-ACME-DEMO-4"
+    )
 
 
 def test_mention_detection_and_strip():
@@ -86,12 +134,28 @@ def test_decide_accepts_mr_mention():
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
         secret="s",
         bot_mentions=["@berat_ai"],
+        jira_project_keys=["KAN"],
     )
     assert d.accepted
     assert d.event is not None
+    # Title has no Jira key → GL- fallback from project path
     assert d.event.issue_key == "GL-ACME-DEMO-4"
     assert d.event.source_branch == "feature/login"
     assert d.event.prompt == "what does login do?"
+
+
+def test_decide_uses_jira_key_from_mr_title():
+    d = decide_gitlab_note_webhook(
+        _mr_payload(title="feat(KAN-1905): wire auth"),
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
+        bot_mentions=["@berat_ai"],
+        jira_project_keys=["KAN", "PROJ"],
+    )
+    assert d.accepted
+    assert d.event is not None
+    assert d.event.issue_key == "KAN-1905"
+    assert not is_gitlab_issue_key(d.event.issue_key)
 
 
 def test_decide_ignores_non_mr_and_no_mention():

@@ -317,11 +317,16 @@ class Settings(BaseSettings):
     # Board poller is always on (sole intake path)
     poll_interval_seconds: int = Field(default=30)
 
-    # Ops dashboard (FastAPI UI; no auth in v1 — bind all interfaces by default
-    # so LAN / port-forward access works; set DASHBOARD_HOST=127.0.0.1 to lock down)
+    # Ops dashboard (FastAPI UI). Intentional product defaults (not a security bug):
+    # no auth in v1 + bind 0.0.0.0 + allow_remote so LAN / offline install works.
+    # Operators on untrusted networks: DASHBOARD_HOST=127.0.0.1 and/or
+    # DASHBOARD_ALLOW_REMOTE=false. See AGENTS.md §3b.
     dashboard_host: str = Field(
         default="0.0.0.0",
-        description="Dashboard bind host (0.0.0.0 = all interfaces)",
+        description=(
+            "Dashboard bind host. Default 0.0.0.0 (all interfaces) is intentional; "
+            "use 127.0.0.1 to lock down."
+        ),
     )
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
     dashboard_enabled: bool = Field(default=True, description="Serve ops dashboard with the daemon")
@@ -329,7 +334,7 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "If false, non-loopback dashboard_host is forced back to 127.0.0.1. "
-            "Default true so DASHBOARD_HOST=0.0.0.0 works out of the box."
+            "Default true is intentional so DASHBOARD_HOST=0.0.0.0 works out of the box."
         ),
     )
 

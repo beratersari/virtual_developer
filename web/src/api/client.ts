@@ -90,6 +90,7 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     description: j.description || '',
     workflow_type: j.workflow_type || 'execution',
     agent: j.agent || '',
+    model: j.model ?? null,
     status: j.status || 'unknown',
     task_id: j.task_id ?? null,
     task_ids: j.task_ids || (j.task_id ? [j.task_id] : []),
