@@ -281,7 +281,7 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
-| `JIRA_PROJECTS` | Project keys (config/reference; board scopes poller) |
+| `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `TRIGGER_LABELS` | Labels that make an issue eligible (e.g. `ai-assist,bot`) |
 | `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments for bot-assignment trigger (e.g. `devbot,jira ai bot`) |
@@ -311,7 +311,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, opencode_serve_max_compact_continues, project_repositories (saved git remotes for the New-issue picker). Plans never auto-start (see §2).
-- **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
+- **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
 ### Layout

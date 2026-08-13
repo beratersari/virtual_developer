@@ -42,6 +42,11 @@ export function JobOverview({
         <MetaCard label="Progress" value={`${job.progress_percentage}%`} />
         <MetaCard label="Workflow" value={job.workflow_type || '—'} />
         <MetaCard label="Agent" value={job.agent || '—'} />
+        <MetaCard
+          label="OpenCode model"
+          mono
+          value={job.model?.trim() ? job.model : '—'}
+        />
         <MetaCard label="Issue" mono value={job.issue_key || '—'} />
         <MetaCard
           label="Source"

@@ -661,6 +661,7 @@ def job_dict_to_item(
         description=description,
         workflow_type=j.get("workflow_type") or "execution",
         agent=j.get("agent") or "",
+        model=(j.get("model") or None),
         status=j.get("status") or "unknown",
         task_id=j.get("task_id"),
         task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),

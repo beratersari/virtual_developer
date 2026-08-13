@@ -1,6 +1,7 @@
 """Job processor for handling JIRA events."""
 
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -130,8 +131,10 @@ class JobProcessor:
         self._active_jobs: Dict[str, str] = {}
         # Per-issue locks prevent double-start races under concurrent events
         self._issue_locks: Dict[str, asyncio.Lock] = {}
-        # Serialize concurrent jobs that share (repo, source_branch)
-        self._source_branch_locks: Dict[str, asyncio.Lock] = {}
+        # Serialize concurrent jobs that share (repo, source_branch).
+        # Claim runs inside asyncio.to_thread git init — use threading.Lock,
+        # not asyncio.Lock (worker threads cannot share the event-loop lock).
+        self._source_branch_holders_lock = threading.Lock()
         self._source_branch_holders: Dict[str, str] = {}
         # lock_key -> issue_key for in-flight schedule/git work (queue claim)
         self._workspace_lock_holders: Dict[str, str] = {}
@@ -687,23 +690,28 @@ class JobProcessor:
         return f"{repo}::{branch}"
 
     def _claim_source_branch(self, issue_key: str, repository_url: str, source_branch: str) -> bool:
-        """Refuse a second concurrent job on the same (repo, source) pair."""
+        """Refuse a second concurrent job on the same (repo, source) pair.
+
+        Atomic under concurrent ``asyncio.to_thread`` git init (threading.Lock).
+        """
         key = self._source_lock_key(repository_url, source_branch)
         if not key.strip(":"):
             return True
-        holder = self._source_branch_holders.get(key)
-        if holder and holder != issue_key:
-            logger.warning(
-                f"{issue_key}: source branch {source_branch} already in use by {holder}"
-            )
-            return False
-        self._source_branch_holders[key] = issue_key
-        return True
+        with self._source_branch_holders_lock:
+            holder = self._source_branch_holders.get(key)
+            if holder and holder != issue_key:
+                logger.warning(
+                    f"{issue_key}: source branch {source_branch} already in use by {holder}"
+                )
+                return False
+            self._source_branch_holders[key] = issue_key
+            return True
 
     def _release_source_branch(self, issue_key: str) -> None:
-        dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
-        for k in dead:
-            self._source_branch_holders.pop(k, None)
+        with self._source_branch_holders_lock:
+            dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
+            for k in dead:
+                self._source_branch_holders.pop(k, None)
         self.drop_workspace_lock(issue_key)
 
     def note_workspace_lock(
@@ -1346,12 +1354,16 @@ class JobProcessor:
         state.status = claimed.status
         state.timeout_seconds = timeout_s
         state.max_retries = max_retries
+        model_id = (getattr(task, "model", None) or "").strip() or (
+            getattr(live, "default_model", None) or settings.default_model or ""
+        ).strip()
         return self._start_job_record(
             state,
             workflow_type=workflow_type,
             agent=agent,
             task_id=task.task_id,
             status=job_status,
+            model=model_id or None,
         )
 
     def _start_job_record(
@@ -1362,6 +1374,7 @@ class JobProcessor:
         agent: str,
         task_id: Optional[str] = None,
         status: str = "running",
+        model: Optional[str] = None,
     ) -> Optional[str]:
         """Create a **new** job history row for this run; returns job_id.
 
@@ -1392,6 +1405,9 @@ class JobProcessor:
             # aborted attempt, then leave no live job pointer.
             term = live_now.status.value
             tmeta = dict((live_now.metadata or {}) if live_now else {})
+            model_id = (model or "").strip() or (
+                settings.default_model or ""
+            ).strip() or None
             job = self.job_store.create_job(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
@@ -1404,6 +1420,7 @@ class JobProcessor:
                 merge_request_url=tmeta.get("merge_request_url") or None,
                 gitlab_project=tmeta.get("gitlab_project") or None,
                 gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
+                model=model_id,
             )
             job_id = job["job_id"]
             self._active_jobs[state.issue_key] = job_id
@@ -1432,6 +1449,9 @@ class JobProcessor:
             return job_id
 
         meta0 = dict((state.metadata or {}) if state else {})
+        model_id = (model or "").strip() or (
+            settings.default_model or ""
+        ).strip() or None
         job = self.job_store.create_job(
             issue_key=state.issue_key,
             summary=state.issue_summary or "",
@@ -1445,6 +1465,7 @@ class JobProcessor:
             merge_request_url=meta0.get("merge_request_url") or None,
             gitlab_project=meta0.get("gitlab_project") or None,
             gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
+            model=model_id,
         )
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id

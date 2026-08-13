@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from src.gitlab.keys import gitlab_issue_key
+from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
     note_mentions_bot,
     normalize_mention,
@@ -172,8 +172,14 @@ def decide_gitlab_note_webhook(
     secret: str = "",
     bot_mentions: Optional[List[str]] = None,
     bot_usernames: Optional[List[str]] = None,
+    jira_project_keys: Optional[List[str]] = None,
 ) -> WebhookDecision:
-    """Accept only MR comments that @mention the configured bot."""
+    """Accept only MR comments that @mention the configured bot.
+
+    ``issue_key`` prefers a Jira key found in the MR title (using
+    ``jira_project_keys`` / ``JIRA_PROJECTS``), then description, else the
+    ``GL-{path}-{iid}`` fallback.
+    """
     headers = headers or {}
     header_map = {str(k).lower(): str(v) for k, v in headers.items()}
     event_name = header_map.get("x-gitlab-event") or header_map.get("x-gitlab-event".lower()) or ""
@@ -262,8 +268,29 @@ def decide_gitlab_note_webhook(
         prompt = note.strip()
 
     note_id = str(attrs.get("id") or attrs.get("note_id") or "")
+    mr_title = _s(mr.get("title"))
+    mr_description = _s(mr.get("description"))
+
+    # Project keys: caller may pass them; default to runtime JIRA_PROJECTS
+    proj_keys = list(jira_project_keys) if jira_project_keys is not None else None
+    if proj_keys is None:
+        try:
+            from src.config import settings as _settings
+
+            proj_keys = list(getattr(_settings, "jira_projects_list", None) or [])
+        except Exception:
+            proj_keys = []
+
+    issue_key = resolve_mr_issue_key(
+        mr_title=mr_title,
+        mr_description=mr_description,
+        project_path=path or f"project-{project_id}",
+        mr_iid=mr_iid,
+        project_keys=proj_keys,
+    )
+
     event = GitlabMrNoteEvent(
-        issue_key=gitlab_issue_key(path or f"project-{project_id}", mr_iid),
+        issue_key=issue_key,
         note_id=note_id,
         note_body=note.strip(),
         prompt=prompt,
@@ -274,8 +301,8 @@ def decide_gitlab_note_webhook(
         repository_url=repo_url,
         host=host,
         mr_iid=mr_iid,
-        mr_title=_s(mr.get("title")),
-        mr_description=_s(mr.get("description")),
+        mr_title=mr_title,
+        mr_description=mr_description,
         source_branch=source,
         target_branch=target,
         mr_url=_s(mr.get("web_url") or mr.get("url")),
@@ -285,6 +312,7 @@ def decide_gitlab_note_webhook(
     )
     logger.info(
         f"GitLab MR note accepted: {event.issue_key} "
-        f"{event.project_path}!{event.mr_iid} note={event.note_id}"
+        f"{event.project_path}!{event.mr_iid} note={event.note_id} "
+        f"title={mr_title[:80]!r}"
     )
     return WebhookDecision(True, "accepted", event=event)
