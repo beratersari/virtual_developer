@@ -86,6 +86,19 @@ DEFAULT_FINISH_TODOS_PROMPT = (
     "Do not restart from scratch."
 )
 
+# When the model stops to ask the operator (daemon is unattended / one-pass).
+# One corrective user turn only — never re-send the full BUILD/PLAN kit.
+DEFAULT_UNATTENDED_NUDGE_PROMPT = (
+    "You are running unattended inside a daemon — there is no human in the "
+    "loop and no one will answer questions. Do not ask clarifying questions, "
+    "confirmation, or multiple-choice options. Choose the safest defaults "
+    "consistent with AGENTS.md, the repository, and the original issue "
+    "description. Finish all remaining work (implementation, verification, "
+    "and local commit steps as required) without waiting. Do **not** git push "
+    "or open a merge request — the orchestrator delivers the branch after "
+    "you stop. Mark todos completed when the work is done."
+)
+
 # How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
 # Do not POST a user "Continue" while compact is running — that pollutes chat
 # and fights the built-in compact loop.
@@ -710,6 +723,38 @@ class ServeOrchestrator:
                     "assessment": assessment,
                     "compact_total": compact_total,
                 }
+            # Clarifying question is a clean idle stop — not mid-compact.
+            # Production symptom without this exit: poll 700–900+ of
+            # "still incomplete … assistant asked a clarifying question —
+            # waiting for auto-resume" while no human reply path exists.
+            # Match flag *or* reason text (belt-and-suspenders).
+            asked = bool(assessment.get("assistant_asked_question")) or any(
+                "clarifying question" in str(r).lower() for r in last_reasons
+            )
+            if asked:
+                assessment["assistant_asked_question"] = True
+                if not any(
+                    "clarifying question" in str(r).lower() for r in last_reasons
+                ):
+                    last_reasons = list(last_reasons) + [
+                        "assistant asked a clarifying question"
+                    ]
+                    assessment["reasons"] = last_reasons
+                _emit(
+                    "stdout",
+                    f"[serve] idle after compact: assistant asked a clarifying "
+                    f"question (poll {polls}) — leaving compact wait for "
+                    f"unattended nudge (reasons={last_reasons})",
+                )
+                return {
+                    "settled": True,
+                    "complete": False,
+                    "polls": polls,
+                    "busy": False,
+                    "assessment": assessment,
+                    "compact_total": compact_total,
+                    "reasons": last_reasons,
+                }
             if polls == 1 or polls % 5 == 0:
                 _emit(
                     "stdout",
@@ -772,6 +817,94 @@ class ServeOrchestrator:
             reasons = list(assessment.get("reasons") or [])
             reasons.append("completeness snapshot unavailable")
             assessment["reasons"] = reasons
+        return assessment
+
+    async def _assess_after_unattended_nudge(
+        self,
+        sid: str,
+        *,
+        compact_total: int,
+        output_text: str = "",
+        _emit: Callable[[str, str], None],
+    ) -> Dict[str, Any]:
+        """Re-assess after the unattended nudge, tolerating stale todo lag.
+
+        Production failure mode: model finishes work (last assistant
+        ``finish=stop``, no new question) but ``list_todos`` still shows the
+        pre-todowrite pending list, and/or an *earlier* clarifying question
+        poisoned completeness. That wrongly returned incomplete after a
+        successful recovery.
+        """
+        assessment: Dict[str, Any] = {}
+        messages: Optional[List[Dict[str, Any]]] = None
+        messages_failed = False
+        for attempt in range(3):
+            messages, todos, messages_failed = await self._fetch_session_lists(
+                sid, _emit=_emit
+            )
+            assessment = assess_serve_turn(
+                sid,
+                messages=messages,
+                todos=todos,
+                compact_events_seen=compact_total,
+                new_compacts_this_turn=0,
+                # Only this turn's reply — do not re-scan the pre-nudge log
+                # for "compaction near end" false positives.
+                output_text=output_text if attempt == 0 else "",
+            )
+            self._fail_closed_if_no_evidence(
+                assessment, messages=messages, messages_failed=messages_failed
+            )
+            if not assessment.get("premature"):
+                return assessment
+
+            reasons = list(assessment.get("reasons") or [])
+            still_asking = bool(assessment.get("assistant_asked_question")) or any(
+                "clarifying question" in str(r).lower() for r in reasons
+            )
+            finish = str(assessment.get("last_finish") or "").strip().lower()
+            clean_stop = (
+                not still_asking
+                and not assessment.get("last_is_summary")
+                and finish not in {"", "tool-calls", "unknown"}
+                and finish == "stop"
+            )
+            only_stale_todos = clean_stop and reasons and all(
+                "open todos" in str(r).lower()
+                or "clarifying question" in str(r).lower()
+                for r in reasons
+            ) and not still_asking
+
+            if only_stale_todos and attempt < 2:
+                _emit(
+                    "stdout",
+                    f"[serve] post-nudge: last turn looks finished but todos "
+                    f"still open (attempt {attempt + 1}/3) — re-fetching "
+                    f"(reasons={reasons})",
+                )
+                await asyncio.sleep(0.4)
+                continue
+
+            if only_stale_todos:
+                # Todo API lag after todowrite. Last turn is a clean stop and
+                # not waiting on the operator — accept; processor still gates
+                # on plan file / git delivery.
+                _emit(
+                    "stdout",
+                    "[serve] post-nudge: treating clean finish=stop as complete "
+                    f"despite stale open todos (reasons={reasons})",
+                )
+                assessment["complete"] = True
+                assessment["premature"] = False
+                assessment["reasons"] = []
+                assessment["stale_todos_ignored"] = True
+                return assessment
+
+            if still_asking:
+                return assessment
+            # Hard incomplete (unfinished finish, compact-then-stop, etc.)
+            return assessment
+
         return assessment
 
     async def _snapshot_assess(
@@ -1293,14 +1426,22 @@ class ServeOrchestrator:
                 )
 
             reasons = list(assessment.get("reasons") or [])
+            asked_question = bool(assessment.get("assistant_asked_question")) or any(
+                "clarifying question" in str(r).lower() for r in reasons
+            )
+            if asked_question:
+                assessment["assistant_asked_question"] = True
+            # Real auto-compact signals only — a clarifying question is a clean
+            # stop waiting on a human, not mid-compaction. Do not burn the full
+            # compact-wait budget on "Shall I continue?".
             had_compact = (
                 reasons_are_compact_only(reasons)
                 or int(new_this_turn or 0) > 0
                 or int(compact_total or 0) > 0
                 or any("compact" in str(r).lower() for r in reasons)
-                or bool(assessment.get("assistant_asked_question"))
             )
-            if assessment.get("premature") and had_compact:
+
+            if assessment.get("premature") and had_compact and not asked_question:
                 # Auto-compact is in-session. Wait; do not POST a user message.
                 _emit(
                     "stdout",
@@ -1313,19 +1454,154 @@ class ServeOrchestrator:
                     _aborted=_aborted,
                     compact_total=compact_total,
                 )
-                return await self._turn_after_compact_wait(
+                # After compact settles the model may still ask a question.
+                post = wait_info.get("assessment")
+                post_reasons = (
+                    list(post.get("reasons") or [])
+                    if isinstance(post, dict)
+                    else []
+                )
+                post_asked = isinstance(post, dict) and (
+                    bool(post.get("assistant_asked_question"))
+                    or any(
+                        "clarifying question" in str(r).lower()
+                        for r in post_reasons
+                    )
+                )
+                if post_asked and not wait_info.get("complete"):
+                    assessment = post if isinstance(post, dict) else assessment
+                    assessment["assistant_asked_question"] = True
+                    reasons = post_reasons or reasons
+                    asked_question = True
+                else:
+                    return await self._turn_after_compact_wait(
+                        sid,
+                        wait_info=wait_info,
+                        compact_total=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        lines=lines,
+                        _emit=_emit,
+                    )
+
+            if assessment.get("premature") and asked_question:
+                # One unattended nudge: product is one-pass, no human answers.
+                # Do not re-send the original BUILD/PLAN kit.
+                _emit(
+                    "stdout",
+                    "[serve] assistant asked a clarifying question — "
+                    "sending one unattended nudge (no human reply path)",
+                )
+                nudge_text = ""
+                try:
+                    nudge_msg = await self.client.send_message(
+                        sid,
+                        DEFAULT_UNATTENDED_NUDGE_PROMPT,
+                        agent=agent,
+                        model=model,
+                    )
+                    continue_count += 1
+                    nudge_parts = []
+                    for p in (nudge_msg or {}).get("parts") or []:
+                        if (
+                            isinstance(p, dict)
+                            and p.get("type") == "text"
+                            and p.get("text")
+                        ):
+                            nudge_parts.append(str(p["text"]))
+                    nudge_text = "\n".join(nudge_parts)
+                    if nudge_text:
+                        _emit("stdout", nudge_text[:4000])
+                except Exception as e:
+                    note = (
+                        f"[INCOMPLETE] clarifying question and unattended "
+                        f"nudge failed: {e}; reasons: "
+                        f"{'; '.join(map(str, reasons))}"
+                    )
+                    _emit("stderr", note)
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=2,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=True,
+                        incomplete_reasons=list(reasons)
+                        + ["unattended nudge failed"],
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=50,
+                    )
+
+                assessment = await self._assess_after_unattended_nudge(
                     sid,
-                    wait_info=wait_info,
                     compact_total=compact_total,
-                    continue_count=continue_count,
-                    turns=turns,
-                    lines=lines,
+                    output_text=nudge_text,
                     _emit=_emit,
                 )
+                turns.append(
+                    {
+                        "turn": "unattended_nudge",
+                        "assessment": {
+                            "complete": assessment.get("complete"),
+                            "premature": assessment.get("premature"),
+                            "reasons": assessment.get("reasons"),
+                            "open_todos": assessment.get("open_todos"),
+                            "assistant_asked_question": assessment.get(
+                                "assistant_asked_question"
+                            ),
+                        },
+                    }
+                )
+                if not assessment.get("premature"):
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=0,
+                        stdout="\n".join(lines),
+                        stderr="",
+                        incomplete=False,
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=100,
+                    )
+                reasons = list(assessment.get("reasons") or reasons)
+                still_asking = bool(
+                    assessment.get("assistant_asked_question")
+                ) or any(
+                    "clarifying question" in str(r).lower() for r in reasons
+                )
+                if still_asking:
+                    note = (
+                        "[INCOMPLETE] assistant asked a clarifying question "
+                        "(unattended; no human reply path). After one nudge "
+                        f"still incomplete: {'; '.join(map(str, reasons))}"
+                    )
+                else:
+                    note = (
+                        "[INCOMPLETE] after unattended nudge still incomplete: "
+                        f"{'; '.join(map(str, reasons))}"
+                    )
+                _emit("stderr", note)
+                return ServeTurnResult(
+                    session_id=sid,
+                    returncode=2,
+                    stdout="\n".join(lines),
+                    stderr=note,
+                    incomplete=True,
+                    incomplete_reasons=list(reasons),
+                    compact_events=compact_total,
+                    continue_count=continue_count,
+                    turns=turns,
+                    session_completeness=assessment,
+                    progress=50,
+                )
 
-            # Still incomplete (non-compact). Do not inject Continue.
+            # Still incomplete (non-compact, non-question). Do not inject Continue.
             note = (
-                f"[INCOMPLETE] session still incomplete after auto-compact wait: "
+                f"[INCOMPLETE] session still incomplete: "
                 f"{'; '.join(map(str, reasons))}"
             )
             _emit("stderr", note)

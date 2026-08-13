@@ -404,6 +404,25 @@ class JobProcessor:
         data = result if isinstance(result, dict) else {}
         incomplete = bool(data.get("incomplete"))
         stderr = (data.get("stderr") or "").strip() or fallback
+        reasons = list(data.get("incomplete_reasons") or [])
+        asked = bool(data.get("assistant_asked_question")) or any(
+            "clarifying question" in str(r).lower() for r in reasons
+        )
+        if incomplete and asked:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "This daemon is unattended (one-pass): the model stopped "
+                    "to ask a clarifying question and there is no human reply "
+                    "path. Put the missing decisions into the issue "
+                    "description (Mode, {params}, constraints), then move the "
+                    "issue back to To Do to re-queue."
+                ),
+                category="question",
+            )
+            return
         if incomplete:
             self._fail_issue(
                 issue_key,
@@ -4092,9 +4111,16 @@ class JobProcessor:
     ) -> bool:
         """Push prepared work_branch and open MR.
 
-        Returns True if the branch was pushed (MR is best-effort after push).
-        Returns False on missing git manager, protected branch, or push failure.
-        Always pushes ``git.work_branch`` (not drifted HEAD) — B5.
+        Delivery contract (build jobs):
+        - Agent **committed only** → orchestrator pushes and opens MR.
+        - Agent **already pushed** → still open MR (push may no-op / already
+          on remote); do not skip MR creation.
+        - Always prefer ``git.work_branch`` (not drifted HEAD) — B5.
+
+        Returns True when the branch is on the remote and delivery was
+        recorded (MR is best-effort after a successful remote tip).
+        Returns False on missing git manager, protected branch, or when
+        neither push nor remote-tip verification succeeds.
 
         Checks cancel/watchdog abort before expensive git work and before
         recording delivery so cancel after agent success does not stamp
@@ -4189,20 +4215,41 @@ class JobProcessor:
             )
             return False
         if not push_success:
-            logger.warning(f"Push failed or remote not configured for {state.issue_key}")
-            try:
-                self.reporter.post_progress_update(
-                    state,
-                    (
-                        f"Git push failed for branch `{branch_name or 'unknown'}`. "
-                        "Local work may still exist in the agent temp workspace; "
-                        "no merge request was created. Check GitLab credentials "
-                        "(GITLAB_PAT) and remote access, then re-queue from To Do."
-                    ),
+            # Last chance: agent may have pushed; remote tip matches HEAD.
+            already_remote = False
+            if hasattr(git, "head_is_on_remote"):
+                try:
+                    already_remote = await asyncio.to_thread(
+                        git.head_is_on_remote, branch_name
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"{state.issue_key}: head_is_on_remote failed: {e}"
+                    )
+                    already_remote = False
+            if already_remote:
+                logger.info(
+                    f"{state.issue_key}: push failed but `{branch_name}` HEAD "
+                    "is already on origin (agent push); continuing to open MR"
                 )
-            except Exception:
-                pass
-            return False
+                push_success = True
+            else:
+                logger.warning(
+                    f"Push failed or remote not configured for {state.issue_key}"
+                )
+                try:
+                    self.reporter.post_progress_update(
+                        state,
+                        (
+                            f"Git push failed for branch `{branch_name or 'unknown'}`. "
+                            "Local work may still exist in the agent temp workspace; "
+                            "no merge request was created. Check GitLab credentials "
+                            "(GITLAB_PAT) and remote access, then re-queue from To Do."
+                        ),
+                    )
+                except Exception:
+                    pass
+                return False
 
         commit_subject = git.get_last_commit_subject()
         commit_body = git.get_last_commit_message()
@@ -4288,8 +4335,8 @@ class JobProcessor:
                 self.reporter.post_progress_update(
                     state,
                     (
-                        f"Branch `{branch_name}` pushed and merge request opened:\n"
-                        f"{mr_url}"
+                        f"Branch `{branch_name}` is on the remote and merge request "
+                        f"opened:\n{mr_url}"
                     ),
                 )
             except Exception:
@@ -4305,7 +4352,7 @@ class JobProcessor:
                 self.reporter.post_progress_update(
                     state,
                     (
-                        f"Branch `{branch_name}` was pushed to the remote, but a merge "
+                        f"Branch `{branch_name}` is on the remote, but a merge "
                         f"request could not be created (target branch may be "
                         f"`{target_branch}`, or `glab` may be missing/misconfigured). "
                         "Open an MR manually in GitLab if needed."
@@ -4314,7 +4361,7 @@ class JobProcessor:
                 )
             except Exception:
                 pass
-        # Push succeeded; MR is best-effort
+        # Remote tip ready; MR is best-effort (create or already-exists URL)
         return True
 
     def _record_git_delivery(

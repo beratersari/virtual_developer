@@ -279,6 +279,28 @@ def test_fail_from_agent_result_incomplete_is_not_crash(processor, state_manager
     )
 
 
+def test_fail_from_agent_result_clarifying_question_heading(
+    processor, state_manager, fake_jira
+):
+    """Model asking questions must not look like a compaction budget error."""
+    state_manager.create_state("FE-Q", "question", "d")
+    processor._fail_from_agent_result(
+        "FE-Q",
+        {
+            "returncode": 2,
+            "stderr": "[INCOMPLETE] assistant asked a clarifying question",
+            "incomplete": True,
+            "assistant_asked_question": True,
+            "incomplete_reasons": ["assistant asked a clarifying question"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Clarifying question" in b for b in bodies)
+    assert any("unattended" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")
@@ -935,11 +957,24 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.get_current_branch.return_value = ""
     assert await processor._push_and_create_mr(state) is False
 
-    # push fail
+    # push fail and not on remote
     git.work_branch = "feature/PU-1"
     git.get_current_branch.return_value = "feature/PU-1"
     git.push.return_value = False
+    git.head_is_on_remote.return_value = False
+    git.get_last_commit_sha.return_value = "sha_new"
     assert await processor._push_and_create_mr(state) is False
+
+    # Agent already pushed: push fails but origin has HEAD → still open MR
+    git.push.return_value = False
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_subject.return_value = "feat: agent pushed"
+    git.get_last_commit_message.return_value = "body"
+    git.get_last_commit_sha.return_value = "sha_agent"
+    git.create_merge_request.return_value = "http://mr/agent"
+    assert await processor._push_and_create_mr(state) is True
+    git.create_merge_request.assert_called()
+    git.head_is_on_remote.return_value = False
 
     # push ok, MR ok
     git.push.return_value = True

@@ -610,16 +610,68 @@ _OMO_MODE_LINE_RE = re.compile(
     r"^\[(?:search|analyze|build|plan)-mode\]",
     re.IGNORECASE,
 )
+# Phrases that mean the assistant is waiting on a human (unattended daemon).
 _ASSISTANT_QUESTION_RE = re.compile(
     r"(?:"
-    r"shall i (?:continue|proceed|keep going)"
-    r"|should i (?:continue|proceed|keep going)"
+    r"shall i (?:continue|proceed|keep going|start|commit|push|open)"
+    r"|should i (?:continue|proceed|keep going|use|pick|choose|start|"
+    r"commit|push|implement|add|remove|update)"
     r"|do you want me to"
-    r"|want me to (?:continue|proceed|keep)"
+    r"|want me to (?:continue|proceed|keep|also|update|add|fix|remove)"
     r"|continue with the remaining"
-    r"|please (?:confirm|advise|let me know)"
+    r"|please (?:confirm|advise|let me know|clarify|choose|select|specify|"
+    r"reply|respond|answer)"
+    r"|which (?:one|approach|option|database|library|framework|branch|"
+    r"path|port|version|strategy|design|api|auth)"
+    r"|what (?:should|would you|do you prefer|is the preferred|is your)"
+    r"|could you (?:clarify|confirm|advise|tell me|specify|choose)"
+    r"|can you (?:clarify|confirm|advise|tell me|specify|choose)"
+    r"|need (?:more )?(?:info|information|clarification|details|input|"
+    r"guidance|your)"
+    r"|before i (?:proceed|continue|start|commit|push|implement)"
+    r"|your (?:preference|input|guidance|decision|confirmation)"
+    r"|any preference"
+    r"|let me know (?:if|which|what|how|when)"
+    r"|ready for your"
+    r"|awaiting (?:your|confirmation|input|guidance|a (?:reply|response))"
+    r"|i(?:'d| would) (?:like|need) (?:you )?to (?:confirm|clarify|choose)"
+    r"|i need (?:you )?to (?:confirm|clarify|choose|decide)"
+    r"|please (?:pick|select) (?:one|an option|a|the)"
     r")",
     re.IGNORECASE,
+)
+# Tokens that make a trailing "?" look like an operator prompt (not prose).
+_QUESTION_ASK_TOKENS = (
+    "shall i",
+    "should i",
+    "do you",
+    "would you",
+    "can you",
+    "could you",
+    "which ",
+    "what ",
+    "prefer",
+    "confirm",
+    "clarify",
+    "let me know",
+    "your input",
+    "your preference",
+    "proceed",
+    "continue",
+    "want me",
+    "ok to",
+    "okay to",
+    "may i",
+    "is it ok",
+    "is it okay",
+    "any preference",
+    "please advise",
+    "need to know",
+    "need your",
+    "before i",
+    "options:",
+    "option a",
+    "option b",
 )
 
 
@@ -698,28 +750,57 @@ def strip_omo_mode_wrap(text: str) -> str:
     return stripped or raw
 
 
+def _last_question_sentence(text: str) -> str:
+    """Return the last sentence that ends with ``?``, or empty."""
+    t = (text or "").strip()
+    if not t or "?" not in t:
+        return ""
+    # Split on sentence ends; keep the last interrogative chunk.
+    parts = re.split(r"(?<=[?.!])\s+", t)
+    for part in reversed(parts):
+        s = part.strip()
+        if s.endswith("?"):
+            return s
+    # Fallback: last non-empty line ending with ?
+    for line in reversed(t.splitlines()):
+        s = line.strip()
+        if s.endswith("?"):
+            return s
+    return ""
+
+
 def assistant_asked_question(text: str) -> bool:
-    """True when the last assistant turn is waiting on the operator."""
+    """True when the last assistant turn is waiting on a human operator.
+
+    Virtual Developer is unattended (one-pass). If the model stops to ask,
+    the session is incomplete — not a successful job completion.
+    """
     t = (text or "").strip()
     if not t:
         return False
     if _ASSISTANT_QUESTION_RE.search(t):
         return True
-    tail = t[-500:]
-    if "?" not in tail:
+    # Trailing multiple-choice block (A/B/C or 1/2/3).
+    tail_lines = [ln.strip() for ln in t[-600:].splitlines() if ln.strip()]
+    if tail_lines:
+        choiceish = 0
+        for ln in tail_lines[-6:]:
+            if re.match(r"^[\[(]?[a-dA-D1-4][\].):\-]\s+\S", ln):
+                choiceish += 1
+        if choiceish >= 2:
+            return True
+    q = _last_question_sentence(t[-800:])
+    if not q:
         return False
-    low = tail.lower()
-    return any(
-        p in low
-        for p in (
-            "shall i",
-            "should i",
-            "continue",
-            "proceed",
-            "confirm",
-            "let me know",
-        )
-    )
+    low = q.lower()
+    if any(tok in low for tok in _QUESTION_ASK_TOKENS):
+        return True
+    # Short pure-question tail: "Postgres or SQLite?" / "JWT vs sessions?"
+    if len(q) <= 160 and re.search(
+        r"\b(or|vs\.?|versus|either|instead)\b", low
+    ):
+        return True
+    return False
 
 
 def _message_text(msg: Optional[Dict[str, Any]]) -> str:
@@ -1167,6 +1248,46 @@ def _apply_last_assistant(
             )
 
 
+def _message_has_open_question_tool(msg: Optional[Dict[str, Any]]) -> bool:
+    """True when *this* message still has an unanswered OpenCode question tool.
+
+    Only the last assistant turn matters. Historical question tools (answered
+    or abandoned) must not mark a later successful stop as incomplete.
+    """
+    if not isinstance(msg, dict):
+        return False
+    parts = msg.get("_parts") or msg.get("parts") or []
+    if not isinstance(parts, list):
+        return False
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        ptype = str(p.get("type") or "").lower()
+        tool = str(p.get("tool") or "").lower()
+        state = p.get("state") if isinstance(p.get("state"), dict) else {}
+        status = str(state.get("status") or p.get("status") or "").lower()
+        if ptype == "question":
+            # Dedicated question part — treat as open unless explicitly done.
+            if status in {"completed", "cancelled", "done", "resolved"}:
+                continue
+            return True
+        if ptype == "tool" and tool == "question":
+            # Only blocked states. Empty/completed/error-after-answer must not
+            # poison a later completion turn.
+            if status in {"pending", "running"}:
+                return True
+    return False
+
+
+def _last_assistant_is_waiting_on_operator(msg: Optional[Dict[str, Any]]) -> bool:
+    """True when the latest assistant turn is waiting for a human answer."""
+    if not isinstance(msg, dict):
+        return False
+    if _message_has_open_question_tool(msg):
+        return True
+    return assistant_asked_question(_message_text(msg))
+
+
 def _apply_message_list(
     result: Dict[str, Any], messages: List[Dict[str, Any]]
 ) -> None:
@@ -1195,10 +1316,14 @@ def _apply_message_list(
     if summary is None:
         summary = info.get("summary")
     parts = target.get("_parts") or target.get("parts") or []
-    if last_assistant is not None and assistant_asked_question(
-        _message_text(last_assistant)
+    # Only the *last* assistant turn. Earlier "Shall I…?" or question tools
+    # must not fail a later successful completion (post unattended-nudge).
+    if last_assistant is not None and _last_assistant_is_waiting_on_operator(
+        last_assistant
     ):
         result["assistant_asked_question"] = True
+        if _message_has_open_question_tool(last_assistant):
+            result["question_tool"] = True
     _apply_last_assistant(
         result,
         role=role,

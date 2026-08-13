@@ -316,7 +316,16 @@ _Completed by the AI agent. Please review and verify before merging or closing._
         session_id = state.current_opencode_session_id or "N/A"
 
         kind = (category or "error").strip().lower()
-        if kind == "incomplete":
+        if kind in {"question", "clarifying_question", "clarification"}:
+            heading = "AI Agent — Clarifying question (unattended)"
+            lead = (
+                "The agent stopped to ask a clarifying question. This daemon "
+                "runs *unattended* (one-pass prompt) — there is no human reply "
+                "path. A single unattended resume nudge was tried when "
+                "possible; the session is still incomplete. This is *not* a "
+                "crash."
+            )
+        elif kind == "incomplete":
             heading = "AI Agent — Incomplete session (context compaction)"
             lead = (
                 "The OpenCode session stopped after context compaction or a "

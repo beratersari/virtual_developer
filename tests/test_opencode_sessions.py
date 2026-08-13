@@ -862,6 +862,151 @@ def test_assistant_asked_question_is_not_a_crash():
     assert not any("unfinished" in str(r) for r in result["reasons"])
 
 
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Which database should we use — Postgres or SQLite?", True),
+        ("What is the preferred API shape?", True),
+        ("Could you clarify the acceptance criteria?", True),
+        ("I need more information: is auth JWT or sessions?", True),
+        ("Any preference on library X vs Y?", True),
+        ("Let me know if you want a different approach.", True),
+        (
+            "Pick one:\nA) Redis\nB) Memcached\nC) In-process cache",
+            True,
+        ),
+        ("Please confirm the target branch before I continue.", True),
+        ("Implemented the parser and committed.", False),
+        ("Fixed the bug. Tests pass.", False),
+        (
+            "Fixed the bug. Does the suite pass? Yes, all green.",
+            False,
+        ),
+    ],
+)
+def test_assistant_asked_question_free_form(text, expected):
+    from src.opencode_sessions import assistant_asked_question
+
+    assert assistant_asked_question(text) is expected
+
+
+def test_free_form_clarifying_question_is_incomplete_not_success():
+    """One-pass daemon must not treat 'Which DB?' as a finished job."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_free_q",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Which database should we use — Postgres or SQLite?",
+                    }
+                ],
+            }
+        ],
+        todos=[],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result["complete"] is False
+    assert result["premature"] is True
+
+
+def test_question_tool_part_is_detected_as_waiting():
+    """OpenCode structured question tool (API-native) marks incomplete."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_q_tool",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "tool-calls",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {
+                            "status": "running",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "header": "DB",
+                                        "question": "Postgres or SQLite?",
+                                        "options": ["Postgres", "SQLite"],
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                ],
+            }
+        ],
+        todos=[{"status": "pending"}],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result.get("question_tool") is True
+    assert result["premature"] is True
+
+
+def test_earlier_question_does_not_poison_later_completion():
+    """Regression: history 'Shall I…?' must not fail a later clean stop.
+
+    Production: after unattended nudge the model finished all work, but
+    assessment still reported clarifying question + stale open todos → ERROR.
+    """
+    from src.opencode_sessions import assess_session_completeness
+
+    done = (
+        "All 16 tasks are marked complete. The work was finished and pushed "
+        "to origin/feature/VOLKAN-12278 in the previous session. "
+        "There is nothing remaining."
+    )
+    result = assess_session_completeness(
+        "ses_done",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Shall I restart the deep exploration?",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "finish": "tool-calls",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {"status": "running", "input": {}},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "unattended nudge"}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": done}],
+            },
+        ],
+        todos=[{"status": "pending"}] * 15 + [{"status": "in_progress"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("last_finish") == "stop"
+    # Open todos may still flag premature — but NOT clarifying question.
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
 def test_compact_related_reasons_detects_markers():
     assert compact_related_reasons(["compaction summary"]) is True
     assert compact_related_reasons(["open todos: 1 pending, 0 in_progress"]) is False

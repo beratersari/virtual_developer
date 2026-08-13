@@ -320,6 +320,8 @@ class GitManager:
                 cwd=self.temp_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._git_command_timeout(),
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -882,7 +884,15 @@ class GitManager:
             logger.error(f"Git operations locked: temp directory '{cwd}' does not exist")
             raise RuntimeError(f"Git operations locked: temp directory '{cwd}' does not exist")
 
-        cmd = ["git", "-c", "core.longpaths=true"] + args
+        # Force UTF-8 log/output so commit subjects with Turkish (ğüşıöç…)
+        # are not mojibake'd on Windows cp1254 locale when building MR titles.
+        cmd = [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "-c",
+            "i18n.logOutputEncoding=utf-8",
+        ] + list(args)
         safe_args = self._redact_git_args(args)
         logger.debug(f"Running git command: git {' '.join(safe_args)}")
 
@@ -901,6 +911,8 @@ class GitManager:
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=cmd_timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -1644,7 +1656,68 @@ class GitManager:
             logger.error(f"Could not checkout work branch '{work}': {e}")
             return False
 
+    def head_is_on_remote(self, branch_name: Optional[str] = None) -> bool:
+        """True when ``origin/<branch>`` already points at (or contains) local HEAD.
+
+        Used when the agent pushed itself: orchestrator push may no-op or fail
+        while the remote already has the work — we still open an MR.
+        """
+        if not self.remote_enabled:
+            return False
+        branch = self._safe_git_ref(
+            (branch_name or "").strip()
+            or (self.work_branch or "").strip()
+            or self.get_current_branch()
+        )
+        if not branch:
+            return False
+        try:
+            head = (self.get_last_commit_sha() or "").strip()
+        except Exception:
+            head = ""
+        if not head:
+            return False
+        try:
+            # Refresh remote ref; ignore fetch failures (offline / missing branch).
+            self._run_git(
+                ["fetch", "origin", "--", branch],
+                check=False,
+                auth=True,
+            )
+            result = self._run_git(
+                ["rev-parse", f"refs/remotes/origin/{branch}"],
+                check=False,
+            )
+            # Do not use ``x or 1`` — returncode 0 is success (falsy).
+            rev_rc = getattr(result, "returncode", 1)
+            if rev_rc is None or int(rev_rc) != 0:
+                return False
+            remote = (result.stdout or "").strip()
+            if not remote:
+                return False
+            if remote == head:
+                return True
+            # Abbreviated SHAs / tip already contains HEAD (agent pushed same tip).
+            if remote.startswith(head) or head.startswith(remote):
+                return True
+            # HEAD is an ancestor of origin/branch (agent pushed further commits).
+            anc = self._run_git(
+                ["merge-base", "--is-ancestor", head, f"refs/remotes/origin/{branch}"],
+                check=False,
+            )
+            anc_rc = getattr(anc, "returncode", 1)
+            return anc_rc is not None and int(anc_rc) == 0
+        except Exception as e:
+            logger.debug(f"head_is_on_remote check failed for {branch}: {e}")
+            return False
+
     def push(self, branch_name: Optional[str] = None) -> bool:
+        """Push work branch to origin.
+
+        Returns True when the remote has our commits (fresh push **or** the
+        agent already pushed the same tip). Callers still open the MR after
+        a successful return.
+        """
         if not self.remote_enabled:
             logger.info("Push not available (no remote configured).")
             return False
@@ -1679,6 +1752,14 @@ class GitManager:
                     logger.info(f"Pushed branch '{branch}' after merge.")
                     return True
                 except RuntimeError as e2:
+                    # Agent may have already pushed the same tip (or further).
+                    if self.head_is_on_remote(branch):
+                        logger.info(
+                            f"Push failed but HEAD is already on origin/{branch} "
+                            f"(agent likely pushed); treating push as success so "
+                            f"the orchestrator can open an MR. Detail: {e2}"
+                        )
+                        return True
                     logger.error(f"Push failed after merge attempt: {e2}")
                     return False
         finally:
@@ -1722,6 +1803,12 @@ class GitManager:
         env["GITLAB_HOST"] = host
         # Prefer HTTPS API; git push still uses authenticated remote URL separately
         env.setdefault("GITLAB_PROTOCOL", "https")
+        # Windows glab/console often default to a legacy code page; force UTF-8
+        # so MR titles with Turkish characters are not corrupted.
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("LC_ALL", "C.UTF-8")
+        env.setdefault("LANG", "C.UTF-8")
         return env
 
     def _run_glab(
@@ -1749,6 +1836,8 @@ class GitManager:
                 cwd=self.temp_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=self._glab_env(),
                 timeout=cmd_timeout,
             )
@@ -1798,7 +1887,8 @@ class GitManager:
 
             headers = {
                 "PRIVATE-TOKEN": pat,
-                "Content-Type": "application/json",
+                # Explicit charset — GitLab expects UTF-8 JSON for titles.
+                "Content-Type": "application/json; charset=utf-8",
             }
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=headers, json=payload)
@@ -1909,17 +1999,26 @@ class GitManager:
         # Issue target branch only (no silent fall back to main/develop)
         candidates = [target_branch]
         last_err = ""
+        # Non-ASCII titles (e.g. Turkish ğüşıöç) are often corrupted by glab
+        # on Windows console code pages. Prefer JSON REST (UTF-8) first.
+        title_s = title if isinstance(title, str) else str(title or "")
+        body_s = body if isinstance(body, str) else str(body or "")
+        if any(ord(ch) > 127 for ch in title_s + body_s):
+            for target in candidates:
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
+                if api_url:
+                    return api_url
         try:
             for target in candidates:
                 cmd = [
                     "mr", "create",
-                    "--title", title,
+                    "--title", title_s,
                     "--source-branch", branch,
                     "--target-branch", target,
                     "--yes",
                 ]
-                if body:
-                    cmd.extend(["--description", body])
+                if body_s:
+                    cmd.extend(["--description", body_s])
                 result = self._run_glab(cmd)
                 if result.returncode == 0:
                     output = result.stdout + result.stderr
@@ -1949,7 +2048,7 @@ class GitManager:
                     f"glab MR create failed for target={target}; trying REST API. "
                     f"Detail: {self._redact_secret_text(err)[:300]}"
                 )
-                api_url = self._create_mr_via_api(title, body, branch, target)
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
                 if api_url:
                     return api_url
                 if "target_branch" in err.lower() or "does not exist" in err.lower():
@@ -1959,7 +2058,7 @@ class GitManager:
 
             # Final API pass over candidates if glab missing entirely
             for target in candidates:
-                api_url = self._create_mr_via_api(title, body, branch, target)
+                api_url = self._create_mr_via_api(title_s, body_s, branch, target)
                 if api_url:
                     return api_url
 

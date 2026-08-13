@@ -616,16 +616,55 @@ def test_push_paths(gm):
             _cp(),  # scrub
         ]):
             assert gm.push("feature/x") is True
-        # auth ok, push fail, fetch/merge/push fail, scrub
-        with patch.object(gm, "_run_git", side_effect=[
-            _cp(),  # auth
-            RuntimeError("fail"),  # push
-            _cp(),  # fetch
-            _cp(),  # merge
-            RuntimeError("fail2"),  # push retry
-            _cp(),  # scrub
-        ]):
-            assert gm.push("feature/x") is False
+        # push/merge fail and remote tip check fails → False
+        with patch.object(gm, "head_is_on_remote", return_value=False):
+            with patch.object(gm, "_run_git", side_effect=[
+                _cp(),  # set-url
+                RuntimeError("fail"),  # push
+                _cp(),  # fetch
+                _cp(),  # merge
+                RuntimeError("fail2"),  # push retry
+                _cp(),  # scrub
+            ]):
+                assert gm.push("feature/x") is False
+        # Agent already pushed: push fails but head_is_on_remote → True
+        with patch.object(gm, "head_is_on_remote", return_value=True):
+            with patch.object(gm, "_run_git", side_effect=[
+                _cp(),  # set-url
+                RuntimeError("fail"),  # push
+                _cp(),  # fetch
+                _cp(),  # merge
+                RuntimeError("fail2"),  # push retry
+                _cp(),  # scrub
+            ]):
+                assert gm.push("feature/x") is True
+
+
+def test_head_is_on_remote_matches_tip(gm):
+    gm.remote_enabled = True
+    gm.work_branch = "feature/x"
+    gm.remote_url = "https://gitlab.example.com/g/p.git"
+
+    def _run(args, **kwargs):
+        # Ignore auth set-url / scrub / fetch noise; answer rev-parse.
+        if args and args[0] == "rev-parse":
+            return _cp(stdout="deadbeef\n")
+        if args and args[0] == "merge-base":
+            return _cp(returncode=1)
+        return _cp()
+
+    with patch.object(gm, "get_last_commit_sha", return_value="deadbeef"):
+        with patch.object(gm, "_run_git", side_effect=_run):
+            assert gm.head_is_on_remote("feature/x") is True
+
+    def _run_miss(args, **kwargs):
+        if args and args[0] == "rev-parse":
+            return _cp(returncode=1, stdout="")
+        return _cp()
+
+    with patch.object(gm, "get_last_commit_sha", return_value="deadbeef"):
+        with patch.object(gm, "_run_git", side_effect=_run_miss):
+            assert gm.head_is_on_remote("feature/x") is False
 
 
 def test_mr_and_comments(gm):
@@ -672,6 +711,41 @@ def test_mr_and_comments(gm):
                 assert gm.create_merge_request("t") is None
             with patch("src.git_manager.subprocess.run", side_effect=RuntimeError("x")):
                 assert gm.create_merge_request("t") is None
+
+
+def test_create_mr_prefers_api_for_turkish_title(gm):
+    """Non-ASCII titles must use REST JSON (UTF-8), not glab console code page."""
+    gm.remote_enabled = True
+    gm.work_branch = "feature/tr"
+    gm.target_branch = "develop"
+    title = "feat: Türkçe karakterler ğüşıöç"
+    with patch.object(gm, "_get_existing_mr_url", return_value=None):
+        with patch.object(
+            gm, "_create_mr_via_api", return_value="https://gitlab.example.com/mr/9"
+        ) as api:
+            with patch.object(gm, "_run_glab") as glab:
+                url = gm.create_merge_request(title, body="açıklama")
+    assert url == "https://gitlab.example.com/mr/9"
+    api.assert_called_once()
+    assert api.call_args[0][0] == title
+    glab.assert_not_called()
+
+
+def test_run_git_uses_utf8_encoding(gm, tmp_path):
+    """Commit subjects must be decoded as UTF-8 (Windows locale safe)."""
+    gm.temp_dir = tmp_path
+    (tmp_path / ".git").mkdir()
+    turkish = "feat: Türkçe ğüşıöç\n"
+    with patch("subprocess.run") as run:
+        run.return_value = _cp(stdout=turkish, returncode=0)
+        subject = gm.get_last_commit_subject()
+    assert subject == "feat: Türkçe ğüşıöç"
+    kwargs = run.call_args.kwargs
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("errors") == "replace"
+    # git -c i18n.logOutputEncoding=utf-8 is on the command line
+    cmd = run.call_args.args[0] if run.call_args.args else run.call_args[0][0]
+    assert "i18n.logOutputEncoding=utf-8" in cmd
 
 
 def test_get_existing_mr_url(gm):
