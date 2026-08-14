@@ -99,6 +99,15 @@ export function datetimeLocalToNaiveIso(local: string): string {
   return raw.length === 16 ? `${raw}:00` : raw
 }
 
+/** Local wall-clock now as naive ISO (same convention as scheduled_at). */
+export function localNaiveNowIso(now: Date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}` +
+    `T${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`
+  )
+}
+
 export function useNow(enabled = true, intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {

@@ -22,16 +22,21 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
-import { datetimeLocalToNaiveIso } from '../../util/time'
+import { datetimeLocalToNaiveIso, localNaiveNowIso } from '../../util/time'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
 const CUSTOM_REPO = '__custom__'
 
+/** Picker default for "schedule later" only — not used by Run now. */
 function defaultWhen(): string {
   const d = new Date()
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset() + 5)
   d.setSeconds(0, 0)
   return d.toISOString().slice(0, 16)
+}
+
+function scheduledAtForSubmit(when: string, dispatchNow: boolean): string {
+  return dispatchNow ? localNaiveNowIso() : datetimeLocalToNaiveIso(when)
 }
 
 export function SchedulesPage() {
@@ -207,7 +212,7 @@ function Existing({ onDone }: { onDone: () => void }) {
     try {
       await scheduleExistingIssue({
         issue_key: preview.issue_key,
-        scheduled_at: datetimeLocalToNaiveIso(when),
+        scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
       })
       setPreview(null)
@@ -351,7 +356,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         target_branch: target.trim(),
         mode,
         issue_type: issueType.trim(),
-        scheduled_at: datetimeLocalToNaiveIso(when),
+        scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
       })
       try {

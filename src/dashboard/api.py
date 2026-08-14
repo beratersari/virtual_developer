@@ -321,6 +321,14 @@ def create_dashboard_app(
         result["dispatched"] = bool(launched.get("ok"))
         if not launched.get("ok"):
             result["dispatch_error"] = launched.get("error")
+            return result
+        # Run now must not keep the form's picker time (default +5 min).
+        from datetime import datetime
+
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        stamped = schedule_store.update(sid, scheduled_at=now_iso)
+        if stamped:
+            result["schedule"] = stamped
         return result
 
     @app.post("/api/schedules")
