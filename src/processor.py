@@ -162,6 +162,13 @@ class JobProcessor:
         TaskStatus.PLANNING,
         TaskStatus.EXECUTING,
     }
+    # Cold-start leftovers with no child process. PENDING is the accept/ack
+    # window while the daemon is alive; after a crash it is orphaned too.
+    ORPHAN_RECOVER_STATUSES = {
+        TaskStatus.PENDING,
+        TaskStatus.PLANNING,
+        TaskStatus.EXECUTING,
+    }
     TERMINAL_STATUSES = {
         TaskStatus.COMPLETED,
         TaskStatus.ERROR,
@@ -1848,15 +1855,15 @@ class JobProcessor:
             return False
 
     def recover_orphaned_in_flight(self) -> int:
-        """On cold start: disk PLANNING/EXECUTING cannot be live — finalise them.
+        """On cold start: disk PENDING/PLANNING/EXECUTING cannot be live.
 
         In-memory cache is empty after a process restart, so any leftover
-        in-flight status is orphaned (no child process). Mark ERROR so poller
-        can re-queue from To Do, and Jira users are not left with a silent hang.
+        accept-window or in-flight status is orphaned (no child process).
+        Mark ERROR so poller can re-queue from To Do.
         """
         recovered = 0
         for state in self.state_manager.get_active_issues():
-            if state.status not in self.IN_FLIGHT_STATUSES:
+            if state.status not in self.ORPHAN_RECOVER_STATUSES:
                 continue
             logger.warning(
                 f"Orphaned in-flight state for {state.issue_key} "
@@ -4147,8 +4154,9 @@ class JobProcessor:
 
         Returns True when the branch is on the remote and delivery was
         recorded (MR is best-effort after a successful remote tip).
-        Returns False on missing git manager, protected branch, or when
-        neither push nor remote-tip verification succeeds.
+        Returns False on missing git manager, protected branch (unless
+        ``existing_mr_url`` — GitLab note jobs push the MR source as-is),
+        or when neither push nor remote-tip verification succeeds.
 
         Checks cancel/watchdog abort before expensive git work and before
         recording delivery so cancel after agent success does not stamp
@@ -4202,13 +4210,19 @@ class JobProcessor:
         if not branch_name:
             branch_name = await asyncio.to_thread(git.get_current_branch)
 
-        # Refuse to push protected bases / MR target / release/*
+        # Refuse to push protected bases / MR target / release/* unless this
+        # is an existing-MR update (GitLab note intake keeps the MR source,
+        # including develop→main and release/*).
         target = (getattr(git, "target_branch", None) or "").strip().lower()
         protected = {"main", "master", "develop", "trunk", "dev"}
         if target:
             protected.add(target)
         bl = (branch_name or "").lower()
-        if not branch_name or bl in protected or bl.startswith("release/"):
+        updating_existing_mr = bool((existing_mr_url or "").strip())
+        if not branch_name or (
+            not updating_existing_mr
+            and (bl in protected or bl.startswith("release/"))
+        ):
             msg = (
                 f"Refusing to push protected branch '{branch_name}'. "
                 f"Agent must work on a feature/work branch "
@@ -4562,7 +4576,10 @@ class JobProcessor:
         logger.info(f"Starting Oracle consultation for {state.issue_key}")
         success: Optional[bool] = False
         try:
-            runner = self._ensure_agent_runner(state.issue_key)
+            # Clone/init must not block the daemon event loop (cancel/watchdog).
+            runner = await asyncio.to_thread(
+                self._ensure_agent_runner, state.issue_key
+            )
 
             prompt = PromptBuilder.build_plan_prompt(
                 issue_key=state.issue_key,

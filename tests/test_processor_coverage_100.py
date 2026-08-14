@@ -952,6 +952,34 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.work_branch = "release/1.0"
     assert await processor._push_and_create_mr(state) is False
 
+    # Existing MR (GitLab note intake): push the MR source even if protected
+    git.work_branch = "develop"
+    git.target_branch = "main"
+    git.get_current_branch.return_value = "develop"
+    git.push.return_value = True
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_sha.return_value = "abc123"
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+
+    # release/* on an existing MR must also push
+    git.work_branch = "release/1.0"
+    git.get_current_branch.return_value = "release/1.0"
+    git.push.reset_mock()
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
+
     # empty branch name
     git.work_branch = ""
     git.get_current_branch.return_value = ""

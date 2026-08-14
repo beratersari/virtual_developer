@@ -77,6 +77,50 @@ async def test_prepare_git_workspace_yields_event_loop(processor, state_manager)
 
 
 @pytest.mark.asyncio
+async def test_oracle_ensure_runner_yields_event_loop(processor, state_manager):
+    """Oracle clone used to run on the asyncio loop and freeze cancel/watchdog."""
+    state = state_manager.create_state(
+        "OR-NB",
+        "oracle hang",
+        (
+            "{params}\n"
+            "Repository: https://gitlab.com/example/large.git\n"
+            "Source branch: develop\n"
+            "Target branch: develop\n"
+            "Mode: consult\n"
+            "{params}"
+        ),
+    )
+
+    def sleepy(_issue_key):
+        time.sleep(0.8)
+        raise RuntimeError("clone hang")
+
+    ticks: list[float] = []
+
+    async def ticker():
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.05)
+
+    with patch.object(processor, "_init_git_manager", side_effect=sleepy):
+        with patch.object(
+            processor, "_begin_workflow_run", return_value=None
+        ):
+            oracle_task = asyncio.create_task(
+                processor._start_oracle_consultation(state)
+            )
+            tick_task = asyncio.create_task(ticker())
+            await asyncio.gather(oracle_task, tick_task)
+
+    assert len(ticks) >= 8, (
+        f"event loop was blocked during oracle git init "
+        f"(only {len(ticks)} ticks; need >= 8)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_dashboard_api_responsive_during_slow_clone(processor, state_manager):
     """E2E-ish: dashboard HTTP stays responsive while workspace prep is slow."""
     state = state_manager.create_state(

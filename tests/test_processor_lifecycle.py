@@ -79,15 +79,24 @@ def test_recover_multiple_orphans(processor, state_manager):
     assert state_manager.get_state("M-2").status == TaskStatus.ERROR
 
 
-def test_recover_skips_plan_ready_pending_completed(processor, state_manager):
+def test_recover_orphaned_pending_marks_error(processor, state_manager, fake_jira):
+    """Crash in the accept/ack window leaves PENDING with no child process."""
+    state_manager.create_state("ORPH-PEND", "s", "d")
+    assert state_manager.get_state("ORPH-PEND").status == TaskStatus.PENDING
+    assert processor.recover_orphaned_in_flight() == 1
+    st = state_manager.get_state("ORPH-PEND")
+    assert st.status == TaskStatus.ERROR
+    assert st.error_message
+    assert fake_jira.comments
+
+
+def test_recover_skips_plan_ready_and_completed(processor, state_manager):
     state_manager.create_state("OK-1", "s", "d")
     state_manager.update_state("OK-1", status=TaskStatus.PLAN_READY)
-    state_manager.create_state("OK-2", "s", "d")  # PENDING
     state_manager.create_state("OK-3", "s", "d")
     state_manager.update_state("OK-3", status=TaskStatus.COMPLETED, completed_at=datetime.now())
     assert processor.recover_orphaned_in_flight() == 0
     assert state_manager.get_state("OK-1").status == TaskStatus.PLAN_READY
-    assert state_manager.get_state("OK-2").status == TaskStatus.PENDING
     assert state_manager.get_state("OK-3").status == TaskStatus.COMPLETED
 
 

@@ -390,18 +390,29 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             elif previous_host and previous_host in current:
                 # Explicit rename from the Settings UI — not an inferred swap.
                 new_map[host] = current[previous_host]
+        # [] from Settings means "no host rows", not "wipe a legacy GITLAB_PAT
+        # that was never projected as a row". Only clear when host rows existed.
+        clearing_hosts = bool(current) and not new_map
+        keep_legacy_pat = (not new_map) and (not current) and bool(
+            (settings.gitlab_pat or "").strip()
+        )
         if hasattr(settings, "set_gitlab_host_pat_map"):
-            settings.set_gitlab_host_pat_map(new_map)
+            if new_map or clearing_hosts:
+                settings.set_gitlab_host_pat_map(new_map)
         else:
             settings.gitlab_allowed_hosts = ",".join(sorted(new_map.keys()))
-            settings.gitlab_pat = next(iter(new_map.values()), "") if new_map else ""
-        dotenv_updates["GITLAB_HOST_PATS"] = getattr(
-            settings, "gitlab_host_pats", ""
-        ) or ""
-        dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
-            settings.gitlab_allowed_hosts or ""
-        )
-        dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
+            if new_map:
+                settings.gitlab_pat = next(iter(new_map.values()))
+            elif clearing_hosts:
+                settings.gitlab_pat = ""
+        if not keep_legacy_pat:
+            dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+                settings, "gitlab_host_pats", ""
+            ) or ""
+            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+                settings.gitlab_allowed_hosts or ""
+            )
+            dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
     else:
         # Legacy single PAT + host list (still supported)
         if "gitlab_pat" in data and data["gitlab_pat"] is not None:

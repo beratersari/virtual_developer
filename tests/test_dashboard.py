@@ -278,6 +278,30 @@ def test_apply_settings_gitlab_rename_1to1_without_previous_host(
     assert settings.gitlab_pat_for_host("gitlab.com") == ""
 
 
+def test_settings_save_without_gitlab_rows_keeps_legacy_pat(tmp_path, monkeypatch):
+    """UI always sends gitlab_credentials; empty list must not wipe GITLAB_PAT."""
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://jira.example.com\nGITLAB_PAT=LEGACY-SECRET-PAT\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "LEGACY-SECRET-PAT")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+
+    apply_settings_update(
+        SettingsUpdate(
+            poll_interval_seconds=45,
+            gitlab_credentials=[],
+        )
+    )
+    assert settings.gitlab_pat == "LEGACY-SECRET-PAT"
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LEGACY-SECRET-PAT" in env
+
+
 def test_refresh_runtime_jira_clients(monkeypatch):
     from src.dashboard.service import refresh_runtime_jira_clients
 
