@@ -167,6 +167,7 @@ not as multi-turn chat.
 |-------|-----------|-----|
 | Task prompt | **One** user POST of BUILD/PLAN kit (`max_turns` style) | One-pass design |
 | Auto-compact | **Wait** for OpenCode idle/auto-resume; **never** inject a user “Continue” for compact | A fake Continue shows up as the operator in chat and races OpenCode’s compact loop |
+| Compact **loop** | **Abort** the in-flight compact turn, wait until **idle**, then **Continue the same session**. Not a new session. Not Continue *while* compact is running. If it loops again after that Continue → `incomplete` / Jira **`compact_loop`** | History stays in this chat; abort stops the spin so Continue does not race compact |
 | Clarifying question | **Leave compact-wait immediately** (do not spin hundreds of “waiting for auto-resume” polls) | Auto-resume never answers a human; spinning burns the wall-clock budget |
 | After question | **One** short unattended nudge (defaults / finish; **not** the full BUILD kit again) | Recover without human; outer retry must not re-blast BUILD |
 | After nudge | Re-assess **last assistant turn only** for “still asking” | Earlier “Shall I…?” in history must not poison a later clean `finish=stop` |
@@ -272,6 +273,7 @@ model not to push; if it still does, delivery must remain correct.
 - Scan **whole session history** for open `question` tools when the last turn is a clean stop.
 - Treat a compaction **summary** or “let me know if you need anything” as a live clarifying question.
 - Short-circuit `should_wait_after_nudge` on `still_asking` **before** `last_is_summary` / compact reasons (`5e6cf9e` regression).
+- Continue *while* compact is still running, or open a **new** session to escape a compact loop. Abort first, then Continue the **same** session. Fail `compact_loop` only if it loops again after that.
 - Mark soft COMPLETE when the model only asked a question and delivered nothing (build: no new commits should not look like a happy delivered job without a clear note).
 - “Fix” by inventing a human Q&A loop over Jira comments unless product explicitly adds that intake path.
 

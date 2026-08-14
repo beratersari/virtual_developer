@@ -17,6 +17,7 @@ import pytest
 import httpx
 
 from src.opencode_serve import (
+    DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT,
     DEFAULT_CONTINUE_PROMPT,
     OpenCodeServeClient,
     ServeOrchestrator,
@@ -25,6 +26,7 @@ from src.opencode_serve import (
     count_compaction_signals,
     format_serve_error,
     is_serve_timeout,
+    next_compact_loop_streak,
 )
 from src.opencode_sessions import assess_session_completeness
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
@@ -1707,3 +1709,171 @@ def test_should_wait_after_nudge_helpers():
     assert not should_wait_after_nudge(
         {"premature": False, "reasons": [], "last_finish": "stop"}
     )
+
+
+def test_next_compact_loop_streak_increments_and_resets():
+    summary = {
+        "premature": True,
+        "last_is_summary": True,
+        "last_finish": "stop",
+        "reasons": ["session ended on compaction summary (finish=stop, summary=true)"],
+    }
+    work = {
+        "premature": False,
+        "last_is_summary": False,
+        "last_finish": "stop",
+        "reasons": [],
+    }
+    assert (
+        next_compact_loop_streak(
+            prev_keys=set(),
+            next_keys={"c1"},
+            assessment=summary,
+            consecutive=0,
+        )
+        == 1
+    )
+    assert (
+        next_compact_loop_streak(
+            prev_keys={"c1"},
+            next_keys={"c1", "c2"},
+            assessment=summary,
+            consecutive=1,
+        )
+        == 2
+    )
+    # Same keys: do not increment (same cycle)
+    assert (
+        next_compact_loop_streak(
+            prev_keys={"c1", "c2"},
+            next_keys={"c1", "c2"},
+            assessment=summary,
+            consecutive=2,
+        )
+        == 2
+    )
+    assert (
+        next_compact_loop_streak(
+            prev_keys={"c1", "c2"},
+            next_keys={"c1", "c2", "c3"},
+            assessment=work,
+            consecutive=2,
+        )
+        == 0
+    )
+
+
+class _CompactLoopBackend(FakeServeBackend):
+    """Each status poll appends another compact-only cycle (no work turn)."""
+
+    def __init__(self, *, keep_looping_after_abort: bool = False):
+        super().__init__(required_compacts=1)
+        self.auto_complete_on_idle = False
+        self._looping = True
+        self.keep_looping_after_abort = keep_looping_after_abort
+        self.create_calls = 0
+
+    async def create_session(self, title: str, **kwargs) -> Dict[str, Any]:
+        self.create_calls += 1
+        return {"id": self.session_id, "title": title}
+
+    async def abort(self, session_id: str) -> bool:
+        self.aborted = True
+        if not self.keep_looping_after_abort:
+            self._looping = False
+        else:
+            self.required_compacts = 99
+        return True
+
+    async def session_status(self) -> Dict[str, Any]:
+        self.status_polls += 1
+        if self._looping and self.message_calls >= 1:
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("cmp"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "compaction", "auto": True}],
+                }
+            )
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("sum"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": True,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": f"## Compaction recap #{self.status_polls}",
+                        }
+                    ],
+                }
+            )
+        return {self.session_id: {"type": "idle"}}
+
+
+@pytest.mark.asyncio
+async def test_compact_loop_aborts_then_continues_same_session():
+    """Loop → abort in-flight turn → Continue same session. Job can finish."""
+    backend = _CompactLoopBackend()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=5.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+        compact_loop_cycles=3,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-LOOP")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert backend.create_calls == 1
+    assert result.session_id == backend.session_id
+    assert DEFAULT_CONTINUE_PROMPT not in backend.prompts
+    assert backend.prompts[1] == DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT
+    assert backend.aborted is True
+
+
+@pytest.mark.asyncio
+async def test_compact_loop_again_after_continue_is_incomplete():
+    """One same-session Continue only. A second loop fails (last resort)."""
+    backend = _CompactLoopBackend(keep_looping_after_abort=True)
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=5.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+        compact_loop_cycles=3,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-LOOP2")
+    assert result.returncode == 2, result.stderr
+    assert result.incomplete is True
+    assert backend.message_calls == 2
+    assert DEFAULT_CONTINUE_PROMPT not in backend.prompts
+    assert "auto-compact loop" in (result.stderr or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_compact_then_work_then_compact_is_not_a_loop():
+    """A real work turn between compacts must reset the streak and still succeed."""
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = True
+    backend.idle_polls_before_auto_complete = 4
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=2.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+        compact_loop_cycles=3,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-OK")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 1
+    assert DEFAULT_CONTINUE_PROMPT not in backend.prompts

@@ -3,6 +3,7 @@
  */
 import {
   datetimeLocalToNaiveIso,
+  localNaiveNowIso,
   elapsedSecondsBetween,
   formatChatTime,
   formatDashboardClock,
@@ -35,6 +36,11 @@ assert(elapsedSecondsBetween(start, null, now) === 30, 'running uses now')
 assert(datetimeLocalToNaiveIso('2026-08-08T15:29') === '2026-08-08T15:29:00', 'local pad seconds')
 assert(datetimeLocalToNaiveIso('2026-08-08T15:29:00') === '2026-08-08T15:29:00', 'already naive')
 assert(datetimeLocalToNaiveIso('') === '', 'empty local')
+const fixed = new Date(2026, 7, 14, 14, 21, 50)
+assert(localNaiveNowIso(fixed) === '2026-08-14T14:21:50', 'naive now is local wall clock')
+const naive = localNaiveNowIso()
+assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(naive), 'naive now shape')
+assert(!naive.endsWith('Z'), 'naive now has no Z')
 assert(formatElapsedBetween(start, null, now) === '30s', 'running format')
 
 const chatLabel = formatChatTime('2026-08-09T16:04:18+00:00')

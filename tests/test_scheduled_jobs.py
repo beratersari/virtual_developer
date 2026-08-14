@@ -997,3 +997,51 @@ def test_api_dispatch_now(tmp_path, monkeypatch):
     assert r_bad.status_code == 409
     r_miss = tc.post("/api/schedules/sched_missing/dispatch")
     assert r_miss.status_code == 404
+
+
+def test_api_from_issue_run_now_stamps_scheduled_at_now(tmp_path, monkeypatch):
+    """Run now must not keep the form default (now + 5 minutes)."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    picker = (datetime.now() + timedelta(minutes=5)).isoformat(timespec="seconds")
+
+    def _schedule(issue_key, scheduled_at, store=None):
+        rec = (store or ScheduleStore(schedules_dir=tmp_path / "schedules")).create(
+            title="run-now",
+            description="",
+            repository_url="https://example.com/r.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+            scheduled_at=scheduled_at,
+            issue_key=issue_key,
+            issue_description="x",
+        )
+        return {"ok": True, "schedule": rec, "issue_key": issue_key}
+
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    monkeypatch.setattr("src.dashboard.api.schedule_store", store)
+    monkeypatch.setattr("src.dashboard.api.schedule_existing_issue", _schedule)
+    app = create_dashboard_app(processor=processor, state_manager=sm)
+    tc = TestClient(app)
+    before = datetime.now()
+    r = tc.post(
+        "/api/schedules/from-issue",
+        json={
+            "issue_key": "KAN-RUNNOW",
+            "scheduled_at": picker,
+            "dispatch_now": True,
+        },
+    )
+    after = datetime.now()
+    assert r.status_code == 200, r.text
+    got = parse_schedule_at(r.json()["schedule"]["scheduled_at"])
+    if got.tzinfo is not None:
+        got = got.replace(tzinfo=None)
+    assert got >= before.replace(microsecond=0) - timedelta(seconds=2)
+    assert got <= after + timedelta(seconds=2)
+    assert abs((got - parse_schedule_at(picker)).total_seconds()) >= 60
+    assert r.json()["dispatched"] is True

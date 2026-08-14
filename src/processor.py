@@ -421,7 +421,12 @@ class JobProcessor:
         compactish = compact_related_reasons(reasons) or (
             "compact" in blob and "clarifying question" not in blob
         )
-        if incomplete and asked:
+        loopish = (
+            "compact loop" in blob
+            or "auto-compact loop" in blob
+            or "compact-only cycles" in blob
+        )
+        if incomplete and asked and not loopish:
             self._fail_issue(
                 issue_key,
                 stderr,
@@ -434,6 +439,22 @@ class JobProcessor:
                     "issue back to To Do to re-queue."
                 ),
                 category="question",
+            )
+            return
+        if incomplete and loopish:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode entered an auto-compact loop (repeated "
+                    "'Session auto-compacted' with no new work). Raising "
+                    "AGENT_TASK_TIMEOUT_SECONDS will not help, and a Continue "
+                    "prompt would grow context and race the compact loop. "
+                    "Split the ticket or shrink scope, then move it back to "
+                    "To Do to re-queue."
+                ),
+                category="compact_loop",
             )
             return
         if incomplete and compactish:

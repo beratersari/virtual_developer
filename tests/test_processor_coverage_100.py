@@ -325,6 +325,34 @@ def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
     assert not any("OPENCODE_SERVE_MAX_COMPACT_CONTINUES" in b for b in bodies)
 
 
+def test_fail_from_agent_result_compact_loop_heading(
+    processor, state_manager, fake_jira
+):
+    """Tight auto-compact loop must not look like a timeout or question."""
+    state_manager.create_state("FE-L", "loop", "d")
+    processor._fail_from_agent_result(
+        "FE-L",
+        {
+            "returncode": 2,
+            "stderr": (
+                "[INCOMPLETE] auto-compact loop: OpenCode kept compacting "
+                "with no new work. auto-compact loop (8 consecutive "
+                "compact-only cycles)"
+            ),
+            "incomplete": True,
+            "incomplete_reasons": [
+                "auto-compact loop (8 consecutive compact-only cycles)"
+            ],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("auto-compact loop" in b.lower() for b in bodies)
+    assert any("will not help" in b.lower() or "will not break" in b.lower() for b in bodies)
+    assert not any("Clarifying question" in b for b in bodies)
+    assert not any("raise that timeout" in b.lower() for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")
