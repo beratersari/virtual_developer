@@ -1,6 +1,7 @@
 """GitLab REST v4 client — works on GitLab.com, CE (basic), and EE.
 
-Uses ``PRIVATE-TOKEN`` (all plans) and ``verify=False`` (product TLS policy).
+Uses ``PRIVATE-TOKEN`` (all plans) and ``verify=False``
+(INTENTIONAL product TLS policy: on-prem / intercept; no custom-CA path yet).
 """
 
 from __future__ import annotations
@@ -95,6 +96,7 @@ class GitlabClient:
         if (discussion_id or "").strip():
             payload["in_reply_to_discussion_id"] = discussion_id.strip()
         try:
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=self._headers(), json=payload)
                 if resp.status_code in (200, 201):

@@ -64,8 +64,10 @@ def test_workspace_lock_matches_session_bind():
 
 def test_queue_store_fifo_and_cancel(tmp_path):
     qs = WorkQueueStore(queue_dir=tmp_path / "q")
-    qs.enqueue(source="jira", issue_key="KAN-1", summary="a", message="first")
-    qs.enqueue(source="gitlab", issue_key="GL-X-1", summary="b", message="second")
+    a = qs.enqueue(source="jira", issue_key="KAN-1", summary="a", message="first")
+    b = qs.enqueue(source="gitlab", issue_key="GL-X-1", summary="b", message="second")
+    qs.update(a["queue_id"], created_at="2026-01-01T00:00:00.000")
+    qs.update(b["queue_id"], created_at="2026-01-01T00:00:01.000")
     rows = qs.list_items(status="queued")
     assert [r["issue_key"] for r in rows] == ["KAN-1", "GL-X-1"]
     first = qs.claim_next(max_running=2)

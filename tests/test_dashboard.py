@@ -87,9 +87,10 @@ def test_settings_update_rejects_non_numeric_board_id():
     assert SettingsUpdate(jira_board_id=" 42 ").jira_board_id == "42"
 
 
-def test_apply_settings_update_runtime(monkeypatch):
+def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "default_model", "old/m")
@@ -195,7 +196,7 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
     assert view.jira_email == "new@ex.com"
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
-    assert settings.gitlab_pat_for_host("api.gitlab.com") == "pat-cloud"
+    assert settings.gitlab_pat_for_host("api.gitlab.com") == ""
     assert view.jira_token_configured is True
     assert view.gitlab_pat_configured is True
     assert {c.host for c in view.gitlab_credentials} == {
@@ -224,11 +225,16 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
     assert "JIRA_API_TOKEN=new-secret-token" in env_text
     assert "JIRA_HOST=https://new.example.com" in env_text
     assert "JIRA_EMAIL=new@ex.com" in env_text
+    assert "GITLAB_HOST_PATS=" in env_text
+    assert "pat-cloud" in env_text
 
 
-def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(monkeypatch):
+def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(
+    tmp_path, monkeypatch
+):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_pat", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
@@ -250,9 +256,12 @@ def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(monkeypatch):
     assert settings.gitlab_pat_for_host("gitlab.com") == ""
 
 
-def test_apply_settings_gitlab_rename_1to1_without_previous_host(monkeypatch):
+def test_apply_settings_gitlab_rename_1to1_without_previous_host(
+    tmp_path, monkeypatch
+):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_pat", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
@@ -264,7 +273,8 @@ def test_apply_settings_gitlab_rename_1to1_without_previous_host(monkeypatch):
             gitlab_credentials=[{"host": "gitlab.company.com", "pat": ""}]
         )
     )
-    assert settings.gitlab_pat_for_host("gitlab.company.com") == "keep-me-secret"
+    # Inferred 1:1 rename is refused — PAT stays off the new host
+    assert settings.gitlab_pat_for_host("gitlab.company.com") == ""
     assert settings.gitlab_pat_for_host("gitlab.com") == ""
 
 
@@ -894,7 +904,11 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
 
     p = JiraPoller(client=fake_jira, board_id="1", interval_seconds=10)
     p.state_manager = state_manager
-    out = p.poll_board()
+    with patch("src.jira.poller.settings") as s:
+        s.trigger_labels_list = ["ai-assist", "bot"]
+        s.trigger_assignee_names_list = []
+        s.trigger_on_assignment = False
+        out = p.poll_board()
     assert len(out) == 1
     snap = store.snapshot()
     assert snap["issues"]

@@ -60,13 +60,17 @@ def normalize_branch(name: str) -> str:
 
 
 def bind_id_for(
-    repository_url: str, branch: str, target_branch: str = ""
+    repository_url: str,
+    branch: str,
+    target_branch: str = "",
+    issue_key: str = "",
 ) -> str:
     repo_key = normalize_repo_key(repository_url)
     br = normalize_branch(branch)
     tgt = normalize_branch(target_branch)
+    issue = (issue_key or "").strip().upper()
     digest = hashlib.sha256(
-        f"{repo_key}\0{br}\0{tgt}".encode("utf-8")
+        f"{repo_key}\0{br}\0{tgt}\0{issue}".encode("utf-8")
     ).hexdigest()[:16]
     return f"osb_{digest}"
 
@@ -95,13 +99,23 @@ class SessionBindStore:
         repository_url: str,
         branch: str,
         target_branch: str = "",
+        issue_key: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_repo_key(repository_url) or not normalize_branch(branch):
             return None
         if not normalize_branch(target_branch):
             return None
-        bid = bind_id_for(repository_url, branch, target_branch)
-        return self.get_by_id(bid)
+        bid = bind_id_for(
+            repository_url, branch, target_branch, issue_key=issue_key
+        )
+        hit = self.get_by_id(bid)
+        if hit:
+            return hit
+        if (issue_key or "").strip():
+            return self.get_by_id(
+                bind_id_for(repository_url, branch, target_branch, issue_key="")
+            )
+        return None
 
     def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
         path = self._path((bind_id or "").strip())
@@ -138,7 +152,7 @@ class SessionBindStore:
         sid = session_id.strip()
         if not normalize_repo_key(repo) or not br or not tgt or not sid:
             return None
-        bid = bind_id_for(repo, br, tgt)
+        bid = bind_id_for(repo, br, tgt, issue_key=issue_key)
         now = _now_iso()
         wd = (working_directory or "").strip() or None
         if wd:

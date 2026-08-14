@@ -180,8 +180,9 @@ class GitManager:
         repo_key = normalize_repo_key(self.remote_url or "")
         branch = normalize_branch(work)
         target = normalize_branch(self.target_branch or "")
+        issue = (self.issue_key or "").strip().upper()
         digest = hashlib.sha256(
-            f"{repo_key}\0{branch}\0{target}".encode("utf-8")
+            f"{repo_key}\0{branch}\0{target}\0{issue}".encode("utf-8")
         ).hexdigest()[:12]
         return {
             "repo_key": repo_key,
@@ -650,7 +651,11 @@ class GitManager:
             return ""
         if not raw.startswith("http"):
             raw = "https://" + raw
-        return (urlparse(raw).hostname or "").lower()
+        parsed = urlparse(raw)
+        name = (parsed.hostname or "").lower()
+        if parsed.port:
+            return f"{name}:{parsed.port}"
+        return name
 
     def _pat_for_remote(self, url: str = "") -> str:
         """Resolve GitLab PAT for this remote URL (per-host map)."""
@@ -1864,7 +1869,9 @@ class GitManager:
         if not raw.startswith("http"):
             raw = "https://" + raw
         parsed = urlparse(raw)
-        host = parsed.hostname or "gitlab.com"
+        host = (parsed.hostname or "gitlab.com").lower()
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
         path = (parsed.path or "").strip("/").removesuffix(".git")
         return host, path
 
@@ -1978,6 +1985,7 @@ class GitManager:
                 # Explicit charset — GitLab expects UTF-8 JSON for titles.
                 "Content-Type": "application/json; charset=utf-8",
             }
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=headers, json=payload)
                 if resp.status_code in (200, 201):
@@ -2046,6 +2054,7 @@ class GitManager:
             url = (
                 f"https://{host}/api/v4/projects/{enc}/merge_requests{q}"
             )
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.get(url, headers={"PRIVATE-TOKEN": pat})
                 if resp.status_code == 200:
@@ -2120,7 +2129,20 @@ class GitManager:
                             logger.info(f"Merge request created: {url} (target={target})")
                             return url
                     logger.info(f"Merge request created (target={target}).")
-                    return "created"
+                    api_url = self._create_mr_via_api(
+                        title_s, body_s, branch, target
+                    )
+                    if api_url:
+                        return api_url
+                    existing = self._get_existing_mr_url(
+                        branch, target_branch=target
+                    )
+                    if existing:
+                        return existing
+                    logger.error(
+                        "glab reported success but no MR URL was parsed"
+                    )
+                    return None
 
                 err = (result.stderr or "") + (result.stdout or "")
                 last_err = err

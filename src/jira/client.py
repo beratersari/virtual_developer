@@ -50,6 +50,9 @@ class JiraClient:
         → HTTP Basic (email as username, API token as password)
 
     Empty email never forces Basic. Prod on-prem should leave email empty.
+
+    TLS: ``verify=False`` is intentional (on-prem / intercept). Do not turn
+    verification on without a supported custom-CA path.
     """
     
     def __init__(
@@ -78,6 +81,9 @@ class JiraClient:
             headers["Authorization"] = f"Bearer {self.api_token}"
             logger.info("JiraClient auth: Bearer token")
         
+        # INTENTIONAL: verify=False. On-prem / enterprise TLS intercept and
+        # self-signed certs are expected. Do not enable verification until a
+        # custom-CA path exists (product requirement).
         self.client = httpx.Client(
             base_url=f"{self.host}/rest/api/2",
             auth=auth,
@@ -86,8 +92,10 @@ class JiraClient:
             verify=False,
         )
         self.is_cloud = "atlassian.net" in self.host.lower()
-        # Last create_issue failure detail (for callers that soft-map None)
+        # Last create_issue / Agile lookup failure detail (callers soft-map None)
         self.last_error: Optional[str] = None
+        # Last get_active_sprint outcome: ok | kanban | empty | error
+        self.sprint_lookup: Optional[str] = None
 
     # Locale-friendly aliases: English preferred name → match tokens (lower)
     _ISSUE_TYPE_ALIASES: Dict[str, List[str]] = {
@@ -384,9 +392,13 @@ class JiraClient:
     def get_active_sprint(self, board_id: str) -> Optional[Dict[str, Any]]:
         """Get the active sprint for a board.
 
-        Returns None for Kanban/simple boards that do not support sprints
-        (HTTP 400) or when no active sprint exists.
+        Sets ``sprint_lookup`` so the poller can tell these None cases apart:
+          * ``kanban`` — HTTP 400, board does not support sprints (use board issues)
+          * ``empty`` — Scrum board with no active sprint (do not widen intake)
+          * ``error`` — 401/5xx/network (do not widen intake)
+          * ``ok`` — returned a sprint dict
         """
+        self.sprint_lookup = "error"
         try:
             # Agile API is at /rest/agile/1.0, not /rest/api/2
             url = f"{self.host}/rest/agile/1.0/board/{board_id}/sprint"
@@ -397,15 +409,19 @@ class JiraClient:
                     f"Board {board_id} does not support sprints "
                     f"({response.text[:200]}); use board issues instead"
                 )
+                self.sprint_lookup = "kanban"
                 return None
             response.raise_for_status()
             data = response.json()
             values = data.get("values", [])
             if values:
+                self.sprint_lookup = "ok"
                 return values[0]
+            self.sprint_lookup = "empty"
             return None
         except Exception as e:
             self.last_error = str(e)
+            self.sprint_lookup = "error"
             logger.error(f"Error getting active sprint: {e}")
             return None
 

@@ -692,6 +692,7 @@ def test_d3_unauthenticated_settings_can_redirect_jira_host(monkeypatch, tmp_pat
     from src.dashboard.api import create_dashboard_app
     from src.dashboard.schemas import SettingsUpdate
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "jira_host", "https://jira.company.com")
     monkeypatch.setattr(settings, "jira_api_token", "KEEP-ME")
 
@@ -701,15 +702,18 @@ def test_d3_unauthenticated_settings_can_redirect_jira_host(monkeypatch, tmp_pat
         "/api/settings",
         json={"jira_host": "https://attacker.example"},
     )
-    assert r.status_code == 200
-    assert settings.jira_host == "https://attacker.example"
+    assert r.status_code == 400
+    assert settings.jira_host == "https://jira.company.com"
     assert settings.jira_api_token == "KEEP-ME"
 
 
-def test_d3_unauthenticated_settings_can_wipe_gitlab_credentials(monkeypatch):
+def test_d3_unauthenticated_settings_can_wipe_gitlab_credentials(
+    tmp_path, monkeypatch
+):
     from src.config import settings
     from src.dashboard.api import create_dashboard_app
 
+    monkeypatch.chdir(tmp_path)
     if hasattr(settings, "set_gitlab_host_pat_map"):
         settings.set_gitlab_host_pat_map({"gitlab.company.com": "pat-xyz"})
     monkeypatch.setattr(settings, "gitlab_pat", "pat-xyz")

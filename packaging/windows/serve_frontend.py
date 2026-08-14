@@ -128,6 +128,7 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
         }
         body = await request.body()
         try:
+            # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             async with httpx.AsyncClient(timeout=120.0, verify=False) as client:
                 r = await client.request(
                     request.method,

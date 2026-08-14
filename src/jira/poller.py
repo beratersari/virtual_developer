@@ -146,6 +146,8 @@ class JiraPoller:
         if hasattr(self.client, "last_error"):
             self.client.last_error = None
         sprint = self.client.get_active_sprint(self.board_id)
+        lookup = getattr(self.client, "sprint_lookup", None)
+        sprint_err = getattr(self.client, "last_error", None)
         if sprint:
             sprint_id = sprint["id"]
             sprint_name = sprint.get("name", "unknown")
@@ -156,6 +158,37 @@ class JiraPoller:
                 max_results=100,
             )
             source = f"sprint {sprint_name}"
+        elif lookup == "error" or (
+            sprint_err and lookup not in ("kanban", "empty", "ok")
+        ):
+            # Scrum lookup failed — do not widen to the whole board/backlog.
+            logger.error(
+                f"Sprint lookup failed for board {self.board_id}"
+                + (f" ({sprint_err})" if sprint_err else "")
+                + "; skipping intake this cycle"
+            )
+            poll_snapshot_store.end_poll(
+                source=f"board {self.board_id}",
+                issues=[],
+                interval_seconds=self.interval,
+                error=sprint_err or "sprint lookup failed",
+            )
+            self._last_check = datetime.now()
+            return []
+        elif lookup == "empty":
+            # Active-sprint list is empty on a board that supports sprints.
+            logger.info(
+                f"No active sprint on board {self.board_id}; "
+                f"not loading the whole board"
+            )
+            poll_snapshot_store.end_poll(
+                source=f"sprint (none active) board {self.board_id}",
+                issues=[],
+                interval_seconds=self.interval,
+                error=None,
+            )
+            self._last_check = datetime.now()
+            return []
         else:
             logger.info(
                 f"No active sprint on board {self.board_id}; "
@@ -262,10 +295,12 @@ class JiraPoller:
                 # back on To Do (or never left), that is another rework.
                 #
                 # Exceptions (not rework):
-                #   * in-flight planning/executing — never restart from poll noise
+                #   * in-flight pending/planning/executing — never restart
+                #     from poll noise (PENDING is the accept/ack window)
                 #   * plan_ready — waits for ai-start-work / ai-execute (or a
                 #     new Mode: build issue). bot/ai-assist alone does not build.
                 in_flight = local_st in {
+                    TaskStatus.PENDING,
                     TaskStatus.PLANNING,
                     TaskStatus.EXECUTING,
                 }
@@ -305,7 +340,6 @@ class JiraPoller:
                     )
                 else:
                     plan_start_issues.append(issue)
-                    self._plan_start_emitted.add(issue_key)
                     logger.info(
                         f"Plan-ready start signal for {issue_key} "
                         f"(label ai-start-work / ai-execute)"
@@ -607,6 +641,29 @@ class JiraPoller:
                 pass
         return False
 
+    def _fail_unhandled_accept(self, issue_key: str, summary: str) -> None:
+        """Board was moved In Progress but no worker will run — tell Jira."""
+        msg = (
+            "Issue was accepted (moved toward In Progress) but no worker "
+            "was bound. Re-save settings / restart the daemon, then move "
+            "the ticket back to To Do to retry."
+        )
+        try:
+            self.client.add_comment(issue_key, f"AI Agent — ERROR\n\n{msg}")
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not post unhandled-accept comment: {e}")
+        try:
+            st = self.state_manager.get_state(issue_key)
+            if st is None:
+                self.state_manager.create_state(issue_key, summary or issue_key, "")
+            self.state_manager.update_state(
+                issue_key,
+                status=TaskStatus.ERROR,
+                error_message=msg,
+            )
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not record unhandled-accept ERROR: {e}")
+
     def process_issue(self, issue: dict, is_update: bool = False) -> None:
         issue = self._enrich_issue_for_work(issue)
         issue_key = issue["key"]
@@ -631,6 +688,14 @@ class JiraPoller:
                 "timestamp": int(time.time() * 1000),
             }
             self._handler(event)
+            if is_update:
+                self._plan_start_emitted.add(issue_key)
+        else:
+            logger.error(
+                f"{issue_key}: no poller handler bound after accept; "
+                f"recording ERROR so the ticket is not silently stuck"
+            )
+            self._fail_unhandled_accept(issue_key, summary)
 
     def start(self, handler: Callable[[dict], None]):
         from concurrent.futures import ThreadPoolExecutor, as_completed

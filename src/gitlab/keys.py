@@ -41,7 +41,12 @@ def _normalize_project_keys(project_keys: Optional[Sequence[str]]) -> List[str]:
             continue
         seen.add(k)
         out.append(k)
-    # Longer keys first so PROJEXT-1 is not eaten as PROJ-1 when both exist
+    # INTENTIONAL: longer configured keys win, including when a shorter key
+    # appears earlier in the same string. Overlapping prefixes must not parse
+    # ``PROJECT-1`` as ``PROJ-1`` when both keys are configured. Distinct keys
+    # in one title (``feat(KAN-12): … PLATFORM-3``) therefore bind the longer
+    # key. Operators who need the leftmost ticket should put only that key in
+    # the MR title (description is a fallback scan).
     out.sort(key=len, reverse=True)
     return out
 
@@ -50,10 +55,13 @@ def jira_key_from_text(
     text: str,
     project_keys: Optional[Sequence[str]] = None,
 ) -> Optional[str]:
-    """Find the first ``PROJECT-123`` in *text* for configured project keys.
+    """Find a ``PROJECT-123`` in *text* for configured project keys.
 
     Matching is case-insensitive; returned key uses the configured project
     key casing (upper) + numeric id as found.
+
+    Longer configured keys are preferred over shorter ones (intentional —
+    see ``_normalize_project_keys``). This is not leftmost-in-text order.
     """
     keys = _normalize_project_keys(project_keys)
     if not keys or not (text or "").strip():
@@ -62,6 +70,25 @@ def jira_key_from_text(
     for proj in keys:
         pat = re.compile(
             rf"(?<![A-Za-z0-9]){re.escape(proj)}-(\d+)\b",
+            re.IGNORECASE,
+        )
+        m = pat.search(text)
+        if m:
+            return f"{proj}-{m.group(1)}"
+    return None
+
+
+def jira_key_from_closes_line(
+    text: str,
+    project_keys: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    """Only ``Closes|Fixes|Resolves KEY-n`` in description — not free-text mentions."""
+    keys = _normalize_project_keys(project_keys)
+    if not keys or not (text or "").strip():
+        return None
+    for proj in keys:
+        pat = re.compile(
+            rf"(?:^|\n)\s*(?:closes|fixes|resolves)[:\s]+{re.escape(proj)}-(\d+)\b",
             re.IGNORECASE,
         )
         m = pat.search(text)
@@ -86,16 +113,15 @@ def resolve_mr_issue_key(
     mr_iid: int = 0,
     project_keys: Optional[Sequence[str]] = None,
 ) -> str:
-    """Prefer Jira key from MR title (then description); else GL- fallback.
+    """Prefer Jira key from MR title; description only via Closes/Fixes.
 
-    Title is primary so commit messages / job ids match the ticket the MR
-    claims (e.g. ``feat(KAN-12): …`` → ``KAN-12``). Description is a secondary
-    scan when the title has no key. Without a match, fall back to the stable
-    ``GL-…`` key so non-Jira MRs still work.
+    Title is primary (e.g. ``feat(KAN-12): …`` → ``KAN-12``). A free-text
+    mention in the description is ignored so ``See also PLATFORM-9`` cannot
+    steal the job. Without a match, fall back to the stable ``GL-…`` key.
     """
     found = jira_key_from_mr_title(mr_title, project_keys)
     if not found and (mr_description or "").strip():
-        found = jira_key_from_text(mr_description, project_keys)
+        found = jira_key_from_closes_line(mr_description, project_keys)
     if found:
         return found
     return gitlab_issue_key(project_path or "project", mr_iid)

@@ -745,7 +745,10 @@ def create_dashboard_app(
         dumped = body.model_dump(exclude_unset=True)
         auth_changed = any(k in dumped for k in auth_keys)
 
-        view = apply_settings_update(body)
+        try:
+            view = apply_settings_update(body)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         poller = getattr(app.state, "poller", None)
         proc = app.state.processor
         if poller is not None and body.poll_interval_seconds is not None:

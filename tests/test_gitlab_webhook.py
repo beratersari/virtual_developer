@@ -293,6 +293,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
         branch="feature/login",
         target_branch="develop",
         session_id="ses_gl1",
+        issue_key="GL-ACME-DEMO-4",
         working_directory=str(clone),
     )
 

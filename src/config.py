@@ -528,7 +528,12 @@ class Settings(BaseSettings):
         return {h: pat for h in hosts}
 
     def gitlab_pat_for_host(self, host: str) -> str:
-        """Return the PAT for ``host`` (exact or parent-domain match), or ''."""
+        """Return the PAT for ``host`` (exact hostname[:port] only).
+
+        Parent-domain matching is intentionally not used: it would send the
+        PAT to ``evil.gitlab.company.com`` when ``gitlab.company.com`` is
+        configured. Add each host (including ``host:port``) in Settings.
+        """
         h = (host or "").strip().lower()
         if not h:
             return ""
@@ -537,10 +542,6 @@ class Settings(BaseSettings):
             return ""
         if h in mapping:
             return mapping[h]
-        # subdomain: api.gitlab.example.com → gitlab.example.com
-        for allowed, pat in mapping.items():
-            if h == allowed or h.endswith("." + allowed):
-                return pat
         return ""
 
     def gitlab_has_any_pat(self) -> bool:

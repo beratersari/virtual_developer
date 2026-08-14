@@ -161,9 +161,17 @@ def test_bind_store_upsert_get_delete(tmp_path):
     )
     assert rec is not None
     assert rec["bind_id"] == bind_id_for(
-        "https://gitlab.com/g/r.git", "feature/shared", "develop"
+        "https://gitlab.com/g/r.git",
+        "feature/shared",
+        "develop",
+        issue_key="KAN-1",
     )
-    got = store.get("https://gitlab.com/g/r", "feature/shared", "develop")
+    got = store.get(
+        "https://gitlab.com/g/r",
+        "feature/shared",
+        "develop",
+        issue_key="KAN-1",
+    )
     assert got is not None
     assert got["session_id"] == "ses_abc123"
     assert got["issue_key"] == "KAN-1"
@@ -202,13 +210,21 @@ def test_bind_store_isolates_sessions_by_target(tmp_path):
         issue_key="KAN-2",
     )
     assert (
-        store.get("https://gitlab.com/g/r.git", "feature/shared", "develop")[
-            "session_id"
-        ]
+        store.get(
+            "https://gitlab.com/g/r.git",
+            "feature/shared",
+            "develop",
+            issue_key="KAN-1",
+        )["session_id"]
         == "ses_dev"
     )
     assert (
-        store.get("https://gitlab.com/g/r.git", "feature/shared", "main")["session_id"]
+        store.get(
+            "https://gitlab.com/g/r.git",
+            "feature/shared",
+            "main",
+            issue_key="KAN-2",
+        )["session_id"]
         == "ses_main"
     )
     assert store.get("https://gitlab.com/g/r.git", "feature/shared") is None
