@@ -170,8 +170,9 @@ not as multi-turn chat.
 | Clarifying question | **Leave compact-wait immediately** (do not spin hundreds of “waiting for auto-resume” polls) | Auto-resume never answers a human; spinning burns the wall-clock budget |
 | After question | **One** short unattended nudge (defaults / finish; **not** the full BUILD kit again) | Recover without human; outer retry must not re-blast BUILD |
 | After nudge | Re-assess **last assistant turn only** for “still asking” | Earlier “Shall I…?” in history must not poison a later clean `finish=stop` |
+| After nudge + compact | **Wait** for auto-resume. Compact **recap is not a live question** | Long jobs compact on the nudge turn; the summary often quotes the earlier “Shall I…?” |
 | Stale open todos | After nudge, clean `finish=stop` + only open-todo reasons → may accept complete (todo API lag after `todowrite`) | Processor still gates on plan file / **git delivery** |
-| Still asking after nudge | `incomplete` + Jira category **`question`** (not “context compaction”) | Operators need the real failure mode |
+| Still asking after nudge | Last turn is a **real** ask (not a recap/closer) → `incomplete` + Jira category **`question`** | Operators need the real failure mode |
 
 Typical log **good** path after a question:
 
@@ -190,10 +191,33 @@ idle after compact but still incomplete (poll 780,
   — waiting for auto-resume (no user message)
 ```
 
+Typical log **bug #2** (fixed in serve wait-after-nudge; do not reintroduce):
+
+```text
+[INCOMPLETE] assistant asked a clarifying question (unattended; no human reply path).
+After one nudge still incomplete: open todos: 14 pending, 1 in_progress;
+assistant asked a clarifying question
+```
+
+That fired when the **nudge turn compact-then-stopped** and the summary quoted the
+earlier “Shall I…?”, or when the last text was a polite closer
+(“Let me know if you need anything else”) with stale todos. It is **not** a
+new operator question. `should_wait_after_nudge` must check **compact / summary
+first**, then “still asking”. Never return “don’t wait” solely because
+`assistant_asked_question` is set on a compaction recap.
+
+Regressed once: `5e6cf9e` (`fix(serve): wait after nudge…`) added the wait
+helper but short-circuited on `still_asking` **before** `last_is_summary`.
+Do not put that `if assessment_still_asking: return False` above the compact
+check again.
+
 #### Detection (fail closed, but last-turn only)
 
 - Free-text: last assistant matches “shall I / which DB / please confirm…” heuristics
   (`assistant_asked_question` in `src/opencode_sessions.py`).
+- **Not** a question: compaction **summary** / recap that quotes an earlier ask;
+  farewell closers (“let me know if you need anything”); a **user** nudge as the
+  last message (reply not landed yet — retry / wait, do not ERROR).
 - Structured: OpenCode **`question` tool** parts with `pending`/`running` on the
   **last** assistant message only (history tools must not fail a later done turn).
 - `GET /session/status` is only `idle`/`busy`/`retry` — **not** “waiting for human”.
@@ -238,6 +262,7 @@ model not to push; if it still does, delivery must remain correct.
 
 - Treat clarifying question + open todos in assessment reasons as a **signal to leave wait**, not to poll forever.
 - Keep one-pass: at most one unattended nudge for questions inside a serve run.
+- After that nudge, **wait out compact / tool-calls**. Compact recap quoting “Shall I…?” is still mid-work.
 - Gate real success on **evidence** (plan file / new commits + push+MR), not “assistant finished speaking”.
 
 **Don’t**
@@ -245,6 +270,8 @@ model not to push; if it still does, delivery must remain correct.
 - Inject user “Continue” / Finish-todos **because of** auto-compact.
 - Re-post the full BUILD kit on outer retry when the failure was compact or clarifying question.
 - Scan **whole session history** for open `question` tools when the last turn is a clean stop.
+- Treat a compaction **summary** or “let me know if you need anything” as a live clarifying question.
+- Short-circuit `should_wait_after_nudge` on `still_asking` **before** `last_is_summary` / compact reasons (`5e6cf9e` regression).
 - Mark soft COMPLETE when the model only asked a question and delivered nothing (build: no new commits should not look like a happy delivered job without a clear note).
 - “Fix” by inventing a human Q&A loop over Jira comments unless product explicitly adds that intake path.
 

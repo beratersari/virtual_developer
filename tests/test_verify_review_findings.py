@@ -516,6 +516,147 @@ async def test_live_schedule_job_blocks_same_workspace_queue(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_live_jira_schedule_blocks_same_workspace_queue(
+    tmp_path, isolate_jira_agent_artifacts
+):
+    """Two live Jira issues: schedule dispatch must block the other on the clone."""
+    skip = _jira_live_ready()
+    if skip:
+        pytest.skip(skip)
+
+    from src.jira.client import JiraClient
+    from src.jira_connection import probe_jira_connection
+    from src.scheduler.service import (
+        dispatch_due_schedules,
+        wait_inflight_dispatches,
+    )
+    from src.state.queue_store import workspace_lock_key
+    from src.state.schedule_store import ScheduleStore
+
+    from src import config as cfg
+
+    cfg.bootstrap_dotenv_into_environ()
+    client = JiraClient()
+    probe = probe_jira_connection(
+        host=client.host,
+        email=client.email,
+        api_token=client.api_token,
+    )
+    if not probe.get("ok"):
+        pytest.skip(f"Jira probe failed: {probe.get('error') or probe}")
+
+    project = ((settings.jira_projects or "KAN").split(",")[0] or "KAN").strip()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    repo = "https://gitlab.example.com/acme/demo.git"
+    keys = []
+    for tag in ("sched-A", "sched-B"):
+        rec = client.create_issue(
+            project,
+            f"[vd-verify] schedule lock {tag} {stamp}",
+            (
+                f"Automated schedule-lock probe {tag}. "
+                "No bot/ai-assist label.\n"
+                f"Repository: {repo}\n"
+                "Source branch: develop\n"
+                "Target branch: main\n"
+                "Mode: build\n"
+            ),
+            issue_type="Task",
+            labels=["vd-verify"],
+        )
+        assert rec and rec.get("key"), client.last_error
+        keys.append(rec["key"])
+        client.add_comment(
+            rec["key"],
+            f"h3. vd-verify schedule lock\n\nPair {tag} created via REST.",
+        )
+    key_a, key_b = keys
+    print(f"\n[live jira] schedule lock pair {key_a} / {key_b}", flush=True)
+
+    from src.git_manager import GitManager
+
+    work = GitManager.resolve_work_branch_name(key_a, "develop", "main")
+    lock = workspace_lock_key(repo, work, "main")
+    qs = isolate_jira_agent_artifacts["queue_store"]
+    qs.enqueue(
+        source="jira",
+        issue_key=key_b,
+        summary="second",
+        repository_url=repo,
+        work_branch=work,
+        target_branch="main",
+        lock_key=lock,
+    )
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    store.create(
+        title="t",
+        description="d",
+        repository_url=repo,
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        scheduled_at=(datetime.now() - timedelta(minutes=1)).isoformat(
+            timespec="seconds"
+        ),
+        issue_key=key_a,
+        issue_description="x",
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Proc:
+        def __init__(self) -> None:
+            self._locks: dict[str, str] = {}
+
+        def note_workspace_lock(self, issue_key: str, **kw: str) -> str:
+            lk = workspace_lock_key(
+                kw.get("repository_url") or "",
+                kw.get("work_branch") or "",
+                kw.get("target_branch") or "",
+            )
+            if lk:
+                self._locks[lk] = issue_key
+            return lk
+
+        def drop_workspace_lock(self, issue_key: str) -> None:
+            dead = [k for k, v in self._locks.items() if v == issue_key]
+            for k in dead:
+                self._locks.pop(k, None)
+
+        def live_workspace_lock_keys(self) -> set:
+            return set(self._locks)
+
+        async def process_event(self, event):
+            started.set()
+            await release.wait()
+            return {"ok": True, "work_started": True, "skipped": None}
+
+    proc = Proc()
+    task = asyncio.create_task(
+        dispatch_due_schedules(
+            processor=proc,  # type: ignore[arg-type]
+            store=store,
+            jira_client=client,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=15)
+    claimed = qs.claim_next(
+        blocked_issue_keys={key_a},
+        blocked_locks=proc.live_workspace_lock_keys(),
+        max_running=6,
+    )
+    release.set()
+    await task
+    await wait_inflight_dispatches()
+    assert claimed is None, (
+        f"queue claimed {key_b} on {key_a}'s clone while schedule "
+        f"process_event was running (got {claimed})"
+    )
+    print(f"[live jira] {key_a} lock blocked {key_b} claim", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # 5. Existing MR lookup ignores target
 # ---------------------------------------------------------------------------
@@ -816,9 +957,18 @@ def test_job_detail_artifacts_must_ignore_stale_response():
     load = src[start : src.find("const load = useCallback", start)]
     assert "fetchJobArtifacts(id)" in load
     assert "setPrompts(nextPrompts)" in load
-    assert "id !== jobId.trim()" in load, (
-        "loadArtifacts applies setPrompts/setSessionLogs with no generation "
-        "check; job A's in-flight artifacts land on job B"
+    assert "jobIdRef.current" in src
+    assert "acceptJobArtifactsResponse(id, jobIdRef.current)" in load, (
+        "loadArtifacts must compare the fetch id to the *current* route ref, "
+        "not the jobId closed over when the request started"
+    )
+    assert "id !== jobId.trim()" not in load, (
+        "closed-over jobId === request id after A→B; late A still applies"
+    )
+    effect = _job_id_effect_block(src)
+    assert "artsGen.current" in effect
+    assert "artsInFlight.current = false" in effect, (
+        "job change must release the in-flight flag so B can fetch"
     )
 
 
@@ -856,3 +1006,195 @@ def test_job_chat_api_returns_requested_job_id(
     assert rb.status_code == 200, rb.text
     assert ra.json()["job_id"] == a["job_id"]
     assert rb.json()["job_id"] == b["job_id"]
+
+
+def _write_job_text_artifacts(root: Path, marker: str) -> tuple[str, str]:
+    d = root / ".jira-agent" / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    prompt = d / f"{marker}.prompt.txt"
+    log = d / f"{marker}.log"
+    prompt.write_text(f"PROMPT of {marker}\n", encoding="utf-8")
+    log.write_text(f"LOG of {marker}\n", encoding="utf-8")
+    return str(prompt), str(log)
+
+
+def _stale_closure_would_apply(request_id: str, closed_over_job_id: str) -> bool:
+    """Old JobDetailPage guard: `id !== jobId.trim()` with jobId from fetch start."""
+    return request_id.strip() == closed_over_job_id.strip()
+
+
+def _current_route_applies(request_id: str, route_job_id: str) -> bool:
+    """Fixed guard: compare fetch id to the live route ref."""
+    req = request_id.strip()
+    route = route_job_id.strip()
+    return bool(req) and req == route
+
+
+def test_job_artifacts_api_is_job_scoped_and_stale_a_must_not_replace_b(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts, state_manager
+):
+    """Two jobs, two files: artifacts API is scoped; stale A must not paint B."""
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.api import create_dashboard_app
+
+    monkeypatch.chdir(tmp_path)
+    js = isolate_jira_agent_artifacts["job_store"]
+    ja = js.create_job(issue_key="ART-A", summary="job A", description="desc A")
+    jb = js.create_job(issue_key="ART-B", summary="job B", description="desc B")
+    pa, la = _write_job_text_artifacts(tmp_path, ja["job_id"])
+    pb, lb = _write_job_text_artifacts(tmp_path, jb["job_id"])
+    js.update_job(ja["job_id"], prompt_path=pa, session_log_path=la)
+    js.update_job(jb["job_id"], prompt_path=pb, session_log_path=lb)
+    state_manager.create_state("ART-A", "job A", "desc A")
+    state_manager.create_state("ART-B", "job B", "desc B")
+
+    with patch("src.dashboard.api.job_store", js):
+        app = create_dashboard_app(processor=None, state_manager=state_manager)
+        client = TestClient(app)
+        ra = client.get(f"/api/jobs/{ja['job_id']}/artifacts")
+        rb = client.get(f"/api/jobs/{jb['job_id']}/artifacts")
+
+    assert ra.status_code == 200, ra.text
+    assert rb.status_code == 200, rb.text
+    body_a, body_b = ra.json(), rb.json()
+    assert body_a["job_id"] == ja["job_id"]
+    assert body_b["job_id"] == jb["job_id"]
+    text_a = " ".join(
+        (p.get("content") or "") for p in (body_a["prompts"] + body_a["session_logs"])
+    )
+    text_b = " ".join(
+        (p.get("content") or "") for p in (body_b["prompts"] + body_b["session_logs"])
+    )
+    assert f"PROMPT of {ja['job_id']}" in text_a
+    assert f"LOG of {ja['job_id']}" in text_a
+    assert f"PROMPT of {jb['job_id']}" in text_b
+    assert ja["job_id"] not in text_b
+    assert jb["job_id"] not in text_a
+
+    # Frontend race: A fetch still in flight, operator opens B, A returns.
+    displayed = body_b
+    if _stale_closure_would_apply(ja["job_id"], ja["job_id"]):
+        displayed_if_buggy = body_a
+    else:
+        displayed_if_buggy = body_b
+    assert displayed_if_buggy["job_id"] == ja["job_id"], (
+        "the old closed-over jobId check would not reproduce; test is wrong"
+    )
+    if _current_route_applies(ja["job_id"], jb["job_id"]):
+        displayed = body_a
+    assert displayed["job_id"] == jb["job_id"]
+    assert ja["job_id"] not in " ".join(
+        (p.get("content") or "") for p in (displayed["prompts"] + displayed["session_logs"])
+    )
+
+
+def test_live_jira_two_issues_artifacts_are_job_scoped(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts, state_manager
+):
+    """Create two real Jira issues, bind two jobs, assert artifacts do not leak."""
+    skip = _jira_live_ready()
+    if skip:
+        pytest.skip(skip)
+
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.api import create_dashboard_app
+    from src.jira.client import JiraClient
+    from src.jira_connection import probe_jira_connection
+
+    from src import config as cfg
+
+    cfg.bootstrap_dotenv_into_environ()
+    client = JiraClient()
+    probe = probe_jira_connection(
+        host=client.host,
+        email=client.email,
+        api_token=client.api_token,
+    )
+    if not probe.get("ok"):
+        pytest.skip(f"Jira probe failed: {probe.get('error') or probe}")
+
+    project = ((settings.jira_projects or "KAN").split(",")[0] or "KAN").strip()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    created = []
+    for tag in ("A", "B"):
+        rec = client.create_issue(
+            project,
+            f"[vd-verify] artifacts isolation {tag} {stamp}",
+            (
+                f"Automated artifacts-isolation probe {tag}. "
+                "No bot/ai-assist label — daemon must not pick this up.\n"
+                "Mode: build\n"
+            ),
+            issue_type="Task",
+            labels=["vd-verify"],
+        )
+        assert rec and rec.get("key"), client.last_error
+        created.append(rec["key"])
+        client.add_comment(
+            rec["key"],
+            f"h3. vd-verify artifacts isolation\n\nCreated via REST as job pair {tag}.",
+        )
+    key_a, key_b = created
+    print(f"\n[live jira] created {key_a} and {key_b}", flush=True)
+
+    live_a = client.get_issue(key_a)
+    live_b = client.get_issue(key_b)
+    assert live_a and live_a.get("key") == key_a
+    assert live_b and live_b.get("key") == key_b
+    labels_a = [str(x).lower() for x in ((live_a.get("fields") or {}).get("labels") or [])]
+    assert "bot" not in labels_a and "ai-assist" not in labels_a
+
+    monkeypatch.chdir(tmp_path)
+    js = isolate_jira_agent_artifacts["job_store"]
+    ja = js.create_job(
+        issue_key=key_a,
+        summary=f"job for {key_a}",
+        description=f"desc {key_a}",
+    )
+    jb = js.create_job(
+        issue_key=key_b,
+        summary=f"job for {key_b}",
+        description=f"desc {key_b}",
+    )
+    pa, la = _write_job_text_artifacts(tmp_path, ja["job_id"])
+    pb, lb = _write_job_text_artifacts(tmp_path, jb["job_id"])
+    js.update_job(ja["job_id"], prompt_path=pa, session_log_path=la)
+    js.update_job(jb["job_id"], prompt_path=pb, session_log_path=lb)
+    state_manager.create_state(key_a, f"job for {key_a}", f"desc {key_a}")
+    state_manager.create_state(key_b, f"job for {key_b}", f"desc {key_b}")
+
+    with patch("src.dashboard.api.job_store", js):
+        app = create_dashboard_app(processor=None, state_manager=state_manager)
+        http = TestClient(app)
+        ra = http.get(f"/api/jobs/{ja['job_id']}/artifacts")
+        rb = http.get(f"/api/jobs/{jb['job_id']}/artifacts")
+        da = http.get(f"/api/jobs/{ja['job_id']}")
+        db = http.get(f"/api/jobs/{jb['job_id']}")
+
+    assert ra.status_code == 200, ra.text
+    assert rb.status_code == 200, rb.text
+    assert da.status_code == 200 and da.json()["job"]["issue_key"] == key_a
+    assert db.status_code == 200 and db.json()["job"]["issue_key"] == key_b
+    assert ra.json()["job_id"] == ja["job_id"]
+    assert rb.json()["job_id"] == jb["job_id"]
+    text_a = " ".join(
+        (p.get("content") or "")
+        for p in (ra.json()["prompts"] + ra.json()["session_logs"])
+    )
+    text_b = " ".join(
+        (p.get("content") or "")
+        for p in (rb.json()["prompts"] + rb.json()["session_logs"])
+    )
+    assert f"PROMPT of {ja['job_id']}" in text_a
+    assert f"PROMPT of {jb['job_id']}" in text_b
+    assert ja["job_id"] not in text_b
+    assert jb["job_id"] not in text_a
+    assert not _current_route_applies(ja["job_id"], jb["job_id"])
+    assert _stale_closure_would_apply(ja["job_id"], ja["job_id"])
+    print(
+        f"[live jira] artifacts isolated for {key_a}={ja['job_id']} "
+        f"and {key_b}={jb['job_id']}",
+        flush=True,
+    )

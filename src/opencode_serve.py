@@ -17,6 +17,13 @@ Agent jobs use ``opencode serve``. The control loop here:
 6. After the nudge, only the **last** assistant turn decides "still asking";
    stale open todos alone after a clean finish=stop may be accepted
    (todo API lag). Timeout/error resume may still send Continue; compact never does.
+7. INTENTIONAL: after the nudge, **wait** if the turn compact-then-stopped.
+   A compaction *recap* that quotes the earlier "Shall I…?" is **not** a new
+   question. ``should_wait_after_nudge`` must test compact / ``last_is_summary``
+   **before** ``still_asking``. The ``5e6cf9e`` helper returned False on
+   ``still_asking`` first and marked ERROR:
+   ``After one nudge still incomplete: open todos…; assistant asked a
+   clarifying question``. Do not restore that order (AGENTS.md §2).
 
 TLS: INTENTIONAL — all clients use ``verify=False`` (on-prem / intercept;
 do not enable verification until a custom-CA path exists).
@@ -59,14 +66,23 @@ def should_wait_after_nudge(assessment: Optional[Dict[str, Any]]) -> bool:
     Long jobs often compact (or return finish=tool-calls) on the nudge turn.
     That is not a hard fail — OpenCode may auto-resume. Do not classify it
     as "ran out of compact-continue budget" until we have waited.
+
+    INTENTIONAL order: compact / summary **before** still_asking. A recap
+    that quotes "Shall I…?" sets the question flag; that is mid-compact, not
+    a live operator prompt. Do not move ``assessment_still_asking`` above
+    this check (``5e6cf9e`` regression — see AGENTS.md §2).
     """
     if not isinstance(assessment, dict) or not assessment.get("premature"):
         return False
-    if assessment_still_asking(assessment):
-        return False
     reasons = list(assessment.get("reasons") or [])
+    # Compact recaps often quote the previous "Shall I…?". That is still
+    # mid-compact — wait for auto-resume; do not fail as "still asking".
     if compact_related_reasons(reasons) or assessment.get("last_is_summary"):
         return True
+    if assessment.get("awaiting_assistant_after_user"):
+        return True
+    if assessment_still_asking(assessment):
+        return False
     finish = str(assessment.get("last_finish") or "").strip().lower()
     return finish in _UNFINISHED_FINISH
 
@@ -897,10 +913,18 @@ class ServeOrchestrator:
             still_asking = bool(assessment.get("assistant_asked_question")) or any(
                 "clarifying question" in str(r).lower() for r in reasons
             )
+            # INTENTIONAL: recap / unanswered nudge is not a live operator
+            # prompt. Fail "still asking" only after retries, and only when
+            # the last non-summary assistant turn is a real question.
+            if assessment.get("last_is_summary") or assessment.get(
+                "awaiting_assistant_after_user"
+            ):
+                still_asking = False
             finish = str(assessment.get("last_finish") or "").strip().lower()
             clean_stop = (
                 not still_asking
                 and not assessment.get("last_is_summary")
+                and not assessment.get("awaiting_assistant_after_user")
                 and finish not in {"", "tool-calls", "unknown"}
                 and finish == "stop"
             )
@@ -909,6 +933,20 @@ class ServeOrchestrator:
                 or "clarifying question" in str(r).lower()
                 for r in reasons
             ) and not still_asking
+
+            waiting_for_reply = bool(
+                assessment.get("awaiting_assistant_after_user")
+            )
+            if (still_asking or waiting_for_reply) and attempt < 2:
+                _emit(
+                    "stdout",
+                    f"[serve] post-nudge: last snapshot still looks mid-turn "
+                    f"(attempt {attempt + 1}/3, still_asking={still_asking}, "
+                    f"awaiting_reply={waiting_for_reply}) — re-fetching "
+                    f"(reasons={reasons})",
+                )
+                await asyncio.sleep(0.4)
+                continue
 
             if only_stale_todos and attempt < 2:
                 _emit(

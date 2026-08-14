@@ -611,6 +611,9 @@ _OMO_MODE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 # Phrases that mean the assistant is waiting on a human (unattended daemon).
+# INTENTIONAL: do **not** match farewell closers ("let me know if you need
+# anything") — that plus stale todos was a false INCOMPLETE after the nudge.
+# Keep "let me know if you want a different approach" as a real ask.
 _ASSISTANT_QUESTION_RE = re.compile(
     r"(?:"
     r"shall i (?:continue|proceed|keep going|start|commit|push|open)"
@@ -619,8 +622,9 @@ _ASSISTANT_QUESTION_RE = re.compile(
     r"|do you want me to"
     r"|want me to (?:continue|proceed|keep|also|update|add|fix|remove)"
     r"|continue with the remaining"
-    r"|please (?:confirm|advise|let me know|clarify|choose|select|specify|"
+    r"|please (?:confirm|advise|clarify|choose|select|specify|"
     r"reply|respond|answer)"
+    r"|please let me know (?:which|what|how|when)"
     r"|which (?:one|approach|option|database|library|framework|branch|"
     r"path|port|version|strategy|design|api|auth)"
     r"|what (?:should|would you|do you prefer|is the preferred|is your)"
@@ -631,7 +635,9 @@ _ASSISTANT_QUESTION_RE = re.compile(
     r"|before i (?:proceed|continue|start|commit|push|implement)"
     r"|your (?:preference|input|guidance|decision|confirmation)"
     r"|any preference"
-    r"|let me know (?:if|which|what|how|when)"
+    r"|let me know (?:which|what|how|when)"
+    r"|let me know if (?:i should|you'd like me to|you want me to|"
+    r"you prefer|we should|i need to|you want a )"
     r"|ready for your"
     r"|awaiting (?:your|confirmation|input|guidance|a (?:reply|response))"
     r"|i(?:'d| would) (?:like|need) (?:you )?to (?:confirm|clarify|choose)"
@@ -769,6 +775,14 @@ def _last_question_sentence(text: str) -> str:
     return ""
 
 
+# Finished-work closer, not an operator prompt (AGENTS.md §2).
+_FAREWELL_CLOSER_RE = re.compile(
+    r"let me know if you (?:need|have|want) (?:anything|any |something|"
+    r"further|more|questions)\b",
+    re.IGNORECASE,
+)
+
+
 def assistant_asked_question(text: str) -> bool:
     """True when the last assistant turn is waiting on a human operator.
 
@@ -781,6 +795,14 @@ def assistant_asked_question(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _FAREWELL_CLOSER_RE.search(t) and not re.search(
+        r"\b(?:shall i|should i|which |what should|please confirm|"
+        r"before i (?:proceed|continue))\b",
+        t,
+        re.IGNORECASE,
+    ):
+        # Polite "let me know if you need anything" after finished work.
+        t = _FAREWELL_CLOSER_RE.sub("", t)
     if _ASSISTANT_QUESTION_RE.search(t):
         return True
     # Trailing multiple-choice block (A/B/C or 1/2/3).
@@ -1290,12 +1312,45 @@ def _message_has_open_question_tool(msg: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def _message_role(msg: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    return str(msg.get("role") or info.get("role") or "").strip().lower()
+
+
+def _message_summary_flag(msg: Optional[Dict[str, Any]]) -> Any:
+    if not isinstance(msg, dict):
+        return None
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    if "summary" in msg:
+        return msg.get("summary")
+    return info.get("summary")
+
+
 def _last_assistant_is_waiting_on_operator(msg: Optional[Dict[str, Any]]) -> bool:
-    """True when the latest assistant turn is waiting for a human answer."""
+    """True when the latest assistant turn is waiting for a human answer.
+
+    INTENTIONAL: compaction summaries are **not** a live ask, even when the
+    recap quotes "Shall I…?". Treating them as questions made
+    ``should_wait_after_nudge`` skip auto-resume and ERROR the job
+    (AGENTS.md §2, ``5e6cf9e``). Only a pending ``question`` tool on this
+    message, or free-text on a non-summary last turn, counts.
+    """
     if not isinstance(msg, dict):
         return False
     if _message_has_open_question_tool(msg):
         return True
+    # Compaction recap often quotes the previous "Shall I…?" — that is not
+    # a live operator prompt. Auto-resume / post-nudge wait must continue.
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    if _is_compaction_summary(_message_summary_flag(msg)) or _message_has_compaction_part(
+        msg
+    ):
+        return False
+    agent = str(msg.get("agent") or info.get("agent") or "").strip().lower()
+    if agent in {"compaction", "summarize", "summary"}:
+        return False
     return assistant_asked_question(_message_text(msg))
 
 
@@ -1329,8 +1384,20 @@ def _apply_message_list(
     parts = target.get("_parts") or target.get("parts") or []
     # Only the *last* assistant turn. Earlier "Shall I…?" or question tools
     # must not fail a later successful completion (post unattended-nudge).
-    if last_assistant is not None and _last_assistant_is_waiting_on_operator(
-        last_assistant
+    # A user message after that assistant means we already nudged — do not
+    # treat the unanswered question as the current stop until a new reply.
+    last_is_user = (
+        last_any is not None
+        and last_assistant is not last_any
+        and _message_role(last_any) == "user"
+        and not _message_has_compaction_part(last_any)
+    )
+    if last_is_user:
+        result["awaiting_assistant_after_user"] = True
+    if (
+        last_assistant is not None
+        and not last_is_user
+        and _last_assistant_is_waiting_on_operator(last_assistant)
     ):
         result["assistant_asked_question"] = True
         if _message_has_open_question_tool(last_assistant):

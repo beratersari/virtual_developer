@@ -1412,6 +1412,188 @@ async def test_nudge_then_compact_then_auto_resume_is_success():
 
 
 @pytest.mark.asyncio
+async def test_nudge_then_compact_recap_of_shall_i_is_success_not_error():
+    """Production: compact summary quotes 'Shall I…?' + 14 stale todos.
+
+    That used to look like 'still asking after one nudge' and mark ERROR.
+    """
+    from src.opencode_serve import DEFAULT_UNATTENDED_NUDGE_PROMPT
+
+    class QuestionThenRecapCompact(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_nudge_recap"
+            self.todos = [
+                {"content": f"T{i}", "status": "pending"} for i in range(14)
+            ] + [{"content": "now", "status": "in_progress"}]
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 2
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Shall I restart the deep exploration and "
+                                "begin rewriting the documentation?"
+                            ),
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "compaction", "auto": True}],
+                }
+            )
+            compact = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": True,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "## Compaction\nPreviously: Shall I restart the "
+                            "deep exploration and begin rewriting the "
+                            "documentation? Work still in progress."
+                        ),
+                    }
+                ],
+            }
+            self.messages.append(compact)
+            return compact
+
+    backend = QuestionThenRecapCompact()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-RECAP")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert backend.prompts[1] == DEFAULT_UNATTENDED_NUDGE_PROMPT
+    assert "After one nudge still incomplete" not in (result.stderr or "")
+    assert "assistant asked a clarifying question" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
+async def test_nudge_then_done_polite_closer_with_stale_todos_is_success():
+    """'Let me know if you need anything' after finished work is not a question."""
+    from src.opencode_serve import DEFAULT_UNATTENDED_NUDGE_PROMPT
+
+    class QuestionThenCloser(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_closer"
+            self.todos = [
+                {"content": f"T{i}", "status": "pending"} for i in range(14)
+            ] + [{"content": "now", "status": "in_progress"}]
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "Shall I restart the deep exploration?",
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            final = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "All 15 tasks are marked complete. The work was "
+                            "finished. Let me know if you need anything else."
+                        ),
+                    }
+                ],
+            }
+            self.messages.append(final)
+            return final
+
+        async def list_todos(self, session_id):
+            return list(self.todos)
+
+    backend = QuestionThenCloser()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=0.3,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(prompt="# Build\nwrite docs", title="KAN-CLOSER")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert backend.prompts[1] == DEFAULT_UNATTENDED_NUDGE_PROMPT
+    assert "After one nudge still incomplete" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
 async def test_nudge_then_tool_calls_then_auto_resume_is_success():
     """Nudge HTTP can return finish=tool-calls while the session is still working."""
     class QuestionThenToolsNudge(FakeServeBackend):
@@ -1499,6 +1681,19 @@ def test_should_wait_after_nudge_helpers():
             ],
             "last_finish": "stop",
             "last_is_summary": True,
+        }
+    )
+    assert should_wait_after_nudge(
+        {
+            "premature": True,
+            "assistant_asked_question": True,
+            "last_is_summary": True,
+            "reasons": [
+                "open todos: 14 pending, 1 in_progress",
+                "assistant asked a clarifying question",
+                "session ended on compaction summary (finish=stop, summary=true)",
+            ],
+            "last_finish": "stop",
         }
     )
     assert not should_wait_after_nudge(

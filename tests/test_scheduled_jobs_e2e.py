@@ -266,7 +266,9 @@ def test_e2e_cancel_dispatched_refused(tmp_path):
         issue_key="KAN-C",
         issue_description="x",
     )
+    assert store.claim_due(rec["schedule_id"]) is not None
     store.update(rec["schedule_id"], status="dispatched")
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
     out = cancel_scheduled_job(rec["schedule_id"], store=store)
     assert out["ok"] is False
     assert "Cannot cancel" in out["error"]

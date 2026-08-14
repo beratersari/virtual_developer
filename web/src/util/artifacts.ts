@@ -31,6 +31,21 @@ export function artifactsHaveContent(
  * Refetch when the job id changes, linked paths appear, the last read was
  * empty, the caller forces, or the run is still live (log still growing).
  */
+/**
+ * After GET /api/jobs/{id}/artifacts returns, apply it only if the route is
+ * still that job. Pass the *current* route id (a ref), not the jobId closed
+ * over when the fetch started — that stale value equals `requestJobId` even
+ * after the operator has opened another job.
+ */
+export function acceptJobArtifactsResponse(
+  requestJobId: string,
+  routeJobId: string,
+): boolean {
+  const req = (requestJobId || '').trim()
+  const route = (routeJobId || '').trim()
+  return Boolean(req) && req === route
+}
+
 export function shouldRefetchJobArtifacts(opts: {
   jobId: string
   lastJobId: string

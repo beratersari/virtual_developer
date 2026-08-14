@@ -2,6 +2,7 @@
  * Run: npx tsx src/util/artifacts.test.ts
  */
 import {
+  acceptJobArtifactsResponse,
   artifactsHaveContent,
   jobArtifactPathSignature,
   shouldRefetchJobArtifacts,
@@ -78,6 +79,35 @@ assert(
     lastPathSignature: '',
   }) === false,
   'still no paths — nothing to read yet',
+)
+
+// A→B navigation: request was for A. Closed-over jobId is still A (the bug).
+// Current route is B. Must drop A's payload.
+assert(
+  acceptJobArtifactsResponse('job_aaa', 'job_aaa') === true,
+  'same job keeps its own artifacts',
+)
+assert(
+  acceptJobArtifactsResponse('job_aaa', 'job_bbb') === false,
+  'late A response must not apply on B',
+)
+assert(
+  acceptJobArtifactsResponse('job_aaa', '  job_bbb  ') === false,
+  'trim does not make a different job match',
+)
+assert(acceptJobArtifactsResponse('', 'job_bbb') === false, 'empty request')
+assert(acceptJobArtifactsResponse('job_aaa', '') === false, 'empty route')
+
+const closedOverRoute = 'job_aaa'
+const routeNow = 'job_bbb'
+const requestId = 'job_aaa'
+assert(
+  acceptJobArtifactsResponse(requestId, closedOverRoute) === true,
+  'stale closure (jobId at fetch start) would wrongly accept A on B',
+)
+assert(
+  acceptJobArtifactsResponse(requestId, routeNow) === false,
+  'current route ref must drop the late A payload',
 )
 
 console.log('artifacts.test.ts: ok')

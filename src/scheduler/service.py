@@ -667,6 +667,65 @@ def recover_stuck_schedules(
     )
 
 
+def _schedule_workspace_lock_kwargs(
+    rec: Dict[str, Any], issue_key: str
+) -> Dict[str, str]:
+    """Clone identity for a schedule row (same rules as JobProcessor)."""
+    from src.git_manager import GitManager
+
+    repo = (rec.get("repository_url") or "").strip()
+    src = (rec.get("source_branch") or "").strip()
+    tgt = (rec.get("target_branch") or "").strip()
+    work = GitManager.resolve_work_branch_name(issue_key, src, tgt)
+    return {
+        "repository_url": repo,
+        "work_branch": work,
+        "target_branch": tgt,
+    }
+
+
+def _issue_in_flight_reason(processor: Any, issue_key: str) -> Optional[str]:
+    """Why a schedule must not claim success when the issue is already running."""
+    key = (issue_key or "").strip()
+    if not key:
+        return None
+    sm = getattr(processor, "state_manager", None)
+    get = getattr(sm, "get_state", None) if sm is not None else None
+    if not callable(get):
+        return None
+    try:
+        st = get(key)
+    except Exception:
+        return None
+    if not st:
+        return None
+    status = getattr(st, "status", None)
+    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
+    if not isinstance(inflight, (set, frozenset, tuple, list)):
+        return None
+    if status not in inflight:
+        return None
+    label = getattr(status, "value", status)
+    return f"already in progress ({label})"
+
+
+def _note_schedule_workspace_lock(
+    processor: Any, rec: Dict[str, Any], issue_key: str
+) -> str:
+    """Mark the schedule's clone busy before ``process_event`` starts."""
+    note = getattr(processor, "note_workspace_lock", None)
+    if not callable(note) or not (issue_key or "").strip():
+        return ""
+    try:
+        return (
+            note(issue_key, **_schedule_workspace_lock_kwargs(rec, issue_key))
+            or ""
+        )
+    except Exception as e:
+        logger.debug(f"{issue_key}: schedule workspace lock note failed: {e}")
+        return ""
+
+
 def _issue_payload_for_dispatch(
     rec: Dict[str, Any],
     *,
@@ -895,6 +954,19 @@ async def _dispatch_claimed_schedule(
                 f"({live.get('status')}); not starting work"
             )
             return
+        inflight = _issue_in_flight_reason(processor, issue_key)
+        if inflight:
+            _finish_schedule_dispatch(
+                store,
+                schedule_id,
+                status="error",
+                error_message=inflight[:1000],
+            )
+            logger.warning(
+                f"Schedule {schedule_id} for {issue_key} did not start work: "
+                f"{inflight}"
+            )
+            return
         if event is None:
             issue = _issue_payload_for_dispatch(
                 claimed_rec or live, jira_client=jira_client
@@ -926,8 +998,21 @@ async def _dispatch_claimed_schedule(
         if use_queue:
             outcome = await enqueue(event)
         else:
-            # Older processors / tests without the queue path
-            outcome = await processor.process_event(event)
+            # process_event owns the full run and may not note the clone lock
+            # until git prep. Hold it for the whole await so the work queue
+            # cannot claim the same (repo, work, target) mid-dispatch.
+            _note_schedule_workspace_lock(
+                processor, claimed_rec or live, issue_key
+            )
+            try:
+                outcome = await processor.process_event(event)
+            finally:
+                drop = getattr(processor, "drop_workspace_lock", None)
+                if callable(drop):
+                    try:
+                        drop(issue_key)
+                    except Exception:
+                        pass
             work_started, skip_reason = _outcome_work_started(outcome)
             if not work_started:
                 msg = skip_reason or "processor did not start work for this schedule"

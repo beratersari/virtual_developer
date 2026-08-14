@@ -5,6 +5,7 @@ import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
 import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import {
+  acceptJobArtifactsResponse,
   artifactsHaveContent,
   jobArtifactPathSignature,
   shouldRefetchJobArtifacts,
@@ -44,6 +45,9 @@ export function JobDetailPage() {
   const artsSig = useRef('')
   const artsHad = useRef(false)
   const artsInFlight = useRef(false)
+  const artsGen = useRef(0)
+  const jobIdRef = useRef(jobId)
+  jobIdRef.current = jobId
 
   const loadArtifacts = useCallback(async (id: string, force = false, sig = '') => {
     if (!id) return
@@ -62,11 +66,13 @@ export function JobDetailPage() {
     ) {
       return
     }
+    const gen = artsGen.current
     artsInFlight.current = true
     setArtsLoading(true)
     try {
       const arts = await fetchJobArtifacts(id)
-      if (id !== jobId.trim()) return
+      if (gen !== artsGen.current) return
+      if (!acceptJobArtifactsResponse(id, jobIdRef.current)) return
       artsFor.current = id
       if (sig) artsSig.current = sig
       const nextPrompts = arts.prompts || []
@@ -77,10 +83,12 @@ export function JobDetailPage() {
     } catch {
       /* tab shows its own empty/warning */
     } finally {
-      artsInFlight.current = false
-      setArtsLoading(false)
+      if (gen === artsGen.current) {
+        artsInFlight.current = false
+        setArtsLoading(false)
+      }
     }
-  }, [jobId])
+  }, [])
 
   const load = useCallback(
     async (soft = false) => {
@@ -117,6 +125,8 @@ export function JobDetailPage() {
 
   useEffect(() => {
     setTab('overview')
+    artsGen.current += 1
+    artsInFlight.current = false
     artsFor.current = ''
     artsSig.current = ''
     artsHad.current = false

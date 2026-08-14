@@ -872,6 +872,11 @@ def test_assistant_asked_question_is_not_a_crash():
         ("Any preference on library X vs Y?", True),
         ("Let me know if you want a different approach.", True),
         (
+            "All 15 tasks are done. Let me know if you need anything else.",
+            False,
+        ),
+        ("Finished. Let me know if you have any questions.", False),
+        (
             "Pick one:\nA) Redis\nB) Memcached\nC) In-process cache",
             True,
         ),
@@ -1005,6 +1010,71 @@ def test_earlier_question_does_not_poison_later_completion():
     assert result.get("last_finish") == "stop"
     # Open todos may still flag premature — but NOT clarifying question.
     assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
+def test_compaction_summary_recap_is_not_a_live_question():
+    """Compact recap quoting 'Shall I…?' must not look like a new ask."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_sum",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {"type": "text", "text": "Shall I restart the deep exploration?"}
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "compaction", "auto": True}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": True,
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "## Compaction\nPreviously asked: Shall I restart "
+                            "the deep exploration and begin rewriting docs?"
+                        ),
+                    }
+                ],
+            },
+        ],
+        todos=[{"status": "pending"}] * 14 + [{"status": "in_progress"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("last_is_summary") is True
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
+def test_user_nudge_after_question_is_not_still_asking():
+    """Last message is our nudge — wait for the reply, do not fail yet."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_nudge_gap",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {"type": "text", "text": "Shall I restart the deep exploration?"}
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "You are running unattended…"}],
+            },
+        ],
+        todos=[{"status": "pending"}] * 14,
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("awaiting_assistant_after_user") is True
 
 
 def test_compact_related_reasons_detects_markers():
