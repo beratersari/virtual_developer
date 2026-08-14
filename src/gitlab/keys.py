@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
 
 def gitlab_issue_key(project_path: str, mr_iid: int) -> str:

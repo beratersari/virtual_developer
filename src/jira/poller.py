@@ -37,7 +37,6 @@ class JiraPoller:
         if not self.board_id:
             logger.warning("JIRA_BOARD_ID not configured, board polling disabled")
 
-        self._last_check: Optional[datetime] = None
         self._seen_issues: Set[str] = set()
         # Last observed Jira status name (lowercased) per issue — used to detect
         # real transitions into "To Do" rather than re-queueing every poll.
@@ -173,7 +172,6 @@ class JiraPoller:
                 interval_seconds=self.interval,
                 error=sprint_err or "sprint lookup failed",
             )
-            self._last_check = datetime.now()
             return []
         elif lookup == "empty":
             # Active-sprint list is empty on a board that supports sprints.
@@ -187,7 +185,6 @@ class JiraPoller:
                 interval_seconds=self.interval,
                 error=None,
             )
-            self._last_check = datetime.now()
             return []
         else:
             logger.info(
@@ -213,7 +210,6 @@ class JiraPoller:
                 interval_seconds=self.interval,
                 error=fetch_error,
             )
-            self._last_check = datetime.now()
             return []
 
         logger.debug(f"Found {len(issues)} issues from {source}")
@@ -238,7 +234,6 @@ class JiraPoller:
             status_name = (fields.get("status") or {}).get("name", "")
             status = status_name.lower()
             labels = list(fields.get("labels") or [])
-            label_set = set(labels)
             assignee_data = fields.get("assignee")
             assignee_display = None
             if assignee_data:
@@ -380,7 +375,6 @@ class JiraPoller:
             issues=snapshot_rows,
             interval_seconds=self.interval,
         )
-        self._last_check = datetime.now()
         # plan_start goes as is_update so processor uses issue_updated path
         return new_issues + reprocess_issues + plan_start_issues
 

@@ -3,8 +3,6 @@
 import asyncio
 import os
 import platform
-import subprocess
-import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -405,24 +403,6 @@ class AgentRunner:
             f"Retry after {why}: resume OpenCode session {sid}"
         )
 
-    def _assess_incomplete_run(
-        self,
-        *,
-        session_id: Optional[str],
-        output_text: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Inspect OpenCode DB + transcript for premature exit-0 runs."""
-        try:
-            from src.opencode_sessions import assess_session_completeness
-
-            return assess_session_completeness(
-                session_id,
-                output_text=output_text or "",
-            )
-        except Exception as e:
-            logger.debug(f"Session completeness assessment failed: {e}")
-            return None
-
     async def _run_agent_via_serve(
         self,
         task: AgentTask,
@@ -444,9 +424,6 @@ class AgentRunner:
 
         base = (
             getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
-        )
-        max_cont = int(
-            getattr(settings, "opencode_serve_max_compact_continues", 256) or 0
         )
         work_dir = str(self.working_directory) if self.working_directory else None
         agent_name = resolve_opencode_agent_name(task.agent)
@@ -506,7 +483,6 @@ class AgentRunner:
 
         orch = ServeOrchestrator(
             client=client,
-            max_compact_continues=max_cont,
             # Cover the rest of the job: auto-compact then auto-resume can
             # take as long as the original turn. Never inject Continue.
             compact_wait_seconds=float(timeout_seconds) or 180.0,
@@ -868,24 +844,6 @@ class AgentRunner:
         except ProcessLookupError:
             pass
 
-    async def _kill_process_tree_escalating(
-        self, process: Any, task_id: str, *, soft_wait: float = 10.0
-    ) -> None:
-        """SIGTERM, wait, then SIGKILL if the process is still alive."""
-        self._kill_process_tree(process, force=False)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=soft_wait)
-            return
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Process still alive after SIGTERM, escalating to SIGKILL: {task_id}"
-            )
-        self._kill_process_tree(process, force=True)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"Process wait timed out after SIGKILL: {task_id}")
-
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
@@ -1166,9 +1124,11 @@ class AgentRunner:
                     bool(result.get("had_compact"))
                     or bool(result.get("assistant_asked_question"))
                     or int(result.get("compact_events") or 0) > 0
+                    or int(result.get("continue_count") or 0) > 0
                     or compact_related_reasons(reasons)
                     or any("compact" in str(r).lower() for r in reasons)
                     or any("clarifying question" in str(r).lower() for r in reasons)
+                    or "unattended nudge" in str(result.get("stderr") or "").lower()
                 )
                 if compact_followup:
                     logger.warning(

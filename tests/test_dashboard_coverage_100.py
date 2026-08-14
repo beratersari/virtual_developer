@@ -337,7 +337,6 @@ def test_legacy_jobs_helper_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr("src.dashboard.service._sessions_dir", lambda: sessions)
     rows = _legacy_jobs_from_sessions(
         issue_key="LEG-1",
-        covered_paths=set(),
         summaries={"LEG-1": "sum"},
         limit=10,
     )

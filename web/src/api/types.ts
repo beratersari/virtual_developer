@@ -6,30 +6,6 @@ export type Meta = {
   app_name: string
 }
 
-export type TaskItem = {
-  issue_key: string
-  summary: string
-  status: string
-  progress_percentage: number
-  workflow_type?: string | null
-  jira_assignee?: string | null
-  error_message?: string | null
-  started_at?: string | null
-  completed_at?: string | null
-  feature_branch?: string | null
-  merge_request_url?: string | null
-  live: boolean
-  task_id?: string | null
-  opencode_session_id?: string | null
-  opencode_session_ids?: string[]
-}
-
-export type TasksPayload = {
-  tasks: TaskItem[]
-  total: number
-  server_time: string
-}
-
 export type PolledIssue = {
   key: string
   summary: string
@@ -100,7 +76,6 @@ export type SettingsPayload = {
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
-  opencode_serve_max_compact_continues: number
   default_branch: string
   dashboard_host: string
   dashboard_port: number
@@ -317,15 +292,6 @@ export type JiraIssueTypesPayload = {
   server_time?: string
 }
 
-export type DashboardPayload = {
-  type: string
-  meta: Meta
-  tasks: TasksPayload
-  jobs?: JobsPayload
-  poll: PollPayload
-  settings: SettingsPayload
-}
-
 export type ChatPart = {
   id: string
   type: string
@@ -500,7 +466,6 @@ export type SettingsPatch = Partial<
     | 'agent_task_timeout_seconds'
     | 'agent_task_max_retries'
     | 'agent_task_max_incomplete_retries'
-    | 'opencode_serve_max_compact_continues'
     | 'default_model'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'

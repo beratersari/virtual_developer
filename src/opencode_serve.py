@@ -25,7 +25,6 @@ do not enable verification until a custom-CA path exists).
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -34,9 +33,42 @@ import httpx
 from src.logger import logger
 from src.opencode_sessions import (
     assess_session_completeness,
+    compact_related_reasons,
     reasons_are_compact_only,
+    reasons_are_open_todos_only,
     strip_compact_reasons,
 )
+
+
+_UNFINISHED_FINISH = frozenset({"", "tool-calls", "unknown"})
+
+
+def assessment_still_asking(assessment: Optional[Dict[str, Any]]) -> bool:
+    """True when the last turn is still waiting on a human."""
+    if not isinstance(assessment, dict):
+        return False
+    reasons = list(assessment.get("reasons") or [])
+    return bool(assessment.get("assistant_asked_question")) or any(
+        "clarifying question" in str(r).lower() for r in reasons
+    )
+
+
+def should_wait_after_nudge(assessment: Optional[Dict[str, Any]]) -> bool:
+    """After the unattended nudge, wait out compact / mid-tool idle.
+
+    Long jobs often compact (or return finish=tool-calls) on the nudge turn.
+    That is not a hard fail — OpenCode may auto-resume. Do not classify it
+    as "ran out of compact-continue budget" until we have waited.
+    """
+    if not isinstance(assessment, dict) or not assessment.get("premature"):
+        return False
+    if assessment_still_asking(assessment):
+        return False
+    reasons = list(assessment.get("reasons") or [])
+    if compact_related_reasons(reasons) or assessment.get("last_is_summary"):
+        return True
+    finish = str(assessment.get("last_finish") or "").strip().lower()
+    return finish in _UNFINISHED_FINISH
 
 
 def coerce_json_list(data: Any) -> List[Dict[str, Any]]:
@@ -115,9 +147,6 @@ DEFAULT_COMPACT_POLL_SECONDS = 2.0
 # Compact-then-stop often idles briefly before OpenCode replays the last turn.
 DEFAULT_COMPACT_SETTLE_SECONDS = 2.0
 
-# Long agent jobs compact many times. A default of 3 treated the 4th compact
-# as a hard ERROR (returncode 2 → Jira "AI Agent — Error").
-DEFAULT_MAX_COMPACT_CONTINUES = 256
 # OpenCode /session/{id}/message?limit= used to be 80 — after ~15–20 compact
 # cycles the sliding window dropped old markers and mis-counted "new this turn".
 DEFAULT_MESSAGE_LIST_LIMIT = 500
@@ -638,8 +667,6 @@ class ServeOrchestrator:
     """Run one agent task against OpenCode serve; wait out auto-compact."""
 
     client: OpenCodeServeClient
-    max_compact_continues: int = DEFAULT_MAX_COMPACT_CONTINUES
-    continue_prompt: str = DEFAULT_CONTINUE_PROMPT
     compact_wait_seconds: float = DEFAULT_COMPACT_WAIT_SECONDS
     compact_poll_seconds: float = DEFAULT_COMPACT_POLL_SECONDS
     compact_settle_seconds: float = DEFAULT_COMPACT_SETTLE_SECONDS
@@ -1548,6 +1575,44 @@ class ServeOrchestrator:
                     output_text=nudge_text,
                     _emit=_emit,
                 )
+                if should_wait_after_nudge(assessment):
+                    _emit(
+                        "stdout",
+                        "[serve] post-nudge still mid-work/compact "
+                        f"(reasons={assessment.get('reasons')}) — "
+                        "waiting for auto-resume (no second BUILD kit)",
+                    )
+                    wait_info = await self._wait_for_auto_compact(
+                        sid,
+                        _emit=_emit,
+                        _aborted=_aborted,
+                        compact_total=compact_total,
+                    )
+                    compact_total = int(
+                        wait_info.get("compact_total") or compact_total
+                    )
+                    if wait_info.get("complete"):
+                        assessment = (
+                            wait_info.get("assessment")
+                            if isinstance(wait_info.get("assessment"), dict)
+                            else assessment
+                        )
+                        assessment["complete"] = True
+                        assessment["premature"] = False
+                    else:
+                        post = wait_info.get("assessment")
+                        if isinstance(post, dict) and assessment_still_asking(
+                            post
+                        ):
+                            assessment = post
+                            assessment["assistant_asked_question"] = True
+                        else:
+                            assessment = await self._assess_after_unattended_nudge(
+                                sid,
+                                compact_total=compact_total,
+                                output_text="",
+                                _emit=_emit,
+                            )
                 turns.append(
                     {
                         "turn": "unattended_nudge",
@@ -1576,11 +1641,7 @@ class ServeOrchestrator:
                         progress=100,
                     )
                 reasons = list(assessment.get("reasons") or reasons)
-                still_asking = bool(
-                    assessment.get("assistant_asked_question")
-                ) or any(
-                    "clarifying question" in str(r).lower() for r in reasons
-                )
+                still_asking = assessment_still_asking(assessment)
                 if still_asking:
                     note = (
                         "[INCOMPLETE] assistant asked a clarifying question "

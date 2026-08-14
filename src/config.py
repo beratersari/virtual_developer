@@ -218,14 +218,6 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:4096",
         description="Base URL for the required opencode serve process",
     )
-    opencode_serve_max_compact_continues: int = Field(
-        default=256,
-        description=(
-            "When serve mode detects incomplete/compact-stop, how many "
-            "Continue prompts to send on the same session (0 = fail immediately). "
-            "Long jobs compact many times; a low budget treats later compacts as ERROR."
-        ),
-    )
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
@@ -343,15 +335,6 @@ class Settings(BaseSettings):
         default=Path(".temp"),
         description="Base directory for temp working folders (relative to agent root)"
     )
-    temp_dir_format: str = Field(
-        default="{remote_name}_{repo_branch_hash}",
-        description=(
-            "Legacy description only — clones use a short stable "
-            "{remote12}_{hash12(repo+work+target)} folder so Windows MAX_PATH "
-            "has room for nested build trees. OpenCode sessions resume only "
-            "for the same Source and Target."
-        ),
-    )
     temp_cleanup_policy: str = Field(
         default="age",
         description=(
@@ -438,10 +421,6 @@ class Settings(BaseSettings):
             "(push, fetch, MR create; default 5 minutes)"
         ),
     )
-    
-    # Logging
-    log_level: str = Field(default="INFO")
-    log_file: Optional[Path] = Field(default=Path("logs/jira-agent.log"))
     
     # Trigger Configuration - stored as strings, parsed as properties
     trigger_on_assignment: bool = Field(default=True)
@@ -658,7 +637,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "agent_task_timeout_seconds",
         "agent_task_max_retries",
         "agent_task_max_incomplete_retries",
-        "opencode_serve_max_compact_continues",
         "poll_interval_seconds",
         "max_concurrent_jobs",
         "jira_board_id",
@@ -676,7 +654,6 @@ _RUNTIME_ENV_MIRROR = {
     "agent_task_timeout_seconds": "AGENT_TASK_TIMEOUT_SECONDS",
     "agent_task_max_retries": "AGENT_TASK_MAX_RETRIES",
     "agent_task_max_incomplete_retries": "AGENT_TASK_MAX_INCOMPLETE_RETRIES",
-    "opencode_serve_max_compact_continues": "OPENCODE_SERVE_MAX_COMPACT_CONTINUES",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
     "jira_board_id": "JIRA_BOARD_ID",

@@ -19,7 +19,7 @@ from src.issue_git_spec import (
     parse_issue_mode,
     require_issue_git_spec,
 )
-from src.jira.client import JiraClient, create_jira_client
+from src.jira.client import create_jira_client
 from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
@@ -39,12 +39,6 @@ def _plain_int(val: Any, default: int = 0) -> int:
         return int(val)
     except (TypeError, ValueError):
         return int(default)
-
-
-def _plain_str(val: Any, default: str = "") -> str:
-    if isinstance(val, str) and val and not val.startswith("<MagicMock"):
-        return val
-    return default
 
 
 class _JobSlotLimiter:
@@ -417,6 +411,15 @@ class JobProcessor:
         reasons = list(data.get("incomplete_reasons") or [])
         asked = bool(data.get("assistant_asked_question")) or any(
             "clarifying question" in str(r).lower() for r in reasons
+        ) or "clarifying question" in stderr.lower()
+        blob = " ".join([stderr] + [str(r) for r in reasons]).lower()
+        from src.opencode_sessions import (
+            compact_related_reasons,
+            reasons_are_open_todos_only,
+        )
+
+        compactish = compact_related_reasons(reasons) or (
+            "compact" in blob and "clarifying question" not in blob
         )
         if incomplete and asked:
             self._fail_issue(
@@ -433,18 +436,38 @@ class JobProcessor:
                 category="question",
             )
             return
-        if incomplete:
+        if incomplete and compactish:
             self._fail_issue(
                 issue_key,
                 stderr,
                 suggestion=suggestion
                 or (
                     "OpenCode stopped after context compaction (not a crash). "
-                    "The same session can be resumed. Raise "
-                    "OPENCODE_SERVE_MAX_COMPACT_CONTINUES or "
-                    "AGENT_TASK_MAX_INCOMPLETE_RETRIES, then re-queue from To Do."
+                    "The same session can be resumed. Compact wait is unbounded "
+                    "except by AGENT_TASK_TIMEOUT_SECONDS; raise that timeout "
+                    "if the job is still compacting when the wall-clock budget "
+                    "ends, then re-queue from To Do."
                 ),
                 category="incomplete",
+            )
+            return
+        if incomplete:
+            todos_only = reasons_are_open_todos_only(reasons) or (
+                "open todos" in blob and "compact" not in blob
+            )
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "After one unattended nudge the session still had "
+                    "unfinished work"
+                    + (" (open todos)" if todos_only else "")
+                    + ". This is not a compaction crash. Put remaining "
+                    "decisions in the issue description if the model asked "
+                    "something, then move the issue back to To Do to re-queue."
+                ),
+                category="unfinished",
             )
             return
         self._fail_issue(
@@ -533,13 +556,6 @@ class JobProcessor:
             timed_out=False,
             completed_at=None,
             metadata=meta_patch,
-        )
-
-    def _clear_requeue_flag(self, issue_key: str) -> None:
-        """Clear poller re-queue eligibility when work actually starts."""
-        self.state_manager.update_state(
-            issue_key,
-            metadata={"requeue_eligible": False},
         )
 
     def _runner_for(self, issue_key: str) -> Optional[AgentRunner]:
@@ -907,13 +923,6 @@ class JobProcessor:
             },
         )
         logger.info(f"{issue_key} OpenCode session: {session_id}")
-
-    def _repo_and_work_branch(
-        self, issue_key: str, git: Any = None
-    ) -> tuple[str, str]:
-        """Best-effort (repository_url, work_branch) — tests / logging."""
-        repo, branch, _tgt = self._session_bind_key(issue_key, git)
-        return repo, branch
 
     def _session_bind_key(
         self, issue_key: str, git: Any = None
@@ -1321,11 +1330,7 @@ class JobProcessor:
         max_incomplete = _plain_int(
             getattr(live, "agent_task_max_incomplete_retries", None), 0
         )
-        max_compacts = _plain_int(
-            getattr(live, "opencode_serve_max_compact_continues", None), 0
-        )
         archive["max_incomplete_retries"] = max_incomplete
-        archive["max_compact_continues"] = max_compacts
         claimed = self.state_manager.update_state_if(
             state.issue_key,
             reject_statuses=self.TERMINAL_STATUSES,
@@ -1348,12 +1353,11 @@ class JobProcessor:
         stuck_s = compute_stuck_limit_seconds(
             timeout_s,
             max_retries,
-            extra_attempts=max(max_incomplete, max_compacts),
+            extra_attempts=max_incomplete,
         )
         logger.info(
             f"{state.issue_key} job budget: timeout={timeout_s}s "
             f"max_retries={max_retries} incomplete={max_incomplete} "
-            f"compacts={max_compacts} "
             f"(stuck limit ≈ {int(stuck_s)}s)"
         )
         state.current_task_id = task.task_id

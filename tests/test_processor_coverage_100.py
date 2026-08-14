@@ -301,6 +301,30 @@ def test_fail_from_agent_result_clarifying_question_heading(
     assert not any("context compaction" in b.lower() for b in bodies)
 
 
+def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
+    processor, state_manager, fake_jira
+):
+    """Open todos after the unattended nudge must not look like compact budget."""
+    state_manager.create_state("FE-T", "todos", "d")
+    processor._fail_from_agent_result(
+        "FE-T",
+        {
+            "returncode": 2,
+            "stderr": (
+                "[INCOMPLETE] after unattended nudge still incomplete: "
+                "open todos: 4 pending, 1 in_progress"
+            ),
+            "incomplete": True,
+            "incomplete_reasons": ["open todos: 4 pending, 1 in_progress"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("unfinished work" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+    assert not any("OPENCODE_SERVE_MAX_COMPACT_CONTINUES" in b for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")

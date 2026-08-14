@@ -230,7 +230,6 @@ async def test_live_auto_compact_via_reduced_context_is_not_false_complete(
         )
         orch = ServeOrchestrator(
             client=client,
-            max_compact_continues=3,
             compact_wait_seconds=180.0,
             compact_poll_seconds=2.0,
             compact_settle_seconds=2.0,

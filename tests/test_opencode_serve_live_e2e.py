@@ -359,7 +359,6 @@ async def test_live_opencode_serve_two_real_compactions(tmp_path: Path):
         try:
             orch = ServeOrchestrator(
                 client=orch_client,
-                max_compact_continues=2,
                 compact_wait_seconds=120.0,
                 compact_poll_seconds=2.0,
                 compact_settle_seconds=2.0,

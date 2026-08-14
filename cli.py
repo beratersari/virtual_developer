@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """CLI for JIRA Virtual Developer."""
 
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -512,7 +511,7 @@ def test_issue(
     from src.orchestrator.prompt_builder import PromptBuilder
     from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
     from src.state.manager import JiraStateManager
-    from src.state.models import JiraAgentState, TaskStatus
+    from src.state.models import TaskStatus
 
     agent = (agent or settings.default_agent).strip() or settings.default_agent
     

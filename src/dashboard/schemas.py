@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -91,19 +91,6 @@ class TasksResponse(BaseModel):
     tasks: List[TaskItem]
     total: int
     server_time: str
-
-
-class GitDeliveryItem(BaseModel):
-    """One push / commit / MR delivery from a job run (task may have many)."""
-
-    job_id: Optional[str] = None
-    feature_branch: Optional[str] = None
-    merge_request_url: Optional[str] = None
-    commit_sha: Optional[str] = None
-    commit_subject: Optional[str] = None
-    commit_url: Optional[str] = None
-    created_at: Optional[str] = None
-    status: Optional[str] = None
 
 
 class JobRetryAttempt(BaseModel):
@@ -258,7 +245,6 @@ class SettingsView(BaseModel):
     agent_task_timeout_seconds: int = 1800
     agent_task_max_retries: int = 3
     agent_task_max_incomplete_retries: int = 256
-    opencode_serve_max_compact_continues: int = 256
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
@@ -435,15 +421,6 @@ class SettingsUpdate(BaseModel):
             "(independent of error retries)"
         ),
     )
-    opencode_serve_max_compact_continues: Optional[int] = Field(
-        default=None,
-        ge=0,
-        le=256,
-        description=(
-            "Legacy serve compact budget. Auto-compact is waited out; "
-            "Continue is not injected for compaction."
-        ),
-    )
     default_model: Optional[str] = Field(default=None, max_length=200)
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,
@@ -481,15 +458,3 @@ class QueueResponse(BaseModel):
     running_count: int = 0
     total: int = 0
     server_time: str = ""
-
-
-class DashboardEnvelope(BaseModel):
-    """Full snapshot pushed over WebSocket."""
-
-    type: str = "dashboard"
-    meta: MetaResponse
-    tasks: TasksResponse
-    jobs: Optional[JobsResponse] = None
-    poll: PollStatusResponse
-    settings: SettingsView
-    queue: Optional[QueueResponse] = None

@@ -1,6 +1,6 @@
 """Cost calculator for tracking token usage and API costs."""
 
-from typing import Dict, Optional
+from typing import Dict
 
 
 # Approximate token costs per 1K tokens (input/output)

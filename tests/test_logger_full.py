@@ -41,11 +41,9 @@ def test_logger_instance_methods():
         lg.exception("div", e)
 
 
-def test_module_level_wrappers():
-    logger_mod.debug("d")
-    logger_mod.info("i")
-    logger_mod.warning("w")
-    logger_mod.error("e")
+def test_module_level_wrappers_removed():
+    for name in ("debug", "info", "warning", "error", "critical", "exception"):
+        assert not hasattr(logger_mod, name)
 
 
 def test_format_has_no_emoji_and_stable_columns():

@@ -29,7 +29,6 @@ type Draft = {
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
-  opencode_serve_max_compact_continues: number
   default_model: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
   project_repositories: ProjectRepository[]
@@ -48,8 +47,6 @@ function fromSettings(s: SettingsPayload): Draft {
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
     agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
-    opencode_serve_max_compact_continues:
-      s.opencode_serve_max_compact_continues ?? 256,
     default_model: s.default_model,
     gitlab_cred_rows: (s.gitlab_credentials ?? []).map((c) => ({
       host: c.host,
@@ -135,9 +132,6 @@ export function SettingsPage() {
         agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
         agent_task_max_retries: Number(draft.agent_task_max_retries),
         agent_task_max_incomplete_retries: Number(draft.agent_task_max_incomplete_retries),
-        opencode_serve_max_compact_continues: Number(
-          draft.opencode_serve_max_compact_continues,
-        ),
         default_model: draft.default_model.trim(),
         gitlab_credentials: draft.gitlab_cred_rows
           .map((r) => {
@@ -710,23 +704,8 @@ export function SettingsPage() {
         />
         <span className="text-xs text-text-muted">
           Extra serve attempts only when the session is incomplete for a
-          non-compact reason. Compact is waited out; no extra prompt. Default 256.
-        </span>
-      </label>
-      <label className="field">
-        <span>Serve compact continues</span>
-        <input
-          type="number"
-          min={0}
-          max={256}
-          value={draft.opencode_serve_max_compact_continues}
-          onChange={(e) =>
-            mark('opencode_serve_max_compact_continues', Number(e.target.value))
-          }
-        />
-        <span className="text-xs text-text-muted">
-          Legacy serve budget (unused for compact). Auto-compact is waited out on
-          the same session. Default 256.
+          non-compact reason. Compact wait is unbounded (same session until
+          the agent timeout). Default 256.
         </span>
       </label>
 

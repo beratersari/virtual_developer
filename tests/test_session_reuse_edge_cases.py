@@ -475,7 +475,6 @@ async def test_e2e_cancel_in_flight_then_second_issue_resumes(
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
     live.agent_task_max_incomplete_retries = 0
-    live.opencode_serve_max_compact_continues = 0
     monkeypatch.setattr("src.config.get_settings", lambda: live)
 
     sm.create_state("KAN-A", "first", _params())
@@ -564,7 +563,6 @@ async def test_e2e_error_then_new_issue_resumes(
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
     live.agent_task_max_incomplete_retries = 0
-    live.opencode_serve_max_compact_continues = 0
     monkeypatch.setattr("src.config.get_settings", lambda: live)
 
     sm.create_state("KAN-A", "first", _params())

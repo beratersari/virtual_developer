@@ -121,7 +121,6 @@ async def test_live_jira_compact_then_stop_is_not_resumed(jira_client: JiraClien
         compact_wait_seconds=0.4,
         compact_poll_seconds=0.05,
         compact_settle_seconds=0.1,
-        max_compact_continues=256,
     )
     result = await orch.run(
         prompt="Long task that must survive 20 compact cycles.",
@@ -156,8 +155,8 @@ async def test_live_jira_compact_then_stop_is_not_resumed(jira_client: JiraClien
         state,
         result.stderr or finding,
         suggestion=(
-            "OPENCODE_SERVE_MAX_COMPACT_CONTINUES=256 did not send another turn. "
-            "Raise that setting does not resume this session."
+            "Compact wait is unbounded; this session did not auto-resume. "
+            "Re-queue from To Do if the job is still needed."
         ),
         category="incomplete",
     )
