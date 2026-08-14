@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -22,6 +23,31 @@ def _normalize_jira_host(raw: str) -> str:
         return (parsed.hostname or "").lower()
     except Exception:
         return host.lower().split("/")[0].split(":")[0]
+
+
+def _probe_error_text(status: int, raw: str = "") -> str:
+    """Operator-facing probe error — never echo remote body (SSRF oracle)."""
+    return f"Jira returned HTTP {status}"
+
+
+def _is_blocked_probe_host(host_url: str) -> bool:
+    """True for cloud-metadata / link-local probe targets."""
+    try:
+        parsed = urlparse(
+            host_url if "://" in host_url else f"https://{host_url}"
+        )
+        name = (parsed.hostname or "").lower()
+    except Exception:
+        name = (host_url or "").lower()
+    if not name:
+        return False
+    if name in {"metadata.google.internal", "metadata"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return ip.is_link_local or str(ip) == "169.254.169.254"
 
 
 def probe_jira_connection(
@@ -50,6 +76,12 @@ def probe_jira_connection(
 
     if not h:
         return {"ok": False, "error": "Jira host is required", "host": ""}
+    if _is_blocked_probe_host(h):
+        return {
+            "ok": False,
+            "host": h,
+            "error": "Refusing to probe this host (link-local / metadata).",
+        }
     configured = _normalize_jira_host(settings.jira_host or "")
     requested = _normalize_jira_host(h)
     if tok and not provided_token and requested != configured:
@@ -85,6 +117,7 @@ def probe_jira_connection(
     timeout = httpx.Timeout(25.0, connect=10.0)
 
     try:
+        # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(
             base_url=base,
             auth=auth,
@@ -117,10 +150,7 @@ def probe_jira_connection(
                     "host": h,
                     "auth_mode": auth_mode,
                     "http_status": me.status_code,
-                    "error": (
-                        f"/myself returned HTTP {me.status_code}: "
-                        f"{(me.text or '')[:300]}"
-                    ),
+                    "error": _probe_error_text(me.status_code),
                 }
             user = me.json() if me.content else {}
             display = ""

@@ -12,6 +12,7 @@ from src.logger import logger
 
 
 def _normalize_host(raw: str) -> str:
+    """Hostname plus port when the operator set a non-default port."""
     host = (raw or "").strip().lower()
     if not host:
         return ""
@@ -19,7 +20,12 @@ def _normalize_host(raw: str) -> str:
         host = f"https://{host}"
     try:
         parsed = urlparse(host)
-        return (parsed.hostname or "").lower()
+        name = (parsed.hostname or "").lower()
+        if not name:
+            return ""
+        if parsed.port:
+            return f"{name}:{parsed.port}"
+        return name
     except Exception:
         return (raw or "").strip().lower().split("/")[0]
 
@@ -78,10 +84,10 @@ def probe_gitlab_connection(
 
     base = f"https://{h}/api/v4"
     headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
-    # On-prem often uses custom CAs; match product's pragmatic TLS stance for GitLab
     timeout = httpx.Timeout(20.0, connect=10.0)
 
     try:
+        # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(timeout=timeout, verify=False, headers=headers) as client:
             user_resp = client.get(f"{base}/user")
             if user_resp.status_code == 401:

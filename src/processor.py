@@ -956,7 +956,7 @@ class JobProcessor:
         recs: List[Dict[str, Any]] = []
         store = session_binds.session_bind_store
         if repo and branch and target:
-            hit = store.get(repo, branch, target)
+            hit = store.get(repo, branch, target, issue_key=issue_key)
             if hit:
                 recs.append(hit)
         by_issue = store.find_by_issue_key(issue_key)
@@ -2861,7 +2861,11 @@ class JobProcessor:
                 from src.gitlab.webhook import GitlabMrNoteEvent
 
                 event = GitlabMrNoteEvent.from_dict(rec.get("payload") or {})
-                ran = await self._run_gitlab_mr_comment(event)
+                if self._job_semaphore is None:
+                    limit = max(1, int(settings.max_concurrent_jobs or 1))
+                    self._job_semaphore = _JobSlotLimiter(limit)
+                async with self._job_semaphore:
+                    ran = await self._run_gitlab_mr_comment(event)
                 if not ran:
                     self.queue_store.requeue(
                         qid, reason="workspace or issue still in-flight"

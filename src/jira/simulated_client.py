@@ -11,6 +11,8 @@ class SimulatedJiraClient:
     def __init__(self, base_url: str = "http://localhost:7001"):
         self.base_url = base_url
         self.last_error: Optional[str] = None
+        self.sprint_lookup: Optional[str] = None
+        # INTENTIONAL: verify=False (same TLS policy as JiraClient).
         self.client = httpx.Client(base_url=base_url, timeout=30.0, verify=False)
 
     def create_issue(
@@ -61,6 +63,8 @@ class SimulatedJiraClient:
 
     def get_active_sprint(self, board_id: str) -> Optional[Dict[str, Any]]:
         _ = board_id
+        # Simulated server has no sprints — Kanban-style whole-board list.
+        self.sprint_lookup = "kanban"
         return None
 
     def get_board_issues(

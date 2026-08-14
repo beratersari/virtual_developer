@@ -18,7 +18,8 @@ Agent jobs use ``opencode serve``. The control loop here:
    stale open todos alone after a clean finish=stop may be accepted
    (todo API lag). Timeout/error resume may still send Continue; compact never does.
 
-TLS: all clients use ``verify=False`` (product requirement for on-prem/intercept).
+TLS: INTENTIONAL — all clients use ``verify=False`` (on-prem / intercept;
+do not enable verification until a custom-CA path exists).
 """
 
 from __future__ import annotations
@@ -183,6 +184,7 @@ class OpenCodeServeClient:
         self.timeout_seconds = float(timeout_seconds)
         self.directory = directory
         self._owned_client = client is None
+        # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=30.0),

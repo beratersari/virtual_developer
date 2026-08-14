@@ -110,10 +110,13 @@ def test_board_and_sprint(client):
 
     http.get.return_value = _resp(200, {"values": [{"id": 9, "name": "S1"}]})
     assert c.get_active_sprint("1")["id"] == 9
+    assert c.sprint_lookup == "ok"
     http.get.return_value = _resp(200, {"values": []})
     assert c.get_active_sprint("1") is None
+    assert c.sprint_lookup == "empty"
     http.get.return_value = _resp(500)
     assert c.get_active_sprint("1") is None
+    assert c.sprint_lookup == "error"
 
 
 def test_get_sprint_issues_pagination(client):

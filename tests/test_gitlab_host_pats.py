@@ -34,7 +34,7 @@ def test_json_map_preferred_over_legacy():
 def test_subdomain_match():
     s = Settings(gitlab_host_pats='{"gitlab.example.com":"pat-x"}')
     assert s.gitlab_pat_for_host("gitlab.example.com") == "pat-x"
-    assert s.gitlab_pat_for_host("api.gitlab.example.com") == "pat-x"
+    assert s.gitlab_pat_for_host("api.gitlab.example.com") == ""
     assert s.gitlab_pat_for_host("evil.com") == ""
 
 

@@ -372,10 +372,11 @@ class AgentRunner:
                 ):
                     logger.warning(
                         f"Retry after {why}: session {sid} is not for "
-                        f"{self.working_directory}; keeping session, not "
-                        "re-sending the original BUILD/PLAN kit"
+                        f"{self.working_directory}; starting cold (do not "
+                        "re-send BUILD/PLAN on another clone's session)"
                     )
-                    task.session_id = sid
+                    task.abandoned_session_id = sid
+                    task.session_id = None
                     return
             except Exception as e:
                 logger.debug(f"session dir check failed: {e}")

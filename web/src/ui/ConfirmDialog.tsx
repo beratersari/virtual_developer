@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { Spinner } from './Spinner'
 
 export function ConfirmDialog({
@@ -20,6 +20,20 @@ export function ConfirmDialog({
   onConfirm: () => void
   onCancel: () => void
 }) {
+  const snap = useRef<{
+    title: string
+    body: string
+    confirmLabel: string
+    onConfirm: () => void
+  } | null>(null)
+  if (open && !snap.current) {
+    snap.current = { title, body, confirmLabel, onConfirm }
+  }
+  if (!open) {
+    snap.current = null
+  }
+  const shown = snap.current || { title, body, confirmLabel, onConfirm }
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -41,9 +55,9 @@ export function ConfirmDialog({
     >
       <div className="vd-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
         <h3 id="confirm-title" className="vd-modal-title">
-          {title}
+          {shown.title}
         </h3>
-        <p className="vd-modal-body whitespace-pre-wrap">{body}</p>
+        <p className="vd-modal-body whitespace-pre-wrap">{shown.body}</p>
         <div className="vd-modal-actions">
           <button
             type="button"
@@ -58,14 +72,14 @@ export function ConfirmDialog({
             className={`vd-btn px-3 py-1.5 text-sm ${danger ? 'vd-btn-danger' : 'vd-btn-primary'}`}
             disabled={busy}
             autoFocus
-            onClick={onConfirm}
+            onClick={shown.onConfirm}
           >
             {busy ? (
               <>
                 <Spinner /> Working…
               </>
             ) : (
-              confirmLabel
+              shown.confirmLabel
             )}
           </button>
         </div>

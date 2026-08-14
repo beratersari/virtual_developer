@@ -81,6 +81,8 @@ export function IssueDetailPage() {
     if (seed) {
       setDetail(seed)
       setLoading(false)
+    } else {
+      setDetail(null)
     }
     void load(Boolean(seed))
   }, [issueKey]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -92,12 +94,13 @@ export function IssueDetailPage() {
     void load(true)
   }, [live.generation, load])
 
+  const routeKey = issueKey.trim().toUpperCase()
   const onCancel = async () => {
-    if (!detail?.issue_key) return
+    if (!detail?.issue_key || detail.issue_key !== routeKey) return
     setBusy(true)
     setError(null)
     try {
-      await cancelTask(detail.issue_key)
+      await cancelTask(routeKey)
       setConfirmCancel(false)
       await load(false)
     } catch (e) {
@@ -139,7 +142,7 @@ export function IssueDetailPage() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {detail?.can_cancel && (
+          {detail?.can_cancel && detail.issue_key === routeKey && (
             <button
               type="button"
               disabled={busy}

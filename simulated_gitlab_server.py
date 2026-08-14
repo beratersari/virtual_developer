@@ -285,6 +285,7 @@ def fire_note_webhook(payload: dict) -> Dict[str, Any]:
     if WEBHOOK_SECRET:
         headers["X-Gitlab-Token"] = WEBHOOK_SECRET
     try:
+        # INTENTIONAL: verify=False (same TLS policy as production GitLab clients).
         with httpx.Client(timeout=15.0, verify=False) as client:
             resp = client.post(DAEMON_WEBHOOK, json=payload, headers=headers)
             return {

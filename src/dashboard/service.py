@@ -324,7 +324,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets).
 
     Non-secret fields persist in runtime_settings.json. Jira host/email/token
-    are also written to ``.env`` so Test connection and the next daemon start
+    and GitLab host PATs are also written to ``.env`` so Test connection and
+    the next daemon start
     use the saved values. Token is never returned in the view.
 
     Callers should refresh live Jira clients when host/token/email change
@@ -335,6 +336,16 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
 
     if "jira_host" in data and data["jira_host"] is not None:
         host = str(data["jira_host"]).strip().rstrip("/")
+        from src.jira_connection import _normalize_jira_host
+
+        old_h = _normalize_jira_host(settings.jira_host or "")
+        new_h = _normalize_jira_host(host)
+        token_in_patch = bool(str(data.get("jira_api_token") or "").strip())
+        if new_h and old_h and new_h != old_h and not token_in_patch:
+            raise ValueError(
+                "Changing Jira host requires an API token in the same save "
+                "so the stored token is not sent to a new host."
+            )
         settings.jira_host = host
         dotenv_updates["JIRA_HOST"] = host
         # Non-secret: also survive restart via runtime_settings.json
@@ -358,7 +369,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             else {}
         )
         new_map: Dict[str, str] = {}
-        pending_no_pat: List[str] = []
         for item in data["gitlab_credentials"] or []:
             if isinstance(item, dict):
                 host = _normalize_gitlab_host(item.get("host"))
@@ -378,19 +388,20 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             elif host in current:
                 new_map[host] = current[host]
             elif previous_host and previous_host in current:
+                # Explicit rename from the Settings UI — not an inferred swap.
                 new_map[host] = current[previous_host]
-            else:
-                pending_no_pat.append(host)
-        # 1:1 rename without previous_host (older clients): copy the dropped PAT
-        dropped = [h for h in current if h not in new_map]
-        still_pending = [h for h in pending_no_pat if h not in new_map]
-        if len(dropped) == 1 and len(still_pending) == 1:
-            new_map[still_pending[0]] = current[dropped[0]]
         if hasattr(settings, "set_gitlab_host_pat_map"):
             settings.set_gitlab_host_pat_map(new_map)
         else:
             settings.gitlab_allowed_hosts = ",".join(sorted(new_map.keys()))
             settings.gitlab_pat = next(iter(new_map.values()), "") if new_map else ""
+        dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+            settings, "gitlab_host_pats", ""
+        ) or ""
+        dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+            settings.gitlab_allowed_hosts or ""
+        )
+        dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
     else:
         # Legacy single PAT + host list (still supported)
         if "gitlab_pat" in data and data["gitlab_pat"] is not None:
@@ -410,6 +421,14 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 settings.set_gitlab_host_pat_map(
                     {h: settings.gitlab_pat.strip() for h in hosts}
                 )
+        if "gitlab_pat" in data or "gitlab_allowed_hosts" in data:
+            dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+                settings, "gitlab_host_pats", ""
+            ) or ""
+            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+                settings.gitlab_allowed_hosts or ""
+            )
+            dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
 
     # Runtime-persisted fields (survive restart; win over .env)
     runtime_persist: Dict[str, Any] = {}
@@ -839,10 +858,25 @@ def build_jobs(
     fetch_cap = 2000
     raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
     raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
-    raw.sort(
+    inflight: List[Dict[str, Any]] = []
+    rest: List[Dict[str, Any]] = []
+    for j in raw:
+        st = str(j.get("status") or "").lower()
+        live = (
+            j.get("issue_key") in live_keys
+            or j.get("job_id") in active_job_ids
+            or st in {"executing", "planning", "running", "pending"}
+        )
+        (inflight if live else rest).append(j)
+    inflight.sort(
         key=lambda j: j.get("started_at") or j.get("updated_at") or "",
         reverse=True,
     )
+    rest.sort(
+        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
+        reverse=True,
+    )
+    raw = inflight + rest
 
     total = len(raw)
     page_raw = raw[offset : offset + size]
@@ -879,10 +913,15 @@ def build_queue(
     from src.state.queue_store import work_queue_store as default_queue
 
     qs = store or default_queue
-    raw = qs.list_items(status=status, limit=limit)
+    if status:
+        raw = qs.list_items(status=status, limit=limit)
+    else:
+        raw = qs.list_items(status="queued", limit=limit) + qs.list_items(
+            status="running", limit=limit
+        )
     items: List[QueueItem] = []
-    queued = 0
-    running = 0
+    queued = len(qs.list_items(status="queued", limit=500))
+    running = len(qs.list_items(status="running", limit=500))
     for rec in raw:
         st = rec.get("status") or "queued"
         if st == "queued":
@@ -920,11 +959,6 @@ def build_queue(
             i.created_at or "",
         )
     )
-    # When filtered, recount from unfiltered for header badges
-    if status:
-        all_open = qs.list_items(limit=500)
-        queued = sum(1 for r in all_open if r.get("status") == "queued")
-        running = sum(1 for r in all_open if r.get("status") == "running")
     return QueueResponse(
         items=items,
         queued_count=queued,

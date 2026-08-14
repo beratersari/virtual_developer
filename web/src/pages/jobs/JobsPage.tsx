@@ -56,7 +56,7 @@ export function JobsPage() {
 
   const loadQueue = useCallback(async () => {
     try {
-      const q = await fetchQueue({ limit: 200 })
+      const q = await fetchQueue({ status: 'queued', limit: 200 })
       const rows = (q.items || []).filter((r) => r.status === 'queued')
       rows.sort((a, b) =>
         String(b.created_at || '').localeCompare(String(a.created_at || '')),

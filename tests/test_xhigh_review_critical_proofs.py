@@ -44,11 +44,14 @@ def test_c1_dashboard_defaults_bind_all_interfaces_unauthenticated():
 # ---------------------------------------------------------------------------
 
 
-def test_c2_unauthenticated_settings_redirect_jira_host_keeps_token(monkeypatch):
+def test_c2_unauthenticated_settings_redirect_jira_host_keeps_token(
+    tmp_path, monkeypatch
+):
     from src.config import settings
     from src.dashboard.api import create_dashboard_app
     from src.jira.client import JiraClient
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "jira_host", "https://jira.company.com")
     monkeypatch.setattr(settings, "jira_api_token", "REAL-SECRET-TOKEN")
     monkeypatch.setattr(settings, "jira_email", "")
@@ -59,20 +62,10 @@ def test_c2_unauthenticated_settings_redirect_jira_host_keeps_token(monkeypatch)
         "/api/settings",
         json={"jira_host": "https://attacker.example"},
     )
-    assert r.status_code == 200
-    assert settings.jira_host.rstrip("/") == "https://attacker.example"
+    assert r.status_code == 400
+    assert "token" in (r.json().get("detail") or "").lower()
+    assert settings.jira_host.rstrip("/") == "https://jira.company.com"
     assert settings.jira_api_token == "REAL-SECRET-TOKEN"
-
-    jc = JiraClient(
-        host=settings.jira_host,
-        api_token=settings.jira_api_token,
-        email="",
-    )
-    assert "attacker.example" in jc.host
-    auth = jc.client.headers.get("Authorization")
-    assert auth is not None
-    assert auth.startswith("Bearer ")
-    assert "REAL-SECRET-TOKEN" in auth
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +109,9 @@ def test_c3_jira_probe_ssrf_with_provided_token_reflects_body(monkeypatch):
         email="",
     )
     assert result.get("ok") is False
-    assert "Refusing to send the stored" not in (result.get("error") or "")
-    assert "INTERNAL_STACKTRACE_SECRET" in (result.get("error") or "")
+    err = result.get("error") or ""
+    assert "INTERNAL_STACKTRACE_SECRET" not in err
+    assert "169.254.169.254" in (result.get("host") or "") or "Refusing" in err or "HTTP" in err
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +127,8 @@ def test_c4_gitlab_pat_evil_subdomain_receives_real_pat():
         gitlab_host_pats='{"gitlab.company.com":"REAL-GITLAB-PAT"}',
     )
     evil = s.gitlab_pat_for_host("evil.gitlab.company.com")
-    assert evil == "REAL-GITLAB-PAT"
+    assert evil == ""
+    assert s.gitlab_pat_for_host("gitlab.company.com") == "REAL-GITLAB-PAT"
 
     # Nested hosts: parent can win over more-specific map entry (order-dependent)
     s2 = Settings(
@@ -143,10 +138,7 @@ def test_c4_gitlab_pat_evil_subdomain_receives_real_pat():
         ),
     )
     nested = s2.gitlab_pat_for_host("api.gitlab.example.com")
-    assert nested in ("PAT-PARENT", "PAT-GITLAB")
-    # If parent wins, nested GitLab PAT is mis-selected
-    # Document actual winner for operators
-    assert nested == "PAT-PARENT" or nested == "PAT-GITLAB"
+    assert nested == ""
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +172,7 @@ def test_c5_create_mr_returns_literal_created_without_url(tmp_path, monkeypatch)
     monkeypatch.setattr(gm, "_get_existing_mr_url", lambda *a, **k: None)
 
     url = gm.create_merge_request(title="feat(x): test", body="body", target_branch="develop")
-    assert url == "created"
+    assert url is None
 
 
 # ---------------------------------------------------------------------------
@@ -300,13 +292,15 @@ def test_c8_process_issue_in_progress_with_noop_handler_leaves_no_state(
         },
     }
 
-    p._handler = lambda event: None
+    p._handler = None
     p.process_issue(issue, is_update=False)
 
     assert "KAN-DROP-1" in transitions
     st = state_manager.get_state("KAN-DROP-1")
-    assert st is None
+    assert st is not None
+    assert st.status == TaskStatus.ERROR
     assert p._last_jira_status.get("KAN-DROP-1") == "in progress"
+    assert fake_jira.comments
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +328,7 @@ def test_c9_post_completion_no_new_commits_still_includes_prior_mr_url(
 
     assert fake_jira.comments, "expected a Jira completion comment"
     body = "\n".join(c["body"] for c in fake_jira.comments)
-    assert "merge_requests/99" in body
+    assert "merge_requests/99" not in body
     assert "No new commits for this run" in body
 
 
