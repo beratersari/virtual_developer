@@ -86,7 +86,6 @@ def test_unlinked_session_logs_not_shown_as_legacy_jobs(
     # Helper is a permanent no-op
     assert (
         _legacy_jobs_from_sessions(
-            covered_paths=set(),
             summaries={},
         )
         == []

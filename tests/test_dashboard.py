@@ -148,20 +148,16 @@ def test_apply_settings_retry_counts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "agent_task_max_retries", 3)
     monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 256)
-    monkeypatch.setattr(settings, "opencode_serve_max_compact_continues", 256)
     view = apply_settings_update(
         SettingsUpdate(
             agent_task_max_retries=5,
             agent_task_max_incomplete_retries=64,
-            opencode_serve_max_compact_continues=128,
         )
     )
     assert settings.agent_task_max_retries == 5
     assert settings.agent_task_max_incomplete_retries == 64
-    assert settings.opencode_serve_max_compact_continues == 128
     assert view.agent_task_max_retries == 5
     assert view.agent_task_max_incomplete_retries == 64
-    assert view.opencode_serve_max_compact_continues == 128
 
 
 def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch):
@@ -276,6 +272,30 @@ def test_apply_settings_gitlab_rename_1to1_without_previous_host(
     # Inferred 1:1 rename is refused — PAT stays off the new host
     assert settings.gitlab_pat_for_host("gitlab.company.com") == ""
     assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
+def test_settings_save_without_gitlab_rows_keeps_legacy_pat(tmp_path, monkeypatch):
+    """UI always sends gitlab_credentials; empty list must not wipe GITLAB_PAT."""
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://jira.example.com\nGITLAB_PAT=LEGACY-SECRET-PAT\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "LEGACY-SECRET-PAT")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+
+    apply_settings_update(
+        SettingsUpdate(
+            poll_interval_seconds=45,
+            gitlab_credentials=[],
+        )
+    )
+    assert settings.gitlab_pat == "LEGACY-SECRET-PAT"
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LEGACY-SECRET-PAT" in env
 
 
 def test_refresh_runtime_jira_clients(monkeypatch):

@@ -18,7 +18,6 @@ import httpx
 
 from src.opencode_serve import (
     DEFAULT_CONTINUE_PROMPT,
-    DEFAULT_MAX_COMPACT_CONTINUES,
     OpenCodeServeClient,
     ServeOrchestrator,
     assess_serve_turn,
@@ -634,7 +633,6 @@ async def test_e2e_agent_runner_serve_mode_waits_compact(tmp_path, monkeypatch):
     with patch.object(runner, "_run_agent_via_serve", side_effect=fake_run_via_serve):
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.opencode_serve_url = "http://127.0.0.1:4096"
-            s.opencode_serve_max_compact_continues = 3
             s.opencode_cli = "opencode"
             s.default_model = "opencode/deepseek-v4-flash-free"
             s.agent_task_timeout_seconds = 60
@@ -724,7 +722,7 @@ async def test_serve_health_failure():
 
     backend = FakeServeBackend()
     client = DeadClient(backend)
-    orch = ServeOrchestrator(client=client, max_compact_continues=2)
+    orch = ServeOrchestrator(client=client)
     result = await orch.run(prompt="x", title="t")
     assert result.returncode == 1
     assert "unreachable" in (result.stderr or "").lower() or "health" in (
@@ -776,7 +774,7 @@ async def test_e2e_serve_http_timeout_marks_timed_out_without_abort():
     client = FakeServeClient(backend)
     client.timeout_seconds = 30.0
     orch = ServeOrchestrator(
-        client=client, max_compact_continues=2, compact_wait_seconds=0.4
+        client=client, compact_wait_seconds=0.4
     )
     result = await orch.run(prompt="do work", title="KAN-TO")
 
@@ -1320,4 +1318,197 @@ async def test_nudge_then_done_with_stale_todos_is_success_not_error():
     assert "git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT.lower() or (
         "do **not** git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT.lower()
         or "Do **not** git push" in DEFAULT_UNATTENDED_NUDGE_PROMPT
+    )
+
+
+@pytest.mark.asyncio
+async def test_nudge_then_compact_then_auto_resume_is_success():
+    """Long jobs often compact on the nudge turn; wait, do not fail immediately."""
+    from src.opencode_serve import DEFAULT_UNATTENDED_NUDGE_PROMPT
+
+    class QuestionThenCompactNudge(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_nudge_compact"
+            self.todos = [
+                {"content": f"T{i}", "status": "pending"} for i in range(14)
+            ] + [{"content": "now", "status": "in_progress"}]
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 2
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "Shall I use Postgres or SQLite?",
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            # Nudge turn compact-then-stop (the long-job production case).
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "compaction", "auto": True}],
+                }
+            )
+            compact = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": True,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "## Compaction summary\nWork still in progress.",
+                    }
+                ],
+            }
+            self.messages.append(compact)
+            return compact
+
+    backend = QuestionThenCompactNudge()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-LONG")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert backend.prompts[1] == DEFAULT_UNATTENDED_NUDGE_PROMPT
+    assert "after unattended nudge still incomplete" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
+async def test_nudge_then_tool_calls_then_auto_resume_is_success():
+    """Nudge HTTP can return finish=tool-calls while the session is still working."""
+    class QuestionThenToolsNudge(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_nudge_tools"
+            self.todos = [
+                {"content": f"T{i}", "status": "pending"} for i in range(4)
+            ] + [{"content": "now", "status": "in_progress"}]
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 2
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {"type": "text", "text": "Which DB should we use?"}
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            mid = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "tool-calls",
+                    "summary": None,
+                },
+                "parts": [
+                    {"type": "text", "text": "Continuing with defaults…"}
+                ],
+            }
+            self.messages.append(mid)
+            return mid
+
+    backend = QuestionThenToolsNudge()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(prompt="# Build\ndo the work", title="KAN-TOOLS")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert "after unattended nudge still incomplete" not in (result.stderr or "")
+
+
+def test_should_wait_after_nudge_helpers():
+    from src.opencode_serve import should_wait_after_nudge
+
+    assert should_wait_after_nudge(
+        {
+            "premature": True,
+            "reasons": ["open todos: 4 pending, 1 in_progress"],
+            "last_finish": "tool-calls",
+        }
+    )
+    assert should_wait_after_nudge(
+        {
+            "premature": True,
+            "reasons": [
+                "open todos: 14 pending, 1 in_progress",
+                "session ended on compaction summary (finish=stop, summary=true)",
+                "last assistant followed a compaction message (compact-then-stop)",
+            ],
+            "last_finish": "stop",
+            "last_is_summary": True,
+        }
+    )
+    assert not should_wait_after_nudge(
+        {
+            "premature": True,
+            "assistant_asked_question": True,
+            "reasons": ["assistant asked a clarifying question"],
+            "last_finish": "stop",
+        }
+    )
+    assert not should_wait_after_nudge(
+        {"premature": False, "reasons": [], "last_finish": "stop"}
     )

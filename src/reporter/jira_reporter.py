@@ -1,12 +1,11 @@
 """Reporter for posting updates to JIRA."""
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 from src.config import settings
 from src.jira.client import JiraClient, create_jira_client
 from src.logger import logger
-from src.state.models import JiraAgentState, TaskStatus
+from src.state.models import JiraAgentState
 
 # Keep Jira comments readable (Server/DC plain text bodies)
 _MAX_ERROR_CHARS = 1800
@@ -332,6 +331,13 @@ _Completed by the AI agent. Please review and verify before merging or closing._
                 "mid-turn idle. This is *not* a crash — the agent ran out of "
                 "compact-continue budget before finishing."
             )
+        elif kind in {"unfinished", "todos", "open_todos"}:
+            heading = "AI Agent — Incomplete session (unfinished work)"
+            lead = (
+                "The agent stopped before finishing remaining work (often "
+                "open todos after an unattended nudge). This is *not* a "
+                "compaction budget failure and *not* a crash."
+            )
         else:
             heading = "AI Agent — Error"
             lead = "An error occurred while processing this issue:"
@@ -362,7 +368,6 @@ Please review the details above and advise how to proceed (for example, move the
         self,
         issue_key: str,
         response: str,
-        in_reply_to: Optional[str] = None,
     ) -> Optional[str]:
         """Post response to a comment."""
         text = (response or "").strip() or (

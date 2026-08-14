@@ -301,6 +301,30 @@ def test_fail_from_agent_result_clarifying_question_heading(
     assert not any("context compaction" in b.lower() for b in bodies)
 
 
+def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
+    processor, state_manager, fake_jira
+):
+    """Open todos after the unattended nudge must not look like compact budget."""
+    state_manager.create_state("FE-T", "todos", "d")
+    processor._fail_from_agent_result(
+        "FE-T",
+        {
+            "returncode": 2,
+            "stderr": (
+                "[INCOMPLETE] after unattended nudge still incomplete: "
+                "open todos: 4 pending, 1 in_progress"
+            ),
+            "incomplete": True,
+            "incomplete_reasons": ["open todos: 4 pending, 1 in_progress"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("unfinished work" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+    assert not any("OPENCODE_SERVE_MAX_COMPACT_CONTINUES" in b for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")
@@ -951,6 +975,34 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     # release/*
     git.work_branch = "release/1.0"
     assert await processor._push_and_create_mr(state) is False
+
+    # Existing MR (GitLab note intake): push the MR source even if protected
+    git.work_branch = "develop"
+    git.target_branch = "main"
+    git.get_current_branch.return_value = "develop"
+    git.push.return_value = True
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_sha.return_value = "abc123"
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+
+    # release/* on an existing MR must also push
+    git.work_branch = "release/1.0"
+    git.get_current_branch.return_value = "release/1.0"
+    git.push.reset_mock()
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
 
     # empty branch name
     git.work_branch = ""

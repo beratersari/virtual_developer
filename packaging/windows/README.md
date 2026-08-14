@@ -22,8 +22,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 ## User flow
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
-   Dashboard UI only: **Dashboard SPA** workflow (or Windows Dist extra artifact)
-   **`dashboard-web-dist`** / **`dashboard-web-dist-zip`** — drop onto `web\dist`.
+   The zip already includes the prebuilt ops dashboard SPA (`web\dist`).
 2. Extract once (you should see `install.bat` and `start.bat` at the top level).
 3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
 4. Install (pick one):

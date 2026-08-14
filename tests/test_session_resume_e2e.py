@@ -71,7 +71,6 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
     runner = AgentRunner(working_directory=tmp_path)
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_serve_url = "http://fake/"
-        s.opencode_serve_max_compact_continues = 0
         s.default_model = "opencode/deepseek-v4-flash-free"
         s.default_agent = "atlas"
         s.agent_task_timeout_seconds = 60
@@ -150,7 +149,6 @@ async def test_e2e_serve_retry_reuses_session_after_timeout_or_error(
     runner = AgentRunner(working_directory=tmp_path)
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_serve_url = "http://fake/"
-        s.opencode_serve_max_compact_continues = 0
         s.default_model = "opencode/deepseek-v4-flash-free"
         s.default_agent = "atlas"
         s.agent_task_timeout_seconds = 60

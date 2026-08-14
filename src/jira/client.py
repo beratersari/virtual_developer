@@ -378,10 +378,13 @@ class JiraClient:
                 total = int(data.get("total") or 0)
                 if not batch:
                     break
+                # Agile often returns fewer than maxResults (e.g. 50 of 100).
+                # Advance by page length, not the requested size.
                 page_start += len(batch)
                 if total and page_start >= total:
                     break
-                if len(batch) < max_results:
+                # Short page is final only when the server did not advertise more.
+                if len(batch) < max_results and (not total or page_start >= total):
                     break
             return all_issues
         except Exception as e:

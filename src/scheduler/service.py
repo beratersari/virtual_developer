@@ -871,21 +871,6 @@ def dispatch_schedule_now(
     }
 
 
-def _register_schedule_workspace(processor: Any, rec: Dict[str, Any]) -> None:
-    """Expose this schedule's clone lock so the work queue will not collide."""
-    note = getattr(processor, "note_workspace_lock", None)
-    if not callable(note):
-        return
-    from src.git_manager import GitManager
-
-    issue_key = (rec.get("issue_key") or "").upper()
-    repo = rec.get("repository_url") or ""
-    src = rec.get("source_branch") or ""
-    tgt = rec.get("target_branch") or ""
-    work = GitManager.resolve_work_branch_name(issue_key, src, tgt)
-    note(issue_key, repository_url=repo, work_branch=work, target_branch=tgt)
-
-
 async def _dispatch_claimed_schedule(
     *,
     processor: "JobProcessor",

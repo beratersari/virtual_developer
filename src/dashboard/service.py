@@ -15,7 +15,6 @@ from src.dashboard.project_repos import (
     project_repositories_to_json,
 )
 from src.dashboard.schemas import (
-    GitDeliveryItem,
     GitlabHostCredentialView,
     JobItem,
     JobRetryAttempt,
@@ -237,9 +236,6 @@ def build_settings_view() -> SettingsView:
         agent_task_max_incomplete_retries=int(
             getattr(settings, "agent_task_max_incomplete_retries", 256) or 0
         ),
-        opencode_serve_max_compact_continues=int(
-            getattr(settings, "opencode_serve_max_compact_continues", 256) or 0
-        ),
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
         dashboard_port=int(getattr(settings, "dashboard_port", 8080) or 8080),
@@ -390,18 +386,29 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             elif previous_host and previous_host in current:
                 # Explicit rename from the Settings UI — not an inferred swap.
                 new_map[host] = current[previous_host]
+        # [] from Settings means "no host rows", not "wipe a legacy GITLAB_PAT
+        # that was never projected as a row". Only clear when host rows existed.
+        clearing_hosts = bool(current) and not new_map
+        keep_legacy_pat = (not new_map) and (not current) and bool(
+            (settings.gitlab_pat or "").strip()
+        )
         if hasattr(settings, "set_gitlab_host_pat_map"):
-            settings.set_gitlab_host_pat_map(new_map)
+            if new_map or clearing_hosts:
+                settings.set_gitlab_host_pat_map(new_map)
         else:
             settings.gitlab_allowed_hosts = ",".join(sorted(new_map.keys()))
-            settings.gitlab_pat = next(iter(new_map.values()), "") if new_map else ""
-        dotenv_updates["GITLAB_HOST_PATS"] = getattr(
-            settings, "gitlab_host_pats", ""
-        ) or ""
-        dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
-            settings.gitlab_allowed_hosts or ""
-        )
-        dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
+            if new_map:
+                settings.gitlab_pat = next(iter(new_map.values()))
+            elif clearing_hosts:
+                settings.gitlab_pat = ""
+        if not keep_legacy_pat:
+            dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+                settings, "gitlab_host_pats", ""
+            ) or ""
+            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+                settings.gitlab_allowed_hosts or ""
+            )
+            dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
     else:
         # Legacy single PAT + host list (still supported)
         if "gitlab_pat" in data and data["gitlab_pat"] is not None:
@@ -485,20 +492,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         logger.info(
             f"Agent compact/incomplete retries set to "
             f"{settings.agent_task_max_incomplete_retries} (next job uses this)"
-        )
-    if (
-        "opencode_serve_max_compact_continues" in data
-        and data["opencode_serve_max_compact_continues"] is not None
-    ):
-        settings.opencode_serve_max_compact_continues = int(
-            data["opencode_serve_max_compact_continues"]
-        )
-        runtime_persist["opencode_serve_max_compact_continues"] = (
-            settings.opencode_serve_max_compact_continues
-        )
-        logger.info(
-            f"Serve compact continues set to "
-            f"{settings.opencode_serve_max_compact_continues} (next job uses this)"
         )
     if "default_model" in data and data["default_model"] is not None:
         model = str(data["default_model"]).strip()
@@ -605,10 +598,8 @@ def _parse_session_log_name(name: str) -> Optional[tuple]:
 def _legacy_jobs_from_sessions(
     *,
     issue_key: Optional[str] = None,
-    covered_paths: set,
-    summaries: Dict[str, str],
+    summaries: Optional[Dict[str, str]] = None,
     limit: int = 200,
-    suppress_logs_after: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Deprecated: legacy session rows are no longer merged into the jobs list.
 

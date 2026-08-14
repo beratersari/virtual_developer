@@ -20,10 +20,7 @@ import pytest
 
 from src.config import settings
 from src.jira.client import JiraClient
-from src.opencode_serve import (
-    DEFAULT_MAX_COMPACT_CONTINUES,
-    ServeOrchestrator,
-)
+from src.opencode_serve import ServeOrchestrator
 from src.reporter.jira_reporter import JiraReporter
 from src.state.models import JiraAgentState, TaskStatus
 from tests.test_opencode_serve_e2e import FakeServeBackend, FakeServeClient
@@ -64,9 +61,8 @@ async def test_live_jira_twenty_compacts_not_posted_as_error():
     description = (
         "Automated Virtual Developer e2e (do not process).\n"
         "Verifies context compaction is resumed, not posted as an Error.\n"
-        f"Mode: e2e-compact\nRequired compact cycles: 20\n"
-        f"Budget: OPENCODE_SERVE_MAX_COMPACT_CONTINUES="
-        f"{DEFAULT_MAX_COMPACT_CONTINUES}\n"
+        "Mode: e2e-compact\nRequired compact cycles: 20\n"
+        "Compact wait has no continue cap.\n"
     )
     created = client.create_issue(
         project,

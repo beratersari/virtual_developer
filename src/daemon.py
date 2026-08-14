@@ -46,7 +46,7 @@ class JiraAgentDaemon:
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
 
-        # Disk PLANNING/EXECUTING after crash is not a live job — finalise first
+        # Disk PENDING/PLANNING/EXECUTING after crash is not a live job — finalise first
         try:
             n = self.processor.recover_orphaned_in_flight()
             if n:

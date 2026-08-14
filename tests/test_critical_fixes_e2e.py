@@ -118,7 +118,6 @@ async def test_e2e_wrapped_message_list_does_not_false_complete():
             compact_wait_seconds=0.35,
             compact_poll_seconds=0.05,
             compact_settle_seconds=0.08,
-            max_compact_continues=256,
         )
         result = await orch.run(prompt="long job", title="KAN-WRAP: compact")
     finally:
@@ -391,7 +390,6 @@ async def test_e2e_plan_workflow_rejects_foreign_markdown(
         s.agent_task_timeout_seconds = 30
         s.agent_task_max_retries = 0
         s.agent_task_max_incomplete_retries = 0
-        s.opencode_serve_max_compact_continues = 0
         await proc._start_planning_workflow(state)
 
     live = state_manager.get_state("KAN-2")

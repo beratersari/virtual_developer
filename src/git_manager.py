@@ -1266,9 +1266,6 @@ class GitManager:
         result = self._run_git(["status", "--porcelain"], check=False)
         return (result.stdout or "").strip()
 
-    def _working_tree_dirty(self) -> bool:
-        return bool(self._working_tree_status())
-
     def _dirty_paths_summary(self, porcelain: str, *, limit: int = 8) -> str:
         paths: list[str] = []
         for line in (porcelain or "").splitlines():

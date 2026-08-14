@@ -153,6 +153,21 @@ def test_post_incomplete_compaction_is_not_generic_error(state):
     assert "AI Agent — Error" not in body
 
 
+def test_post_unfinished_work_is_not_compaction(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] after unattended nudge still incomplete: open todos: 4 pending, 1 in_progress",
+        suggestion="not a compaction crash",
+        category="unfinished",
+    )
+    body = client.comments[-1]["body"]
+    assert "unfinished work" in body.lower()
+    assert "context compaction" not in body.lower()
+    assert "AI Agent — Error" not in body
+
+
 def test_post_error_not_timed_out_not_exhausted(state):
     state.timed_out = False
     state.retry_count = 0

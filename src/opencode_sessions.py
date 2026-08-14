@@ -1138,6 +1138,14 @@ def compact_related_reasons(reasons: Optional[List[Any]]) -> bool:
     return False
 
 
+def reasons_are_open_todos_only(reasons: Optional[List[Any]]) -> bool:
+    """True when the only incompleteness signal is leftover todos."""
+    items = [r for r in (reasons or []) if str(r).strip()]
+    if not items:
+        return False
+    return all("open todos" in str(r).lower() for r in items)
+
+
 def strip_compact_reasons(result: Dict[str, Any]) -> Dict[str, Any]:
     """Drop transient compact *log* flags after we waited for auto-compact.
 

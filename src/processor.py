@@ -19,7 +19,7 @@ from src.issue_git_spec import (
     parse_issue_mode,
     require_issue_git_spec,
 )
-from src.jira.client import JiraClient, create_jira_client
+from src.jira.client import create_jira_client
 from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
@@ -39,12 +39,6 @@ def _plain_int(val: Any, default: int = 0) -> int:
         return int(val)
     except (TypeError, ValueError):
         return int(default)
-
-
-def _plain_str(val: Any, default: str = "") -> str:
-    if isinstance(val, str) and val and not val.startswith("<MagicMock"):
-        return val
-    return default
 
 
 class _JobSlotLimiter:
@@ -159,6 +153,13 @@ class JobProcessor:
     
     # Statuses where an agent is actively running — never restart these from updates
     IN_FLIGHT_STATUSES = {
+        TaskStatus.PLANNING,
+        TaskStatus.EXECUTING,
+    }
+    # Cold-start leftovers with no child process. PENDING is the accept/ack
+    # window while the daemon is alive; after a crash it is orphaned too.
+    ORPHAN_RECOVER_STATUSES = {
+        TaskStatus.PENDING,
         TaskStatus.PLANNING,
         TaskStatus.EXECUTING,
     }
@@ -410,6 +411,15 @@ class JobProcessor:
         reasons = list(data.get("incomplete_reasons") or [])
         asked = bool(data.get("assistant_asked_question")) or any(
             "clarifying question" in str(r).lower() for r in reasons
+        ) or "clarifying question" in stderr.lower()
+        blob = " ".join([stderr] + [str(r) for r in reasons]).lower()
+        from src.opencode_sessions import (
+            compact_related_reasons,
+            reasons_are_open_todos_only,
+        )
+
+        compactish = compact_related_reasons(reasons) or (
+            "compact" in blob and "clarifying question" not in blob
         )
         if incomplete and asked:
             self._fail_issue(
@@ -426,18 +436,38 @@ class JobProcessor:
                 category="question",
             )
             return
-        if incomplete:
+        if incomplete and compactish:
             self._fail_issue(
                 issue_key,
                 stderr,
                 suggestion=suggestion
                 or (
                     "OpenCode stopped after context compaction (not a crash). "
-                    "The same session can be resumed. Raise "
-                    "OPENCODE_SERVE_MAX_COMPACT_CONTINUES or "
-                    "AGENT_TASK_MAX_INCOMPLETE_RETRIES, then re-queue from To Do."
+                    "The same session can be resumed. Compact wait is unbounded "
+                    "except by AGENT_TASK_TIMEOUT_SECONDS; raise that timeout "
+                    "if the job is still compacting when the wall-clock budget "
+                    "ends, then re-queue from To Do."
                 ),
                 category="incomplete",
+            )
+            return
+        if incomplete:
+            todos_only = reasons_are_open_todos_only(reasons) or (
+                "open todos" in blob and "compact" not in blob
+            )
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "After one unattended nudge the session still had "
+                    "unfinished work"
+                    + (" (open todos)" if todos_only else "")
+                    + ". This is not a compaction crash. Put remaining "
+                    "decisions in the issue description if the model asked "
+                    "something, then move the issue back to To Do to re-queue."
+                ),
+                category="unfinished",
             )
             return
         self._fail_issue(
@@ -526,13 +556,6 @@ class JobProcessor:
             timed_out=False,
             completed_at=None,
             metadata=meta_patch,
-        )
-
-    def _clear_requeue_flag(self, issue_key: str) -> None:
-        """Clear poller re-queue eligibility when work actually starts."""
-        self.state_manager.update_state(
-            issue_key,
-            metadata={"requeue_eligible": False},
         )
 
     def _runner_for(self, issue_key: str) -> Optional[AgentRunner]:
@@ -900,13 +923,6 @@ class JobProcessor:
             },
         )
         logger.info(f"{issue_key} OpenCode session: {session_id}")
-
-    def _repo_and_work_branch(
-        self, issue_key: str, git: Any = None
-    ) -> tuple[str, str]:
-        """Best-effort (repository_url, work_branch) — tests / logging."""
-        repo, branch, _tgt = self._session_bind_key(issue_key, git)
-        return repo, branch
 
     def _session_bind_key(
         self, issue_key: str, git: Any = None
@@ -1314,11 +1330,7 @@ class JobProcessor:
         max_incomplete = _plain_int(
             getattr(live, "agent_task_max_incomplete_retries", None), 0
         )
-        max_compacts = _plain_int(
-            getattr(live, "opencode_serve_max_compact_continues", None), 0
-        )
         archive["max_incomplete_retries"] = max_incomplete
-        archive["max_compact_continues"] = max_compacts
         claimed = self.state_manager.update_state_if(
             state.issue_key,
             reject_statuses=self.TERMINAL_STATUSES,
@@ -1341,12 +1353,11 @@ class JobProcessor:
         stuck_s = compute_stuck_limit_seconds(
             timeout_s,
             max_retries,
-            extra_attempts=max(max_incomplete, max_compacts),
+            extra_attempts=max_incomplete,
         )
         logger.info(
             f"{state.issue_key} job budget: timeout={timeout_s}s "
             f"max_retries={max_retries} incomplete={max_incomplete} "
-            f"compacts={max_compacts} "
             f"(stuck limit ≈ {int(stuck_s)}s)"
         )
         state.current_task_id = task.task_id
@@ -1848,15 +1859,15 @@ class JobProcessor:
             return False
 
     def recover_orphaned_in_flight(self) -> int:
-        """On cold start: disk PLANNING/EXECUTING cannot be live — finalise them.
+        """On cold start: disk PENDING/PLANNING/EXECUTING cannot be live.
 
         In-memory cache is empty after a process restart, so any leftover
-        in-flight status is orphaned (no child process). Mark ERROR so poller
-        can re-queue from To Do, and Jira users are not left with a silent hang.
+        accept-window or in-flight status is orphaned (no child process).
+        Mark ERROR so poller can re-queue from To Do.
         """
         recovered = 0
         for state in self.state_manager.get_active_issues():
-            if state.status not in self.IN_FLIGHT_STATUSES:
+            if state.status not in self.ORPHAN_RECOVER_STATUSES:
                 continue
             logger.warning(
                 f"Orphaned in-flight state for {state.issue_key} "
@@ -4147,8 +4158,9 @@ class JobProcessor:
 
         Returns True when the branch is on the remote and delivery was
         recorded (MR is best-effort after a successful remote tip).
-        Returns False on missing git manager, protected branch, or when
-        neither push nor remote-tip verification succeeds.
+        Returns False on missing git manager, protected branch (unless
+        ``existing_mr_url`` — GitLab note jobs push the MR source as-is),
+        or when neither push nor remote-tip verification succeeds.
 
         Checks cancel/watchdog abort before expensive git work and before
         recording delivery so cancel after agent success does not stamp
@@ -4202,13 +4214,19 @@ class JobProcessor:
         if not branch_name:
             branch_name = await asyncio.to_thread(git.get_current_branch)
 
-        # Refuse to push protected bases / MR target / release/*
+        # Refuse to push protected bases / MR target / release/* unless this
+        # is an existing-MR update (GitLab note intake keeps the MR source,
+        # including develop→main and release/*).
         target = (getattr(git, "target_branch", None) or "").strip().lower()
         protected = {"main", "master", "develop", "trunk", "dev"}
         if target:
             protected.add(target)
         bl = (branch_name or "").lower()
-        if not branch_name or bl in protected or bl.startswith("release/"):
+        updating_existing_mr = bool((existing_mr_url or "").strip())
+        if not branch_name or (
+            not updating_existing_mr
+            and (bl in protected or bl.startswith("release/"))
+        ):
             msg = (
                 f"Refusing to push protected branch '{branch_name}'. "
                 f"Agent must work on a feature/work branch "
@@ -4562,7 +4580,10 @@ class JobProcessor:
         logger.info(f"Starting Oracle consultation for {state.issue_key}")
         success: Optional[bool] = False
         try:
-            runner = self._ensure_agent_runner(state.issue_key)
+            # Clone/init must not block the daemon event loop (cancel/watchdog).
+            runner = await asyncio.to_thread(
+                self._ensure_agent_runner, state.issue_key
+            )
 
             prompt = PromptBuilder.build_plan_prompt(
                 issue_key=state.issue_key,

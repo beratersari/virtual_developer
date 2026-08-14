@@ -310,7 +310,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, opencode_serve_max_compact_continues, project_repositories (saved git remotes for the New-issue picker). Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -582,7 +582,7 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
 2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
-3. **CI assert payload layout** (fast): `install.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. Also publish the standalone **`dashboard-web-dist`** artifact (Dashboard SPA workflow + Windows Dist extra upload) so the current UI can be dropped onto `web/dist` without the 300MB zip.
+3. **CI assert payload layout** (fast): `install.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
 4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).

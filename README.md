@@ -458,7 +458,7 @@ Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents wor
   sessions/       # agent stdout/stderr session logs (not auto-deleted by temp cleanup)
 .temp/            # per-issue git clones (cleanup policy from env)
 .sisyphus/plans/  # plan markdown when using local plans dir
-logs/             # optional log file (LOG_FILE)
+logs/             # local log directory (stdout/stderr; not configured via env)
 ```
 
 ---

@@ -240,3 +240,53 @@ def test_board_issues_pagination():
             issues = client.get_board_issues("1", max_results=100)
             assert len(issues) == 150
             assert http.get.call_count == 2
+
+
+def test_board_issues_pagination_follows_total_when_agile_caps_page():
+    """Kanban intake must keep paging when Agile returns 50 of a requested 100."""
+    from src.jira.client import JiraClient
+
+    with patch("src.jira.client.httpx.Client") as C:
+        http = MagicMock()
+        C.return_value = http
+        with patch("src.jira.client.settings") as s:
+            s.jira_host = "https://jira.example.com"
+            s.jira_api_token = "t"
+            s.jira_email = ""
+            client = JiraClient()
+            client.client = http
+
+            def resp(*_a, **k):
+                start = k.get("params", {}).get("startAt", 0)
+                m = MagicMock()
+                m.status_code = 200
+                m.raise_for_status = MagicMock()
+                if start == 0:
+                    m.json.return_value = {
+                        "total": 120,
+                        "maxResults": 50,
+                        "startAt": 0,
+                        "issues": [{"key": f"I-{i}"} for i in range(50)],
+                    }
+                elif start == 50:
+                    m.json.return_value = {
+                        "total": 120,
+                        "maxResults": 50,
+                        "startAt": 50,
+                        "issues": [{"key": f"I-{i}"} for i in range(50, 100)],
+                    }
+                else:
+                    m.json.return_value = {
+                        "total": 120,
+                        "maxResults": 50,
+                        "startAt": 100,
+                        "issues": [{"key": f"I-{i}"} for i in range(100, 120)],
+                    }
+                return m
+
+            http.get.side_effect = resp
+            issues = client.get_board_issues("1", max_results=100)
+            keys = [i["key"] for i in issues]
+            assert len(issues) == 120
+            assert keys[0] == "I-0" and keys[-1] == "I-119"
+            assert http.get.call_count == 3

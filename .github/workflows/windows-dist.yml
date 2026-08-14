@@ -141,12 +141,15 @@ jobs:
           foreach ($needle in @(
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",
-              "opencode_serve_max_compact_continues"
+              "Compact wait is unbounded"
             )) {
             if ($jsText -notmatch [regex]::Escape($needle)) {
               throw "Stale dashboard SPA: '$needle' not in $($js[0].Name)"
             }
             Write-Host "OK SPA contains $needle"
+          }
+          if ($jsText -match [regex]::Escape("opencode_serve_max_compact_continues")) {
+            throw "Stale dashboard SPA: removed compact-continue setting still in $($js[0].Name)"
           }
           Write-Host "OK SPA bundle $($js[0].Name) + $($css[0].Name)"
           Write-Host "Payload layout OK (no full install smoke)"
@@ -171,14 +174,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload dashboard SPA (web/dist only)
-        uses: actions/upload-artifact@v4
-        with:
-          name: dashboard-web-dist
-          path: dist/stage/${{ steps.meta.outputs.dist_name }}/web/dist/
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Summary
         shell: pwsh
         run: |
@@ -197,10 +192,9 @@ jobs:
           | oh-my-openagent | ``${{ steps.versions.outputs.OH_MY_OPENCODE_VERSION }}`` |
           | glab | ``${{ steps.versions.outputs.GLAB_VERSION }}`` |
 
-          Download the **Actions artifact** named after the dist, extract once, run ``install.bat``,
-          then start the product with ``start.bat`` (backend + ops dashboard on http://127.0.0.1:8080).
-          Dashboard UI only: download the **dashboard-web-dist** artifact (``web/dist``) and copy it
-          over ``web\\dist`` on an existing install, then restart the backend.
+          Download the **Actions artifact** named after the dist (includes prebuilt ``web/dist``),
+          extract once, run ``install.bat``, then start with ``start.bat``
+          (backend + ops dashboard on http://127.0.0.1:8080).
           Optional TUI: ``start-opencode.bat`` (never from your user home folder).
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 

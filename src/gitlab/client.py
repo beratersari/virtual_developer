@@ -125,7 +125,3 @@ class GitlabClient:
         except Exception as e:
             logger.error(f"GitLab MR note error: {e}")
             return None
-
-
-def gitlab_client_for_host(host: str) -> GitlabClient:
-    return GitlabClient(host=host)
