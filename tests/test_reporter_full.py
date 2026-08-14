@@ -168,6 +168,22 @@ def test_post_unfinished_work_is_not_compaction(state):
     assert "AI Agent — Error" not in body
 
 
+def test_post_compact_loop_is_not_question_or_timeout(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] auto-compact loop (8 consecutive compact-only cycles)",
+        suggestion="split the ticket",
+        category="compact_loop",
+    )
+    body = client.comments[-1]["body"]
+    assert "auto-compact loop" in body.lower()
+    assert "Continue was not sent" in body or "continue was not sent" in body.lower()
+    assert "Clarifying question" not in body
+    assert "AI Agent — Error" not in body
+
+
 def test_post_error_not_timed_out_not_exhausted(state):
     state.timed_out = False
     state.retry_count = 0

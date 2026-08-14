@@ -324,6 +324,15 @@ _Completed by the AI agent. Please review and verify before merging or closing._
                 "possible; the session is still incomplete. This is *not* a "
                 "crash."
             )
+        elif kind in {"compact_loop", "autocompact_loop"}:
+            heading = "AI Agent — Incomplete session (auto-compact loop)"
+            lead = (
+                "The OpenCode session kept auto-compacting with no new work "
+                "('Session auto-compacted' repeating). This is *not* a crash "
+                "and *not* a clarifying question. Continue was not sent — it "
+                "races compact and grows context. Raising the job timeout "
+                "will not break the loop."
+            )
         elif kind == "incomplete":
             heading = "AI Agent — Incomplete session (context compaction)"
             lead = (

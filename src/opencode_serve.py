@@ -24,6 +24,11 @@ Agent jobs use ``opencode serve``. The control loop here:
    ``still_asking`` first and marked ERROR:
    ``After one nudge still incomplete: open todos…; assistant asked a
    clarifying question``. Do not restore that order (AGENTS.md §2).
+8. Compact **loop** (many ``Session auto-compacted`` with no work turn):
+   abort the in-flight compact turn, wait until the **same** session is
+   idle, then POST one Continue. Do **not** open a new session (history
+   lives here). Do **not** Continue *while* compact is still running.
+   Fail only if the same session loops again after that Continue.
 
 TLS: INTENTIONAL — all clients use ``verify=False`` (on-prem / intercept;
 do not enable verification until a custom-CA path exists).
@@ -58,6 +63,61 @@ def assessment_still_asking(assessment: Optional[Dict[str, Any]]) -> bool:
     return bool(assessment.get("assistant_asked_question")) or any(
         "clarifying question" in str(r).lower() for r in reasons
     )
+
+
+def assessment_is_compact_only(assessment: Optional[Dict[str, Any]]) -> bool:
+    """True when the last turn is compact recap / compact-then-stop, not work.
+
+    A live clarifying question (non-summary) is *not* compact-only — that
+    path leaves wait for the unattended nudge. A summary that quotes
+    "Shall I…?" is still compact-only.
+    """
+    if not isinstance(assessment, dict):
+        return False
+    if assessment_still_asking(assessment) and not assessment.get("last_is_summary"):
+        return False
+    if assessment.get("last_is_summary"):
+        return True
+    reasons = list(assessment.get("reasons") or [])
+    return compact_related_reasons(reasons) and not assessment_still_asking(
+        assessment
+    )
+
+
+def assessment_is_real_work_turn(assessment: Optional[Dict[str, Any]]) -> bool:
+    """True when the last assistant turn did non-summary work (reset loop)."""
+    if not isinstance(assessment, dict):
+        return False
+    if assessment.get("last_is_summary"):
+        return False
+    if assessment_still_asking(assessment):
+        return False
+    finish = str(assessment.get("last_finish") or "").strip().lower()
+    if finish == "tool-calls":
+        return True
+    if finish == "stop" and not assessment.get("premature"):
+        return True
+    if finish == "stop" and not compact_related_reasons(
+        list(assessment.get("reasons") or [])
+    ):
+        return True
+    return False
+
+
+def next_compact_loop_streak(
+    *,
+    prev_keys: set,
+    next_keys: set,
+    assessment: Optional[Dict[str, Any]],
+    consecutive: int,
+) -> int:
+    """Update consecutive compact-only count. Reset on a real work turn."""
+    if assessment_is_real_work_turn(assessment):
+        return 0
+    new_markers = set(next_keys or ()) - set(prev_keys or ())
+    if new_markers and assessment_is_compact_only(assessment):
+        return max(0, int(consecutive or 0)) + 1
+    return max(0, int(consecutive or 0))
 
 
 def should_wait_after_nudge(assessment: Optional[Dict[str, Any]]) -> bool:
@@ -135,6 +195,17 @@ DEFAULT_CONTINUE_PROMPT = (
     "and commit steps as required."
 )
 
+# After a compact *loop*: abort the spinning turn, then Continue on the
+# **same** session once idle. Never Continue *during* compact (races the
+# loop). Never create a new session (operators need this chat).
+DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT = (
+    "Auto-compact looped and was aborted. Stay in this session. "
+    "Do not start another compaction cycle. Finish remaining work from "
+    "the current files and conversation. Do not restart from scratch. "
+    "Do not ask clarifying questions. Do not git push or open a merge "
+    "request — the orchestrator delivers the branch after you stop."
+)
+
 # Incomplete (open todos) resume — short nudge, not the original BUILD kit.
 DEFAULT_FINISH_TODOS_PROMPT = (
     "Finish remaining todos and complete the original task in this session. "
@@ -162,6 +233,12 @@ DEFAULT_COMPACT_POLL_SECONDS = 2.0
 # After the session goes idle, wait this long for auto-resume to start.
 # Compact-then-stop often idles briefly before OpenCode replays the last turn.
 DEFAULT_COMPACT_SETTLE_SECONDS = 2.0
+
+# Consecutive compact-only cycles (new compact marker + last turn still a
+# summary, no real work) before we leave wait. 1–3 is a healthy long job;
+# 8 matches the production "Session auto-compacted" tight loop (~2 min).
+# INTENTIONAL: do **not** break a loop with Continue / Finish-todos.
+DEFAULT_COMPACT_LOOP_CYCLES = 8
 
 # OpenCode /session/{id}/message?limit= used to be 80 — after ~15–20 compact
 # cycles the sliding window dropped old markers and mis-counted "new this turn".
@@ -686,10 +763,13 @@ class ServeOrchestrator:
     compact_wait_seconds: float = DEFAULT_COMPACT_WAIT_SECONDS
     compact_poll_seconds: float = DEFAULT_COMPACT_POLL_SECONDS
     compact_settle_seconds: float = DEFAULT_COMPACT_SETTLE_SECONDS
+    compact_loop_cycles: int = DEFAULT_COMPACT_LOOP_CYCLES
     # Optional: force summarize after each turn (tests / stress). Production: False.
     force_summarize_after_turn: bool = False
     force_summarize_provider: str = "opencode"
     force_summarize_model: str = "deepseek-v4-flash-free"
+    # At most one same-session Continue after a compact-loop abort.
+    compact_loop_restarts: int = 1
 
     def _compact_wait_budget(self) -> float:
         explicit = float(self.compact_wait_seconds or 0)
@@ -724,6 +804,9 @@ class ServeOrchestrator:
         last_busy = False
         idle_since: Optional[float] = None
         last_reasons: List[Any] = []
+        seen_compact_keys: set = set()
+        compact_only_streak = 0
+        loop_limit = max(2, int(self.compact_loop_cycles or DEFAULT_COMPACT_LOOP_CYCLES))
         while time.time() < deadline:
             if _aborted():
                 return {"aborted": True, "polls": polls}
@@ -755,11 +838,48 @@ class ServeOrchestrator:
                 continue
             # Idle long enough to snapshot. Do **not** treat this as terminal:
             # auto-resume often starts a few seconds after compact-then-stop.
-            _messages, assessment, compact_total = await self._snapshot_assess(
+            raw_messages, assessment, compact_total = await self._snapshot_assess(
                 sid, compact_total=compact_total, output_text="", _emit=_emit
             )
             strip_compact_reasons(assessment)
             last_reasons = list(assessment.get("reasons") or [])
+            next_keys = compaction_marker_keys(raw_messages or [])
+            compact_only_streak = next_compact_loop_streak(
+                prev_keys=seen_compact_keys,
+                next_keys=next_keys,
+                assessment=assessment,
+                consecutive=compact_only_streak,
+            )
+            seen_compact_keys |= next_keys
+            if compact_only_streak >= loop_limit:
+                reason = (
+                    f"auto-compact loop ({compact_only_streak} consecutive "
+                    "compact-only cycles)"
+                )
+                last_reasons = list(last_reasons) + [reason]
+                assessment["reasons"] = last_reasons
+                assessment["complete"] = False
+                assessment["premature"] = True
+                assessment["compact_loop"] = True
+                _emit(
+                    "stderr",
+                    f"[serve] auto-compact loop detected after {compact_only_streak} "
+                    "compact-only cycles — leaving wait (no Continue)",
+                )
+                try:
+                    await self.client.abort(sid)
+                except Exception as e:
+                    _emit("stderr", f"[serve] abort after compact loop failed: {e}")
+                return {
+                    "settled": True,
+                    "complete": False,
+                    "compact_loop": True,
+                    "polls": polls,
+                    "busy": False,
+                    "assessment": assessment,
+                    "compact_total": compact_total,
+                    "reasons": last_reasons,
+                }
             if not assessment.get("premature"):
                 _emit(
                     "stdout",
@@ -1035,6 +1155,37 @@ class ServeOrchestrator:
                 turns=turns,
                 timed_out=bool(wait_info.get("timeout")),
             )
+        if wait_info.get("compact_loop"):
+            assessment = wait_info.get("assessment")
+            reasons = list(
+                (assessment or {}).get("reasons")
+                if isinstance(assessment, dict)
+                else []
+            ) or list(wait_info.get("reasons") or [])
+            if not any("compact loop" in str(r).lower() for r in reasons):
+                reasons = list(reasons) + ["auto-compact loop"]
+            note = (
+                "[INCOMPLETE] auto-compact loop: OpenCode kept compacting "
+                "with no new work. Continue was not sent (it races compact "
+                "and grows context). "
+                + "; ".join(map(str, reasons))
+            )
+            _emit("stderr", note)
+            return ServeTurnResult(
+                session_id=sid,
+                returncode=2,
+                stdout="\n".join(lines),
+                stderr=note,
+                incomplete=True,
+                incomplete_reasons=reasons,
+                compact_events=compact_total,
+                continue_count=continue_count,
+                turns=turns,
+                session_completeness=assessment
+                if isinstance(assessment, dict)
+                else None,
+                progress=50,
+            )
         assessment = wait_info.get("assessment")
         if not isinstance(assessment, dict) or wait_info.get("timeout"):
             _messages, assessment, compact_total = await self._snapshot_assess(
@@ -1268,10 +1419,37 @@ class ServeOrchestrator:
 
         current_prompt = prompt
         # One task prompt. Compact is waited out — we do not POST Continue
-        # for auto-compact (that looked like the user typed it and broke the loop).
-        max_turns = 1
+        # *while* auto-compact is running. A compact *loop* aborts that turn,
+        # then Continues the **same** session once idle.
+        compact_loop_used = 0
+        max_loop_restarts = max(0, int(self.compact_loop_restarts or 0))
+        turn_idx = 0
 
-        for turn_idx in range(max_turns):
+        async def _try_restart_after_loop(wait_info: Dict[str, Any]) -> bool:
+            nonlocal current_prompt, compact_loop_used, continue_count, turn_idx
+            if not wait_info.get("compact_loop"):
+                return False
+            if compact_loop_used >= max_loop_restarts:
+                return False
+            try:
+                await self.client.abort(sid)
+            except Exception as e:
+                _emit("stderr", f"[serve] abort after compact loop failed: {e}")
+            await self._ensure_session_idle(
+                sid, _emit=_emit, _aborted=_aborted
+            )
+            _emit(
+                "stdout",
+                f"[serve] compact loop — aborted in-flight turn; "
+                f"continuing same session {sid}",
+            )
+            current_prompt = DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT
+            compact_loop_used += 1
+            continue_count += 1
+            turn_idx += 1
+            return True
+
+        while True:
             if _aborted():
                 await self.client.abort(sid)
                 return ServeTurnResult(
@@ -1286,7 +1464,15 @@ class ServeOrchestrator:
                     turns=turns,
                 )
 
-            label = "initial" if turn_idx == 0 else f"continue#{turn_idx}"
+            label = (
+                "initial"
+                if turn_idx == 0
+                else (
+                    "compact_loop_restart"
+                    if compact_loop_used
+                    else f"continue#{turn_idx}"
+                )
+            )
             # Markers already in the session (resume / prior turn) must not count
             # as "new this turn" or every retry after compact looks premature.
             try:
@@ -1347,6 +1533,8 @@ class ServeOrchestrator:
                             _aborted=_aborted,
                             compact_total=compact_total,
                         )
+                        if await _try_restart_after_loop(wait_info):
+                            continue
                         return await self._turn_after_compact_wait(
                             sid,
                             wait_info=wait_info,
@@ -1391,6 +1579,8 @@ class ServeOrchestrator:
                     _aborted=_aborted,
                     compact_total=compact_total,
                 )
+                if await _try_restart_after_loop(wait_info):
+                    continue
                 return await self._turn_after_compact_wait(
                     sid,
                     wait_info=wait_info,
@@ -1534,6 +1724,18 @@ class ServeOrchestrator:
                     if isinstance(post, dict)
                     else []
                 )
+                if await _try_restart_after_loop(wait_info):
+                    continue
+                if wait_info.get("compact_loop"):
+                    return await self._turn_after_compact_wait(
+                        sid,
+                        wait_info=wait_info,
+                        compact_total=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        lines=lines,
+                        _emit=_emit,
+                    )
                 post_asked = isinstance(post, dict) and (
                     bool(post.get("assistant_asked_question"))
                     or any(
@@ -1629,6 +1831,18 @@ class ServeOrchestrator:
                     compact_total = int(
                         wait_info.get("compact_total") or compact_total
                     )
+                    if await _try_restart_after_loop(wait_info):
+                        continue
+                    if wait_info.get("compact_loop"):
+                        return await self._turn_after_compact_wait(
+                            sid,
+                            wait_info=wait_info,
+                            compact_total=compact_total,
+                            continue_count=continue_count,
+                            turns=turns,
+                            lines=lines,
+                            _emit=_emit,
+                        )
                     if wait_info.get("complete"):
                         assessment = (
                             wait_info.get("assessment")

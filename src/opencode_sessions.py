@@ -1120,6 +1120,8 @@ _COMPACT_REASON_MARKERS = (
     "compaction summary",
     "compaction user part",
     "compaction near end",
+    "auto-compact loop",
+    "compact-only cycles",
     "compaction occurred this turn",
     "cli output indicates compaction",
 )
