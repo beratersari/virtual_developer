@@ -143,6 +143,11 @@ def should_wait_after_nudge(assessment: Optional[Dict[str, Any]]) -> bool:
         return True
     if assessment_still_asking(assessment):
         return False
+    # Long jobs often take the nudge, start working, then go idle with
+    # leftover todos (in_progress + pending). That is mid-work, not a
+    # hard fail — wait for auto-resume. Do not terminate here.
+    if reasons_are_open_todos_only(reasons):
+        return True
     finish = str(assessment.get("last_finish") or "").strip().lower()
     return finish in _UNFINISHED_FINISH
 
@@ -157,6 +162,88 @@ def coerce_json_list(data: Any) -> List[Dict[str, Any]]:
             if isinstance(inner, list):
                 return [x for x in inner if isinstance(x, dict)]
     return []
+
+
+def known_model_ids_from_payload(data: Any) -> List[str]:
+    """Extract ``provider/model`` ids from GET /config/providers or /provider."""
+    out: List[str] = []
+
+    def _add(provider: str, model: str) -> None:
+        prov = (provider or "").strip()
+        mid = (model or "").strip()
+        if not mid:
+            return
+        if "/" in mid and not prov:
+            out.append(mid)
+            return
+        if prov:
+            out.append(f"{prov}/{mid}")
+        else:
+            out.append(mid)
+
+    def _walk_provider(pid: str, body: Any) -> None:
+        if not isinstance(body, dict):
+            return
+        models = body.get("models")
+        if isinstance(models, dict):
+            for mid in models:
+                if isinstance(mid, str):
+                    _add(pid, mid)
+        elif isinstance(models, list):
+            for item in models:
+                if isinstance(item, str):
+                    _add(pid, item)
+                elif isinstance(item, dict):
+                    _add(pid, str(item.get("id") or item.get("modelID") or ""))
+
+    if isinstance(data, list):
+        for row in data:
+            if isinstance(row, dict):
+                pid = str(row.get("id") or row.get("providerID") or "")
+                _walk_provider(pid, row)
+        return out
+
+    if not isinstance(data, dict):
+        return out
+
+    providers = data.get("providers")
+    if providers is None:
+        providers = data.get("all")
+    if isinstance(providers, dict):
+        for pid, body in providers.items():
+            _walk_provider(str(pid), body)
+    elif isinstance(providers, list):
+        for row in providers:
+            if not isinstance(row, dict):
+                continue
+            pid = str(row.get("id") or row.get("providerID") or "")
+            _walk_provider(pid, row)
+
+    # Some payloads only list a default map {provider: model}
+    default = data.get("default")
+    if isinstance(default, dict):
+        for pid, mid in default.items():
+            if isinstance(mid, str) and mid.strip():
+                _add(str(pid), mid)
+    return out
+
+
+def model_is_known(requested: str, known: Sequence[str]) -> bool:
+    """True when ``requested`` is in the serve inventory (or inventory is empty)."""
+    req = (requested or "").strip()
+    if not req:
+        return True
+    bag = {(k or "").strip() for k in known if (k or "").strip()}
+    if not bag:
+        return True
+    if req in bag:
+        return True
+    tail = req.split("/", 1)[-1]
+    tails = {k.split("/", 1)[-1] for k in bag}
+    if "/" not in req:
+        return tail in tails
+    # ``opencode/foo`` matches inventory row ``foo`` (no provider prefix)
+    return tail in bag
 
 
 def is_serve_timeout(exc: BaseException) -> bool:
@@ -376,6 +463,40 @@ class OpenCodeServeClient:
             return []
         r.raise_for_status()
         return coerce_json_list(r.json())
+
+    async def list_known_models(self) -> List[str]:
+        """Model ids OpenCode will accept (``provider/model``).
+
+        Live 1.18.x returns a generic ``UnknownError`` 500 when the requested
+        model was rotated off Zen (e.g. ``opencode/deepseek-v4-flash-free``).
+        Inventory comes from ``GET /config/providers`` first (connected only),
+        then ``GET /provider``.
+        """
+        ids: List[str] = []
+        for path in ("/config/providers", "/provider"):
+            try:
+                r = await self._client.get(path, headers=self._headers())
+            except Exception:
+                continue
+            if r.status_code == 404:
+                continue
+            if r.status_code >= 400:
+                continue
+            try:
+                ids.extend(known_model_ids_from_payload(r.json()))
+            except Exception:
+                continue
+            if ids:
+                break
+        # Unique, stable order
+        seen = set()
+        out: List[str] = []
+        for mid in ids:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            out.append(mid)
+        return out
 
     async def send_message(
         self,
@@ -636,17 +757,12 @@ def explain_message_http_error(
             "OpenCode could not resolve the workspace path "
             "(x-opencode-directory). Check temp clone still exists."
         )
-    if agent and not hints:
-        hints.append(
-            f"If agent {agent!r} is not registered on this serve "
-            "(oh-my-openagent missing), OpenCode returns UnknownError 500. "
-            "Check GET /agent and plugin install."
-        )
     if not hints and isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500:
         hints.append(
-            "Common causes of serve 500 on a *new* session: missing workdir, "
-            "unknown agent name, or unknown model. Check opencode serve logs "
-            "for the error ref above."
+            f"Serve returned a generic 500 (agent={agent!r} model={model!r}). "
+            "Common causes: unknown/rotated model (check GET /config/providers), "
+            "missing workdir, or unregistered agent. OpenCode logs the real "
+            "error next to the ref above (often ProviderModelNotFoundError)."
         )
     if hints:
         return base + " | " + " ".join(hints)
@@ -1417,6 +1533,38 @@ class ServeOrchestrator:
             except Exception as e:
                 _emit("stdout", f"[serve] agent list check skipped: {e}")
 
+        # Soft-check model is registered (Zen rotates free ids → UnknownError 500)
+        if model:
+            try:
+                known_models = await self.client.list_known_models()
+                if known_models and not model_is_known(model, known_models):
+                    sample = ", ".join(known_models[:12])
+                    more = (
+                        f" (+{len(known_models) - 12} more)"
+                        if len(known_models) > 12
+                        else ""
+                    )
+                    note = (
+                        f"[serve] model {model!r} is not registered on this "
+                        f"OpenCode serve. Available (sample): {sample}{more}. "
+                        "Set DEFAULT_MODEL / dashboard model to a "
+                        "provider/model OpenCode has."
+                    )
+                    _emit("stderr", note)
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=1,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=False,
+                        incomplete_reasons=[f"unknown model: {model}"],
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                    )
+            except Exception as e:
+                _emit("stdout", f"[serve] model list check skipped: {e}")
+
         current_prompt = prompt
         # One task prompt. Compact is waited out — we do not POST Continue
         # *while* auto-compact is running. A compact *loop* aborts that turn,
@@ -1900,11 +2048,46 @@ class ServeOrchestrator:
                         "(unattended; no human reply path). After one nudge "
                         f"still incomplete: {'; '.join(map(str, reasons))}"
                     )
-                else:
-                    note = (
-                        "[INCOMPLETE] after unattended nudge still incomplete: "
-                        f"{'; '.join(map(str, reasons))}"
+                    _emit("stderr", note)
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=2,
+                        stdout="\n".join(lines),
+                        stderr=note,
+                        incomplete=True,
+                        incomplete_reasons=list(reasons),
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=50,
                     )
+                if reasons_are_open_todos_only(reasons):
+                    # After the one nudge the last turn is not a live question.
+                    # Leftover todos are todo-API lag or remaining work the
+                    # processor still gates via plan file / git delivery.
+                    # Do not kill a long job that just resumed.
+                    _emit(
+                        "stdout",
+                        "[serve] post-nudge: leftover open todos only — "
+                        "accepting complete (processor gates delivery)",
+                    )
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=0,
+                        stdout="\n".join(lines),
+                        stderr="",
+                        incomplete=False,
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=100,
+                    )
+                note = (
+                    "[INCOMPLETE] after unattended nudge still incomplete: "
+                    f"{'; '.join(map(str, reasons))}"
+                )
                 _emit("stderr", note)
                 return ServeTurnResult(
                     session_id=sid,

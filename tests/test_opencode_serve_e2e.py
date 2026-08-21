@@ -24,8 +24,11 @@ from src.opencode_serve import (
     assess_serve_turn,
     compaction_marker_keys,
     count_compaction_signals,
+    explain_message_http_error,
     format_serve_error,
     is_serve_timeout,
+    known_model_ids_from_payload,
+    model_is_known,
     next_compact_loop_streak,
 )
 from src.opencode_sessions import assess_session_completeness
@@ -266,6 +269,9 @@ class FakeServeClient(OpenCodeServeClient):
 
     async def summarize(self, session_id, **kw):
         return await self._backend.summarize(session_id, **kw)
+
+    async def list_known_models(self):
+        return list(getattr(self, "known_models", []) or [])
 
     async def aclose(self):
         return await self._backend.aclose()
@@ -969,6 +975,79 @@ def test_session_is_busy_accepts_alternate_shapes():
     assert not session_is_busy({}, sid)
 
 
+def test_known_model_ids_from_config_providers_payload():
+    ids = known_model_ids_from_payload(
+        {
+            "providers": [
+                {
+                    "id": "opencode",
+                    "models": {
+                        "big-pickle": {"name": "Big Pickle"},
+                        "hy3-free": {},
+                    },
+                }
+            ],
+            "default": {"opencode": "big-pickle"},
+        }
+    )
+    assert "opencode/big-pickle" in ids
+    assert "opencode/hy3-free" in ids
+
+
+def test_model_is_known_matches_provider_and_bare_id():
+    known = ["opencode/big-pickle", "opencode/hy3-free"]
+    assert model_is_known("opencode/big-pickle", known) is True
+    assert model_is_known("hy3-free", known) is True
+    assert model_is_known("opencode/deepseek-v4-flash-free", known) is False
+    assert model_is_known("opencode/deepseek-v4-flash-free", []) is True
+
+
+def test_explain_message_http_error_does_not_blame_missing_atlas():
+    text = explain_message_http_error(
+        _http_500(),
+        directory=None,
+        agent="Atlas - Plan Executor",
+        model="opencode/deepseek-v4-flash-free",
+    )
+    assert "not registered" not in text
+    assert "model=" in text
+    assert "ProviderModelNotFoundError" in text
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_fails_before_message():
+    """Rotated Zen ids must fail closed with the inventory, not UnknownError 500."""
+    backend = FakeServeBackend(required_compacts=0)
+    client = FakeServeClient(backend)
+    client.known_models = ["opencode/big-pickle", "opencode/hy3-free"]
+    orch = ServeOrchestrator(client=client, compact_wait_seconds=0.3)
+    result = await orch.run(
+        prompt="do the work",
+        title="KAN-MODEL",
+        model="opencode/deepseek-v4-flash-free",
+    )
+    assert result.returncode == 1
+    assert backend.message_calls == 0
+    assert "unknown model" in " ".join(result.incomplete_reasons)
+    assert "opencode/deepseek-v4-flash-free" in (result.stderr or "")
+    assert "opencode/big-pickle" in (result.stderr or "")
+
+
+@pytest.mark.asyncio
+async def test_known_model_still_sends_prompt():
+    backend = FakeServeBackend(required_compacts=0)
+    client = FakeServeClient(backend)
+    client.known_models = ["opencode/big-pickle"]
+    orch = ServeOrchestrator(client=client, compact_wait_seconds=0.3)
+    result = await orch.run(
+        prompt="do the work",
+        title="KAN-MODEL-OK",
+        model="opencode/big-pickle",
+    )
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 1
+
+
 def test_is_message_conflict_error_not_blanket_5xx():
     from src.opencode_serve import is_message_conflict_error
 
@@ -1663,6 +1742,103 @@ async def test_nudge_then_tool_calls_then_auto_resume_is_success():
     assert "after unattended nudge still incomplete" not in (result.stderr or "")
 
 
+@pytest.mark.asyncio
+async def test_nudge_then_stop_with_leftover_todos_waits_then_succeeds():
+    """Production 45-min failure: question → nudge → finish=stop + leftover todos.
+
+    The orchestrator used to emit
+    ``[INCOMPLETE] after unattended nudge still incomplete: open todos:
+    4 pending, 1 in_progress`` and kill the job. After the nudge the model
+    is mid-work; we must wait for auto-resume, not terminate.
+    """
+
+    class QuestionThenWorkingTodos(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_long_todos"
+            self.todos = [
+                {"content": f"step-{i}", "status": "pending"} for i in range(10)
+            ] + [{"content": "now", "status": "in_progress"}]
+            self.auto_complete_on_idle = True
+            self.idle_polls_before_auto_complete = 3
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": None,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "Shall I continue with the remaining 11 steps?",
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            self.todos = [
+                {"content": f"step-{i}", "status": "pending"} for i in range(4)
+            ] + [{"content": "now", "status": "in_progress"}]
+            reply = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Continuing with defaults. Implementing the "
+                            "remaining modules now."
+                        ),
+                    }
+                ],
+            }
+            self.messages.append(reply)
+            return reply
+
+    backend = QuestionThenWorkingTodos()
+    orch = ServeOrchestrator(
+        client=FakeServeClient(backend),
+        compact_wait_seconds=1.5,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="# Build\nimplement the django-sized feature",
+        title="KAN-45MIN",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert "after unattended nudge still incomplete" not in (result.stderr or "")
+    assert "Shall I continue" in "\n".join(
+        str(p.get("text") or "")
+        for m in backend.messages
+        for p in (m.get("parts") or [])
+        if isinstance(p, dict)
+    )
+
+
 def test_should_wait_after_nudge_helpers():
     from src.opencode_serve import should_wait_after_nudge
 
@@ -1696,6 +1872,15 @@ def test_should_wait_after_nudge_helpers():
                 "session ended on compaction summary (finish=stop, summary=true)",
             ],
             "last_finish": "stop",
+        }
+    )
+    assert should_wait_after_nudge(
+        {
+            "premature": True,
+            "reasons": ["open todos: 4 pending, 1 in_progress"],
+            "last_finish": "stop",
+            "last_is_summary": False,
+            "assistant_asked_question": False,
         }
     )
     assert not should_wait_after_nudge(
