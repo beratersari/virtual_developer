@@ -396,6 +396,63 @@ class JobProcessor:
         except Exception as e:
             logger.exception(f"Failed to report error for {issue_key}: {e}", e)
 
+    def record_dropped_accept(
+        self,
+        issue_key: str,
+        summary: str = "",
+        *,
+        reason: str = "",
+    ) -> None:
+        """Jira was moved In Progress but no worker started — ERROR + comment.
+
+        Used when the poller accepted the ticket and the daemon handler then
+        dropped the event (stopping, closed loop, enqueue crash). Safe to call
+        from the poller thread. Missing/unknown keys are ignored.
+        """
+        key = (issue_key or "").strip()
+        if not key or key.lower() == "unknown":
+            return
+        extra = f" {reason.strip()}" if (reason or "").strip() else ""
+        msg = (
+            "Issue was accepted (moved toward In Progress) but no worker "
+            f"was bound.{extra} Restart the daemon if it was stopping, "
+            "then move the ticket back to To Do to retry."
+        )
+        try:
+            st = self.state_manager.get_state(key)
+            if st is None:
+                self.state_manager.create_state(key, summary or key, "")
+            self.state_manager.update_state(
+                key,
+                status=TaskStatus.ERROR,
+                error_message=msg[:2000],
+                metadata={"requeue_eligible": True},
+            )
+        except Exception as e:
+            logger.warning(f"{key}: could not record dropped-accept ERROR: {e}")
+        try:
+            self._ensure_job_for_failure(key)
+        except Exception:
+            pass
+        posted = False
+        try:
+            if self.jira_client is not None and hasattr(
+                self.jira_client, "add_comment"
+            ):
+                self.jira_client.add_comment(key, f"AI Agent — ERROR\n\n{msg}")
+                posted = True
+        except Exception as e:
+            logger.warning(f"{key}: dropped-accept Jira comment failed: {e}")
+        if not posted:
+            try:
+                self.reporter.post_comment_response(
+                    key, f"AI Agent — ERROR\n\n{msg}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"{key}: dropped-accept reporter comment failed: {e}"
+                )
+
     def _fail_from_agent_result(
         self,
         issue_key: str,
@@ -1018,6 +1075,12 @@ class JobProcessor:
                 wd0 = rec.get("working_directory")
                 if isinstance(wd0, str) and wd0.strip():
                     bind_wd = wd0.strip()
+        if repo and branch and target:
+            for fx in store.forgotten_ids_for(
+                repo, branch, target, issue_key=issue_key
+            ):
+                if fx not in forgotten:
+                    forgotten.append(fx)
         st = self.state_manager.get_state(issue_key)
         if st is not None:
             _add_sid(st.current_opencode_session_id)
@@ -1153,7 +1216,12 @@ class JobProcessor:
         import src.state.session_bind_store as session_binds
 
         session_binds.session_bind_store.forget_for(
-            repo, branch, target, session_id=sid, reason="abandoned"
+            repo,
+            branch,
+            target,
+            session_id=sid,
+            reason="abandoned",
+            issue_key=issue_key,
         )
 
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:

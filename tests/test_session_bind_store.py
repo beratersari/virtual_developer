@@ -20,6 +20,40 @@ def test_normalize_repo_key_collapses_url_shapes():
     assert a == b == c == "gitlab.com/group/repo"
 
 
+def test_forget_for_tombstones_issue_keyed_bind(tmp_path):
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    repo = "https://gitlab.example.com/a/r.git"
+    rec = store.upsert(
+        repository_url=repo,
+        branch="feature/KAN-1",
+        target_branch="develop",
+        session_id="ses_hung",
+        issue_key="KAN-1",
+    )
+    assert rec is not None
+    live_id = bind_id_for(repo, "feature/KAN-1", "develop", issue_key="KAN-1")
+    legacy_id = bind_id_for(repo, "feature/KAN-1", "develop", issue_key="")
+    assert rec["bind_id"] == live_id
+    assert live_id != legacy_id
+
+    forgotten = store.forget_for(
+        repo,
+        "feature/KAN-1",
+        "develop",
+        session_id="ses_hung",
+        reason="abandoned",
+        issue_key="KAN-1",
+    )
+    assert forgotten is not None
+    assert forgotten["bind_id"] == live_id
+    assert forgotten.get("session_id") == ""
+    assert "ses_hung" in (forgotten.get("forgotten_session_ids") or [])
+    live = store.get_by_id(live_id)
+    assert live is not None
+    assert live.get("session_id") == ""
+    assert "ses_hung" in (live.get("forgotten_session_ids") or [])
+
+
 def test_find_by_issue_key_returns_newest_live_bind(tmp_path):
     store = SessionBindStore(binds_dir=tmp_path / "binds")
     store.upsert(
