@@ -635,12 +635,32 @@ class JiraPoller:
                 pass
         return False
 
-    def _fail_unhandled_accept(self, issue_key: str, summary: str) -> None:
+    def _fail_unhandled_accept(
+        self, issue_key: str, summary: str, *, reason: str = ""
+    ) -> None:
         """Board was moved In Progress but no worker will run — tell Jira."""
+        proc = getattr(self, "_processor", None)
+        if proc is not None and hasattr(proc, "record_dropped_accept"):
+            try:
+                proc.record_dropped_accept(
+                    issue_key,
+                    summary,
+                    reason=reason
+                    or (
+                        "No poller handler was bound after accept. "
+                        "Re-save settings / restart the daemon."
+                    ),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"{issue_key}: processor dropped-accept failed: {e}"
+                )
+        extra = f" {reason.strip()}" if (reason or "").strip() else ""
         msg = (
             "Issue was accepted (moved toward In Progress) but no worker "
-            "was bound. Re-save settings / restart the daemon, then move "
-            "the ticket back to To Do to retry."
+            f"was bound.{extra} Re-save settings / restart the daemon, then "
+            "move the ticket back to To Do to retry."
         )
         try:
             self.client.add_comment(issue_key, f"AI Agent — ERROR\n\n{msg}")
@@ -654,6 +674,7 @@ class JiraPoller:
                 issue_key,
                 status=TaskStatus.ERROR,
                 error_message=msg,
+                metadata={"requeue_eligible": True},
             )
         except Exception as e:
             logger.warning(f"{issue_key}: could not record unhandled-accept ERROR: {e}")

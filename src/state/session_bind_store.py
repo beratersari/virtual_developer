@@ -110,12 +110,43 @@ class SessionBindStore:
         )
         hit = self.get_by_id(bid)
         if hit:
+            # Exact key, including a forgotten row (empty session_id) so
+            # attach can read forgotten_session_ids and refuse that ses_*.
             return hit
         if (issue_key or "").strip():
-            return self.get_by_id(
+            legacy = self.get_by_id(
                 bind_id_for(repository_url, branch, target_branch, issue_key="")
             )
-        return None
+            if legacy and str(legacy.get("session_id") or "").strip():
+                return legacy
+        # Newest live bind for this repo+work+target (any issue). Forgotten
+        # rows have an empty session_id and are skipped by list_binds.
+        return self._find_live_for(repository_url, branch, target_branch)
+
+    def _find_live_for(
+        self, repository_url: str, branch: str, target_branch: str
+    ) -> Optional[Dict[str, Any]]:
+        repo = normalize_repo_key(repository_url)
+        br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
+        if not repo or not br or not tgt:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        for rec in self.list_binds(limit=500):
+            rec_repo = rec.get("repository_key") or normalize_repo_key(
+                str(rec.get("repository_url") or "")
+            )
+            if rec_repo != repo:
+                continue
+            if normalize_branch(str(rec.get("branch") or "")) != br:
+                continue
+            if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
+                continue
+            if best is None or (rec.get("updated_at") or "") >= (
+                best.get("updated_at") or ""
+            ):
+                best = rec
+        return best
 
     def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
         path = self._path((bind_id or "").strip())
@@ -251,11 +282,26 @@ class SessionBindStore:
         return rec
 
     def delete_for(
-        self, repository_url: str, branch: str, target_branch: str = ""
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str = "",
+        issue_key: str = "",
     ) -> bool:
         if not normalize_branch(target_branch):
             return False
-        return self.delete(bind_id_for(repository_url, branch, target_branch))
+        ok = self.delete(
+            bind_id_for(
+                repository_url, branch, target_branch, issue_key=issue_key
+            )
+        )
+        # Leftover pre-issue-key file must not keep a live pointer.
+        if (issue_key or "").strip():
+            ok = (
+                self.delete(bind_id_for(repository_url, branch, target_branch))
+                or ok
+            )
+        return ok
 
     def forget_for(
         self,
@@ -265,14 +311,83 @@ class SessionBindStore:
         *,
         session_id: str = "",
         reason: str = "abandoned",
+        issue_key: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_branch(target_branch):
             return None
-        return self.forget_session(
-            bind_id_for(repository_url, branch, target_branch),
+        rec = self.forget_session(
+            bind_id_for(
+                repository_url, branch, target_branch, issue_key=issue_key
+            ),
             session_id=session_id,
             reason=reason,
         )
+        # Production upserts include issue_key. Also tombstone the legacy
+        # "" bind so get() fallback cannot restore the abandoned ses_*.
+        if (issue_key or "").strip():
+            leftover = self.forget_session(
+                bind_id_for(repository_url, branch, target_branch),
+                session_id=session_id,
+                reason=reason,
+            )
+            rec = rec or leftover
+        return rec
+
+    def forgotten_ids_for(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str,
+        issue_key: str = "",
+    ) -> List[str]:
+        """Forgotten ses_* for this repo+work+target (any issue, including empty)."""
+        out: List[str] = []
+        seen: set[str] = set()
+
+        def _add(rec: Optional[Dict[str, Any]]) -> None:
+            if not rec:
+                return
+            for x in rec.get("forgotten_session_ids") or []:
+                fx = str(x or "").strip()
+                if fx and fx not in seen:
+                    seen.add(fx)
+                    out.append(fx)
+
+        repo = normalize_repo_key(repository_url)
+        br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
+        if not repo or not br or not tgt:
+            return out
+        _add(
+            self.get_by_id(
+                bind_id_for(
+                    repository_url, branch, target_branch, issue_key=issue_key
+                )
+            )
+        )
+        _add(self.get_by_id(bind_id_for(repository_url, branch, target_branch)))
+        if not self.binds_dir.is_dir():
+            return out
+        with self._lock:
+            for path in self.binds_dir.glob("osb_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                rec_repo = rec.get("repository_key") or normalize_repo_key(
+                    str(rec.get("repository_url") or "")
+                )
+                if rec_repo != repo:
+                    continue
+                if normalize_branch(str(rec.get("branch") or "")) != br:
+                    continue
+                if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
+                    continue
+                _add(rec)
+        return out
 
     def find_by_issue_key(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Newest bind that still points at a session for this Jira issue."""

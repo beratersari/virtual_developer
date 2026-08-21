@@ -224,6 +224,7 @@ class JiraAgentDaemon:
         )
         # Link live poller for dashboard settings + cancel re-queue status markers
         self.processor._poller = self._poller
+        self._poller._processor = self.processor
         try:
             n = self.processor.seed_poller_requeue_markers()
             if n:
@@ -241,6 +242,9 @@ class JiraAgentDaemon:
         # Create async-safe handler that works from a different thread
         def async_handler(event):
             if not self._running or self._stopping:
+                self._record_dropped_accept(
+                    event, "Daemon is stopping or not running."
+                )
                 return
             issue_key = (event.get("issue") or {}).get("key") or "unknown"
             main = self._main_loop
@@ -249,6 +253,9 @@ class JiraAgentDaemon:
                     f"Cannot schedule process_event for {issue_key}: "
                     f"no asyncio loop captured (restart daemon)"
                 )
+                self._record_dropped_accept(
+                    event, "No asyncio loop was captured."
+                )
                 return
             try:
                 if main.is_closed():
@@ -256,6 +263,9 @@ class JiraAgentDaemon:
                         f"Cannot schedule process_event for {issue_key}: "
                         f"asyncio event loop is closed "
                         f"(issue may sit In Progress without a job — restart daemon)"
+                    )
+                    self._record_dropped_accept(
+                        event, "The asyncio event loop is closed."
                     )
                     return
             except Exception:
@@ -270,15 +280,23 @@ class JiraAgentDaemon:
                     f"Failed to schedule process_event for {issue_key}: {e} "
                     f"(issue may sit In Progress without a job — restart daemon)"
                 )
+                self._record_dropped_accept(event, str(e))
                 return
 
             def _on_done(f: "asyncio.Future") -> None:
                 try:
-                    f.result()
+                    result = f.result()
                 except Exception as exc:
                     logger.exception(
                         f"process_event failed for {issue_key}: {exc}",
                         exc,
+                    )
+                    self._record_dropped_accept(event, str(exc))
+                    return
+                if isinstance(result, dict) and result.get("ok") is False:
+                    self._record_dropped_accept(
+                        event,
+                        str(result.get("reason") or "enqueue rejected"),
                     )
 
             try:
@@ -291,6 +309,25 @@ class JiraAgentDaemon:
             self._poller.start,
             async_handler,
         )
+
+    def _record_dropped_accept(self, event: dict, reason: str) -> None:
+        """Jira already left To Do; persist ERROR + comment so it is not silent."""
+        issue = (event or {}).get("issue") or {}
+        key = (issue.get("key") or "").strip()
+        if not key or key.lower() == "unknown":
+            return
+        fields = issue.get("fields") or {}
+        summary = fields.get("summary") or key
+        proc = getattr(self, "processor", None)
+        if proc is None or not hasattr(proc, "record_dropped_accept"):
+            logger.error(
+                f"{key}: accepted but no worker and no processor to record ERROR"
+            )
+            return
+        try:
+            proc.record_dropped_accept(key, str(summary or key), reason=reason)
+        except Exception as e:
+            logger.warning(f"{key}: dropped-accept notify failed: {e}")
 
     def _abort_stuck_issue(self, state, message: str) -> None:
         """Fail issue, notify Jira, kill agent children, and release live context."""

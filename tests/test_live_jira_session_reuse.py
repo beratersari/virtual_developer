@@ -382,9 +382,8 @@ async def test_http_jira_in_flight_cancel_then_second_issue_resumes(
         labels=[TRIGGER, "vd-session-sim"],
     )
     key_a = created_a["key"]
-    _install_agent(monkeypatch, seen, hang_key=key_a)
 
-    # Patch AgentTask construction is hard; hang by watching processor state.
+    # Hang A until cancel; B is instant. Watch processor state.
     orig_run = AgentRunner.run_agent
 
     async def hang_run(self, task: AgentTask, **kwargs: Any) -> Dict[str, Any]:
