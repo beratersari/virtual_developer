@@ -327,6 +327,11 @@ DEFAULT_COMPACT_SETTLE_SECONDS = 2.0
 # INTENTIONAL: do **not** break a loop with Continue / Finish-todos.
 DEFAULT_COMPACT_LOOP_CYCLES = 8
 
+# Same idle-after-compact log, three times in a row → OpenCode did not
+# auto-resume. Send one Continue (not an ERROR). The line is emitted on
+# poll 1 and every 5th poll, so three logs ≈ 30s at the default 2s poll.
+IDLE_STUCK_LOG_THRESHOLD = 3
+
 # OpenCode /session/{id}/message?limit= used to be 80 — after ~15–20 compact
 # cycles the sliding window dropped old markers and mis-counted "new this turn".
 DEFAULT_MESSAGE_LIST_LIMIT = 500
@@ -922,7 +927,9 @@ class ServeOrchestrator:
         last_reasons: List[Any] = []
         seen_compact_keys: set = set()
         compact_only_streak = 0
+        idle_stuck_logs = 0
         loop_limit = max(2, int(self.compact_loop_cycles or DEFAULT_COMPACT_LOOP_CYCLES))
+        stuck_logs_needed = max(1, int(IDLE_STUCK_LOG_THRESHOLD))
         while time.time() < deadline:
             if _aborted():
                 return {"aborted": True, "polls": polls}
@@ -940,6 +947,7 @@ class ServeOrchestrator:
             now = time.time()
             if busy:
                 idle_since = None
+                idle_stuck_logs = 0
                 _emit("stdout", f"[serve] waiting for auto-compact (poll {polls}, busy)")
                 await asyncio.sleep(poll_s)
                 continue
@@ -1049,6 +1057,27 @@ class ServeOrchestrator:
                     f"(poll {polls}, reasons={last_reasons}) — "
                     "waiting for auto-resume (no user message)",
                 )
+                # Leftover work + no auto-resume. Three of these logs → Continue.
+                # Do not Continue when todos are already done (wait/timeout path).
+                if any("open todos" in str(r).lower() for r in last_reasons):
+                    idle_stuck_logs += 1
+                    if idle_stuck_logs >= stuck_logs_needed:
+                        _emit(
+                            "stdout",
+                            f"[serve] idle-after-compact log seen "
+                            f"{idle_stuck_logs} consecutive times — "
+                            "sending Continue (not an error)",
+                        )
+                        return {
+                            "settled": True,
+                            "complete": False,
+                            "idle_stuck_resume": True,
+                            "polls": polls,
+                            "busy": False,
+                            "assessment": assessment,
+                            "compact_total": compact_total,
+                            "reasons": last_reasons,
+                        }
             await asyncio.sleep(poll_s)
         _emit(
             "stderr",
@@ -1354,11 +1383,15 @@ class ServeOrchestrator:
         _emit: Callable[[str, str], None],
         _aborted: Callable[[], bool],
         wait_seconds: float = 30.0,
+        abort_busy: bool = True,
     ) -> None:
-        """Abort a leftover turn before posting a new job prompt.
+        """Make the session idle before posting a new user prompt.
 
         Cancel often kills our HTTP client without aborting OpenCode. A new
         POST /message then 500s while the old turn keeps editing files.
+
+        Incomplete-session resume must **not** abort: the leftover turn is
+        still the job (finish=unknown + open todos). Wait it out.
         """
         try:
             status = await self.client.session_status()
@@ -1366,6 +1399,30 @@ class ServeOrchestrator:
             _emit("stdout", f"[serve] status check failed: {e}")
             return
         if not session_is_busy(status, sid):
+            return
+        if not abort_busy:
+            _emit(
+                "stdout",
+                f"[serve] session {sid} still busy — waiting for leftover "
+                "turn (no abort on incomplete resume)",
+            )
+            deadline = time.time() + max(1.0, float(wait_seconds))
+            poll_s = max(0.15, float(self.compact_poll_seconds or 0.5))
+            while time.time() < deadline:
+                if _aborted():
+                    return
+                await asyncio.sleep(poll_s)
+                try:
+                    status = await self.client.session_status()
+                except Exception:
+                    return
+                if not session_is_busy(status, sid):
+                    _emit("stdout", "[serve] session idle after leftover turn")
+                    return
+            _emit(
+                "stdout",
+                "[serve] leftover turn still busy after wait — posting anyway",
+            )
             return
         _emit(
             "stdout",
@@ -1398,6 +1455,7 @@ class ServeOrchestrator:
         on_session: Optional[Callable[[str], None]] = None,
         should_abort: Optional[Callable[[], bool]] = None,
         log_lines: Optional[List[str]] = None,
+        abort_busy_session: bool = True,
     ) -> ServeTurnResult:
         lines = log_lines if log_lines is not None else []
         turns: List[Dict[str, Any]] = []
@@ -1466,7 +1524,15 @@ class ServeOrchestrator:
         else:
             _emit("stdout", f"[serve] session resumed: {sid}")
             await self._ensure_session_idle(
-                sid, _emit=_emit, _aborted=_aborted
+                sid,
+                _emit=_emit,
+                _aborted=_aborted,
+                abort_busy=abort_busy_session,
+                wait_seconds=(
+                    self._compact_wait_budget()
+                    if not abort_busy_session
+                    else 30.0
+                ),
             )
         if not sid:
             return ServeTurnResult(
@@ -1571,7 +1637,27 @@ class ServeOrchestrator:
         # then Continues the **same** session once idle.
         compact_loop_used = 0
         max_loop_restarts = max(0, int(self.compact_loop_restarts or 0))
+        idle_stuck_used = 0
+        max_idle_stuck = 3
         turn_idx = 0
+
+        async def _try_continue_after_idle_stuck(wait_info: Dict[str, Any]) -> bool:
+            """Idle compact-then-stop with no auto-resume — one Continue, not ERROR."""
+            nonlocal current_prompt, idle_stuck_used, continue_count, turn_idx
+            if not wait_info.get("idle_stuck_resume"):
+                return False
+            if idle_stuck_used >= max_idle_stuck:
+                return False
+            _emit(
+                "stdout",
+                "[serve] OpenCode idle after compact — sending Continue "
+                f"on the same session {sid} (not an error)",
+            )
+            current_prompt = DEFAULT_CONTINUE_PROMPT
+            idle_stuck_used += 1
+            continue_count += 1
+            turn_idx += 1
+            return True
 
         async def _try_restart_after_loop(wait_info: Dict[str, Any]) -> bool:
             nonlocal current_prompt, compact_loop_used, continue_count, turn_idx
@@ -1683,6 +1769,8 @@ class ServeOrchestrator:
                         )
                         if await _try_restart_after_loop(wait_info):
                             continue
+                        if await _try_continue_after_idle_stuck(wait_info):
+                            continue
                         return await self._turn_after_compact_wait(
                             sid,
                             wait_info=wait_info,
@@ -1728,6 +1816,8 @@ class ServeOrchestrator:
                     compact_total=compact_total,
                 )
                 if await _try_restart_after_loop(wait_info):
+                    continue
+                if await _try_continue_after_idle_stuck(wait_info):
                     continue
                 return await self._turn_after_compact_wait(
                     sid,
@@ -1874,6 +1964,8 @@ class ServeOrchestrator:
                 )
                 if await _try_restart_after_loop(wait_info):
                     continue
+                if await _try_continue_after_idle_stuck(wait_info):
+                    continue
                 if wait_info.get("compact_loop"):
                     return await self._turn_after_compact_wait(
                         sid,
@@ -1980,6 +2072,8 @@ class ServeOrchestrator:
                         wait_info.get("compact_total") or compact_total
                     )
                     if await _try_restart_after_loop(wait_info):
+                        continue
+                    if await _try_continue_after_idle_stuck(wait_info):
                         continue
                     if wait_info.get("compact_loop"):
                         return await self._turn_after_compact_wait(

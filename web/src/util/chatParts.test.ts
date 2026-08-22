@@ -128,6 +128,32 @@ assert(compactGroups[2].role === 'summary', 'summary assistant is Summary, not Y
 assert(compactGroups[2].parts.some((p) => (p.text || '').includes('Work so far')), 'summary text kept')
 assert(compactGroups[3].role === 'user' && compactGroups[3].parts[0].text === 'real ask', 'continue prompt hidden')
 
+const reminderMsgs: ChatMessage[] = [
+  {
+    id: 'sys',
+    session_id: 'ses_a',
+    role: 'user',
+    parts: [
+      {
+        id: 'sysp',
+        type: 'text',
+        text:
+          '<system-reminder> [ALL BACKGROUND TASKS FINISHED - 1 FAILED]\n' +
+          'Failed:\nbg_fc13ae3e: explore background task [ERROR] - ' +
+          'ProviderModelNotFoundError: Model not found: opencode/deepseek-v4-flash-free. '.repeat(8) +
+          '\nACTION REQUIRED: 1 task(s) failed.</system-reminder>',
+      },
+    ],
+  },
+  { id: 'u4', session_id: 'ses_a', role: 'user', parts: [{ id: 'u4p', type: 'text', text: 'real ask' }] },
+]
+const reminderGroups = groupChatMessages(reminderMsgs)
+assert(
+  reminderGroups.every((g) => g.role !== 'user' || g.parts[0].text === 'real ask'),
+  'long OpenCode system-reminder must not render as You',
+)
+assert(reminderGroups.length === 1 && reminderGroups[0].parts[0].text === 'real ask', 'only real user text remains')
+
 const resumeMsgs: ChatMessage[] = [
   {
     id: 'old',

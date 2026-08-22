@@ -164,6 +164,8 @@ class AgentTask:
     abandoned_session_id: Optional[str] = None
     forgotten_session_ids: List[str] = field(default_factory=list)
     original_prompt: Optional[str] = None
+    # Incomplete-session resume must not abort a leftover busy turn.
+    abort_busy_session: bool = True
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
@@ -390,6 +392,7 @@ class AgentRunner:
             # Short finish-todos nudge — not the original BUILD/PLAN kit and
             # not a fake operator "Continue" during compact.
             task.prompt = DEFAULT_FINISH_TODOS_PROMPT
+            task.abort_busy_session = False
             logger.warning(
                 f"Retry after {why}: resume session {sid} with finish-todos prompt"
             )
@@ -502,6 +505,9 @@ class AgentRunner:
                     agent=agent_name,
                     model=model,
                     session_id=task.session_id,
+                    abort_busy_session=bool(
+                        getattr(task, "abort_busy_session", True)
+                    ),
                     on_output=_on_out,
                     on_session=_remember_session,
                     should_abort=lambda: bool(serve_handle.get("cancel")),

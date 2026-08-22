@@ -19,6 +19,7 @@ import httpx
 from src.opencode_serve import (
     DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT,
     DEFAULT_CONTINUE_PROMPT,
+    IDLE_STUCK_LOG_THRESHOLD,
     OpenCodeServeClient,
     ServeOrchestrator,
     assess_serve_turn,
@@ -864,6 +865,59 @@ async def test_resume_aborts_leftover_busy_session_before_prompt():
     assert backend.prompts == ["NEW JOB PROMPT"]
     assert result.returncode == 0, result.stderr
     assert "still busy; aborting leftover turn" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_incomplete_resume_waits_does_not_abort_busy_session():
+    """finish=unknown retries must not kill the leftover turn."""
+    backend = FakeServeBackend(required_compacts=0)
+    backend.busy_polls_remaining = 3
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=1.5,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="Finish remaining todos",
+        title="KAN-94-RESUME",
+        session_id=backend.session_id,
+        abort_busy_session=False,
+    )
+    assert backend.aborted is False
+    assert backend.message_calls == 1
+    assert result.returncode == 0, result.stderr
+    assert "no abort on incomplete resume" in result.stdout
+    assert "aborting leftover turn" not in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_three_idle_after_compact_logs_sends_continue_not_error():
+    """Three consecutive idle-after-compact logs → Continue, not ERROR."""
+    backend = FakeServeBackend(required_compacts=1)
+    backend.auto_complete_on_idle = False
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=8.0,
+        compact_poll_seconds=0.02,
+        compact_settle_seconds=0.02,
+    )
+    result = await orch.run(prompt="do the work", title="KAN-IDLE-STUCK")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert result.timed_out is False
+    assert backend.message_calls == 2
+    assert any(
+        p == DEFAULT_CONTINUE_PROMPT or (p or "").startswith("Continue")
+        for p in backend.prompts
+    )
+    out = result.stdout or ""
+    assert "idle-after-compact log seen" in out
+    assert out.count("idle after compact but still incomplete") >= IDLE_STUCK_LOG_THRESHOLD
+    assert "[INCOMPLETE]" not in (result.stderr or "")
+    assert "[TIMEOUT]" not in (result.stderr or "")
 
 
 @pytest.mark.asyncio
