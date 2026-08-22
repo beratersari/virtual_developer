@@ -93,6 +93,11 @@ export function isInternalCompactFollowupText(text: string): boolean {
   const cleaned = stripInternalMarkup(raw)
   if (!cleaned) return true
   const t = cleaned.toLowerCase()
+  // OpenCode/oh-my-openagent injects these as role=user. Length is unbounded
+  // (failed explore subagents paste the full stack). Never label them "You".
+  if (t.startsWith('<system-reminder>') || t.includes('<system-reminder>')) return true
+  if (t.includes('[all background tasks finished')) return true
+  if (t.includes('action required:') && t.includes('background task')) return true
   if (t.startsWith(OPENCODE_AUTO_CONTINUE_PREFIX)) return true
   if (t.startsWith(FINISH_TODOS_PREFIX)) return true
   if (t.startsWith(CONTINUE_AFTER_COMPACT_PREFIX)) return true

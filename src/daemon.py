@@ -74,6 +74,15 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Startup queue recovery failed: {e}", e)
 
+        # Crash recovery leaves durable rows in ``queued``. Start them now —
+        # otherwise poller sees "already queued" and never dispatches.
+        try:
+            started = await self.processor.dispatch_queue()
+            if started:
+                logger.info(f"Startup queue dispatch started {started} item(s)")
+        except Exception as e:
+            logger.exception(f"Startup queue dispatch failed: {e}", e)
+
         # Age-based temp clone sweep (default: delete dirs older than 24h)
         try:
             from src.git_manager import purge_stale_temp_dirs, session_bound_workspace_paths

@@ -1283,6 +1283,35 @@ class JobProcessor:
         except Exception:
             pass
 
+    def _apply_job_opencode_context_limit(self, working_dir: Any) -> None:
+        """Cap the job workspace model window so long runs auto-compact."""
+        if not working_dir:
+            return
+        try:
+            limit = int(getattr(settings, "opencode_context_limit", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if limit <= 0:
+            return
+        model = (getattr(settings, "default_model", "") or "").strip()
+        if not model:
+            return
+        try:
+            from src.opencode_models import write_workspace_context_limit
+
+            path = write_workspace_context_limit(
+                Path(str(working_dir)),
+                model=model,
+                context_limit=limit,
+            )
+        except Exception as e:
+            logger.debug(f"workspace OpenCode context cap skipped: {e}")
+            return
+        if path is not None:
+            logger.info(
+                f"OpenCode workspace context cap {limit} for {model} → {path}"
+            )
+
     def _link_job_session_paths(
         self,
         issue_key: str,
@@ -2739,6 +2768,7 @@ class JobProcessor:
             except Exception:
                 wd = None
             self._record_job_working_directory(state.issue_key, wd)
+            self._apply_job_opencode_context_limit(wd)
             return git
         except IssueGitConfigError as e:
             logger.warning(
@@ -2887,15 +2917,18 @@ class JobProcessor:
         if existing and (existing.get("status") or "") == "queued":
             logger.info(
                 f"{key}: already queued as {existing.get('queue_id')}; "
-                f"not re-enqueueing"
+                f"dispatching existing row (not creating a duplicate)"
             )
+            await self.dispatch_queue()
+            live = self.queue_store.get(existing.get("queue_id") or "") or existing
             return {
                 "ok": True,
-                "queued": True,
+                "queued": live.get("status") == "queued",
+                "started": live.get("status") == "running",
                 "duplicate": True,
-                "queue_id": existing.get("queue_id"),
+                "queue_id": live.get("queue_id"),
                 "issue_key": key,
-                "status": "queued",
+                "status": live.get("status"),
             }
         spec, _err = parse_issue_git_spec(summary, desc)
         repo = (spec.repository_url if spec else "") or ""

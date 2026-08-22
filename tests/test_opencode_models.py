@@ -12,6 +12,7 @@ from src.opencode_models import (
     load_opencode_config,
     models_from_cli,
     models_from_opencode_config,
+    write_workspace_context_limit,
     _strip_jsonc,
 )
 
@@ -108,6 +109,27 @@ def test_list_available_models_merges_sources(tmp_path, monkeypatch):
     assert "cfg/extra" in ids
     assert "opencode/free-one" in ids
     clear_models_cache()
+
+
+def test_write_workspace_context_limit_excludes_from_git(tmp_path):
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    path = write_workspace_context_limit(
+        tmp_path,
+        model="opencode/hy3-free",
+        context_limit=32768,
+    )
+    assert path == tmp_path / "opencode.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["model"] == "opencode/hy3-free"
+    assert data["provider"]["opencode"]["models"]["hy3-free"]["limit"]["context"] == 32768
+    exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "/opencode.json" in exclude
+    # Second write must not duplicate the exclude line
+    write_workspace_context_limit(
+        tmp_path, model="opencode/hy3-free", context_limit=16384
+    )
+    exclude2 = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert exclude2.count("/opencode.json") == 1
 
 
 def test_settings_and_models_endpoints_separated(monkeypatch):

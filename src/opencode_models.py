@@ -361,6 +361,90 @@ def list_available_models(
     return merged, cli_err, path_str, cfg_default
 
 
+DEFAULT_JOB_CONTEXT_LIMIT = 32768
+_EXCLUDE_MARKERS = (
+    "/opencode.json",
+    "opencode.json",
+)
+
+
+def write_workspace_context_limit(
+    workdir: Path,
+    *,
+    model: str,
+    context_limit: int,
+) -> Optional[Path]:
+    """Write a job-local ``opencode.json`` that shrinks the model context.
+
+    OpenCode auto-compact only runs when the session nears the advertised
+    window. Zen free models are 190k–1M, so a long Django job never
+    compact. A git-excluded project override makes compact fire without
+    committing into the customer repo.
+    """
+    root = Path(workdir)
+    if not root.is_dir():
+        return None
+    try:
+        limit = int(context_limit)
+    except (TypeError, ValueError):
+        return None
+    if limit <= 0:
+        return None
+    mid = (model or "").strip()
+    if not mid:
+        return None
+    provider, model_id = _split_provider_model(mid)
+    if not provider or not model_id:
+        return None
+
+    _, existing = load_opencode_config()
+    plugin = existing.get("plugin") if isinstance(existing, dict) else None
+    cfg: Dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "autoupdate": False,
+        "model": mid,
+        "provider": {
+            provider: {
+                "models": {
+                    model_id: {
+                        "limit": {
+                            "context": limit,
+                            "output": min(limit, 8192),
+                        }
+                    }
+                }
+            }
+        },
+    }
+    if isinstance(plugin, list) and plugin:
+        cfg["plugin"] = plugin
+
+    path = root / "opencode.json"
+    path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    _exclude_workspace_opencode_json(root)
+    return path
+
+
+def _exclude_workspace_opencode_json(workdir: Path) -> None:
+    """Keep the job-local opencode.json out of the customer git history."""
+    info = workdir / ".git" / "info"
+    try:
+        info.mkdir(parents=True, exist_ok=True)
+        exclude = info / "exclude"
+        existing = ""
+        if exclude.is_file():
+            existing = exclude.read_text(encoding="utf-8")
+        if any(m in existing for m in _EXCLUDE_MARKERS):
+            return
+        with exclude.open("a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write("# virtual developer — job-local OpenCode context cap\n")
+            fh.write("/opencode.json\n")
+    except OSError as e:
+        logger.debug(f"Could not git-exclude workspace opencode.json: {e}")
+
+
 def clear_models_cache() -> None:
     """Drop cached inventory (tests / after config change)."""
     global _cache_at, _cache_items, _cache_error, _cache_config_path, _cache_config_model
