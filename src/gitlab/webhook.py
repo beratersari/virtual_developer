@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
     note_mentions_bot,
@@ -22,7 +23,6 @@ from src.logger import logger
 
 
 GITLAB_NOTE_EVENTS = frozenset({"Note Hook", "Confidential Note Hook"})
-_REPLY_PREFIX = "*Virtual Developer*"
 
 
 @dataclass

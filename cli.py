@@ -36,7 +36,7 @@ def validate_config():
 @click.group()
 @click.version_option(version=__version__)
 def cli():
-    """JIRA Virtual Developer - AI Agent Integration for JIRA."""
+    """Yaver — unattended Jira aide."""
     pass
 
 

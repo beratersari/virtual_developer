@@ -638,12 +638,13 @@ def test_e2e_api_matrix_hard_and_soft(tmp_path, monkeypatch):
         def _preview(issue_key):
             return preview_existing_issue(issue_key, jira_client=client)
 
-        def _from_issue(issue_key, scheduled_at, store=None):
+        def _from_issue(issue_key, scheduled_at, store=None, **kw):
             return schedule_existing_issue(
                 issue_key,
                 scheduled_at=scheduled_at,
                 jira_client=client,
                 store=store or store,
+                **kw,
             )
 
         m.setattr("src.dashboard.api.create_scheduled_job", _create)
@@ -715,7 +716,7 @@ def test_e2e_description_adf_and_plain_helpers():
     }
     assert "hello ADF" in _description_to_text(adf)
     msg = _plain_template_error(
-        "*Virtual Developer* could not start: no ``{params}`` block found.\n\n"
+        "*Yaver* could not start: no ``{params}`` block found.\n\n"
         "{code}\nhelp\n{code}"
     )
     assert "could not start" in msg.lower() or "params" in msg.lower()

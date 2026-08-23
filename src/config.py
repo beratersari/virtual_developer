@@ -222,10 +222,12 @@ class Settings(BaseSettings):
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
     opencode_context_limit: int = Field(
-        default=32768,
+        default=128000,
         description=(
             "Job-local OpenCode model context cap (0 = no override). "
-            "Zen free models advertise 190k–1M so long jobs never auto-compact."
+            "32k filled in minutes and looped compact/restore; 128k is "
+            "enough for a long build without compacting every turn. "
+            "Zen free models advertise 190k–1M natively."
         ),
     )
     project_repositories: str = Field(

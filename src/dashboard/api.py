@@ -128,7 +128,7 @@ def create_dashboard_app(
     sm = state_manager or JiraStateManager()
     # No OpenAPI UI in production path — dashboard has no auth
     app = FastAPI(
-        title="JIRA Virtual Developer Dashboard",
+        title="Yaver",
         version="1.0.0",
         docs_url=None,
         redoc_url=None,
@@ -345,6 +345,7 @@ def create_dashboard_app(
             project_key=body.project_key,
             issue_type=body.issue_type or "Task",
             source_branch_mode=body.source_branch_mode or "custom",
+            model=body.model or "",
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -389,6 +390,7 @@ def create_dashboard_app(
         result = schedule_existing_issue(
             body.issue_key,
             scheduled_at=body.scheduled_at,
+            model=body.model or "",
             store=schedule_store,
         )
         if not result.get("ok"):

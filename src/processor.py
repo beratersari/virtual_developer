@@ -364,7 +364,7 @@ class JobProcessor:
                 self._post_gitlab_mr_reply(
                     state,
                     (
-                        "*Virtual Developer* hit an error on this MR comment:\n\n"
+                        "*Yaver* hit an error on this MR comment:\n\n"
                         f"```\n{error_text}\n```\n"
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
@@ -1283,7 +1283,27 @@ class JobProcessor:
         except Exception:
             pass
 
-    def _apply_job_opencode_context_limit(self, working_dir: Any) -> None:
+    def _model_for_issue(self, state: Any) -> str:
+        """Per-issue Model: from {params}, else settings default."""
+        if state is None:
+            return (getattr(settings, "default_model", "") or "").strip()
+        try:
+            from src.issue_git_spec import parse_issue_git_spec
+
+            spec, _err = parse_issue_git_spec(
+                getattr(state, "issue_summary", "") or "",
+                getattr(state, "description", "") or "",
+            )
+        except Exception:
+            spec = None
+        mid = (getattr(spec, "model", None) or "").strip() if spec else ""
+        if mid:
+            return mid
+        return (getattr(settings, "default_model", "") or "").strip()
+
+    def _apply_job_opencode_context_limit(
+        self, working_dir: Any, *, model: str = ""
+    ) -> None:
         """Cap the job workspace model window so long runs auto-compact."""
         if not working_dir:
             return
@@ -1293,7 +1313,7 @@ class JobProcessor:
             return
         if limit <= 0:
             return
-        model = (getattr(settings, "default_model", "") or "").strip()
+        model = (model or getattr(settings, "default_model", "") or "").strip()
         if not model:
             return
         try:
@@ -1310,6 +1330,35 @@ class JobProcessor:
         if path is not None:
             logger.info(
                 f"OpenCode workspace context cap {limit} for {model} → {path}"
+            )
+
+    def _clear_stale_omo_continuations(self, working_dir: Any) -> None:
+        """Remove leftover oh-my-openagent run-continuation JSON.
+
+        Those files are empty idle checkpoints from earlier sessions. After
+        compact, Atlas treats them as the job and loops
+        "inspect prior session files to recover {issue}".
+        """
+        if not working_dir:
+            return
+        folder = Path(str(working_dir)) / ".omo" / "run-continuation"
+        if not folder.is_dir():
+            return
+        removed = 0
+        try:
+            for path in folder.glob("*.json"):
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.debug(f"stale .omo continuation cleanup skipped: {e}")
+            return
+        if removed:
+            logger.info(
+                f"Removed {removed} stale .omo/run-continuation checkpoint(s) "
+                f"under {folder}"
             )
 
     def _link_job_session_paths(
@@ -2768,7 +2817,10 @@ class JobProcessor:
             except Exception:
                 wd = None
             self._record_job_working_directory(state.issue_key, wd)
-            self._apply_job_opencode_context_limit(wd)
+            self._apply_job_opencode_context_limit(
+                wd, model=self._model_for_issue(state)
+            )
+            self._clear_stale_omo_continuations(wd)
             return git
         except IssueGitConfigError as e:
             logger.warning(
@@ -2820,7 +2872,7 @@ class JobProcessor:
             logger.exception(f"{state.issue_key} git workspace setup failed: {e}", e)
             self._fail_issue(
                 state.issue_key,
-                f"*Virtual Developer* could not prepare the git workspace.\n\n`{e}`",
+                f"*Yaver* could not prepare the git workspace.\n\n`{e}`",
                 suggestion="Check logs, then move the issue back to To Do.",
             )
             self._release_context(state.issue_key, success=False)
@@ -3163,7 +3215,7 @@ class JobProcessor:
         # GitLab notes are large, but keep the dashboard/job comment readable.
         if len(answer) > 8000:
             answer = answer[:8000].rstrip() + "\n\n…(truncated)"
-        parts = ["*Virtual Developer*", "", answer]
+        parts = ["*Yaver*", "", answer]
         if pushed:
             extra = ["", "---", ""]
             br = (branch or "").strip()
@@ -3209,6 +3261,7 @@ class JobProcessor:
                 ),
                 agent=settings.default_agent,
                 issue_key=state.issue_key,
+                model=self._model_for_issue(state),
             )
             job_id = self._begin_workflow_run(
                 state,
@@ -3260,7 +3313,7 @@ class JobProcessor:
                 )
                 self._fail_issue(
                     state.issue_key,
-                    f"*Virtual Developer* could not check out `{event.source_branch}`.\n\n`{e}`",
+                    f"*Yaver* could not check out `{event.source_branch}`.\n\n`{e}`",
                     suggestion="Check that the MR source branch exists and the PAT can clone.",
                 )
                 self._release_context(state.issue_key, success=False)
@@ -3480,6 +3533,7 @@ class JobProcessor:
             ),
             agent=settings.default_agent,
             issue_key=state.issue_key,
+            model=self._model_for_issue(state),
         )
         job_id = self._begin_workflow_run(
             state,
@@ -3750,6 +3804,7 @@ class JobProcessor:
             ),
             agent=settings.default_agent,
             issue_key=state.issue_key,
+            model=self._model_for_issue(state),
         )
 
         # Claim in-flight before git clone (archives prior task/session/job ids)
@@ -4718,6 +4773,7 @@ class JobProcessor:
                 prompt=prompt,
                 agent="oracle",
                 issue_key=state.issue_key,
+                model=self._model_for_issue(state),
             )
 
             job_id = self._begin_workflow_run(
@@ -4830,6 +4886,7 @@ class JobProcessor:
                 prompt=prompt,
                 agent=settings.default_agent,
                 issue_key=issue_key,
+                model=self._model_for_issue(state),
             )
 
             result = await runner.run_agent(task)

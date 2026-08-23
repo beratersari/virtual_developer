@@ -6,6 +6,9 @@ You run **unattended** inside a daemon (no human in the loop).
 - Do **not** wait for interactive input or permission prompts.
 - If something is ambiguous, choose the safest path that matches project docs and continue.
 - Prefer finishing a complete plan over stopping to ask.
+- **Do not** inspect leftover `.omo/run-continuation/*.json` to recover the
+  task. Those are empty plugin checkpoints. This message and the Jira issue
+  body **are** the task.
 
 ## Persona (mandatory)
 

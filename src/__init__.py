@@ -1,4 +1,4 @@
-"""JIRA Virtual Developer - Python integration for Oh My OpenAgent."""
+"""Yaver — unattended Jira aide (OpenCode / Oh My OpenAgent)."""
 
 from pathlib import Path
 

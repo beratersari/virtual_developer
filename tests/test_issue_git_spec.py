@@ -29,6 +29,47 @@ Acceptance: do the thing
     assert spec.source_branch == "develop"
     assert spec.target_branch == "main"
     assert spec.mode == "plan"
+    assert spec.model is None
+
+
+def test_parse_optional_model():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: build
+Model: opencode/hy3-free
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/hy3-free"
+
+
+def test_upsert_params_model_inserts_and_replaces():
+    from src.issue_git_spec import upsert_params_model
+
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: build
+{params}
+"""
+    one = upsert_params_model(desc, "opencode/mimo-v2.5-free")
+    spec, err = parse_issue_git_spec("", one)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/mimo-v2.5-free"
+    two = upsert_params_model(one, "opencode/hy3-free")
+    spec2, err2 = parse_issue_git_spec("", two)
+    assert err2 is None
+    assert spec2 is not None
+    assert spec2.model == "opencode/hy3-free"
+    assert two.lower().count("model:") == 1
 
 
 def test_params_required():

@@ -228,6 +228,7 @@ export type ScheduleItem = {
   source_branch: string
   target_branch: string
   mode: string
+  model?: string
   issue_type?: string
   scheduled_at: string
   status: string
@@ -254,6 +255,7 @@ export type SchedulePreview = {
   source_branch: string
   target_branch: string
   mode: string
+  model?: string
   message?: string
   error?: string
 }
@@ -276,6 +278,7 @@ export type ScheduleCreateBody = {
   issue_type?: string
   source_branch_mode?: 'custom' | 'issue_key'
   dispatch_now?: boolean
+  model?: string
 }
 
 export type JiraIssueType = {
