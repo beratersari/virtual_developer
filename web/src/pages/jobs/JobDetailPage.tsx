@@ -17,11 +17,12 @@ import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
+import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
 import { JobChatTab } from './JobChatTab'
 
-type JobTab = 'overview' | 'prompt' | 'chat' | 'opencode' | 'logs'
+type JobTab = 'overview' | 'prompt' | 'chat' | 'output' | 'logs'
 
 export function JobDetailPage() {
   const { jobId = '' } = useParams()
@@ -151,7 +152,7 @@ export function JobDetailPage() {
     Boolean(job?.live) || IN_FLIGHT_STATUSES.has((job?.status || '').toLowerCase())
   const artifactSig = job ? jobArtifactPathSignature(job) : ''
 
-  // Chat polls OpenCode on its own. Output reads session files — refetch when
+  // Transcript polls the worker. Output reads session files — refetch when
   // the path appears after the first empty snapshot, or while the log grows.
   useEffect(() => {
     const id = job?.job_id
@@ -224,6 +225,11 @@ export function JobDetailPage() {
               </span>
             )}
             {job && <StatusBadge status={job.status} />}
+            {job && (
+              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
+                {workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}
+              </span>
+            )}
             {job?.live && <LiveDot />}
             {elapsed !== '—' && (
               <span className="font-mono text-sm text-text-secondary">{elapsed}</span>
@@ -235,7 +241,10 @@ export function JobDetailPage() {
           <p className="mt-1 font-mono text-xs text-text-muted">
             {job?.job_id}
             {job?.workflow_type ? ` · ${job.workflow_type}` : ''}
-            {job?.agent ? ` · ${job.agent}` : ''}
+            {job
+              ? ` · ${workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}`
+              : ''}
+            {job?.model ? ` · ${job.model}` : ''}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -278,8 +287,8 @@ export function JobDetailPage() {
         tabs={[
           { id: 'overview', label: 'Details' },
           { id: 'prompt', label: 'Prompt' },
-          { id: 'chat', label: 'Chat' },
-          { id: 'opencode', label: 'Output' },
+          { id: 'chat', label: 'Transcript' },
+          { id: 'output', label: 'Output' },
           { id: 'logs', label: 'Daemon', count: systemLogs.length },
         ]}
         value={tab}
@@ -294,7 +303,11 @@ export function JobDetailPage() {
         )}
         {job && tab === 'overview' && (
           <div key="overview" className="vd-fade">
-            <JobOverview job={job} elapsedLabel={elapsed} />
+            <JobOverview
+              job={job}
+              elapsedLabel={elapsed}
+              fallbackWorker={live.settings?.agent_backend || ''}
+            />
           </div>
         )}
         {job && tab === 'prompt' && (
@@ -311,11 +324,14 @@ export function JobDetailPage() {
               key={jobId.trim()}
               jobId={jobId.trim()}
               liveRun={liveRun && job.job_id === jobId.trim()}
+              worker={resolveJobWorker(job, live.settings?.agent_backend || '')}
+              sessionLogs={sessionLogs}
+              prompts={prompts}
             />
           </div>
         )}
-        {job && tab === 'opencode' && (
-          <div key="opencode" className="vd-fade">
+        {job && tab === 'output' && (
+          <div key="output" className="vd-fade">
             {artsLoading && sessionLogs.length === 0 && (
               <p className="mb-3 text-sm text-text-muted">Loading output…</p>
             )}

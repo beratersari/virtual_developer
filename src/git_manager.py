@@ -48,6 +48,28 @@ class GitTargetBranchError(RuntimeError):
         super().__init__(user_message)
 
 
+def summarize_git_error(exc: object, *, limit: int = 800) -> str:
+    """Operator-facing git stderr: prefer fatal/error/remote lines."""
+    text = str(exc or "").replace("\r", "").strip()
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if not lines:
+        return ""
+    preferred = [
+        ln
+        for ln in lines
+        if ln.lower().startswith(("fatal:", "error:", "remote:", "hint:"))
+    ]
+    if preferred:
+        body = "\n".join(preferred)
+    elif lines[0].startswith("Git command failed:") and len(lines) > 1:
+        body = "\n".join(lines[1:])
+    else:
+        body = "\n".join(lines[-4:])
+    return body[:limit].strip()
+
+
 # Primary integration bases — never used as the agent work branch
 _PRIMARY_BASES = frozenset({"main", "master", "develop", "trunk", "dev"})
 
@@ -91,6 +113,8 @@ class GitManager:
         self.keep_source_work_branch: bool = bool(keep_source_work_branch)
         # Actual branch checked out for agent work (set by ensure_feature_branch)
         self.work_branch: Optional[str] = None
+        # Last failed push reason (operator-facing; cleared on success)
+        self.last_push_error: Optional[str] = None
 
         logger.info(f"Initializing GitManager for issue: {issue_key}")
         logger.debug(
@@ -1808,8 +1832,10 @@ class GitManager:
         agent already pushed the same tip). Callers still open the MR after
         a successful return.
         """
+        self.last_push_error = None
         if not self.remote_enabled:
             logger.info("Push not available (no remote configured).")
+            self.last_push_error = "Push not available (no remote configured)."
             return False
 
         # Prefer prepared work_branch over drifted HEAD (B5)
@@ -1820,6 +1846,9 @@ class GitManager:
         )
         if not branch:
             logger.error("Push refused: branch name missing or looks like a git option")
+            self.last_push_error = (
+                "Push refused: branch name missing or looks like a git option"
+            )
             return False
 
         # auth=True → settings PAT on origin for the push when configured;
@@ -1850,6 +1879,8 @@ class GitManager:
                             f"the orchestrator can open an MR. Detail: {e2}"
                         )
                         return True
+                    reason = summarize_git_error(e2) or str(e2).strip()
+                    self.last_push_error = reason or "git push failed"
                     logger.error(f"Push failed after merge attempt: {e2}")
                     return False
         finally:

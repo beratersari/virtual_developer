@@ -661,6 +661,32 @@ def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
     return paths
 
 
+def _resolve_job_backend(j: Dict[str, Any], *, description: str = "") -> str:
+    """opencode | codex. Prefer the stored field, then session id / {params}."""
+    from src.backends.base import normalize_backend_name
+
+    bid = normalize_backend_name(j.get("backend"))
+    if bid:
+        return bid
+    sid = str(j.get("opencode_session_id") or "").strip()
+    if sid.startswith("ses_"):
+        return "opencode"
+    if sid.count("-") >= 4 and len(sid) >= 16:
+        return "codex"
+    text = description or (j.get("description") or "")
+    if text:
+        try:
+            from src.issue_git_spec import parse_issue_git_spec
+
+            spec, _err = parse_issue_git_spec("", text)
+            got = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            if got:
+                return got
+        except Exception:
+            pass
+    return ""
+
+
 def job_dict_to_item(
     j: Dict[str, Any],
     *,
@@ -700,6 +726,7 @@ def job_dict_to_item(
         workflow_type=j.get("workflow_type") or "execution",
         agent=j.get("agent") or "",
         model=(j.get("model") or None),
+        backend=_resolve_job_backend(j, description=description),
         status=j.get("status") or "unknown",
         task_id=j.get("task_id"),
         task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
@@ -788,7 +815,7 @@ def build_one_job(
             current_jid = str((st.metadata or {}).get("current_job_id") or "").strip()
             if current_jid and current_jid != (raw.get("job_id") or "").strip():
                 live_sid = ""
-    if live_sid and live_sid.startswith("ses_") and not (raw.get("opencode_session_id") or "").strip():
+    if live_sid and not (raw.get("opencode_session_id") or "").strip():
         raw = {**raw, "opencode_session_id": live_sid}
         ids = list(raw.get("opencode_session_ids") or [])
         if live_sid not in ids:

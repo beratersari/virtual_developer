@@ -1,5 +1,6 @@
 import type { JobItem } from '../../api/types'
 import { jobIsDeletable, statusToneClass } from '../../util/status'
+import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { StatusBadge } from '../../ui/StatusBadge'
 
@@ -58,6 +59,9 @@ export function JobsTable({
                 )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
+                <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  {workerLabel(resolveJobWorker(j))}
+                </span>
               </div>
               <div className={`mt-1 truncate text-text ${compact ? 'text-sm' : 'text-[15px]'}`}>
                 {j.summary || 'Untitled run'}

@@ -1,6 +1,7 @@
 import type { JobItem, JobRetryAttempt } from '../../api/types'
 import { IN_FLIGHT_STATUSES } from '../../util/status'
 import { pathBasename } from '../../util/paths'
+import { resolveJobWorker, sessionKindLabel, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
 import { StatusBadge } from '../../ui/StatusBadge'
@@ -8,11 +9,14 @@ import { StatusBadge } from '../../ui/StatusBadge'
 export function JobOverview({
   job,
   elapsedLabel,
+  fallbackWorker = '',
 }: {
   job: JobItem
   elapsedLabel: string
+  fallbackWorker?: string
 }) {
   const retries: JobRetryAttempt[] = job.retry_attempts || []
+  const worker = resolveJobWorker(job, fallbackWorker)
   const showDelivery =
     job.merge_request_url ||
     job.commit_url ||
@@ -41,9 +45,9 @@ export function JobOverview({
         <MetaCard label="Status" valueNode={<StatusBadge status={job.status} />} />
         <MetaCard label="Progress" value={`${job.progress_percentage}%`} />
         <MetaCard label="Workflow" value={job.workflow_type || '—'} />
-        <MetaCard label="Agent" value={job.agent || '—'} />
+        <MetaCard label="Worker" value={workerLabel(worker)} />
         <MetaCard
-          label="OpenCode model"
+          label="Model"
           mono
           value={job.model?.trim() ? job.model : '—'}
         />
@@ -154,9 +158,13 @@ export function JobOverview({
       <div className="border-t border-border pt-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <MetaCard label="Task id (latest)" mono value={job.task_id ?? '—'} />
-          <MetaCard label="OpenCode session" mono value={job.opencode_session_id ?? '—'} />
           <MetaCard
-            label="Session log (latest)"
+            label={sessionKindLabel(worker) === 'thread' ? 'Codex thread' : 'Session'}
+            mono
+            value={job.opencode_session_id ?? '—'}
+          />
+          <MetaCard
+            label="Run log (latest)"
             mono
             className="sm:col-span-2 lg:col-span-3"
             value={job.session_log_path ?? '—'}

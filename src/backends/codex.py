@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,23 +22,53 @@ _THREAD_RE = re.compile(
 
 
 def resolve_codex_wire_api(*, base_url: str, wire_api: str = "") -> str:
-    """Official OpenAI uses responses; custom/OpenAI-compat usually chat."""
+    """Codex 0.149+ only accepts ``responses``. ``chat`` is kept if set explicitly."""
     explicit = (wire_api or "").strip().lower()
     if explicit in ("responses", "chat"):
         return explicit
-    return "chat" if (base_url or "").strip() else "responses"
+    return "responses"
 
 
-def build_codex_config_toml(*, model: str, base_url: str, wire_api: str = "") -> str:
+def _codex_home_for(cwd: str) -> Path:
+    """Stable isolated Codex home for this clone so ``exec resume`` can find threads.
+
+    Never written into the customer work tree. Tests isolate ``Path.cwd()``.
+    """
+    key = hashlib.sha1(os.path.abspath(cwd or os.getcwd()).encode("utf-8")).hexdigest()[
+        :16
+    ]
+    home = Path.cwd() / ".jira-agent" / "codex-homes" / key
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def _usable_cli(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    # Windows PE shipped in vendor/bin must not win on Linux/WSL.
+    if path.suffix.lower() == ".exe" and os.name != "nt":
+        return False
+    return True
+
+
+def build_codex_config_toml(
+    *,
+    model: str,
+    base_url: str,
+    wire_api: str = "",
+    api_key: str = "",
+) -> str:
     """Isolated Codex home config: never write this into the customer clone."""
     mid = (model or "").strip()
     url = (base_url or "").strip().rstrip("/")
     wire = resolve_codex_wire_api(base_url=url, wire_api=wire_api)
+    have_key = bool((api_key or "").strip())
     lines = [
         'approval_policy = "never"',
         'sandbox_mode = "danger-full-access"',
-        'preferred_auth_method = "apikey"',
     ]
+    if have_key:
+        lines.append('preferred_auth_method = "apikey"')
     if mid:
         lines.append(f"model = {json.dumps(mid)}")
     if url:
@@ -49,7 +79,12 @@ def build_codex_config_toml(*, model: str, base_url: str, wire_api: str = "") ->
         lines.append("[model_providers.yaver]")
         lines.append('name = "Yaver"')
         lines.append(f"base_url = {json.dumps(url)}")
-        lines.append('env_key = "CODEX_API_KEY"')
+        if have_key:
+            lines.append('env_key = "CODEX_API_KEY"')
+        else:
+            # Zen free models (and some OSS gateways) accept unauthenticated
+            # Responses calls. A dummy key becomes HTTP 401.
+            lines.append("requires_openai_auth = false")
         lines.append(f"wire_api = {json.dumps(wire)}")
     return "\n".join(lines) + "\n"
 
@@ -57,9 +92,9 @@ def build_codex_config_toml(*, model: str, base_url: str, wire_api: str = "") ->
 def resolve_codex_cli(cli: str = "") -> str:
     """Prefer an explicit path, then Codex's default install, then vendor/PATH."""
     raw = (cli or "").strip() or "codex"
-    if os.path.isfile(raw):
+    if _usable_cli(Path(raw)):
         return raw
-    names = ("codex.exe", "codex")
+    names = ("codex.exe", "codex") if os.name == "nt" else ("codex",)
     folders: List[Path] = []
     local = os.environ.get("LOCALAPPDATA") or ""
     home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
@@ -83,7 +118,7 @@ def resolve_codex_cli(cli: str = "") -> str:
         seen.add(key)
         for name in names:
             cand = folder / name
-            if cand.is_file():
+            if _usable_cli(cand):
                 return str(cand)
     return raw
 
@@ -97,21 +132,30 @@ def build_codex_argv(
 ) -> List[str]:
     """``codex exec`` argv. Prompt last. No secrets."""
     exe = (cli or "codex").strip() or "codex"
-    cmd = [exe, "exec"]
+    text = (prompt or "").strip()
+    if "UNATTENDED JOB:" not in text:
+        text = (
+            "UNATTENDED JOB: do not ask clarifying questions, confirmations, "
+            "or wait for a human. Choose defaults and finish the work.\n\n"
+            + text
+        )
+    # Full auto: no approval prompts / no interactive Q&A. The job is
+    # unattended (no human reply path).
+    cmd = [
+        exe,
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "--json",
+    ]
     rid = (resume_id or "").strip()
-    if rid:
-        cmd.extend(["resume", rid])
-    cmd.extend(
-        [
-            "--sandbox",
-            "danger-full-access",
-            "--json",
-        ]
-    )
     mid = (model or "").strip()
     if mid and not rid:
         cmd.extend(["-m", mid])
-    cmd.append(prompt or "")
+    # `exec resume` is a subcommand — flags must come before it.
+    if rid:
+        cmd.extend(["resume", rid])
+    cmd.append(text)
     return cmd
 
 
@@ -179,11 +223,14 @@ class CodexBackend:
             else os.getcwd()
         )
 
-        home = Path(tempfile.mkdtemp(prefix="yaver-codex-"))
+        home = _codex_home_for(cwd)
         try:
             (home / "config.toml").write_text(
                 build_codex_config_toml(
-                    model=model, base_url=base_url, wire_api=wire_api
+                    model=model,
+                    base_url=base_url,
+                    wire_api=wire_api,
+                    api_key=api_key,
                 ),
                 encoding="utf-8",
             )
@@ -237,6 +284,7 @@ class CodexBackend:
                 *argv,
                 cwd=cwd,
                 env=env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
