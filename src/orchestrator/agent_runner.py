@@ -16,20 +16,21 @@ from src.logger import logger
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
 
-# oh-my-openagent registers agents under display names, not short keys.
-# Map config/short names so --agent resolves without "not found" fallback.
+# Stock OpenCode agents (no oh-my-openagent). Old plugin names map here so
+# existing tickets / DEFAULT_AGENT=atlas still run.
 OPENCODE_AGENT_ALIASES: Dict[str, str] = {
-    "sisyphus": "Sisyphus - ultraworker",
-    "prometheus": "Prometheus - Plan Builder",
-    "atlas": "Atlas - Plan Executor",
+    "build": "build",
+    "plan": "plan",
+    "atlas": "build",
+    "sisyphus": "build",
+    "sisyphus-junior": "build",
+    "hephaestus": "build",
+    "prometheus": "plan",
+    "metis": "plan",
+    "momus": "plan",
     "oracle": "oracle",
     "explore": "explore",
     "librarian": "librarian",
-    "metis": "Metis - Plan Consultant",
-    "momus": "Momus - Plan Critic",
-    "sisyphus-junior": "Sisyphus-Junior",
-    "hephaestus": "Hephaestus",
-    "multimodal-looker": "multimodal-looker",
 }
 
 
@@ -39,7 +40,7 @@ def _default_sessions_dir() -> Path:
 
 
 def resolve_opencode_agent_name(agent: str) -> str:
-    """Map short agent keys to OpenCode agent IDs registered by oh-my-openagent."""
+    """Map short / legacy plugin names to stock OpenCode agent ids (build, plan)."""
     if not agent:
         return agent
     key = agent.strip()
@@ -166,6 +167,8 @@ class AgentTask:
     original_prompt: Optional[str] = None
     # Incomplete-session resume must not abort a leftover busy turn.
     abort_busy_session: bool = True
+    # Worker: opencode | codex (empty = settings.agent_backend).
+    backend: Optional[str] = None
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
@@ -272,7 +275,14 @@ class AgentRunner:
 
         def _publish_session(sid: Optional[str]) -> None:
             sid = (sid or "").strip()
-            if not sid or not sid.startswith("ses_") or sid == published_sid["id"]:
+            if not sid or sid == published_sid["id"]:
+                return
+            # OpenCode uses ses_*; Codex uses thread UUIDs.
+            if not (
+                sid.startswith("ses_")
+                or sid.startswith("thread_")
+                or (sid.count("-") >= 4 and len(sid) >= 16)
+            ):
                 return
             forgotten = {
                 str(x).strip()
@@ -304,16 +314,99 @@ class AgentRunner:
         if getattr(task, "session_id", None):
             _publish_session(str(task.session_id))
 
-        return await self._run_agent_via_serve(
-            task,
-            session_file=session_file,
-            on_output=on_output,
-            on_complete=on_complete,
-            on_progress=on_progress,
-            on_session_id=_publish_session,
-            timeout_seconds=effective_timeout,
-            start_time=start_time,
+        from src.backends import get_agent_backend, resolve_backend_name
+        from src.backends.base import BACKEND_OPENCODE, AgentRunRequest
+
+        backend_name = resolve_backend_name(
+            task_backend=getattr(task, "backend", None)
         )
+        if backend_name == BACKEND_OPENCODE:
+            return await self._run_agent_via_serve(
+                task,
+                session_file=session_file,
+                on_output=on_output,
+                on_complete=on_complete,
+                on_progress=on_progress,
+                on_session_id=_publish_session,
+                timeout_seconds=effective_timeout,
+                start_time=start_time,
+            )
+
+        backend = get_agent_backend(backend_name)
+        handle: Dict[str, Any] = {
+            "mode": backend.name,
+            "backend": backend.name,
+            "cancel": False,
+            "session_id": task.session_id,
+        }
+        self._running_tasks[task.task_id] = handle
+        log_lines: List[str] = []
+
+        def _on_out(stream: str, line: str) -> None:
+            try:
+                with open(session_file, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+            except OSError:
+                pass
+            if on_output:
+                on_output(stream, line)
+            if on_progress:
+                pct = self._parse_progress(line)
+                if pct is not None:
+                    try:
+                        on_progress(pct, line[:200])
+                    except Exception:
+                        pass
+
+        try:
+            result_obj = await backend.run(
+                AgentRunRequest(
+                    prompt=task.prompt or "",
+                    title=(
+                        f"{task.issue_key}: {task.description}"
+                        if task.issue_key
+                        else (task.description or task.task_id)
+                    )[:120],
+                    model=(task.model or settings.default_model or ""),
+                    agent=task.agent or "",
+                    session_id=task.session_id,
+                    working_directory=self.working_directory,
+                    timeout_seconds=float(effective_timeout),
+                    abort_busy_session=bool(
+                        getattr(task, "abort_busy_session", True)
+                    ),
+                    handle=handle,
+                    on_output=_on_out,
+                    on_session=_publish_session,
+                    should_abort=lambda: bool(handle.get("cancel")),
+                    log_lines=log_lines,
+                )
+            )
+        finally:
+            self._running_tasks.pop(task.task_id, None)
+
+        if result_obj.session_id:
+            _publish_session(str(result_obj.session_id))
+            task.session_id = result_obj.session_id
+        try:
+            body = result_obj.stdout or ""
+            if result_obj.stderr:
+                body = body + ("\n" if body else "") + result_obj.stderr
+            if body.strip():
+                session_file.write_text(body, encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not write session log: {e}")
+
+        result = result_obj.to_agent_result(
+            task.task_id, session_file=str(session_file)
+        )
+        if on_complete:
+            try:
+                on_complete(result)
+            except Exception:
+                pass
+        return result
 
 
     @staticmethod
@@ -857,25 +950,25 @@ class AgentRunner:
             logger.debug(f"Task not found or already completed: task_id={task_id}")
             return False
 
-        # Serve mode: POST /session/{id}/abort (best effort, sync wrapper)
-        if isinstance(process, dict) and process.get("mode") == "serve":
+        # Backend handle (OpenCode serve or Codex subprocess)
+        if isinstance(process, dict) and process.get("mode") in {
+            "serve",
+            "opencode",
+            "codex",
+        }:
             process["cancel"] = True
-            sid = process.get("session_id")
-            client = process.get("client")
-            logger.info(f"Cancelling serve task: task_id={task_id}, session={sid}")
-            if client is not None and sid:
-                try:
-                    # cancel_task is sync; schedule abort if loop is running
-                    try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.ensure_future(client.abort(sid))
-                        else:
-                            loop.run_until_complete(client.abort(sid))
-                    except Exception:
-                        pass
-                except Exception as e:
-                    logger.debug(f"serve abort failed: {e}")
+            logger.info(
+                f"Cancelling {process.get('backend') or process.get('mode')} "
+                f"task: task_id={task_id}"
+            )
+            try:
+                from src.backends import get_agent_backend
+
+                get_agent_backend(
+                    process.get("backend") or process.get("mode")
+                ).cancel(process)
+            except Exception as e:
+                logger.debug(f"backend cancel failed: {e}")
             return True
 
         if process.returncode is None:

@@ -174,6 +174,22 @@ if ($LASTEXITCODE -ne 0) {
     throw "opencode --version failed (exit $LASTEXITCODE): $ver"
 }
 
+$vendorCodex = Join-Path $PayloadDir "vendor\bin\codex.exe"
+if (-not (Test-Path -LiteralPath $vendorCodex)) {
+    throw "vendor\bin\codex.exe missing — offline zip must ship pinned Codex CLI"
+}
+$codexHome = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
+if (-not (Test-Path -LiteralPath $codexHome)) {
+    throw "codex.exe missing after install: $codexHome"
+}
+if (Test-Path -LiteralPath (Join-Path $ocHome "bin\codex.exe")) {
+    throw "codex.exe must not be installed under OpenCode home: $ocHome\bin"
+}
+& $assert -Path $codexHome -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) { throw "codex.exe AMD64 assert failed" }
+$cxVer = & $codexHome --version 2>&1
+Write-Host "codex --version => $cxVer"
+
 # Regression: unescaped "echo ... -> path" used to overwrite opencode.json with "[OK] config ..."
 $homeCfg = Join-Path $ocHome "opencode.json"
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
@@ -193,66 +209,18 @@ foreach ($cfg in @($homeCfg, $globalCfg)) {
     Write-Host "OK valid JSON: $cfg"
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode"))) {
-    throw "oh-my-opencode plugin missing under $ocHome\node_modules"
-}
-
-# Full plugin package must exist (not a thin junction) with agents + skill markdown
-function Assert-OmoTree([string]$Root, [string]$Label) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "package.json"))) {
-        throw "$Label missing package.json: $Root"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.js"))) {
-        throw "$Label missing dist\index.js: $Root"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\agents"))) {
-        throw "$Label missing dist\agents (Sisyphus etc.): $Root"
-    }
-    $md = @(Get-ChildItem -LiteralPath $Root -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-    if ($md.Count -lt 10) {
-        throw "$Label has only $($md.Count) .md files — skills/agents over-pruned: $Root"
-    }
-    $files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)
-    if ($files.Count -lt 500) {
-        throw "$Label only $($files.Count) files — incomplete plugin tree: $Root"
-    }
-    Write-Host "OK $Label : $($files.Count) files, $($md.Count) md, agents present"
-}
-
-# Primary package id is oh-my-openagent (avoids auto-migration hang)
-$homePlugin = Join-Path $ocHome "node_modules\oh-my-openagent"
-$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
-$configPlugin = Join-Path $ocConfigDir "node_modules\oh-my-openagent"
-Assert-OmoTree $homePlugin "home/openagent"
-Assert-OmoTree $cachePlugin "cache/openagent"
-Assert-OmoTree $configPlugin "config/openagent"
-
-$packagesPlugin = Join-Path $env:USERPROFILE ".cache\opencode\packages\oh-my-openagent"
-if (Test-Path -LiteralPath $packagesPlugin) {
-    Assert-OmoTree $packagesPlugin "cache/packages/openagent"
-} else {
-    Write-Host "WARNING: cache/packages/oh-my-openagent missing"
-}
-
-# Legacy name should also exist offline
-$legacy = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
-if (-not (Test-Path -LiteralPath (Join-Path $legacy "dist\index.js"))) {
-    throw "Legacy oh-my-opencode cache missing: $legacy"
-}
-Write-Host "OK legacy oh-my-opencode cache present"
-
-# Config must pin NEW package id (legacy name triggers migration + Bun re-fetch)
+# Stock OpenCode: no oh-my-openagent / Sisyphus plugin
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
 $cfgObj = Get-Content -LiteralPath $globalCfg -Raw | ConvertFrom-Json
 $plugins = @($cfgObj.plugin)
-$pinned = $plugins | Where-Object { $_ -match '^oh-my-openagent@' }
-if (-not $pinned) {
-    throw "FAIL: opencode.json must pin oh-my-openagent@VERSION, got: $($plugins -join ', ')"
+$omo = $plugins | Where-Object { $_ -match 'oh-my-opencod' }
+if ($omo) {
+    throw "FAIL: opencode.json must not register oh-my-openagent, got: $($plugins -join ', ')"
 }
 if ($cfgObj.autoupdate -ne $false) {
     Write-Host "WARNING: autoupdate is not false (may hang offline)"
 }
-Write-Host "OK pinned plugin: $($pinned -join ', ')"
+Write-Host "OK stock OpenCode config (plugin empty, default build agent)"
 
 # ripgrep offline seed
 $rg = Join-Path $env:USERPROFILE ".cache\opencode\bin\rg.exe"

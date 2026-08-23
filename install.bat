@@ -287,23 +287,12 @@ if exist "%OPENCODE_HOME%\opencode.json" (
     echo [WARNING] opencode.json not found under %OPENCODE_HOME%
 )
 
-if exist "%OPENCODE_HOME%\node_modules\oh-my-opencode" (
-    echo [OK] plugin oh-my-opencode in %OPENCODE_HOME%\node_modules
-) else (
-    echo [WARNING] oh-my-opencode plugin not found under node_modules
-)
+echo [OK] Using stock OpenCode agents ^(build / plan^). No oh-my-openagent plugin.
 
-REM Mirror config + seed plugin locations OpenCode actually loads at TUI startup.
-REM Blank/black screen is usually Bun trying to download the plugin into ~/.cache/opencode.
+REM Mirror config to %%USERPROFILE%%\.config\opencode (OpenCode global discovery).
 call :mirror_opencode_config
 if errorlevel 1 (
     echo [ERROR] Failed to install valid config at %%USERPROFILE%%\.config\opencode
-    call :maybe_pause
-    exit /b 1
-)
-call :seed_opencode_plugin_cache
-if errorlevel 1 (
-    echo [ERROR] Failed to seed OpenCode plugin cache ^(needed to avoid black-screen hang^)
     call :maybe_pause
     exit /b 1
 )
@@ -351,11 +340,29 @@ REM ---------------------------------------------------------------------------
 REM Step 4: glab
 REM ---------------------------------------------------------------------------
 echo.
-echo Step 4: GitLab CLI ^(glab^)...
+echo Step 4: GitLab CLI ^(glab^) + Codex CLI...
 if exist "%OPENCODE_BIN%\glab.exe" (
     echo [OK] glab.exe at %OPENCODE_BIN%\glab.exe
 ) else (
     echo [WARNING] glab.exe not found under %OPENCODE_BIN%
+)
+REM Official standalone path (same as chatgpt.com/codex/install.ps1)
+if not defined LOCALAPPDATA set "LOCALAPPDATA=%USERPROFILE%\AppData\Local"
+set "CODEX_BIN=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin"
+if not exist "%CODEX_BIN%" mkdir "%CODEX_BIN%"
+if exist "%VENDOR_DIR%\bin\codex.exe" (
+    copy /Y "%VENDOR_DIR%\bin\codex.exe" "%CODEX_BIN%\codex.exe" >nul
+    echo [OK] Codex CLI at %CODEX_BIN%\codex.exe
+) else (
+    echo [WARNING] vendor\bin\codex.exe missing — Codex backend needs the CI zip
+)
+REM Do not leave a leftover copy under OpenCode home from older installers
+if exist "%OPENCODE_BIN%\codex.exe" del /f /q "%OPENCODE_BIN%\codex.exe" >nul 2>&1
+if exist "%CODEX_BIN%\codex.exe" (
+    "%CODEX_BIN%\codex.exe" --version
+    if errorlevel 1 (
+        echo [WARNING] codex.exe failed to start; OpenCode jobs still work
+    )
 )
 
 REM ---------------------------------------------------------------------------
@@ -373,6 +380,11 @@ if /i not "%OPENCODE_HOME%"=="%USER_OC_HOME%" (
 call :ensure_user_path "%OPENCODE_BIN%"
 set "PATH=%OPENCODE_BIN%;%PATH%"
 echo [OK] PATH includes %OPENCODE_BIN% ^(this session + user env^)
+if exist "%CODEX_BIN%\codex.exe" (
+    call :ensure_user_path "%CODEX_BIN%"
+    set "PATH=%CODEX_BIN%;%PATH%"
+    echo [OK] PATH includes %CODEX_BIN%
+)
 
 REM ---------------------------------------------------------------------------
 REM Step 6: .env + project init
@@ -408,6 +420,7 @@ echo.
 echo OpenCode home : %OPENCODE_HOME%
 echo   bin         : %OPENCODE_BIN%\opencode.exe
 if exist "%OPENCODE_BIN%\glab.exe" echo   glab        : %OPENCODE_BIN%\glab.exe
+if exist "%CODEX_BIN%\codex.exe" echo   Codex CLI   : %CODEX_BIN%\codex.exe
 echo   config      : %OPENCODE_HOME%\opencode.json
 echo   global cfg  : %USERPROFILE%\.config\opencode\opencode.json
 echo Python venv   : %VENV_DIR%
@@ -429,7 +442,8 @@ echo.
 echo Note: Restart terminals so OpenCode bin is on PATH:
 echo        %OPENCODE_BIN%
 echo.
-echo Already have OpenCode? Next time you can use install-dashboard.bat
+echo Already have OpenCode + Codex? Next time you can use install-dashboard.bat
+echo Workers only ^(no Python^): install-backends.bat
 echo System Python ^(no .venv^): install-dashboard-system-python.bat
 echo ^(venv + start scripts only; does not touch .opencode^).
 echo.
@@ -607,7 +621,7 @@ if errorlevel 1 (
     if exist "%PKG_OC%\opencode.json" (
         copy /Y "%PKG_OC%\opencode.json" "%OPENCODE_HOME%\opencode.json" >nul
     ) else (
-        > "%OPENCODE_HOME%\opencode.json" echo {"$schema":"https://opencode.ai/config.json","autoupdate":false,"plugin":["oh-my-opencode@!OH_MY_OPENCODE_VERSION!"]}
+        > "%OPENCODE_HOME%\opencode.json" echo {"$schema":"https://opencode.ai/config.json","autoupdate":false,"plugin":[]}
     )
     python -c "import json,sys; p=sys.argv[1]; json.load(open(p,encoding='utf-8-sig'))" "%OPENCODE_HOME%\opencode.json" >nul 2>&1
     if errorlevel 1 (
@@ -615,11 +629,11 @@ if errorlevel 1 (
         exit /b 1
     )
 )
-REM Ensure plugin entry is version-pinned (unversioned npm plugins hang/black-screen on Windows)
+REM Strip leftover oh-my-openagent so stock build/plan agents are used.
 set "PIN_PS1=%SCRIPT_DIR%\packaging\windows\Pin-OpencodePlugin.ps1"
 if exist "%PIN_PS1%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%PIN_PS1%" -ConfigPath "%OPENCODE_HOME%\opencode.json" -Version "!OH_MY_OPENCODE_VERSION!"
-    if errorlevel 1 echo [WARNING] Could not pin plugin version in opencode.json
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%PIN_PS1%" -ConfigPath "%OPENCODE_HOME%\opencode.json"
+    if errorlevel 1 echo [WARNING] Could not normalize opencode.json plugin list
 )
 exit /b 0
 
@@ -882,15 +896,12 @@ copy /Y "!TMP_OC!\extract\opencode.exe" "!OPENCODE_BIN!\opencode.exe" >nul
 if exist "!SCRIPT_DIR!\packaging\windows\opencode.json" (
     copy /Y "!SCRIPT_DIR!\packaging\windows\opencode.json" "!OPENCODE_HOME!\opencode.json" >nul
 ) else (
-    > "!OPENCODE_HOME!\opencode.json" echo {"$schema":"https://opencode.ai/config.json","plugin":["oh-my-opencode"]}
-)
-if exist "!SCRIPT_DIR!\packaging\windows\oh-my-opencode.json" (
-    copy /Y "!SCRIPT_DIR!\packaging\windows\oh-my-opencode.json" "!OPENCODE_HOME!\oh-my-opencode.json" >nul
+    > "!OPENCODE_HOME!\opencode.json" echo {"$schema":"https://opencode.ai/config.json","autoupdate":false,"plugin":[]}
 )
 if exist "!SCRIPT_DIR!\packaging\windows\package.json" (
     copy /Y "!SCRIPT_DIR!\packaging\windows\package.json" "!OPENCODE_HOME!\package.json" >nul
 ) else (
-    > "!OPENCODE_HOME!\package.json" echo {"dependencies":{"oh-my-opencode":"!OH_MY_OPENCODE_VERSION!"}}
+    > "!OPENCODE_HOME!\package.json" echo {"name":"virtual-developer-opencode-home","private":true}
 )
 
 echo   Fetching glab v!GLAB_VERSION! ...
@@ -906,14 +917,7 @@ if not errorlevel 1 (
 )
 :glab_done
 
-where npm >nul 2>&1
-if errorlevel 1 (
-    echo [WARNING] npm not found - plugin not installed. Prefer install-opencode-online.bat ^(vendor\node^) or the full offline CI zip.
-) else (
-    pushd "!OPENCODE_HOME!"
-    call npm install --omit=dev --no-fund --no-audit "oh-my-opencode@!OH_MY_OPENCODE_VERSION!"
-    popd
-)
+echo   [OK] stock OpenCode config ^(no oh-my-openagent plugin^)
 
 rmdir /s /q "!TMP_OC!" 2>nul
 exit /b 0

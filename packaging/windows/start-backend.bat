@@ -54,6 +54,17 @@ if not defined VD_PY (
 )
 echo Python  : %VD_PY%
 
+REM Official Codex CLI path (same as chatgpt.com/codex/install.ps1).
+if not defined LOCALAPPDATA set "LOCALAPPDATA=%USERPROFILE%\AppData\Local"
+set "CODEX_BIN=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin"
+if exist "%CODEX_BIN%\codex.exe" (
+    set "PATH=%CODEX_BIN%;%PATH%"
+    echo Codex   : %CODEX_BIN%\codex.exe
+) else if exist "%SCRIPT_DIR%\vendor\bin\codex.exe" (
+    set "PATH=%SCRIPT_DIR%\vendor\bin;%PATH%"
+    echo Codex   : %SCRIPT_DIR%\vendor\bin\codex.exe
+)
+
 if not exist "%SCRIPT_DIR%\.env" (
     if exist "%SCRIPT_DIR%\.env.example" (
         copy /Y "%SCRIPT_DIR%\.env.example" "%SCRIPT_DIR%\.env" >nul

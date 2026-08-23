@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set
 
 from src.config import settings
 from src.issue_git_spec import (
+    _normalize_backend_id,
     _normalize_branch,
     _normalize_model_id,
     _normalize_repo_url,
     parse_issue_git_spec,
+    upsert_params_backend,
     upsert_params_model,
 )
 from src.logger import logger
@@ -74,13 +76,16 @@ def build_issue_description(
     target_branch: str,
     mode: str,
     model: str = "",
+    backend: str = "",
 ) -> str:
     """Build Jira description with mandatory {params} block for the agent."""
-    from src.issue_git_spec import _normalize_model_id
+    from src.issue_git_spec import _normalize_backend_id, _normalize_model_id
 
     body = (description or "").strip()
     mid = _normalize_model_id(model)
+    bid = _normalize_backend_id(backend)
     model_line = f"Model: {mid}\n" if mid else ""
+    backend_line = f"Backend: {bid}\n" if bid else ""
     params = (
         "{params}\n"
         f"Repository: {repository_url}\n"
@@ -88,6 +93,7 @@ def build_issue_description(
         f"Target branch: {target_branch}\n"
         f"Mode: {mode}\n"
         f"{model_line}"
+        f"{backend_line}"
         "{params}"
     )
     if body:
@@ -293,6 +299,7 @@ def preview_existing_issue(
             "target_branch": spec.target_branch,
             "mode": spec.mode or "",
             "model": spec.model or "",
+            "backend": spec.backend or "",
             "message": "Issue found and template is valid. Choose a run time to schedule.",
         }
     finally:
@@ -308,6 +315,7 @@ def schedule_existing_issue(
     *,
     scheduled_at: str,
     model: str = "",
+    backend: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
@@ -377,6 +385,8 @@ def schedule_existing_issue(
         desc = preview.get("description") or ""
         mid = _normalize_model_id(model) or (preview.get("model") or "")
         mid = _normalize_model_id(mid)
+        bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
+        bid = _normalize_backend_id(bid)
         if mid:
             rewritten = upsert_params_model(desc, mid)
             if rewritten != desc:
@@ -395,6 +405,26 @@ def schedule_existing_issue(
                             )
                 except Exception as e:
                     logger.warning(f"{key}: Model description update soft-failed: {e}")
+        if bid:
+            rewritten_b = upsert_params_backend(desc, bid)
+            if rewritten_b != desc:
+                try:
+                    if hasattr(client, "update_issue"):
+                        ok_upd = client.update_issue(
+                            key, fields={"description": rewritten_b}
+                        )
+                        if ok_upd:
+                            desc = rewritten_b
+                            logger.info(f"{key}: set Backend: {bid} on issue")
+                        else:
+                            logger.warning(
+                                f"{key}: could not write Backend: {bid} to Jira "
+                                f"(schedule still records it)"
+                            )
+                except Exception as e:
+                    logger.warning(
+                        f"{key}: Backend description update soft-failed: {e}"
+                    )
 
         rec = ss.create(
             title=preview.get("title") or key,
@@ -404,6 +434,7 @@ def schedule_existing_issue(
             target_branch=preview.get("target_branch") or "",
             mode=preview.get("mode") or "",
             model=mid,
+            backend=bid,
             scheduled_at=scheduled_iso,
             issue_key=key,
             issue_description=desc,
@@ -438,6 +469,7 @@ def create_scheduled_job(
     issue_type: str = "Task",
     source_branch_mode: str = _SOURCE_MODE_CUSTOM,
     model: str = "",
+    backend: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
@@ -501,6 +533,7 @@ def create_scheduled_job(
         return {"ok": False, "error": "JIRA project key is not configured"}
 
     mid = _normalize_model_id(model)
+    bid = _normalize_backend_id(backend)
     issue_description = build_issue_description(
         description=description,
         repository_url=repo,
@@ -508,6 +541,7 @@ def create_scheduled_job(
         target_branch=tgt,
         mode=mode_c,
         model=mid,
+        backend=bid,
     )
 
     client = jira_client
@@ -548,6 +582,7 @@ def create_scheduled_job(
                 target_branch=tgt,
                 mode=mode_c,
                 model=mid,
+                backend=bid,
             )
             # Soft: rewrite description so agents see feature/KEY (not __pending__)
             try:
@@ -597,6 +632,7 @@ def create_scheduled_job(
             target_branch=tgt,
             mode=mode_c,
             model=mid,
+            backend=bid,
             scheduled_at=scheduled_iso,
             issue_key=issue_key,
             issue_description=issue_description,

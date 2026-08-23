@@ -21,7 +21,7 @@
   Layout (same product paths as offline install.bat):
     %USERPROFILE%\.opencode\bin\opencode.exe
     %USERPROFILE%\.opencode\node_modules\oh-my-openagent  (+ oh-my-opencode alias)
-    %USERPROFILE%\.opencode\opencode.json  (pinned oh-my-openagent@VERSION)
+    %USERPROFILE%\.opencode\opencode.json  (plugin=[], stock build/plan)
     %USERPROFILE%\.config\opencode\        (mirrored configs + node_modules)
     %USERPROFILE%\.cache\opencode\         (full plugin tree for Bun + rg.exe)
 
@@ -363,17 +363,13 @@ try {
 # ---------------------------------------------------------------------------
 # 5) Config + package.json (pinned openagent id)
 # ---------------------------------------------------------------------------
-Write-Step "Write OpenCode configs (pinned plugin)"
+Write-Step "Write OpenCode configs (stock build/plan, no oh-my plugin)"
 
 $pkgBody = @"
 {
   "name": "virtual-developer-opencode-home",
   "private": true,
-  "description": "OpenCode user home dependencies for JIRA Virtual Developer",
-  "dependencies": {
-    "oh-my-openagent": "$OH_MY",
-    "oh-my-opencode": "$OH_MY"
-  }
+  "description": "OpenCode user home for Yaver (stock build/plan agents, no oh-my plugin)"
 }
 "@
 Set-Content -Path (Join-Path $OPENCODE_HOME "package.json") -Value $pkgBody -Encoding UTF8
@@ -382,142 +378,28 @@ $ocCfgBody = @"
 {
   "`$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
-  "plugin": ["oh-my-openagent@$OH_MY"]
+  "plugin": []
 }
 "@
 Set-Content -Path (Join-Path $OPENCODE_HOME "opencode.json") -Value $ocCfgBody -Encoding UTF8
 
-$omoStubSrc = Join-Path $RepoRoot "packaging\windows\oh-my-opencode.json"
-if (Test-Path -LiteralPath $omoStubSrc) {
-    Copy-Item -LiteralPath $omoStubSrc -Destination (Join-Path $OPENCODE_HOME "oh-my-opencode.json") -Force
-    Copy-Item -LiteralPath $omoStubSrc -Destination (Join-Path $OPENCODE_HOME "oh-my-openagent.json") -Force
-}
-
 $pinPs1 = Join-Path $RepoRoot "packaging\windows\Pin-OpencodePlugin.ps1"
 if (Test-Path -LiteralPath $pinPs1) {
-    & $pinPs1 -ConfigPath (Join-Path $OPENCODE_HOME "opencode.json") -Version $OH_MY
+    & $pinPs1 -ConfigPath (Join-Path $OPENCODE_HOME "opencode.json")
 }
 
 # ---------------------------------------------------------------------------
-# 6) npm registry config + install plugins (bundled node/npm ONLY)
+# 6) Mirror stock config (no oh-my-openagent npm install)
 # ---------------------------------------------------------------------------
-Write-Step "Configure npm registry + install plugins"
+Write-Step "Mirror stock OpenCode config"
 
-$npmrcTemplate = Resolve-NpmrcPath $RepoRoot
-$homeNpmrc = Join-Path $OPENCODE_HOME ".npmrc"
-if ($npmrcTemplate) {
-    Copy-Item -LiteralPath $npmrcTemplate -Destination $homeNpmrc -Force
-    Write-Host "  .npmrc from: $npmrcTemplate"
-} else {
-    Set-Content -Path $homeNpmrc -Value "registry=https://registry.npmjs.org/`n" -Encoding UTF8
-    Write-Host "  .npmrc default (public registry) - add packaging\windows\npm-online.npmrc to customize"
-}
-
-# Registry precedence: -NpmRegistry param > env NPM_REGISTRY > online-sources.env > .npmrc
-$resolvedRegistry = $null
-if ($NpmRegistry) { $resolvedRegistry = $NpmRegistry.Trim() }
-elseif ($env:NPM_REGISTRY) { $resolvedRegistry = $env:NPM_REGISTRY.Trim() }
-elseif ($srcMap["NPM_REGISTRY"]) { $resolvedRegistry = $srcMap["NPM_REGISTRY"].Trim() }
-else { $resolvedRegistry = Get-RegistryFromNpmrc $homeNpmrc }
-
-if ($resolvedRegistry) {
-    # Rewrite/ensure registry= line in project .npmrc (does not change user global npm config)
-    $lines = @()
-    $found = $false
-    if (Test-Path -LiteralPath $homeNpmrc) {
-        foreach ($line in (Get-Content -LiteralPath $homeNpmrc -Encoding UTF8)) {
-            if ($line -match '^\s*registry\s*=') {
-                $lines += "registry=$resolvedRegistry"
-                $found = $true
-            } else {
-                $lines += $line
-            }
-        }
-    }
-    if (-not $found) { $lines = @("registry=$resolvedRegistry") + $lines }
-    Set-Content -Path $homeNpmrc -Value ($lines -join "`r`n") -Encoding UTF8
-    Write-Host "  npm registry: $resolvedRegistry"
-} else {
-    Write-Host "  npm registry: (default from .npmrc or npm)"
-}
-
-# Point npm at OUR node explicitly (some shells resolve wrong node)
-$env:npm_config_userconfig = $homeNpmrc
-# Avoid writing to %USERPROFILE%\.npmrc accidentally for this run
-$env:npm_config_globalconfig = $homeNpmrc
-
-Push-Location $OPENCODE_HOME
-try {
-    Write-Host "  npm config get registry =>" (& $npmCmd config get registry 2>&1)
-    # Hoisted tree is shallower (Windows MAX_PATH)
-    $npmArgs = @(
-        "install",
-        "--omit=dev",
-        "--no-fund",
-        "--no-audit",
-        "--install-strategy=hoisted",
-        "oh-my-openagent@$OH_MY",
-        "oh-my-opencode@$OH_MY"
-    )
-    if ($resolvedRegistry) {
-        $npmArgs += @("--registry", $resolvedRegistry)
-    }
-    & $npmCmd @npmArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm install plugins failed (exit $LASTEXITCODE). Check registry in npm-online.npmrc / NPM_REGISTRY."
-    }
-} finally {
-    Pop-Location
-    Remove-Item Env:npm_config_userconfig -ErrorAction SilentlyContinue
-    Remove-Item Env:npm_config_globalconfig -ErrorAction SilentlyContinue
-}
-
-$oma = Join-Path $OPENCODE_HOME "node_modules\oh-my-openagent"
-$omo = Join-Path $OPENCODE_HOME "node_modules\oh-my-opencode"
-if (-not (Test-Path -LiteralPath $oma) -and (Test-Path -LiteralPath $omo)) {
-    Write-Host "  Duplicating oh-my-opencode -> oh-my-openagent"
-    Robocopy-Tree $omo $oma
-}
-if (-not (Test-Path -LiteralPath $omo) -and (Test-Path -LiteralPath $oma)) {
-    Write-Host "  Duplicating oh-my-openagent -> oh-my-opencode"
-    Robocopy-Tree $oma $omo
-}
-if (-not (Test-Path -LiteralPath $oma)) {
-    throw "oh-my-openagent missing after npm install: $oma"
-}
-if (-not (Test-Path -LiteralPath (Join-Path $oma "dist\index.js"))) {
-    throw "oh-my-openagent incomplete (missing dist\index.js)"
-}
-
-$omaFiles = @(Get-ChildItem -LiteralPath $oma -Recurse -File -ErrorAction SilentlyContinue)
-$omaMd = @(Get-ChildItem -LiteralPath $oma -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-Write-Host "  oh-my-openagent: $($omaFiles.Count) files, $($omaMd.Count) markdown"
-if ($omaFiles.Count -lt 100) {
-    Write-Host "  [WARNING] plugin tree looks small ($($omaFiles.Count) files)"
-}
-
-# ---------------------------------------------------------------------------
-# 7) Mirror config + full-copy plugin cache (no junctions)
-# ---------------------------------------------------------------------------
-Write-Step "Seed config + cache for oh-my-openagent (Bun load paths)"
-
-foreach ($name in @("opencode.json", "package.json", "oh-my-opencode.json", "oh-my-openagent.json")) {
+foreach ($name in @("opencode.json", "package.json")) {
     $src = Join-Path $OPENCODE_HOME $name
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $OC_CONFIG $name) -Force
     }
 }
-
-Write-Host "  robocopy node_modules -> cache + config (may take 1-3 min)..."
-Robocopy-Tree (Join-Path $OPENCODE_HOME "node_modules") (Join-Path $OC_CACHE "node_modules")
-Robocopy-Tree (Join-Path $OPENCODE_HOME "node_modules") (Join-Path $OC_CONFIG "node_modules")
-if (Test-Path -LiteralPath $omo) {
-    Robocopy-Tree $omo (Join-Path $OC_CACHE "packages\oh-my-opencode")
-}
-if (Test-Path -LiteralPath $oma) {
-    Robocopy-Tree $oma (Join-Path $OC_CACHE "packages\oh-my-openagent")
-}
-Copy-Item -LiteralPath (Join-Path $OPENCODE_HOME "package.json") -Destination (Join-Path $OC_CACHE "package.json") -Force
+Write-Host "  stock OpenCode config mirrored (plugin=[])"
 
 # ---------------------------------------------------------------------------
 # 8) ripgrep seed (avoid first-run download hang)
@@ -592,7 +474,7 @@ Write-Host "========================================"
 Write-Host "  Online OpenCode install complete"
 Write-Host "========================================"
 Write-Host "  bin     : $OPENCODE_BIN\opencode.exe"
-Write-Host "  plugin  : $oma"
+Write-Host "  plugin  : none (stock build/plan)"
 Write-Host "  config  : $OC_CONFIG\opencode.json"
 Write-Host "  cache   : $OC_CACHE"
 Write-Host ""

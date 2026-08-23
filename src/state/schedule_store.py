@@ -73,6 +73,7 @@ class ScheduleStore:
         issue_type: str = "Task",
         source: str = "new",
         model: str = "",
+        backend: str = "",
     ) -> Dict[str, Any]:
         """Persist a schedule after the Jira issue is known (created or existing)."""
         schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
@@ -89,6 +90,7 @@ class ScheduleStore:
             "target_branch": target_branch or "",
             "mode": mode or "",
             "model": (model or "").strip(),
+            "backend": (backend or "").strip(),
             "issue_type": (issue_type or "Task").strip() or "Task",
             "scheduled_at": scheduled_at,
             "status": "scheduled",

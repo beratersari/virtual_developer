@@ -57,7 +57,8 @@ _TARGET_KEY = r"(?:target\s*branch|mr\s*target|merge\s*into|merge\s*target|base\
 # Mode / workflow decision inside {params}
 _MODE_KEY = r"(?:mode|workflow(?:\s*mode)?)"
 _MODEL_KEY = r"(?:model|llm|opencode\s*model|default\s*model)"
-_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY}|{_MODEL_KEY})"
+_BACKEND_KEY = r"(?:backend|agent\s*backend|worker)"
+_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY}|{_MODEL_KEY}|{_BACKEND_KEY})"
 
 _REPO_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r])\s*{_REPO_KEY}\s*:\s*(.*?)(?=\s*{_ANY_KEY}\s*:|\Z)"
@@ -74,6 +75,9 @@ _MODE_FIELD = re.compile(
 _MODEL_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODEL_KEY}\s*:\s*(\S+)"
 )
+_BACKEND_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_BACKEND_KEY}\s*:\s*(\S+)"
+)
 
 _URL_TOKEN = re.compile(
     r"(?i)\b((?:https?://|git@)[^\s\[\]<>\"']+)"
@@ -86,6 +90,7 @@ Source branch: feature/PROJ-123
 Target branch: develop
 Mode: plan
 Model: opencode/hy3-free
+Backend: opencode
 {params}
 
 Mode is mandatory (like Repository / Source branch):
@@ -114,7 +119,8 @@ class IssueGitSpec:
     source_branch: str
     target_branch: str
     mode: Optional[str] = None  # "plan" | "build" when present
-    model: Optional[str] = None  # OpenCode model id; empty = settings default
+    model: Optional[str] = None  # model id; empty = settings default
+    backend: Optional[str] = None  # opencode | codex; empty = settings default
 
 
 class IssueGitConfigError(Exception):
@@ -151,6 +157,13 @@ def _normalize_repo_url(raw: str) -> str:
     return url
 
 
+def _normalize_backend_id(raw: str) -> str:
+    """opencode | codex. Empty if unset."""
+    from src.backends.base import normalize_backend_name
+
+    return normalize_backend_name(raw)
+
+
 def _normalize_model_id(raw: str) -> str:
     """OpenCode model id (provider/name). Empty if unset or junk."""
     mid = (raw or "").strip().strip("`").rstrip(".,;")
@@ -179,6 +192,27 @@ def upsert_params_model(description: str, model: str) -> str:
         )
     else:
         inner2 = inner.rstrip() + f"\nModel: {mid}\n"
+    return text[: m.start(1)] + inner2 + text[m.end(1) :]
+
+
+def upsert_params_backend(description: str, backend: str) -> str:
+    """Set or replace ``Backend:`` inside the first ``{params}`` block."""
+    bid = _normalize_backend_id(backend)
+    text = description or ""
+    if not bid:
+        return text
+    m = _PARAMS_BLOCK.search(text)
+    if not m:
+        return text
+    inner = m.group(1)
+    if _BACKEND_FIELD.search(inner):
+        inner2 = re.sub(
+            rf"(?im)^(\s*(?:backend|agent\s*backend|worker)\s*:\s*)\S+",
+            rf"\g<1>{bid}",
+            inner,
+        )
+    else:
+        inner2 = inner.rstrip() + f"\nBackend: {bid}\n"
     return text[: m.start(1)] + inner2 + text[m.end(1) :]
 
 
@@ -351,6 +385,8 @@ def parse_issue_git_spec(
     mode = _MODE_ALIASES.get(mode_raw) if mode_raw else None
     model_m = _MODEL_FIELD.search(text)
     model = _normalize_model_id(model_m.group(1)) if model_m else ""
+    backend_m = _BACKEND_FIELD.search(text)
+    backend = _normalize_backend_id(backend_m.group(1)) if backend_m else ""
 
     missing = []
     if not repo:
@@ -413,6 +449,7 @@ def parse_issue_git_spec(
             target_branch=target,
             mode=mode,
             model=model or None,
+            backend=backend or None,
         ),
         None,
     )

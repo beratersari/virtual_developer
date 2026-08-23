@@ -30,6 +30,10 @@ type Draft = {
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
   default_model: string
+  agent_backend: string
+  codex_base_url: string
+  codex_wire_api: string
+  codex_api_key: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
   project_repositories: ProjectRepository[]
 }
@@ -48,6 +52,10 @@ function fromSettings(s: SettingsPayload): Draft {
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
     agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
     default_model: s.default_model,
+    agent_backend: s.agent_backend || 'opencode',
+    codex_base_url: s.codex_base_url || '',
+    codex_wire_api: s.codex_wire_api || '',
+    codex_api_key: '',
     gitlab_cred_rows: (s.gitlab_credentials ?? []).map((c) => ({
       host: c.host,
       pat: '',
@@ -133,6 +141,9 @@ export function SettingsPage() {
         agent_task_max_retries: Number(draft.agent_task_max_retries),
         agent_task_max_incomplete_retries: Number(draft.agent_task_max_incomplete_retries),
         default_model: draft.default_model.trim(),
+        agent_backend: draft.agent_backend,
+        codex_base_url: draft.codex_base_url.trim(),
+        codex_wire_api: draft.codex_wire_api,
         gitlab_credentials: draft.gitlab_cred_rows
           .map((r) => {
             const host = r.host.trim()
@@ -155,6 +166,7 @@ export function SettingsPage() {
           .filter((p) => p.url),
       }
       if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
+      if (draft.codex_api_key.trim()) body.codex_api_key = draft.codex_api_key.trim()
       const updated = await patchSettings(body)
       setSettings(updated)
       setDraft(fromSettings(updated))
@@ -186,7 +198,7 @@ export function SettingsPage() {
             ['jira', 'Jira'],
             ['gitlab', 'GitLab'],
             ['projects', 'Projects'],
-            ['model', 'Model'],
+            ['model', 'Agent'],
             ['runtime', 'Runtime'],
           ] as const
         ).map(([id, label]) => (
@@ -569,11 +581,64 @@ export function SettingsPage() {
 
       {section === 'model' && (
       <div key="model" className="vd-fade space-y-3">
+      <label className="field">
+        <span>Worker</span>
+        <select
+          value={draft.agent_backend}
+          onChange={(e) => mark('agent_backend', e.target.value)}
+        >
+          <option value="opencode">OpenCode</option>
+          <option value="codex">Codex</option>
+        </select>
+        <span className="mt-1 block text-xs text-text-muted">
+          Same unattended job contract. Per-issue {'{params}'} Backend: overrides this.
+        </span>
+      </label>
+      {draft.agent_backend === 'codex' && (
+        <>
+          <label className="field">
+            <span>Codex API key</span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={draft.codex_api_key}
+              onChange={(e) => mark('codex_api_key', e.target.value)}
+              placeholder={
+                settings.codex_api_key_configured ? 'Configured — leave blank to keep' : 'sk-… or provider token'
+              }
+            />
+          </label>
+          <label className="field">
+            <span>Custom base URL</span>
+            <input
+              value={draft.codex_base_url}
+              onChange={(e) => mark('codex_base_url', e.target.value)}
+              placeholder="https://llm.example.com/v1 (empty = OpenAI)"
+            />
+            <span className="mt-1 block text-xs text-text-muted">
+              OpenAI-compatible endpoint. Works with a private gateway, LiteLLM, or local Ollama.
+            </span>
+          </label>
+          <label className="field">
+            <span>Wire API</span>
+            <select
+              value={draft.codex_wire_api}
+              onChange={(e) => mark('codex_wire_api', e.target.value)}
+            >
+              <option value="">Auto (chat if custom URL, else responses)</option>
+              <option value="responses">responses (official OpenAI)</option>
+              <option value="chat">chat (most custom / OpenAI-compat)</option>
+            </select>
+          </label>
+        </>
+      )}
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <div className="text-sm font-semibold text-text">OpenCode model</div>
+          <div className="text-sm font-semibold text-text">Default model</div>
           <p className="mt-1 text-xs text-text-muted">
-            Inventory from GET /api/models. Saving updates runtime DEFAULT_MODEL.
+            {draft.agent_backend === 'codex'
+              ? 'Model id sent to Codex (provider name as your API expects).'
+              : 'Inventory from GET /api/models. Saving updates runtime DEFAULT_MODEL.'}
           </p>
         </div>
         <button

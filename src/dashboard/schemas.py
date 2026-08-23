@@ -42,6 +42,8 @@ class ScheduleCreateRequest(BaseModel):
     dispatch_now: bool = False
     # Optional OpenCode model id for this job only (empty = settings default)
     model: str = Field(default="", max_length=200)
+    # Optional worker: opencode | codex (empty = settings.agent_backend)
+    backend: str = Field(default="", max_length=40)
 
 
 class ScheduleExistingRequest(BaseModel):
@@ -51,6 +53,7 @@ class ScheduleExistingRequest(BaseModel):
     scheduled_at: str
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
+    backend: str = Field(default="", max_length=40)
 
 
 class ScheduleItem(BaseModel):
@@ -62,6 +65,7 @@ class ScheduleItem(BaseModel):
     target_branch: str = ""
     mode: str = ""
     model: str = ""
+    backend: str = ""
     issue_type: str = "Task"
     scheduled_at: str = ""
     status: str = "scheduled"
@@ -266,6 +270,12 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
+    # Unattended worker: opencode | codex
+    agent_backend: str = "opencode"
+    codex_base_url: str = ""
+    codex_wire_api: str = ""
+    # Presence only — never return the Codex API key
+    codex_api_key_configured: bool = False
     gitlab_webhook_enabled: bool = False
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
@@ -428,11 +438,58 @@ class SettingsUpdate(BaseModel):
         ),
     )
     default_model: Optional[str] = Field(default=None, max_length=200)
+    agent_backend: Optional[str] = Field(
+        default=None,
+        max_length=40,
+        description="Unattended worker: opencode | codex",
+    )
+    codex_base_url: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="OpenAI-compatible base URL for Codex (empty = default OpenAI)",
+    )
+    codex_wire_api: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        description="Codex wire API: responses | chat | empty (auto)",
+    )
+    codex_api_key: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only Codex / OpenAI-compatible API key (omit to keep current)",
+    )
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,
         max_length=40,
         description="Full replace of saved git remotes for the New-issue form",
     )
+
+    @field_validator("agent_backend", mode="before")
+    @classmethod
+    def _agent_backend_known(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        from src.backends.base import normalize_backend_name
+
+        name = normalize_backend_name(text)
+        if not name:
+            raise ValueError("agent_backend must be 'opencode' or 'codex'")
+        return name
+
+    @field_validator("codex_wire_api", mode="before")
+    @classmethod
+    def _codex_wire_api_known(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if not text:
+            return ""
+        if text not in ("responses", "chat"):
+            raise ValueError("codex_wire_api must be 'responses', 'chat', or empty")
+        return text
 
 
 class QueueItem(BaseModel):

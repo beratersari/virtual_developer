@@ -75,7 +75,7 @@ def test_resolve_opencode_agent_empty_and_unknown():
 
     assert resolve_opencode_agent_name("") == ""
     assert resolve_opencode_agent_name("custom_agent") == "custom_agent"
-    assert resolve_opencode_agent_name("sisyphus_junior") == "Sisyphus-Junior"
+    assert resolve_opencode_agent_name("sisyphus_junior") == "build"
     assert resolve_opencode_agent_name("Sisyphus - ultraworker") == "Sisyphus - ultraworker"
 
 

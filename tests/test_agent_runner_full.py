@@ -20,15 +20,13 @@ def runner(tmp_path):
     return AgentRunner(working_directory=tmp_path)
 
 
-def test_resolve_opencode_agent_name_sisyphus_stack():
-    assert resolve_opencode_agent_name("sisyphus") == "Sisyphus - ultraworker"
-    assert resolve_opencode_agent_name("prometheus") == "Prometheus - Plan Builder"
-    assert resolve_opencode_agent_name("atlas") == "Atlas - Plan Executor"
+def test_resolve_opencode_agent_name_stock_build():
+    assert resolve_opencode_agent_name("build") == "build"
+    assert resolve_opencode_agent_name("plan") == "plan"
+    assert resolve_opencode_agent_name("sisyphus") == "build"
+    assert resolve_opencode_agent_name("prometheus") == "plan"
+    assert resolve_opencode_agent_name("atlas") == "build"
     assert resolve_opencode_agent_name("oracle") == "oracle"
-    assert (
-        resolve_opencode_agent_name("Sisyphus - ultraworker")
-        == "Sisyphus - ultraworker"
-    )
 
 
 def test_agent_task_to_dict():
