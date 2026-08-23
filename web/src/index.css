@@ -136,13 +136,19 @@ body {
   width: 2rem;
   height: 2rem;
   border-radius: 9px;
-  background: linear-gradient(160deg, #ff9a6a, #ff7a45 55%, #e85d3a);
-  color: #1a0d08;
+  background: #11182c;
+  color: #e8d5b0;
   font-weight: 700;
-  font-size: 0.78rem;
-  letter-spacing: -0.04em;
+  font-size: 0.72rem;
+  letter-spacing: -0.03em;
   display: grid;
   place-items: center;
+  overflow: hidden;
+}
+.vd-mark img {
+  width: 2rem;
+  height: 2rem;
+  display: block;
 }
 
 .vd-nav {

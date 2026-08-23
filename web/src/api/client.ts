@@ -329,6 +329,7 @@ export function createSchedule(body: ScheduleCreateBody) {
   if (body.project_key) payload.project_key = body.project_key
   if (body.issue_type) payload.issue_type = body.issue_type
   if (body.dispatch_now) payload.dispatch_now = true
+  if (body.model) payload.model = body.model
   return request<{
     ok: boolean
     schedule: ScheduleItem
@@ -369,6 +370,7 @@ export function scheduleExistingIssue(body: {
   issue_key: string
   scheduled_at: string
   dispatch_now?: boolean
+  model?: string
 }) {
   return request<{
     ok: boolean

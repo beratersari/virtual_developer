@@ -75,10 +75,14 @@ export function Shell() {
     <div className="vd-app">
       <aside className="vd-sidebar">
         <div className="vd-brand">
-          <div className="vd-mark">VD</div>
+          <div className="vd-mark" aria-hidden>
+            <img src="/favicon.svg" alt="" width={32} height={32} />
+          </div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold tracking-tight">Virtual Developer</div>
-            <div className="text-[11px] text-text-muted">v{live.meta?.version ?? '—'}</div>
+            <div className="truncate text-sm font-semibold tracking-tight">Yaver</div>
+            <div className="text-[11px] text-text-muted">
+              the aide · v{live.meta?.version ?? '—'}
+            </div>
           </div>
         </div>
 

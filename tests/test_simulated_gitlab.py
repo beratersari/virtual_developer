@@ -27,7 +27,7 @@ def test_sim_lists_seed_project(sim_client):
 def test_sim_post_note_api(sim_client):
     r = sim_client.post(
         "/api/v4/projects/1/merge_requests/1/notes",
-        json={"body": "*Virtual Developer*\n\nhello"},
+        json={"body": "*Yaver*\n\nhello"},
     )
     assert r.status_code == 201
     note = r.get_json()

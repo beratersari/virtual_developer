@@ -19,6 +19,7 @@ import httpx
 from src.opencode_serve import (
     DEFAULT_COMPACT_LOOP_CONTINUE_PROMPT,
     DEFAULT_CONTINUE_PROMPT,
+    DEFAULT_UNATTENDED_NUDGE_PROMPT,
     IDLE_STUCK_LOG_THRESHOLD,
     OpenCodeServeClient,
     ServeOrchestrator,
@@ -29,8 +30,10 @@ from src.opencode_serve import (
     format_serve_error,
     is_serve_timeout,
     known_model_ids_from_payload,
+    last_turn_is_live_question,
     model_is_known,
     next_compact_loop_streak,
+    turn_should_wait_for_compact,
 )
 from src.opencode_sessions import assess_session_completeness
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
@@ -290,6 +293,70 @@ def test_count_compaction_signals():
         {"info": {"summary": True}, "parts": [{"type": "text", "text": "sum"}]},
     ]
     assert count_compaction_signals(msgs) == 2
+
+
+def test_turn_should_wait_for_compact_ignores_lifetime_history():
+    """KAN-95: old compact markers + finish=unknown must not start compact wait."""
+    reasons = [
+        "open todos: 2 pending, 1 in_progress",
+        "last assistant finish is unfinished ('unknown')",
+    ]
+    assert (
+        turn_should_wait_for_compact(reasons=reasons, new_compacts_this_turn=0)
+        is False
+    )
+    assert (
+        turn_should_wait_for_compact(reasons=reasons, new_compacts_this_turn=1)
+        is True
+    )
+    assert (
+        turn_should_wait_for_compact(
+            reasons=["last assistant followed a compaction message"],
+            new_compacts_this_turn=0,
+        )
+        is True
+    )
+    assert (
+        turn_should_wait_for_compact(
+            reasons=["session ended on compaction user part (no follow-up)"],
+            new_compacts_this_turn=0,
+        )
+        is True
+    )
+
+
+def test_last_turn_is_live_question_requires_stop_not_summary():
+    assert (
+        last_turn_is_live_question(
+            {
+                "assistant_asked_question": True,
+                "last_finish": "stop",
+                "last_is_summary": False,
+            }
+        )
+        is True
+    )
+    assert (
+        last_turn_is_live_question(
+            {
+                "assistant_asked_question": True,
+                "last_finish": "unknown",
+                "last_is_summary": False,
+            }
+        )
+        is False
+    )
+    assert (
+        last_turn_is_live_question(
+            {
+                "assistant_asked_question": True,
+                "last_finish": "stop",
+                "last_is_summary": True,
+            }
+        )
+        is False
+    )
+    assert last_turn_is_live_question({"last_finish": "stop"}) is False
 
 
 def test_assess_serve_turn_open_todos_and_summary():
@@ -918,6 +985,172 @@ async def test_three_idle_after_compact_logs_sends_continue_not_error():
     assert out.count("idle after compact but still incomplete") >= IDLE_STUCK_LOG_THRESHOLD
     assert "[INCOMPLETE]" not in (result.stderr or "")
     assert "[TIMEOUT]" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
+async def test_resume_with_old_compact_markers_does_not_enter_compact_wait():
+    """Reused session history must not start a 6h auto-compact busy poll.
+
+    KAN-95: compact_total>0 from the previous run + finish=unknown + open
+    todos printed "compact detected" and then thousands of busy polls.
+    """
+
+    class HistoricalCompactResume(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=0)
+            self.session_id = "ses_resume_old_compact"
+            self.messages = [
+                {
+                    "info": {
+                        "id": "old_compact",
+                        "role": "user",
+                        "finish": None,
+                    },
+                    "parts": [{"type": "compaction", "auto": True}],
+                },
+                {
+                    "info": {
+                        "id": "old_summary",
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": True,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "## Compaction summary\nOld run work.",
+                        }
+                    ],
+                },
+            ]
+            self.todos = [
+                {"content": "Explore Django", "status": "in_progress"},
+                {"content": "Implement", "status": "pending"},
+                {"content": "Review", "status": "pending"},
+            ]
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            reply = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "unknown",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Still exploring the repo; todos remain open.",
+                    }
+                ],
+            }
+            self.messages.append(reply)
+            return reply
+
+    backend = HistoricalCompactResume()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=8.0,
+        compact_poll_seconds=0.02,
+        compact_settle_seconds=0.02,
+    )
+    result = await orch.run(
+        prompt="BUILD the Django audit-log package",
+        title="KAN-95-RESUME",
+        session_id=backend.session_id,
+    )
+    out = result.stdout or ""
+    assert "compact detected" not in out
+    assert out.count("waiting for auto-compact (poll") <= 1
+    assert backend.message_calls == 1
+    assert result.incomplete is True
+    assert result.returncode == 2
+    assert "[INCOMPLETE]" in (result.stderr or "")
+    assert "open todos" in (result.stderr or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_busy_compact_wait_leaves_on_live_stop_question():
+    """Status stays busy after a finish=stop question — leave wait and nudge.
+
+    KAN-95: last assistant asked the operator after OMO restore, but
+    GET /session/status stayed busy so we never re-assessed.
+    """
+
+    class CompactThenBusyQuestion(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=1)
+            self.busy_polls_remaining = 80
+            self._injected_question = False
+
+        async def session_status(self):
+            self.status_polls += 1
+            if (
+                self.message_calls >= 1
+                and not self._injected_question
+                and self.status_polls >= 1
+            ):
+                self._injected_question = True
+                self.messages.append(
+                    {
+                        "info": {
+                            "id": self._next_id("msg"),
+                            "role": "assistant",
+                            "finish": "stop",
+                            "summary": None,
+                        },
+                        "parts": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Please clarify which approach to use "
+                                    "before I proceed.\n"
+                                    "1. Fresh start from the ticket\n"
+                                    "2. Restore a different plan"
+                                ),
+                            }
+                        ],
+                    }
+                )
+            if self.busy_polls_remaining > 0:
+                self.busy_polls_remaining -= 1
+                return {self.session_id: {"type": "busy"}}
+            return {self.session_id: {"type": "idle"}}
+
+    backend = CompactThenBusyQuestion()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=8.0,
+        compact_poll_seconds=0.02,
+        compact_settle_seconds=0.02,
+    )
+    result = await orch.run(prompt="do the work", title="KAN-95-BUSY-Q")
+    out = result.stdout or ""
+    assert "leaving compact wait for unattended nudge" in out
+    assert "busy after compact: assistant asked a clarifying question" in out
+    assert backend.message_calls >= 2
+    assert any(
+        p == DEFAULT_UNATTENDED_NUDGE_PROMPT or "unattended" in (p or "").lower()
+        or "no human" in (p or "").lower()
+        for p in backend.prompts
+    )
+    # Must not sit out the compact-wait budget as a timeout.
+    assert "[TIMEOUT]" not in (result.stderr or "")
+    assert result.timed_out is False
 
 
 @pytest.mark.asyncio

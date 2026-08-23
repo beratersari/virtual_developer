@@ -6,11 +6,13 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.brand import PRODUCT_NAME
+
 
 class MetaResponse(BaseModel):
     version: str
     server_time: str
-    app_name: str = "JIRA Virtual Developer"
+    app_name: str = PRODUCT_NAME
 
 
 class BulkJobDeleteRequest(BaseModel):
@@ -38,6 +40,8 @@ class ScheduleCreateRequest(BaseModel):
     source_branch_mode: str = "custom"
     # Start process_event immediately (does not wait for scheduled_at)
     dispatch_now: bool = False
+    # Optional OpenCode model id for this job only (empty = settings default)
+    model: str = Field(default="", max_length=200)
 
 
 class ScheduleExistingRequest(BaseModel):
@@ -46,6 +50,7 @@ class ScheduleExistingRequest(BaseModel):
     issue_key: str
     scheduled_at: str
     dispatch_now: bool = False
+    model: str = Field(default="", max_length=200)
 
 
 class ScheduleItem(BaseModel):
@@ -56,6 +61,7 @@ class ScheduleItem(BaseModel):
     source_branch: str = ""
     target_branch: str = ""
     mode: str = ""
+    model: str = ""
     issue_type: str = "Task"
     scheduled_at: str = ""
     status: str = "scheduled"

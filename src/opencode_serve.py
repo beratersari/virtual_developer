@@ -65,6 +65,43 @@ def assessment_still_asking(assessment: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def last_turn_is_live_question(assessment: Optional[Dict[str, Any]]) -> bool:
+    """True when the last assistant *stopped* on a real operator question.
+
+    A compact recap that quotes "Shall I…?" is not live. Mid-turn
+    ``finish=unknown`` / ``tool-calls`` is still working — do not leave
+    compact-wait just because an earlier ask is still in history.
+    """
+    if not assessment_still_asking(assessment):
+        return False
+    assert isinstance(assessment, dict)
+    if assessment.get("last_is_summary"):
+        return False
+    finish = str(assessment.get("last_finish") or "").strip().lower()
+    if finish in _UNFINISHED_FINISH:
+        return False
+    return finish == "stop"
+
+
+def turn_should_wait_for_compact(
+    *,
+    reasons: Optional[Sequence[Any]] = None,
+    new_compacts_this_turn: int = 0,
+) -> bool:
+    """True only when *this* turn compacted.
+
+    Lifetime ``compact_total`` / old session markers must not count. A
+    resumed session that compacted hours ago would otherwise burn the
+    full job timeout in auto-compact wait (KAN-95: poll 3000+ busy).
+    """
+    if int(new_compacts_this_turn or 0) > 0:
+        return True
+    items = list(reasons or [])
+    if reasons_are_compact_only(items):
+        return True
+    return any("compact" in str(r).lower() for r in items)
+
+
 def assessment_is_compact_only(assessment: Optional[Dict[str, Any]]) -> bool:
     """True when the last turn is compact recap / compact-then-stop, not work.
 
@@ -948,7 +985,56 @@ class ServeOrchestrator:
             if busy:
                 idle_since = None
                 idle_stuck_logs = 0
-                _emit("stdout", f"[serve] waiting for auto-compact (poll {polls}, busy)")
+                # Log + re-assess on poll 1 and every 5th. Status can stay
+                # busy after a finish=stop question (OMO restore); spinning
+                # until the job timeout is the KAN-95 failure mode.
+                if polls == 1 or polls % 5 == 0:
+                    _emit(
+                        "stdout",
+                        f"[serve] waiting for auto-compact (poll {polls}, busy)",
+                    )
+                    try:
+                        raw_messages, assessment, compact_total = (
+                            await self._snapshot_assess(
+                                sid,
+                                compact_total=compact_total,
+                                output_text="",
+                                _emit=_emit,
+                            )
+                        )
+                    except Exception as e:
+                        _emit(
+                            "stderr",
+                            f"[serve] busy-wait assess failed: {e}",
+                        )
+                    else:
+                        last_reasons = list(assessment.get("reasons") or [])
+                        if last_turn_is_live_question(assessment):
+                            assessment["assistant_asked_question"] = True
+                            if not any(
+                                "clarifying question" in str(r).lower()
+                                for r in last_reasons
+                            ):
+                                last_reasons = list(last_reasons) + [
+                                    "assistant asked a clarifying question"
+                                ]
+                                assessment["reasons"] = last_reasons
+                            _emit(
+                                "stdout",
+                                f"[serve] busy after compact: assistant asked a "
+                                f"clarifying question (poll {polls}) — leaving "
+                                f"compact wait for unattended nudge "
+                                f"(reasons={last_reasons})",
+                            )
+                            return {
+                                "settled": True,
+                                "complete": False,
+                                "polls": polls,
+                                "busy": True,
+                                "assessment": assessment,
+                                "compact_total": compact_total,
+                                "reasons": last_reasons,
+                            }
                 await asyncio.sleep(poll_s)
                 continue
             if idle_since is None:
@@ -1935,11 +2021,11 @@ class ServeOrchestrator:
             # Real auto-compact signals only — a clarifying question is a clean
             # stop waiting on a human, not mid-compaction. Do not burn the full
             # compact-wait budget on "Shall I continue?".
-            had_compact = (
-                reasons_are_compact_only(reasons)
-                or int(new_this_turn or 0) > 0
-                or int(compact_total or 0) > 0
-                or any("compact" in str(r).lower() for r in reasons)
+            # Do **not** use lifetime compact_total: reused sessions that
+            # compacted earlier would enter this wait on every later turn.
+            had_compact = turn_should_wait_for_compact(
+                reasons=reasons,
+                new_compacts_this_turn=new_this_turn,
             )
 
             if assessment.get("premature") and had_compact and not asked_question:

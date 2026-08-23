@@ -313,7 +313,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     app = build_app(dist=dist, backend=args.backend)
     print("=" * 50)
-    print("  Virtual Developer - Frontend")
+    print("  Yaver - Frontend")
     print("=" * 50)
     print(f"SPA     : {dist}")
     print(f"Backend : {args.backend}")

@@ -218,7 +218,7 @@ def test_gitlab_client_posts_note(monkeypatch):
 
     monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
     c = GitlabClient(host="gitlab.example.com", pat="glpat-test")
-    out = c.post_mr_note(project=1, mr_iid=4, body="*Virtual Developer*\n\nhi", discussion_id="d1")
+    out = c.post_mr_note(project=1, mr_iid=4, body="*Yaver*\n\nhi", discussion_id="d1")
     assert out and out["id"] == 9
     assert "/projects/1/merge_requests/4/notes" in captured["url"]
     assert captured["headers"]["PRIVATE-TOKEN"] == "glpat-test"
@@ -315,7 +315,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     task = runner.run_agent_with_retry.await_args.args[0]
     assert task.session_id == "ses_gl1"
     assert posted.get("mr_iid") == 4
-    assert "*Virtual Developer*" in (posted.get("body") or "")
+    assert "*Yaver*" in (posted.get("body") or "")
     jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
     assert jobs
     assert jobs[0]["source"] == "gitlab"
@@ -411,7 +411,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     git.create_merge_request.assert_not_called()
     jira_progress.assert_not_called()
     body = posted.get("body") or ""
-    assert "*Virtual Developer*" in body
+    assert "*Yaver*" in body
     assert "Fixed the login bug." in body
     assert "Pushed new commits" in body
     assert (st.metadata or {}).get("merge_request_url") == (

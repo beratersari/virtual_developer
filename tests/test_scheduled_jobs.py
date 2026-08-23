@@ -38,6 +38,19 @@ def test_build_issue_description_includes_params():
     assert "Source branch: feature/x" in text
     assert "Target branch: develop" in text
     assert "Mode: build" in text
+    assert "Model:" not in text
+
+
+def test_build_issue_description_includes_optional_model():
+    text = build_issue_description(
+        description="Do the thing",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="feature/x",
+        target_branch="develop",
+        mode="build",
+        model="opencode/hy3-free",
+    )
+    assert "Model: opencode/hy3-free" in text
 
 
 def test_parse_schedule_at_variants():
@@ -182,6 +195,33 @@ def test_create_scheduled_job_custom_source_branch(tmp_path):
     desc = client.create_issue.call_args.kwargs.get("description") or ""
     assert "Source branch: develop" in desc
     client.update_issue.assert_not_called()
+
+
+def test_create_scheduled_job_persists_model(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-91"}
+    client.transition_to_in_progress.return_value = True
+    out = create_scheduled_job(
+        title="Model job",
+        description="body",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        model="opencode/mimo-v2.5-free",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["schedule"]["model"] == "opencode/mimo-v2.5-free"
+    desc = client.create_issue.call_args.kwargs.get("description") or ""
+    assert "Model: opencode/mimo-v2.5-free" in desc
 
 
 def test_create_scheduled_job_source_from_issue_key(tmp_path):
@@ -850,13 +890,14 @@ def test_api_schedules(tmp_path, monkeypatch):
         )
         m.setattr(
             "src.dashboard.api.schedule_existing_issue",
-            lambda issue_key, scheduled_at, store=None: __import__(
+            lambda issue_key, scheduled_at, store=None, **kw: __import__(
                 "src.scheduler.service", fromlist=["schedule_existing_issue"]
             ).schedule_existing_issue(
                 issue_key,
                 scheduled_at=scheduled_at,
                 jira_client=client_mock,
                 store=store,
+                **kw,
             ),
         )
         r_prev = tc.get("/api/schedules/preview", params={"issue_key": "KAN-88"})
@@ -1005,7 +1046,7 @@ def test_api_from_issue_run_now_stamps_scheduled_at_now(tmp_path, monkeypatch):
     sm = JiraStateManager(state_dir=tmp_path / "state")
     picker = (datetime.now() + timedelta(minutes=5)).isoformat(timespec="seconds")
 
-    def _schedule(issue_key, scheduled_at, store=None):
+    def _schedule(issue_key, scheduled_at, store=None, **_kw):
         rec = (store or ScheduleStore(schedules_dir=tmp_path / "schedules")).create(
             title="run-now",
             description="",

@@ -41,7 +41,7 @@ class JiraAgentDaemon:
         # run_coroutine_threadsafe on a closed/stale loop reference.
         self._main_loop = asyncio.get_running_loop()
 
-        logger.info("Starting JIRA Virtual Developer daemon")
+        logger.info("Starting Yaver daemon")
         logger.info(f"project_root={settings.project_root}")
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")

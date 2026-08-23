@@ -113,12 +113,12 @@ class GitManager:
         gitlab_url = (self.remote_url or "").strip()
         if not gitlab_url:
             raise GitCloneError(
-                "*Virtual Developer* could not clone: no repository URL was provided on the issue.\n\n"
+                "*Yaver* could not clone: no repository URL was provided on the issue.\n\n"
                 "Add `Repository: https://gitlab.example.com/group/repo.git` to the description."
             )
         if not self.target_branch:
             raise GitTargetBranchError(
-                "*Virtual Developer* could not prepare the workspace: no target branch on the issue.\n\n"
+                "*Yaver* could not prepare the workspace: no target branch on the issue.\n\n"
                 "Add `Target branch: develop` (the branch that must exist and receive the MR) "
                 "to the `{params}` block."
             )
@@ -491,7 +491,7 @@ class GitManager:
             )
             raise GitCloneError(
                 (
-                    f"*Virtual Developer* could not **update git submodules** "
+                    f"*Yaver* could not **update git submodules** "
                     f"(timed out after {timeout}s).\n\n"
                     f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
                     f"*When:* {reason or 'workspace setup'}\n\n"
@@ -520,7 +520,7 @@ class GitManager:
             )
             raise GitCloneError(
                 (
-                    f"*Virtual Developer* could not **update git submodules**.\n\n"
+                    f"*Yaver* could not **update git submodules**.\n\n"
                     f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
                     f"*When:* {reason or 'workspace setup'}\n"
                     f"*Detail:* {safe_err.strip()[:800]}\n\n"
@@ -597,7 +597,7 @@ class GitManager:
             )
             raise GitCloneError(
                 (
-                    f"*Virtual Developer* could not **clone** the repository "
+                    f"*Yaver* could not **clone** the repository "
                     f"(timed out after {clone_timeout}s).\n\n"
                     f"*Repository:* `{self.remote_url or '(unknown)'}`\n\n"
                     "Raise `GIT_CLONE_TIMEOUT_SECONDS` for large repos, check "
@@ -620,7 +620,7 @@ class GitManager:
             repo_display = self.remote_url or "(unknown)"
             raise GitCloneError(
                 (
-                    f"*Virtual Developer* could not **clone** the repository.\n\n"
+                    f"*Yaver* could not **clone** the repository.\n\n"
                     f"*Repository:* `{repo_display}`\n"
                     f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
                     "Check that the URL is correct, the project is reachable, "
@@ -683,7 +683,7 @@ class GitManager:
         host = self._host_from_url(url)
         if not host:
             raise GitCloneError(
-                "*Virtual Developer* could not clone: repository URL has no host.\n\n"
+                "*Yaver* could not clone: repository URL has no host.\n\n"
                 "Set `Repository: https://gitlab.example.com/group/repo.git` in `{params}`."
             )
         pat = self._pat_for_remote(url)
@@ -694,7 +694,7 @@ class GitManager:
         )
         if not allowed and (settings.gitlab_pat or "").strip():
             raise GitCloneError(
-                "*Virtual Developer* refused to authenticate: "
+                "*Yaver* refused to authenticate: "
                 "no GitLab host→PAT mapping is configured while a PAT is set.\n\n"
                 "Add hosts in dashboard Settings (GitLab credentials), set "
                 "`GITLAB_HOST_PATS={\"gitlab.example.com\":\"glpat-…\"}`, "
@@ -702,7 +702,7 @@ class GitManager:
             )
         raise GitCloneError(
             (
-                f"*Virtual Developer* refused to send credentials to host "
+                f"*Yaver* refused to send credentials to host "
                 f"`{host}`.\n\n"
                 f"Configured hosts: `{', '.join(allowed) or '(none)'}`.\n"
                 "Add this host with a PAT in dashboard Settings, or update the "
@@ -1224,7 +1224,7 @@ class GitManager:
         target = (self.target_branch or "").strip()
         if not target:
             raise GitTargetBranchError(
-                "*Virtual Developer* could not start: no **target branch** on the issue.\n\n"
+                "*Yaver* could not start: no **target branch** on the issue.\n\n"
                 "Add `Target branch: develop` (or your integration branch) inside `{params}`.\n"
                 "The target must already exist on GitLab; the MR merges **into** it."
             )
@@ -1239,7 +1239,7 @@ class GitManager:
         if not self._remote_head_exists(target):
             raise GitTargetBranchError(
                 (
-                    f"*Virtual Developer* could not start: **target branch** missing on GitLab.\n\n"
+                    f"*Yaver* could not start: **target branch** missing on GitLab.\n\n"
                     f"*Target branch:* `{target}`\n"
                     f"*Repository:* `{self.remote_url or '(unknown)'}`\n"
                     f"*Detail:* `origin/{target}` not found (ls-remote)\n\n"
@@ -1327,12 +1327,12 @@ class GitManager:
         target = (target or "").strip()
         if not work_branch:
             raise GitSourceBranchError(
-                "*Virtual Developer* could not create a work branch: empty name."
+                "*Yaver* could not create a work branch: empty name."
             )
         if work_branch == target:
             raise GitSourceBranchError(
                 (
-                    f"*Virtual Developer* refused to use target `{target}` as the work branch.\n\n"
+                    f"*Yaver* refused to use target `{target}` as the work branch.\n\n"
                     "Source and target resolved to the same name. Set "
                     "`Source branch: feature/YOUR-KEY` or leave source as a primary "
                     "base so the agent uses `feature/{KEY}`."
@@ -1354,7 +1354,7 @@ class GitManager:
             else:
                 raise GitTargetBranchError(
                     (
-                        f"*Virtual Developer* could not base work on target `{target}`: "
+                        f"*Yaver* could not base work on target `{target}`: "
                         f"local ref `origin/{target}` missing after fetch.\n\n"
                         f"*Repository:* `{self.remote_url or '(unknown)'}`"
                     ),
@@ -1380,7 +1380,7 @@ class GitManager:
         work_branch = (work_branch or "").strip()
         if not work_branch:
             raise GitSourceBranchError(
-                "*Virtual Developer* could not checkout work branch: empty name."
+                "*Yaver* could not checkout work branch: empty name."
             )
 
         logger.info(
@@ -1470,7 +1470,7 @@ class GitManager:
         work_branch = (work_branch or "").strip()
         if not work_branch:
             raise GitSourceBranchError(
-                "*Virtual Developer* could not checkout work branch: empty name."
+                "*Yaver* could not checkout work branch: empty name."
             )
         logger.info(
             f"Source branch '{work_branch}' exists locally but not on remote — "
@@ -1494,12 +1494,12 @@ class GitManager:
         target = (target or "").strip()
         if not work_branch:
             raise GitSourceBranchError(
-                "*Virtual Developer* could not prepare a work branch: empty name."
+                "*Yaver* could not prepare a work branch: empty name."
             )
         if work_branch == target:
             raise GitSourceBranchError(
                 (
-                    f"*Virtual Developer* refused to use target `{target}` as the work branch.\n\n"
+                    f"*Yaver* refused to use target `{target}` as the work branch.\n\n"
                     "Source and target resolved to the same name. Set a dedicated "
                     "`Source branch` (or a primary base so the agent uses "
                     "`feature/{KEY}`)."

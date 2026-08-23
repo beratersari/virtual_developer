@@ -1,8 +1,8 @@
-# JIRA Virtual Developer
+# Yaver
 
 **Version:** see root [`VERSION`](VERSION) (currently `0.2.0`)
 
-A Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
+**Yaver** (*the aide*) is a Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
 
 ---
 
@@ -27,7 +27,7 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 └───────────────────────────────────────┬───────────────────────────────────────┘
                                         │
                                         ▼
-┌──────────────────────── JIRA Virtual Developer (one process) ────────────────┐
+┌──────────────────────── Yaver (one process) ─────────────────────────────────┐
 │  Board Poller  →  Job Processor  →  Agent Runner (opencode serve + --dir)     │
 │        │                  │                                                   │
 │        │                  ├─ temp clone: feature/{ISSUE} from issue {params}  │

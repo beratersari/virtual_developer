@@ -1,4 +1,4 @@
-# AGENTS.md — Virtual Developer
+# AGENTS.md — Yaver
 
 Instructions for humans and AI agents working on **this** repository (`virtual_developer`).
 
@@ -6,7 +6,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 ## 1. Product snapshot
 
-JIRA Virtual Developer is a Python daemon that:
+Yaver is a Python daemon that:
 
 1. Discovers issues (board poller only)
 2. Routes work (plan / direct execution / oracle)

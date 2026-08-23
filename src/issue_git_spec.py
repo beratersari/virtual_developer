@@ -28,6 +28,7 @@ Aliases inside the block:
 * Repository / Repo / GitLab / Project URL
 * Source branch / Work branch
 * Target branch / MR target / Merge into / Base branch
+* Model / LLM (optional OpenCode model id; empty = settings default)
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ _SOURCE_KEY = r"(?:source\s*branch|work\s*branch)"
 _TARGET_KEY = r"(?:target\s*branch|mr\s*target|merge\s*into|merge\s*target|base\s*branch)"
 # Mode / workflow decision inside {params}
 _MODE_KEY = r"(?:mode|workflow(?:\s*mode)?)"
-_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY})"
+_MODEL_KEY = r"(?:model|llm|opencode\s*model|default\s*model)"
+_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY}|{_MODEL_KEY})"
 
 _REPO_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r])\s*{_REPO_KEY}\s*:\s*(.*?)(?=\s*{_ANY_KEY}\s*:|\Z)"
@@ -69,6 +71,9 @@ _TARGET_FIELD = re.compile(
 _MODE_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODE_KEY}\s*:\s*(\S+)"
 )
+_MODEL_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODEL_KEY}\s*:\s*(\S+)"
+)
 
 _URL_TOKEN = re.compile(
     r"(?i)\b((?:https?://|git@)[^\s\[\]<>\"']+)"
@@ -80,6 +85,7 @@ Repository: https://gitlab.example.com/group/your-repo.git
 Source branch: feature/PROJ-123
 Target branch: develop
 Mode: plan
+Model: opencode/hy3-free
 {params}
 
 Mode is mandatory (like Repository / Source branch):
@@ -108,6 +114,7 @@ class IssueGitSpec:
     source_branch: str
     target_branch: str
     mode: Optional[str] = None  # "plan" | "build" when present
+    model: Optional[str] = None  # OpenCode model id; empty = settings default
 
 
 class IssueGitConfigError(Exception):
@@ -142,6 +149,37 @@ def _normalize_repo_url(raw: str) -> str:
         if m:
             url = m.group(1).rstrip(").,;\"'")
     return url
+
+
+def _normalize_model_id(raw: str) -> str:
+    """OpenCode model id (provider/name). Empty if unset or junk."""
+    mid = (raw or "").strip().strip("`").rstrip(".,;")
+    if not mid or len(mid) > 200:
+        return ""
+    if any(ch.isspace() for ch in mid):
+        return ""
+    return mid
+
+
+def upsert_params_model(description: str, model: str) -> str:
+    """Set or replace ``Model:`` inside the first ``{params}`` block."""
+    mid = _normalize_model_id(model)
+    text = description or ""
+    if not mid:
+        return text
+    m = _PARAMS_BLOCK.search(text)
+    if not m:
+        return text
+    inner = m.group(1)
+    if _MODEL_FIELD.search(inner):
+        inner2 = re.sub(
+            rf"(?im)^(\s*(?:model|llm|opencode\s*model|default\s*model)\s*:\s*)\S+",
+            rf"\g<1>{mid}",
+            inner,
+        )
+    else:
+        inner2 = inner.rstrip() + f"\nModel: {mid}\n"
+    return text[: m.start(1)] + inner2 + text[m.end(1) :]
 
 
 def _normalize_branch(raw: str) -> str:
@@ -293,7 +331,7 @@ def parse_issue_git_spec(
 
     if block is None:
         return None, (
-            "*Virtual Developer* could not start: no ``{params}`` block found on the issue.\n\n"
+            "*Yaver* could not start: no ``{params}`` block found on the issue.\n\n"
             "Wrap the git settings between ``{params}`` markers in the *description* "
             "(or summary), then move the issue back to *To Do*:\n\n"
             "{code}\n"
@@ -311,6 +349,8 @@ def parse_issue_git_spec(
     target = _normalize_branch(target_m.group(1)) if target_m else ""
     mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
     mode = _MODE_ALIASES.get(mode_raw) if mode_raw else None
+    model_m = _MODEL_FIELD.search(text)
+    model = _normalize_model_id(model_m.group(1)) if model_m else ""
 
     missing = []
     if not repo:
@@ -332,7 +372,7 @@ def parse_issue_git_spec(
 
     if missing:
         return None, (
-            "*Virtual Developer* could not start: the issue description format is incomplete.\n\n"
+            "*Yaver* could not start: the issue description format is incomplete.\n\n"
             f"*Missing / invalid:* {', '.join(missing)}.\n\n"
             "Add a ``{params}`` block to the *description* with *all* of these fields, "
             "then move the issue back to *To Do*:\n\n"
@@ -346,7 +386,7 @@ def parse_issue_git_spec(
 
     if not _looks_like_git_url(repo):
         return None, (
-            "*Virtual Developer* could not start: the repository URL looks invalid.\n\n"
+            "*Yaver* could not start: the repository URL looks invalid.\n\n"
             f"Parsed value: `{repo}`\n\n"
             "Use a full HTTPS (or SSH) GitLab URL inside ``{params}``, for example:\n"
             "`Repository: https://gitlab.example.com/group/repo.git`"
@@ -354,14 +394,14 @@ def parse_issue_git_spec(
 
     if not _looks_like_branch(source):
         return None, (
-            "*Virtual Developer* could not start: the source branch name looks invalid.\n\n"
+            "*Yaver* could not start: the source branch name looks invalid.\n\n"
             f"Parsed value: `{source}`\n\n"
             "Example: `Source branch: feature/PROJ-123`"
         )
 
     if not _looks_like_branch(target):
         return None, (
-            "*Virtual Developer* could not start: the target branch name looks invalid.\n\n"
+            "*Yaver* could not start: the target branch name looks invalid.\n\n"
             f"Parsed value: `{target}`\n\n"
             "Example: `Target branch: develop` (must already exist on GitLab)"
         )
@@ -372,6 +412,7 @@ def parse_issue_git_spec(
             source_branch=source,
             target_branch=target,
             mode=mode,
+            model=model or None,
         ),
         None,
     )

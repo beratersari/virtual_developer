@@ -43,7 +43,7 @@ def test_fail_issue_moves_jira_in_progress(processor, state_manager, fake_jira):
 
     processor._fail_issue(
         "KAN-FAIL",
-        "*Virtual Developer* could not start: the issue description format is incomplete.",
+        "*Yaver* could not start: the issue description format is incomplete.",
         suggestion="Fix {params} and move back to To Do.",
     )
 
@@ -106,7 +106,7 @@ async def test_template_error_moves_jira_in_progress(
         processor,
         "_init_git_manager",
         side_effect=IssueGitConfigError(
-            "*Virtual Developer* could not start: the issue description format "
+            "*Yaver* could not start: the issue description format "
             "is incomplete.\n\n*Missing / invalid:* Mode."
         ),
     ):
