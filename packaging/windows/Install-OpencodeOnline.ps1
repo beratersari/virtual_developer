@@ -4,7 +4,7 @@
   Online install of OpenCode + oh-my-openagent for Virtual Developer (Windows).
 
 .DESCRIPTION
-  ONLINE-ONLY installer. Does not change offline install.bat behavior.
+  ONLINE-ONLY installer. Does not change offline install-backends.bat.
 
   Requires portable Node from the dist zip:
     vendor\node\node.exe
@@ -18,7 +18,7 @@
     packaging\windows\online-sources.env
     OPENCODE_ZIP_URL / GLAB_ZIP_URL / RG_ZIP_URL
 
-  Layout (same product paths as offline install.bat):
+  Layout (same product paths as offline install-backends.bat):
     %USERPROFILE%\.opencode\bin\opencode.exe
     %USERPROFILE%\.opencode\node_modules\oh-my-openagent  (+ oh-my-opencode alias)
     %USERPROFILE%\.opencode\opencode.json  (plugin=[], stock build/plan)
@@ -242,7 +242,7 @@ Write-Host "OpenCode home  : $OPENCODE_HOME"
 Write-Host "OpenCode ver   : $OPENCODE_VERSION"
 Write-Host "oh-my-openagent: $OH_MY"
 Write-Host "Node (portable): $NODE_FULL (vendor\node required)"
-Write-Host "Mode           : ONLINE only (offline install.bat is separate)"
+Write-Host "Mode           : ONLINE only (offline install-backends.bat is separate)"
 
 # ---------------------------------------------------------------------------
 # 1) Portable Node (vendor\node) REQUIRED - no system Node fallback
@@ -259,7 +259,7 @@ Expected:
   $RepoRoot\vendor\node\npm.cmd
 
 This zip must be a CI-built package (build-dist stages Node under vendor\node).
-Offline install.bat does not need Node - use that for fully offline installs.
+Offline install-backends.bat does not need Node - use that for fully offline installs.
 "@
 }
 

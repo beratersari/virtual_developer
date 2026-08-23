@@ -514,12 +514,12 @@ glab mr create --title "feat(auth): bearer-only jira token" --description "..." 
 
 ```bash
 cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITLAB_PAT as needed
-./install.sh           # or install.bat
+./install.sh           # or install-dashboard.bat + install-backends.bat + install-codex.bat
 .venv/bin/python cli.py init
 .venv/bin/python -m src.daemon   # or project’s documented start command
 ```
 
-**Windows (offline zip from CI):** extract artifact → `install.bat` → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
+**Windows (offline zip from CI):** extract artifact → `install-dashboard.bat` + `install-backends.bat` (OpenCode) + `install-codex.bat` (Codex) → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
 
 ---
 
@@ -560,17 +560,17 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
-| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install.bat`**). Requires **`vendor/node`**. Edit **`npm-online.npmrc`** `registry=` for private/FTP-backed HTTP mirrors. Offline OpenCode remains **`vendor/opencode-home.zip`**. |
-| Codex CLI | Pin **`CODEX_VERSION`** in `packaging/windows/versions.env`. CI downloads `codex-x86_64-pc-windows-msvc.exe.zip` from `openai/codex` (`rust-vX.Y.Z`) and ships **`vendor/bin/codex.exe` only** (never inside `opencode-home.zip`). `install.bat` / **`install-backends.bat`** copy it to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**. |
-| Backends-only install | **`install-backends.bat`** (PowerShell `Install-Backends.ps1`): OpenCode + Codex from `vendor\`, no Python venv / dashboard. Optional args `opencode` or `codex`. |
+| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Requires **`vendor/node`**. Edit **`npm-online.npmrc`** `registry=` for private/FTP-backed HTTP mirrors. Offline OpenCode remains **`vendor/opencode-home.zip`**. |
+| Codex CLI | Pin **`CODEX_VERSION`** in `packaging/windows/versions.env`. CI downloads `codex-x86_64-pc-windows-msvc.exe.zip` from `openai/codex` (`rust-vX.Y.Z`) and ships **`vendor/bin/codex.exe` only** (never inside `opencode-home.zip`). **`install-codex.bat`** (or `install-backends.bat`) copies it to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**. |
+| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
-### 9.2 cmd.exe / install.bat landmines
+### 9.2 cmd.exe / installer landmines
 
 1. **Never `echo ... -> path` in `.bat` files.** In cmd, `>` is redirect.  
    `echo [OK] config -> %OPENCODE_HOME%\opencode.json` **overwrites** `opencode.json` with the text `[OK] config -` (exactly the “invalid JSON” failure users hit).  
    Same pattern can clobber `opencode.exe`. Always use `^>` or rephrase without `>`.
-2. **`install.bat` must be idempotent:** wipe previous `.opencode`, legacy short paths, stale PATH entries, and broken managed configs before extract — users should only re-run the installer.
+2. **`install-backends.bat` must be idempotent:** wipe previous `.opencode`, legacy short paths, stale PATH entries, and broken managed configs before extract — users should only re-run the installer.
 3. Prefer **PowerShell `-File` scripts** for non-trivial logic; never use PowerShell parameter name **`$args`** (automatic variable — breaks `Start-Process -ArgumentList`).
 
 ### 9.3 oh-my-openagent / oh-my-opencode plugin — **do not install**
@@ -611,7 +611,7 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 **Mitigations already in the dist (keep them):**
 
-- Seed **`%USERPROFILE%\.cache\opencode\bin\rg.exe`** from `vendor\bin\rg.exe` during `install.bat`.
+- Seed **`%USERPROFILE%\.cache\opencode\bin\rg.exe`** from `vendor\bin\rg.exe` during `install-backends.bat`.
 - Set user env **`OPENCODE_DISABLE_MODELS_FETCH=1`** (and set it in `start-opencode.bat`).
 - Launcher always starts in the **product/project folder**, not the user profile.
 
@@ -619,7 +619,7 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
 2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
-3. **CI assert payload layout** (fast): `install.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, **`vendor/bin/codex.exe`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
+3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, **`vendor/bin/codex.exe`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
 4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).

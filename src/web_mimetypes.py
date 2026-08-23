@@ -8,7 +8,7 @@ honours that mapping, so ``<script type="module" src="...js">`` fails with:
     but the server responded with a MIME type of "text/plain".
 
 This is **not** caused by using ``pip install -r requirements.txt`` instead of
-``install.bat`` — it is machine MIME-map + static server behaviour.
+``install-dashboard.bat`` — it is machine MIME-map + static server behaviour.
 """
 
 from __future__ import annotations

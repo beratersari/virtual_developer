@@ -23,37 +23,32 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
    The zip already includes the prebuilt ops dashboard SPA (`web\dist`).
-2. Extract once (you should see `install.bat` and `start.bat` at the top level).
+2. Extract once (you should see `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, and `start.bat` at the top level).
 3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
-4. Install (pick one):
-   - **`install.bat`** — full offline setup:
-     - Creates `.venv` and installs Python deps from **`vendor\python-wheels`**
-     - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
-     - Installs pinned **Codex CLI** to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`** (official standalone path)
+4. Install (run dashboard + backends for a full offline box):
+   - **`install-dashboard.bat`** — **Python + ops dashboard** (no agent workers):
+     - Creates `.venv` + deps from **`vendor\python-wheels`**, start scripts, `.env`, `cli.py init`
      - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
-   - **`install-dashboard.bat`** — **backend + frontend only** (no OpenCode):
-     - Creates `.venv` + deps, start scripts, `.env`, `cli.py init`
-     - Does **not** touch `%USERPROFILE%\.opencode` (use when OpenCode is already installed)
    - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
      - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
      - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
-   - **`install-backends.bat`** — **agent workers only** (no Python / dashboard):
+   - **`install-backends.bat`** — **OpenCode** (no Python / dashboard); also installs Codex when run with no args:
      - OpenCode to **`%USERPROFILE%\.opencode`**
+     - Optional: `install-backends.bat opencode` (OpenCode only)
+   - **`install-codex.bat`** — **Codex CLI only**:
      - Codex to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**
-     - Optional: `install-backends.bat opencode` or `install-backends.bat codex`
-   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network; does **not** replace offline `install.bat`):
+     - Does not touch OpenCode or Python
+   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network):
      - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)
      - Edit **`vendor\npm-online.npmrc`** (or `packaging\windows\npm-online.npmrc`) → set `registry=` to your npm mirror
      - Optional: **`vendor\online-sources.env`** for `OPENCODE_ZIP_URL` / `NPM_REGISTRY` pointing at your HTTP file server
-     - Downloads OpenCode CLI + glab, `npm install`s **oh-my-openagent** / **oh-my-opencode**
-     - Seeds `%USERPROFILE%\.opencode`, `.config\opencode`, and `.cache\opencode` (full plugin tree)
-     - **Offline OpenCode still uses `install.bat` + `vendor\opencode-home.zip` only**
+     - **Offline workers still use `install-backends.bat` + `vendor\opencode-home.zip`**
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
    - **`start-backend.bat`** — ensures OpenCode serve on **:4096**, then daemon on **http://0.0.0.0:8080/** (API + SPA)
    - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
    - **`start.bat`** — both (backend first, then frontend)
-7. Optional OpenCode TUI: **`start-opencode.bat`** (after `install.bat` or `install-opencode-online.bat`; never from your user home folder).
+7. Optional OpenCode TUI: **`start-opencode.bat`** (after `install-backends.bat` or `install-opencode-online.bat`; never from your user home folder).
 
 ### Frontend + backend model (offline)
 
@@ -81,17 +76,17 @@ OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, conf
 Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
 
 Do **not** expect a second install at `C:\vd\opencode` (that was a short-lived workaround).
-Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
+Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
 
 ## Design notes (Windows pain points)
 
 | Problem | Fix |
 |---------|-----|
-| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
+| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install-backends.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
 | Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
 | `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
 | Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
-| Dirty re-install | `install.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
+| Dirty re-install | `install-backends.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
 | Black/blank TUI / default agents | OpenCode Bun-installs plugins into `~/.cache/opencode`; installer **full-copies** the complete `oh-my-opencode` tree (agents + skill `.md`), pins version, seeds `node_modules` + `packages` + `.config` |
 
 ## Files
@@ -102,8 +97,8 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
 | `opencode.json` | Stock OpenCode config (`plugin: []`, built-in build/plan) |
 | `oh-my-opencode.json` | Default plugin config stub |
-| `Install-Backends.ps1` | Offline OpenCode + Codex only (called by root `install-backends.bat`) |
-| `Install-OpencodeOnline.ps1` | Online OpenCode + npm plugin install (called by root bat; not used by offline install.bat) |
+| `Install-Backends.ps1` | Offline OpenCode and/or Codex (called by root `install-backends.bat` / `install-codex.bat`) |
+| `Install-OpencodeOnline.ps1` | Online OpenCode CLI install (called by root bat; not used by offline `install-backends.bat`) |
 | `npm-online.npmrc` | Editable npm `registry=` for online install only |
 | `online-sources.env` | Optional `OPENCODE_ZIP_URL` / `NPM_REGISTRY` mirrors |
 | `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
@@ -118,7 +113,7 @@ Payload also ships **`vendor/node/`** (official Node win-x64 tree: `node.exe`, `
 
 1. Edit `versions.env` (and the version inside `package.json` if you change oh-my-opencode).
 2. Push to `develop` / `main`, or run the **Windows Distribution** workflow manually.
-3. Download the new artifact and smoke-test `install.bat` on a clean Windows machine.
+3. Download the new artifact and smoke-test `install-dashboard.bat` + `install-backends.bat` + `install-codex.bat` on a clean Windows machine.
 
 ## Local pack (Windows)
 

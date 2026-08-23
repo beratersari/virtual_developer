@@ -25,12 +25,12 @@ if not exist "%BE%" set "BE=%SCRIPT_DIR%\packaging\windows\start-backend.bat"
 if not exist "%FE%" set "FE=%SCRIPT_DIR%\packaging\windows\start-frontend.bat"
 
 if not exist "%BE%" (
-    echo [ERROR] start-backend.bat not found. Run install.bat or re-download the package.
+    echo [ERROR] start-backend.bat not found. Run install-dashboard.bat or re-download the package.
     call :maybe_pause
     exit /b 1
 )
 if not exist "%FE%" (
-    echo [ERROR] start-frontend.bat not found. Run install.bat or re-download the package.
+    echo [ERROR] start-frontend.bat not found. Run install-dashboard.bat or re-download the package.
     call :maybe_pause
     exit /b 1
 )

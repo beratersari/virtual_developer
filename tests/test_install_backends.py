@@ -13,6 +13,36 @@ def test_install_backends_files_exist():
     assert PS1.is_file()
 
 
+def test_combined_install_bat_is_removed():
+    """Dashboard owns Python; backends own OpenCode; install-codex owns Codex."""
+    assert not (ROOT / "install.bat").exists()
+    assert (ROOT / "install-dashboard.bat").is_file()
+    assert (ROOT / "install-dashboard-system-python.bat").is_file()
+    assert (ROOT / "install-codex.bat").is_file()
+    dash = (ROOT / "install-dashboard.bat").read_text(encoding="utf-8")
+    assert "python -m venv" in dash
+    assert "python-wheels" in dash
+    assert "opencode-home.zip" not in dash
+    be = BAT.read_text(encoding="utf-8")
+    assert "opencode-home.zip" in be
+    assert "venv" not in be.lower() or "no Python" in be
+
+
+def test_install_codex_bat_is_codex_only():
+    bat = ROOT / "install-codex.bat"
+    text = bat.read_text(encoding="utf-8")
+    assert bat.is_file()
+    assert "Install-Backends.ps1" in text
+    assert "-Codex" in text
+    assert "vendor\\bin\\codex.exe" in text
+    assert "opencode-home.zip" not in text
+    assert "python -m venv" not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("echo ") and " -> " in stripped:
+            raise AssertionError(f"cmd.exe redirect landmine: {stripped}")
+
+
 def test_install_backends_bat_has_no_echo_redirect():
     text = BAT.read_text(encoding="utf-8")
     for line in text.splitlines():

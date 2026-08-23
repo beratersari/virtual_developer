@@ -176,7 +176,7 @@ where opencode >nul 2>&1
 if errorlevel 1 (
     echo [WARNING] `opencode` not found on PATH.
     echo           Dashboard and poller can still run; agent jobs will fail until OpenCode is available.
-    echo           Install OpenCode yourself, or run full install.bat once for a bundled OpenCode.
+    echo           Install OpenCode with install-backends.bat, Codex with install-codex.bat.
 ) else (
     for /f "tokens=*" %%a in ('where opencode 2^>^&1') do (
         echo [OK] Found opencode: %%a
@@ -214,8 +214,9 @@ echo        start.bat            both ^(backend then frontend^)
 echo.
 echo Isolated install ^(project .venv^):
 echo        install-dashboard.bat
-echo Full offline install ^(OpenCode + plugins + glab^):
-echo        install.bat
+echo Agent workers:
+echo        install-backends.bat   OpenCode + Codex
+echo        install-codex.bat      Codex only
 echo.
 call :maybe_pause
 exit /b 0

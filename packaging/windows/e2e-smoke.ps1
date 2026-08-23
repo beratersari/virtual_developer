@@ -4,7 +4,8 @@
   End-to-end Windows smoke test for the offline distribution.
 
 .DESCRIPTION
-  Simulates a realistic user path (deep Downloads nesting), runs install.bat
+  Simulates a realistic user path (deep Downloads nesting), runs
+  install-dashboard.bat then install-backends.bat.
   non-interactively, and verifies opencode.exe is AMD64 and starts.
   Fails the CI job if extract/install would break on Windows MAX_PATH or arch.
 #>
@@ -18,8 +19,14 @@ $ErrorActionPreference = "Stop"
 
 function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" }
 
-if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install.bat"))) {
-    throw "install.bat not found in payload: $PayloadDir"
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-dashboard.bat"))) {
+    throw "install-dashboard.bat not found in payload: $PayloadDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-backends.bat"))) {
+    throw "install-backends.bat not found in payload: $PayloadDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-codex.bat"))) {
+    throw "install-codex.bat not found in payload: $PayloadDir"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "vendor\opencode-home.zip"))) {
     throw "vendor\opencode-home.zip missing — outer package must not expand node_modules"
@@ -134,7 +141,7 @@ try {
     Write-Host "  (skip process exclusion: $($_.Exception.Message))"
 }
 
-Write-Step "Run install.bat non-interactively (home = %USERPROFILE%\.opencode)"
+Write-Step "Run install-dashboard.bat then install-backends.bat (non-interactive)"
 $env:VD_NONINTERACTIVE = "1"
 # Do NOT set VD_OPENCODE_ROOT — product default is %USERPROFILE%\.opencode
 Remove-Item Env:VD_OPENCODE_ROOT -ErrorAction SilentlyContinue
@@ -149,14 +156,20 @@ if (Test-Path -LiteralPath (Join-Path $ocConfigDir "opencode.json")) {
     Remove-Item -LiteralPath (Join-Path $ocConfigDir "opencode.json") -Force -ErrorAction SilentlyContinue
 }
 
-$installBat = Join-Path $deepRoot "install.bat"
-$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$installBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
+$dashBat = Join-Path $deepRoot "install-dashboard.bat"
+$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$dashBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
+if ($p.ExitCode -ne 0) {
+    throw "install-dashboard.bat failed with exit code $($p.ExitCode)"
+}
+
+$beBat = Join-Path $deepRoot "install-backends.bat"
+$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$beBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
 if ($p.ExitCode -ne 0) {
     $oc = Join-Path $ocHome "bin\opencode.exe"
     if (Test-Path -LiteralPath $oc) {
         Write-Host "DEBUG opencode.exe size after failed install: $((Get-Item $oc).Length)"
     }
-    throw "install.bat failed with exit code $($p.ExitCode)"
+    throw "install-backends.bat failed with exit code $($p.ExitCode)"
 }
 
 Write-Step "Verify installed OpenCode (AMD64 + --version + valid config JSON)"
@@ -199,7 +212,7 @@ foreach ($cfg in @($homeCfg, $globalCfg)) {
     }
     $raw = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop
     if ($raw -match '\[OK\]' -or $raw -match 'config\s+-') {
-        throw "FAIL: config looks like install.bat echo output (redirect bug): $cfg => $raw"
+        throw "FAIL: config looks like installer echo output (redirect bug): $cfg => $raw"
     }
     try {
         $null = $raw | ConvertFrom-Json
@@ -256,7 +269,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "OK Stop-VdProcesses.ps1"
 
-# Env for models.dev skip (set by install.bat via setx; process may not see it)
+# Env for models.dev skip (set by install-backends.bat via setx; process may not see it)
 if ($env:OPENCODE_DISABLE_MODELS_FETCH -ne "1") {
     Write-Host "WARNING: OPENCODE_DISABLE_MODELS_FETCH not set in this process (setx is user-env)"
 }

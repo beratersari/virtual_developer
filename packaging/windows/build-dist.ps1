@@ -258,11 +258,11 @@ $copyItems = @(
     "cli.py",
     "requirements.txt",
     ".env.example",
-    "install.bat",
     "install-dashboard.bat",
     "install-dashboard-system-python.bat",
     "install-opencode-online.bat",
     "install-backends.bat",
+    "install-codex.bat",
     "VERSION",
     "README.md",
     "AGENTS.md",
@@ -418,7 +418,7 @@ Codex=$CODEX_VERSION
 CodexAsset=$CODEX_WINDOWS_ASSET
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
-OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install.bat)
+OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install-backends.bat)
 PortableNode=vendor/node (node.exe + npm for install-opencode-online.bat)
 NodeFull=$NODE_FULL_VERSION
 "@
@@ -604,7 +604,7 @@ $rgExe = Get-ChildItem -Path $rgExtract -Recurse -Filter "rg.exe" | Select-Objec
 if (-not $rgExe) { throw "rg.exe not found in ripgrep archive" }
 # Into OpenCode home bin (also on PATH after install)
 Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $ocBin "rg.exe") -Force
-# Into vendor for install.bat seed of ~/.cache/opencode/bin
+# Into vendor for install-backends.bat seed of ~/.cache/opencode/bin
 Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $vendorBin "rg.exe") -Force
 Write-Host ("  ripgrep: {0:N1} MB" -f ($rgExe.Length / 1MB))
 
@@ -644,7 +644,7 @@ try {
 # Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to %USERPROFILE%\.opencode)"
+Write-Host "  vendor\opencode-home.zip ready (install-backends.bat extracts to %USERPROFILE%\.opencode)"
 
 # ---------------------------------------------------------------------------
 # 4b) Portable Node win-x64 (node.exe + npm) for install-opencode-online.bat
@@ -702,7 +702,7 @@ Write-Host ("  vendor\node staged ({0:N1} MB tree)" -f (
     (Get-ChildItem -Path $vendorNode -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
 ))
 
-# Online-installer config templates (user-editable; offline install.bat never uses these)
+# Online-installer config templates (user-editable; offline install-backends.bat never uses these)
 foreach ($cfgName in @("npm-online.npmrc", "online-sources.env")) {
     $cfgSrc = Join-Path $root "packaging\windows\$cfgName"
     if (Test-Path -LiteralPath $cfgSrc) {
@@ -734,7 +734,7 @@ if (-not $supportedPy -or $supportedPy.Count -eq 0) {
 $supportedFile = Join-Path $vendor "SUPPORTED_PYTHON.txt"
 $supportedBody = @(
     "# CPython minor versions with offline wheels in this build (win_amd64).",
-    "# install.bat rejects any other version (e.g. too-new 3.x without wheels).",
+    "# install-dashboard.bat rejects any other version (e.g. too-new 3.x without wheels).",
     ""
 ) + $supportedPy
 Set-Content -Path $supportedFile -Value ($supportedBody -join "`n") -Encoding UTF8
@@ -756,7 +756,7 @@ PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat (full offline), install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode + Codex only), or install-opencode-online.bat (OpenCode via network + vendor\node).
+NOTE=Run install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode + Codex), install-codex.bat (Codex only), or install-opencode-online.bat (OpenCode via network + vendor\node).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -765,24 +765,22 @@ Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.e
 $howTo = @"
 JIRA Virtual Developer — Windows offline package
 ================================================
-1. Extract the GitHub Actions download ONCE (you should see install.bat here).
+1. Extract the GitHub Actions download ONCE (you should see install-dashboard.bat here).
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
-4. Install (pick one):
-      install.bat                 — full OFFLINE: Python + OpenCode + plugins + glab
-                                      + Codex CLI to %LOCALAPPDATA%\Programs\OpenAI\Codex
-      install-backends.bat                  — OpenCode + Codex only (no Python / dashboard)
-      install-dashboard.bat                 — backend + frontend only (no OpenCode; creates .venv)
+4. Install:
+      install-dashboard.bat                 — Python + ops dashboard (.venv)
       install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
+      install-backends.bat                  — OpenCode + Codex (no Python)
+      install-codex.bat                     — Codex CLI only
       install-opencode-online.bat — ONLINE OpenCode only (requires vendor\node;
-                                    edit vendor\npm-online.npmrc registry= for your mirror;
-                                    does NOT replace offline install.bat)
+                                    edit vendor\npm-online.npmrc registry= for your mirror)
 5. Edit .env with Jira / GitLab settings
 6. Start:
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
       start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
       start.bat           → both (backend then frontend)
-7. OpenCode (optional; after install.bat or install-opencode-online.bat):
+7. OpenCode TUI (after install-backends.bat or install-opencode-online.bat):
       start-opencode.bat
       start-opencode-serve.bat
 
@@ -809,7 +807,7 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 
 # Zip the payload directory WITHOUT an extra nested folder name:
-# contents of zip root = install.bat, vendor\, src\, ...
+# contents of zip root = install-dashboard.bat, install-backends.bat, install-codex.bat, vendor\, src\, ...
 $tar = Get-Command tar -ErrorAction SilentlyContinue
 if ($tar) {
     Push-Location $payload
@@ -841,7 +839,7 @@ Write-Host ("Folder : {0}" -f $payload)
 Write-Host ("Folder size ~ {0:N1} MB" -f ($payloadSize / 1MB))
 Write-Host ("Zip    : {0} ({1:N1} MB) — for Releases only" -f $zipPath, ($zipSize / 1MB))
 Write-Host ""
-Write-Host "CI uploads the FOLDER (one extract = install.bat at top level)."
+Write-Host "CI uploads the FOLDER (one extract = install-dashboard.bat at top level)."
 Write-Host "Supported Python: $($supportedPy -join ', ')"
 
 if ($env:GITHUB_OUTPUT) {

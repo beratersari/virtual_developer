@@ -9,7 +9,7 @@ REM   - .env from .env.example (if missing)
 REM   - cli.py init
 REM
 REM Does NOT install or touch OpenCode / oh-my-openagent / glab / PATH.
-REM Use when you already have OpenCode on this machine (full install.bat
+REM Use when you already have OpenCode on this machine (install-backends.bat
 REM rewrites %%USERPROFILE%%\.opencode — skip that with this script).
 REM
 REM Agents still need `opencode` on PATH at runtime (your existing install).
@@ -174,7 +174,7 @@ where opencode >nul 2>&1
 if errorlevel 1 (
     echo [WARNING] `opencode` not found on PATH.
     echo           Dashboard and poller can still run; agent jobs will fail until OpenCode is available.
-    echo           Install OpenCode yourself, or run full install.bat once for a bundled OpenCode.
+    echo           Install OpenCode with install-backends.bat, Codex with install-codex.bat.
 ) else (
     for /f "tokens=*" %%a in ('where opencode 2^>^&1') do (
         echo [OK] Found opencode: %%a
@@ -209,8 +209,9 @@ echo        start-backend.bat    API + SPA on http://127.0.0.1:8080/
 echo        start-frontend.bat   UI on http://127.0.0.1:5173/
 echo        start.bat            both ^(backend then frontend^)
 echo.
-echo Full offline install ^(OpenCode + plugins + glab^):
-echo        install.bat
+echo Agent workers:
+echo        install-backends.bat   OpenCode + Codex
+echo        install-codex.bat      Codex only
 echo.
 call :maybe_pause
 exit /b 0

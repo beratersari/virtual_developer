@@ -65,7 +65,7 @@ if not exist "%OPENCODE_EXE%" (
     where opencode >nul 2>&1
     if errorlevel 1 (
         echo [ERROR] OpenCode not installed.
-        echo Run install.bat ^(full offline^) or install-opencode-online.bat.
+        echo Run install-backends.bat ^(offline^) or install-opencode-online.bat.
         call :maybe_pause
         exit /b 1
     )

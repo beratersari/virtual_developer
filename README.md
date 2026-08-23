@@ -97,12 +97,10 @@ Stop the daemon with **Ctrl+C**.
 CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.md](packaging/windows/README.md)).
 
 ```cmd
-:: Extract zip so install.bat sits next to vendor\ and src\
-install.bat
-:: Workers only (OpenCode + Codex, no Python/dashboard):
-install-backends.bat
-:: Or, if OpenCode is already installed on this PC (skip OpenCode install):
+:: Extract zip so the install-*.bat scripts sit next to vendor\ and src\
 install-dashboard.bat
+install-backends.bat
+install-codex.bat
 :: Or, use the Python already on PATH (does not create .venv):
 install-dashboard-system-python.bat
 :: Edit .env, then:
@@ -110,7 +108,7 @@ start.bat
 ::   or: start-backend.bat / start-frontend.bat
 ```
 
-Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder (after full `install.bat`) — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
+Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder (after `install-backends.bat`) — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
 
 ### Docker
 
@@ -475,7 +473,7 @@ logs/             # local log directory (stdout/stderr; not configured via env)
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
 | Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
-| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install.bat`; see `packaging/windows/` diag notes |
+| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install-backends.bat`; see `packaging/windows/` diag notes |
 | Stuck `planning`/`executing` | Restart daemon (orphan recovery) or cancel from dashboard; check watchdog logs |
 
 ```bash
