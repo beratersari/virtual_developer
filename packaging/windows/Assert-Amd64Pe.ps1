@@ -26,7 +26,7 @@ if ($item.Length -lt $MinBytes) {
     throw @"
 File looks truncated or wrong: $Path
 Size: $($item.Length) bytes (expected at least $MinBytes)
-Re-run install.bat from a complete offline package (do not skip files when extracting).
+Re-run install-backends.bat from a complete offline package (do not skip files when extracting).
 "@
 }
 
@@ -70,7 +70,7 @@ Detected: $archName
 Required: AMD64 (x64 / 64-bit) — the standard for 64-bit Windows PCs.
 
 This offline dist only ships the official opencode-windows-x64 build.
-Delete %USERPROFILE%\.opencode and re-run install.bat from a fresh package.
+Delete %USERPROFILE%\.opencode and re-run install-backends.bat from a fresh package.
 "@
 }
 

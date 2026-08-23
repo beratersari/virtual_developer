@@ -7,9 +7,11 @@
   Does not create a Python venv, install dashboard deps, or write .env.
   Uses vendor\ from the CI zip.
 
-  OpenCode: %USERPROFILE%\.opencode  (same as install.bat)
+  OpenCode: %USERPROFILE%\.opencode
   Codex:    %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
             (official standalone path, same as chatgpt.com/codex/install.ps1)
+  Callers:  install-backends.bat (default both; -OpenCode / -Codex)
+            install-codex.bat    (-Codex only)
 
   ASCII-only. Do not name parameters after PowerShell automatic variables.
 #>
@@ -326,5 +328,5 @@ Write-Host "Backends install complete."
 if ($doOpenCode) { Write-Host "  OpenCode : $ocBin\opencode.exe" }
 if ($doCodex) { Write-Host "  Codex    : $codexExe" }
 Write-Host "Open a NEW terminal so PATH updates apply."
-Write-Host "Dashboard/Python: install-dashboard.bat  (or full install.bat)"
+Write-Host "Dashboard/Python: install-dashboard.bat"
 exit 0

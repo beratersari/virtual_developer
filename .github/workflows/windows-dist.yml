@@ -4,8 +4,11 @@
 #   - main push     → virtual_developer-windows-x64-X.Y.Z.gSHA
 #   - tag vX.Y.Z    → virtual_developer-windows-x64-X.Y.Z + GitHub Release
 #
-# Users: download artifact/zip → extract once → run install.bat
-# OpenCode install target: %USERPROFILE%\.opencode (+ start-opencode.bat launcher)
+# Users: download artifact/zip → extract once →
+#   install-dashboard.bat  (Python .venv + SPA launchers)
+#   install-backends.bat   (OpenCode; also installs Codex unless split)
+#   install-codex.bat      (Codex CLI only)
+# Do not ship a combined install.bat.
 
 name: Windows Distribution
 
@@ -90,17 +93,17 @@ jobs:
             -OutDir "${{ github.workspace }}\dist" `
             -DistName "${{ steps.meta.outputs.dist_name }}"
 
-      # Fast payload assertions only (full install.bat e2e-smoke removed — too slow for CI)
+      # Fast payload assertions only (full e2e-smoke install is too slow for CI)
       - name: Assert payload layout
         shell: pwsh
         run: |
           $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
           foreach ($rel in @(
-            "install.bat",
             "install-dashboard.bat",
             "install-dashboard-system-python.bat",
             "install-opencode-online.bat",
             "install-backends.bat",
+            "install-codex.bat",
             "packaging/windows/Install-Backends.ps1",
             "start.bat",
             "start-backend.bat",
@@ -128,6 +131,9 @@ jobs:
               throw "Missing required payload path: $rel"
             }
             Write-Host "OK $rel"
+          }
+          if (Test-Path -LiteralPath (Join-Path $p "install.bat")) {
+            throw "install.bat must not be in the payload — use install-dashboard.bat + install-backends.bat"
           }
           if (Test-Path -LiteralPath (Join-Path $p "web/node_modules")) {
             throw "web/node_modules must not be in the offline zip"

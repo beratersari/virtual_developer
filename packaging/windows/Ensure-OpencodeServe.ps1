@@ -62,7 +62,7 @@ if (Test-PortListening $ServePort) {
         $found = Get-Command opencode -ErrorAction SilentlyContinue
         if (-not $found) {
             Write-Host "[ERROR] OpenCode not installed."
-            Write-Host "Run install.bat (full offline) or install-opencode-online.bat."
+            Write-Host "Run install-backends.bat (offline) or install-opencode-online.bat."
             exit 1
         }
         $ocBin = Split-Path -Parent $found.Source

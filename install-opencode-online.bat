@@ -2,7 +2,7 @@
 REM =============================================================================
 REM JIRA Virtual Developer - Online OpenCode installer
 REM =============================================================================
-REM ONLINE ONLY. Does not replace offline install.bat.
+REM ONLINE ONLY. Does not replace offline install-backends.bat.
 REM
 REM Requires:
 REM   - internet (or HTTP mirrors of OpenCode zip + npm packages)
@@ -14,7 +14,7 @@ REM   set registry=http://your-server/...
 REM Optional binary mirrors:
 REM   packaging\windows\online-sources.env  (OPENCODE_ZIP_URL, NPM_REGISTRY, ...)
 REM
-REM Result layout (same as offline install.bat):
+REM Result layout (same as offline install-backends.bat):
 REM   %USERPROFILE%\.opencode\
 REM   %USERPROFILE%\.config\opencode\
 REM   %USERPROFILE%\.cache\opencode\
@@ -42,7 +42,7 @@ if not exist "%PS1%" (
 if not exist "%NODE_EXE%" (
     echo [ERROR] Portable Node missing: %NODE_EXE%
     echo This online installer requires vendor\node from the CI zip.
-    echo For offline OpenCode, use install.bat instead ^(vendor\opencode-home.zip^).
+    echo For offline OpenCode, use install-backends.bat instead ^(vendor\opencode-home.zip^).
     call :maybe_pause
     exit /b 1
 )
@@ -60,7 +60,7 @@ echo.
 echo Project root : %SCRIPT_DIR%
 echo Node         : %NODE_EXE%
 echo npm registry : edit %NPMRC%
-echo Offline path : install.bat is unchanged ^(vendor\opencode-home.zip^)
+echo Offline path : install-backends.bat ^(vendor\opencode-home.zip^)
 echo.
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -RepoRoot "%SCRIPT_DIR%"

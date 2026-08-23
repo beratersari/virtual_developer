@@ -8,7 +8,7 @@ REM
 REM Usage:
 REM   install-backends.bat              both OpenCode + Codex
 REM   install-backends.bat opencode     OpenCode only
-REM   install-backends.bat codex        Codex only
+REM   install-backends.bat codex        Codex only (prefer install-codex.bat)
 REM
 REM Paths:
 REM   OpenCode  %USERPROFILE%\.opencode
@@ -73,6 +73,7 @@ if not "%EC%"=="0" (
 
 echo.
 echo Next: install-dashboard.bat if the app is not installed yet.
+echo      install-codex.bat for Codex only.
 echo Then start-backend.bat. Open a NEW terminal so PATH includes the CLIs.
 call :maybe_pause
 exit /b 0

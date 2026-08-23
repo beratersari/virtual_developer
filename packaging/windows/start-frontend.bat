@@ -1,7 +1,7 @@
 @echo off
 REM =============================================================================
 REM Virtual Developer - start FRONTEND only (SPA on :5173, proxies to backend)
-REM Requires: install.bat done, web\dist present, backend already running
+REM Requires: install-dashboard.bat done, web\dist present, backend already running
 REM            (start-backend.bat). No Node/Vite required.
 REM IMPORTANT: never use unescaped "->" in echo lines (cmd redirect).
 REM =============================================================================
