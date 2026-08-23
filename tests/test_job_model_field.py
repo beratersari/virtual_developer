@@ -26,6 +26,34 @@ def test_create_job_stores_model(tmp_path: Path):
     assert item.model == "opencode/deepseek-v4-flash-free"
 
 
+def test_job_dict_to_item_infers_codex_backend_from_params(tmp_path: Path):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    job = store.create_job(
+        issue_key="KAN-7",
+        summary="s",
+        description=(
+            "{params}\n"
+            "Repository: https://gitlab.com/a/b.git\n"
+            "Source branch: develop\n"
+            "Target branch: develop\n"
+            "Mode: build\n"
+            "Backend: codex\n"
+            "{params}\n"
+        ),
+        model="muse-spark-1.2-contributor-free",
+    )
+    item = job_dict_to_item(job, store=store)
+    assert item.backend == "codex"
+
+
+def test_create_job_stores_backend(tmp_path: Path):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    job = store.create_job(issue_key="KAN-8", backend="codex")
+    assert job["backend"] == "codex"
+    item = job_dict_to_item(job, store=store)
+    assert item.backend == "codex"
+
+
 def test_begin_workflow_run_records_default_model(
     tmp_path: Path, monkeypatch, isolate_jira_agent_artifacts
 ):

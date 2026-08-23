@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -64,13 +65,20 @@ def test_resolve_codex_cli_prefers_official_windows_path(tmp_path, monkeypatch):
     official.mkdir(parents=True)
     exe = official / "codex.exe"
     exe.write_text("official", encoding="utf-8")
+    native = official / "codex"
+    native.write_text("official-native", encoding="utf-8")
     vendor = tmp_path / "vendor" / "bin"
     vendor.mkdir(parents=True)
     (vendor / "codex.exe").write_text("vendor", encoding="utf-8")
+    (vendor / "codex").write_text("vendor-native", encoding="utf-8")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert resolve_codex_cli("codex") == str(exe)
+    found = resolve_codex_cli("codex")
+    if os.name == "nt":
+        assert found == str(exe)
+    else:
+        assert found == str(native)
 
 
 def test_resolve_codex_cli_prefers_offline_vendor(tmp_path, monkeypatch):
@@ -78,15 +86,14 @@ def test_resolve_codex_cli_prefers_offline_vendor(tmp_path, monkeypatch):
     monkeypatch.delenv("USERPROFILE", raising=False)
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
-    assert resolve_codex_cli("") == "codex"
     explicit = tmp_path / "custom-codex"
     explicit.write_text("x", encoding="utf-8")
     assert resolve_codex_cli(str(explicit)) == str(explicit)
     vendor = tmp_path / "vendor" / "bin"
     vendor.mkdir(parents=True)
-    exe = vendor / "codex.exe"
-    exe.write_text("bin", encoding="utf-8")
-    assert resolve_codex_cli("codex") == str(exe)
+    native = vendor / "codex"
+    native.write_text("bin", encoding="utf-8")
+    assert resolve_codex_cli("codex") == str(native)
 
 
 def test_pinned_codex_version_in_versions_env():
@@ -105,10 +112,11 @@ def test_build_codex_argv_has_no_secrets_and_prompt_last():
     )
     assert argv[0] == "codex"
     assert argv[1] == "exec"
-    assert "--sandbox" in argv
-    assert "danger-full-access" in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert "--skip-git-repo-check" in argv
     assert "--json" in argv
-    assert argv[-1] == "do the work"
+    assert argv[-1].endswith("do the work")
+    assert "UNATTENDED JOB:" in argv[-1]
     assert "-m" in argv
     assert "my-custom-model" in argv
     joined = " ".join(argv)
@@ -128,15 +136,16 @@ def test_build_codex_argv_resume_skips_model_flag():
     assert "-m" not in argv
 
 
-def test_codex_config_custom_url_uses_chat_and_never_embeds_key():
+def test_codex_config_custom_url_uses_responses_and_never_embeds_key():
     toml = build_codex_config_toml(
         model="acme/qwen",
         base_url="https://llm.example.com",
         wire_api="",
+        api_key="sk-test-not-real",
     )
     assert 'model = "acme/qwen"' in toml
     assert 'base_url = "https://llm.example.com/v1"' in toml
-    assert 'wire_api = "chat"' in toml
+    assert 'wire_api = "responses"' in toml
     assert 'env_key = "CODEX_API_KEY"' in toml
     assert "sk-" not in toml
     assert "secret" not in toml.lower()
@@ -145,6 +154,15 @@ def test_codex_config_custom_url_uses_chat_and_never_embeds_key():
         resolve_codex_wire_api(base_url="https://x", wire_api="responses")
         == "responses"
     )
+    free = build_codex_config_toml(
+        model="muse-spark-1.2-contributor-free",
+        base_url="https://opencode.ai/zen/v1",
+        wire_api="",
+        api_key="",
+    )
+    assert "requires_openai_auth = false" in free
+    assert "env_key" not in free
+    assert 'wire_api = "responses"' in free
 
 
 def test_parse_codex_thread_id_from_jsonl():

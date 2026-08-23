@@ -1621,6 +1621,7 @@ class JobProcessor:
                 gitlab_project=tmeta.get("gitlab_project") or None,
                 gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
                 model=model_id,
+                backend=self._backend_for_issue(state),
             )
             job_id = job["job_id"]
             self._active_jobs[state.issue_key] = job_id
@@ -1666,6 +1667,7 @@ class JobProcessor:
             gitlab_project=meta0.get("gitlab_project") or None,
             gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
             model=model_id,
+            backend=self._backend_for_issue(state),
         )
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id
@@ -3471,8 +3473,10 @@ class JobProcessor:
                     if not push_ok:
                         self._fail_issue(
                             state.issue_key,
-                            "Agent finished but git push failed; "
-                            "work was not delivered to the existing MR.",
+                            self._format_push_fail_error(
+                                self._push_failure_reason(state.issue_key),
+                                existing_mr=True,
+                            ),
                             suggestion=(
                                 "Check GitLab remote/credentials, then comment "
                                 "on the MR again."
@@ -4069,7 +4073,10 @@ class JobProcessor:
             if not push_ok:
                 self._fail_issue(
                     state.issue_key,
-                    "Agent finished but git push failed; work was not delivered to remote.",
+                    self._format_push_fail_error(
+                        self._push_failure_reason(state.issue_key),
+                        existing_mr=False,
+                    ),
                     suggestion="Check GitLab remote/credentials, then re-queue from To Do.",
                 )
                 self._release_context(state.issue_key, success=False)
@@ -4344,6 +4351,64 @@ class JobProcessor:
             logger.warning(f"Could not materialize plan into workspace for {issue_key}: {e}")
             return durable if durable.exists() else None
 
+    def _record_delivery_failure(self, issue_key: str, reason: str) -> str:
+        """Persist a push/delivery failure reason on issue metadata."""
+        note = (reason or "").strip()[:2000]
+        if not note:
+            return ""
+        try:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={"delivery_status": "push_failed", "delivery_note": note},
+            )
+        except Exception:
+            pass
+        return note
+
+    def _push_failure_reason(self, issue_key: str) -> str:
+        """Best-effort git push reason after ``_push_and_create_mr`` returned False."""
+        git = self._git_for(issue_key)
+        extra = getattr(git, "last_push_error", None) if git else None
+        if isinstance(extra, str) and extra.strip():
+            return extra.strip()
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return ""
+        meta = st.metadata or {}
+        note = meta.get("delivery_note")
+        return note.strip() if isinstance(note, str) else ""
+
+    @staticmethod
+    def _format_push_fail_error(reason: str, *, existing_mr: bool) -> str:
+        """Dashboard / Jira error: generic delivery line plus git reason."""
+        if existing_mr:
+            head = (
+                "Agent finished but git push failed; "
+                "work was not delivered to the existing MR."
+            )
+        else:
+            head = (
+                "Agent finished but git push failed; "
+                "work was not delivered to remote."
+            )
+        body = (reason or "").strip()
+        if not body:
+            return head
+        low = body.lower()
+        if (
+            "could not read username" in low
+            or "authentication failed" in low
+            or "http basic: access denied" in low
+            or "terminal prompts disabled" in low
+        ) and "gitlab pat" not in low:
+            body = (
+                f"{body}\n\n"
+                "GitLab rejected the push because no write credentials were "
+                "available. Add a host PAT in Settings (write_repository + api), "
+                "then re-queue."
+            )
+        return f"{head}\n\n{body}"
+
     async def _push_and_create_mr(
         self,
         state: JiraAgentState,
@@ -4381,11 +4446,10 @@ class JobProcessor:
         git = self._git_for(state.issue_key)
         if not git:
             logger.warning(f"No git manager for {state.issue_key}")
+            msg = "No git workspace available; cannot push or open a merge request."
+            self._record_delivery_failure(state.issue_key, msg)
             try:
-                self.reporter.post_progress_update(
-                    state,
-                    "No git workspace available; cannot push or open a merge request.",
-                )
+                self.reporter.post_progress_update(state, msg)
             except Exception:
                 pass
             return False
@@ -4406,6 +4470,7 @@ class JobProcessor:
                 f"`{getattr(git, 'work_branch', None)}`."
             )
             logger.error(msg)
+            self._record_delivery_failure(state.issue_key, msg)
             try:
                 self.reporter.post_progress_update(state, msg)
             except Exception:
@@ -4435,6 +4500,7 @@ class JobProcessor:
                 f"(MR source → target `{getattr(git, 'target_branch', '')}`)."
             )
             logger.error(msg)
+            self._record_delivery_failure(state.issue_key, msg)
             try:
                 self.reporter.post_progress_update(state, msg)
             except Exception:
@@ -4482,19 +4548,25 @@ class JobProcessor:
                 )
                 push_success = True
             else:
-                logger.warning(
-                    f"Push failed or remote not configured for {state.issue_key}"
+                raw = getattr(git, "last_push_error", None)
+                reason = raw.strip() if isinstance(raw, str) and raw.strip() else (
+                    "git push failed (see daemon log)"
                 )
+                logger.warning(
+                    f"Push failed or remote not configured for {state.issue_key}: "
+                    f"{reason[:200]}"
+                )
+                self._record_delivery_failure(state.issue_key, reason)
                 try:
-                    self.reporter.post_progress_update(
-                        state,
-                        (
-                            f"Git push failed for branch `{branch_name or 'unknown'}`. "
-                            "Local work may still exist in the agent temp workspace; "
-                            "no merge request was created. Check GitLab credentials "
-                            "(GITLAB_PAT) and remote access, then re-queue from To Do."
-                        ),
+                    detail = reason
+                    comment = (
+                        f"Git push failed for branch `{branch_name or 'unknown'}`.\n\n"
+                        f"{detail}\n\n"
+                        "Local work may still exist in the agent temp workspace; "
+                        "no merge request was created. Check GitLab credentials "
+                        "(GITLAB_PAT) and remote access, then re-queue from To Do."
                     )
+                    self.reporter.post_progress_update(state, comment)
                 except Exception:
                     pass
                 return False

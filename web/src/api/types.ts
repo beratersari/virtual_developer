@@ -135,8 +135,10 @@ export type JobItem = {
   description?: string
   workflow_type: string
   agent: string
-  /** OpenCode model id used for this run */
+  /** Worker model id used for this run */
   model?: string | null
+  /** opencode | codex (empty = infer on the client) */
+  backend?: string
   status: string
   task_id?: string | null
   task_ids?: string[]

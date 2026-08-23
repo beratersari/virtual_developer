@@ -598,14 +598,32 @@ def test_getters(gm):
         assert "status" in gm.status()
 
 
+def test_summarize_git_error():
+    from src.git_manager import summarize_git_error
+
+    wrapped = (
+        "Git command failed: git push -u origin -- feature/KAN-1905\n"
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled"
+    )
+    assert "could not read Username" in summarize_git_error(wrapped)
+    assert "Git command failed" not in summarize_git_error(wrapped)
+    assert summarize_git_error("") == ""
+    assert "not allowed" in summarize_git_error(
+        "remote: You are not allowed\nerror: failed to push"
+    )
+
+
 def test_push_paths(gm):
     gm.remote_enabled = False
     assert gm.push() is False
+    assert gm.last_push_error
     gm.remote_enabled = True
     # push() does: auth set-url, push, scrub set-url (and more on merge retry)
     with patch.object(gm, "get_current_branch", return_value="feature/x"):
         with patch.object(gm, "_run_git", return_value=_cp()):
             assert gm.push() is True
+            assert gm.last_push_error is None
         # auth set-url ok, push fails, fetch/merge/push ok, scrub set-url
         with patch.object(gm, "_run_git", side_effect=[
             _cp(),  # auth set-url
@@ -627,6 +645,7 @@ def test_push_paths(gm):
                 _cp(),  # scrub
             ]):
                 assert gm.push("feature/x") is False
+                assert "fail2" in (gm.last_push_error or "")
         # Agent already pushed: push fails but head_is_on_remote → True
         with patch.object(gm, "head_is_on_remote", return_value=True):
             with patch.object(gm, "_run_git", side_effect=[
@@ -638,6 +657,7 @@ def test_push_paths(gm):
                 _cp(),  # scrub
             ]):
                 assert gm.push("feature/x") is True
+                assert gm.last_push_error is None
 
 
 def test_head_is_on_remote_matches_tip(gm):

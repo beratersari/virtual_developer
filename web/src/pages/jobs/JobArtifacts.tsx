@@ -108,7 +108,7 @@ export function JobSessionTab({
       <div className="vd-alert vd-alert-warning">
         {job.session_log_path
           ? `Could not load session log (${pathBasename(job.session_log_path)}).`
-          : 'No OpenCode session logs linked to this job yet. Chat can still fill from the OpenCode database before a .log file is attached.'}
+          : 'No run log is linked to this job yet. Transcript appears after the worker writes a session file.'}
       </div>
     )
   }
@@ -116,7 +116,7 @@ export function JobSessionTab({
   return (
     <div className="space-y-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-text-muted">OpenCode output. Latest attempt opens by default.</p>
+        <p className="text-xs text-text-muted">Raw worker output. Latest attempt opens by default.</p>
         {entries.length > 1 && (
           <div className="flex items-center gap-2">
             <button

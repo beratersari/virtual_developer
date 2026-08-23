@@ -978,6 +978,23 @@ def test_persist_and_materialize_plan(processor, tmp_path):
             assert processor._persist_plan("P-3", "content") is None
 
 
+def test_format_push_fail_error_includes_git_reason():
+    auth = (
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled"
+    )
+    msg = JobProcessor._format_push_fail_error(auth, existing_mr=False)
+    assert msg.startswith("Agent finished but git push failed")
+    assert "could not read Username" in msg
+    assert "write credentials" in msg
+    mr = JobProcessor._format_push_fail_error("remote: denied", existing_mr=True)
+    assert "existing MR" in mr
+    assert "remote: denied" in mr
+    assert JobProcessor._format_push_fail_error("", existing_mr=False).endswith(
+        "work was not delivered to remote."
+    )
+
+
 @pytest.mark.asyncio
 async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, fake_jira):
     state = state_manager.create_state("PU-1", "s", "d")
@@ -1043,7 +1060,13 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.push.return_value = False
     git.head_is_on_remote.return_value = False
     git.get_last_commit_sha.return_value = "sha_new"
+    git.last_push_error = (
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled"
+    )
     assert await processor._push_and_create_mr(state) is False
+    noted = (state_manager.get_state("PU-1").metadata or {}).get("delivery_note") or ""
+    assert "could not read Username" in noted
 
     # Agent already pushed: push fails but origin has HEAD → still open MR
     git.push.return_value = False
@@ -1234,7 +1257,21 @@ async def test_execution_delivery_and_push_failures(
     git2.commits_ahead_of_target.return_value = 2
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_push_and_create_mr", new_callable=AsyncMock) as p:
-            p.return_value = False
+
+            async def _fail_push(*_a, **_k):
+                state_manager.update_state(
+                    "EXD-2",
+                    metadata={
+                        "delivery_status": "push_failed",
+                        "delivery_note": (
+                            "fatal: could not read Username for "
+                            "'https://gitlab.com': terminal prompts disabled"
+                        ),
+                    },
+                )
+                return False
+
+            p.side_effect = _fail_push
             with patch("src.processor.settings") as s:
                 s.default_agent = "atlas"
                 s.agent_task_timeout_seconds = 10
@@ -1243,7 +1280,10 @@ async def test_execution_delivery_and_push_failures(
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
                 s.default_branch = "main"
                 await processor._start_execution_workflow(state2)
-    assert state_manager.get_state("EXD-2").status == TaskStatus.ERROR
+    exd2 = state_manager.get_state("EXD-2")
+    assert exd2.status == TaskStatus.ERROR
+    assert "could not read Username" in (exd2.error_message or "")
+    assert "write credentials" in (exd2.error_message or "")
 
     # aborted during execution
     state3 = state_manager.create_state("EXD-3", "s", "d")
