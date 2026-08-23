@@ -48,11 +48,11 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 | **State store** | Per-issue JSON under `.jira-agent/state/`; job records for the dashboard |
 | **Ops dashboard** | REST + WebSocket + static SPA from `web/dist` |
 
-### Agents (Oh My OpenAgent)
+### Agents (stock OpenCode)
 
 | Setting | Role |
 |---------|------|
-| **`DEFAULT_AGENT`** (e.g. `atlas`) | OpenCode persona for both `Mode: plan` and `Mode: build` |
+| **`DEFAULT_AGENT`** (`build`) | OpenCode stock agent for both `Mode: plan` and `Mode: build` |
 | **Plan vs build text** | `agent/PLAN_PROMPT.md` vs `agent/BUILD_PROMPT.md` (mode only) |
 | **Oracle** | Architecture Q&A when routing detects consultative wording |
 
@@ -61,7 +61,7 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 ## Requirements
 
 - **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels)  
-- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) with **oh-my-openagent** plugin  
+- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) — stock **build** / **plan** agents (no oh-my-openagent)  
 - **Git**  
 - **glab** (GitLab CLI) when push/MR is enabled  
 - Jira access (board browse, comment, optional transitions)  
@@ -99,6 +99,8 @@ CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.m
 ```cmd
 :: Extract zip so install.bat sits next to vendor\ and src\
 install.bat
+:: Workers only (OpenCode + Codex, no Python/dashboard):
+install-backends.bat
 :: Or, if OpenCode is already installed on this PC (skip OpenCode install):
 install-dashboard.bat
 :: Or, use the Python already on PATH (does not create .venv):
@@ -337,7 +339,7 @@ Repo URL and branches always come from the issue `{params}` block.
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
 | `DEFAULT_MODEL` | (see `.env.example`) | Passed to OpenCode serve as the job model |
-| `DEFAULT_AGENT` | `atlas` | OpenCode agent for plan and build jobs |
+| `DEFAULT_AGENT` | `build` | OpenCode stock agent for plan and build jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |

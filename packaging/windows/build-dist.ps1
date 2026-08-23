@@ -4,7 +4,7 @@
   Build the Windows offline distribution zip for JIRA Virtual Developer.
 
 .DESCRIPTION
-  Fetches pinned OpenCode, glab, oh-my-opencode, and Python wheels (3.10+) from
+  Fetches pinned OpenCode, Codex, glab, oh-my-opencode, and Python wheels (3.10+) from
   the web, stages the app, packs OpenCode home into a SINGLE archive (avoids
   Windows MAX_PATH / slow node_modules extract for end users), and writes a zip.
 
@@ -205,6 +205,12 @@ $ver = Read-Versions $versionsFile
 $OPENCODE_VERSION = $ver["OPENCODE_VERSION"]
 $OH_MY_OPENCODE_VERSION = $ver["OH_MY_OPENCODE_VERSION"]
 $GLAB_VERSION = $ver["GLAB_VERSION"]
+$CODEX_VERSION = $ver["CODEX_VERSION"]
+$CODEX_WINDOWS_ASSET = if ($ver["CODEX_WINDOWS_ASSET"]) {
+    $ver["CODEX_WINDOWS_ASSET"]
+} else {
+    "codex-x86_64-pc-windows-msvc.exe.zip"
+}
 $NODE_FULL_VERSION = if ($ver["NODE_FULL_VERSION"]) { $ver["NODE_FULL_VERSION"] } else { "20.19.0" }
 $PYTHON_MIN_VERSION = if ($ver["PYTHON_MIN_VERSION"]) { $ver["PYTHON_MIN_VERSION"] } else { "3.10" }
 $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
@@ -216,6 +222,7 @@ $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
 if (-not $OPENCODE_VERSION) { throw "OPENCODE_VERSION missing in versions.env" }
 if (-not $OH_MY_OPENCODE_VERSION) { throw "OH_MY_OPENCODE_VERSION missing in versions.env" }
 if (-not $GLAB_VERSION) { throw "GLAB_VERSION missing in versions.env" }
+if (-not $CODEX_VERSION) { throw "CODEX_VERSION missing in versions.env" }
 if (-not $NODE_FULL_VERSION) { throw "NODE_FULL_VERSION missing in versions.env" }
 
 if (-not $OutDir) {
@@ -238,6 +245,7 @@ Write-Host "Payload   : $payload"
 Write-Host "OpenCode  : $OPENCODE_VERSION"
 Write-Host "oh-my-oc  : $OH_MY_OPENCODE_VERSION"
 Write-Host "glab      : $GLAB_VERSION"
+Write-Host "Codex     : $CODEX_VERSION"
 Write-Host "Wheels for: $($wheelVersionList -join ', ') (min runtime $PYTHON_MIN_VERSION)"
 Write-Host ""
 
@@ -254,6 +262,7 @@ $copyItems = @(
     "install-dashboard.bat",
     "install-dashboard-system-python.bat",
     "install-opencode-online.bat",
+    "install-backends.bat",
     "VERSION",
     "README.md",
     "AGENTS.md",
@@ -405,6 +414,8 @@ OpenCode=$OPENCODE_VERSION
 oh-my-opencode=$OH_MY_OPENCODE_VERSION
 oh-my-openagent=$OH_MY_OPENCODE_VERSION
 glab=$GLAB_VERSION
+Codex=$CODEX_VERSION
+CodexAsset=$CODEX_WINDOWS_ASSET
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
 OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install.bat)
@@ -477,6 +488,35 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
+# 3b) Fetch Codex Windows CLI (pinned rust-vX.Y.Z)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 3b: Fetching Codex CLI v$CODEX_VERSION..."
+
+$codexZip = Join-Path $dl $CODEX_WINDOWS_ASSET
+$codexUrl = "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_WINDOWS_ASSET"
+Write-Host "  Asset: $CODEX_WINDOWS_ASSET (AMD64 / 64-bit Windows)"
+Download-File $codexUrl $codexZip
+
+$codexExtract = Join-Path $dl "codex-extract"
+if (Test-Path -LiteralPath $codexExtract) {
+    Remove-Item -LiteralPath $codexExtract -Recurse -Force
+}
+Expand-ZipSafe $codexZip $codexExtract
+
+$codexExe = Get-ChildItem -Path $codexExtract -Filter "codex*.exe" -Recurse -File |
+    Select-Object -First 1
+if (-not $codexExe) {
+    throw "codex.exe not found inside $codexZip"
+}
+& $assertPe -Path $codexExe.FullName -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) {
+    throw "codex.exe is not AMD64"
+}
+$codexSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexExe.FullName).Hash
+Write-Host ("  Codex SHA256: {0} ({1:N1} MB)" -f $codexSha, ($codexExe.Length / 1MB))
+
+# ---------------------------------------------------------------------------
 # 4) Build OpenCode home in a SHORT temp path, then pack as ONE zip
 #    (Users never extract thousands of node_modules files from the outer zip.)
 # ---------------------------------------------------------------------------
@@ -501,8 +541,11 @@ $vendorBin = Join-Path $vendor "bin"
 Ensure-Dir $vendorBin
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $vendorBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $vendorBin "glab.exe") -Force
+Copy-Item -LiteralPath $codexExe.FullName -Destination (Join-Path $vendorBin "codex.exe") -Force
 & $assertPe -Path (Join-Path $vendorBin "opencode.exe")
 if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
+& $assertPe -Path (Join-Path $vendorBin "codex.exe") -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) { throw "vendor\bin\codex.exe failed AMD64 check" }
 
 # Record architecture for install-time checks / support
 @(
@@ -510,8 +553,14 @@ if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
     "OPENCODE_ASSET=$OPENCODE_ASSET"
     "OPENCODE_SHA256=$ocSha"
     "OPENCODE_BYTES=$((Get-Item -LiteralPath $opencodeExe.FullName).Length)"
+    "CODEX_VERSION=$CODEX_VERSION"
+    "CODEX_ASSET=$CODEX_WINDOWS_ASSET"
+    "CODEX_SHA256=$codexSha"
+    "CODEX_BYTES=$((Get-Item -LiteralPath $codexExe.FullName).Length)"
     "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
     "BACKUP=vendor\bin\opencode.exe"
+    "CODEX_INSTALL=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe"
+    "BACKUP_CODEX=vendor\bin\codex.exe"
 ) | Set-Content -Path (Join-Path $ocBin "ARCH.txt") -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $ocBin "ARCH.txt") -Destination (Join-Path $vendorBin "ARCH.txt") -Force
 
@@ -520,88 +569,26 @@ $pkgBody = @"
 {
   "name": "virtual-developer-opencode-home",
   "private": true,
-  "description": "OpenCode user home dependencies for JIRA Virtual Developer",
-  "dependencies": {
-    "oh-my-openagent": "$OH_MY_OPENCODE_VERSION",
-    "oh-my-opencode": "$OH_MY_OPENCODE_VERSION"
-  }
+  "description": "OpenCode user home for Yaver (stock build/plan agents, no oh-my plugin)"
 }
 "@
 Set-Content -Path $pkgPath -Value $pkgBody -Encoding UTF8
 
-# Use NEW package id oh-my-openagent (legacy oh-my-opencode triggers auto-migration + Bun re-fetch hang).
-# autoupdate=false avoids network hangs on offline machines.
+# Stock OpenCode agents only. Empty plugin list avoids Bun fetching oh-my-openagent.
 $ocCfgBody = @"
 {
   "`$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
-  "plugin": ["oh-my-openagent@$OH_MY_OPENCODE_VERSION"]
+  "plugin": []
 }
 "@
 Set-Content -Path (Join-Path $ocHome "opencode.json") -Value $ocCfgBody -Encoding UTF8
-# Also ship template under packaging\ in the payload (install.bat fallback)
 $pkgWindows = Join-Path $payload "packaging\windows"
 if (Test-Path -LiteralPath $pkgWindows) {
     Set-Content -Path (Join-Path $pkgWindows "opencode.json") -Value $ocCfgBody -Encoding UTF8
 }
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-opencode.json") -Force
-# New basename used by oh-my-openagent docs
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-openagent.json") -Force
 
-Write-Host "  Installing oh-my-openagent@$OH_MY_OPENCODE_VERSION + oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."
-Push-Location $ocHome
-try {
-    # Hoisted tree is shallower (fewer nested node_modules) — critical for Windows MAX_PATH
-    # Install BOTH names: config uses openagent; some tools still resolve legacy opencode name.
-    npm install --omit=dev --no-fund --no-audit --install-strategy=hoisted `
-        "oh-my-openagent@$OH_MY_OPENCODE_VERSION" `
-        "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm install oh-my-openagent/opencode @$OH_MY_OPENCODE_VERSION failed (exit $LASTEXITCODE)"
-    }
-} finally {
-    Pop-Location
-}
-
-# Ensure both package folders exist (npm may dedupe one away)
-$omoRoot = Join-Path $ocHome "node_modules\oh-my-opencode"
-$omaRoot = Join-Path $ocHome "node_modules\oh-my-openagent"
-if (-not (Test-Path -LiteralPath $omaRoot) -and (Test-Path -LiteralPath $omoRoot)) {
-    Write-Host "  Duplicating oh-my-opencode -> oh-my-openagent (npm dedupe)"
-    Copy-Item -LiteralPath $omoRoot -Destination $omaRoot -Recurse -Force
-}
-if (-not (Test-Path -LiteralPath $omoRoot) -and (Test-Path -LiteralPath $omaRoot)) {
-    Write-Host "  Duplicating oh-my-openagent -> oh-my-opencode (npm dedupe)"
-    Copy-Item -LiteralPath $omaRoot -Destination $omoRoot -Recurse -Force
-}
-if (-not (Test-Path -LiteralPath $omaRoot)) {
-    throw "oh-my-openagent missing after npm install"
-}
-if (-not (Test-Path -LiteralPath $omoRoot)) {
-    throw "oh-my-opencode missing after npm install"
-}
-
-Optimize-NodeModules (Join-Path $ocHome "node_modules")
-
-# Prove the offline plugin tree is complete (agents + skill markdown + size)
-foreach ($label in @("oh-my-openagent", "oh-my-opencode")) {
-    $pRoot = Join-Path $ocHome "node_modules\$label"
-    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\index.js"))) {
-        throw "$label missing dist\index.js after install/prune"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\agents"))) {
-        throw "$label missing dist\agents after install/prune"
-    }
-    $pFiles = @(Get-ChildItem -LiteralPath $pRoot -Recurse -File -ErrorAction SilentlyContinue)
-    $pMd = @(Get-ChildItem -LiteralPath $pRoot -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-    Write-Host "  $label tree: $($pFiles.Count) files, $($pMd.Count) markdown (skills/docs)"
-    if ($pFiles.Count -lt 500) {
-        throw "$label tree too small ($($pFiles.Count) files) — incomplete offline plugin"
-    }
-    if ($pMd.Count -lt 10) {
-        throw "$label has almost no .md files ($($pMd.Count)) — skills were pruned"
-    }
-}
+Write-Host "  Stock OpenCode config (plugin=[], default build agent). No oh-my-openagent."
 
 # Bundle ripgrep so first TUI run does not hang downloading from GitHub
 # OpenCode looks for: %USERPROFILE%\.cache\opencode\bin\rg.exe
@@ -646,6 +633,10 @@ try {
     & $assertPe -Path $verifyExe.FullName
     if ($LASTEXITCODE -ne 0) { throw "Packed opencode.exe failed AMD64/size check" }
     Write-Host ("  Verified packed opencode.exe ({0:N1} MB)" -f ($verifyExe.Length / 1MB))
+    $packedCodex = Get-ChildItem -Path $verifyDir -Recurse -Filter "codex.exe" -ErrorAction SilentlyContinue
+    if ($packedCodex) {
+        throw "opencode-home.zip must not contain codex.exe (Codex installs to %LOCALAPPDATA%\Programs\OpenAI\Codex)"
+    }
 } finally {
     Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -759,12 +750,13 @@ $versionsCopy = @"
 OPENCODE_VERSION=$OPENCODE_VERSION
 OH_MY_OPENCODE_VERSION=$OH_MY_OPENCODE_VERSION
 GLAB_VERSION=$GLAB_VERSION
+CODEX_VERSION=$CODEX_VERSION
 NODE_FULL_VERSION=$NODE_FULL_VERSION
 PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat (full offline), install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), or install-opencode-online.bat (OpenCode via network + vendor\node).
+NOTE=Run install.bat (full offline), install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode + Codex only), or install-opencode-online.bat (OpenCode via network + vendor\node).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -778,6 +770,8 @@ JIRA Virtual Developer — Windows offline package
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
 4. Install (pick one):
       install.bat                 — full OFFLINE: Python + OpenCode + plugins + glab
+                                      + Codex CLI to %LOCALAPPDATA%\Programs\OpenAI\Codex
+      install-backends.bat                  — OpenCode + Codex only (no Python / dashboard)
       install-dashboard.bat                 — backend + frontend only (no OpenCode; creates .venv)
       install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
       install-opencode-online.bat — ONLINE OpenCode only (requires vendor\node;

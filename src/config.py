@@ -221,6 +221,20 @@ class Settings(BaseSettings):
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
+    agent_backend: str = Field(
+        default="opencode",
+        description="Unattended worker: opencode | codex",
+    )
+    codex_cli: str = Field(default="codex", description="Codex CLI binary for AGENT_BACKEND=codex")
+    codex_api_key: str = Field(default="", description="API key for Codex (CODEX_API_KEY / OpenAI-compatible)")
+    codex_base_url: str = Field(
+        default="",
+        description="Optional OpenAI-compatible base URL for Codex (empty = default OpenAI)",
+    )
+    codex_wire_api: str = Field(
+        default="",
+        description="Codex wire API: responses | chat. Empty = chat when base URL is set, else responses.",
+    )
     opencode_context_limit: int = Field(
         default=128000,
         description=(
@@ -287,8 +301,8 @@ class Settings(BaseSettings):
     # OpenCode agent name for plan + build runs (oracle consult uses "oracle").
     # Mode (plan vs build) selects the prompt file; agent name does not change prompts.
     default_agent: str = Field(
-        default="atlas",
-        description="OpenCode / oh-my-openagent agent for plan and build jobs",
+        default="build",
+        description="OpenCode agent for plan and build jobs (stock build; not Sisyphus/Atlas)",
     )
 
     # Exactly two mode prompts (agent name does not change prompt text)
@@ -654,6 +668,9 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "trigger_labels",
         "trigger_on_assignment",
         "default_model",
+        "agent_backend",
+        "codex_base_url",
+        "codex_wire_api",
         "project_repositories",
     }
 )
@@ -671,6 +688,9 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_labels": "TRIGGER_LABELS",
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
+    "agent_backend": "AGENT_BACKEND",
+    "codex_base_url": "CODEX_BASE_URL",
+    "codex_wire_api": "CODEX_WIRE_API",
 }
 
 

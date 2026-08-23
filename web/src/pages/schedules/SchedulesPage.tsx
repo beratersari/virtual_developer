@@ -112,6 +112,12 @@ export function SchedulesPage() {
               '—'
             )}{' '}
             {s.title} · {s.mode}
+            {s.backend ? (
+              <>
+                {' '}
+                · <span className="font-mono text-xs text-text-secondary">{s.backend}</span>
+              </>
+            ) : null}
             {s.model ? (
               <>
                 {' '}
@@ -196,6 +202,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [preview, setPreview] = useState<SchedulePreview | null>(null)
   const [when, setWhen] = useState(defaultWhen)
   const [model, setModel] = useState('')
+  const [backend, setBackend] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [looking, setLooking] = useState(false)
@@ -208,6 +215,7 @@ function Existing({ onDone }: { onDone: () => void }) {
       setPreview(p)
       setKey(p.issue_key || key)
       if (p.model) setModel(p.model)
+      if (p.backend) setBackend(p.backend)
     } catch (e) {
       setPreview(null)
       setErr(e instanceof Error ? e.message : 'Preview failed')
@@ -227,10 +235,12 @@ function Existing({ onDone }: { onDone: () => void }) {
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
         model: model.trim() || undefined,
+        backend: backend.trim() || undefined,
       })
       setPreview(null)
       setKey('')
       setModel('')
+      setBackend('')
       onDone()
     } catch (err2) {
       setErr(err2 instanceof Error ? err2.message : 'Failed')
@@ -255,6 +265,11 @@ function Existing({ onDone }: { onDone: () => void }) {
           <p className="quiet">
             {preview.issue_key} — {preview.title} · {preview.mode} · {preview.repository_url}
           </p>
+          <BackendField
+            value={backend}
+            onChange={setBackend}
+            fallback={live.settings?.agent_backend || 'opencode'}
+          />
           <ModelField
             value={model}
             onChange={setModel}
@@ -316,6 +331,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [target, setTarget] = useState('develop')
   const [mode, setMode] = useState<'plan' | 'build'>('build')
   const [model, setModel] = useState('')
+  const [backend, setBackend] = useState('')
   const [issueType, setIssueType] = useState('Task')
   const [types, setTypes] = useState<JiraIssueType[]>([])
   const [when, setWhen] = useState(defaultWhen)
@@ -379,6 +395,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
         model: model.trim() || undefined,
+        backend: backend.trim() || undefined,
       })
       try {
         window.localStorage.setItem(LAST_REPO_KEY, url)
@@ -517,6 +534,11 @@ function CreateNew({ onDone }: { onDone: () => void }) {
           <input value={issueType} onChange={(e) => setIssueType(e.target.value)} />
         )}
       </label>
+      <BackendField
+        value={backend}
+        onChange={setBackend}
+        fallback={live.settings?.agent_backend || 'opencode'}
+      />
       <ModelField
         value={model}
         onChange={setModel}
@@ -547,6 +569,32 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         </button>
       </p>
     </form>
+  )
+}
+
+function BackendField({
+  value,
+  onChange,
+  fallback,
+}: {
+  value: string
+  onChange: (v: string) => void
+  fallback: string
+}) {
+  return (
+    <label className="field">
+      <span>Backend</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">
+          Settings default{fallback ? ` (${fallback})` : ''}
+        </option>
+        <option value="opencode">OpenCode</option>
+        <option value="codex">Codex</option>
+      </select>
+      <span className="mt-1 block text-xs text-text-muted">
+        Same job contract as OpenCode. Leave default to use Settings.
+      </span>
+    </label>
   )
 }
 

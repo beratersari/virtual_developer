@@ -29,6 +29,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install.bat`** — full offline setup:
      - Creates `.venv` and installs Python deps from **`vendor\python-wheels`**
      - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
+     - Installs pinned **Codex CLI** to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`** (official standalone path)
      - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
    - **`install-dashboard.bat`** — **backend + frontend only** (no OpenCode):
      - Creates `.venv` + deps, start scripts, `.env`, `cli.py init`
@@ -36,6 +37,10 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
      - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
      - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
+   - **`install-backends.bat`** — **agent workers only** (no Python / dashboard):
+     - OpenCode to **`%USERPROFILE%\.opencode`**
+     - Codex to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**
+     - Optional: `install-backends.bat opencode` or `install-backends.bat codex`
    - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network; does **not** replace offline `install.bat`):
      - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)
      - Edit **`vendor\npm-online.npmrc`** (or `packaging\windows\npm-online.npmrc`) → set `registry=` to your npm mirror
@@ -93,10 +98,11 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
 
 | Path | Role |
 |------|------|
-| `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python wheel set / Node |
+| `versions.env` | Pinned OpenCode / Codex / oh-my-opencode / glab / Python wheel set / Node |
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
-| `opencode.json` | Registers `oh-my-openagent@…` plugin |
+| `opencode.json` | Stock OpenCode config (`plugin: []`, built-in build/plan) |
 | `oh-my-opencode.json` | Default plugin config stub |
+| `Install-Backends.ps1` | Offline OpenCode + Codex only (called by root `install-backends.bat`) |
 | `Install-OpencodeOnline.ps1` | Online OpenCode + npm plugin install (called by root bat; not used by offline install.bat) |
 | `npm-online.npmrc` | Editable npm `registry=` for online install only |
 | `online-sources.env` | Optional `OPENCODE_ZIP_URL` / `NPM_REGISTRY` mirrors |

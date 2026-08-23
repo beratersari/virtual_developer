@@ -1,0 +1,371 @@
+"""AgentBackend protocol: OpenCode default + Codex CLI adapter."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.backends.base import (
+    BACKEND_CODEX,
+    BACKEND_OPENCODE,
+    AgentRunRequest,
+    AgentRunResult,
+    normalize_backend_name,
+)
+from src.backends.codex import (
+    build_codex_argv,
+    build_codex_config_toml,
+    parse_codex_thread_id,
+    resolve_codex_cli,
+    resolve_codex_wire_api,
+)
+from src.backends.registry import get_agent_backend, resolve_backend_name
+from src.issue_git_spec import parse_issue_git_spec, upsert_params_backend
+
+
+def test_normalize_backend_name_aliases():
+    assert normalize_backend_name("") == ""
+    assert normalize_backend_name("  OpenCode ") == BACKEND_OPENCODE
+    assert normalize_backend_name("oh-my-openagent") == BACKEND_OPENCODE
+    assert normalize_backend_name("openai-codex") == BACKEND_CODEX
+    assert normalize_backend_name("openai") == BACKEND_CODEX
+    assert normalize_backend_name("codex") == BACKEND_CODEX
+    assert normalize_backend_name("not-a-backend") == ""
+
+
+def test_resolve_backend_name_prefers_task_then_issue_then_settings(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "agent_backend", "opencode")
+    assert (
+        resolve_backend_name(task_backend="codex", issue_backend="opencode")
+        == BACKEND_CODEX
+    )
+    assert resolve_backend_name(issue_backend="codex") == BACKEND_CODEX
+    assert resolve_backend_name() == BACKEND_OPENCODE
+    monkeypatch.setattr(settings, "agent_backend", "codex")
+    assert resolve_backend_name() == BACKEND_CODEX
+    monkeypatch.setattr(settings, "agent_backend", "")
+    assert resolve_backend_name() == BACKEND_OPENCODE
+
+
+def test_get_agent_backend_returns_named_impl():
+    assert get_agent_backend("codex").name == BACKEND_CODEX
+    assert get_agent_backend("opencode").name == BACKEND_OPENCODE
+    assert get_agent_backend("unknown").name == BACKEND_OPENCODE
+
+
+def test_resolve_codex_cli_prefers_official_windows_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    official = tmp_path / "Local" / "Programs" / "OpenAI" / "Codex" / "bin"
+    official.mkdir(parents=True)
+    exe = official / "codex.exe"
+    exe.write_text("official", encoding="utf-8")
+    vendor = tmp_path / "vendor" / "bin"
+    vendor.mkdir(parents=True)
+    (vendor / "codex.exe").write_text("vendor", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert resolve_codex_cli("codex") == str(exe)
+
+
+def test_resolve_codex_cli_prefers_offline_vendor(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert resolve_codex_cli("") == "codex"
+    explicit = tmp_path / "custom-codex"
+    explicit.write_text("x", encoding="utf-8")
+    assert resolve_codex_cli(str(explicit)) == str(explicit)
+    vendor = tmp_path / "vendor" / "bin"
+    vendor.mkdir(parents=True)
+    exe = vendor / "codex.exe"
+    exe.write_text("bin", encoding="utf-8")
+    assert resolve_codex_cli("codex") == str(exe)
+
+
+def test_pinned_codex_version_in_versions_env():
+    text = (
+        Path(__file__).resolve().parents[1] / "packaging" / "windows" / "versions.env"
+    ).read_text(encoding="utf-8")
+    assert "CODEX_VERSION=0.149.0" in text
+    assert "CODEX_WINDOWS_ASSET=codex-x86_64-pc-windows-msvc.exe.zip" in text
+
+
+def test_build_codex_argv_has_no_secrets_and_prompt_last():
+    argv = build_codex_argv(
+        cli="codex",
+        prompt="do the work",
+        model="my-custom-model",
+    )
+    assert argv[0] == "codex"
+    assert argv[1] == "exec"
+    assert "--sandbox" in argv
+    assert "danger-full-access" in argv
+    assert "--json" in argv
+    assert argv[-1] == "do the work"
+    assert "-m" in argv
+    assert "my-custom-model" in argv
+    joined = " ".join(argv)
+    assert "sk-" not in joined
+    assert "API_KEY" not in joined
+
+
+def test_build_codex_argv_resume_skips_model_flag():
+    argv = build_codex_argv(
+        cli="codex",
+        prompt="continue",
+        model="ignored-on-resume",
+        resume_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    )
+    assert "resume" in argv
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in argv
+    assert "-m" not in argv
+
+
+def test_codex_config_custom_url_uses_chat_and_never_embeds_key():
+    toml = build_codex_config_toml(
+        model="acme/qwen",
+        base_url="https://llm.example.com",
+        wire_api="",
+    )
+    assert 'model = "acme/qwen"' in toml
+    assert 'base_url = "https://llm.example.com/v1"' in toml
+    assert 'wire_api = "chat"' in toml
+    assert 'env_key = "CODEX_API_KEY"' in toml
+    assert "sk-" not in toml
+    assert "secret" not in toml.lower()
+    assert resolve_codex_wire_api(base_url="", wire_api="") == "responses"
+    assert (
+        resolve_codex_wire_api(base_url="https://x", wire_api="responses")
+        == "responses"
+    )
+
+
+def test_parse_codex_thread_id_from_jsonl():
+    blob = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"11111111-2222-3333-4444-555555555555"}',
+            "noise",
+            '{"thread":{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}}',
+        ]
+    )
+    assert parse_codex_thread_id(blob) == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert parse_codex_thread_id("") is None
+
+
+def test_parse_and_upsert_params_backend():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: build
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.backend is None
+
+    one = upsert_params_backend(desc, "openai-codex")
+    spec2, err2 = parse_issue_git_spec("", one)
+    assert err2 is None
+    assert spec2 is not None
+    assert spec2.backend == BACKEND_CODEX
+    two = upsert_params_backend(one, "opencode")
+    spec3, err3 = parse_issue_git_spec("", two)
+    assert err3 is None
+    assert spec3 is not None
+    assert spec3.backend == BACKEND_OPENCODE
+    assert two.lower().count("backend:") == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_dispatches_codex_not_serve(tmp_path, monkeypatch):
+    from src.orchestrator.agent_runner import AgentRunner, AgentTask
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    captured: dict = {}
+
+    class _FakeCodex:
+        name = BACKEND_CODEX
+
+        async def run(self, request: AgentRunRequest) -> AgentRunResult:
+            captured["prompt"] = request.prompt
+            captured["model"] = request.model
+            captured["cwd"] = str(request.working_directory)
+            return AgentRunResult(
+                returncode=0,
+                stdout="ok",
+                session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                backend=BACKEND_CODEX,
+            )
+
+        def cancel(self, handle):
+            handle["cancel"] = True
+
+    runner = AgentRunner(working_directory=tmp_path)
+    serve = AsyncMock(return_value={"returncode": 99, "stderr": "should not run"})
+    monkeypatch.setattr(runner, "_run_agent_via_serve", serve)
+    monkeypatch.setattr(
+        "src.backends.get_agent_backend",
+        lambda name=None: _FakeCodex(),
+    )
+    monkeypatch.setattr(
+        "src.backends.resolve_backend_name",
+        lambda **kw: BACKEND_CODEX,
+    )
+
+    task = AgentTask(
+        description="Build",
+        prompt="implement it",
+        agent="atlas",
+        issue_key="KAN-1",
+        backend="codex",
+        model="acme/custom",
+    )
+    result = await runner.run_agent(task, timeout_seconds=30)
+    serve.assert_not_called()
+    assert result["returncode"] == 0
+    assert result["backend"] == BACKEND_CODEX
+    assert captured["prompt"] == "implement it"
+    assert captured["model"] == "acme/custom"
+
+
+@pytest.mark.asyncio
+async def test_runner_opencode_still_uses_serve(tmp_path, monkeypatch):
+    from src.orchestrator.agent_runner import AgentRunner, AgentTask
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    runner = AgentRunner(working_directory=tmp_path)
+    serve = AsyncMock(
+        return_value={
+            "task_id": "t",
+            "returncode": 0,
+            "stdout": "ok",
+            "stderr": "",
+            "backend": BACKEND_OPENCODE,
+        }
+    )
+    monkeypatch.setattr(runner, "_run_agent_via_serve", serve)
+    task = AgentTask(
+        description="Build",
+        prompt="implement it",
+        agent="atlas",
+        issue_key="KAN-1",
+        backend="opencode",
+    )
+    result = await runner.run_agent(task, timeout_seconds=30)
+    serve.assert_awaited_once()
+    assert result["returncode"] == 0
+
+
+def test_settings_update_rejects_unknown_backend():
+    from pydantic import ValidationError
+
+    from src.dashboard.schemas import SettingsUpdate
+
+    with pytest.raises(ValidationError):
+        SettingsUpdate(agent_backend="claude")
+
+
+def test_settings_view_hides_codex_key_and_persists_backend(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update, build_settings_view
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "codex_api_key", "sk-secret-codex")
+    monkeypatch.setattr(settings, "agent_backend", "opencode")
+    monkeypatch.setattr(settings, "codex_base_url", "")
+    view = build_settings_view()
+    dumped = view.model_dump()
+    assert "sk-secret-codex" not in json.dumps(dumped)
+    assert "codex_api_key" not in dumped
+    assert dumped["codex_api_key_configured"] is True
+
+    updated = apply_settings_update(
+        SettingsUpdate(
+            agent_backend="codex",
+            codex_base_url="https://llm.example.com/v1",
+            codex_wire_api="chat",
+            codex_api_key="sk-new-key",
+        )
+    )
+    assert updated.agent_backend == BACKEND_CODEX
+    assert updated.codex_base_url == "https://llm.example.com/v1"
+    assert updated.codex_wire_api == "chat"
+    assert updated.codex_api_key_configured is True
+    assert settings.codex_api_key == "sk-new-key"
+    assert "sk-new-key" not in json.dumps(updated.model_dump())
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "CODEX_API_KEY=sk-new-key" in env
+
+
+def test_create_scheduled_job_persists_backend(tmp_path):
+    from datetime import datetime, timedelta
+
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-200"}
+    client.transition_to_in_progress.return_value = True
+    out = create_scheduled_job(
+        title="Codex job",
+        description="body",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        model="acme/custom",
+        backend="codex",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["schedule"]["backend"] == BACKEND_CODEX
+    desc = client.create_issue.call_args.kwargs.get("description") or ""
+    assert "Backend: codex" in desc
+    assert "Model: acme/custom" in desc
+
+
+def test_backend_for_issue_prefers_params(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    jira = MagicMock()
+    with patch("src.processor.create_jira_client", return_value=jira):
+        proc = JobProcessor()
+    monkeypatch.setattr("src.processor.settings.agent_backend", "opencode")
+    desc = """
+{params}
+Repository: https://gitlab.com/a/b.git
+Source branch: develop
+Target branch: develop
+Mode: build
+Backend: codex
+{params}
+"""
+    st = SimpleNamespace(issue_summary="s", description=desc)
+    assert proc._backend_for_issue(st) == BACKEND_CODEX
+    st2 = SimpleNamespace(issue_summary="s", description="no params")
+    assert proc._backend_for_issue(st2) == BACKEND_OPENCODE
+    monkeypatch.setattr("src.processor.settings.agent_backend", "codex")
+    assert proc._backend_for_issue(None) == BACKEND_CODEX

@@ -47,7 +47,7 @@ jobs:
             $p = $line -split "=", 2
             if ($p.Count -eq 2) { $map[$p[0].Trim()] = $p[1].Trim() }
           }
-          foreach ($k in @("OPENCODE_VERSION","OH_MY_OPENCODE_VERSION","GLAB_VERSION","PYTHON_VERSION","NODE_VERSION","NODE_FULL_VERSION")) {
+          foreach ($k in @("OPENCODE_VERSION","OH_MY_OPENCODE_VERSION","GLAB_VERSION","CODEX_VERSION","PYTHON_VERSION","NODE_VERSION","NODE_FULL_VERSION")) {
             if (-not $map.ContainsKey($k) -or -not $map[$k]) {
               throw "Missing $k in packaging/windows/versions.env"
             }
@@ -100,6 +100,8 @@ jobs:
             "install-dashboard.bat",
             "install-dashboard-system-python.bat",
             "install-opencode-online.bat",
+            "install-backends.bat",
+            "packaging/windows/Install-Backends.ps1",
             "start.bat",
             "start-backend.bat",
             "start-frontend.bat",
@@ -108,6 +110,7 @@ jobs:
             "src/daemon.py",
             "web/dist/index.html",
             "vendor/opencode-home.zip",
+            "vendor/bin/codex.exe",
             "vendor/python-wheels",
             "vendor/node/node.exe",
             "vendor/node/npm.cmd",
@@ -141,7 +144,9 @@ jobs:
           foreach ($needle in @(
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",
-              "Compact wait is unbounded"
+              "Compact wait is unbounded",
+              "Codex API key",
+              "agent_backend"
             )) {
             if ($jsText -notmatch [regex]::Escape($needle)) {
               throw "Stale dashboard SPA: '$needle' not in $($js[0].Name)"
@@ -189,8 +194,9 @@ jobs:
           | Dist name | ``${{ steps.meta.outputs.dist_name }}`` |
           | Zip size | $size |
           | OpenCode | ``${{ steps.versions.outputs.OPENCODE_VERSION }}`` |
-          | oh-my-openagent | ``${{ steps.versions.outputs.OH_MY_OPENCODE_VERSION }}`` |
+          | OpenCode agents | stock ``build`` / ``plan`` (no oh-my-openagent) |
           | glab | ``${{ steps.versions.outputs.GLAB_VERSION }}`` |
+          | Codex | ``${{ steps.versions.outputs.CODEX_VERSION }}`` |
 
           Download the **Actions artifact** named after the dist (includes prebuilt ``web/dist``),
           extract once, run ``install.bat``, then start with ``start.bat``

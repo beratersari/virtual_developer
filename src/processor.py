@@ -1301,6 +1301,28 @@ class JobProcessor:
             return mid
         return (getattr(settings, "default_model", "") or "").strip()
 
+    def _backend_for_issue(self, state: Any) -> str:
+        """Per-issue Backend: from {params}, else settings.agent_backend."""
+        from src.backends.base import BACKEND_OPENCODE, normalize_backend_name
+
+        if state is not None:
+            try:
+                from src.issue_git_spec import parse_issue_git_spec
+
+                spec, _err = parse_issue_git_spec(
+                    getattr(state, "issue_summary", "") or "",
+                    getattr(state, "description", "") or "",
+                )
+            except Exception:
+                spec = None
+            bid = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            if bid:
+                return bid
+        return (
+            normalize_backend_name(getattr(settings, "agent_backend", None))
+            or BACKEND_OPENCODE
+        )
+
     def _apply_job_opencode_context_limit(
         self, working_dir: Any, *, model: str = ""
     ) -> None:
@@ -3262,6 +3284,7 @@ class JobProcessor:
                 agent=settings.default_agent,
                 issue_key=state.issue_key,
                 model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
             )
             job_id = self._begin_workflow_run(
                 state,
@@ -3534,6 +3557,7 @@ class JobProcessor:
             agent=settings.default_agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
+            backend=self._backend_for_issue(state),
         )
         job_id = self._begin_workflow_run(
             state,
@@ -3805,6 +3829,7 @@ class JobProcessor:
             agent=settings.default_agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
+            backend=self._backend_for_issue(state),
         )
 
         # Claim in-flight before git clone (archives prior task/session/job ids)
@@ -4774,6 +4799,7 @@ class JobProcessor:
                 agent="oracle",
                 issue_key=state.issue_key,
                 model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
             )
 
             job_id = self._begin_workflow_run(
@@ -4887,6 +4913,7 @@ class JobProcessor:
                 agent=settings.default_agent,
                 issue_key=issue_key,
                 model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
             )
 
             result = await runner.run_agent(task)

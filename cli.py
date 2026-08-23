@@ -54,14 +54,14 @@ def start():
 
 @cli.command()
 @click.argument("issue_key")
-@click.option("--agent", "-a", default=None, help="Override agent (sisyphus, prometheus, atlas)")
+@click.option("--agent", "-a", default=None, help="Override agent (build, plan, oracle)")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running")
 def process(issue_key: str, agent: Optional[str], dry_run: bool):
     """Process a specific JIRA issue manually.
     
     Examples:
         python cli.py process SIM-1008
-        python cli.py process SIM-1008 --agent sisyphus
+        python cli.py process SIM-1008 --agent build
         python cli.py process SIM-1008 --dry-run
     """
     validate_config()

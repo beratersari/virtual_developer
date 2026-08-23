@@ -86,6 +86,10 @@ export type SettingsPayload = {
   gitlab_allowed_hosts?: string
   gitlab_credentials?: GitlabHostCredential[]
   default_model: string
+  agent_backend?: string
+  codex_base_url?: string
+  codex_wire_api?: string
+  codex_api_key_configured?: boolean
   gitlab_webhook_enabled?: boolean
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
@@ -229,6 +233,7 @@ export type ScheduleItem = {
   target_branch: string
   mode: string
   model?: string
+  backend?: string
   issue_type?: string
   scheduled_at: string
   status: string
@@ -256,6 +261,7 @@ export type SchedulePreview = {
   target_branch: string
   mode: string
   model?: string
+  backend?: string
   message?: string
   error?: string
 }
@@ -279,6 +285,7 @@ export type ScheduleCreateBody = {
   source_branch_mode?: 'custom' | 'issue_key'
   dispatch_now?: boolean
   model?: string
+  backend?: string
 }
 
 export type JiraIssueType = {
@@ -470,6 +477,9 @@ export type SettingsPatch = Partial<
     | 'agent_task_max_retries'
     | 'agent_task_max_incomplete_retries'
     | 'default_model'
+    | 'agent_backend'
+    | 'codex_base_url'
+    | 'codex_wire_api'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
   >
@@ -477,4 +487,5 @@ export type SettingsPatch = Partial<
   jira_api_token?: string
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
+  codex_api_key?: string
 }

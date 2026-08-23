@@ -346,6 +346,7 @@ def create_dashboard_app(
             issue_type=body.issue_type or "Task",
             source_branch_mode=body.source_branch_mode or "custom",
             model=body.model or "",
+            backend=body.backend or "",
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -391,6 +392,7 @@ def create_dashboard_app(
             body.issue_key,
             scheduled_at=body.scheduled_at,
             model=body.model or "",
+            backend=body.backend or "",
             store=schedule_store,
         )
         if not result.get("ok"):
