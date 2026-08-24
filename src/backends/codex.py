@@ -159,6 +159,17 @@ def build_codex_argv(
     return cmd
 
 
+def _codex_cmd_for_log(argv: List[str]) -> str:
+    """Join argv for logs; replace the prompt (last arg) so we never dump the kit."""
+    if not argv:
+        return ""
+    parts = list(argv)
+    last = parts[-1]
+    if last and not last.startswith("-") and last not in {"exec", "resume"}:
+        parts[-1] = f"<prompt {len(last)} chars>"
+    return " ".join(parts)
+
+
 def parse_codex_thread_id(text: str) -> Optional[str]:
     """Best-effort thread/session id from JSONL or log text."""
     if not (text or "").strip():
@@ -187,6 +198,81 @@ def parse_codex_thread_id(text: str) -> Optional[str]:
     return last
 
 
+def summarize_codex_exec_line(line: str, *, limit: int = 220) -> Optional[str]:
+    """Operator-facing one-liner for a ``codex exec --json`` event (or stderr)."""
+    raw = (line or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith("{"):
+        if raw.startswith("[codex]"):
+            return raw
+        return f"[codex] {raw[:limit]}"
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return f"[codex] {raw[:limit]}"
+    if not isinstance(obj, dict):
+        return None
+    etype = str(obj.get("type") or "")
+    item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+    item_type = str(item.get("type") or "")
+    status = str(item.get("status") or "").strip()
+
+    def _clip(text: object) -> str:
+        s = " ".join(str(text or "").split())
+        if len(s) <= limit:
+            return s
+        return s[: max(0, limit - 1)] + "…"
+
+    if etype == "thread.started":
+        tid = str(obj.get("thread_id") or "").strip()
+        return f"[codex] thread {tid}" if tid else "[codex] thread started"
+    if etype == "turn.failed" or etype == "error":
+        msg = obj.get("message") or (obj.get("error") or {})
+        if isinstance(msg, dict):
+            msg = msg.get("message") or msg.get("error") or msg
+        return f"[codex] error: {_clip(msg)}" if msg else "[codex] error"
+    if etype in {"turn.started", "turn.completed", "item.updated"}:
+        return None
+    if item_type == "command_execution" or item_type == "command":
+        cmd = _clip(item.get("command") or item.get("cmd") or "command")
+        if etype == "item.started" or status == "in_progress":
+            return f"[codex] running: {cmd}"
+        code = item.get("exit_code")
+        tail = f" exit={code}" if code is not None and str(code) != "" else ""
+        return f"[codex] command{tail}: {cmd}"
+    if item_type == "agent_message" or item_type == "message":
+        text = _clip(item.get("text") or item.get("content") or "")
+        return f"[codex] assistant: {text}" if text else None
+    if item_type == "reasoning":
+        text = _clip(item.get("text") or "")
+        return f"[codex] thinking: {text}" if text else None
+    if item_type in {"file_change", "fileChange"}:
+        changes = item.get("changes") or item.get("files") or []
+        names: List[str] = []
+        if isinstance(changes, list):
+            for ch in changes[:8]:
+                if isinstance(ch, dict):
+                    names.append(str(ch.get("path") or ch.get("filename") or ""))
+                elif ch:
+                    names.append(str(ch))
+        names = [n for n in names if n]
+        return f"[codex] files: {', '.join(names)}" if names else "[codex] files changed"
+    if item_type in {"mcp_tool_call", "mcpToolCall"}:
+        tool = item.get("tool") or item.get("name") or "mcp"
+        server = item.get("server") or ""
+        label = f"{server}/{tool}" if server else str(tool)
+        return f"[codex] mcp: {label}"
+    if item_type in {"web_search", "webSearch"}:
+        q = _clip(item.get("query") or item.get("q") or "")
+        return f"[codex] search: {q}" if q else "[codex] web search"
+    if item_type in {"todo_list", "todoList"}:
+        return "[codex] todos updated"
+    if item_type == "error":
+        return f"[codex] error: {_clip(item.get('message') or item.get('text') or 'failed')}"
+    return None
+
+
 def _looks_like_session_id(sid: str) -> bool:
     s = (sid or "").strip()
     if not s:
@@ -205,6 +291,12 @@ class CodexBackend:
         from src.orchestrator.agent_runner import AgentRunner
 
         timeout_seconds = float(request.timeout_seconds or 1800)
+        from src.log_context import set_issue_key, set_job_id
+
+        if request.issue_key:
+            set_issue_key(request.issue_key)
+        if request.job_id:
+            set_job_id(request.job_id)
         handle = request.handle
         log_lines = request.log_lines if request.log_lines is not None else []
         cli = resolve_codex_cli(
@@ -247,6 +339,12 @@ class CodexBackend:
             model=model,
             resume_id=resume if _looks_like_session_id(resume) else "",
         )
+        if os.name != "nt":
+            import shutil
+
+            stdbuf = shutil.which("stdbuf")
+            if stdbuf:
+                argv = [stdbuf, "-oL", "-eL", *argv]
         env = _agent_subprocess_env(request.working_directory)
         env["CODEX_HOME"] = str(home)
         if api_key:
@@ -267,6 +365,9 @@ class CodexBackend:
                     request.on_output(stream, line)
                 except Exception:
                     pass
+            summary = summarize_codex_exec_line(line)
+            if summary:
+                logger.info(summary)
             sid = parse_codex_thread_id(line)
             if sid:
                 handle["session_id"] = sid
@@ -277,8 +378,18 @@ class CodexBackend:
                         pass
 
         _emit("stdout", f"[codex] cwd={cwd} model={model or '(default)'}")
+        logger.info(
+            f"[codex] start command: {_codex_cmd_for_log(argv)} "
+            f"cwd={cwd} model={model or '(default)'} "
+            f"timeout={int(timeout_seconds)}s resume={resume or 'no'}"
+        )
+        logger.debug(
+            f"[codex] cli={cli} home={home} base_url={base_url or '(default)'} "
+            f"wire_api={wire_api or '(default)'} has_api_key={bool(api_key)}"
+        )
         proc = None
         timed_out = False
+        started = asyncio.get_event_loop().time()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -290,6 +401,7 @@ class CodexBackend:
                 start_new_session=True,
             )
             handle["proc"] = proc
+            logger.info(f"[codex] process started pid={proc.pid}")
 
             async def _pump(stream_name: str, reader: Any) -> None:
                 if reader is None:
@@ -322,6 +434,7 @@ class CodexBackend:
                 except Exception:
                     pass
         except FileNotFoundError:
+            logger.error(f"[codex] binary not found: {cli}")
             return AgentRunResult(
                 returncode=-1,
                 stdout="\n".join(log_lines),
@@ -333,7 +446,7 @@ class CodexBackend:
                 backend=self.name,
             )
         except Exception as e:
-            logger.warning(f"codex exec failed: {e}")
+            logger.warning(f"[codex] exec failed: {e}")
             return AgentRunResult(
                 returncode=-1,
                 stdout="\n".join(log_lines),
@@ -344,8 +457,13 @@ class CodexBackend:
         finally:
             handle["proc"] = None
 
+        elapsed = asyncio.get_event_loop().time() - started
         code = int(getattr(proc, "returncode", None) or ( -1 if timed_out else 0))
         if timed_out:
+            logger.warning(
+                f"[codex] exec timed out after {int(timeout_seconds)}s "
+                f"(ran {elapsed:.1f}s) pid={getattr(proc, 'pid', None)}"
+            )
             return AgentRunResult(
                 returncode=-1,
                 stdout="\n".join(log_lines),
@@ -354,6 +472,10 @@ class CodexBackend:
                 timed_out=True,
                 backend=self.name,
             )
+        logger.info(
+            f"[codex] exec finished returncode={code} duration={elapsed:.1f}s "
+            f"thread={handle.get('session_id') or '-'}"
+        )
         return AgentRunResult(
             returncode=code,
             stdout="\n".join(log_lines),
@@ -368,6 +490,7 @@ class CodexBackend:
     def cancel(self, handle: Dict[str, Any]) -> None:
         handle["cancel"] = True
         proc = handle.get("proc")
+        logger.info(f"[codex] cancel requested pid={getattr(proc, 'pid', None)}")
         if proc is None:
             return
         try:

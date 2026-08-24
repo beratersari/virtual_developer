@@ -22,6 +22,7 @@ from src.backends.codex import (
     parse_codex_thread_id,
     resolve_codex_cli,
     resolve_codex_wire_api,
+    summarize_codex_exec_line,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
 from src.issue_git_spec import parse_issue_git_spec, upsert_params_backend
@@ -175,6 +176,51 @@ def test_parse_codex_thread_id_from_jsonl():
     )
     assert parse_codex_thread_id(blob) == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert parse_codex_thread_id("") is None
+
+
+def test_summarize_codex_exec_line_steps():
+    assert summarize_codex_exec_line(
+        '{"type":"thread.started","thread_id":"tid-1"}'
+    ) == "[codex] thread tid-1"
+    assert summarize_codex_exec_line(
+        '{"type":"item.started","item":{"type":"command_execution","command":"ls","status":"in_progress"}}'
+    ) == "[codex] running: ls"
+    assert summarize_codex_exec_line(
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Done"}}'
+    ) == "[codex] assistant: Done"
+    assert summarize_codex_exec_line('{"type":"turn.started"}') is None
+    assert summarize_codex_exec_line("[codex] cwd=/tmp") == "[codex] cwd=/tmp"
+
+
+def test_codex_cmd_for_log_hides_prompt():
+    from src.backends.codex import _codex_cmd_for_log
+
+    shown = _codex_cmd_for_log(
+        ["codex", "exec", "--json", "-m", "gpt", "UNATTENDED JOB: do the work"]
+    )
+    assert "UNATTENDED" not in shown
+    assert "<prompt" in shown
+    assert "codex exec --json -m gpt" in shown
+
+
+def test_bind_log_context_sets_job_id_for_filter():
+    from src.log_context import clear_log_context, get_job_id, get_issue_key
+    from src.orchestrator.agent_runner import AgentRunner, AgentTask
+
+    clear_log_context()
+    try:
+        task = AgentTask(
+            description="d",
+            prompt="p",
+            agent="build",
+            issue_key="KAN-9",
+            job_id="job_codex_filter_1",
+        )
+        AgentRunner._bind_log_context(task)
+        assert get_job_id() == "job_codex_filter_1"
+        assert get_issue_key() == "KAN-9"
+    finally:
+        clear_log_context()
 
 
 def test_parse_and_upsert_params_backend():

@@ -1558,7 +1558,7 @@ class JobProcessor:
         model_id = (getattr(task, "model", None) or "").strip() or (
             getattr(live, "default_model", None) or settings.default_model or ""
         ).strip()
-        return self._start_job_record(
+        job_id = self._start_job_record(
             state,
             workflow_type=workflow_type,
             agent=agent,
@@ -1566,6 +1566,9 @@ class JobProcessor:
             status=job_status,
             model=model_id or None,
         )
+        if job_id:
+            task.job_id = job_id
+        return job_id
 
     def _start_job_record(
         self,

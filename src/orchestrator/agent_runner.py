@@ -169,6 +169,8 @@ class AgentTask:
     abort_busy_session: bool = True
     # Worker: opencode | codex (empty = settings.agent_backend).
     backend: Optional[str] = None
+    # Ops dashboard filter — logger prefixes ``[job_id=…]`` from log_context.
+    job_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
@@ -201,7 +203,19 @@ class AgentRunner:
         # Maps task_id -> last session log path (run_agent naming may include issue_key)
         self._session_files: Dict[str, Path] = {}
         logger.debug(f"AgentRunner initialized with working_directory={working_directory}")
-    
+
+    @staticmethod
+    def _bind_log_context(task: AgentTask) -> None:
+        """Tag subsequent logs with issue + job so the dashboard can filter."""
+        from src.log_context import get_job_id, set_issue_key, set_job_id
+
+        if task.issue_key:
+            set_issue_key(task.issue_key)
+        jid = (getattr(task, "job_id", None) or get_job_id() or "").strip()
+        if jid:
+            task.job_id = jid
+            set_job_id(jid)
+
     async def run_agent(
         self,
         task: AgentTask,
@@ -225,6 +239,7 @@ class AgentRunner:
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
+        self._bind_log_context(task)
         logger.info(f"Starting agent task: task_id={task.task_id}, agent={task.agent}, attempt={attempt_number}")
         
         # Use configured timeout if not overridden (allow explicit 0)
@@ -371,6 +386,8 @@ class AgentRunner:
                     model=(task.model or settings.default_model or ""),
                     agent=task.agent or "",
                     session_id=task.session_id,
+                    issue_key=task.issue_key,
+                    job_id=task.job_id,
                     working_directory=self.working_directory,
                     timeout_seconds=float(effective_timeout),
                     abort_busy_session=bool(
@@ -1080,6 +1097,7 @@ class AgentRunner:
         retry_on_timeout = settings.agent_task_retry_on_timeout
         retry_on_error = settings.agent_task_retry_on_error
         
+        self._bind_log_context(task)
         logger.info(f"Starting agent with retry: task_id={task.task_id}, max_retries={effective_max_retries}")
 
         def _aborted() -> bool:

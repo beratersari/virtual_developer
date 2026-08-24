@@ -44,6 +44,8 @@ class AgentRunRequest:
     model: str = ""
     agent: str = ""
     session_id: Optional[str] = None
+    issue_key: Optional[str] = None
+    job_id: Optional[str] = None
     working_directory: Optional[Path] = None
     timeout_seconds: float = 1800.0
     abort_busy_session: bool = True
