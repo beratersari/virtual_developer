@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,7 +20,7 @@ from src.backends.codex import (
     build_codex_config_toml,
     parse_codex_thread_id,
     resolve_codex_cli,
-    resolve_codex_wire_api,
+    seed_isolated_codex_home,
     summarize_codex_exec_line,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
@@ -137,33 +136,51 @@ def test_build_codex_argv_resume_skips_model_flag():
     assert "-m" not in argv
 
 
-def test_codex_config_custom_url_uses_responses_and_never_embeds_key():
-    toml = build_codex_config_toml(
-        model="acme/qwen",
-        base_url="https://llm.example.com",
-        wire_api="",
-        api_key="sk-test-not-real",
+def test_codex_config_merges_user_file_and_overrides_model():
+    user = "\n".join(
+        [
+            'model = "old/from-user"',
+            'approval_policy = "on-request"',
+            'model_provider = "yaver"',
+            "",
+            "[model_providers.yaver]",
+            'name = "Yaver"',
+            'base_url = "https://llm.example.com/v1"',
+            'wire_api = "responses"',
+            'env_key = "OPENAI_API_KEY"',
+        ]
     )
+    toml = build_codex_config_toml(model="acme/qwen", user_config=user)
     assert 'model = "acme/qwen"' in toml
+    assert 'model = "old/from-user"' not in toml
+    assert 'approval_policy = "never"' in toml
+    assert 'sandbox_mode = "danger-full-access"' in toml
+    assert 'model_provider = "yaver"' in toml
     assert 'base_url = "https://llm.example.com/v1"' in toml
-    assert 'wire_api = "responses"' in toml
-    assert 'env_key = "CODEX_API_KEY"' in toml
     assert "sk-" not in toml
-    assert "secret" not in toml.lower()
-    assert resolve_codex_wire_api(base_url="", wire_api="") == "responses"
-    assert (
-        resolve_codex_wire_api(base_url="https://x", wire_api="responses")
-        == "responses"
+    assert "CODEX_API_KEY" not in toml
+    minimal = build_codex_config_toml(model="muse-spark-1.2-contributor-free")
+    assert 'model = "muse-spark-1.2-contributor-free"' in minimal
+    assert "model_providers" not in minimal
+    assert "env_key" not in minimal
+
+
+def test_seed_isolated_codex_home_copies_auth(tmp_path, monkeypatch):
+    user = tmp_path / "operator-codex"
+    user.mkdir()
+    (user / "auth.json").write_text('{"token":"keep-me"}', encoding="utf-8")
+    (user / "config.toml").write_text(
+        'model = "user/default"\nmodel_provider = "openai"\n',
+        encoding="utf-8",
     )
-    free = build_codex_config_toml(
-        model="muse-spark-1.2-contributor-free",
-        base_url="https://opencode.ai/zen/v1",
-        wire_api="",
-        api_key="",
-    )
-    assert "requires_openai_auth = false" in free
-    assert "env_key" not in free
-    assert 'wire_api = "responses"' in free
+    monkeypatch.setattr("src.backends.codex.user_codex_home", lambda: user)
+    home = tmp_path / "job-home"
+    seed_isolated_codex_home(home, model="job/model")
+    assert (home / "auth.json").read_text(encoding="utf-8") == '{"token":"keep-me"}'
+    written = (home / "config.toml").read_text(encoding="utf-8")
+    assert 'model = "job/model"' in written
+    assert 'model_provider = "openai"' in written
+    assert 'approval_policy = "never"' in written
 
 
 def test_parse_codex_thread_id_from_jsonl():
@@ -341,37 +358,35 @@ def test_settings_update_rejects_unknown_backend():
         SettingsUpdate(agent_backend="claude")
 
 
-def test_settings_view_hides_codex_key_and_persists_backend(tmp_path, monkeypatch):
+def test_settings_update_persists_backend_not_codex_provider(tmp_path, monkeypatch):
     from src.config import settings
     from src.dashboard.schemas import SettingsUpdate
     from src.dashboard.service import apply_settings_update, build_settings_view
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(settings, "codex_api_key", "sk-secret-codex")
     monkeypatch.setattr(settings, "agent_backend", "opencode")
-    monkeypatch.setattr(settings, "codex_base_url", "")
+    monkeypatch.setattr(settings, "default_model", "old/m")
     view = build_settings_view()
     dumped = view.model_dump()
-    assert "sk-secret-codex" not in json.dumps(dumped)
     assert "codex_api_key" not in dumped
-    assert dumped["codex_api_key_configured"] is True
+    assert "codex_base_url" not in dumped
+    assert "codex_wire_api" not in dumped
+    assert "codex_api_key_configured" not in dumped
 
     updated = apply_settings_update(
         SettingsUpdate(
             agent_backend="codex",
-            codex_base_url="https://llm.example.com/v1",
-            codex_wire_api="chat",
-            codex_api_key="sk-new-key",
+            default_model="acme/qwen",
         )
     )
     assert updated.agent_backend == BACKEND_CODEX
-    assert updated.codex_base_url == "https://llm.example.com/v1"
-    assert updated.codex_wire_api == "chat"
-    assert updated.codex_api_key_configured is True
-    assert settings.codex_api_key == "sk-new-key"
-    assert "sk-new-key" not in json.dumps(updated.model_dump())
-    env = (tmp_path / ".env").read_text(encoding="utf-8")
-    assert "CODEX_API_KEY=sk-new-key" in env
+    assert updated.default_model == "acme/qwen"
+    assert settings.agent_backend == BACKEND_CODEX
+    assert settings.default_model == "acme/qwen"
+    assert not hasattr(updated, "codex_api_key")
+    env_path = tmp_path / ".env"
+    if env_path.is_file():
+        assert "CODEX_API_KEY" not in env_path.read_text(encoding="utf-8")
 
 
 def test_create_scheduled_job_persists_backend(tmp_path):

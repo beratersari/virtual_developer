@@ -87,9 +87,6 @@ export type SettingsPayload = {
   gitlab_credentials?: GitlabHostCredential[]
   default_model: string
   agent_backend?: string
-  codex_base_url?: string
-  codex_wire_api?: string
-  codex_api_key_configured?: boolean
   gitlab_webhook_enabled?: boolean
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
@@ -480,8 +477,6 @@ export type SettingsPatch = Partial<
     | 'agent_task_max_incomplete_retries'
     | 'default_model'
     | 'agent_backend'
-    | 'codex_base_url'
-    | 'codex_wire_api'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
   >
@@ -489,5 +484,4 @@ export type SettingsPatch = Partial<
   jira_api_token?: string
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
-  codex_api_key?: string
 }

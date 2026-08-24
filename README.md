@@ -336,7 +336,7 @@ Repo URL and branches always come from the issue `{params}` block.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
-| `DEFAULT_MODEL` | (see `.env.example`) | Passed to OpenCode serve as the job model |
+| `DEFAULT_MODEL` | (see `.env.example`) | Job model for OpenCode and Codex (provider/auth stay in each tool's config) |
 | `DEFAULT_AGENT` | `build` | OpenCode stock agent for plan and build jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |

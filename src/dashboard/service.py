@@ -255,11 +255,6 @@ def build_settings_view() -> SettingsView:
         default_model=(settings.default_model or "").strip(),
         agent_backend=(getattr(settings, "agent_backend", None) or "opencode").strip()
         or "opencode",
-        codex_base_url=(getattr(settings, "codex_base_url", None) or "").strip(),
-        codex_wire_api=(getattr(settings, "codex_wire_api", None) or "").strip(),
-        codex_api_key_configured=bool(
-            (getattr(settings, "codex_api_key", None) or "").strip()
-        ),
         gitlab_webhook_enabled=bool(
             getattr(settings, "gitlab_webhook_enabled", False)
         ),
@@ -511,21 +506,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         name = normalize_backend_name(data["agent_backend"]) or BACKEND_OPENCODE
         settings.agent_backend = name
         runtime_persist["agent_backend"] = name
-    if "codex_base_url" in data and data["codex_base_url"] is not None:
-        url = str(data["codex_base_url"]).strip().rstrip("/")
-        settings.codex_base_url = url
-        runtime_persist["codex_base_url"] = url
-    if "codex_wire_api" in data and data["codex_wire_api"] is not None:
-        wire = str(data["codex_wire_api"]).strip().lower()
-        if wire not in ("", "responses", "chat"):
-            wire = ""
-        settings.codex_wire_api = wire
-        runtime_persist["codex_wire_api"] = wire
-    if "codex_api_key" in data and data["codex_api_key"] is not None:
-        tok = str(data["codex_api_key"])
-        if tok.strip():
-            settings.codex_api_key = tok.strip()
-            dotenv_updates["CODEX_API_KEY"] = settings.codex_api_key
     if "project_repositories" in data and data["project_repositories"] is not None:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
