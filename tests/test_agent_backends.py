@@ -18,6 +18,7 @@ from src.backends.base import (
 from src.backends.codex import (
     build_codex_argv,
     build_codex_config_toml,
+    models_from_codex_config,
     parse_codex_thread_id,
     resolve_codex_cli,
     seed_isolated_codex_home,
@@ -134,6 +135,45 @@ def test_build_codex_argv_resume_skips_model_flag():
     assert "resume" in argv
     assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in argv
     assert "-m" not in argv
+
+
+def test_models_from_codex_config_reads_declared_ids():
+    text = "\n".join(
+        [
+            'model = "gpt-5"',
+            "# model = \"ignored\"",
+            "",
+            "[profiles.zen]",
+            'model = "muse-spark-1.2-contributor-free"',
+        ]
+    )
+    assert models_from_codex_config(text) == [
+        "gpt-5",
+        "muse-spark-1.2-contributor-free",
+    ]
+    assert models_from_codex_config("") == []
+
+
+def test_build_models_response_codex_skips_opencode_inventory(tmp_path, monkeypatch):
+    from src.config import settings
+    from src.dashboard.service import build_models_response
+
+    home = tmp_path / ".codex"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        'model = "muse-spark-1.2-contributor-free"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("src.backends.codex.user_codex_home", lambda: home)
+    monkeypatch.setattr(settings, "default_model", "settings-default")
+    with patch("src.dashboard.service.list_available_models") as mocked:
+        resp = build_models_response(backend="codex")
+        mocked.assert_not_called()
+    ids = [m.id for m in resp.models]
+    assert resp.backend == BACKEND_CODEX
+    assert "settings-default" in ids
+    assert "muse-spark-1.2-contributor-free" in ids
+    assert all("opencode/" not in (m.id or "") for m in resp.models if m.source == "cli")
 
 
 def test_codex_config_merges_user_file_and_overrides_model():

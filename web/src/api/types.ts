@@ -47,6 +47,7 @@ export type ModelOption = {
 export type ModelsPayload = {
   default_model: string
   models: ModelOption[]
+  backend?: string
   opencode_config_model?: string | null
   opencode_config_path?: string | null
   error?: string | null

@@ -5,7 +5,6 @@ import {
   createSchedule,
   dispatchSchedule,
   fetchIssueTypes,
-  fetchModels,
   fetchSchedules,
   fetchSettings,
   patchSettings,
@@ -14,13 +13,13 @@ import {
 } from '../../api/client'
 import type {
   JiraIssueType,
-  ModelsPayload,
   ProjectRepository,
   ScheduleItem,
   SchedulePreview,
 } from '../../api/types'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
+import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
@@ -274,6 +273,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             value={model}
             onChange={setModel}
             fallback={live.settings?.default_model || ''}
+            backend={backend || live.settings?.agent_backend || 'opencode'}
           />
           <label className="field">
             <span>Run at</span>
@@ -543,6 +543,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         value={model}
         onChange={setModel}
         fallback={live.settings?.default_model || ''}
+        backend={backend || live.settings?.agent_backend || 'opencode'}
       />
       <label className="field">
         <span>Run at</span>
@@ -598,67 +599,4 @@ function BackendField({
   )
 }
 
-function ModelField({
-  value,
-  onChange,
-  fallback,
-}: {
-  value: string
-  onChange: (v: string) => void
-  fallback: string
-}) {
-  const [inventory, setInventory] = useState<ModelsPayload | null>(null)
-  const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    setLoading(true)
-    void fetchModels()
-      .then((p) => setInventory(p))
-      .catch(() => undefined)
-      .finally(() => setLoading(false))
-  }, [])
-
-  const options = inventory?.models ?? []
-  const known = new Set(options.map((m) => m.id))
-  const selectValue = value && known.has(value) ? value : value ? '__custom__' : ''
-
-  return (
-    <label className="field">
-      <span>Model</span>
-      <select
-        value={selectValue}
-        onChange={(e) => {
-          const v = e.target.value
-          if (v === '__custom__') {
-            onChange(value && !known.has(value) ? value : '')
-            return
-          }
-          onChange(v)
-        }}
-      >
-        <option value="">
-          Settings default{fallback ? ` (${fallback})` : ''}
-        </option>
-        {options.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.label || m.id}
-          </option>
-        ))}
-        <option value="__custom__">Other id…</option>
-      </select>
-      {(selectValue === '__custom__' || (!!value && !known.has(value))) && (
-        <input
-          className="mt-2"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="provider/model-id"
-        />
-      )}
-      <span className="mt-1 block text-xs text-text-muted">
-        {loading
-          ? 'Loading models…'
-          : 'This job only. Leave default to use Settings.'}
-      </span>
-    </label>
-  )
-}
