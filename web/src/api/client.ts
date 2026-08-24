@@ -254,8 +254,12 @@ export function patchSettings(body: SettingsPatch) {
   })
 }
 
-export function fetchModels(refresh = false) {
-  return request<ModelsPayload>(`/api/models${refresh ? '?refresh=true' : ''}`)
+export function fetchModels(refresh = false, backend?: string) {
+  const params = new URLSearchParams()
+  if (refresh) params.set('refresh', 'true')
+  if (backend) params.set('backend', backend)
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return request<ModelsPayload>(`/api/models${q}`)
 }
 
 export function testGitlabConnection(body: {

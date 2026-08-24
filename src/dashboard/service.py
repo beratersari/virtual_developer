@@ -269,32 +269,69 @@ def build_settings_view() -> SettingsView:
     )
 
 
-def build_models_response(*, refresh: bool = False) -> ModelsResponse:
-    """Inventory OpenCode models (CLI + opencode.json). Backend-only business logic."""
-    models, models_err, cfg_path, cfg_model = list_available_models(refresh=refresh)
-    options: List[ModelOption] = []
-    for m in models:
-        mid = m.id
-        name = m.name or mid
-        # Prefer human label from inventory; always include source hint for config rows
-        if name and name != mid and name != mid.split("/")[-1]:
-            label = f"{mid} — {name}"
-        else:
-            label = mid
-        if m.source in ("config", "config_default"):
-            label = f"{label} · config"
-        options.append(
-            ModelOption(
-                id=mid,
-                name=name,
-                provider=m.provider or "",
-                source=m.source,
-                label=label,
+def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) -> ModelOption:
+    label_name = name or mid
+    if label_name and label_name != mid and label_name != mid.split("/")[-1]:
+        label = f"{mid} — {label_name}"
+    else:
+        label = mid
+    if source in ("config", "config_default"):
+        label = f"{label} · config"
+    return ModelOption(
+        id=mid,
+        name=label_name,
+        provider=provider,
+        source=source,
+        label=label,
+    )
+
+
+def build_models_response(*, refresh: bool = False, backend: str = "") -> ModelsResponse:
+    """Inventory models for the selected worker (OpenCode CLI or Codex config)."""
+    from src.backends.base import BACKEND_CODEX, BACKEND_OPENCODE, normalize_backend_name
+
+    name = normalize_backend_name(backend) or BACKEND_OPENCODE
+    default_model = (settings.default_model or "").strip()
+    if name == BACKEND_CODEX:
+        from src.backends.codex import list_codex_config_models
+
+        ids, cfg_path, err = list_codex_config_models()
+        options: List[ModelOption] = []
+        seen: set[str] = set()
+        if default_model:
+            options.append(
+                _model_option(mid=default_model, source="settings")
             )
+            seen.add(default_model)
+        for mid in ids:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            options.append(_model_option(mid=mid, source="config"))
+        return ModelsResponse(
+            default_model=default_model,
+            models=options,
+            backend=BACKEND_CODEX,
+            opencode_config_model=None,
+            opencode_config_path=cfg_path,
+            error=err,
+            server_time=datetime.now().isoformat(timespec="seconds"),
         )
+
+    models, models_err, cfg_path, cfg_model = list_available_models(refresh=refresh)
+    options = [
+        _model_option(
+            mid=m.id,
+            name=m.name or m.id,
+            provider=m.provider or "",
+            source=m.source,
+        )
+        for m in models
+    ]
     return ModelsResponse(
-        default_model=(settings.default_model or "").strip(),
+        default_model=default_model,
         models=options,
+        backend=BACKEND_OPENCODE,
         opencode_config_model=cfg_model,
         opencode_config_path=cfg_path,
         error=models_err,

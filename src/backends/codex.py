@@ -25,12 +25,48 @@ _THREAD_RE = re.compile(
 _ISOLATED_OVERRIDE_KEYS = frozenset({"approval_policy", "sandbox_mode", "model"})
 
 
+_CODEX_MODEL_LINE = re.compile(
+    r"^model\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|(\S+))\s*(?:#.*)?$"
+)
+
+
 def user_codex_home() -> Path:
     """Operator Codex config dir (not the per-job isolated home)."""
     raw = (os.environ.get("CODEX_HOME") or "").strip()
     if raw:
         return Path(raw)
     return Path.home() / ".codex"
+
+
+def models_from_codex_config(user_config: str) -> List[str]:
+    """Model ids declared in the operator's Codex config.toml (any table)."""
+    found: List[str] = []
+    seen: set[str] = set()
+    for line in (user_config or "").replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _CODEX_MODEL_LINE.match(stripped)
+        if not match:
+            continue
+        mid = (match.group(1) or match.group(2) or match.group(3) or "").strip()
+        if mid and mid not in seen:
+            seen.add(mid)
+            found.append(mid)
+    return found
+
+
+def list_codex_config_models() -> tuple[List[str], Optional[str], Optional[str]]:
+    """Return (model ids, config path, error) from the operator Codex home."""
+    home = user_codex_home()
+    path = home / "config.toml"
+    if not path.is_file():
+        return [], str(path), None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return [], str(path), f"Could not read Codex config: {e}"
+    return models_from_codex_config(text), str(path), None
 
 
 def _codex_home_for(cwd: str) -> Path:

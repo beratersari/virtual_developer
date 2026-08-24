@@ -746,9 +746,9 @@ def create_dashboard_app(
         return result
 
     @app.get("/api/models")
-    def get_models(refresh: bool = False) -> dict:
-        """List OpenCode models (CLI + opencode.json). Sole inventory endpoint for the UI."""
-        return build_models_response(refresh=refresh).model_dump()
+    def get_models(refresh: bool = False, backend: str = "") -> dict:
+        """List models for the selected worker (OpenCode CLI or Codex ~/.codex)."""
+        return build_models_response(refresh=refresh, backend=backend).model_dump()
 
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import {
-  fetchModels,
   fetchSettings,
   patchSettings,
   testGitlabConnection,
@@ -10,10 +9,10 @@ import type {
   GitlabConnectionTestResult,
   GitlabHostCredentialDraft,
   JiraConnectionTestResult,
-  ModelsPayload,
   ProjectRepository,
   SettingsPayload,
 } from '../../api/types'
+import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 
@@ -71,13 +70,11 @@ export function SettingsPage() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [models, setModels] = useState<ModelsPayload | null>(null)
   const [section, setSection] = useState<'jira' | 'gitlab' | 'projects' | 'model' | 'runtime'>('jira')
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
   )
-  const [modelsLoading, setModelsLoading] = useState(false)
   const [jiraTesting, setJiraTesting] = useState(false)
   const [gitlabTestingIdx, setGitlabTestingIdx] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
@@ -85,17 +82,6 @@ export function SettingsPage() {
   const mark = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDirty(true)
     setDraft((d) => (d ? { ...d, [key]: value } : d))
-  }
-
-  const loadModels = async (refresh: boolean) => {
-    setModelsLoading(true)
-    try {
-      setModels(await fetchModels(refresh))
-    } catch {
-      /* list stays empty; operator can type an id */
-    } finally {
-      setModelsLoading(false)
-    }
   }
 
   useEffect(() => {
@@ -106,11 +92,6 @@ export function SettingsPage() {
       })
       .catch((e: Error) => setError(e.message))
   }, [])
-
-  useEffect(() => {
-    if (section !== 'model') return
-    void loadModels(false)
-  }, [section])
 
   const onSave = async () => {
     if (!draft) return
@@ -587,59 +568,18 @@ export function SettingsPage() {
           (OpenCode: opencode.json · Codex: ~/.codex/config.toml).
         </span>
       </label>
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <div className="text-sm font-semibold text-text">Default model</div>
-          <p className="mt-1 text-xs text-text-muted">
-            One model id for both OpenCode and Codex jobs. Saving updates runtime
-            DEFAULT_MODEL. Inventory is from GET /api/models; you can also type an
-            id the selected worker understands.
-          </p>
-        </div>
-        <button
-          type="button"
-          disabled={modelsLoading}
-          onClick={() => void loadModels(true)}
-          className="vd-btn vd-btn-secondary shrink-0 px-2.5 py-1 text-xs"
-        >
-          {modelsLoading ? (
-            <>
-              <Spinner /> Loading…
-            </>
-          ) : (
-            'Refresh list'
-          )}
-        </button>
-      </div>
-      <label className="field">
-        <span>Default model</span>
-        <select
-          value={draft.default_model}
-          onChange={(e) => mark('default_model', e.target.value)}
-        >
-          <option value="">{modelsLoading ? 'Loading models…' : '— select a model —'}</option>
-          {(models?.models ?? []).map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label || m.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="field">
-        <span>Or type an id</span>
-        <input
-          value={draft.default_model}
-          onChange={(e) => mark('default_model', e.target.value)}
-        />
-      </label>
-      <div className="text-xs text-text-muted">
-        Active:{' '}
-        <span className="font-mono text-text-secondary">
-          {draft.default_model || models?.default_model || '(unset)'}
-        </span>
-        {models != null && <span> · {models.models.length} from API</span>}
-      </div>
-      {models?.error && <p className="text-xs text-warning-text">{models.error}</p>}
+      <p className="text-xs text-text-muted">
+        One model id for both OpenCode and Codex jobs. The list follows the
+        worker above. Other id stays typed.
+      </p>
+      <ModelField
+        label="Default model"
+        value={draft.default_model}
+        onChange={(v) => mark('default_model', v)}
+        backend={draft.agent_backend}
+        allowEmpty={false}
+        showRefresh
+      />
       </div>
       )}
 

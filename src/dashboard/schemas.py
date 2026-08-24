@@ -217,10 +217,11 @@ class ModelOption(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """OpenCode model inventory — sole source for the Settings model list."""
+    """Worker model inventory — OpenCode CLI/config or Codex ~/.codex."""
 
     default_model: str = ""
     models: List[ModelOption] = Field(default_factory=list)
+    backend: str = "opencode"
     opencode_config_model: Optional[str] = None
     opencode_config_path: Optional[str] = None
     error: Optional[str] = None
