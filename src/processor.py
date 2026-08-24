@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from src.config import settings
 from src.git_manager import (
+    GitCancelledError,
     GitCloneError,
     GitManager,
     GitSourceBranchError,
@@ -1829,6 +1830,8 @@ class JobProcessor:
                 if n:
                     killed = True
             self._kill_children_for_issue(issue_key)
+            if self._kill_git_for_issue(issue_key):
+                killed = True
         except Exception as e:
             logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
@@ -1935,18 +1938,123 @@ class JobProcessor:
                     }
 
     def _kill_children_for_issue(self, issue_key: str) -> None:
-        """Best-effort kill of agent subprocesses for one issue."""
+        """Force-kill every subprocess for one issue (agent, git, workspace tools)."""
         state = self.state_manager.get_state(issue_key)
         runner = self._runner_for(issue_key)
-        if not runner:
-            return
+        extra_pids = self._tracked_pids_for_issue(issue_key, runner)
+        if runner:
+            try:
+                if state and state.current_task_id:
+                    runner.cancel_task(state.current_task_id)
+                if hasattr(runner, "cancel_all_tasks"):
+                    runner.cancel_all_tasks()
+            except Exception as e:
+                logger.warning(f"Could not kill agent processes for {issue_key}: {e}")
+        self._kill_git_for_issue(issue_key)
+        self._kill_workspace_for_issue(issue_key, extra_root_pids=extra_pids)
+
+    def _tracked_pids_for_issue(self, issue_key: str, runner: Any = None) -> list:
+        """PIDs we already know about (git Popen, Codex proc)."""
+        pids: list = []
+        git = self._git_for(issue_key) or GitManager.live_for(issue_key)
+        if git is not None:
+            for proc in list(getattr(git, "_live_procs", None) or []):
+                pid = getattr(proc, "pid", None)
+                if pid:
+                    pids.append(int(pid))
+        runner = runner or self._runner_for(issue_key)
+        tasks = getattr(runner, "_running_tasks", None) or {}
+        for handle in list(tasks.values()):
+            if isinstance(handle, dict):
+                proc = handle.get("proc")
+            else:
+                proc = handle
+            pid = getattr(proc, "pid", None)
+            if pid:
+                pids.append(int(pid))
+        return pids
+
+    def _workspace_path_for_issue(self, issue_key: str) -> Optional[Path]:
+        git = self._git_for(issue_key) or GitManager.live_for(issue_key)
+        if git is not None:
+            getter = getattr(git, "get_working_directory", None)
+            wd = None
+            if callable(getter):
+                try:
+                    wd = getter()
+                except Exception:
+                    wd = None
+            wd = wd or getattr(git, "temp_dir", None)
+            if wd:
+                return Path(str(wd))
+        runner = self._runner_for(issue_key)
+        wd = getattr(runner, "working_directory", None) if runner else None
+        if wd:
+            return Path(str(wd))
+        job_id = self._active_jobs.get(issue_key)
+        if job_id:
+            try:
+                job = self.job_store.get_job(job_id)
+            except Exception:
+                job = None
+            if isinstance(job, dict) and job.get("working_directory"):
+                return Path(str(job["working_directory"]))
+        return None
+
+    def _kill_workspace_for_issue(
+        self, issue_key: str, *, extra_root_pids: Optional[list] = None
+    ) -> int:
+        """Force-kill leftover bash/npm/git still running in the job clone."""
+        wd = self._workspace_path_for_issue(issue_key)
+        if wd is None:
+            return 0
         try:
-            if state and state.current_task_id:
-                runner.cancel_task(state.current_task_id)
-            if hasattr(runner, "cancel_all_tasks"):
-                runner.cancel_all_tasks()
+            from src.process_kill import kill_workspace_processes
+
+            n = kill_workspace_processes(
+                wd, extra_root_pids=extra_root_pids or [], force=True
+            )
+            if n:
+                logger.info(
+                    f"{issue_key}: force-killed {n} leftover workspace process(es)"
+                )
+            return int(n or 0)
         except Exception as e:
-            logger.warning(f"Could not kill agent processes for {issue_key}: {e}")
+            logger.warning(f"Could not kill workspace processes for {issue_key}: {e}")
+            return 0
+
+    def _kill_git_for_issue(self, issue_key: str) -> int:
+        """Force-kill git/glab children; delete an in-progress clone.
+
+        Returns the number of git processes signalled. Safe when no GitManager
+        is registered yet (clone may still be in ``GitManager.__init__``).
+        """
+        git = self._git_for(issue_key)
+        if git is None:
+            git = GitManager.live_for(issue_key)
+        if git is None:
+            return 0
+        killed = 0
+        cancel = getattr(git, "cancel_processes", None)
+        if callable(cancel):
+            try:
+                n = cancel(force=True)
+                if isinstance(n, int):
+                    killed = max(0, n)
+                elif n:
+                    killed = 1
+            except Exception as e:
+                logger.warning(f"Could not kill git processes for {issue_key}: {e}")
+        # Incomplete clone is not in ``_contexts`` yet — delete it now so a
+        # killed ``git clone`` cannot keep writing, and so age-policy cleanup
+        # does not keep a half-downloaded tree.
+        if issue_key not in self._contexts and isinstance(git, GitManager):
+            try:
+                if git.should_discard_on_cancel():
+                    git.discard_workspace()
+            except Exception as e:
+                logger.warning(f"Could not discard clone for {issue_key}: {e}")
+        return killed
 
     def _cancel_issue_state(
         self,
@@ -2748,13 +2856,18 @@ class JobProcessor:
                     f"finish or use a distinct Source branch."
                 )
 
-        git = GitManager(
-            issue_key=issue_key,
-            remote_url=spec.repository_url,
-            source_branch=spec.source_branch,
-            target_branch=spec.target_branch,
-            keep_source_work_branch=keep_source_work_branch,
-        )
+        try:
+            git = GitManager(
+                issue_key=issue_key,
+                remote_url=spec.repository_url,
+                source_branch=spec.source_branch,
+                target_branch=spec.target_branch,
+                keep_source_work_branch=keep_source_work_branch,
+            )
+        except GitCancelledError:
+            logger.info(f"{issue_key}: clone aborted because the job was cancelled")
+            self._release_source_branch(issue_key)
+            return None
         try:
             work = git.work_branch or git.resolve_work_branch_name(
                 issue_key,
@@ -2777,7 +2890,14 @@ class JobProcessor:
                 f"{issue_key}: aborted during/after clone; discarding workspace"
             )
             try:
-                git.cleanup(success=False)
+                if isinstance(git, GitManager):
+                    git.cancel_processes(force=True)
+                    if git.should_discard_on_cancel():
+                        git.discard_workspace()
+                    else:
+                        git.cleanup(success=False)
+                else:
+                    git.cleanup(success=False)
             except Exception as e:
                 logger.warning(f"{issue_key}: cleanup after abort failed: {e}")
             self._release_source_branch(issue_key)
@@ -2861,6 +2981,11 @@ class JobProcessor:
                 ),
             )
             self._release_context(state.issue_key, success=False)
+            return None
+        except GitCancelledError:
+            logger.info(
+                f"{state.issue_key}: git aborted because the job was cancelled"
+            )
             return None
         except GitCloneError as e:
             logger.error(f"{state.issue_key} clone failed: {e}")

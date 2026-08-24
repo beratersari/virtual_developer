@@ -909,6 +909,21 @@ class AgentRunner:
             return
         try:
             if IS_WINDOWS:
+                pid = getattr(process, "pid", None)
+                if force and pid:
+                    try:
+                        import subprocess as _sp
+
+                        r = _sp.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=15,
+                            check=False,
+                        )
+                        if r.returncode == 0:
+                            return
+                    except Exception:
+                        pass
                 try:
                     if force:
                         process.kill()
@@ -973,46 +988,26 @@ class AgentRunner:
 
         if process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
-            self._kill_process_tree(process, force=False)
-            # Escalate if still running (sync path — best effort)
-            if process.returncode is None:
-                try:
-                    import time
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                if process.returncode is None:
-                    self._kill_process_tree(process, force=True)
+            self._kill_process_tree(process, force=True)
             logger.info(f"Task cancel signal sent: task_id={task_id}")
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False
 
     def cancel_all_tasks(self) -> int:
-        """Kill every live child process tracked by this runner. Returns count signalled.
-
-        SIGTERM then brief wait then SIGKILL (same escalation as cancel_task).
-        """
+        """Force-kill every live child process tracked by this runner."""
         killed = 0
         for task_id, process in list(self._running_tasks.items()):
             if process is None:
                 continue
-            if isinstance(process, dict) and process.get("mode") == "serve":
+            if isinstance(process, dict):
                 if self.cancel_task(task_id):
                     killed += 1
                 continue
             if getattr(process, "returncode", None) is not None:
                 continue
             logger.info(f"Cancelling task on shutdown: task_id={task_id}")
-            self._kill_process_tree(process, force=False)
-            if getattr(process, "returncode", None) is None:
-                try:
-                    import time
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                if getattr(process, "returncode", None) is None:
-                    self._kill_process_tree(process, force=True)
+            self._kill_process_tree(process, force=True)
             killed += 1
         return killed
 
