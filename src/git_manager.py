@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -19,6 +20,7 @@ from urllib.parse import quote, urlparse, urlunparse
 
 from src.config import settings, set_current_temp_dir
 from src.logger import logger
+from src.process_kill import kill_process_tree
 
 
 class GitCloneError(RuntimeError):
@@ -46,6 +48,10 @@ class GitTargetBranchError(RuntimeError):
         self.user_message = user_message
         self.technical = technical
         super().__init__(user_message)
+
+
+class GitCancelledError(RuntimeError):
+    """Job was cancelled; git/glab subprocesses were force-killed."""
 
 
 def summarize_git_error(exc: object, *, limit: int = 800) -> str:
@@ -91,6 +97,11 @@ class GitManager:
        (commit subjects always use the Jira issue key, not the branch name)
     """
 
+    # Live instances keyed by issue — cancel can find clone-in-flight
+    # GitManagers before the processor registers ``_contexts``.
+    _live_lock = threading.Lock()
+    _live_by_issue: Dict[str, "GitManager"] = {}
+
     def __init__(
         self,
         issue_key: Optional[str] = None,
@@ -115,6 +126,7 @@ class GitManager:
         self.work_branch: Optional[str] = None
         # Last failed push reason (operator-facing; cleared on success)
         self.last_push_error: Optional[str] = None
+        self._init_proc_state()
 
         logger.info(f"Initializing GitManager for issue: {issue_key}")
         logger.debug(
@@ -132,6 +144,22 @@ class GitManager:
 
     def _setup_temp_working_dir(self) -> None:
         """Setup isolated temp clone for this JIRA issue (always required)."""
+        self._register_live()
+        try:
+            self._setup_temp_working_dir_inner()
+        except GitCancelledError:
+            # Clone thread also drops an incomplete tree so a race with
+            # cancel_job's live_for() cannot leave a half-downloaded repo.
+            if self.should_discard_on_cancel():
+                self.discard_workspace()
+            else:
+                self._unregister_live()
+            raise
+        except Exception:
+            self._unregister_live()
+            raise
+
+    def _setup_temp_working_dir_inner(self) -> None:
         logger.info(f"Setting up temp working directory for issue: {self.issue_key}")
 
         gitlab_url = (self.remote_url or "").strip()
@@ -340,7 +368,7 @@ class GitManager:
         if not git_dir.exists():
             return False
         try:
-            result = subprocess.run(
+            result = self._run_tracked(
                 ["git", "remote", "get-url", "origin"],
                 cwd=self.temp_dir,
                 capture_output=True,
@@ -349,6 +377,8 @@ class GitManager:
                 errors="replace",
                 timeout=self._git_command_timeout(),
             )
+        except GitCancelledError:
+            raise
         except (OSError, subprocess.TimeoutExpired):
             return False
         if result.returncode != 0:
@@ -504,7 +534,7 @@ class GitManager:
         applied = self._apply_settings_pat_to_origin()
         env = self._submodule_auth_env()
         try:
-            result = subprocess.run(
+            result = self._run_tracked(
                 [
                     "git",
                     "submodule",
@@ -518,6 +548,8 @@ class GitManager:
                 timeout=timeout,
                 env=env,
             )
+        except GitCancelledError:
+            raise
         except subprocess.TimeoutExpired as e:
             logger.error(
                 f"Submodule update timed out for {issue_tag} after {timeout}s"
@@ -598,8 +630,9 @@ class GitManager:
         logger.debug(f"Clone will use settings PAT in URL: {bool(gitlab_pat)}")
         started = time.monotonic()
 
+        self._clone_in_progress = True
         try:
-            result = subprocess.run(
+            result = self._run_tracked(
                 [
                     "git",
                     "-c",
@@ -614,6 +647,8 @@ class GitManager:
                 timeout=clone_timeout,
                 env=clone_env,
             )
+        except GitCancelledError:
+            raise
         except subprocess.TimeoutExpired as e:
             logger.error(
                 f"Clone timed out for {issue_tag} after {clone_timeout}s"
@@ -666,6 +701,7 @@ class GitManager:
         # Clone already has origin/* refs (--no-single-branch); ensure_feature_branch
         # fetches only target/source when preparing the work branch.
         self._materialize_job_remote_refs()
+        self._clone_in_progress = False
 
     @staticmethod
     def _host_from_url(url: str) -> str:
@@ -788,15 +824,16 @@ class GitManager:
         if not auth_url or not self.temp_dir or not self.temp_dir.is_dir():
             return False
         try:
-            subprocess.run(
+            self._run_tracked(
                 ["git", "remote", "set-url", "origin", auth_url],
                 cwd=self.temp_dir,
                 capture_output=True,
                 text=True,
                 timeout=self._git_command_timeout(),
-                check=False,
             )
             return True
+        except GitCancelledError:
+            raise
         except Exception as e:
             logger.warning(f"Could not apply settings PAT to origin: {e}")
             return False
@@ -936,6 +973,231 @@ class GitManager:
             int(getattr(settings, "git_command_timeout_seconds", 300) or 300),
         )
 
+    def _init_proc_state(self) -> None:
+        """Idempotent init so ``__new__`` test instances still work."""
+        if not hasattr(self, "_cancelled"):
+            self._cancelled = False
+        if not hasattr(self, "_clone_in_progress"):
+            self._clone_in_progress = False
+        if not hasattr(self, "_live_procs"):
+            self._live_procs: List[subprocess.Popen] = []
+        if not hasattr(self, "_proc_lock"):
+            self._proc_lock = threading.Lock()
+
+    def _register_live(self) -> None:
+        self._init_proc_state()
+        key = (self.issue_key or "").strip()
+        if not key:
+            return
+        with GitManager._live_lock:
+            GitManager._live_by_issue[key] = self
+
+    def _unregister_live(self) -> None:
+        key = (self.issue_key or "").strip()
+        if not key:
+            return
+        with GitManager._live_lock:
+            if GitManager._live_by_issue.get(key) is self:
+                GitManager._live_by_issue.pop(key, None)
+
+    @classmethod
+    def live_for(cls, issue_key: str) -> Optional["GitManager"]:
+        """Return the in-flight GitManager for ``issue_key``, if any."""
+        key = (issue_key or "").strip()
+        if not key:
+            return None
+        with cls._live_lock:
+            return cls._live_by_issue.get(key)
+
+    @staticmethod
+    def _subprocess_run_is_patched() -> bool:
+        """True when unit tests replaced ``subprocess.run`` with a mock."""
+        return getattr(subprocess.run, "__module__", "") != "subprocess"
+
+    def _run_tracked(
+        self,
+        cmd: list,
+        *,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        capture_output: bool = True,
+        text: bool = True,
+        encoding: Optional[str] = None,
+        errors: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        """Run a subprocess that cancel can force-kill (process group).
+
+        Unit tests that patch ``src.git_manager.subprocess.run`` still go
+        through that mock so existing fixtures keep working.
+        """
+        self._init_proc_state()
+        if self._cancelled:
+            raise GitCancelledError(
+                f"git cancelled before start: {' '.join(str(c) for c in cmd[:6])}"
+            )
+        run_kwargs: Dict[str, Any] = {
+            "cwd": cwd,
+            "env": env,
+            "timeout": timeout,
+            "capture_output": capture_output,
+            "text": text,
+        }
+        if encoding is not None:
+            run_kwargs["encoding"] = encoding
+        if errors is not None:
+            run_kwargs["errors"] = errors
+        if self._subprocess_run_is_patched():
+            return subprocess.run(cmd, **run_kwargs)
+        return self._popen_wait(cmd, **run_kwargs)
+
+    def _popen_wait(
+        self,
+        cmd: list,
+        *,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        capture_output: bool = True,
+        text: bool = True,
+        encoding: Optional[str] = None,
+        errors: Optional[str] = None,
+    ) -> subprocess.CompletedProcess:
+        """``subprocess.run`` equivalent that is registered and group-killable."""
+        self._init_proc_state()
+        popen_kwargs: Dict[str, Any] = {
+            "args": cmd,
+            "cwd": str(cwd) if cwd is not None else None,
+            "env": env,
+            "stdout": subprocess.PIPE if capture_output else None,
+            "stderr": subprocess.PIPE if capture_output else None,
+        }
+        if text or encoding:
+            popen_kwargs["text"] = True
+            if encoding:
+                popen_kwargs["encoding"] = encoding
+            if errors:
+                popen_kwargs["errors"] = errors
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        proc = subprocess.Popen(**popen_kwargs)
+        with self._proc_lock:
+            self._live_procs.append(proc)
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc, force=True)
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except Exception:
+                    stdout, stderr = ("", "") if text or encoding else (b"", b"")
+                if self._cancelled:
+                    raise GitCancelledError(
+                        f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                    )
+                raise
+            if self._cancelled:
+                raise GitCancelledError(
+                    f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                )
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0 if proc.returncode is None else proc.returncode,
+                stdout=stdout if stdout is not None else ("" if text or encoding else b""),
+                stderr=stderr if stderr is not None else ("" if text or encoding else b""),
+            )
+        finally:
+            with self._proc_lock:
+                if proc in self._live_procs:
+                    self._live_procs.remove(proc)
+
+    def cancel_processes(self, *, force: bool = True) -> int:
+        """Force-kill every live git/glab child (and leftover path users)."""
+        self._init_proc_state()
+        self._cancelled = True
+        with self._proc_lock:
+            procs = list(self._live_procs)
+        killed = 0
+        for proc in procs:
+            if getattr(proc, "poll", lambda: None)() is not None:
+                continue
+            kill_process_tree(proc, force=True)
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            killed += 1
+        return killed
+
+    def should_discard_on_cancel(self) -> bool:
+        """True when cancel should delete this workspace (incomplete clone)."""
+        self._init_proc_state()
+        if self._clone_in_progress:
+            return True
+        if not self.temp_dir:
+            return False
+        try:
+            if not self.temp_dir.exists():
+                return False
+            if not (self.temp_dir / ".git").exists():
+                return True
+        except OSError:
+            return True
+        return False
+
+    def _rmtree_best_effort(self, path: Path, *, timeout: float = 5.0) -> bool:
+        """Delete ``path`` without blocking cancel if the FS stalls (WSL/9p)."""
+        err: List[BaseException] = []
+
+        def _rm() -> None:
+            try:
+                if path.exists():
+                    shutil.rmtree(path)
+            except Exception as e:
+                err.append(e)
+
+        t = threading.Thread(target=_rm, name="discard-clone", daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            logger.warning(
+                f"rmtree still running after {timeout:.0f}s (clone will be orphaned): {path}"
+            )
+            return False
+        if err:
+            logger.warning(f"rmtree failed for {path}: {err[0]}")
+            return False
+        return True
+
+    def discard_workspace(self) -> bool:
+        """Force-delete the temp clone after cancel. Ignores age policy."""
+        self._init_proc_state()
+        self.cancel_processes(force=True)
+        path = self.temp_dir
+        if path is None:
+            self._unregister_live()
+            return True
+        # Re-kill once more in case a child re-locked files, then delete.
+        time.sleep(0.05)
+        self.cancel_processes(force=True)
+        if self._rmtree_best_effort(path, timeout=5.0):
+            self.temp_dir = None
+            self._unregister_live()
+            logger.info(f"Discarded cancelled clone workspace: {path}")
+            return True
+        logger.error(f"Failed to discard cancelled clone {path}")
+        self._unregister_live()
+        return False
+
     def _run_git(
         self,
         args: list,
@@ -991,7 +1253,7 @@ class GitManager:
         )
         git_env = self._apply_pat_to_git_env(self._base_git_env())
         try:
-            result = subprocess.run(
+            result = self._run_tracked(
                 cmd,
                 cwd=cwd,
                 capture_output=True,
@@ -1001,6 +1263,8 @@ class GitManager:
                 timeout=cmd_timeout,
                 env=git_env,
             )
+        except GitCancelledError:
+            raise
         except subprocess.TimeoutExpired as e:
             safe_err = f"git command timed out after {cmd_timeout}s: git {' '.join(safe_args)}"
             logger.error(safe_err)
@@ -1968,7 +2232,7 @@ class GitManager:
             else self._git_command_timeout()
         )
         try:
-            return subprocess.run(
+            return self._run_tracked(
                 cmd,
                 cwd=self.temp_dir,
                 capture_output=True,
@@ -1978,6 +2242,8 @@ class GitManager:
                 env=self._glab_env(),
                 timeout=cmd_timeout,
             )
+        except GitCancelledError:
+            raise
         except subprocess.TimeoutExpired as e:
             safe_err = f"glab timed out after {cmd_timeout}s: glab {' '.join(args)}"
             logger.error(safe_err)
@@ -2291,6 +2557,7 @@ class GitManager:
         - age: delete this directory only if older than temp_cleanup_max_age_days
           (also call ``purge_stale_temp_dirs`` for a full base sweep)
         """
+        self._unregister_live()
         if not self.temp_dir or not self.temp_dir.exists():
             return True
 

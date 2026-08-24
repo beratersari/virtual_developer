@@ -371,12 +371,9 @@ class CodexBackend:
         if proc is None:
             return
         try:
-            from src.orchestrator.agent_runner import AgentRunner
+            from src.process_kill import kill_process_tree
 
-            killer = AgentRunner(working_directory=None)
-            killer._kill_process_tree(proc, force=False)
-            if getattr(proc, "returncode", None) is None:
-                killer._kill_process_tree(proc, force=True)
+            kill_process_tree(proc, force=True)
         except Exception as e:
             logger.debug(f"codex cancel failed: {e}")
             try:
