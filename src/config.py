@@ -220,21 +220,15 @@ class Settings(BaseSettings):
     )
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
-    default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
+    default_model: str = Field(
+        default="ollama/Qwen3.5-397B-A17B-FP8",
+        description="Default model id for OpenCode and Codex jobs (provider/auth stay in each tool's config)",
+    )
     agent_backend: str = Field(
         default="opencode",
         description="Unattended worker: opencode | codex",
     )
     codex_cli: str = Field(default="codex", description="Codex CLI binary for AGENT_BACKEND=codex")
-    codex_api_key: str = Field(default="", description="API key for Codex (CODEX_API_KEY / OpenAI-compatible)")
-    codex_base_url: str = Field(
-        default="",
-        description="Optional OpenAI-compatible base URL for Codex (empty = default OpenAI)",
-    )
-    codex_wire_api: str = Field(
-        default="",
-        description="Codex wire API: responses | chat. Empty = chat when base URL is set, else responses.",
-    )
     opencode_context_limit: int = Field(
         default=128000,
         description=(
@@ -669,8 +663,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "trigger_on_assignment",
         "default_model",
         "agent_backend",
-        "codex_base_url",
-        "codex_wire_api",
         "project_repositories",
     }
 )
@@ -689,8 +681,6 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
     "agent_backend": "AGENT_BACKEND",
-    "codex_base_url": "CODEX_BASE_URL",
-    "codex_wire_api": "CODEX_WIRE_API",
 }
 
 

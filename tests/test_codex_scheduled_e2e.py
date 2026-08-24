@@ -157,18 +157,35 @@ def _zen_reachable() -> bool:
         return False
 
 
-def _point_settings_at_real_codex(monkeypatch: pytest.MonkeyPatch, cli: str) -> None:
+def _point_settings_at_real_codex(
+    monkeypatch: pytest.MonkeyPatch, cli: str, *, user_home: Optional[Path] = None
+) -> None:
     from src.config import settings
 
     monkeypatch.setattr(settings, "codex_cli", cli)
-    monkeypatch.setattr(settings, "codex_api_key", "")
-    monkeypatch.setattr(settings, "codex_base_url", ZEN_BASE_URL)
-    monkeypatch.setattr(settings, "codex_wire_api", "responses")
     monkeypatch.setattr(settings, "default_model", FREE_CODEX_MODEL)
     monkeypatch.setattr(settings, "agent_backend", "opencode")
     monkeypatch.setattr(settings, "agent_task_max_retries", 0)
     monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 0)
     monkeypatch.setattr(settings, "agent_task_timeout_seconds", int(REAL_TIMEOUT_S))
+    if user_home is not None:
+        user_home.mkdir(parents=True, exist_ok=True)
+        (user_home / "config.toml").write_text(
+            "\n".join(
+                [
+                    'model_provider = "yaver"',
+                    "",
+                    "[model_providers.yaver]",
+                    'name = "Yaver"',
+                    f'base_url = "{ZEN_BASE_URL}"',
+                    "requires_openai_auth = false",
+                    'wire_api = "responses"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("src.backends.codex.user_codex_home", lambda: user_home)
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -242,7 +259,7 @@ async def test_real_codex_exec_free_zen_model(tmp_path, monkeypatch):
     cli = _require_real_codex()
     if not _zen_reachable():
         pytest.skip("OpenCode Zen endpoint not reachable")
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
     wd = tmp_path / "ws"
     wd.mkdir()
     (wd / "README.md").write_text("real codex\n", encoding="utf-8")
@@ -271,7 +288,7 @@ async def test_real_codex_runner_never_calls_serve(tmp_path, monkeypatch):
     cli = _require_real_codex()
     if not _zen_reachable():
         pytest.skip("OpenCode Zen endpoint not reachable")
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".jira-agent").mkdir()
     (tmp_path / "README.md").write_text("runner\n", encoding="utf-8")
@@ -299,7 +316,7 @@ async def test_real_codex_resume_same_thread(tmp_path, monkeypatch):
     cli = _require_real_codex()
     if not _zen_reachable():
         pytest.skip("OpenCode Zen endpoint not reachable")
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
     wd = tmp_path / "ws"
     wd.mkdir()
     first = await CodexBackend().run(
@@ -503,7 +520,7 @@ async def test_e2e_scheduled_build_real_codex_writes_file(tmp_path, monkeypatch)
     work = tmp_path / "run"
     work.mkdir()
     monkeypatch.chdir(work)
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
 
     from src.config import settings
 
@@ -596,7 +613,7 @@ async def test_e2e_scheduled_plan_real_codex_reaches_plan_ready(
     work = tmp_path / "run"
     work.mkdir()
     monkeypatch.chdir(work)
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
 
     from src.config import settings
 
@@ -727,7 +744,7 @@ async def test_live_jira_ticket_codex_auto_plan(tmp_path, monkeypatch):
     if not (settings.jira_host or "").strip() or not (settings.jira_api_token or "").strip():
         pytest.skip("Jira is not configured")
 
-    _point_settings_at_real_codex(monkeypatch, cli)
+    _point_settings_at_real_codex(monkeypatch, cli, user_home=tmp_path / "codex-user")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "temp_dir_base", Path(".temp"))
     monkeypatch.setattr(settings, "agent_prompts_dir", REPO_ROOT / "agent")

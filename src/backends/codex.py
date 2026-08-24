@@ -20,13 +20,17 @@ _THREAD_RE = re.compile(
     r"(?:thread_id|session_id|thread)\s*[:=]\s*[\"']?([0-9a-fA-F-]{16,})[\"']?"
 )
 
+# Isolated job home only overrides these; everything else comes from the
+# operator's ~/.codex (or $CODEX_HOME) config — same idea as OpenCode.
+_ISOLATED_OVERRIDE_KEYS = frozenset({"approval_policy", "sandbox_mode", "model"})
 
-def resolve_codex_wire_api(*, base_url: str, wire_api: str = "") -> str:
-    """Codex 0.149+ only accepts ``responses``. ``chat`` is kept if set explicitly."""
-    explicit = (wire_api or "").strip().lower()
-    if explicit in ("responses", "chat"):
-        return explicit
-    return "responses"
+
+def user_codex_home() -> Path:
+    """Operator Codex config dir (not the per-job isolated home)."""
+    raw = (os.environ.get("CODEX_HOME") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path.home() / ".codex"
 
 
 def _codex_home_for(cwd: str) -> Path:
@@ -51,42 +55,67 @@ def _usable_cli(path: Path) -> bool:
     return True
 
 
-def build_codex_config_toml(
-    *,
-    model: str,
-    base_url: str,
-    wire_api: str = "",
-    api_key: str = "",
-) -> str:
-    """Isolated Codex home config: never write this into the customer clone."""
-    mid = (model or "").strip()
-    url = (base_url or "").strip().rstrip("/")
-    wire = resolve_codex_wire_api(base_url=url, wire_api=wire_api)
-    have_key = bool((api_key or "").strip())
-    lines = [
+def build_codex_config_toml(*, model: str = "", user_config: str = "") -> str:
+    """Isolated Codex home: unattended flags + DEFAULT_MODEL over the user's config.
+
+    Provider, base URL, wire API, and API keys stay in the operator's Codex
+    config (``~/.codex/config.toml`` / ``auth.json``). Never write this file
+    into the customer clone.
+    """
+    header = [
         'approval_policy = "never"',
         'sandbox_mode = "danger-full-access"',
     ]
-    if have_key:
-        lines.append('preferred_auth_method = "apikey"')
+    mid = (model or "").strip()
     if mid:
-        lines.append(f"model = {json.dumps(mid)}")
-    if url:
-        if not url.endswith("/v1"):
-            url = url + "/v1"
-        lines.append('model_provider = "yaver"')
-        lines.append("")
-        lines.append("[model_providers.yaver]")
-        lines.append('name = "Yaver"')
-        lines.append(f"base_url = {json.dumps(url)}")
-        if have_key:
-            lines.append('env_key = "CODEX_API_KEY"')
-        else:
-            # Zen free models (and some OSS gateways) accept unauthenticated
-            # Responses calls. A dummy key becomes HTTP 401.
-            lines.append("requires_openai_auth = false")
-        lines.append(f"wire_api = {json.dumps(wire)}")
-    return "\n".join(lines) + "\n"
+        header.append(f"model = {json.dumps(mid)}")
+    kept: List[str] = []
+    in_table = False
+    for line in (user_config or "").replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_table = True
+        if not in_table:
+            match = re.match(r"^([A-Za-z0-9_]+)\s*=", stripped)
+            if match and match.group(1) in _ISOLATED_OVERRIDE_KEYS:
+                continue
+        kept.append(line)
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    text = "\n".join(header)
+    if kept:
+        text += "\n\n" + "\n".join(kept)
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def seed_isolated_codex_home(home: Path, *, model: str = "") -> None:
+    """Copy operator auth + merge config into the job-local Codex home."""
+    home.mkdir(parents=True, exist_ok=True)
+    user = user_codex_home()
+    user_cfg = ""
+    try:
+        same = user.resolve() == home.resolve()
+    except OSError:
+        same = False
+    if not same and user.is_dir():
+        auth = user / "auth.json"
+        if auth.is_file():
+            try:
+                (home / "auth.json").write_bytes(auth.read_bytes())
+            except OSError as e:
+                logger.debug(f"[codex] could not copy operator auth.json: {e}")
+        cfg = user / "config.toml"
+        if cfg.is_file():
+            try:
+                user_cfg = cfg.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.debug(f"[codex] could not read operator config.toml: {e}")
+    (home / "config.toml").write_text(
+        build_codex_config_toml(model=model, user_config=user_cfg),
+        encoding="utf-8",
+    )
 
 
 def resolve_codex_cli(cli: str = "") -> str:
@@ -303,11 +332,6 @@ class CodexBackend:
             getattr(settings, "codex_cli", None) or "codex"
         )
         model = (request.model or getattr(settings, "default_model", "") or "").strip()
-        api_key = (getattr(settings, "codex_api_key", None) or "").strip()
-        if not api_key:
-            api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-        base_url = (getattr(settings, "codex_base_url", None) or "").strip()
-        wire_api = (getattr(settings, "codex_wire_api", None) or "").strip()
         resume = (request.session_id or "").strip()
         cwd = (
             str(request.working_directory)
@@ -317,15 +341,7 @@ class CodexBackend:
 
         home = _codex_home_for(cwd)
         try:
-            (home / "config.toml").write_text(
-                build_codex_config_toml(
-                    model=model,
-                    base_url=base_url,
-                    wire_api=wire_api,
-                    api_key=api_key,
-                ),
-                encoding="utf-8",
-            )
+            seed_isolated_codex_home(home, model=model)
         except OSError as e:
             return AgentRunResult(
                 returncode=-1,
@@ -347,11 +363,6 @@ class CodexBackend:
                 argv = [stdbuf, "-oL", "-eL", *argv]
         env = _agent_subprocess_env(request.working_directory)
         env["CODEX_HOME"] = str(home)
-        if api_key:
-            env["CODEX_API_KEY"] = api_key
-            env["OPENAI_API_KEY"] = api_key
-        if base_url:
-            env["OPENAI_BASE_URL"] = base_url.rstrip("/")
 
         handle["mode"] = "codex"
         handle["backend"] = self.name
@@ -383,10 +394,7 @@ class CodexBackend:
             f"cwd={cwd} model={model or '(default)'} "
             f"timeout={int(timeout_seconds)}s resume={resume or 'no'}"
         )
-        logger.debug(
-            f"[codex] cli={cli} home={home} base_url={base_url or '(default)'} "
-            f"wire_api={wire_api or '(default)'} has_api_key={bool(api_key)}"
-        )
+        logger.debug(f"[codex] cli={cli} home={home}")
         proc = None
         timed_out = False
         started = asyncio.get_event_loop().time()

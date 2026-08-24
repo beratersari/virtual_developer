@@ -274,10 +274,6 @@ class SettingsView(BaseModel):
     default_model: str = ""
     # Unattended worker: opencode | codex
     agent_backend: str = "opencode"
-    codex_base_url: str = ""
-    codex_wire_api: str = ""
-    # Presence only — never return the Codex API key
-    codex_api_key_configured: bool = False
     gitlab_webhook_enabled: bool = False
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
@@ -445,21 +441,6 @@ class SettingsUpdate(BaseModel):
         max_length=40,
         description="Unattended worker: opencode | codex",
     )
-    codex_base_url: Optional[str] = Field(
-        default=None,
-        max_length=500,
-        description="OpenAI-compatible base URL for Codex (empty = default OpenAI)",
-    )
-    codex_wire_api: Optional[str] = Field(
-        default=None,
-        max_length=20,
-        description="Codex wire API: responses | chat | empty (auto)",
-    )
-    codex_api_key: Optional[str] = Field(
-        default=None,
-        max_length=4000,
-        description="Write-only Codex / OpenAI-compatible API key (omit to keep current)",
-    )
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,
         max_length=40,
@@ -480,18 +461,6 @@ class SettingsUpdate(BaseModel):
         if not name:
             raise ValueError("agent_backend must be 'opencode' or 'codex'")
         return name
-
-    @field_validator("codex_wire_api", mode="before")
-    @classmethod
-    def _codex_wire_api_known(cls, value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        text = str(value).strip().lower()
-        if not text:
-            return ""
-        if text not in ("responses", "chat"):
-            raise ValueError("codex_wire_api must be 'responses', 'chat', or empty")
-        return text
 
 
 class QueueItem(BaseModel):
