@@ -57,7 +57,7 @@ export function jobMatchesFilter(
     case 'active':
       return (
         live ||
-        ['pending', 'planning', 'executing', 'running', 'plan_ready'].includes(s)
+        ['pending', 'planning', 'executing', 'running'].includes(s)
       )
     case 'queue':
       // Queue rows are not JobItem records — JobsPage handles this filter.

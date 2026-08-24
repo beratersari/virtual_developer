@@ -139,6 +139,44 @@ Mode: execute
     assert spec.mode == "build"
 
 
+def test_jira_issue_key_brackets_in_branch_parse():
+    """Cloud visual editor wraps keys: feature/[KAN-7] must stay a git ref."""
+    spec, err = parse_issue_git_spec(
+        "KANe",
+        (
+            "{params}\n"
+            "Repository: https://gitlab.com/beratersari0/test_project.git\n"
+            "Source branch: feature/[KAN-7]\n"
+            "Target branch: main\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+    )
+    assert err is None, err
+    assert spec is not None
+    assert spec.source_branch == "feature/KAN-7"
+    assert spec.target_branch == "main"
+
+
+def test_jira_issue_key_wiki_link_in_branch_parse():
+    """[KAN-7|browse-url] must become KAN-7, not a URL glued onto the branch."""
+    spec, err = parse_issue_git_spec(
+        "KANe",
+        (
+            "{params}\n"
+            "Repository: https://gitlab.com/beratersari0/test_project.git\n"
+            "Source branch: feature/[KAN-7|https://beratersari0.atlassian.net/browse/KAN-7]\n"
+            "Target branch: develop\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+    )
+    assert err is None, err
+    assert spec is not None
+    assert spec.source_branch == "feature/KAN-7"
+    assert spec.target_branch == "develop"
+
+
 def test_jira_wiki_inside_params():
     """Jira wiki links and same-line fields inside {params}."""
     desc = (

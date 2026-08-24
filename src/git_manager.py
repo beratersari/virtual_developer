@@ -418,6 +418,42 @@ class GitManager:
             or "filter-process" in low
         )
 
+    def _apply_pat_to_git_env(
+        self, env: Optional[Dict[str, str]] = None, *, url: str = ""
+    ) -> Dict[str, str]:
+        """Unattended git env: settings/``.env`` PAT, no credential-manager prompt.
+
+        Rewrites ``https://host/`` → ``https://oauth2:PAT@host/`` via
+        ``GIT_CONFIG_*`` (PAT is not on the git argv). Disables
+        ``credential.helper`` for this child so a missing/disabled Windows
+        GCM cannot pop a username prompt. Askpass is a backup.
+        """
+        out = dict(env) if env is not None else self._base_git_env()
+        out["GIT_TERMINAL_PROMPT"] = "0"
+        target = url or self.remote_url or ""
+        pat = self._pat_for_remote(target)
+        host = self._host_from_url(target)
+        if not pat or not host:
+            return out
+        askpass = self._ensure_askpass_script()
+        out["GIT_ASKPASS"] = str(askpass)
+        out["VD_GIT_PASSWORD"] = pat
+        pairs = [
+            (f"url.https://oauth2:{pat}@{host}/.insteadOf", f"https://{host}/"),
+            (f"url.http://oauth2:{pat}@{host}/.insteadOf", f"http://{host}/"),
+            ("credential.helper", ""),
+        ]
+        try:
+            base_count = int(out.get("GIT_CONFIG_COUNT") or "0")
+        except ValueError:
+            base_count = 0
+        for i, (key, value) in enumerate(pairs):
+            idx = base_count + i
+            out[f"GIT_CONFIG_KEY_{idx}"] = key
+            out[f"GIT_CONFIG_VALUE_{idx}"] = value
+        out["GIT_CONFIG_COUNT"] = str(base_count + len(pairs))
+        return out
+
     def _submodule_auth_env(self) -> Dict[str, str]:
         """Env that rewrites https://host/ → oauth2:PAT@host for nested submodule clones.
 
@@ -425,34 +461,7 @@ class GitManager:
         the same GitLab host. ``url.*.insteadOf`` via ``GIT_CONFIG_*`` avoids
         writing the PAT into the repo config file.
         """
-        env = self._base_git_env()
-        base = (self.remote_url or "").strip()
-        pat = self._pat_for_remote(base)
-        host = self._host_from_url(base)
-        if not pat or not host:
-            return env
-        # Prefer settings PAT over Windows GCM for this child process only
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        pairs = [
-            (
-                f"url.https://oauth2:{pat}@{host}/.insteadOf",
-                f"https://{host}/",
-            ),
-            (
-                f"url.http://oauth2:{pat}@{host}/.insteadOf",
-                f"http://{host}/",
-            ),
-        ]
-        try:
-            base_count = int(env.get("GIT_CONFIG_COUNT") or "0")
-        except ValueError:
-            base_count = 0
-        for i, (key, value) in enumerate(pairs):
-            idx = base_count + i
-            env[f"GIT_CONFIG_KEY_{idx}"] = key
-            env[f"GIT_CONFIG_VALUE_{idx}"] = value
-        env["GIT_CONFIG_COUNT"] = str(base_count + len(pairs))
-        return env
+        return self._apply_pat_to_git_env(self._base_git_env())
 
     def _update_submodules(self, *, reason: str = "") -> None:
         """Init and update submodules recursively after clone / branch checkout.
@@ -572,20 +581,10 @@ class GitManager:
         # Coerce so mock/non-str never break redact/replace
         gitlab_pat = raw_pat if isinstance(raw_pat, str) and raw_pat.strip() else ""
         clean_url = (self.remote_url or "").strip()
-        # Prefer settings PAT in the clone URL so Windows Credential Manager is
-        # not consulted for this call — helpers stay enabled for the user elsewhere.
-        # Without a settings PAT, use the clean URL (host helpers may apply).
-        # Never embed PAT in argv (ps /proc cmdline). Askpass + disabled helper.
+        # Clean URL on argv (no PAT in ps). Auth is insteadOf + askpass in env
+        # from Settings / .env so a disabled credential manager cannot prompt.
         clone_url = clean_url
-        clone_env = self._base_git_env(self._git_auth_env(url=clean_url))
-        # Disable credential helper for this clone only (settings PAT in URL)
-        try:
-            base_count = int(clone_env.get("GIT_CONFIG_COUNT") or "0")
-        except ValueError:
-            base_count = 0
-        clone_env[f"GIT_CONFIG_KEY_{base_count}"] = "credential.helper"
-        clone_env[f"GIT_CONFIG_VALUE_{base_count}"] = ""
-        clone_env["GIT_CONFIG_COUNT"] = str(base_count + 1)
+        clone_env = self._apply_pat_to_git_env(self._base_git_env(), url=clean_url)
 
         issue_tag = self.issue_key or "(unknown)"
         clone_timeout = max(
@@ -682,20 +681,35 @@ class GitManager:
         return name
 
     def _pat_for_remote(self, url: str = "") -> str:
-        """Resolve GitLab PAT for this remote URL (per-host map)."""
+        """Resolve GitLab PAT for this remote URL (per-host map).
+
+        A lone ``GITLAB_PAT`` / Settings PAT with no host map still
+        authenticates this job remote (clone/push). Host maps stay exact-match
+        so a stored PAT is never sent to an unlisted host.
+        """
         host = self._host_from_url(url or self.remote_url or "")
         if not host:
             return ""
         if hasattr(settings, "gitlab_pat_for_host"):
-            return (settings.gitlab_pat_for_host(host) or "").strip()
-        # Legacy fallback
-        return (settings.gitlab_pat or "").strip()
+            mapped = (settings.gitlab_pat_for_host(host) or "").strip()
+            if mapped:
+                return mapped
+        mapping = {}
+        if hasattr(settings, "gitlab_host_pat_map"):
+            try:
+                mapping = settings.gitlab_host_pat_map() or {}
+            except Exception:
+                mapping = {}
+        if mapping:
+            return ""
+        return (getattr(settings, "gitlab_pat", "") or "").strip()
 
     def _assert_remote_host_allowed(self, url: str) -> None:
-        """Refuse to use a PAT against hosts without a configured credential.
+        """Refuse to send a mapped PAT to an unknown host.
 
         When no PATs are configured at all, any host is allowed (public clone).
-        When any host PAT exists, the repository host must match one of them.
+        A lone ``GITLAB_PAT`` (no host map) authenticates the job remote.
+        When a host→PAT map exists, the repository host must be in that map.
         """
         mapping = (
             settings.gitlab_host_pat_map()
@@ -975,7 +989,7 @@ class GitManager:
             if timeout is not None
             else self._git_command_timeout()
         )
-        git_env = self._base_git_env()
+        git_env = self._apply_pat_to_git_env(self._base_git_env())
         try:
             result = subprocess.run(
                 cmd,

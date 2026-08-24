@@ -189,7 +189,7 @@ export function SettingsPage() {
       <PageHeader
         kicker="Runtime"
         title="Settings"
-        description="Saved here, not to .env. Leave secret fields blank to keep the current value."
+        description="Non-secret fields stay in runtime settings. Jira host/email/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value."
       />
 
       <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">

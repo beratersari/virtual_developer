@@ -584,6 +584,51 @@ def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):
     assert item2.working_directory == str((tmp_path / "clone-b").resolve())
 
 
+def test_build_one_job_does_not_inherit_later_run_session(tmp_path):
+    """Job detail is run-scoped: an older job must not show the later ses_*."""
+    from src.dashboard.service import build_one_job
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("SES-1", "s", "d")
+    old = jobs.create_job(issue_key="SES-1", summary="clone fail", status="error")
+    current = jobs.create_job(issue_key="SES-1", summary="later run", status="executing")
+    jobs.update_job(current["job_id"], opencode_session_id="ses_later")
+    sm.update_state(
+        "SES-1",
+        current_opencode_session_id="ses_later",
+        metadata={
+            "current_job_id": current["job_id"],
+            "last_opencode_session_id": "ses_later",
+        },
+    )
+    old_item = build_one_job(old["job_id"], store=jobs, state_manager=sm)
+    assert old_item is not None
+    assert not (old_item.opencode_session_id or "").strip()
+
+    # After finish, current_job_id is cleared — still do not backfill old rows
+    sm.update_state("SES-1", metadata={"current_job_id": "", "last_opencode_session_id": "ses_later"})
+    old_after = build_one_job(old["job_id"], store=jobs, state_manager=sm)
+    assert old_after is not None
+    assert not (old_after.opencode_session_id or "").strip()
+
+    live = build_one_job(current["job_id"], store=jobs, state_manager=sm)
+    assert live is not None
+    assert live.opencode_session_id == "ses_later"
+
+    # In-flight job with no session on disk may inherit the issue session
+    bare = jobs.create_job(issue_key="SES-1", summary="live clone", status="executing")
+    sm.update_state(
+        "SES-1",
+        current_opencode_session_id="ses_now",
+        metadata={"current_job_id": bare["job_id"]},
+    )
+    bare_item = build_one_job(bare["job_id"], store=jobs, state_manager=sm)
+    assert bare_item is not None
+    assert bare_item.opencode_session_id == "ses_now"
+
+
 def test_poll_api_hides_unmatched_board_issues(tmp_path):
     """Poll DTO lists only bot-eligible issues (label or assignee match)."""
     from src.dashboard.service import build_poll_status

@@ -47,6 +47,10 @@ _PARAMS_BLOCK = re.compile(
 _JIRA_LINK = re.compile(
     r"\[([^\]|\n]+)\|([^\]|\n]+)(?:\|[^\]\n]+)?\]"
 )
+# Cloud auto-link of an issue key: [KAN-7] or [KAN-7|https://…/browse/KAN-7]
+_JIRA_ISSUE_KEY = re.compile(
+    r"\[([A-Za-z][A-Za-z0-9]+-\d+)(?:\|[^\]\n]+)?\]"
+)
 _MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
 
 _REPO_KEY = r"(?:repository|repo|gitlab(?:\s*url)?|project(?:\s*url)?)"
@@ -132,7 +136,12 @@ class IssueGitConfigError(Exception):
 
 
 def _expand_links(text: str) -> str:
-    """Turn Jira/markdown links into bare URLs for easier field parsing."""
+    """Turn Jira/markdown links into bare URLs / keys for field parsing.
+
+    Issue-key wiki (``[KAN-7]`` / ``[KAN-7|browse-url]``) must become the
+    key, not the browse URL — otherwise ``Source branch: feature/[KAN-7]``
+    is rejected as an invalid git ref.
+    """
 
     def jira_repl(m: re.Match) -> str:
         left, right = m.group(1).strip(), m.group(2).strip()
@@ -142,6 +151,7 @@ def _expand_links(text: str) -> str:
             return left
         return right
 
+    text = _JIRA_ISSUE_KEY.sub(r"\1", text)
     text = _JIRA_LINK.sub(jira_repl, text)
     text = _MD_LINK.sub(lambda m: m.group(2), text)
     return text
@@ -220,6 +230,8 @@ def _normalize_branch(raw: str) -> str:
     branch = (raw or "").strip().strip("`").strip()
     if branch.startswith("refs/heads/"):
         branch = branch[len("refs/heads/") :]
+    # Jira visual editor wraps issue keys: feature/[KAN-7] or feature/[KAN-7|url]
+    branch = _JIRA_ISSUE_KEY.sub(r"\1", branch)
     return branch
 
 

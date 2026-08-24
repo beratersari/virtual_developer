@@ -809,12 +809,13 @@ def build_one_job(
         if st and st.issue_summary:
             summaries[st.issue_key] = st.issue_summary
         if st:
-            live_sid = (st.current_opencode_session_id or "").strip()
-            if not live_sid:
-                live_sid = str((st.metadata or {}).get("last_opencode_session_id") or "").strip()
+            # Run-scoped: only the in-flight job row may inherit the issue session.
+            # After complete, current_job_id is cleared — do not stamp last_ses_*
+            # onto an earlier clone-fail / cancelled run (transcript leak).
             current_jid = str((st.metadata or {}).get("current_job_id") or "").strip()
-            if current_jid and current_jid != (raw.get("job_id") or "").strip():
-                live_sid = ""
+            this_jid = (raw.get("job_id") or "").strip()
+            if current_jid and current_jid == this_jid:
+                live_sid = (st.current_opencode_session_id or "").strip()
     if live_sid and not (raw.get("opencode_session_id") or "").strip():
         raw = {**raw, "opencode_session_id": live_sid}
         ids = list(raw.get("opencode_session_ids") or [])
@@ -970,10 +971,6 @@ def build_queue(
     running = len(qs.list_items(status="running", limit=500))
     for rec in raw:
         st = rec.get("status") or "queued"
-        if st == "queued":
-            queued += 1
-        elif st == "running":
-            running += 1
         try:
             items.append(
                 QueueItem(
