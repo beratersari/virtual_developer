@@ -92,7 +92,7 @@ export function PollPage() {
             </div>
             <div>
               {i.will_process ? (
-                <span className="vd-pill bg-accent text-[#1a0d08]">Queued</span>
+                <span className="vd-pill bg-accent text-[#1a0d08]">This cycle</span>
               ) : (
                 <span className="text-xs text-text-muted">Skip</span>
               )}

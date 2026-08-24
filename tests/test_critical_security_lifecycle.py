@@ -52,16 +52,16 @@ def test_assert_remote_host_allowed_blocks_attacker(monkeypatch):
     assert "attacker.example" in str(ei.value).lower() or "refused" in str(ei.value).lower()
 
 
-def test_assert_remote_host_requires_allowlist_when_pat_set(monkeypatch):
+def test_assert_remote_host_uses_legacy_pat_without_allowlist(monkeypatch):
     from src.config import settings as real_settings
 
     monkeypatch.setattr(real_settings, "gitlab_pat", "pat")
+    monkeypatch.setattr(real_settings, "gitlab_host_pats", "")
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "")
     with patch.object(GitManager, "_setup_temp_working_dir"):
         gm = GitManager(issue_key="SEC-2")
-    with pytest.raises(GitCloneError) as ei:
-        gm._assert_remote_host_allowed("https://gitlab.company.com/g/r.git")
-    assert "GITLAB_ALLOWED_HOSTS" in str(ei.value)
+    gm._assert_remote_host_allowed("https://gitlab.company.com/g/r.git")
+    assert gm._pat_for_remote("https://gitlab.company.com/g/r.git") == "pat"
 
 
 def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
@@ -103,11 +103,20 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
     i = cmd.index("clone")
     assert cmd[i : i + 2] == ["clone", "--no-single-branch"]
     clone_url = cmd[i + 2]
-    # PAT must not appear in argv (askpass + disabled helper instead)
+    # PAT must not appear in argv (insteadOf + askpass in env)
     assert "oauth2:super-secret-pat-xyz@" not in clone_url
     env = captured.get("env") or {}
-    # fake_run may not have captured kwargs — check clone URL is clean
     assert clone_url == "https://gitlab.example.com/group/repo.git"
+    rewrite = [
+        env.get(k)
+        for k in env
+        if str(k).startswith("GIT_CONFIG_KEY_")
+        and "insteadOf" in str(env.get(k) or "")
+    ]
+    assert any("oauth2:super-secret-pat-xyz@" in str(v) for v in rewrite), env
+    assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    assert env.get("GIT_ASKPASS")
+    assert env.get("VD_GIT_PASSWORD") == "super-secret-pat-xyz"
 
 
 def test_push_applies_settings_pat_to_origin_without_clearing_helpers(

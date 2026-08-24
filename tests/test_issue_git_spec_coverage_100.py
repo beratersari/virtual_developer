@@ -122,6 +122,11 @@ def test_looks_like_git_url_edges():
 def test_normalize_helpers():
     assert _normalize_branch("  refs/heads/main  ") == "main"
     assert _normalize_branch("`feature/x`") == "feature/x"
+    assert _normalize_branch("feature/[KAN-7]") == "feature/KAN-7"
+    assert (
+        _normalize_branch("feature/[KAN-7|https://jira.example/browse/KAN-7]")
+        == "feature/KAN-7"
+    )
     assert "repo" in _normalize_repo_url("  <https://g.com/a/repo.git>,  ")
     # extract URL from surrounding junk
     assert "gitlab" in _normalize_repo_url("see https://gitlab.com/g/r.git please")

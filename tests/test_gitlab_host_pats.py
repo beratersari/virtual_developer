@@ -8,6 +8,19 @@ from src.config import Settings
 from src.git_manager import GitCloneError, GitManager
 
 
+def test_git_manager_uses_legacy_pat_without_allowlist(monkeypatch):
+    """Operator set GITLAB_PAT only — clone/push must still authenticate."""
+    from src import git_manager as gm_mod
+
+    monkeypatch.setattr(gm_mod.settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(gm_mod.settings, "gitlab_pat", "legacy-only-pat")
+    monkeypatch.setattr(gm_mod.settings, "gitlab_allowed_hosts", "")
+
+    gm = GitManager.__new__(GitManager)
+    gm.remote_url = "https://gitlab.com/group/repo.git"
+    assert gm._pat_for_remote() == "legacy-only-pat"
+
+
 def test_legacy_single_pat_expands_to_hosts():
     s = Settings(
         gitlab_host_pats="",

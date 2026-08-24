@@ -100,25 +100,18 @@ def test_assert_remote_host_allowed_branches(gm, monkeypatch):
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
 
     # urlparse("https://") → no hostname
-    with patch.object(
-        type(settings),
-        "gitlab_allowed_hosts_list",
-        property(lambda self: ["gitlab.example.com"]),
-    ):
-        with pytest.raises(GitCloneError, match="no host"):
-            gm._assert_remote_host_allowed("https://")
+    with pytest.raises(GitCloneError, match="no host"):
+        gm._assert_remote_host_allowed("https://")
 
-    with patch.object(type(settings), "gitlab_allowed_hosts_list", property(lambda self: [])):
-        with pytest.raises(GitCloneError, match="GITLAB_ALLOWED_HOSTS|host→PAT mapping"):
-            gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")
+    # Lone GITLAB_PAT (no host map) authenticates any job remote
+    gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")
 
-    with patch.object(
-        type(settings),
-        "gitlab_allowed_hosts_list",
-        property(lambda self: ["allowed.example.com"]),
-    ):
-        with pytest.raises(GitCloneError, match="refused to send credentials"):
-            gm._assert_remote_host_allowed("https://evil.example.com/g/r.git")
+    monkeypatch.setattr(
+        settings, "gitlab_host_pats", '{"allowed.example.com":"secret-pat"}'
+    )
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    with pytest.raises(GitCloneError, match="refused to send credentials"):
+        gm._assert_remote_host_allowed("https://evil.example.com/g/r.git")
 
 
 def test_host_from_url_edges():
