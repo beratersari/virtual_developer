@@ -382,6 +382,32 @@ def summarize_codex_exec_line(line: str, *, limit: int = 220) -> Optional[str]:
     return None
 
 
+def daemon_worthy_codex_summary(summary: Optional[str]) -> bool:
+    """True for daemon-tab lines (errors only). Chatter belongs in Transcript."""
+    s = (summary or "").strip()
+    if not s:
+        return False
+    return s.startswith("[codex] error")
+
+
+def extract_codex_failure_detail(blob: str, *, limit: int = 800) -> str:
+    """Last error or last assistant line from a failed ``codex exec`` stream."""
+    last_error = ""
+    last_assistant = ""
+    for raw in (blob or "").splitlines():
+        summary = summarize_codex_exec_line(raw, limit=limit)
+        if not summary:
+            continue
+        if summary.startswith("[codex] error"):
+            last_error = summary
+        elif summary.startswith("[codex] assistant:"):
+            last_assistant = summary
+    picked = last_error or last_assistant
+    if not picked:
+        return ""
+    return picked[:limit]
+
+
 def _looks_like_session_id(sid: str) -> bool:
     s = (sid or "").strip()
     if not s:
@@ -463,7 +489,9 @@ class CodexBackend:
                 except Exception:
                     pass
             summary = summarize_codex_exec_line(line)
-            if summary:
+            # Assistant / tool chatter stays in the session log (Transcript).
+            # Daemon tab only gets errors here; start/exit are logged around exec.
+            if summary and daemon_worthy_codex_summary(summary):
                 logger.info(summary)
             sid = parse_codex_thread_id(line)
             if sid:
@@ -600,10 +628,18 @@ class CodexBackend:
                 backend=self.name,
                 extra={"thread_locked": True},
             )
-        logger.info(
-            f"[codex] exec finished returncode={code} duration={elapsed:.1f}s "
-            f"thread={handle.get('session_id') or '-'}"
-        )
+        if code != 0:
+            detail = extract_codex_failure_detail(blob)
+            logger.error(
+                f"[codex] exit failed returncode={code} duration={elapsed:.1f}s "
+                f"thread={handle.get('session_id') or '-'} "
+                f"{detail or '(no error detail in exec stream)'}"
+            )
+        else:
+            logger.info(
+                f"[codex] exit ok returncode={code} duration={elapsed:.1f}s "
+                f"thread={handle.get('session_id') or '-'}"
+            )
         return AgentRunResult(
             returncode=code,
             stdout=blob,

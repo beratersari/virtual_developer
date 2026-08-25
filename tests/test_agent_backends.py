@@ -24,6 +24,8 @@ from src.backends.codex import (
     resolve_codex_cli,
     seed_isolated_codex_home,
     summarize_codex_exec_line,
+    daemon_worthy_codex_summary,
+    extract_codex_failure_detail,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
 from src.issue_git_spec import parse_issue_git_spec, upsert_params_backend
@@ -248,6 +250,17 @@ def test_summarize_codex_exec_line_steps():
     ) == "[codex] assistant: Done"
     assert summarize_codex_exec_line('{"type":"turn.started"}') is None
     assert summarize_codex_exec_line("[codex] cwd=/tmp") == "[codex] cwd=/tmp"
+    assert not daemon_worthy_codex_summary("[codex] assistant: hello")
+    assert not daemon_worthy_codex_summary("[codex] running: ls")
+    assert not daemon_worthy_codex_summary("[codex] command exit=0: ls")
+    assert daemon_worthy_codex_summary("[codex] error: boom")
+    blob = "\n".join(
+        [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"halfway"}}',
+            '{"type":"error","message":"writer still holds the thread"}',
+        ]
+    )
+    assert "writer still holds" in extract_codex_failure_detail(blob)
 
 
 @pytest.mark.asyncio

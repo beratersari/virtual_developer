@@ -221,7 +221,7 @@ class SessionBindStore:
                 rec["reset_at"] = prev.get("reset_at")
             self._write(rec)
         logger.info(
-            f"OpenCode session bind {bid}: {normalize_repo_key(repo)}"
+            f"Session bind {bid}: {normalize_repo_key(repo)}"
             f"@{br}→{tgt} → {sid}"
         )
         return rec

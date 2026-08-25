@@ -17,6 +17,7 @@ import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
+import { isDaemonChatter } from '../../util/daemonLogs'
 import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
@@ -341,13 +342,17 @@ export function JobDetailPage() {
         {job && tab === 'logs' && (
           <div key="logs" className="vd-fade space-y-2 text-sm">
             <p className="text-xs text-text-muted">
-              Daemon lines for <span className="font-mono">{job.job_id}</span>.
+              Daemon start/exit/failure lines for{' '}
+              <span className="font-mono">{job.job_id}</span>. Assistant
+              replies and tool chatter are on the Transcript tab.
             </p>
-            {systemLogs.length === 0 && (
+            {systemLogs.filter((line) => !isDaemonChatter(line.message)).length === 0 && (
               <p className="text-text-muted">No system log lines for this job.</p>
             )}
             <div className="max-h-[70vh] overflow-auto rounded border border-border bg-bg p-4 font-mono text-[11px] leading-relaxed text-text-secondary">
-              {systemLogs.map((line, i) => (
+              {systemLogs
+                .filter((line) => !isDaemonChatter(line.message))
+                .map((line, i) => (
                 <div key={`${line.timestamp}-${i}`} className="border-b border-border/50 py-0.5">
                   <span className="text-text-muted">{line.timestamp} </span>
                   {line.message}
