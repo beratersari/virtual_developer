@@ -18,7 +18,6 @@ import { Spinner } from '../../ui/Spinner'
 
 type Draft = {
   jira_host: string
-  jira_email: string
   jira_api_token: string
   jira_board_id: string
   poll_interval_seconds: number
@@ -41,7 +40,6 @@ type Draft = {
 function fromSettings(s: SettingsPayload): Draft {
   return {
     jira_host: s.jira_host,
-    jira_email: s.jira_email ?? '',
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
@@ -114,7 +112,6 @@ export function SettingsPage() {
       }
       const body: Parameters<typeof patchSettings>[0] = {
         jira_host: draft.jira_host.trim(),
-        jira_email: draft.jira_email.trim(),
         jira_board_id: draft.jira_board_id.trim(),
         poll_interval_seconds: Number(draft.poll_interval_seconds),
         trigger_labels: draft.trigger_labels,
@@ -175,7 +172,7 @@ export function SettingsPage() {
       <PageHeader
         kicker="Runtime"
         title="Settings"
-        description="Non-secret fields stay in runtime settings. Jira host/email/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value."
+        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value. Saving Settings clears JIRA_EMAIL so later auth is token-only."
       />
 
       <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
@@ -209,23 +206,12 @@ export function SettingsPage() {
       <div className="text-sm font-semibold text-text">Jira connection</div>
       <p className="text-xs text-text-muted">
         Host + API token / PAT. Test uses the values below; a blank token tests
-        the last saved token. Cloud needs email (Basic); on-prem PAT leaves email empty.
+        the last saved token. If JIRA_EMAIL is set in .env it is used until you
+        save Settings; a save clears it and later auth is token-only.
       </p>
       <label className="field">
         <span>Host</span>
         <input value={draft.jira_host} onChange={(e) => mark('jira_host', e.target.value)} />
-      </label>
-      <label className="field">
-        <span>
-          Email {settings.jira_email_configured ? '(saved)' : '(optional — Cloud Basic)'}
-        </span>
-        <input
-          type="email"
-          autoComplete="off"
-          value={draft.jira_email}
-          onChange={(e) => mark('jira_email', e.target.value)}
-          placeholder="Cloud: account email · on-prem: leave empty"
-        />
       </label>
       <label className="field">
         <span>Board ID</span>
@@ -257,12 +243,10 @@ export function SettingsPage() {
           onClick={() => {
             setJiraTesting(true)
             const host = draft.jira_host.trim()
-            const email = draft.jira_email.trim()
             const token = draft.jira_api_token.trim()
-            // Omit blank fields so the API uses the last saved host/email/token.
+            // Omit blank fields so the API uses the last saved host/token.
             void testJiraConnection({
               ...(host ? { host } : {}),
-              ...(email ? { email } : {}),
               ...(token ? { api_token: token } : {}),
             })
               .then(setJiraResult)

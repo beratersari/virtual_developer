@@ -370,10 +370,13 @@ def _normalize_gitlab_host(raw: Any) -> str:
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets).
 
-    Non-secret fields persist in runtime_settings.json. Jira host/email/token
+    Non-secret fields persist in runtime_settings.json. Jira host/token
     and GitLab host PATs are also written to ``.env`` so Test connection and
     the next daemon start
     use the saved values. Token is never returned in the view.
+
+    Every Settings save clears ``JIRA_EMAIL`` (runtime + .env) so later
+    auth is Bearer token only. Email from ``.env`` is used only until that save.
 
     Callers should refresh live Jira clients when host/token/email change
     (see ``refresh_runtime_jira_clients``).
@@ -397,10 +400,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         dotenv_updates["JIRA_HOST"] = host
         # Non-secret: also survive restart via runtime_settings.json
         # (applied below with other persist keys)
-    if "jira_email" in data and data["jira_email"] is not None:
-        # Empty string clears Cloud email → Bearer PAT mode
-        settings.jira_email = str(data["jira_email"]).strip()
-        dotenv_updates["JIRA_EMAIL"] = settings.jira_email
     if "jira_api_token" in data and data["jira_api_token"] is not None:
         # Write-only: only apply non-empty values so blank UI fields keep current
         tok = str(data["jira_api_token"])
@@ -493,8 +492,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
 
     if "jira_host" in data and data["jira_host"] is not None:
         runtime_persist["jira_host"] = settings.jira_host
-    if "jira_email" in data and data["jira_email"] is not None:
-        runtime_persist["jira_email"] = settings.jira_email
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
         runtime_persist["jira_board_id"] = settings.jira_board_id
@@ -580,6 +577,12 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.trigger_assignee_names = str(data["trigger_assignee_names"]).strip()
         runtime_persist["trigger_assignee_names"] = settings.trigger_assignee_names
         dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = settings.trigger_assignee_names
+
+    # Settings save always drops JIRA_EMAIL. Until this first save, .env email
+    # (if any) is used for Cloud Basic. After save, auth is token-only Bearer.
+    settings.jira_email = ""
+    dotenv_updates["JIRA_EMAIL"] = ""
+    runtime_persist["jira_email"] = ""
 
     if runtime_persist:
         # Persist so the next job (and process restart) does not fall back to .env

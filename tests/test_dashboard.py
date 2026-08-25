@@ -187,9 +187,11 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
         )
     )
     assert settings.jira_host == "https://new.example.com"
-    assert settings.jira_email == "new@ex.com"
+    # Settings save always clears JIRA_EMAIL (Bearer from then on)
+    assert settings.jira_email == ""
     assert settings.jira_api_token == "new-secret-token"
-    assert view.jira_email == "new@ex.com"
+    assert view.jira_email == ""
+    assert view.jira_email_configured is False
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
     assert settings.gitlab_pat_for_host("api.gitlab.com") == ""
@@ -220,7 +222,8 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "JIRA_API_TOKEN=new-secret-token" in env_text
     assert "JIRA_HOST=https://new.example.com" in env_text
-    assert "JIRA_EMAIL=new@ex.com" in env_text
+    assert "JIRA_EMAIL=new@ex.com" not in env_text
+    assert "JIRA_EMAIL=" in env_text
     assert "GITLAB_HOST_PATS=" in env_text
     assert "pat-cloud" in env_text
 

@@ -470,7 +470,6 @@ export type SettingsPatch = Partial<
   Pick<
     SettingsPayload,
     | 'jira_host'
-    | 'jira_email'
     | 'jira_board_id'
     | 'poll_interval_seconds'
     | 'trigger_labels'

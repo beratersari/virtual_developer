@@ -875,10 +875,13 @@ def create_dashboard_app(
 
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
-        # Detect auth/connection changes before apply (for client refresh)
-        auth_keys = ("jira_host", "jira_email", "jira_api_token")
+        # Detect auth/connection changes before apply (for client refresh).
+        # Settings save always clears JIRA_EMAIL — treat a previously set email
+        # as an auth change so live clients switch to Bearer.
+        auth_keys = ("jira_host", "jira_api_token")
         dumped = body.model_dump(exclude_unset=True)
-        auth_changed = any(k in dumped for k in auth_keys)
+        email_before = (getattr(settings, "jira_email", "") or "").strip()
+        auth_changed = any(k in dumped for k in auth_keys) or bool(email_before)
 
         try:
             view = apply_settings_update(body)
