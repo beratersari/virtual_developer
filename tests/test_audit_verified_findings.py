@@ -260,4 +260,10 @@ def test_frontend_copy_matches_run_scoped_and_waiting_plan():
     status = (root / "util/status.ts").read_text(encoding="utf-8")
     active = status.split("case 'active':", 1)[1].split("case 'queue':", 1)[0]
     assert "plan_ready" not in active
+    jobs_table = (root / "pages/jobs/JobsTable.tsx").read_text(encoding="utf-8")
+    job_overview = (root / "pages/jobs/JobOverview.tsx").read_text(encoding="utf-8")
+    issue_detail = (root / "pages/issues/IssueDetailPage.tsx").read_text(encoding="utf-8")
+    assert "progress_percentage" not in jobs_table
+    assert 'label="Progress"' not in job_overview
+    assert 'label="Progress"' not in issue_detail
 

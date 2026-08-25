@@ -119,7 +119,6 @@ def build_tasks(
                 issue_key=st.issue_key,
                 summary=st.issue_summary or "",
                 status=st.status.value,
-                progress_percentage=int(st.progress_percentage or 0),
                 workflow_type=meta.get("workflow_type"),
                 jira_assignee=st.jira_assignee,
                 error_message=st.error_message,
@@ -790,7 +789,6 @@ def job_dict_to_item(
         prompt_path=j.get("prompt_path") or (prompt_paths[-1] if prompt_paths else None),
         prompt_paths=prompt_paths,
         retry_attempts=_job_retry_attempts(j),
-        progress_percentage=int(j.get("progress_percentage") or 0),
         error_message=j.get("error_message"),
         started_at=j.get("started_at"),
         completed_at=j.get("completed_at"),
@@ -1456,8 +1454,71 @@ def _artifacts_root() -> Path:
     return (Path.cwd() / ".jira-agent").resolve()
 
 
+def _codex_thread_id(job: Dict[str, Any]) -> str:
+    from src.backends.base import is_session_or_thread_id
+
+    sid = str(job.get("opencode_session_id") or "").strip()
+    if is_session_or_thread_id(sid) and not sid.startswith("ses_"):
+        return sid
+    for raw in job.get("opencode_session_ids") or []:
+        extra = str(raw or "").strip()
+        if is_session_or_thread_id(extra) and not extra.startswith("ses_"):
+            return extra
+    return ""
+
+
+def _prepend_codex_thread_artifact_paths(
+    job: Dict[str, Any],
+    prompt_paths: List[str],
+    log_paths: List[str],
+    *,
+    store: Any = None,
+) -> tuple[List[str], List[str]]:
+    """Older jobs on the same Codex thread belong in this job's transcript."""
+    if _resolve_job_backend(job) != "codex":
+        return prompt_paths, log_paths
+    tid = _codex_thread_id(job)
+    if not tid:
+        return prompt_paths, log_paths
+    issue_key = str(job.get("issue_key") or "").strip()
+    job_id = str(job.get("job_id") or "").strip()
+    if not issue_key:
+        return prompt_paths, log_paths
+    try:
+        from src.state.job_store import JobStore, job_store as default_store
+
+        js = store if store is not None else default_store
+        if js is None:
+            js = JobStore()
+        siblings = list(js.list_jobs(issue_key=issue_key, limit=200))
+    except Exception:
+        return prompt_paths, log_paths
+    extra_prompts: List[str] = []
+    extra_logs: List[str] = []
+    for rec in reversed(siblings):
+        if not isinstance(rec, dict):
+            continue
+        if job_id and rec.get("job_id") == job_id:
+            continue
+        sid = str(rec.get("opencode_session_id") or "").strip()
+        ids = [str(x).strip() for x in (rec.get("opencode_session_ids") or []) if x]
+        if sid != tid and tid not in ids:
+            continue
+        for p in _job_prompt_paths(rec):
+            if p and p not in extra_prompts and p not in prompt_paths:
+                extra_prompts.append(p)
+        for p in _job_session_log_paths(rec):
+            if p and p not in extra_logs and p not in log_paths:
+                extra_logs.append(p)
+    return extra_prompts + prompt_paths, extra_logs + log_paths
+
+
 def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
-    """Read prompt/session files linked on this job only (not the whole issue)."""
+    """Read prompt/session files for this job.
+
+    Codex resume writes a new JSONL per exec. Include earlier jobs that share
+    the same thread id so the Chat tab shows the full transcript.
+    """
     if hasattr(job, "model_dump"):
         job = job.model_dump()
     if not isinstance(job, dict):
@@ -1467,12 +1528,15 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
     logs: List[Dict[str, Any]] = []
     seen_p: set = set()
     seen_l: set = set()
-    for p in _job_prompt_paths(job):
+    prompt_paths, log_paths = _prepend_codex_thread_artifact_paths(
+        job, _job_prompt_paths(job), _job_session_log_paths(job)
+    )
+    for p in prompt_paths:
         if not p or p in seen_p:
             continue
         seen_p.add(p)
         prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, root=root))
-    for p in _job_session_log_paths(job):
+    for p in log_paths:
         if not p or p in seen_l:
             continue
         seen_l.add(p)
@@ -1949,7 +2013,6 @@ def _build_task_detail_without_state(
         "jira_status": jira_status,
         "jira_live": bool(jira_live),
         "status": str(local_status),
-        "progress_percentage": 0,
         "live": False,
         "can_cancel": False,
         "can_start": False,
@@ -2103,7 +2166,6 @@ def build_task_detail(
         "jira_status": jira_live.get("jira_status") or None,
         "jira_live": bool(jira_live),
         "status": state.status.value,
-        "progress_percentage": int(state.progress_percentage or 0),
         "live": live,
         "can_cancel": can_cancel,
         "can_start": can_start,

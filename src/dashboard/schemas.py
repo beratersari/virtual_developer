@@ -83,7 +83,6 @@ class TaskItem(BaseModel):
     issue_key: str
     summary: str
     status: str
-    progress_percentage: int = 0
     workflow_type: Optional[str] = None
     jira_assignee: Optional[str] = None
     error_message: Optional[str] = None
@@ -143,7 +142,6 @@ class JobItem(BaseModel):
     prompt_paths: List[str] = Field(default_factory=list)
     # Failed attempts that scheduled retries (nested; not separate dashboard jobs)
     retry_attempts: List[JobRetryAttempt] = Field(default_factory=list)
-    progress_percentage: int = 0
     error_message: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None

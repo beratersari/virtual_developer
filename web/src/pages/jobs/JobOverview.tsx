@@ -43,7 +43,6 @@ export function JobOverview({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <MetaCard label="Job id" mono value={job.job_id} />
         <MetaCard label="Status" valueNode={<StatusBadge status={job.status} />} />
-        <MetaCard label="Progress" value={`${job.progress_percentage}%`} />
         <MetaCard label="Workflow" value={job.workflow_type || '—'} />
         <MetaCard label="Worker" value={workerLabel(worker)} />
         <MetaCard

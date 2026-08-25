@@ -16,7 +16,6 @@ function job(partial: Partial<JobItem>): JobItem {
     workflow_type: 'execution',
     agent: 'build',
     status: 'executing',
-    progress_percentage: 0,
     live: false,
     ...partial,
   }

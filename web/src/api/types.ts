@@ -152,7 +152,6 @@ export type JobItem = {
   prompt_path?: string | null
   prompt_paths?: string[]
   retry_attempts?: JobRetryAttempt[]
-  progress_percentage: number
   error_message?: string | null
   started_at?: string | null
   completed_at?: string | null
@@ -375,7 +374,6 @@ export type TaskDetail = {
   jira_status?: string | null
   jira_live?: boolean
   status: string
-  progress_percentage: number
   live: boolean
   can_cancel: boolean
   can_start?: boolean
