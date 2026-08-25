@@ -62,6 +62,106 @@ def test_workspace_lock_matches_session_bind():
     assert a != c
 
 
+def test_finish_open_for_issue_clears_running_and_queued(tmp_path):
+    qs = WorkQueueStore(queue_dir=tmp_path / "q")
+    a = qs.enqueue(source="jira", issue_key="KAN-9", summary="run")
+    b = qs.enqueue(source="jira", issue_key="KAN-9", summary="wait")
+    claimed = qs.claim_next(max_running=4)
+    assert claimed is not None
+    assert claimed["status"] == "running"
+    n = qs.finish_open_for_issue("KAN-9", status="cancelled", error_message="stop")
+    assert n == 2
+    assert qs.get(a["queue_id"])["status"] == "cancelled"
+    assert qs.get(b["queue_id"])["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_unblocks_reschedule_of_same_issue(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """Dashboard Stop must not leave a running queue row that blocks schedule-again."""
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.job_store = isolate_jira_agent_artifacts["job_store"]
+
+    st = state_manager.create_state("KAN-STOP", "s", "d")
+    state_manager.update_state("KAN-STOP", status=TaskStatus.EXECUTING)
+    first = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-STOP",
+        summary="first",
+        lock_key="lock_stop",
+    )
+    claimed = proc.queue_store.claim_next(max_running=4)
+    assert claimed["queue_id"] == first["queue_id"]
+
+    out = await proc.cancel_job("KAN-STOP", reason="dashboard stop")
+    assert out.get("ok") is True
+    assert proc.queue_store.get(first["queue_id"])["status"] == "cancelled"
+
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "scheduled_job": True,
+        "schedule_id": "sch_1",
+        "issue": {
+            "key": "KAN-STOP",
+            "fields": {
+                "summary": "again",
+                "description": (
+                    "{params}\nRepository: https://gitlab.com/g/r.git\n"
+                    "Source branch: develop\nTarget branch: develop\n"
+                    "Mode: build\n{params}\n"
+                ),
+            },
+        },
+    }
+    started = {"n": 0}
+
+    async def fake_process(ev):
+        started["n"] += 1
+        state_manager.update_state("KAN-STOP", status=TaskStatus.EXECUTING)
+        return {"ok": True, "work_started": True}
+
+    proc.process_event = fake_process  # type: ignore[method-assign]
+    r2 = await proc.enqueue_jira_event(event)
+    assert r2.get("ok") is True
+    for _ in range(50):
+        if started["n"]:
+            break
+        await asyncio.sleep(0.01)
+    assert started["n"] == 1
+    second = proc.queue_store.get(r2["queue_id"])
+    # Worker ran; do not require a particular terminal (mock does not reset
+    # CANCELLED → PENDING the way process_event does in production).
+    assert second["status"] != "queued"
+
+
+def test_reap_stale_running_after_cancel(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    state_manager.create_state("KAN-REAP", "s", "d")
+    rec = proc.queue_store.enqueue(source="jira", issue_key="KAN-REAP", summary="orphan")
+    proc.queue_store.claim_next(max_running=4)
+    assert proc.queue_store.get(rec["queue_id"])["status"] == "running"
+    # Cancel after the claim so started_at < completed_at (stale leftover).
+    state_manager.update_state("KAN-REAP", status=TaskStatus.CANCELLED)
+    n = proc._reap_stale_queue_running()
+    assert n == 1
+    assert proc.queue_store.get(rec["queue_id"])["status"] == "cancelled"
+
+
 def test_queue_store_fifo_and_cancel(tmp_path):
     qs = WorkQueueStore(queue_dir=tmp_path / "q")
     a = qs.enqueue(source="jira", issue_key="KAN-1", summary="a", message="first")

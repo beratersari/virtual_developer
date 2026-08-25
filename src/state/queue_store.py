@@ -119,7 +119,8 @@ class WorkQueueStore:
             self._write(rec)
         logger.info(
             f"Queue enqueue {qid} source={rec['source']} "
-            f"issue={rec['issue_key']} lock={rec['lock_key'] or '-'}"
+            f"issue={rec['issue_key']} lock={rec['lock_key'] or '-'} "
+            f"job_id={rec.get('job_id') or '-'}"
         )
         return rec
 
@@ -236,7 +237,8 @@ class WorkQueueStore:
                 live["updated_at"] = now
                 self._write(live)
                 logger.info(
-                    f"Queue claim {live['queue_id']} issue={live.get('issue_key')}"
+                    f"Queue claim {live['queue_id']} issue={live.get('issue_key')} "
+                    f"job_id={live.get('job_id') or '-'}"
                 )
                 return live
         return None
@@ -274,8 +276,57 @@ class WorkQueueStore:
             patch["job_id"] = job_id
         rec = self.update(queue_id, **patch)
         if rec:
-            logger.info(f"Queue finish {queue_id} status={status}")
+            logger.info(
+                f"Queue finish {queue_id} status={status} "
+                f"issue={rec.get('issue_key') or '-'} "
+                f"job_id={rec.get('job_id') or job_id or '-'}"
+            )
         return rec
+
+    def finish_open_for_issue(
+        self,
+        issue_key: str,
+        *,
+        status: str = "cancelled",
+        error_message: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> int:
+        """Terminal-finish every queued/running row for one issue.
+
+        Dashboard Stop must do this; otherwise a leftover ``running`` row
+        blocks ``claim_next`` for the same issue forever (schedule-again
+        sits in the queue and never starts).
+        """
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return 0
+        if status not in _TERMINAL:
+            status = "cancelled"
+        n = 0
+        with self._lock:
+            for rec in list(self._iter_records()):
+                if rec.get("status") not in _OPEN:
+                    continue
+                if (rec.get("issue_key") or "").strip().upper() != key:
+                    continue
+                qid = rec.get("queue_id")
+                if not qid:
+                    continue
+                rec["status"] = status
+                rec["finished_at"] = _now_iso()
+                rec["updated_at"] = rec["finished_at"]
+                if error_message is not None:
+                    rec["error_message"] = (error_message or "")[:2000]
+                if job_id:
+                    rec["job_id"] = job_id
+                self._write(rec)
+                n += 1
+                logger.info(
+                    f"Queue finish {qid} status={status} issue={key} "
+                    f"job_id={rec.get('job_id') or job_id or '-'} "
+                    f"(open-for-issue)"
+                )
+        return n
 
     def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
         """Re-queue durable ``running`` rows after a crash (no live worker)."""

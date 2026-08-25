@@ -442,6 +442,10 @@ def schedule_existing_issue(
             issue_type=preview.get("issue_type") or "Task",
             source="existing",
         )
+        logger.info(
+            f"Schedule existing issue {key} schedule_id={rec.get('schedule_id')} "
+            f"at={scheduled_iso} job_id=-"
+        )
         return {
             "ok": True,
             "schedule": rec,
@@ -994,7 +998,8 @@ def dispatch_schedule_now(
         ss.update(sid, status="error", error_message=str(e)[:1000])
         return {"ok": False, "error": str(e)[:1000], "schedule": ss.get(sid)}
     logger.info(
-        f"Schedule {sid} dispatched now for {(claimed.get('issue_key') or '').upper()}"
+        f"Schedule {sid} dispatched now for {(claimed.get('issue_key') or '').upper()} "
+        f"job_id=-"
     )
     return {
         "ok": True,
@@ -1125,7 +1130,10 @@ async def _dispatch_claimed_schedule(
             note = f"already on queue ({outcome.get('queue_id')})"
         _finish_schedule_dispatch(store, schedule_id, status="dispatched")
         logger.info(
-            f"Schedule {schedule_id} dispatched for {issue_key}"
+            f"Schedule {schedule_id} dispatched for {issue_key} "
+            f"queue_id={outcome.get('queue_id') or '-'} "
+            f"queue_status={outcome.get('status') or '-'} "
+            f"job_id=-"
             + (f" — {note}" if note else "")
         )
     except asyncio.CancelledError:

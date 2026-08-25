@@ -671,8 +671,14 @@ class GitManager:
             60,
             int(getattr(settings, "git_clone_timeout_seconds", 1800) or 1800),
         )
+        try:
+            from src.log_context import get_job_id
+
+            job_tag = get_job_id() or "-"
+        except Exception:
+            job_tag = "-"
         logger.info(
-            f"Clone started for {issue_tag}: {self.remote_url} "
+            f"Clone started for {issue_tag} job_id={job_tag}: {self.remote_url} "
             f"→ {self.temp_dir} (timeout={clone_timeout}s)"
         )
         logger.debug(f"Clone will use settings PAT in URL: {bool(gitlab_pat)}")
@@ -697,7 +703,8 @@ class GitManager:
             raise
         except subprocess.TimeoutExpired as e:
             logger.error(
-                f"Clone timed out for {issue_tag} after {clone_timeout}s"
+                f"Clone timed out for {issue_tag} job_id={job_tag} "
+                f"after {clone_timeout}s"
             )
             raise GitCloneError(
                 (
@@ -718,8 +725,8 @@ class GitManager:
                 safe_err = safe_err.replace(gitlab_pat, "***")
             safe_err = self._redact_secret_text(safe_err)
             logger.error(
-                f"Clone failed for {issue_tag} after {elapsed:.1f}s: "
-                f"{safe_err.strip()[:500]}"
+                f"Clone failed for {issue_tag} job_id={job_tag} "
+                f"after {elapsed:.1f}s: {safe_err.strip()[:500]}"
             )
             repo_display = self.remote_url or "(unknown)"
             raise GitCloneError(
@@ -734,7 +741,9 @@ class GitManager:
                 technical=safe_err,
             )
 
-        logger.info(f"Clone finished for {issue_tag} in {elapsed:.1f}s")
+        logger.info(
+            f"Clone finished for {issue_tag} job_id={job_tag} in {elapsed:.1f}s"
+        )
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
         self._enable_git_longpaths()
