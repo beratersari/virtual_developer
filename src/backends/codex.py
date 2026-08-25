@@ -20,6 +20,31 @@ _THREAD_RE = re.compile(
     r"(?:thread_id|session_id|thread)\s*[:=]\s*[\"']?([0-9a-fA-F-]{16,})[\"']?"
 )
 
+# Codex holds an exclusive writer on the thread store. A second
+# ``exec resume`` against the same id fails immediately with this.
+_THREAD_LOCK_MARKERS = (
+    "already has an active writer",
+    "thread-store conflict",
+    "thread/resume failed",
+)
+
+# Resume / new-thread prompts for Codex. Never reuse OpenCode
+# finish-todos / "Continue the previous OpenCode session" text.
+DEFAULT_CODEX_RESUME_PROMPT = (
+    "UNATTENDED JOB: continue the work already started in this repository. "
+    "Do not restart from scratch. Finish remaining implementation, "
+    "verification, and local commit steps. Do not ask clarifying questions. "
+    "Do not git push or open a merge request — the orchestrator delivers."
+)
+DEFAULT_CODEX_COLD_CONTINUE_PROMPT = (
+    "UNATTENDED JOB: the previous Codex thread could not be resumed "
+    "(thread store still had an active writer). Continue from the current "
+    "files and git state. Do not restart from scratch. Finish remaining "
+    "implementation, verification, and local commit steps. Do not ask "
+    "clarifying questions. Do not git push or open a merge request — "
+    "the orchestrator delivers."
+)
+
 # Isolated job home only overrides these; everything else comes from the
 # operator's ~/.codex (or $CODEX_HOME) config — same idea as OpenCode.
 _ISOLATED_OVERRIDE_KEYS = frozenset({"approval_policy", "sandbox_mode", "model"})
@@ -233,6 +258,25 @@ def _codex_cmd_for_log(argv: List[str]) -> str:
     if last and not last.startswith("-") and last not in {"exec", "resume"}:
         parts[-1] = f"<prompt {len(last)} chars>"
     return " ".join(parts)
+
+
+def is_codex_thread_lock_error(text: str) -> bool:
+    """True when Codex refused resume because another writer holds the thread."""
+    blob = (text or "").lower()
+    return any(marker in blob for marker in _THREAD_LOCK_MARKERS)
+
+
+async def _await_process_exit(proc: Any, *, seconds: float) -> bool:
+    """Wait until ``proc`` exits. Returns True if it is gone."""
+    if proc is None:
+        return True
+    if getattr(proc, "returncode", None) is not None:
+        return True
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=max(0.1, float(seconds)))
+        return True
+    except (asyncio.TimeoutError, Exception):
+        return getattr(proc, "returncode", None) is not None
 
 
 def parse_codex_thread_id(text: str) -> Optional[str]:
@@ -473,10 +517,18 @@ class CodexBackend:
             except asyncio.TimeoutError:
                 timed_out = True
                 self.cancel(handle)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=10.0)
-                except Exception:
-                    pass
+                gone = await _await_process_exit(proc, seconds=15.0)
+                if not gone:
+                    self.cancel(handle)
+                    gone = await _await_process_exit(proc, seconds=10.0)
+                if not gone:
+                    logger.warning(
+                        f"[codex] process still alive after timeout kill "
+                        f"pid={getattr(proc, 'pid', None)}"
+                    )
+                # Windows keeps the thread-store writer until the process
+                # (and its file handles) are actually gone.
+                await asyncio.sleep(0.75)
         except FileNotFoundError:
             logger.error(f"[codex] binary not found: {cli}")
             return AgentRunResult(
@@ -503,18 +555,44 @@ class CodexBackend:
 
         elapsed = asyncio.get_event_loop().time() - started
         code = int(getattr(proc, "returncode", None) or ( -1 if timed_out else 0))
+        blob = "\n".join(log_lines)
+        still_running = (
+            proc is not None and getattr(proc, "returncode", None) is None
+        )
+        locked = is_codex_thread_lock_error(blob) or (
+            timed_out and still_running
+        )
         if timed_out:
             logger.warning(
                 f"[codex] exec timed out after {int(timeout_seconds)}s "
                 f"(ran {elapsed:.1f}s) pid={getattr(proc, 'pid', None)}"
+                + (" (writer still alive)" if still_running else "")
             )
             return AgentRunResult(
                 returncode=-1,
-                stdout="\n".join(log_lines),
+                stdout=blob,
                 stderr=f"[codex] timed out after {int(timeout_seconds)}s",
                 session_id=handle.get("session_id"),
                 timed_out=True,
                 backend=self.name,
+                extra={"thread_locked": bool(locked or still_running)},
+            )
+        if locked:
+            logger.warning(
+                f"[codex] thread locked (active writer) "
+                f"thread={handle.get('session_id') or '-'} "
+                f"duration={elapsed:.1f}s"
+            )
+            return AgentRunResult(
+                returncode=code if code else -1,
+                stdout=blob,
+                stderr="[codex] thread-store conflict: already has an active writer",
+                session_id=handle.get("session_id"),
+                incomplete=False,
+                incomplete_reasons=["codex thread locked"],
+                progress=0,
+                backend=self.name,
+                extra={"thread_locked": True},
             )
         logger.info(
             f"[codex] exec finished returncode={code} duration={elapsed:.1f}s "
@@ -522,11 +600,11 @@ class CodexBackend:
         )
         return AgentRunResult(
             returncode=code,
-            stdout="\n".join(log_lines),
+            stdout=blob,
             stderr="" if code == 0 else f"[codex] exit {code}",
             session_id=handle.get("session_id"),
-            incomplete=code != 0,
-            incomplete_reasons=["codex non-zero exit"] if code != 0 else [],
+            incomplete=False,
+            incomplete_reasons=[],
             progress=100 if code == 0 else 0,
             backend=self.name,
         )

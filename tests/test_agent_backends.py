@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -247,6 +248,66 @@ def test_summarize_codex_exec_line_steps():
     ) == "[codex] assistant: Done"
     assert summarize_codex_exec_line('{"type":"turn.started"}') is None
     assert summarize_codex_exec_line("[codex] cwd=/tmp") == "[codex] cwd=/tmp"
+
+
+@pytest.mark.asyncio
+async def test_codex_run_classifies_writer_lock_not_incomplete(tmp_path, monkeypatch):
+    from src.backends.base import AgentRunRequest
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    lock_line = (
+        "Error: thread/resume failed: thread "
+        "01a03397-15ff-7941-a5e7-17e23b3d7b82 already has an active writer"
+    )
+
+    class _FakeProc:
+        pid = 4242
+        returncode = 1
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+
+        def __init__(self):
+            self.stdout.feed_data((lock_line + "\n").encode())
+            self.stdout.feed_eof()
+            self.stderr.feed_eof()
+
+        async def wait(self):
+            return 1
+
+    async def _fake_exec(*_a, **_k):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    result = await CodexBackend().run(
+        AgentRunRequest(
+            prompt="continue",
+            session_id="01a03397-15ff-7941-a5e7-17e23b3d7b82",
+            working_directory=tmp_path,
+            timeout_seconds=5,
+        )
+    )
+    assert result.extra.get("thread_locked") is True
+    assert result.incomplete is False
+    assert "codex thread locked" in result.incomplete_reasons
+    assert result.returncode != 0
+
+
+def test_is_codex_thread_lock_error_detects_kan12371_log():
+    from src.backends.codex import is_codex_thread_lock_error
+
+    blob = (
+        "ERROR codex_core::session::session: failed to initialize thread "
+        "persistence: thread-store conflict: thread "
+        "01a03397-15ff-7941-a5e7-17e23b3d7b82 already has an active writer\n"
+        "Error: thread/resume: thread/resume failed: thread "
+        "01a03397-15ff-7941-a5e7-17e23b3d7b82 already has an active writer "
+        "(code -32600)"
+    )
+    assert is_codex_thread_lock_error(blob) is True
+    assert is_codex_thread_lock_error("[codex] exit 1") is False
+    assert is_codex_thread_lock_error("") is False
 
 
 def test_codex_cmd_for_log_hides_prompt():

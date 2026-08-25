@@ -325,6 +325,31 @@ def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
     assert not any("OPENCODE_SERVE_MAX_COMPACT_CONTINUES" in b for b in bodies)
 
 
+def test_fail_from_agent_result_thread_lock_heading(
+    processor, state_manager, fake_jira
+):
+    """Codex writer lock must not look like OpenCode incomplete/compaction."""
+    state_manager.create_state("KAN-12371", "django", "d")
+    processor._fail_from_agent_result(
+        "KAN-12371",
+        {
+            "returncode": 1,
+            "stderr": (
+                "Error: thread/resume failed: thread "
+                "01a03397-15ff-7941-a5e7-17e23b3d7b82 already has an "
+                "active writer (code -32600)"
+            ),
+            "incomplete": False,
+            "thread_locked": True,
+            "incomplete_reasons": ["codex thread locked"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Codex thread locked" in b for b in bodies)
+    assert not any("Incomplete session" in b for b in bodies)
+
+
 def test_fail_from_agent_result_compact_loop_heading(
     processor, state_manager, fake_jira
 ):
