@@ -371,6 +371,66 @@ export function previewScheduleIssue(issueKey: string) {
   return request<SchedulePreview>(`/api/schedules/preview?${params.toString()}`)
 }
 
+export async function downloadIssueReport(body: {
+  kind: 'general' | 'job'
+  note: string
+  job_id?: string
+}): Promise<string> {
+  const res = await fetch('/api/reports', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      kind: body.kind,
+      note: body.note,
+      job_id: body.kind === 'job' ? body.job_id : undefined,
+    }),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({}))
+    throw new ApiError(
+      formatApiError(
+        (payload as { detail?: unknown })?.detail,
+        `Request failed: ${res.status}`,
+      ),
+      res.status,
+    )
+  }
+  const blob = await res.blob()
+  const filename = filenameFromDisposition(
+    res.headers.get('Content-Disposition'),
+    body.kind === 'job'
+      ? `yaver-report-${body.job_id || 'job'}.zip`
+      : 'yaver-report-general.zip',
+  )
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 2_000)
+  }
+  return filename
+}
+
+function filenameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) return fallback
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim())
+    } catch {
+      return star[1].trim()
+    }
+  }
+  const plain = /filename="([^"]+)"/i.exec(header) || /filename=([^;]+)/i.exec(header)
+  return plain?.[1]?.trim() || fallback
+}
+
 export function scheduleExistingIssue(body: {
   issue_key: string
   scheduled_at: string

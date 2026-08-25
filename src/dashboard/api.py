@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING, Any, Optional, Set
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
 from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
+    IssueReportRequest,
     JiraConnectionTestRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
@@ -160,6 +161,33 @@ def create_dashboard_app(
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok", "version": build_meta().version}
+
+    @app.post("/api/reports")
+    def create_issue_report(body: IssueReportRequest) -> Response:
+        """Download a diagnostic zip (general daemon logs, or one job + logs)."""
+        from src.dashboard.issue_report import build_issue_report_zip
+
+        try:
+            payload, filename = build_issue_report_zip(
+                body,
+                processor=app.state.processor,
+                state_manager=app.state.state_manager,
+                store=job_store,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except Exception as e:
+            logger.exception("Issue report zip failed", e)
+            raise HTTPException(
+                status_code=500, detail="Could not build issue report"
+            ) from e
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        }
+        return Response(content=payload, media_type="application/zip", headers=headers)
 
     @app.post("/webhooks/gitlab")
     async def gitlab_webhook(request: Request) -> dict:
@@ -1059,6 +1087,7 @@ def create_dashboard_app(
                     "settings": "/api/settings",
                     "models": "/api/models",
                     "dashboard": "/api/dashboard",
+                    "reports": "POST /api/reports",
                     "ws": "/ws",
                 },
             }

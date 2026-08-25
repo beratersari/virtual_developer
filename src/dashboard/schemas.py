@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.brand import PRODUCT_NAME
 
@@ -20,6 +20,44 @@ class BulkJobDeleteRequest(BaseModel):
 
     job_ids: List[str] = Field(default_factory=list, max_length=100)
     delete_artifacts: bool = True
+
+
+class IssueReportRequest(BaseModel):
+    """Body for POST /api/reports — download a diagnostic zip."""
+
+    kind: str = Field(default="general", description="general | job")
+    note: str = Field(..., min_length=1, max_length=8000)
+    job_id: Optional[str] = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind_ok(cls, v: str) -> str:
+        got = (v or "").strip().lower()
+        if got not in ("general", "job"):
+            raise ValueError("kind must be 'general' or 'job'")
+        return got
+
+    @field_validator("note")
+    @classmethod
+    def _note_ok(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("note is required")
+        return text
+
+    @field_validator("job_id")
+    @classmethod
+    def _job_id_ok(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        jid = v.strip()
+        return jid or None
+
+    @model_validator(mode="after")
+    def _job_requires_id(self) -> "IssueReportRequest":
+        if self.kind == "job" and not self.job_id:
+            raise ValueError("job_id is required when kind is 'job'")
+        return self
 
 
 class ScheduleCreateRequest(BaseModel):
