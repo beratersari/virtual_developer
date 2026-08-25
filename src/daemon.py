@@ -45,6 +45,12 @@ class JiraAgentDaemon:
         logger.info(f"project_root={settings.project_root}")
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
+        intake = (
+            settings.jira_intake_mode_normalized
+            if hasattr(settings, "jira_intake_mode_normalized")
+            else (settings.jira_intake_mode or "poll")
+        )
+        logger.info(f"jira_intake_mode={intake}")
 
         # Disk PENDING/PLANNING/EXECUTING after crash is not a live job — finalise first
         try:
@@ -147,7 +153,7 @@ class JiraAgentDaemon:
                 )
             tasks.append(asyncio.create_task(self._start_dashboard()))
 
-        # Board/sprint poller is the sole issue intake path
+        # Board/sprint poller (idle when jira_intake_mode=webhook)
         logger.info("Starting JIRA poller...")
         poller_task = asyncio.create_task(self._start_poller())
         tasks.append(poller_task)

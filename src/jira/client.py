@@ -734,12 +734,82 @@ class JiraClient:
             logger.error(f"Error fetching comments for {issue_key}: {e}")
             return []
     
+    def get_myself(self) -> Optional[Dict[str, Any]]:
+        """Current user (Server ``name`` / Cloud ``accountId``)."""
+        try:
+            response = self.client.get("/myself")
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else None
+        except httpx.HTTPError as e:
+            logger.error(f"Error fetching Jira myself: {e}")
+            return None
+
+    def list_webhooks(self) -> List[Dict[str, Any]]:
+        """Admin webhook list (Server/DC 9.4 + Cloud ``/rest/webhooks/1.0``)."""
+        try:
+            response = self.client.get(f"{self.host}/rest/webhooks/1.0/webhook")
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                return [x for x in data if isinstance(x, dict)]
+            if isinstance(data, dict):
+                values = data.get("values") or data.get("webhooks") or []
+                if isinstance(values, list):
+                    return [x for x in values if isinstance(x, dict)]
+            return []
+        except httpx.HTTPError as e:
+            logger.error(f"Error listing Jira webhooks: {e}")
+            return []
+
     def assign_issue(self, issue_key: str, username: str) -> bool:
-        """Assign issue to a user (on-prem Server/DC uses assignee.name)."""
+        """Assign issue to a user.
+
+        Server/DC 9.4 uses ``assignee.name``. Cloud uses ``accountId`` (a
+        display name is resolved via ``/user/search`` when needed).
+        """
+        ident = (username or "").strip()
+        if not ident:
+            return False
+        if self.is_cloud:
+            account_id = ident
+            looks_like_id = ":" in ident or (len(ident) >= 16 and "-" in ident)
+            if not looks_like_id:
+                resolved = self._lookup_cloud_account_id(ident)
+                if resolved:
+                    account_id = resolved
+            return self.update_issue(
+                issue_key,
+                fields={"assignee": {"accountId": account_id}},
+            )
         return self.update_issue(
             issue_key,
-            fields={"assignee": {"name": username}},
+            fields={"assignee": {"name": ident}},
         )
+
+    def _lookup_cloud_account_id(self, query: str) -> str:
+        """Best-effort Cloud user search → accountId."""
+        q = (query or "").strip()
+        if not q:
+            return ""
+        for path in (f"/user/search?query={q}", f"/user/search?username={q}"):
+            try:
+                response = self.client.get(path)
+                if response.status_code != 200:
+                    continue
+                data = response.json()
+                rows = data if isinstance(data, list) else data.get("values") or []
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        continue
+                    aid = str(row.get("accountId") or "").strip()
+                    if aid:
+                        return aid
+            except Exception:
+                continue
+        return ""
     
     def add_attachment(
         self,

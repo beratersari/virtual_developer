@@ -8,7 +8,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 Yaver is a Python daemon that:
 
-1. Discovers issues (board poller only)
+1. Discovers issues (board poller **or** Jira webhook — `JIRA_INTAKE_MODE`)
 2. Routes work (plan / direct execution / oracle)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
@@ -301,8 +301,8 @@ JIRA_API_TOKEN=your-api-token-here
 
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
-- Poller focuses on board/sprint + To Do + trigger labels / bot assignee.
-- **No HTTP webhook intake** — comments are not ingested unless a separate comment-polling path is added later.
+- Poller focuses on board/sprint + To Do + trigger labels / bot assignee (`JIRA_INTAKE_MODE=poll`).
+- **Webhook intake** (`JIRA_INTAKE_MODE=webhook`): `POST /webhooks/jira`. Triggers only on **assignment to** the bot (changelog `assignee.to`; unassign is ignored) or a **comment that mentions** the bot. Bot-authored / `*Yaver*` comments are ignored (loop guard). Poller sleeps while webhook mode is on.
 
 ### Config checklist (common)
 
@@ -316,7 +316,9 @@ JIRA_API_TOKEN=your-api-token-here
 | `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments for bot-assignment trigger (e.g. `devbot,jira ai bot`) |
 | `TEMP_CLEANUP_POLICY` | `age` (default) / `always` / `on_success` / `never` |
 | `TEMP_CLEANUP_MAX_AGE_DAYS` | Age cutoff for temp clones (default `1` = 24 hours) |
-| `POLL_INTERVAL_SECONDS` | Board poller interval (poller always runs) |
+| `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
+| `JIRA_INTAKE_MODE` | `poll` (default, board poller) or `webhook` (`POST /webhooks/jira`) |
+| `JIRA_WEBHOOK_SECRET` | Shared token for `/webhooks/jira?token=` (required in webhook mode) |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
@@ -339,7 +341,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -561,7 +563,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
 | Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Requires **`vendor/node`**. Edit **`npm-online.npmrc`** `registry=` for private/FTP-backed HTTP mirrors. Offline OpenCode remains **`vendor/opencode-home.zip`**. |
-| Codex CLI | Pin **`CODEX_VERSION`** in `packaging/windows/versions.env`. CI downloads `codex-x86_64-pc-windows-msvc.exe.zip` from `openai/codex` (`rust-vX.Y.Z`) and ships **`vendor/bin/codex.exe` only** (never inside `opencode-home.zip`). **`install-codex.bat`** (or `install-backends.bat`) copies it to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**. |
+| Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
 | Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
@@ -619,7 +621,7 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
 2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
-3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, **`vendor/bin/codex.exe`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
+3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, **`vendor/codex-package-x86_64-pc-windows-msvc.tar.gz`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
 4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).

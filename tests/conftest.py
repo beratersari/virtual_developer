@@ -152,6 +152,12 @@ class FakeJiraClient:
     def get_sprint_issues(self, sprint_id, fields=None, max_results=100):
         return []
 
+    def get_myself(self):
+        return {"name": "devbot", "displayName": "DevBot", "key": "devbot"}
+
+    def list_webhooks(self):
+        return []
+
 
 @pytest.fixture
 def fake_jira() -> FakeJiraClient:

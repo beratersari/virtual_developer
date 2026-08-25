@@ -144,6 +144,17 @@ class SimulatedJiraClient:
             return response.json()["issue"]
         return None
 
+    def get_myself(self) -> Optional[Dict[str, Any]]:
+        return {
+            "name": "devbot",
+            "key": "devbot",
+            "displayName": "DevBot",
+            "active": True,
+        }
+
+    def list_webhooks(self) -> list:
+        return []
+
     def close(self):
         """Close the HTTP client."""
         self.client.close()

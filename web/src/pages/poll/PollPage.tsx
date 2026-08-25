@@ -18,7 +18,11 @@ export function PollPage() {
       <PageHeader
         kicker="Intake"
         title="Board"
-        description="What the poller saw last cycle. Only tickets with a trigger label or bot assignee are listed."
+        description={
+          poll.source === 'webhook'
+            ? 'Jira intake is in webhook mode. The board poller is idle; jobs start from assignment-to-bot or a mention.'
+            : 'What the poller saw last cycle. Only tickets with a trigger label or bot assignee are listed.'
+        }
       />
 
       <div className="vd-hero">

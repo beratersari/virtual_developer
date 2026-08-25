@@ -265,6 +265,19 @@ def build_settings_view() -> SettingsView:
             (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
         ),
         gitlab_webhook_path="/webhooks/gitlab",
+        jira_intake_mode=(
+            settings.jira_intake_mode_normalized
+            if hasattr(settings, "jira_intake_mode_normalized")
+            else str(getattr(settings, "jira_intake_mode", "poll") or "poll")
+        ),
+        jira_webhook_secret_configured=bool(
+            (getattr(settings, "jira_webhook_secret", "") or "").strip()
+        ),
+        jira_webhook_path="/webhooks/jira",
+        trigger_mentions=(getattr(settings, "trigger_mentions", "") or "").strip(),
+        trigger_assignee_names=(
+            getattr(settings, "trigger_assignee_names", "") or ""
+        ).strip(),
         project_repositories=_settings_project_repositories(),
     )
 
@@ -547,6 +560,27 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
+    if "jira_intake_mode" in data and data["jira_intake_mode"] is not None:
+        from src.jira.webhook import normalize_intake_mode
+
+        mode = normalize_intake_mode(data["jira_intake_mode"])
+        settings.jira_intake_mode = mode
+        runtime_persist["jira_intake_mode"] = mode
+        dotenv_updates["JIRA_INTAKE_MODE"] = mode
+        logger.info(f"Jira intake mode set to {mode}")
+    if "jira_webhook_secret" in data and data["jira_webhook_secret"] is not None:
+        tok = str(data["jira_webhook_secret"])
+        if tok.strip():
+            settings.jira_webhook_secret = tok.strip()
+            dotenv_updates["JIRA_WEBHOOK_SECRET"] = settings.jira_webhook_secret
+    if "trigger_mentions" in data and data["trigger_mentions"] is not None:
+        settings.trigger_mentions = str(data["trigger_mentions"]).strip()
+        runtime_persist["trigger_mentions"] = settings.trigger_mentions
+        dotenv_updates["TRIGGER_MENTIONS"] = settings.trigger_mentions
+    if "trigger_assignee_names" in data and data["trigger_assignee_names"] is not None:
+        settings.trigger_assignee_names = str(data["trigger_assignee_names"]).strip()
+        runtime_persist["trigger_assignee_names"] = settings.trigger_assignee_names
+        dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = settings.trigger_assignee_names
 
     if runtime_persist:
         # Persist so the next job (and process restart) does not fall back to .env

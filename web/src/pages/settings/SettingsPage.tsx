@@ -24,6 +24,10 @@ type Draft = {
   poll_interval_seconds: number
   trigger_labels: string
   trigger_on_assignment: boolean
+  jira_intake_mode: string
+  jira_webhook_secret: string
+  trigger_mentions: string
+  trigger_assignee_names: string
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
@@ -43,6 +47,10 @@ function fromSettings(s: SettingsPayload): Draft {
     poll_interval_seconds: s.poll_interval_seconds,
     trigger_labels: s.trigger_labels,
     trigger_on_assignment: s.trigger_on_assignment,
+    jira_intake_mode: s.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
+    jira_webhook_secret: '',
+    trigger_mentions: s.trigger_mentions ?? '',
+    trigger_assignee_names: s.trigger_assignee_names ?? '',
     max_concurrent_jobs: s.max_concurrent_jobs,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
@@ -111,6 +119,9 @@ export function SettingsPage() {
         poll_interval_seconds: Number(draft.poll_interval_seconds),
         trigger_labels: draft.trigger_labels,
         trigger_on_assignment: draft.trigger_on_assignment,
+        jira_intake_mode: draft.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
+        trigger_mentions: draft.trigger_mentions,
+        trigger_assignee_names: draft.trigger_assignee_names,
         max_concurrent_jobs: Number(draft.max_concurrent_jobs),
         agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
         agent_task_max_retries: Number(draft.agent_task_max_retries),
@@ -139,6 +150,9 @@ export function SettingsPage() {
           .filter((p) => p.url),
       }
       if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
+      if (draft.jira_webhook_secret.trim()) {
+        body.jira_webhook_secret = draft.jira_webhook_secret.trim()
+      }
       const updated = await patchSettings(body)
       setSettings(updated)
       setDraft(fromSettings(updated))
@@ -585,6 +599,77 @@ export function SettingsPage() {
 
       {section === 'runtime' && (
       <div key="runtime" className="vd-fade space-y-3">
+      <div className="text-sm font-semibold text-text">Jira intake</div>
+      <p className="text-xs text-text-muted">
+        Poll reads the board on an interval. Webhook waits for Jira to POST
+        assignment-to-bot or a comment that mentions the bot. Default comes
+        from <span className="font-mono">JIRA_INTAKE_MODE</span> in .env.
+      </p>
+      <label className="field">
+        <span>Intake mode</span>
+        <select
+          value={draft.jira_intake_mode}
+          onChange={(e) => mark('jira_intake_mode', e.target.value)}
+        >
+          <option value="poll">Poll (board / sprint)</option>
+          <option value="webhook">Webhook (assignment + mention)</option>
+        </select>
+      </label>
+      {draft.jira_intake_mode === 'webhook' && (
+        <div className="space-y-3 rounded border border-border bg-bg px-4 py-3">
+          <p className="text-xs text-text-muted">
+            Jira Server 9.4: System → WebHooks. Events: Issue created, Issue
+            updated, Comment created. URL includes the token (no HMAC on Server).
+          </p>
+          <dl className="grid gap-1 font-mono text-[11px] text-text-secondary">
+            <div>
+              Secret:{' '}
+              {settings.jira_webhook_secret_configured ? 'configured' : 'missing (required)'}
+            </div>
+            <div>
+              URL: http://&lt;this-host&gt;:{settings.dashboard_port}
+              {settings.jira_webhook_path || '/webhooks/jira'}
+              ?token=&lt;secret&gt;
+            </div>
+          </dl>
+          <label className="field">
+            <span>
+              Webhook secret{' '}
+              {settings.jira_webhook_secret_configured
+                ? '(set — blank keeps it)'
+                : '(required)'}
+            </span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={draft.jira_webhook_secret}
+              onChange={(e) => mark('jira_webhook_secret', e.target.value)}
+            />
+          </label>
+        </div>
+      )}
+      <label className="field">
+        <span>Mention tokens</span>
+        <input
+          value={draft.trigger_mentions}
+          onChange={(e) => mark('trigger_mentions', e.target.value)}
+          placeholder="@DevBot,@AI"
+        />
+        <span className="text-xs text-text-muted">
+          Comment must mention one of these (or wiki [~user] matching the bot names).
+        </span>
+      </label>
+      <label className="field">
+        <span>Bot assignee names</span>
+        <input
+          value={draft.trigger_assignee_names}
+          onChange={(e) => mark('trigger_assignee_names', e.target.value)}
+          placeholder="devbot,jira ai bot"
+        />
+        <span className="text-xs text-text-muted">
+          Assignment to a matching user starts a job. Unassign does not.
+        </span>
+      </label>
       <label className="field">
         <span>Board ID</span>
         <input

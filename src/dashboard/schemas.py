@@ -279,6 +279,12 @@ class SettingsView(BaseModel):
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
     gitlab_webhook_path: str = "/webhooks/gitlab"
+    # poll (board poller, default) | webhook (POST /webhooks/jira)
+    jira_intake_mode: str = "poll"
+    jira_webhook_secret_configured: bool = False
+    jira_webhook_path: str = "/webhooks/jira"
+    trigger_mentions: str = ""
+    trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
 
@@ -447,6 +453,41 @@ class SettingsUpdate(BaseModel):
         max_length=40,
         description="Full replace of saved git remotes for the New-issue form",
     )
+    jira_intake_mode: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        description="Jira intake: poll (board poller) or webhook (POST /webhooks/jira)",
+    )
+    jira_webhook_secret: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only Jira webhook token (omit to keep current)",
+    )
+    trigger_mentions: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Comma-separated @mentions that start a job from a Jira comment",
+    )
+    trigger_assignee_names: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Comma-separated name fragments for assign-to-bot trigger",
+    )
+
+    @field_validator("jira_intake_mode", mode="before")
+    @classmethod
+    def _jira_intake_mode_known(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        from src.jira.webhook import INTAKE_POLL, INTAKE_WEBHOOK, normalize_intake_mode
+
+        mode = normalize_intake_mode(text)
+        if mode not in {INTAKE_POLL, INTAKE_WEBHOOK}:
+            raise ValueError("jira_intake_mode must be 'poll' or 'webhook'")
+        return mode
 
     @field_validator("agent_backend", mode="before")
     @classmethod
