@@ -102,7 +102,6 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     prompt_path: j.prompt_path ?? null,
     prompt_paths: j.prompt_paths || [],
     retry_attempts: j.retry_attempts || [],
-    progress_percentage: Number(j.progress_percentage || 0),
     error_message: j.error_message ?? null,
     started_at: j.started_at ?? null,
     completed_at: j.completed_at ?? null,

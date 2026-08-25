@@ -88,7 +88,7 @@ export function JobsTable({
                 <div className="mt-1.5 truncate text-xs text-danger-text">{j.error_message}</div>
               )}
             </div>
-            {selectable ? (
+            {selectable && (
               <div onClick={(e) => e.stopPropagation()} className="pt-1">
                 <input
                   type="checkbox"
@@ -101,8 +101,6 @@ export function JobsTable({
                   }}
                 />
               </div>
-            ) : (
-              <div className="font-mono text-xs text-text-muted">{j.progress_percentage}%</div>
             )}
           </div>
         )

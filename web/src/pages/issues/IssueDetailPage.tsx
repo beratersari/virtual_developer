@@ -198,7 +198,6 @@ export function IssueDetailPage() {
           <div className="space-y-5 text-sm">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <MetaCard label="Issue status" valueNode={<StatusBadge status={detail.status} />} />
-              <MetaCard label="Progress" value={`${detail.progress_percentage}%`} />
               <MetaCard label="Workflow" value={detail.workflow_type ?? '—'} />
               <MetaCard label="Current job id" mono value={detail.current_job_id ?? '—'} />
               <MetaCard label="Started" mono value={detail.started_at ?? '—'} />

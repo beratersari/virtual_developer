@@ -30,6 +30,16 @@ def normalize_backend_name(raw: Optional[str]) -> str:
     return _BACKEND_ALIASES.get(key, key if key in SUPPORTED_BACKENDS else "")
 
 
+def is_session_or_thread_id(sid: Optional[str]) -> bool:
+    """True for an OpenCode ``ses_*`` id or a Codex thread UUID."""
+    s = (sid or "").strip()
+    if not s:
+        return False
+    if s.startswith("ses_") or s.startswith("thread_"):
+        return True
+    return s.count("-") >= 4 and len(s) >= 16
+
+
 OnOutput = Callable[[str, str], None]
 OnSession = Callable[[str], None]
 ShouldAbort = Callable[[], bool]

@@ -1116,8 +1116,10 @@ class JobProcessor:
         sids: List[str] = []
 
         def _add_sid(raw: Any) -> None:
+            from src.backends.base import is_session_or_thread_id
+
             sid = str(raw or "").strip()
-            if sid.startswith("ses_") and sid not in sids:
+            if is_session_or_thread_id(sid) and sid not in sids:
                 sids.append(sid)
 
         for rec in recs:
@@ -1148,13 +1150,15 @@ class JobProcessor:
     def _attach_bound_opencode_session(
         self, issue_key: str, task: AgentTask, git: Any = None
     ) -> Optional[str]:
-        """Reuse the OpenCode session for this issue / repo+work+target.
+        """Reuse the OpenCode session or Codex thread for this issue / bind.
 
-        If the bind map already has a live ``ses_*`` for (repo, work, target),
-        continue that session. Cancel, a missing SQLite row, a locked DB, or a
-        new clone path must not start a cold session. Dashboard Reset is the
-        only forget. Relocate ``session.directory`` onto the live clone so
-        serve resume stays aligned.
+        If the bind map already has a live ``ses_*`` or Codex thread UUID for
+        (repo, work, target), continue that session. Cancel, a missing SQLite
+        row, a locked DB, or a new clone path must not start a cold session.
+        Dashboard Reset is the only forget. Relocate OpenCode
+        ``session.directory`` onto the live clone so serve resume stays aligned.
+        Codex resume uses ``exec resume`` and a short continue prompt — not
+        another full BUILD/PLAN kit.
         """
         if getattr(task, "session_id", None):
             return task.session_id
@@ -1195,47 +1199,54 @@ class JobProcessor:
         if not chosen:
             return None
 
-        stored_dir: Optional[str] = None
-        try:
-            stored_dir, ok = lookup_session_directory(chosen)
-        except Exception as e:
-            logger.debug(f"{issue_key}: session dir check failed: {e}")
-            ok = False
-            stored_dir = None
-        relocate_from = None
-        if ok and stored_dir and wd and not paths_equivalent(stored_dir, wd):
-            relocate_from = stored_dir
-        elif bind_wd and wd and not paths_equivalent(bind_wd, wd):
-            relocate_from = bind_wd
-        if relocate_from:
+        is_opencode = chosen.startswith("ses_")
+        if is_opencode:
+            stored_dir: Optional[str] = None
             try:
-                n = relocate_session_directories(relocate_from, wd)
-                logger.info(
-                    f"{issue_key}: relocating session {chosen} "
-                    f"{relocate_from} → {wd} (updated={n}) to resume"
-                )
+                stored_dir, ok = lookup_session_directory(chosen)
             except Exception as e:
-                logger.debug(f"{issue_key}: session relocate failed: {e}")
-            try:
-                import src.state.session_bind_store as session_binds
+                logger.debug(f"{issue_key}: session dir check failed: {e}")
+                ok = False
+                stored_dir = None
+            relocate_from = None
+            if ok and stored_dir and wd and not paths_equivalent(stored_dir, wd):
+                relocate_from = stored_dir
+            elif bind_wd and wd and not paths_equivalent(bind_wd, wd):
+                relocate_from = bind_wd
+            if relocate_from:
+                try:
+                    n = relocate_session_directories(relocate_from, wd)
+                    logger.info(
+                        f"{issue_key}: relocating session {chosen} "
+                        f"{relocate_from} → {wd} (updated={n}) to resume"
+                    )
+                except Exception as e:
+                    logger.debug(f"{issue_key}: session relocate failed: {e}")
+                try:
+                    import src.state.session_bind_store as session_binds
 
-                session_binds.session_bind_store.relocate_working_directory(
-                    relocate_from, wd
+                    session_binds.session_bind_store.relocate_working_directory(
+                        relocate_from, wd
+                    )
+                except Exception:
+                    pass
+            elif not ok:
+                logger.warning(
+                    f"{issue_key}: OpenCode DB unreadable; still resuming {chosen} "
+                    f"(bind key {repo}@{branch}→{target} is live)"
                 )
-            except Exception:
-                pass
-        elif not ok:
-            logger.warning(
-                f"{issue_key}: OpenCode DB unreadable; still resuming {chosen} "
-                f"(bind key {repo}@{branch}→{target} is live)"
-            )
-        elif stored_dir is None:
-            logger.info(
-                f"{issue_key}: session {chosen} not in OpenCode DB; "
-                f"resuming because bind key exists"
-            )
+            elif stored_dir is None:
+                logger.info(
+                    f"{issue_key}: session {chosen} not in OpenCode DB; "
+                    f"resuming because bind key exists"
+                )
 
         task.session_id = chosen
+        if not is_opencode:
+            from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
+
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            self._inherit_codex_thread_artifacts(issue_key, chosen)
         try:
             self.state_manager.update_state(
                 issue_key, current_opencode_session_id=chosen
@@ -1460,10 +1471,75 @@ class JobProcessor:
         except Exception:
             pass
 
+    def _inherit_codex_thread_artifacts(self, issue_key: str, thread_id: str) -> None:
+        """Copy prior job logs/prompts for this Codex thread onto the live job.
+
+        Each ``codex exec`` writes a new JSONL file. Chat and Prompt tabs only
+        read paths stored on the current job, so a resume without this copy
+        looks like a cold start.
+        """
+        job_id = self._active_jobs.get(issue_key)
+        tid = (thread_id or "").strip()
+        if not job_id or not tid:
+            return
+        logs: List[str] = []
+        prompts: List[str] = []
+        # list_jobs is newest-first; walk oldest job first so chat reads in time order
+        for rec in reversed(self.job_store.list_jobs(issue_key=issue_key, limit=200)):
+            if rec.get("job_id") == job_id:
+                continue
+            sid = str(rec.get("opencode_session_id") or "").strip()
+            ids = [str(x).strip() for x in (rec.get("opencode_session_ids") or []) if x]
+            if sid != tid and tid not in ids:
+                continue
+            for p in rec.get("session_log_paths") or []:
+                if p and str(p) not in logs:
+                    logs.append(str(p))
+            lp = rec.get("session_log_path")
+            if lp and str(lp) not in logs:
+                logs.append(str(lp))
+            for p in rec.get("prompt_paths") or []:
+                if p and str(p) not in prompts:
+                    prompts.append(str(p))
+            pp = rec.get("prompt_path")
+            if pp and str(pp) not in prompts:
+                prompts.append(str(pp))
+        if not logs and not prompts:
+            return
+        current = self.job_store.get_job(job_id) or {}
+        merged_logs = list(logs)
+        for p in current.get("session_log_paths") or []:
+            if p and str(p) not in merged_logs:
+                merged_logs.append(str(p))
+        lp = current.get("session_log_path")
+        if lp and str(lp) not in merged_logs:
+            merged_logs.append(str(lp))
+        merged_prompts = list(prompts)
+        for p in current.get("prompt_paths") or []:
+            if p and str(p) not in merged_prompts:
+                merged_prompts.append(str(p))
+        pp = current.get("prompt_path")
+        if pp and str(pp) not in merged_prompts:
+            merged_prompts.append(str(pp))
+        patch: Dict[str, Any] = {"opencode_session_id": tid}
+        if merged_logs:
+            patch["session_log_paths"] = merged_logs
+            patch["session_log_path"] = merged_logs[-1]
+        if merged_prompts:
+            patch["prompt_paths"] = merged_prompts
+            if not current.get("prompt_path"):
+                patch["prompt_path"] = merged_prompts[-1]
+        try:
+            self.job_store.update_job(job_id, **patch)
+        except Exception as e:
+            logger.debug(f"{issue_key}: inherit Codex artifacts failed: {e}")
+
     def _link_job_opencode_session(self, issue_key: str, session_id: Optional[str]) -> None:
-        """Publish ses_* onto the live job as soon as OpenCode has it."""
+        """Publish ses_* / Codex thread id onto the live job as soon as known."""
+        from src.backends.base import is_session_or_thread_id
+
         sid = (session_id or "").strip()
-        if not sid or not sid.startswith("ses_"):
+        if not sid or not is_session_or_thread_id(sid):
             return
         try:
             self._record_opencode_session(issue_key, sid)
@@ -1516,17 +1592,31 @@ class JobProcessor:
                 )
             if result.get("session_file") and result["session_file"] not in all_files:
                 all_files.append(result["session_file"])
+            existing = self.job_store.get_job(job_id) or {}
             if all_files:
-                patch["session_log_paths"] = all_files
-                patch["session_log_path"] = all_files[-1]
+                merged_logs: List[str] = []
+                for p in list(existing.get("session_log_paths") or []) + all_files:
+                    sp = str(p or "").strip()
+                    if sp and sp not in merged_logs:
+                        merged_logs.append(sp)
+                patch["session_log_paths"] = merged_logs
+                patch["session_log_path"] = merged_logs[-1]
             if result.get("session_file"):
                 try:
                     p = Path(str(result["session_file"]))
                     prompt = p.parent / f"{p.stem}.prompt.txt"
                     if prompt.is_file():
                         patch["prompt_path"] = str(prompt)
+                        merged_prompts: List[str] = []
+                        for item in list(existing.get("prompt_paths") or []) + [
+                            str(prompt)
+                        ]:
+                            sp = str(item or "").strip()
+                            if sp and sp not in merged_prompts:
+                                merged_prompts.append(sp)
+                        if merged_prompts:
+                            patch["prompt_paths"] = merged_prompts
                         # Backfill description from frozen prompt if missing
-                        existing = self.job_store.get_job(job_id) or {}
                         if not (existing.get("description") or "").strip():
                             from src.state.job_store import description_from_prompt_path
 
