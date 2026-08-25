@@ -20,14 +20,12 @@ assert(
   'unknown id is custom',
 )
 assert(
-  modelSelectValue('opencode/hy3-free', known, true) === CUSTOM_MODEL,
-  'custom wins over listed',
+  modelSelectValue('opencode/hy3-free', known, true) === 'opencode/hy3-free',
+  'listed id wins over leftover custom flag',
 )
 
-assert(showCustomModelId('', false) === false, 'default hides id field')
-assert(showCustomModelId('opencode/hy3-free', false) === false, 'listed hides id field')
-assert(showCustomModelId(CUSTOM_MODEL, false) === true, 'Other id shows id field')
-assert(showCustomModelId('', true) === true, 'custom flag shows id field')
-assert(showCustomModelId('opencode/hy3-free', true) === true, 'custom flag wins')
+assert(showCustomModelId('') === false, 'default hides id field')
+assert(showCustomModelId('opencode/hy3-free') === false, 'listed hides id field')
+assert(showCustomModelId(CUSTOM_MODEL) === true, 'Other id shows id field')
 
 console.log('modelPicker.test.ts ok')

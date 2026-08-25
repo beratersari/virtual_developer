@@ -7,12 +7,14 @@ export function modelSelectValue(
   custom: boolean,
 ): string {
   const known = knownIds instanceof Set ? knownIds : new Set(knownIds)
-  if (custom || (value && !known.has(value))) return CUSTOM_MODEL
+  // A listed id always wins. Otherwise Settings "required" + a real
+  // dropdown choice still looked like Other id and kept the text field.
   if (value && known.has(value)) return value
+  if (custom || (value && !known.has(value))) return CUSTOM_MODEL
   return ''
 }
 
-/** Model-id text field is only for "Other id…". Listed models hide it. */
-export function showCustomModelId(selectValue: string, custom: boolean): boolean {
-  return Boolean(custom) || selectValue === CUSTOM_MODEL
+/** True only when the dropdown is on Other id…. Never for a listed model. */
+export function showCustomModelId(selectValue: string): boolean {
+  return selectValue === CUSTOM_MODEL
 }

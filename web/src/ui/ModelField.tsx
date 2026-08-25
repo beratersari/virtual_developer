@@ -52,7 +52,7 @@ export function ModelField({
   }, [value, inventory])
 
   const selectValue = modelSelectValue(value, known, custom)
-  const showInput = showCustomModelId(selectValue, custom)
+  const showInput = showCustomModelId(selectValue)
 
   return (
     <div className="space-y-2">

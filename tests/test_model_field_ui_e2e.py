@@ -25,9 +25,10 @@ def test_e2e_model_id_input_only_when_other_id_selected():
     field = MODEL_FIELD.read_text(encoding="utf-8")
     picker = PICKER.read_text(encoding="utf-8")
 
-    assert "const showInput = showCustomModelId(selectValue, custom)" in field
+    assert "const showInput = showCustomModelId(selectValue)" in field
     assert "|| isCodex || !allowEmpty" not in field
     assert "|| isCodex" not in field.split("const showInput")[1].split("return")[0]
+    assert "allowEmpty" not in field.split("const showInput")[1].split("return")[0]
 
     assert "export function showCustomModelId" in picker
     assert "selectValue === CUSTOM_MODEL" in picker
