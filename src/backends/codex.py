@@ -28,6 +28,23 @@ _THREAD_LOCK_MARKERS = (
     "thread/resume failed",
 )
 
+# asyncio StreamReader default is 64 KiB. Codex JSONL embeds full
+# ``git diff`` / command output in one ``command_execution`` line.
+# Exceeding the limit raises LimitOverrunError ("Separator is not
+# found, and chunk exceed the limit") and used to abort the pumps
+# while leaving ``codex exec`` holding the exclusive thread writer.
+STREAM_READER_LIMIT = 32 * 1024 * 1024
+EMIT_LINE_CAP = 4 * 1024 * 1024
+_WRITER_RELEASE_SLEEP_S = 0.75
+
+_STREAM_OVERFLOW_MARKERS = (
+    "separator is not found, and chunk exceed the limit",
+    "separator is found, but chunk is longer than limit",
+    "chunk exceed the limit",
+    "chunk is longer than limit",
+    "limitoverrunerror",
+)
+
 # Resume / new-thread prompts for Codex. Never reuse OpenCode
 # finish-todos / "Continue the previous OpenCode session" text.
 DEFAULT_CODEX_RESUME_PROMPT = (
@@ -264,6 +281,124 @@ def is_codex_thread_lock_error(text: str) -> bool:
     """True when Codex refused resume because another writer holds the thread."""
     blob = (text or "").lower()
     return any(marker in blob for marker in _THREAD_LOCK_MARKERS)
+
+
+def is_codex_stream_overflow_error(text: str) -> bool:
+    """True when asyncio dropped a Codex JSONL line that exceeded the buffer."""
+    blob = (text or "").lower()
+    return any(marker in blob for marker in _STREAM_OVERFLOW_MARKERS)
+
+
+def _cap_exec_line(raw: bytes) -> bytes:
+    if len(raw) <= EMIT_LINE_CAP:
+        return raw
+    nl = b"\n" if raw.endswith(b"\n") else b""
+    return raw[:EMIT_LINE_CAP] + b"...[truncated oversize jsonl]" + nl
+
+
+class CodexExecLineReader:
+    """Line reader that never calls ``StreamReader.readline()``.
+
+    ``readline()`` raises ``ValueError`` / ``LimitOverrunError`` when a
+    JSONL event exceeds the 64 KiB default (or even a raised limit) and
+    then **discards** the line. Codex ``command_execution`` items embed
+    full ``git diff`` output in one line; that used to abort the pumps
+    while ``codex exec`` kept the exclusive thread-store writer.
+    ``read(n)`` does not apply the line-length limit.
+    """
+
+    def __init__(self, reader: Any) -> None:
+        self._reader = reader
+        self._buf = bytearray()
+
+    async def readline(self) -> bytes:
+        reader = self._reader
+        if reader is None:
+            return b""
+        read = getattr(reader, "read", None)
+        if read is None:
+            return await self._fallback_readline(reader)
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl >= 0:
+                line = bytes(self._buf[: nl + 1])
+                del self._buf[: nl + 1]
+                return _cap_exec_line(line)
+            try:
+                chunk = await read(65536)
+            except (asyncio.LimitOverrunError, ValueError) as e:
+                if not is_codex_stream_overflow_error(str(e)):
+                    raise
+                if self._buf:
+                    line = bytes(self._buf)
+                    self._buf.clear()
+                    return _cap_exec_line(line)
+                return b""
+            if not chunk:
+                if self._buf:
+                    line = bytes(self._buf)
+                    self._buf.clear()
+                    return _cap_exec_line(line)
+                return b""
+            if len(self._buf) >= EMIT_LINE_CAP:
+                nl = chunk.find(b"\n")
+                if nl < 0:
+                    continue
+                leftover = chunk[nl + 1 :]
+                self._buf.clear()
+                self._buf.extend(leftover)
+                return _cap_exec_line(b"...[truncated oversize jsonl]\n")
+            self._buf.extend(chunk)
+
+    async def _fallback_readline(self, reader: Any) -> bytes:
+        try:
+            raw = await reader.readline()
+        except (asyncio.LimitOverrunError, ValueError) as e:
+            if not is_codex_stream_overflow_error(str(e)):
+                raise
+            return b""
+        return _cap_exec_line(raw or b"")
+
+
+async def read_codex_exec_line(
+    reader: Any, *, acc: Optional[CodexExecLineReader] = None
+) -> bytes:
+    """Read one stdout/stderr line without tripping the StreamReader limit."""
+    src = acc or CodexExecLineReader(reader)
+    return await src.readline()
+
+
+# Live ``codex exec`` processes still holding a thread writer, keyed by
+# thread id and/or working directory. A later run must attach to these
+# instead of ``exec resume`` / a new thread.
+_LIVE_CODEX: Dict[str, Any] = {}
+
+
+def _live_codex_get(key: str) -> Any:
+    key = (key or "").strip()
+    if not key:
+        return None
+    proc = _LIVE_CODEX.get(key)
+    if proc is None:
+        return None
+    if getattr(proc, "returncode", None) is not None:
+        _LIVE_CODEX.pop(key, None)
+        return None
+    return proc
+
+
+def _live_codex_put(key: str, proc: Any) -> None:
+    key = (key or "").strip()
+    if key and proc is not None:
+        _LIVE_CODEX[key] = proc
+
+
+def _live_codex_drop(key: str, proc: Any = None) -> None:
+    key = (key or "").strip()
+    if not key:
+        return
+    if proc is None or _LIVE_CODEX.get(key) is proc:
+        _LIVE_CODEX.pop(key, None)
 
 
 async def _await_process_exit(proc: Any, *, seconds: float) -> bool:
@@ -567,6 +702,7 @@ class CodexBackend:
         handle["backend"] = self.name
         handle["cancel"] = False
         handle["session_id"] = resume or None
+        proc = None
 
         def _emit(stream: str, line: str) -> None:
             log_lines.append(line)
@@ -583,6 +719,8 @@ class CodexBackend:
             sid = parse_codex_thread_id(line)
             if sid:
                 handle["session_id"] = sid
+                if proc is not None:
+                    _live_codex_put(sid, proc)
                 if request.on_session:
                     try:
                         request.on_session(sid)
@@ -596,60 +734,114 @@ class CodexBackend:
             f"timeout={int(timeout_seconds)}s resume={resume or 'no'}"
         )
         logger.debug(f"[codex] cli={cli} home={home}")
-        proc = None
         timed_out = False
         started = asyncio.get_event_loop().time()
+        live_key = resume or cwd
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            handle["proc"] = proc
-            logger.info(f"[codex] process started pid={proc.pid}")
-
-            async def _pump(stream_name: str, reader: Any) -> None:
-                if reader is None:
-                    return
-                while True:
-                    if handle.get("cancel") or (
-                        request.should_abort and request.should_abort()
-                    ):
-                        break
-                    raw = await reader.readline()
-                    if not raw:
-                        break
-                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                    _emit(stream_name, line)
+            proc = _live_codex_get(resume) or _live_codex_get(cwd)
+            if proc is not None:
+                handle["proc"] = proc
+                logger.warning(
+                    f"[codex] attaching to live exec "
+                    f"pid={getattr(proc, 'pid', None)} "
+                    f"thread={resume or '-'}"
+                )
+                _emit(
+                    "stdout",
+                    f"[codex] attached to live exec "
+                    f"pid={getattr(proc, 'pid', None)}",
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=cwd,
+                    env=env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                    limit=STREAM_READER_LIMIT,
+                )
+                handle["proc"] = proc
+                logger.info(f"[codex] process started pid={proc.pid}")
+            _live_codex_put(live_key, proc)
+            _live_codex_put(cwd, proc)
+            if resume:
+                _live_codex_put(resume, proc)
+            line_readers = {
+                "stdout": CodexExecLineReader(proc.stdout),
+                "stderr": CodexExecLineReader(proc.stderr),
+            }
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        _pump("stdout", proc.stdout),
-                        _pump("stderr", proc.stderr),
-                    ),
-                    timeout=timeout_seconds,
+                await self._pump_exec_streams(
+                    proc,
+                    handle,
+                    request,
+                    _emit,
+                    line_readers,
+                    timeout_seconds=timeout_seconds,
                 )
-                await asyncio.wait_for(proc.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 timed_out = True
-                self.cancel(handle)
-                gone = await _await_process_exit(proc, seconds=15.0)
-                if not gone:
-                    self.cancel(handle)
-                    gone = await _await_process_exit(proc, seconds=10.0)
-                if not gone:
-                    logger.warning(
-                        f"[codex] process still alive after timeout kill "
-                        f"pid={getattr(proc, 'pid', None)}"
+                await self._reap_child(handle, proc)
+            except Exception as e:
+                cancelled = handle.get("cancel") or (
+                    request.should_abort and request.should_abort()
+                )
+                still = (
+                    proc is not None
+                    and getattr(proc, "returncode", None) is None
+                )
+                if cancelled:
+                    await self._reap_child(handle, proc)
+                    raise
+                if still:
+                    remaining = timeout_seconds - (
+                        asyncio.get_event_loop().time() - started
                     )
-                # Windows keeps the thread-store writer until the process
-                # (and its file handles) are actually gone.
-                await asyncio.sleep(0.75)
+                    logger.warning(
+                        f"[codex] pump failed ({type(e).__name__}: {e}); "
+                        f"pid={getattr(proc, 'pid', None)} still writing — "
+                        "continuing this exec (no resume, no new thread)"
+                    )
+                    _emit(
+                        "stdout",
+                        "[codex] pump interrupted; continuing live exec",
+                    )
+                    if remaining <= 1.0:
+                        timed_out = True
+                        await self._reap_child(handle, proc)
+                    else:
+                        try:
+                            await self._pump_exec_streams(
+                                proc,
+                                handle,
+                                request,
+                                _emit,
+                                line_readers,
+                                timeout_seconds=remaining,
+                            )
+                        except asyncio.TimeoutError:
+                            timed_out = True
+                            await self._reap_child(handle, proc)
+                        except Exception as e2:
+                            if getattr(proc, "returncode", None) is None:
+                                logger.warning(
+                                    f"[codex] drain failed ({type(e2).__name__}: {e2}); "
+                                    f"waiting for live pid={getattr(proc, 'pid', None)}"
+                                )
+                                try:
+                                    await asyncio.wait_for(
+                                        proc.wait(), timeout=remaining
+                                    )
+                                except asyncio.TimeoutError:
+                                    timed_out = True
+                                    await self._reap_child(handle, proc)
+                            else:
+                                raise
+                else:
+                    raise
         except FileNotFoundError:
             report = format_failure_report(
                 backend="codex",
@@ -670,22 +862,44 @@ class CodexBackend:
                 backend=self.name,
             )
         except Exception as e:
+            leftover = False
+            overflow = isinstance(e, asyncio.LimitOverrunError) or (
+                is_codex_stream_overflow_error(f"{type(e).__name__}: {e}")
+            )
+            if proc is not None:
+                leftover = not await self._reap_child(handle, proc)
+            elapsed = asyncio.get_event_loop().time() - started
+            blob = "\n".join(log_lines)
+            extra = {
+                "thread_locked": bool(leftover or overflow),
+                "leftover_writer": leftover,
+                "stream_overflow": overflow,
+            }
             report = format_failure_report(
                 backend="codex",
                 returncode=-1,
                 stderr=f"[codex] {type(e).__name__}: {e}",
-                stdout="\n".join(log_lines),
+                stdout=blob,
                 session_id=str(handle.get("session_id") or ""),
+                duration_s=elapsed,
+                extra=extra,
             )
             logger.error(report)
             return AgentRunResult(
                 returncode=-1,
-                stdout="\n".join(log_lines),
+                stdout=blob,
                 stderr=report,
                 session_id=handle.get("session_id"),
                 backend=self.name,
+                extra=extra,
             )
         finally:
+            if proc is not None and getattr(proc, "returncode", None) is not None:
+                _live_codex_drop(live_key, proc)
+                _live_codex_drop(cwd, proc)
+                _live_codex_drop(str(handle.get("session_id") or ""), proc)
+                if resume:
+                    _live_codex_drop(resume, proc)
             handle["proc"] = None
 
         elapsed = asyncio.get_event_loop().time() - started
@@ -698,6 +912,10 @@ class CodexBackend:
             timed_out and still_running
         )
         if timed_out:
+            extra = {
+                "thread_locked": bool(locked or still_running),
+                "leftover_writer": bool(still_running),
+            }
             report = format_failure_report(
                 backend="codex",
                 returncode=-1,
@@ -708,7 +926,7 @@ class CodexBackend:
                 timed_out=True,
                 session_id=str(handle.get("session_id") or ""),
                 duration_s=elapsed,
-                extra={"thread_locked": bool(locked or still_running)},
+                extra=extra,
             )
             logger.error(report)
             return AgentRunResult(
@@ -718,7 +936,7 @@ class CodexBackend:
                 session_id=handle.get("session_id"),
                 timed_out=True,
                 backend=self.name,
-                extra={"thread_locked": bool(locked or still_running)},
+                extra=extra,
             )
         if locked:
             report = format_failure_report(
@@ -778,6 +996,70 @@ class CodexBackend:
             progress=100,
             backend=self.name,
         )
+
+    async def _pump_exec_streams(
+        self,
+        proc: Any,
+        handle: Dict[str, Any],
+        request: Any,
+        emit: Any,
+        line_readers: Dict[str, CodexExecLineReader],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Read stdout/stderr until the live exec exits. Does not kill it."""
+
+        async def _pump(stream_name: str) -> None:
+            src = line_readers.get(stream_name)
+            if src is None:
+                return
+            while True:
+                if handle.get("cancel") or (
+                    request.should_abort and request.should_abort()
+                ):
+                    break
+                raw = await src.readline()
+                if not raw:
+                    break
+                if len(raw) >= EMIT_LINE_CAP:
+                    emit(
+                        stream_name,
+                        f"[codex] truncated oversize {stream_name} "
+                        f"line ({len(raw)} bytes)",
+                    )
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                emit(stream_name, line)
+
+        await asyncio.wait_for(
+            asyncio.gather(_pump("stdout"), _pump("stderr")),
+            timeout=timeout_seconds,
+        )
+        if getattr(proc, "returncode", None) is None:
+            await asyncio.wait_for(proc.wait(), timeout=30.0)
+
+    async def _reap_child(self, handle: Dict[str, Any], proc: Any) -> bool:
+        """Kill ``codex exec`` and wait until it releases the thread writer.
+
+        Returning from a pump exception without this left the child holding
+        the exclusive thread-store lock; the next ``exec resume`` then
+        failed with "already has an active writer".
+        """
+        if proc is None:
+            return True
+        self.cancel(handle)
+        gone = await _await_process_exit(proc, seconds=15.0)
+        if not gone:
+            self.cancel(handle)
+            gone = await _await_process_exit(proc, seconds=10.0)
+        if not gone:
+            logger.warning(
+                f"[codex] process still alive after kill "
+                f"pid={getattr(proc, 'pid', None)}"
+            )
+        # Windows keeps the thread-store writer until process file
+        # handles are actually gone.
+        await asyncio.sleep(_WRITER_RELEASE_SLEEP_S)
+        return gone
 
     def cancel(self, handle: Dict[str, Any]) -> None:
         handle["cancel"] = True

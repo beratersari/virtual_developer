@@ -27,6 +27,8 @@ from src.backends.codex import (
     daemon_worthy_codex_summary,
     extract_codex_failure_detail,
     format_failure_report,
+    is_codex_stream_overflow_error,
+    CodexExecLineReader,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
 from src.issue_git_spec import parse_issue_git_spec, upsert_params_backend
@@ -324,6 +326,192 @@ async def test_codex_run_classifies_writer_lock_not_incomplete(tmp_path, monkeyp
     assert result.incomplete is False
     assert "codex thread locked" in result.incomplete_reasons
     assert result.returncode != 0
+
+
+@pytest.mark.asyncio
+async def test_read_codex_exec_line_consumes_oversize_jsonl():
+    """KAN-12375: huge git-diff JSONL must not abort the pump."""
+    reader = asyncio.StreamReader(limit=64)
+    payload = (
+        b'{"type":"item.completed","item":{"type":"command_execution",'
+        b'"command":"git diff HEAD","aggregated_output":"'
+        + (b"x" * 400)
+        + b'"}}\nnext-line\n'
+    )
+    reader.feed_data(payload)
+    reader.feed_eof()
+    src = CodexExecLineReader(reader)
+    raw = await src.readline()
+    text = raw.decode("utf-8", errors="replace")
+    assert "command_execution" in text or "truncated" in text
+    rest = await src.readline()
+    assert rest.decode("utf-8", errors="replace").strip() == "next-line"
+
+
+@pytest.mark.asyncio
+async def test_codex_run_continues_live_child_on_pump_error(tmp_path, monkeypatch):
+    """Pump crash must keep the live exec — it is still the thread writer."""
+    from src.backends.base import AgentRunRequest
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    monkeypatch.setattr("src.backends.codex._WRITER_RELEASE_SLEEP_S", 0.0)
+
+    done_line = (
+        b'{"type":"item.completed","item":{"type":"agent_message",'
+        b'"text":"finished after the huge diff"}}\n'
+    )
+
+    class _FlakyStdout:
+        def __init__(self):
+            self.calls = 0
+            self._off = 0
+
+        async def read(self, n=-1):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError(
+                    "Separator is not found, and chunk exceed the limit"
+                )
+            if self._off >= len(done_line):
+                return b""
+            take = done_line[self._off : self._off + (n if n > 0 else len(done_line))]
+            self._off += len(take)
+            return take
+
+        async def readline(self):
+            return await self.read(65536)
+
+    class _AliveProc:
+        pid = None
+        returncode = None
+
+        def __init__(self):
+            self.stdout = _FlakyStdout()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            while self.returncode is None:
+                if self.stdout._off >= len(done_line):
+                    self.returncode = 0
+                    return 0
+                await asyncio.sleep(0.01)
+            return self.returncode
+
+    proc = _AliveProc()
+
+    async def _fake_exec(*_a, **_k):
+        assert _k.get("limit") is not None
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    result = await CodexBackend().run(
+        AgentRunRequest(
+            prompt="build",
+            session_id="01a038f3-1327-7b51-a5ba-aa2b82e2fe9f",
+            working_directory=tmp_path,
+            timeout_seconds=5,
+        )
+    )
+    assert proc.killed is False
+    assert result.returncode == 0
+    assert "finished after the huge diff" in (result.stdout or "")
+    assert "continuing live exec" in (result.stdout or "")
+    assert not result.extra.get("leftover_writer")
+
+
+@pytest.mark.asyncio
+async def test_codex_run_attaches_to_live_writer(tmp_path, monkeypatch):
+    """Second run must reuse the still-writing exec, not spawn resume."""
+    from src.backends.base import AgentRunRequest
+    from src.backends import codex as codex_mod
+    from src.backends.codex import CodexBackend
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".jira-agent").mkdir()
+    monkeypatch.setattr("src.backends.codex._WRITER_RELEASE_SLEEP_S", 0.0)
+    tid = "01a038f3-1327-7b51-a5ba-aa2b82e2fe9f"
+    payload = (
+        b'{"type":"item.completed","item":{"type":"agent_message",'
+        b'"text":"still working on the original thread"}}\n'
+    )
+
+    class _LiveStdout:
+        def __init__(self):
+            self._sent = False
+
+        async def read(self, n=-1):
+            if self._sent:
+                return b""
+            self._sent = True
+            return payload
+
+        async def readline(self):
+            return await self.read(65536)
+
+    class _LiveProc:
+        pid = None
+        returncode = None
+
+        def __init__(self):
+            self.stdout = _LiveStdout()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            if self.stdout._sent and self.returncode is None:
+                self.returncode = 0
+            return self.returncode if self.returncode is not None else 0
+
+    proc = _LiveProc()
+    created = {"n": 0}
+
+    async def _fake_exec(*_a, **_k):
+        created["n"] += 1
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    codex_mod._LIVE_CODEX.clear()
+    codex_mod._LIVE_CODEX[tid] = proc
+    result = await CodexBackend().run(
+        AgentRunRequest(
+            prompt="continue",
+            session_id=tid,
+            working_directory=tmp_path,
+            timeout_seconds=5,
+        )
+    )
+    assert created["n"] == 0
+    assert proc.killed is False
+    assert result.returncode == 0
+    assert "attached to live exec" in (result.stdout or "")
+    assert "still working on the original thread" in (result.stdout or "")
+    codex_mod._LIVE_CODEX.clear()
+
+
+def test_is_codex_stream_overflow_error_detects_kan12375_log():
+    assert is_codex_stream_overflow_error(
+        "Separator is not found, and chunk exceed the limit"
+    )
+    assert is_codex_stream_overflow_error(
+        "Separator is found, but chunk is longer than limit"
+    )
+    assert is_codex_stream_overflow_error(
+        "[codex] LimitOverrunError: chunk exceed the limit"
+    )
+    assert not is_codex_stream_overflow_error("[codex] exit 1")
 
 
 def test_is_codex_thread_lock_error_detects_kan12371_log():
