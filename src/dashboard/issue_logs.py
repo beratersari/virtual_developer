@@ -202,6 +202,23 @@ class IssueLogRing:
             merged = merged[-limit:]
         return merged
 
+    def recent(self, *, limit: int = 2000) -> List[Dict[str, str]]:
+        """Most recent in-memory daemon lines (process lifetime)."""
+        cap = max(0, int(limit or 0))
+        with self._lock:
+            items = list(self._lines)
+        if cap:
+            items = items[-cap:]
+        rows: List[Dict[str, str]] = []
+        for ts, msg, jid, ikey in items:
+            row: Dict[str, str] = {"timestamp": ts, "message": msg}
+            if jid:
+                row["job_id"] = jid
+            if ikey:
+                row["issue_key"] = ikey
+            rows.append(row)
+        return rows
+
 
 _TS_PREFIX = re.compile(
     r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"

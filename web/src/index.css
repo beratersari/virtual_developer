@@ -387,6 +387,54 @@ body {
   animation: vd-pop 0.2s ease;
 }
 
+.vd-report-panel {
+  position: absolute;
+  z-index: 40;
+  left: 0;
+  top: calc(100% + 0.4rem);
+  width: min(22rem, calc(100vw - 1.5rem));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  padding: 0.85rem 0.85rem 0.9rem;
+}
+
+@media (min-width: 900px) {
+  .vd-report-panel {
+    top: auto;
+    bottom: calc(100% + 0.45rem);
+  }
+}
+
+.vd-report-list {
+  max-height: min(40vh, 16rem);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.vd-report-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.65rem;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.vd-report-option:last-child { border-bottom: 0; }
+
+.vd-report-option:hover { background: var(--surface-hover); }
+
+.vd-report-option.is-selected {
+  background: var(--accent-muted);
+}
+
 .vd-modal-title { margin: 0; font-size: 1.05rem; font-weight: 650; color: var(--text); }
 .vd-modal-body { margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.55; }
 .vd-modal-actions { margin-top: 1.2rem; display: flex; justify-content: flex-end; gap: 0.5rem; }

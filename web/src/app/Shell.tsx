@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Alert } from '../ui/Alert'
+import { ReportIssue } from '../ui/ReportIssue'
 import { formatChatTime, formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
 
@@ -118,6 +119,7 @@ export function Shell() {
         </nav>
 
         <div className="mt-3 space-y-2 px-2 text-xs">
+          <ReportIssue />
           <div className="hidden font-mono text-[11px] leading-snug text-text-secondary md:block">
             <div className="text-text">{localClock || '—'}</div>
             {serverClock && (

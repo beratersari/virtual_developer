@@ -185,6 +185,7 @@ class Logger:
                 f"[{filename}:{line_no}]  {func_name}  {body}"
             )
             issue_log_ring.append(plain, job_id=jid, issue_key=ikey)
+            _append_daemon_log_file(plain)
         except Exception:
             pass
 
@@ -206,6 +207,30 @@ class Logger:
     def exception(self, message: str, exc: BaseException) -> None:
         """Log an error with full traceback (message, exception)."""
         self._log(LogLevel.ERROR, message, exc)
+
+
+_DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def daemon_log_path() -> Path:
+    """Durable daemon log (plain text). Isolated under ``.jira-agent``."""
+    return Path.cwd() / ".jira-agent" / "logs" / "daemon.log"
+
+
+def _append_daemon_log_file(plain: str) -> None:
+    """Best-effort append so issue reports survive a process restart."""
+    path = daemon_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.stat().st_size > _DAEMON_LOG_MAX_BYTES:
+            tail = path.read_bytes()[-(_DAEMON_LOG_MAX_BYTES // 2) :]
+            path.write_bytes(tail + b"\n")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(plain)
+            if not plain.endswith("\n"):
+                f.write("\n")
+    except OSError:
+        pass
 
 
 # Global logger instance
