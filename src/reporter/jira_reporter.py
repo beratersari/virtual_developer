@@ -347,6 +347,15 @@ _Completed by the AI agent. Please review and verify before merging or closing._
                 "open todos after an unattended nudge). This is *not* a "
                 "compaction budget failure and *not* a crash."
             )
+        elif kind in {"thread_lock", "codex_lock", "active_writer"}:
+            heading = "AI Agent — Codex thread locked"
+            lead = (
+                "Codex would not resume the thread: another process still "
+                "held the thread-store writer (`already has an active "
+                "writer`). This is *not* an incomplete OpenCode session. "
+                "The orchestrator retries resume briefly, then starts a "
+                "new thread from the current files."
+            )
         else:
             heading = "AI Agent — Error"
             lead = "An error occurred while processing this issue:"

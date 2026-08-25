@@ -436,6 +436,76 @@ class AgentRunner:
         except OSError:
             return True
 
+    @staticmethod
+    def _task_is_codex(
+        task: AgentTask, session_id: Optional[str] = None
+    ) -> bool:
+        """True for Codex jobs (backend flag or Codex thread UUID)."""
+        from src.backends.base import BACKEND_CODEX, normalize_backend_name
+
+        name = normalize_backend_name(getattr(task, "backend", None))
+        if name == BACKEND_CODEX:
+            return True
+        sid = (session_id or getattr(task, "session_id", None) or "").strip()
+        if not sid or sid.startswith("ses_"):
+            return False
+        return sid.count("-") >= 4 and len(sid) >= 16
+
+    @staticmethod
+    def _result_thread_locked(result: Optional[Dict[str, Any]]) -> bool:
+        data = result if isinstance(result, dict) else {}
+        if data.get("thread_locked"):
+            return True
+        blob = " ".join(
+            [str(data.get("stderr") or "")]
+            + [str(r) for r in (data.get("incomplete_reasons") or [])]
+        ).lower()
+        return (
+            "active writer" in blob
+            or "thread-store conflict" in blob
+            or "codex thread locked" in blob
+        )
+
+    def _resume_codex_after_lock(
+        self,
+        task: AgentTask,
+        session_id: Optional[str],
+        *,
+        lock_hits: int,
+    ) -> None:
+        """Retry the same Codex thread once, then start a new thread.
+
+        Codex refuses ``exec resume`` while another writer holds the store.
+        Flooding the same id with OpenCode finish-todos prompts does not
+        release the lock and burns the incomplete retry budget.
+        """
+        from src.backends.codex import (
+            DEFAULT_CODEX_COLD_CONTINUE_PROMPT,
+            DEFAULT_CODEX_RESUME_PROMPT,
+        )
+
+        sid = (session_id or "").strip()
+        if sid and lock_hits < 2:
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            logger.warning(
+                f"Retry after thread_locked: resume Codex thread {sid} "
+                f"(lock hit {lock_hits})"
+            )
+            return
+        if sid:
+            task.abandoned_session_id = sid
+            forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
+            if sid not in forgotten:
+                forgotten.append(sid)
+            task.forgotten_session_ids = forgotten
+        task.session_id = None
+        task.prompt = DEFAULT_CODEX_COLD_CONTINUE_PROMPT
+        logger.warning(
+            f"Retry after thread_locked: Codex thread {sid or '-'} still "
+            "has an active writer — starting a new thread from current files"
+        )
+
     def _resume_opencode_session_for_retry(
         self,
         task: AgentTask,
@@ -454,6 +524,21 @@ class AgentRunner:
         hung; retrying Continue on that id stays stuck.
         """
         sid = (session_id or "").strip()
+        if self._task_is_codex(task, sid):
+            from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
+
+            if not sid:
+                logger.warning(
+                    f"Retry after {why} has no Codex thread id; starting cold"
+                )
+                return
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            task.abort_busy_session = False
+            logger.warning(
+                f"Retry after {why}: resume Codex thread {sid}"
+            )
+            return
         empty_log = self._session_log_is_empty(session_file)
         no_stdout = not (stdout or "").strip()
         if timed_out and empty_log and no_stdout and not sid:
@@ -1127,6 +1212,7 @@ class AgentRunner:
         incomplete_used = 0
         error_used = 0
         timeout_used = 0
+        lock_used = 0
         all_session_files = []
 
         def _retry_info(**extra: Any) -> Dict[str, Any]:
@@ -1135,6 +1221,7 @@ class AgentRunner:
                 "max_retries": effective_max_retries,
                 "max_incomplete_retries": incomplete_cap,
                 "incomplete_retries_used": incomplete_used,
+                "lock_retries_used": lock_used,
                 "retried": attempt > 0,
                 "all_session_files": all_session_files,
                 "last_opencode_session_id": last_session_id,
@@ -1202,7 +1289,16 @@ class AgentRunner:
             should_retry = False
             retry_reason = ""
 
-            if result.get("timed_out"):
+            if self._result_thread_locked(result):
+                if lock_used < effective_max_retries:
+                    should_retry = True
+                    retry_reason = "thread_locked"
+                    logger.warning(
+                        f"Codex thread locked on attempt {attempt + 1}: "
+                        f"task_id={task.task_id} "
+                        f"(lock retry {lock_used + 1}/{effective_max_retries})"
+                    )
+            elif result.get("timed_out"):
                 from src.opencode_sessions import compact_related_reasons
 
                 to_reasons = list(result.get("incomplete_reasons") or [])
@@ -1269,14 +1365,20 @@ class AgentRunner:
                 logger.error(f"Agent failed and no more retries allowed: task_id={task.task_id}, attempt={attempt + 1}")
 
             if should_retry:
-                self._resume_opencode_session_for_retry(
-                    task,
-                    result.get("opencode_session_id") or last_session_id,
-                    why=retry_reason,
-                    session_file=result.get("session_file"),
-                    timed_out=bool(result.get("timed_out")),
-                    stdout=result.get("stdout"),
-                )
+                sid = result.get("opencode_session_id") or last_session_id
+                if retry_reason == "thread_locked":
+                    self._resume_codex_after_lock(
+                        task, sid, lock_hits=lock_used + 1
+                    )
+                else:
+                    self._resume_opencode_session_for_retry(
+                        task,
+                        sid,
+                        why=retry_reason,
+                        session_file=result.get("session_file"),
+                        timed_out=bool(result.get("timed_out")),
+                        stdout=result.get("stdout"),
+                    )
                 if _aborted():
                     logger.info(
                         f"Abort before scheduling retry: task_id={task.task_id}"
@@ -1293,12 +1395,21 @@ class AgentRunner:
                     incomplete_used += 1
                 elif retry_reason == "timeout":
                     timeout_used += 1
+                elif retry_reason == "thread_locked":
+                    lock_used += 1
                 else:
                     error_used += 1
                 attempt += 1
 
-                # Calculate delay with exponential backoff
-                delay = retry_delay * (backoff_multiplier ** (attempt - 1))
+                # Lock conflicts fail in seconds; do not apply the
+                # incomplete-session exponential (5 * 2^n → hours).
+                if retry_reason == "thread_locked":
+                    delay = min(
+                        float(retry_delay or 5) * (2 ** max(0, lock_used - 1)),
+                        15.0,
+                    )
+                else:
+                    delay = retry_delay * (backoff_multiplier ** (attempt - 1))
 
                 # Extract error details from the failed attempt
                 error_message = result.get("stderr", "") if result.get("returncode") != 0 else None
@@ -1327,7 +1438,7 @@ class AgentRunner:
 
                 # Log retry attempt
                 logger.warning(
-                    f"{retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} "
+                    f"{retry_reason} on attempt {attempt}/{max_total_attempts} "
                     f"for {task.task_id}, retrying in {delay:.1f}s..."
                 )
 

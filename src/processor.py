@@ -484,6 +484,26 @@ class JobProcessor:
             or "auto-compact loop" in blob
             or "compact-only cycles" in blob
         )
+        locked = bool(data.get("thread_locked")) or (
+            "active writer" in blob
+            or "thread-store conflict" in blob
+            or "codex thread locked" in blob
+        )
+        if locked:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "Codex refused to resume the thread because another "
+                    "writer still holds it (often a leftover `codex exec` "
+                    "after timeout). Kill leftover Codex processes for this "
+                    "job, then move the issue back to To Do to re-queue. "
+                    "The next run starts a new thread from the current files."
+                ),
+                category="thread_lock",
+            )
+            return
         if incomplete and asked and not loopish:
             self._fail_issue(
                 issue_key,
