@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchModels } from '../api/client'
 import type { ModelsPayload } from '../api/types'
-import { CUSTOM_MODEL, modelSelectValue } from '../util/modelPicker'
+import { CUSTOM_MODEL, modelSelectValue, showCustomModelId } from '../util/modelPicker'
 import { Spinner } from './Spinner'
 
 export function ModelField({
@@ -52,7 +52,7 @@ export function ModelField({
   }, [value, inventory])
 
   const selectValue = modelSelectValue(value, known, custom)
-  const showInput = custom || selectValue === CUSTOM_MODEL || isCodex || !allowEmpty
+  const showInput = showCustomModelId(selectValue)
 
   return (
     <div className="space-y-2">
@@ -125,13 +125,17 @@ export function ModelField({
       <span className="mt-1 block text-xs text-text-muted">
         {loading
           ? 'Loading models…'
-          : isCodex
-            ? allowEmpty
-              ? 'This job only. List is from ~/.codex/config.toml — type any id Codex accepts.'
-              : 'Ids from ~/.codex/config.toml. Type any id Codex accepts.'
-            : allowEmpty
-              ? 'This job only. Leave default to use Settings. Other id stays typed.'
-              : 'Inventory from OpenCode. You can also type an id.'}
+          : showInput
+            ? isCodex
+              ? 'Type any id Codex accepts.'
+              : 'Type a provider/model id.'
+            : isCodex
+              ? allowEmpty
+                ? 'This job only. List is from ~/.codex/config.toml. Choose Other id… to type a custom model.'
+                : 'Ids from ~/.codex/config.toml. Choose Other id… to type a custom model.'
+              : allowEmpty
+                ? 'This job only. Leave default to use Settings. Choose Other id… to type a custom model.'
+                : 'Inventory from OpenCode. Choose Other id… to type a custom model.'}
       </span>
       {inventory?.error && <p className="text-xs text-warning-text">{inventory.error}</p>}
     </div>
