@@ -300,10 +300,10 @@ class JobProcessor:
         that would make ``force_after_in_progress`` re-fire every poll while
         the ticket never left To Do.
         """
-        error_text = (error_message or "Unknown error")[:2000]
+        error_text = (error_message or "Unknown error")[:8000]
         logger.error(
-            f"{issue_key} failed ({category}): {error_text}"
-            + (f" Suggestion: {suggestion}" if suggestion else "")
+            f"{issue_key} failed ({category}) exit_message:\n{error_text}"
+            + (f"\nSuggestion: {suggestion}" if suggestion else "")
         )
         try:
             from src.gitlab.keys import is_gitlab_issue_key
@@ -473,13 +473,34 @@ class JobProcessor:
         incomplete = bool(data.get("incomplete"))
         stderr = (data.get("stderr") or "").strip() or fallback
         reasons = list(data.get("incomplete_reasons") or [])
-        backend = (data.get("backend") or "").strip() or "agent"
-        logger.error(
-            f"{issue_key} {backend} failed: returncode={data.get('returncode')} "
-            f"timed_out={bool(data.get('timed_out'))} incomplete={incomplete} "
-            f"reasons={reasons or '-'} "
-            f"stderr={(stderr or '')[:1500]}"
+        backend = (data.get("backend") or data.get("mode") or "").strip() or "agent"
+        from src.backends.codex import format_failure_report
+
+        report = format_failure_report(
+            backend=backend,
+            returncode=data.get("returncode"),
+            stderr=stderr,
+            stdout=str(data.get("stdout") or ""),
+            timed_out=bool(data.get("timed_out")),
+            incomplete=incomplete,
+            incomplete_reasons=reasons,
+            session_id=str(
+                data.get("session_id") or data.get("opencode_session_id") or ""
+            ),
+            extra={
+                k: data.get(k)
+                for k in (
+                    "task_id",
+                    "progress",
+                    "thread_locked",
+                    "assistant_asked_question",
+                    "compact_events",
+                    "continue_count",
+                    "session_file",
+                )
+            },
         )
+        logger.error(f"{issue_key} {report}")
         asked = bool(data.get("assistant_asked_question")) or any(
             "clarifying question" in str(r).lower() for r in reasons
         ) or "clarifying question" in stderr.lower()

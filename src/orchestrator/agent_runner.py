@@ -870,13 +870,25 @@ class AgentRunner:
                 f"session={turn.session_id} duration={elapsed:.2f}s"
             )
         else:
-            reasons = ",".join(str(r) for r in (turn.incomplete_reasons or []))
+            from src.backends.codex import format_failure_report
+
             logger.error(
-                f"[opencode] exit failed: task_id={task.task_id} "
-                f"returncode={turn.returncode} incomplete={turn.incomplete} "
-                f"reasons={reasons or '-'} "
-                f"stderr={(turn.stderr or '')[:1500]} "
-                f"duration={elapsed:.2f}s"
+                format_failure_report(
+                    backend="opencode",
+                    returncode=turn.returncode,
+                    stderr=turn.stderr or "",
+                    stdout=turn.stdout or "",
+                    timed_out=bool(turn.timed_out),
+                    incomplete=bool(turn.incomplete),
+                    incomplete_reasons=list(turn.incomplete_reasons or []),
+                    session_id=str(turn.session_id or ""),
+                    duration_s=elapsed,
+                    extra={
+                        "task_id": task.task_id,
+                        "compact_events": turn.compact_events,
+                        "continue_count": turn.continue_count,
+                    },
+                )
             )
         if on_complete:
             on_complete(result)
@@ -1541,26 +1553,31 @@ class AgentRunner:
             else:
                 # No more retries - include session ID from last attempt
                 logger.info(f"All retry attempts exhausted: task_id={task.task_id}, total_attempts={attempt + 1}")
-                fail_bits = [
-                    f"reason={retry_reason}",
-                    f"returncode={result.get('returncode')}",
-                ]
-                if result.get("timed_out"):
-                    fail_bits.append("timed_out=true")
-                if result.get("incomplete"):
-                    fail_bits.append(
-                        "incomplete_reasons="
-                        + ",".join(
-                            str(r)
-                            for r in (result.get("incomplete_reasons") or [])
-                        )
-                    )
-                err = (result.get("stderr") or "").strip()
-                if err:
-                    fail_bits.append(f"stderr={err[:1500]}")
+                from src.backends.codex import format_failure_report
+
                 logger.error(
-                    f"Job attempts exhausted ({task.backend or 'agent'}): "
-                    + " ".join(fail_bits)
+                    format_failure_report(
+                        backend=str(task.backend or result.get("backend") or "agent"),
+                        returncode=result.get("returncode"),
+                        stderr=str(result.get("stderr") or ""),
+                        stdout=str(result.get("stdout") or ""),
+                        timed_out=bool(result.get("timed_out")),
+                        incomplete=bool(result.get("incomplete")),
+                        incomplete_reasons=list(
+                            result.get("incomplete_reasons") or []
+                        ),
+                        session_id=str(
+                            result.get("opencode_session_id")
+                            or result.get("session_id")
+                            or ""
+                        ),
+                        extra={
+                            "task_id": task.task_id,
+                            "retry_reason": retry_reason,
+                            "total_attempts": attempt + 1,
+                            "session_file": result.get("session_file"),
+                        },
+                    )
                 )
                 result["retry_info"] = _retry_info(final_failure=True)
                 return result

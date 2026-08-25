@@ -26,6 +26,7 @@ from src.backends.codex import (
     summarize_codex_exec_line,
     daemon_worthy_codex_summary,
     extract_codex_failure_detail,
+    format_failure_report,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
 from src.issue_git_spec import parse_issue_git_spec, upsert_params_backend
@@ -257,10 +258,28 @@ def test_summarize_codex_exec_line_steps():
     blob = "\n".join(
         [
             '{"type":"item.completed","item":{"type":"agent_message","text":"halfway"}}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"msbuild","exit_code":1,"aggregated_output":"C1060 out of heap"}}',
             '{"type":"error","message":"writer still holds the thread"}',
         ]
     )
-    assert "writer still holds" in extract_codex_failure_detail(blob)
+    detail = extract_codex_failure_detail(blob)
+    assert "writer still holds" in detail
+    assert "exit_code=1" in detail
+    assert "msbuild" in detail
+    assert "halfway" in detail
+    report = format_failure_report(
+        backend="codex",
+        returncode=1,
+        stderr="[codex] process exit_code=1",
+        stdout=blob,
+        session_id="tid-9",
+        duration_s=12.5,
+    )
+    assert "exit_code=1" in report
+    assert "session_id=tid-9" in report
+    assert "duration_s=12.5" in report
+    assert "--- stderr ---" in report
+    assert "writer still holds" in report
 
 
 @pytest.mark.asyncio
