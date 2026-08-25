@@ -815,14 +815,13 @@ def test_g1_purge_age_zero_deletes_everything_including_fresh(tmp_path):
 
 
 def test_g2_agent_env_includes_home():
-    """Documents allowlist includes HOME — host ~/.git-credentials reachable."""
+    """Full process env is inherited, including HOME and host tokens."""
     from src.orchestrator.agent_runner import _agent_subprocess_env
 
     with patch.dict(os.environ, {"HOME": "/Users/operator", "GITLAB_PAT": "secret"}, clear=False):
         env = _agent_subprocess_env()
     assert env.get("HOME") == "/Users/operator"
-    assert "GITLAB_PAT" not in env
-    assert "JIRA_API_TOKEN" not in env or env.get("JIRA_API_TOKEN") is None
+    assert env.get("GITLAB_PAT") == "secret"
 
 
 def test_g2_agent_env_must_isolate_home_and_disable_credential_helper():

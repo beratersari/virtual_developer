@@ -6,12 +6,14 @@ same Source **and** Target reuse the folder and continue the OpenCode session
 (see ``src.issue_git_spec``). A different Target gets a new clone.
 """
 
+import base64
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -114,7 +116,9 @@ class GitManager:
         self.issue_key = issue_key
         self.temp_dir: Optional[Path] = None
         self.remote_enabled: bool = False
-        self.remote_url: Optional[str] = (remote_url or "").strip() or None
+        self.remote_url: Optional[str] = (
+            self.normalize_remote_url(remote_url or "") or None
+        )
         self.remote_name: str = "unknown"
         # Params "source" = intended MR source / work branch name
         self.source_branch: str = (source_branch or "").strip()
@@ -162,7 +166,7 @@ class GitManager:
     def _setup_temp_working_dir_inner(self) -> None:
         logger.info(f"Setting up temp working directory for issue: {self.issue_key}")
 
-        gitlab_url = (self.remote_url or "").strip()
+        gitlab_url = self.normalize_remote_url(self.remote_url or "")
         if not gitlab_url:
             raise GitCloneError(
                 "*Yaver* could not clone: no repository URL was provided on the issue.\n\n"
@@ -430,10 +434,32 @@ class GitManager:
         """
         env = dict(os.environ)
         env.setdefault("GIT_LFS_SKIP_SMUDGE", "1")
-        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        # Git Credential Manager (Windows) — never show a username/password GUI.
+        env["GCM_INTERACTIVE"] = "never"
+        env["GCM_MODAL_PROMPT"] = "false"
+        env["GCM_GUI_PROMPT"] = "false"
         if extra:
             env.update(extra)
         return env
+
+    @staticmethod
+    def _unattended_git_prefix() -> List[str]:
+        """``git -c …`` flags that must appear on every remote-touching command.
+
+        ``GIT_CONFIG_*`` env is not enough on some Git-for-Windows builds:
+        system ``credential.helper=manager`` still opens a GUI unless an
+        empty ``-c credential.helper=`` resets the list on argv.
+        """
+        return [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "i18n.logOutputEncoding=utf-8",
+        ]
 
     @staticmethod
     def _looks_like_lfs_filter_noise(text: str) -> bool:
@@ -460,19 +486,41 @@ class GitManager:
         """
         out = dict(env) if env is not None else self._base_git_env()
         out["GIT_TERMINAL_PROMPT"] = "0"
-        target = url or self.remote_url or ""
+        out["GCM_INTERACTIVE"] = "never"
+        out["GCM_MODAL_PROMPT"] = "false"
+        out["GCM_GUI_PROMPT"] = "false"
+        # Do not inherit a GUI askpass from the operator PC (git-gui--askpass).
+        out.pop("DISPLAY", None)
+        target = self.normalize_remote_url(url or self.remote_url or "")
         pat = self._pat_for_remote(target)
         host = self._host_from_url(target)
         if not pat or not host:
             return out
         askpass = self._ensure_askpass_script()
         out["GIT_ASKPASS"] = str(askpass)
+        out["SSH_ASKPASS"] = str(askpass)
+        out["SSH_ASKPASS_REQUIRE"] = "never"
         out["VD_GIT_PASSWORD"] = pat
+        out["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        basic = base64.b64encode(f"oauth2:{pat}".encode("utf-8")).decode("ascii")
+        rewrite_from = (
+            f"https://{host}/",
+            f"http://{host}/",
+            f"https://git@{host}/",
+            f"http://git@{host}/",
+            f"git@{host}:",
+            f"ssh://git@{host}/",
+            f"ssh://{host}/",
+        )
         pairs = [
-            (f"url.https://oauth2:{pat}@{host}/.insteadOf", f"https://{host}/"),
-            (f"url.http://oauth2:{pat}@{host}/.insteadOf", f"http://{host}/"),
-            ("credential.helper", ""),
+            (f"url.https://oauth2:{pat}@{host}/.insteadOf", src)
+            for src in rewrite_from
         ]
+        # Empty helper resets system GCM / manager-core for this child.
+        pairs.append(("credential.helper", ""))
+        pairs.append((f"credential.https://{host}.helper", ""))
+        pairs.append(("core.askPass", str(askpass)))
+        pairs.append(("http.extraHeader", f"Authorization: Basic {basic}"))
         try:
             base_count = int(out.get("GIT_CONFIG_COUNT") or "0")
         except ValueError:
@@ -536,7 +584,7 @@ class GitManager:
         try:
             result = self._run_tracked(
                 [
-                    "git",
+                    *self._unattended_git_prefix(),
                     "submodule",
                     "update",
                     "--init",
@@ -615,8 +663,8 @@ class GitManager:
         clean_url = (self.remote_url or "").strip()
         # Clean URL on argv (no PAT in ps). Auth is insteadOf + askpass in env
         # from Settings / .env so a disabled credential manager cannot prompt.
-        clone_url = clean_url
-        clone_env = self._apply_pat_to_git_env(self._base_git_env(), url=clean_url)
+        clone_url = self.normalize_remote_url(clean_url) or clean_url
+        clone_env = self._apply_pat_to_git_env(self._base_git_env(), url=clone_url)
 
         issue_tag = self.issue_key or "(unknown)"
         clone_timeout = max(
@@ -634,9 +682,7 @@ class GitManager:
         try:
             result = self._run_tracked(
                 [
-                    "git",
-                    "-c",
-                    "core.longpaths=true",
+                    *self._unattended_git_prefix(),
                     "clone",
                     "--no-single-branch",
                     clone_url,
@@ -704,16 +750,70 @@ class GitManager:
         self._clone_in_progress = False
 
     @staticmethod
+    def normalize_remote_url(url: str) -> str:
+        """HTTPS clone URL: SSH → https, strip userinfo, drop default ports.
+
+        GitLab MR hooks sometimes send ``git@host:group/repo.git`` or
+        ``https://git@host/...``. Userinfo breaks ``url.*.insteadOf`` matching
+        and Windows GCM then pops a username/password dialog.
+        """
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("git@"):
+            rest = raw[4:]
+            if ":" in rest:
+                host, path = rest.split(":", 1)
+                return f"https://{host}/{path.lstrip('/')}"
+            return raw
+        if raw.startswith("ssh://"):
+            rest = raw[6:]
+            if rest.startswith("git@"):
+                rest = rest[4:]
+            if "/" in rest:
+                host, path = rest.split("/", 1)
+                return f"https://{host}/{path.lstrip('/')}"
+            return raw
+        if "://" not in raw:
+            raw = "https://" + raw
+        parsed = urlparse(raw)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return raw
+        host = parsed.hostname.lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{host}:{port}" if port and port not in (80, 443) else host
+        return urlunparse(
+            (parsed.scheme, netloc, parsed.path or "", "", parsed.query, parsed.fragment)
+        )
+
+    @staticmethod
     def _host_from_url(url: str) -> str:
         raw = (url or "").strip()
         if not raw:
             return ""
-        if not raw.startswith("http"):
+        if raw.startswith("git@"):
+            rest = raw[4:]
+            return rest.split(":", 1)[0].split("/", 1)[0].lower()
+        if raw.startswith("ssh://"):
+            rest = raw[6:]
+            if rest.startswith("git@"):
+                rest = rest[4:]
+            return rest.split("/", 1)[0].split(":", 1)[0].lower()
+        if "://" not in raw:
             raw = "https://" + raw
         parsed = urlparse(raw)
         name = (parsed.hostname or "").lower()
-        if parsed.port:
-            return f"{name}:{parsed.port}"
+        if not name:
+            return ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port and port not in (80, 443):
+            return f"{name}:{port}"
         return name
 
     def _pat_for_remote(self, url: str = "") -> str:
@@ -723,7 +823,10 @@ class GitManager:
         authenticates this job remote (clone/push). Host maps stay exact-match
         so a stored PAT is never sent to an unlisted host.
         """
-        host = self._host_from_url(url or self.remote_url or "")
+        host = self._host_from_url(
+            self.normalize_remote_url(url or self.remote_url or "")
+            or (url or self.remote_url or "")
+        )
         if not host:
             return ""
         if hasattr(settings, "gitlab_pat_for_host"):
@@ -792,7 +895,7 @@ class GitManager:
         When credentials are already in the URL, git does not call helpers.
         Origin is scrubbed back to a clean URL after the operation.
         """
-        base = (url or self.remote_url or "").strip()
+        base = self.normalize_remote_url(url or self.remote_url or "")
         if not base:
             return None
         pat = self._pat_for_remote(base)
@@ -839,21 +942,8 @@ class GitManager:
             return False
 
     def _git_auth_env(self, *, url: str = "") -> Dict[str, str]:
-        """Optional askpass env (legacy/tests). Does **not** clear credential helpers.
-
-        Preferred auth for clone/push is ``_https_url_with_settings_pat`` so the
-        Windows credential helper remains available for the user and for ops
-        without a settings PAT. Askpass alone loses to Windows GCM when both run.
-        """
-        env = dict(os.environ)
-        pat = self._pat_for_remote(url or self.remote_url or "")
-        if not pat:
-            return env
-        askpass = self._ensure_askpass_script()
-        env["GIT_ASKPASS"] = str(askpass)
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        env["VD_GIT_PASSWORD"] = pat
-        return env
+        """Same unattended env as clone/fetch/push (legacy name, tests still call it)."""
+        return self._apply_pat_to_git_env(self._base_git_env(), url=url or self.remote_url or "")
 
     @staticmethod
     def _ensure_askpass_script() -> Path:
@@ -861,32 +951,36 @@ class GitManager:
         # Prefer a stable path under the agent runtime so we do not rewrite each call
         base = Path.cwd() / ".jira-agent" / "bin"
         base.mkdir(parents=True, exist_ok=True)
+        py = base / "vd-git-askpass.py"
+        py_content = (
+            "import os, sys\n"
+            "p = \" \".join(sys.argv[1:]).lower()\n"
+            "if \"username\" in p:\n"
+            "    sys.stdout.write(\"oauth2\\n\")\n"
+            "else:\n"
+            "    sys.stdout.write(os.environ.get(\"VD_GIT_PASSWORD\", \"\") + \"\\n\")\n"
+        )
+        if not py.exists() or py.read_text(encoding="utf-8") != py_content:
+            py.write_text(py_content, encoding="utf-8")
         if os.name == "nt":
             path = base / "vd-git-askpass.cmd"
+            exe = str(Path(sys.executable).resolve())
             content = (
                 "@echo off\r\n"
-                "set \"PROMPT=%~1\"\r\n"
-                "echo %PROMPT% | findstr /I \"Username username\" >nul\r\n"
-                "if not errorlevel 1 (\r\n"
-                "  echo oauth2\r\n"
-                "  exit /b 0\r\n"
-                ")\r\n"
-                "echo %VD_GIT_PASSWORD%\r\n"
+                f"\"{exe}\" \"%~dp0vd-git-askpass.py\" %*\r\n"
             )
         else:
             path = base / "vd-git-askpass.sh"
             content = (
                 "#!/bin/sh\n"
-                "case \"$1\" in\n"
-                "  *[Uu]sername*) echo oauth2 ;;\n"
-                "  *) printf '%s\\n' \"$VD_GIT_PASSWORD\" ;;\n"
-                "esac\n"
+                f"exec '{sys.executable}' '{py}' \"$@\"\n"
             )
         if not path.exists() or path.read_text(encoding="utf-8") != content:
             path.write_text(content, encoding="utf-8")
             if os.name != "nt":
                 try:
                     path.chmod(0o700)
+                    py.chmod(0o700)
                 except OSError:
                     pass
         return path
@@ -1078,10 +1172,13 @@ class GitManager:
                 popen_kwargs["encoding"] = encoding
             if errors:
                 popen_kwargs["errors"] = errors
+        # Never attach a console / wait on the operator keyboard. A missing
+        # PAT must fail the child, not pop Git Credential Manager.
+        popen_kwargs["stdin"] = subprocess.DEVNULL
         if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(
-                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-            )
+            flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0)
+            flags |= int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+            popen_kwargs["creationflags"] = flags
         else:
             popen_kwargs["start_new_session"] = True
 
@@ -1210,9 +1307,8 @@ class GitManager:
         """Run a git command in the temp working directory.
 
         When ``auth=True`` and a settings PAT exists for the host, temporarily
-        points ``origin`` at ``https://oauth2:PAT@…`` so **settings** win without
-        clearing Windows credential helpers. Scrubs origin afterward. With no
-        settings PAT, leaves helpers alone (Windows Credential Manager can apply).
+        points ``origin`` at ``https://oauth2:PAT@…``. Always disables the
+        Windows credential-manager GUI for this child (empty helper + GCM never).
 
         Always applies a hard timeout (default ``git_command_timeout_seconds``)
         so a hung push/fetch cannot pin a job slot forever.
@@ -1227,11 +1323,7 @@ class GitManager:
         # are not mojibake'd on Windows cp1254 locale when building MR titles.
         # Disable LFS filter hooks so a broken git-lfs install cannot fail checkout.
         cmd = [
-            "git",
-            "-c",
-            "core.longpaths=true",
-            "-c",
-            "i18n.logOutputEncoding=utf-8",
+            *self._unattended_git_prefix(),
             "-c",
             "filter.lfs.smudge=",
             "-c",

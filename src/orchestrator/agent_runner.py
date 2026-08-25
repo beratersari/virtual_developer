@@ -54,85 +54,166 @@ def resolve_opencode_agent_name(agent: str) -> str:
     return OPENCODE_AGENT_ALIASES.get(key.lower().replace("_", "-"), key)
 
 # ---------------------------------------------------------------------------
-# Agent child env: pass everything except sensitive names.
+# Agent child env: inherit the full process environment (no allow/deny filter)
+# plus current Windows User/Machine vars (System Properties / WSL host).
 # (working_directory is accepted for call-site compatibility; unused.)
 # ---------------------------------------------------------------------------
 
-# Host bot / push / SSH — always blocked.
-_AGENT_ENV_BLOCK_EXACT = frozenset(
-    {
-        "JIRA_API_TOKEN",
-        "JIRA_PASSWORD",
-        "JIRA_EMAIL",
-        "GITLAB_PAT",
-        "GITLAB_TOKEN",
-        "GITLAB_HOST_PATS",
-        "GITLAB_PRIVATE_TOKEN",
-        "GITLAB_ACCESS_TOKEN",
-        "VD_GIT_PASSWORD",
-        "SSH_AUTH_SOCK",
-        "SSH_AGENT_PID",
-        "GIT_ASKPASS",
-        "GIT_SSH_COMMAND",
-        "GIT_SSH",
-        "SSH_ASKPASS",
-    }
-)
 
-# Block if any of these appear in the variable name.
-# (No bare "_PAT" — it false-matches CMAKE_PREFIX_PATH; PATs are in EXACT above.)
-_AGENT_ENV_BLOCK_PATTERNS = (
-    "_PASSWORD",
-    "_SECRET",
-    "_TOKEN",
-    "_API_KEY",
-    "PRIVATE_KEY",
-)
+def _maybe_wsl_windows_path(path: str) -> str:
+    """Translate ``C:\\Windows\\...`` to ``/mnt/c/Windows/...`` when on WSL."""
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        return raw
+    if raw.startswith("/"):
+        return raw
+    if len(raw) >= 3 and raw[1] == ":" and raw[0].isalpha():
+        drive = raw[0].lower()
+        rest = raw[2:].replace("\\", "/").lstrip("/")
+        return f"/mnt/{drive}/{rest}"
+    return raw
 
-# LLM keys: needed by OpenCode even though they match _API_KEY / _TOKEN.
-_AGENT_ENV_PASS = frozenset(
-    {
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "OPENROUTER_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "XAI_API_KEY",
-        "GROQ_API_KEY",
-        "MISTRAL_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "TOGETHER_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_ENDPOINT",
-        "OLLAMA_HOST",
-        "OLLAMA_API_KEY",
-    }
-)
+
+def _parse_cmd_set_output(text: str) -> Dict[str, str]:
+    """Parse ``cmd.exe /c set`` lines (``KEY=value``; value may contain ``=``)."""
+    out: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def _windows_registry_environ() -> Dict[str, str]:
+    """User + Machine environment from the Windows registry."""
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except ImportError:
+        return {}
+    merged: Dict[str, str] = {}
+    hives = (
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+    )
+    for hive, path in hives:
+        try:
+            key = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        try:
+            index = 0
+            while True:
+                try:
+                    name, value, typ = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                if not name:
+                    continue
+                raw = value if isinstance(value, str) else str(value)
+                if typ == getattr(winreg, "REG_EXPAND_SZ", 2):
+                    raw = os.path.expandvars(raw)
+                merged[str(name)] = raw
+        finally:
+            winreg.CloseKey(key)
+    return merged
+
+
+def _resolve_windows_cmd() -> Optional[str]:
+    import shutil
+
+    candidates = [
+        os.environ.get("COMSPEC"),
+        "/mnt/c/Windows/System32/cmd.exe",
+        "/mnt/c/WINDOWS/system32/cmd.exe",
+        shutil.which("cmd.exe"),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        path = Path(_maybe_wsl_windows_path(str(cand)))
+        try:
+            if path.is_file():
+                return str(path)
+        except OSError:
+            continue
+    return None
+
+
+def _windows_environ_via_cmd() -> Dict[str, str]:
+    """Fresh Windows env as seen by ``cmd.exe`` (WSL / System Properties)."""
+    import subprocess
+
+    cmd = _resolve_windows_cmd()
+    if not cmd:
+        return {}
+    try:
+        proc = subprocess.run(
+            [cmd, "/d", "/c", "set"],
+            capture_output=True,
+            timeout=12,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    raw = proc.stdout or b""
+    text = ""
+    for enc in ("utf-8", "cp1254", "cp857", "latin-1"):
+        try:
+            text = raw.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        if "=" in text:
+            break
+    return _parse_cmd_set_output(text)
+
+
+def read_host_system_environ() -> Dict[str, str]:
+    """Current PC User/Machine env — not only what this process inherited.
+
+    Native Windows reads the registry. On WSL, ``cmd.exe /c set`` is used so
+    keys set in System Properties (e.g. ``CODEX_API_KEY``) reach Codex jobs.
+    """
+    if os.name == "nt":
+        return _windows_registry_environ()
+    # Avoid spawning cmd.exe during the unit suite (slow on /mnt/c).
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("VD_TEST_HOST_ENV"):
+        return {}
+    return _windows_environ_via_cmd()
+
+
+def _merge_host_system_environ(env: Dict[str, str], host: Dict[str, str]) -> None:
+    """Fill missing/empty keys from the PC environment. Never wipe a set value."""
+    for key, value in (host or {}).items():
+        if not key or value is None:
+            continue
+        host_val = str(value)
+        if not host_val.strip():
+            continue
+        current = env.get(key)
+        if current is None or not str(current).strip():
+            env[key] = host_val
 
 
 def _agent_subprocess_env(
     working_directory: Optional[Path] = None,
 ) -> Dict[str, str]:
-    """Pass all env vars except blocked sensitive credentials.
+    """Pass every process env var plus current PC User/Machine vars.
 
-    - Build tools get toolchain vars (PATH, INCLUDE, LIB, MSVC, CMake, …).
-    - Model provider keys pass (see ``_AGENT_ENV_PASS``).
-    - Host Jira/GitLab/SSH secrets stay out; push stays on GitManager askpass.
+    No name-based allow/deny list. ``.env`` bootstrap and host env
+    (toolchain, ``CODEX_API_KEY``, ``OPENAI_API_KEY``, tokens, custom build
+    vars) are inherited as-is. Empty process values are filled from the
+    Windows User/Machine environment so System Properties keys work.
     """
-    env: Dict[str, str] = {}
-    for key, value in os.environ.items():
-        if value is None:
-            continue
-        if key in _AGENT_ENV_BLOCK_EXACT:
-            continue
-        if key.startswith("VD_GIT_"):
-            continue
-        if key not in _AGENT_ENV_PASS:
-            if any(p in key for p in _AGENT_ENV_BLOCK_PATTERNS):
-                continue
-        env[key] = value
+    env: Dict[str, str] = {
+        key: value for key, value in os.environ.items() if value is not None
+    }
+    _merge_host_system_environ(env, read_host_system_environ())
 
     # Harden git so the agent cannot push with host credentials.
     # Do NOT rewrite HOME/USERPROFILE — OpenCode loads plugins from

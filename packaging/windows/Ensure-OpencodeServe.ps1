@@ -69,7 +69,7 @@ if (Test-PortListening $ServePort) {
     }
 
     Write-Host "Starting OpenCode serve in window VD-OpenCode-Serve..."
-    $inner = "set OPENCODE_DISABLE_MODELS_FETCH=1&& set PATH=$ocBin;%PATH%&& opencode serve --port $ServePort --hostname $ServeHost --print-logs --log-level INFO & echo. & echo OpenCode serve exited. & pause"
+    $inner = "set OPENCODE_DISABLE_MODELS_FETCH=1&& set GIT_TERMINAL_PROMPT=0&& set GCM_INTERACTIVE=never&& set GCM_MODAL_PROMPT=false&& set GCM_GUI_PROMPT=false&& set PATH=$ocBin;%PATH%&& opencode serve --port $ServePort --hostname $ServeHost --print-logs --log-level INFO & echo. & echo OpenCode serve exited. & pause"
     $startArgs = "/c start `"VD-OpenCode-Serve`" /D `"$ProjectDir`" cmd /c `"$inner`""
     Start-Process -FilePath $env:ComSpec -ArgumentList $startArgs -WorkingDirectory $ProjectDir | Out-Null
 }

@@ -443,6 +443,12 @@ class CodexBackend:
                 argv = [stdbuf, "-oL", "-eL", *argv]
         env = _agent_subprocess_env(request.working_directory)
         env["CODEX_HOME"] = str(home)
+        has_codex_key = bool((env.get("CODEX_API_KEY") or "").strip())
+        has_openai_key = bool((env.get("OPENAI_API_KEY") or "").strip())
+        logger.info(
+            f"[codex] host env keys present: "
+            f"CODEX_API_KEY={has_codex_key} OPENAI_API_KEY={has_openai_key}"
+        )
 
         handle["mode"] = "codex"
         handle["backend"] = self.name

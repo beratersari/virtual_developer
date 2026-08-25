@@ -37,6 +37,11 @@ set "DASHBOARD_ALLOW_REMOTE=true"
 set "DASHBOARD_PORT=%DASH_PORT%"
 set "DASHBOARD_ENABLED=true"
 set "VD_WEB_DIST=%SCRIPT_DIR%\web\dist"
+REM Unattended git: never open Git Credential Manager / username-password GUI
+set "GIT_TERMINAL_PROMPT=0"
+set "GCM_INTERACTIVE=never"
+set "GCM_MODAL_PROMPT=false"
+set "GCM_GUI_PROMPT=false"
 
 echo ========================================
 echo   Virtual Developer - Backend

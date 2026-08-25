@@ -18,11 +18,11 @@ from tests.conftest import FakeJiraClient
 
 
 # ---------------------------------------------------------------------------
-# agent_runner: env allowlist + retry/abort/timeout helpers
+# agent_runner: full env inheritance + retry/abort/timeout helpers
 # ---------------------------------------------------------------------------
 
 
-def test_agent_subprocess_env_simple_block(monkeypatch):
+def test_agent_subprocess_env_passes_all(monkeypatch):
     from src.orchestrator.agent_runner import _agent_subprocess_env
 
     monkeypatch.setenv("PATH", "/usr/bin")
@@ -31,10 +31,10 @@ def test_agent_subprocess_env_simple_block(monkeypatch):
     monkeypatch.setenv("MVCC_HOME", "/opt/mvcc")
     monkeypatch.setenv("CMAKE_PREFIX_PATH", "/opt/cmake")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("NPM_TOKEN", "blocked")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "blocked")
-    monkeypatch.setenv("GITLAB_PAT", "blocked")
-    monkeypatch.setenv("JIRA_API_TOKEN", "blocked")
+    monkeypatch.setenv("NPM_TOKEN", "npm-from-env")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-from-env")
+    monkeypatch.setenv("GITLAB_PAT", "gl-from-env")
+    monkeypatch.setenv("JIRA_API_TOKEN", "jira-from-env")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh.sock")
 
     env = _agent_subprocess_env()
@@ -44,11 +44,11 @@ def test_agent_subprocess_env_simple_block(monkeypatch):
     assert env.get("INCLUDE") == "C:\\SDK\\include"
     assert env.get("OPENAI_API_KEY") == "sk-test"
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
-    assert "NPM_TOKEN" not in env
-    assert "AWS_SECRET_ACCESS_KEY" not in env
-    assert "GITLAB_PAT" not in env
-    assert "JIRA_API_TOKEN" not in env
-    assert "SSH_AUTH_SOCK" not in env
+    assert env.get("NPM_TOKEN") == "npm-from-env"
+    assert env.get("AWS_SECRET_ACCESS_KEY") == "aws-from-env"
+    assert env.get("GITLAB_PAT") == "gl-from-env"
+    assert env.get("JIRA_API_TOKEN") == "jira-from-env"
+    assert env.get("SSH_AUTH_SOCK") == "/tmp/ssh.sock"
 
 
 def test_agent_subprocess_env_skips_none_values(monkeypatch):
@@ -67,7 +67,7 @@ def test_agent_subprocess_env_skips_none_values(monkeypatch):
     assert env.get("PATH") == "/bin"
     assert "HOME" not in env
     assert env.get("LC_FOO") == "bar"
-    assert "JIRA_API_TOKEN" not in env
+    assert env.get("JIRA_API_TOKEN") == "secret"
 
 
 def test_resolve_opencode_agent_empty_and_unknown():

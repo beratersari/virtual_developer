@@ -114,19 +114,35 @@ def _s(value: Any) -> str:
 
 
 def _repo_http_url(project: Dict[str, Any], repository: Dict[str, Any]) -> str:
-    for key in ("http_url_to_repo", "http_url"):
-        url = _s(project.get(key))
+    for key in (
+        "http_url_to_repo",
+        "git_http_url",
+        "http_url",
+        "git_http_url_to_repo",
+    ):
+        url = _s(project.get(key)) or _s(repository.get(key))
         if url:
             return url
     home = _s(project.get("web_url"))
     if home:
         return home.rstrip("/") + ".git"
-    git_ssh = _s(repository.get("url")) or _s(project.get("git_ssh_url"))
+    git_ssh = (
+        _s(repository.get("url"))
+        or _s(project.get("git_ssh_url"))
+        or _s(project.get("ssh_url_to_repo"))
+    )
     if git_ssh.startswith("git@"):
         # git@host:group/repo.git → https://host/group/repo.git
         rest = git_ssh[4:]
         if ":" in rest:
             host, path = rest.split(":", 1)
+            return f"https://{host}/{path.lstrip('/')}"
+    if git_ssh.startswith("ssh://"):
+        rest = git_ssh[6:]
+        if rest.startswith("git@"):
+            rest = rest[4:]
+        if "/" in rest:
+            host, path = rest.split("/", 1)
             return f"https://{host}/{path.lstrip('/')}"
     return git_ssh
 

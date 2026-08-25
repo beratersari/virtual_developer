@@ -225,7 +225,8 @@ def test_run_git_passes_core_longpaths(gm):
         gm._run_git(["status"])
     cmd = run.call_args.args[0]
     assert cmd[:3] == ["git", "-c", "core.longpaths=true"]
-    assert cmd[3:] == ["status"]
+    assert "credential.helper=" in cmd
+    assert cmd[-1] == "status"
 
 
 def test_clone_into_temp_success_and_fail(gm, tmp_path):

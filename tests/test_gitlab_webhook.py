@@ -128,6 +128,32 @@ def test_webhook_token():
     assert not validate_webhook_token("nope", "secret")
 
 
+def test_repo_http_url_prefers_git_http_and_converts_ssh():
+    from src.gitlab.webhook import _repo_http_url
+
+    assert (
+        _repo_http_url(
+            {"git_http_url": "https://gitlab.example.com/acme/demo.git"},
+            {},
+        )
+        == "https://gitlab.example.com/acme/demo.git"
+    )
+    assert (
+        _repo_http_url(
+            {"ssh_url_to_repo": "git@gitlab.example.com:acme/demo.git"},
+            {},
+        )
+        == "https://gitlab.example.com/acme/demo.git"
+    )
+    assert (
+        _repo_http_url(
+            {},
+            {"url": "git@gitlab.example.com:acme/demo.git"},
+        )
+        == "https://gitlab.example.com/acme/demo.git"
+    )
+
+
 def test_decide_accepts_mr_mention():
     d = decide_gitlab_note_webhook(
         _mr_payload(),
