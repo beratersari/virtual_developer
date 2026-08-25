@@ -631,12 +631,9 @@ def format_failure_report(
 
 
 def _looks_like_session_id(sid: str) -> bool:
-    s = (sid or "").strip()
-    if not s:
-        return False
-    if s.startswith("ses_") or s.startswith("thread_"):
-        return True
-    return s.count("-") >= 4 and len(s) >= 16
+    from src.backends.base import is_session_or_thread_id
+
+    return is_session_or_thread_id(sid)
 
 
 class CodexBackend:
