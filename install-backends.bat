@@ -32,14 +32,15 @@ if not exist "%PS1%" (
     exit /b 1
 )
 
-if /i "%WHICH%"=="codex" (
+if /i not "%WHICH%"=="opencode" (
     if not exist "%SCRIPT_DIR%\vendor\codex-package-x86_64-pc-windows-msvc.tar.gz" (
-        echo [ERROR] Codex package missing. Need vendor\codex-package-x86_64-pc-windows-msvc.tar.gz
-        echo         ^(this installer only extracts that tar.gz; it does not use vendor\bin\codex.exe^)
+        echo [ERROR] vendor\codex-package-x86_64-pc-windows-msvc.tar.gz missing.
+        echo         Use the CI offline zip. This installer does not download Codex.
         call :maybe_pause
         exit /b 1
     )
-) else (
+)
+if /i not "%WHICH%"=="codex" (
     if not exist "%SCRIPT_DIR%\vendor\opencode-home.zip" (
         echo [ERROR] vendor\opencode-home.zip missing. This script needs the CI offline zip.
         call :maybe_pause

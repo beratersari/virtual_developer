@@ -36,15 +36,17 @@ def test_combined_install_bat_is_removed():
     assert "venv" not in be.lower() or "no Python" in be
 
 
-def test_install_codex_bat_is_codex_only():
+def test_install_codex_bat_is_offline_tar_only():
     bat = ROOT / "install-codex.bat"
     text = bat.read_text(encoding="utf-8")
     assert bat.is_file()
     assert "Install-Backends.ps1" in text
     assert "-Codex" in text
-    assert "tar.exe" in text or " tar " in text
-    assert "codex-package-x86_64-pc-windows-msvc.tar.gz" in text
+    assert "tar.exe" in text
+    assert r"vendor\%ASSET%" in text or r"vendor\codex-package-x86_64-pc-windows-msvc.tar.gz" in text
     assert "config.toml" in text
+    assert "github.com" not in text.lower()
+    assert "curl" not in text.lower()
     assert "opencode-home.zip" not in text
     assert "python -m venv" not in text
     for line in text.splitlines():
@@ -71,6 +73,7 @@ def test_install_backends_ps1_uses_official_codex_path():
     assert "codex-package-x86_64-pc-windows-msvc.tar.gz" in text
     assert r".codex" in text
     assert "codex-config.toml" in text
+    assert "github.com/openai/codex/releases" not in text
     assert "$args" not in text
     assert "$pid" not in text
     assert "venv" in text.lower()

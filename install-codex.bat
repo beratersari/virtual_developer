@@ -1,11 +1,11 @@
 @echo off
 REM =============================================================================
-REM JIRA Virtual Developer - Codex CLI only
+REM JIRA Virtual Developer - Codex CLI only (offline)
 REM =============================================================================
-REM Downloads/extracts the official Windows package:
-REM   codex-package-x86_64-pc-windows-msvc.tar.gz
-REM Prefer vendor\ copy (offline zip). Else download from GitHub.
-REM Extract with tar.exe (Windows 10+). Does NOT install OpenCode / Python.
+REM Installs Codex from the CI zip:
+REM   vendor\codex-package-x86_64-pc-windows-msvc.tar.gz
+REM Extract with tar.exe (Windows 10+). No network. No vendor\bin\codex.exe.
+REM Does NOT install OpenCode, Python, .venv, or the dashboard.
 REM
 REM Paths:
 REM   %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
@@ -19,11 +19,11 @@ setlocal EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PS1=%SCRIPT_DIR%\packaging\windows\Install-Backends.ps1"
-set "VER_FILE=%SCRIPT_DIR%\packaging\windows\versions.env"
-if exist "%SCRIPT_DIR%\vendor\versions.env" set "VER_FILE=%SCRIPT_DIR%\vendor\versions.env"
-set "DUMMY_CFG=%SCRIPT_DIR%\packaging\windows\codex-config.toml"
-set "CODEX_VERSION=0.149.0"
 set "ASSET=codex-package-x86_64-pc-windows-msvc.tar.gz"
+set "PKG=%SCRIPT_DIR%\vendor\%ASSET%"
+set "DUMMY_CFG=%SCRIPT_DIR%\packaging\windows\codex-config.toml"
+if not exist "%DUMMY_CFG%" set "DUMMY_CFG=%SCRIPT_DIR%\vendor\codex-config.toml"
+set "EXTRACT=%TEMP%\vd-codex-pkg"
 
 if not exist "%PS1%" (
     echo [ERROR] Missing %PS1%
@@ -32,38 +32,26 @@ if not exist "%PS1%" (
     exit /b 1
 )
 
-if exist "%VER_FILE%" (
-    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%VER_FILE%") do (
-        if /i "%%A"=="CODEX_VERSION" set "CODEX_VERSION=%%B"
-        if /i "%%A"=="CODEX_WINDOWS_ASSET" set "ASSET=%%B"
-    )
-)
-set "CODEX_VERSION=%CODEX_VERSION: =%"
-set "ASSET=%ASSET: =%"
-if not defined ASSET set "ASSET=codex-package-x86_64-pc-windows-msvc.tar.gz"
-
-set "PKG=%SCRIPT_DIR%\vendor\%ASSET%"
-set "EXTRACT=%TEMP%\vd-codex-pkg"
-set "DL=%TEMP%\%ASSET%"
-set "CODEX_URL=https://github.com/openai/codex/releases/download/rust-v%CODEX_VERSION%/%ASSET%"
-
 if not exist "%PKG%" (
-    echo Package not in vendor. Downloading from GitHub...
-    echo URL     : %CODEX_URL%
-    curl.exe -L --fail --retry 3 -o "%DL%" "%CODEX_URL%"
-    if errorlevel 1 (
-        echo [ERROR] Could not download %ASSET%
-        echo Place it at vendor\%ASSET% for offline install, or check the network.
-        echo This installer only uses the tar.gz package ^(not vendor\bin\codex.exe^).
-        call :maybe_pause
-        exit /b 1
-    )
-    set "PKG=%DL%"
+    echo [ERROR] %PKG% missing.
+    echo This script needs the CI offline zip, which ships vendor\%ASSET%.
+    echo It does not download Codex and does not use vendor\bin\codex.exe.
+    call :maybe_pause
+    exit /b 1
 )
 
-if not exist "%PKG%" goto :install_ps
+echo ========================================
+echo   Virtual Developer - Codex only
+echo   Codex CLI ^(offline tar, no OpenCode / Python^)
+echo ========================================
+echo.
+echo Project : %SCRIPT_DIR%
+echo Package : vendor\%ASSET%
+echo Target  : %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
+echo Config  : %USERPROFILE%\.codex
+echo.
 
-echo Extracting %ASSET% with tar...
+echo Extracting vendor\%ASSET% with tar...
 if exist "%EXTRACT%" rmdir /s /q "%EXTRACT%"
 mkdir "%EXTRACT%"
 pushd "%EXTRACT%"
@@ -76,19 +64,7 @@ if not "!TAR_EC!"=="0" (
     call :maybe_pause
     exit /b 1
 )
-echo [OK] Extracted package with tar
-
-:install_ps
-echo ========================================
-echo   Virtual Developer - Codex only
-echo   Codex CLI ^(no OpenCode / Python^)
-echo ========================================
-echo.
-echo Project : %SCRIPT_DIR%
-echo Package : %ASSET%
-echo Target  : %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
-echo Config  : %USERPROFILE%\.codex
-echo.
+echo [OK] Extracted vendor\%ASSET% with tar
 
 if exist "%DUMMY_CFG%" (
     if not exist "%USERPROFILE%\.codex" mkdir "%USERPROFILE%\.codex"
@@ -100,11 +76,7 @@ if exist "%DUMMY_CFG%" (
     )
 )
 
-if defined EXTRACT if exist "%EXTRACT%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -RepoRoot "%SCRIPT_DIR%" -Codex -CodexExtract "%EXTRACT%"
-) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -RepoRoot "%SCRIPT_DIR%" -Codex
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -RepoRoot "%SCRIPT_DIR%" -Codex -CodexExtract "%EXTRACT%"
 set "EC=%ERRORLEVEL%"
 if not "%EC%"=="0" (
     echo.

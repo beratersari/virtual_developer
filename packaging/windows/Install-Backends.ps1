@@ -11,7 +11,7 @@
   Codex:    %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
             (official standalone path, same as chatgpt.com/codex/install.ps1)
             Extracted from vendor\codex-package-x86_64-pc-windows-msvc.tar.gz
-            with tar.exe (or downloaded from GitHub). Dummy config is copied
+            with tar.exe (offline CI zip only). Dummy config is copied
             to %USERPROFILE%\.codex\config.toml when that file is missing.
   Callers:  install-backends.bat (default both; -OpenCode / -Codex)
             install-codex.bat    (-Codex only)
@@ -389,24 +389,7 @@ if ($doCodex) {
     }
 
     if (-not $srcExe) {
-        $url = "https://github.com/openai/codex/releases/download/rust-v$codexVer/$codexAsset"
-        $dl = Join-Path $env:TEMP $codexAsset
-        Write-Host "  Downloading $url"
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $dl -UseBasicParsing
-        } catch {
-            Write-Host "  [WARNING] Download failed: $($_.Exception.Message)"
-            $dl = ""
-        }
-        if ($dl -and (Test-Path -LiteralPath $dl) -and ((Get-Item -LiteralPath $dl).Length -gt 1MB)) {
-            $extractDir = Join-Path $env:TEMP "vd-codex-pkg-ps"
-            Expand-TarGz $dl $extractDir
-            $srcExe = Find-CodexExe $extractDir
-        }
-    }
-
-    if (-not $srcExe) {
-        throw "Codex package missing. Need vendor\$codexAsset (tar.gz only; no vendor\bin\codex.exe fallback)."
+        throw "Codex package missing. Need vendor\$codexAsset in the CI offline zip. No download; no vendor\bin\codex.exe."
     }
 
     New-Item -ItemType Directory -Path $codexBin -Force | Out-Null
