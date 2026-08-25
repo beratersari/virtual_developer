@@ -409,7 +409,7 @@ class SettingsUpdate(BaseModel):
     jira_email: Optional[str] = Field(
         default=None,
         max_length=320,
-        description="Optional Cloud email for Basic auth; empty clears (Bearer)",
+        description="Ignored on save. Settings always clears JIRA_EMAIL (Bearer).",
     )
     jira_api_token: Optional[str] = Field(
         default=None,

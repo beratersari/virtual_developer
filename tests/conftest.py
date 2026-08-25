@@ -29,6 +29,8 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     project_root = Path.cwd()
     real_agent = (project_root / ".jira-agent").resolve()
     before = _snapshot_paths(real_agent)
+    real_env = project_root / ".env"
+    env_before = real_env.read_text(encoding="utf-8") if real_env.is_file() else None
 
     # Separate from tests that mkdir tmp_path/.jira-agent themselves
     runtime = tmp_path / "_vd_runtime"
@@ -90,6 +92,15 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     }
 
     shutil.rmtree(runtime, ignore_errors=True)
+
+    # Tests that call apply_settings_update without chdir must not keep
+    # JIRA_EMAIL= (or other dotenv writes) in the developer's real .env.
+    if env_before is not None and real_env.is_file():
+        try:
+            if real_env.read_text(encoding="utf-8") != env_before:
+                real_env.write_text(env_before, encoding="utf-8")
+        except OSError:
+            pass
 
     # Safety net: only remove files created under the real tree during this test
     if real_agent.is_dir():
