@@ -151,7 +151,8 @@ jobs:
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",
               "Compact wait is unbounded",
-              "Codex API key",
+              "One model id for both OpenCode and Codex jobs",
+              "Type any id Codex accepts",
               "agent_backend"
             )) {
             if ($jsText -notmatch [regex]::Escape($needle)) {
@@ -159,8 +160,13 @@ jobs:
             }
             Write-Host "OK SPA contains $needle"
           }
-          if ($jsText -match [regex]::Escape("opencode_serve_max_compact_continues")) {
-            throw "Stale dashboard SPA: removed compact-continue setting still in $($js[0].Name)"
+          foreach ($gone in @(
+              "opencode_serve_max_compact_continues",
+              "Codex API key"
+            )) {
+            if ($jsText -match [regex]::Escape($gone)) {
+              throw "Stale dashboard SPA: removed setting '$gone' still in $($js[0].Name)"
+            }
           }
           Write-Host "OK SPA bundle $($js[0].Name) + $($css[0].Name)"
           Write-Host "Payload layout OK (no full install smoke)"
