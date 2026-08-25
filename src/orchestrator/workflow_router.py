@@ -77,8 +77,9 @@ class WorkflowRouter:
         if has_oracle_phrase and not has_implementation:
             return WorkflowType.ORACLE_CONSULT
 
-        # Mode missing: prefer planning so git prepare posts the full format help
-        # (processor also fails early via route_issue_with_reason when Mode required)
+        # No {params} Mode (and no params default): prefer planning so git
+        # prepare posts the format help. A {params} block without Mode is
+        # already ``build`` via parse_issue_mode.
         return WorkflowType.PLANNING
 
     @classmethod

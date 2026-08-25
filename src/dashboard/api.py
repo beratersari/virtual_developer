@@ -209,6 +209,101 @@ def create_dashboard_app(
             "server_time": build_meta().server_time,
         }
 
+    @app.post("/webhooks/jira")
+    async def jira_webhook(request: Request) -> dict:
+        """Jira Server/DC 9.4 + Cloud webhook (assignment to bot, or mention).
+
+        Register on Jira: Issue created, Issue updated, Comment created.
+        Secret: ``?token=`` (Server has no HMAC) or ``X-Hub-Signature`` (Cloud).
+        """
+        from fastapi.responses import JSONResponse
+
+        from src.jira.triggers import jira_body_to_text
+        from src.jira.webhook import decide_jira_webhook, normalize_intake_mode
+
+        headers = {k: v for k, v in request.headers.items()}
+        raw = await request.body()
+        try:
+            import json as _json
+
+            payload = _json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "reason": "invalid json"}, status_code=400
+            )
+        mode = normalize_intake_mode(getattr(settings, "jira_intake_mode", "poll"))
+        decision = decide_jira_webhook(
+            payload,
+            headers=headers,
+            query=dict(request.query_params),
+            raw_body=raw,
+            enabled=mode == "webhook",
+            secret=str(getattr(settings, "jira_webhook_secret", "") or ""),
+            intake_mode=mode,
+            assignee_needles=list(settings.trigger_assignee_names_list),
+            mention_tokens=list(settings.trigger_mentions_list),
+        )
+        if not decision.accepted:
+            status = int(decision.http_status or 200)
+            return JSONResponse(
+                {"ok": False, "reason": decision.reason},
+                status_code=status,
+            )
+        proc = app.state.processor
+        if proc is None or decision.event is None:
+            raise HTTPException(
+                status_code=503, detail="processor not bound; start the daemon"
+            )
+        event = decision.event
+        issue = event.get("issue") or {}
+        key = (issue.get("key") or "").strip()
+        fields = issue.get("fields") or {}
+        desc = fields.get("description")
+        if key and (desc in (None, "")) and hasattr(proc, "jira_client"):
+            try:
+                full = proc.jira_client.get_issue(
+                    key,
+                    fields=[
+                        "summary",
+                        "description",
+                        "labels",
+                        "assignee",
+                        "status",
+                        "issuetype",
+                    ],
+                )
+            except Exception:
+                full = None
+            if full and full.get("fields"):
+                merged = dict(issue)
+                merged_fields = dict(fields)
+                live_fields = full.get("fields") or {}
+                if live_fields.get("description") is not None and not isinstance(
+                    live_fields.get("description"), str
+                ):
+                    live_fields = dict(live_fields)
+                    live_fields["description"] = jira_body_to_text(
+                        live_fields.get("description")
+                    )
+                merged_fields.update(live_fields)
+                merged["fields"] = merged_fields
+                event = dict(event)
+                event["issue"] = merged
+        result = await proc.enqueue_jira_event(event)
+        return {
+            "ok": True,
+            "issue_key": key,
+            "trigger": decision.trigger,
+            "event_id": decision.event_id,
+            "queue_id": result.get("queue_id"),
+            "queued": result.get("queued"),
+            "started": result.get("started"),
+            "status": result.get("status"),
+            "duplicate": result.get("duplicate"),
+            "reason": "queued" if result.get("queued") else "accepted",
+            "server_time": build_meta().server_time,
+        }
+
     @app.get("/api/meta")
     def meta() -> dict:
         return build_meta().model_dump()

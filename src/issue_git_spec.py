@@ -97,9 +97,10 @@ Model: opencode/hy3-free
 Backend: opencode
 {params}
 
-Mode is mandatory (like Repository / Source branch):
+Mode is optional (default ``build``):
 * plan  — generate a plan, append it to the Jira description (no GitLab push)
 * build — implement / execute (push branch + open merge request)
+Model and Backend are optional (default from .env / dashboard Settings).
 """
 
 # Valid mode tokens (aliases → canonical)
@@ -307,13 +308,15 @@ def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     """Return canonical mode (``plan`` / ``build``) from ``{params}``, or None.
 
     Looks for ``Mode:`` / ``Workflow:`` inside the params block only.
+    When a ``{params}`` block exists but Mode is omitted, defaults to ``build``.
+    No params block → ``None`` (router keeps its no-template heuristics).
     """
     block = _params_block_text(summary, description)
     if not block:
         return None
     m = _MODE_FIELD.search(block)
     if not m:
-        return None
+        return "build"
     token = (m.group(1) or "").strip().lower().strip("`").strip()
     # Drop trailing punctuation
     token = token.rstrip(".,;:")
@@ -360,6 +363,8 @@ def parse_issue_git_spec(
 
     Target branch is optional; when omitted it defaults to the source branch
     (agent will still use ``feature/{KEY}`` as the work branch when they match).
+    Mode is optional (default ``build``). Model and Backend are optional
+    (empty = dashboard / .env defaults).
 
     Returns ``(spec, None)`` on success, or ``(None, user_error_message)`` on failure.
     """
@@ -394,7 +399,8 @@ def parse_issue_git_spec(
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
     mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
-    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else None
+    # Mode is optional — default build (Model / Backend already optional)
+    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else "build"
     model_m = _MODEL_FIELD.search(text)
     model = _normalize_model_id(model_m.group(1)) if model_m else ""
     backend_m = _BACKEND_FIELD.search(text)
@@ -410,13 +416,10 @@ def parse_issue_git_spec(
             "Source branch (e.g. `Source branch: feature/PROJ-123` "
             "or `Source branch: develop` to auto-use feature/{KEY})"
         )
-    if not mode:
-        if mode_raw:
-            missing.append(
-                f"Mode (got `{mode_raw}`; must be `plan` or `build`)"
-            )
-        else:
-            missing.append("Mode (e.g. `Mode: plan` or `Mode: build`)")
+    if mode_raw and mode_raw not in _MODE_ALIASES:
+        missing.append(
+            f"Mode (got `{mode_raw}`; must be `plan` or `build`, or omit for build)"
+        )
 
     if missing:
         return None, (

@@ -89,6 +89,7 @@ class WorkQueueStore:
         job_id: Optional[str] = None,
         gitlab_note_id: str = "",
         merge_request_url: str = "",
+        jira_event_id: str = "",
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         qid = f"q_{uuid.uuid4().hex[:12]}"
@@ -107,6 +108,7 @@ class WorkQueueStore:
             "lock_key": lock_key or "",
             "job_id": job_id,
             "gitlab_note_id": gitlab_note_id or "",
+            "jira_event_id": jira_event_id or "",
             "merge_request_url": merge_request_url or "",
             "payload": payload if isinstance(payload, dict) else {},
             "error_message": None,
@@ -190,6 +192,22 @@ class WorkQueueStore:
         with self._lock:
             for rec in self._iter_records():
                 if str(rec.get("gitlab_note_id") or "") != nid:
+                    continue
+                if best is None or (rec.get("created_at") or "") >= (
+                    best.get("created_at") or ""
+                ):
+                    best = rec
+        return best
+
+    def find_jira_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Return a queue row for this Jira webhook event id (dedup retries)."""
+        eid = (event_id or "").strip()
+        if not eid:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        with self._lock:
+            for rec in self._iter_records():
+                if str(rec.get("jira_event_id") or "") != eid:
                     continue
                 if best is None or (rec.get("created_at") or "") >= (
                     best.get("created_at") or ""

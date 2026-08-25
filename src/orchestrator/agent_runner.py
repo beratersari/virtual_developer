@@ -321,7 +321,11 @@ class AgentRunner:
             attempt_number: The retry attempt number (0 = first attempt)
         """
         self._bind_log_context(task)
-        logger.info(f"Starting agent task: task_id={task.task_id}, agent={task.agent}, attempt={attempt_number}")
+        logger.info(
+            f"Starting agent task: task_id={task.task_id} "
+            f"backend={task.backend or 'opencode'} agent={task.agent} "
+            f"attempt={attempt_number}"
+        )
         
         # Use configured timeout if not overridden (allow explicit 0)
         effective_timeout = (
@@ -658,7 +662,7 @@ class AgentRunner:
                 logger.debug(f"session dir check failed: {e}")
         if not sid:
             logger.warning(
-                f"Retry after {why} has no OpenCode session id; starting cold"
+                f"Retry after {why} has no session id; starting cold"
             )
             return
         task.session_id = sid
@@ -679,7 +683,7 @@ class AgentRunner:
         if not prev.lower().startswith("continue"):
             task.prompt = DEFAULT_CONTINUE_PROMPT
         logger.warning(
-            f"Retry after {why}: resume OpenCode session {sid}"
+            f"Retry after {why}: resume session {sid}"
         )
 
     async def _run_agent_via_serve(
@@ -862,15 +866,29 @@ class AgentRunner:
         elapsed = asyncio.get_event_loop().time() - start_time
         if turn.returncode == 0:
             logger.info(
-                f"Serve agent completed: task_id={task.task_id}, "
-                f"session={turn.session_id}, continues={turn.continue_count}, "
-                f"compacts={turn.compact_events}, duration={elapsed:.2f}s"
+                f"[opencode] exit ok: task_id={task.task_id} "
+                f"session={turn.session_id} duration={elapsed:.2f}s"
             )
         else:
-            logger.warning(
-                f"Serve agent failed: task_id={task.task_id}, "
-                f"returncode={turn.returncode}, continues={turn.continue_count}, "
-                f"incomplete={turn.incomplete}, duration={elapsed:.2f}s"
+            from src.backends.codex import format_failure_report
+
+            logger.error(
+                format_failure_report(
+                    backend="opencode",
+                    returncode=turn.returncode,
+                    stderr=turn.stderr or "",
+                    stdout=turn.stdout or "",
+                    timed_out=bool(turn.timed_out),
+                    incomplete=bool(turn.incomplete),
+                    incomplete_reasons=list(turn.incomplete_reasons or []),
+                    session_id=str(turn.session_id or ""),
+                    duration_s=elapsed,
+                    extra={
+                        "task_id": task.task_id,
+                        "compact_events": turn.compact_events,
+                        "continue_count": turn.continue_count,
+                    },
+                )
             )
         if on_complete:
             on_complete(result)
@@ -1535,6 +1553,32 @@ class AgentRunner:
             else:
                 # No more retries - include session ID from last attempt
                 logger.info(f"All retry attempts exhausted: task_id={task.task_id}, total_attempts={attempt + 1}")
+                from src.backends.codex import format_failure_report
+
+                logger.error(
+                    format_failure_report(
+                        backend=str(task.backend or result.get("backend") or "agent"),
+                        returncode=result.get("returncode"),
+                        stderr=str(result.get("stderr") or ""),
+                        stdout=str(result.get("stdout") or ""),
+                        timed_out=bool(result.get("timed_out")),
+                        incomplete=bool(result.get("incomplete")),
+                        incomplete_reasons=list(
+                            result.get("incomplete_reasons") or []
+                        ),
+                        session_id=str(
+                            result.get("opencode_session_id")
+                            or result.get("session_id")
+                            or ""
+                        ),
+                        extra={
+                            "task_id": task.task_id,
+                            "retry_reason": retry_reason,
+                            "total_attempts": attempt + 1,
+                            "session_file": result.get("session_file"),
+                        },
+                    )
+                )
                 result["retry_info"] = _retry_info(final_failure=True)
                 return result
 

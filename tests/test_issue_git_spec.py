@@ -218,7 +218,7 @@ def test_missing_fields_inside_params():
     assert "Source branch" in err
 
 
-def test_mode_required():
+def test_mode_defaults_to_build():
     desc = """
 {params}
 Repository: https://gitlab.example.com/group/repo.git
@@ -227,10 +227,24 @@ Target branch: main
 {params}
 """
     spec, err = parse_issue_git_spec("feat", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.mode == "build"
+
+
+def test_invalid_mode_rejected():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: banana
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
     assert spec is None
     assert err is not None
     assert "Mode" in err
-    assert "{params}" in err or "description" in err.lower()
 
 
 def test_parse_issue_mode_helper():
@@ -240,6 +254,14 @@ def test_parse_issue_mode_helper():
             "",
             "{params}\nRepository: https://g.com/a/b.git\n"
             "Source branch: develop\nMode: BUILD\n{params}",
+        )
+        == "build"
+    )
+    assert (
+        parse_issue_mode(
+            "",
+            "{params}\nRepository: https://g.com/a/b.git\n"
+            "Source branch: develop\n{params}",
         )
         == "build"
     )

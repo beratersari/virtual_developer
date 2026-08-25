@@ -44,10 +44,21 @@ def test_route_mode_aliases():
 
 
 def test_route_missing_mode_still_routes_template_checked_later():
-    """Routing does not fail on missing Mode; git template parse does."""
+    """No {params} block: router keeps planning (template checked at git prepare)."""
     wt, err = WorkflowRouter.route_issue_with_reason("X-1", "fix typo", "small change")
     assert wt == WorkflowType.PLANNING
     assert err is None
+
+
+def test_route_params_without_mode_defaults_to_build():
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/g/r.git\n"
+        "Source branch: feature/X-1\n"
+        "Target branch: develop\n"
+        "{params}"
+    )
+    assert WorkflowRouter.route_issue("X-1", "feat", desc) == WorkflowType.EXECUTION
 
 
 def test_should_auto_start_execution():

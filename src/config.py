@@ -323,8 +323,21 @@ class Settings(BaseSettings):
         default=8,
         description="Thread pool size for dispatching issues after a poll",
     )
-    # Board poller is always on (sole intake path)
+    # Board poller interval (used when jira_intake_mode=poll)
     poll_interval_seconds: int = Field(default=30)
+    # poll = board/sprint poller (default). webhook = POST /webhooks/jira only.
+    # Switching at runtime via dashboard; default comes from .env.
+    jira_intake_mode: str = Field(
+        default="poll",
+        description="Jira intake: poll (board poller) or webhook (POST /webhooks/jira)",
+    )
+    jira_webhook_secret: str = Field(
+        default="",
+        description=(
+            "Shared secret for /webhooks/jira. Jira Server 9.4 has no HMAC — "
+            "put the token in the hook URL (?token=). Cloud may send X-Hub-Signature."
+        ),
+    )
 
     # Ops dashboard (FastAPI UI). Intentional product defaults (not a security bug):
     # no auth in v1 + bind 0.0.0.0 + allow_remote so LAN / offline install works.
@@ -606,6 +619,13 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.trigger_mentions.split(",") if item.strip()]
 
     @property
+    def jira_intake_mode_normalized(self) -> str:
+        """``poll`` or ``webhook`` (default poll)."""
+        from src.jira.webhook import normalize_intake_mode
+
+        return normalize_intake_mode(self.jira_intake_mode)
+
+    @property
     def gitlab_bot_mentions_list(self) -> List[str]:
         from src.gitlab.mentions import parse_mention_list
 
@@ -664,6 +684,9 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "default_model",
         "agent_backend",
         "project_repositories",
+        "jira_intake_mode",
+        "trigger_mentions",
+        "trigger_assignee_names",
     }
 )
 
@@ -681,6 +704,9 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
     "agent_backend": "AGENT_BACKEND",
+    "jira_intake_mode": "JIRA_INTAKE_MODE",
+    "trigger_mentions": "TRIGGER_MENTIONS",
+    "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
 }
 
 
@@ -764,6 +790,10 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 )
                 continue
             value = text
+        if key == "jira_intake_mode":
+            from src.jira.webhook import normalize_intake_mode
+
+            value = normalize_intake_mode(value)
         if key == "project_repositories":
             from src.dashboard.project_repos import project_repositories_to_json
 

@@ -137,6 +137,8 @@ class JobProcessor:
         self._freeze_session_binds: set[str] = set()
         # GitLab note ids already accepted (webhook retries)
         self._gitlab_seen_notes: set[str] = set()
+        # Jira webhook event ids (comment:… / assignee:… / created:…)
+        self._jira_seen_events: set[str] = set()
         
         logger.info("Initializing JobProcessor")
         
@@ -298,7 +300,11 @@ class JobProcessor:
         that would make ``force_after_in_progress`` re-fire every poll while
         the ticket never left To Do.
         """
-        error_text = (error_message or "Unknown error")[:2000]
+        error_text = (error_message or "Unknown error")[:8000]
+        logger.error(
+            f"{issue_key} failed ({category}) exit_message:\n{error_text}"
+            + (f"\nSuggestion: {suggestion}" if suggestion else "")
+        )
         try:
             from src.gitlab.keys import is_gitlab_issue_key
 
@@ -467,6 +473,34 @@ class JobProcessor:
         incomplete = bool(data.get("incomplete"))
         stderr = (data.get("stderr") or "").strip() or fallback
         reasons = list(data.get("incomplete_reasons") or [])
+        backend = (data.get("backend") or data.get("mode") or "").strip() or "agent"
+        from src.backends.codex import format_failure_report
+
+        report = format_failure_report(
+            backend=backend,
+            returncode=data.get("returncode"),
+            stderr=stderr,
+            stdout=str(data.get("stdout") or ""),
+            timed_out=bool(data.get("timed_out")),
+            incomplete=incomplete,
+            incomplete_reasons=reasons,
+            session_id=str(
+                data.get("session_id") or data.get("opencode_session_id") or ""
+            ),
+            extra={
+                k: data.get(k)
+                for k in (
+                    "task_id",
+                    "progress",
+                    "thread_locked",
+                    "assistant_asked_question",
+                    "compact_events",
+                    "continue_count",
+                    "session_file",
+                )
+            },
+        )
+        logger.error(f"{issue_key} {report}")
         asked = bool(data.get("assistant_asked_question")) or any(
             "clarifying question" in str(r).lower() for r in reasons
         ) or "clarifying question" in stderr.lower()
@@ -1021,7 +1055,7 @@ class JobProcessor:
                 "opencode_sessions": entries,
             },
         )
-        logger.info(f"{issue_key} OpenCode session: {session_id}")
+        logger.info(f"{issue_key} session: {session_id}")
 
     def _session_bind_key(
         self, issue_key: str, git: Any = None
@@ -1210,7 +1244,7 @@ class JobProcessor:
             pass
         self._link_job_opencode_session(issue_key, chosen)
         logger.info(
-            f"{issue_key}: resuming OpenCode session {chosen} for "
+            f"{issue_key}: resuming session {chosen} for "
             f"{repo}@{branch}→{target}"
         )
         return chosen
@@ -2302,7 +2336,7 @@ class JobProcessor:
 
         Events use a ``webhookEvent`` key for historical compatibility with
         the poller envelope (``jira:issue_created`` / ``jira:issue_updated``).
-        HTTP webhooks are not supported.
+        HTTP Jira webhooks set ``webhook_intake=True`` (assignment / mention).
 
         Returns a small outcome dict so schedule dispatch can tell a real start
         from a deliberate no-op (e.g. plan_ready without an explicit start).
@@ -2495,7 +2529,11 @@ class JobProcessor:
                 issue_key=issue_key,
                 issue_summary=summary,
                 description=description,
-                triggered_by="scheduled" if scheduled_job else "poller",
+                triggered_by=(
+                    "scheduled"
+                    if scheduled_job
+                    else ("webhook" if event.get("webhook_intake") else "poller")
+                ),
                 jira_assignee=assignee,
             )
             self.state_manager.update_state(
@@ -2573,6 +2611,13 @@ class JobProcessor:
         from src.jira.poller import JiraPoller
 
         is_todo = JiraPoller._is_todo_status(fields)
+
+        webhook_intake = bool(event.get("webhook_intake"))
+
+        # Explicit webhook assignment / mention: start or re-run regardless of
+        # the Jira column. In-flight is still never restarted.
+        if webhook_intake:
+            return await self._handle_webhook_intake(event, state)
 
         # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
         # (poller already required a trigger) resets and runs again.
@@ -2677,6 +2722,72 @@ class JobProcessor:
             return False, f"plan_ready; jira status '{status_name}'"
 
         return False, f"no action for status {state.status.value}"
+
+    async def _handle_webhook_intake(
+        self, event: Dict[str, Any], state: Optional[JiraAgentState]
+    ) -> tuple[bool, Optional[str]]:
+        """Assignment-to-bot or mention — explicit start, not poller To Do noise.
+
+        In-flight is never restarted. plan_ready starts execution (mention /
+        assign is the operator start signal). Terminal work is reset and run
+        again even if the board is still In Progress.
+        """
+        issue = event.get("issue") or {}
+        issue_key = issue.get("key") or ""
+        trigger = str(event.get("webhook_trigger") or "webhook")
+        logger.info(
+            f"{issue_key}: webhook intake ({trigger}) "
+            f"local={state.status.value if state else 'none'}"
+        )
+        if self._is_live_processing(issue_key):
+            return False, "already live in processing cache"
+        if state and state.status in self.IN_FLIGHT_STATUSES:
+            return False, f"already in progress ({state.status.value})"
+
+        if state and state.status == TaskStatus.PLAN_READY:
+            fields = issue.get("fields") or {}
+            summary = fields.get("summary", "") or state.issue_summary or ""
+            description = fields.get("description", "") or ""
+            if not isinstance(description, str):
+                description = str(description)
+            if not description:
+                description = state.description or ""
+            if summary:
+                state.issue_summary = summary
+            if description:
+                state.description = description
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": WorkflowType.EXECUTION.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            self._mark_jira_in_progress(issue_key)
+            try:
+                await self._start_execution_workflow(state)
+                return True, None
+            except Exception as e:
+                logger.exception(
+                    f"Webhook plan start failed for {issue_key}: {e}", e
+                )
+                self._fail_issue(
+                    issue_key,
+                    f"Failed to start plan execution: {e}",
+                    suggestion="Check logs, then mention or re-assign the bot.",
+                )
+                self._release_context(issue_key, success=False)
+                return True, None
+
+        if state and state.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"Reprocessing {issue_key} from {state.status.value} "
+                f"(webhook {trigger})"
+            )
+            self._reset_for_reprocess(issue_key)
+            return await self._handle_issue_created(event)
+
+        return await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -3154,6 +3265,35 @@ class JobProcessor:
             desc = str(desc) if desc is not None else ""
         if not key:
             return {"ok": False, "reason": "missing issue key"}
+        event_id = str(event.get("jira_event_id") or "").strip()
+        if event_id:
+            if event_id in self._jira_seen_events:
+                logger.info(f"{key}: duplicate Jira webhook event {event_id}; skip")
+                return {
+                    "ok": True,
+                    "queued": False,
+                    "started": False,
+                    "duplicate": True,
+                    "issue_key": key,
+                    "status": "skipped",
+                    "reason": "duplicate webhook event",
+                }
+            existing_ev = self.queue_store.find_jira_event(event_id)
+            if existing_ev:
+                logger.info(
+                    f"{key}: Jira event {event_id} already queued as "
+                    f"{existing_ev.get('queue_id')}"
+                )
+                return {
+                    "ok": True,
+                    "queued": existing_ev.get("status") == "queued",
+                    "started": existing_ev.get("status") == "running",
+                    "duplicate": True,
+                    "queue_id": existing_ev.get("queue_id"),
+                    "issue_key": key,
+                    "status": existing_ev.get("status"),
+                }
+            self._jira_seen_events.add(event_id)
         # Only collapse into an existing *waiting* row. If one run is already
         # ``running``, a second dispatch (schedule/rework) must stay ``queued``
         # so operators can see it on Jobs until the live job finishes.
@@ -3191,6 +3331,7 @@ class JobProcessor:
             target_branch=tgt,
             lock_key=lock,
             job_id=self._active_jobs.get(key),
+            jira_event_id=event_id,
             payload=event,
         )
         logger.info(

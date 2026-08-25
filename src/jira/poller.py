@@ -52,25 +52,13 @@ class JiraPoller:
 
         Fragments come from ``TRIGGER_ASSIGNEE_NAMES`` (see settings
         ``trigger_assignee_names_list``). Match is case-insensitive substring
-        against displayName, name, and key.
+        against displayName, name, key, and accountId (Cloud).
         """
-        if not assignee:
-            return False
-        candidates = [
-            (assignee.get("displayName") or "").lower(),
-            (assignee.get("name") or "").lower(),
-            (assignee.get("key") or "").lower(),
-        ]
-        needles = settings.trigger_assignee_names_list
-        if not needles:
-            return False
-        for name in candidates:
-            if not name:
-                continue
-            for needle in needles:
-                if needle and needle in name:
-                    return True
-        return False
+        from src.jira.triggers import assignee_looks_like_bot
+
+        return assignee_looks_like_bot(
+            assignee, needles=settings.trigger_assignee_names_list
+        )
 
     def _is_assigned_to_jira_ai_bot(self, issue_key: str, fields: Optional[dict] = None) -> bool:
         # Prefer assignee already present on the board payload (avoids N+1 GET)
@@ -730,6 +718,32 @@ class JiraPoller:
                 )
                 if settings.jira_board_id:
                     self.board_id = settings.jira_board_id
+
+                from src.jira.webhook import INTAKE_WEBHOOK, normalize_intake_mode
+
+                intake = normalize_intake_mode(
+                    getattr(settings, "jira_intake_mode", None)
+                )
+                if intake == INTAKE_WEBHOOK:
+                    # Poller idle — webhook endpoint is the sole Jira intake.
+                    # Still publish a snapshot so the Board page is not stale.
+                    poll_snapshot_store.begin_poll(
+                        board_id=self.board_id,
+                        interval_seconds=self.interval,
+                    )
+                    poll_snapshot_store.end_poll(
+                        source="webhook",
+                        issues=[],
+                        interval_seconds=self.interval,
+                    )
+                    logger.debug(
+                        "Jira intake mode=webhook; skipping board poll this cycle"
+                    )
+                    for _ in range(self.interval):
+                        if not self._running:
+                            break
+                        time.sleep(1)
+                    continue
 
                 poll_snapshot_store.begin_poll(
                     board_id=self.board_id,

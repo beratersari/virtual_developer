@@ -8,14 +8,14 @@
 
 ## What it does
 
-1. **Polls** a Jira board for To Do issues that match trigger labels and/or bot assignee  
-2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`)  
+1. **Discovers** work via **poll** (board To Do + trigger label / bot assignee) or **webhook** (assignment to the bot, or a comment that mentions the bot). Mode is set in Settings / `JIRA_INTAKE_MODE`.  
+2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`; Mode defaults to build)  
 3. **Runs** OpenCode agents (Prometheus planning, Atlas build, Oracle consult) in temp clones  
 4. **Reports** plans, progress, errors, and completion as Jira comments  
 5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
 6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
 
-There is **no HTTP webhook intake**. Discovery is board polling only. Comment-driven bot commands are not a primary path (legacy plan-start labels still exist; see [Workflows](#workflows)).
+Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated, and Comment created. Only **assign-to-bot** (not unassign) and **mention-of-bot** start a job. Bot replies are ignored so comments cannot loop. Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`.
 
 ---
 

@@ -382,6 +382,119 @@ def summarize_codex_exec_line(line: str, *, limit: int = 220) -> Optional[str]:
     return None
 
 
+def daemon_worthy_codex_summary(summary: Optional[str]) -> bool:
+    """True for daemon-tab lines (errors only). Chatter belongs in Transcript."""
+    s = (summary or "").strip()
+    if not s:
+        return False
+    return s.startswith("[codex] error")
+
+
+def extract_codex_failure_detail(blob: str, *, limit: int = 8000) -> str:
+    """Structured failure dump from a ``codex exec`` JSONL stream."""
+    errors: List[str] = []
+    failed_cmds: List[str] = []
+    last_assistant = ""
+    last_error = ""
+    for raw in (blob or "").splitlines():
+        line = (raw or "").strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            if "error" in line.lower() or "fail" in line.lower():
+                errors.append(line[:500])
+                last_error = line[:800]
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        etype = str(obj.get("type") or "")
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+        item_type = str(item.get("type") or "")
+        if etype in {"turn.failed", "error"} or item_type == "error":
+            msg = obj.get("message") or obj.get("error") or item.get("message") or item.get("text")
+            if isinstance(msg, dict):
+                msg = msg.get("message") or msg.get("error") or msg
+            text = " ".join(str(msg or "error").split())
+            last_error = text
+            errors.append(text[:800])
+            continue
+        if item_type in {"command_execution", "command"}:
+            code = item.get("exit_code")
+            if code is None or str(code) in {"", "0"}:
+                continue
+            cmd = str(item.get("command") or item.get("cmd") or "command")
+            out = item.get("aggregated_output") or item.get("output") or item.get("stderr") or ""
+            tail = " ".join(str(out).split())[:400]
+            row = f"exit_code={code} cmd={cmd}"
+            if tail:
+                row += f" output={tail}"
+            failed_cmds.append(row)
+            continue
+        if item_type in {"agent_message", "message"}:
+            text = " ".join(str(item.get("text") or item.get("content") or "").split())
+            if text:
+                last_assistant = text[:2000]
+    parts: List[str] = []
+    if last_error:
+        parts.append(f"exit_message: {last_error}")
+    if errors:
+        parts.append("errors:")
+        parts.extend(f"  - {e}" for e in errors[-12:])
+    if failed_cmds:
+        parts.append("failed_commands:")
+        parts.extend(f"  - {c}" for c in failed_cmds[-12:])
+    if last_assistant:
+        parts.append(f"last_assistant: {last_assistant}")
+    return "\n".join(parts)[:limit]
+
+
+def format_failure_report(
+    *,
+    backend: str,
+    returncode: Any,
+    stderr: str = "",
+    stdout: str = "",
+    timed_out: bool = False,
+    incomplete: bool = False,
+    incomplete_reasons: Optional[List[Any]] = None,
+    session_id: str = "",
+    duration_s: Optional[float] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Full operator-facing failure dump for the Daemon tab."""
+    lines = [
+        f"{backend} failure",
+        f"  exit_code={returncode}",
+        f"  timed_out={bool(timed_out)}",
+        f"  incomplete={bool(incomplete)}",
+        f"  reasons={list(incomplete_reasons or []) or '-'}",
+        f"  session_id={session_id or '-'}",
+    ]
+    if duration_s is not None:
+        lines.append(f"  duration_s={duration_s:.1f}")
+    if extra:
+        skip = {"stdout", "stderr", "session_file", "serve_turns"}
+        for key, val in extra.items():
+            if key in skip or val in (None, "", [], {}):
+                continue
+            lines.append(f"  {key}={val}")
+    if stderr and stderr.strip():
+        lines.append("  --- stderr ---")
+        lines.append(stderr.strip()[-8000:])
+    parsed = extract_codex_failure_detail(stdout) if stdout else ""
+    if parsed:
+        lines.append("  --- exec detail ---")
+        lines.append(parsed)
+    elif stdout and stdout.strip():
+        lines.append("  --- stdout (tail) ---")
+        lines.append(stdout.strip()[-4000:])
+    return "\n".join(lines)
+
+
 def _looks_like_session_id(sid: str) -> bool:
     s = (sid or "").strip()
     if not s:
@@ -463,7 +576,9 @@ class CodexBackend:
                 except Exception:
                     pass
             summary = summarize_codex_exec_line(line)
-            if summary:
+            # Assistant / tool chatter stays in the session log (Transcript).
+            # Daemon tab only gets errors here; start/exit are logged around exec.
+            if summary and daemon_worthy_codex_summary(summary):
                 logger.info(summary)
             sid = parse_codex_thread_id(line)
             if sid:
@@ -536,23 +651,37 @@ class CodexBackend:
                 # (and its file handles) are actually gone.
                 await asyncio.sleep(0.75)
         except FileNotFoundError:
-            logger.error(f"[codex] binary not found: {cli}")
-            return AgentRunResult(
+            report = format_failure_report(
+                backend="codex",
                 returncode=-1,
-                stdout="\n".join(log_lines),
                 stderr=(
                     f"[codex] binary not found: {cli}. "
                     "Install Codex CLI or set CODEX_CLI."
                 ),
+                stdout="\n".join(log_lines),
+                session_id=str(handle.get("session_id") or ""),
+            )
+            logger.error(report)
+            return AgentRunResult(
+                returncode=-1,
+                stdout="\n".join(log_lines),
+                stderr=report,
                 session_id=handle.get("session_id"),
                 backend=self.name,
             )
         except Exception as e:
-            logger.warning(f"[codex] exec failed: {e}")
+            report = format_failure_report(
+                backend="codex",
+                returncode=-1,
+                stderr=f"[codex] {type(e).__name__}: {e}",
+                stdout="\n".join(log_lines),
+                session_id=str(handle.get("session_id") or ""),
+            )
+            logger.error(report)
             return AgentRunResult(
                 returncode=-1,
                 stdout="\n".join(log_lines),
-                stderr=f"[codex] {e}",
+                stderr=report,
                 session_id=handle.get("session_id"),
                 backend=self.name,
             )
@@ -569,30 +698,45 @@ class CodexBackend:
             timed_out and still_running
         )
         if timed_out:
-            logger.warning(
-                f"[codex] exec timed out after {int(timeout_seconds)}s "
-                f"(ran {elapsed:.1f}s) pid={getattr(proc, 'pid', None)}"
-                + (" (writer still alive)" if still_running else "")
+            report = format_failure_report(
+                backend="codex",
+                returncode=-1,
+                stderr=f"[codex] timed out after {int(timeout_seconds)}s "
+                f"pid={getattr(proc, 'pid', None)}"
+                + (" writer_still_alive=true" if still_running else ""),
+                stdout=blob,
+                timed_out=True,
+                session_id=str(handle.get("session_id") or ""),
+                duration_s=elapsed,
+                extra={"thread_locked": bool(locked or still_running)},
             )
+            logger.error(report)
             return AgentRunResult(
                 returncode=-1,
                 stdout=blob,
-                stderr=f"[codex] timed out after {int(timeout_seconds)}s",
+                stderr=report,
                 session_id=handle.get("session_id"),
                 timed_out=True,
                 backend=self.name,
                 extra={"thread_locked": bool(locked or still_running)},
             )
         if locked:
-            logger.warning(
-                f"[codex] thread locked (active writer) "
-                f"thread={handle.get('session_id') or '-'} "
-                f"duration={elapsed:.1f}s"
+            report = format_failure_report(
+                backend="codex",
+                returncode=code if code else -1,
+                stderr="[codex] thread-store conflict: already has an active writer",
+                stdout=blob,
+                incomplete=False,
+                incomplete_reasons=["codex thread locked"],
+                session_id=str(handle.get("session_id") or ""),
+                duration_s=elapsed,
+                extra={"thread_locked": True},
             )
+            logger.error(report)
             return AgentRunResult(
                 returncode=code if code else -1,
                 stdout=blob,
-                stderr="[codex] thread-store conflict: already has an active writer",
+                stderr=report,
                 session_id=handle.get("session_id"),
                 incomplete=False,
                 incomplete_reasons=["codex thread locked"],
@@ -600,18 +744,38 @@ class CodexBackend:
                 backend=self.name,
                 extra={"thread_locked": True},
             )
+        if code != 0:
+            report = format_failure_report(
+                backend="codex",
+                returncode=code,
+                stderr=f"[codex] process exit_code={code}",
+                stdout=blob,
+                session_id=str(handle.get("session_id") or ""),
+                duration_s=elapsed,
+            )
+            logger.error(report)
+            return AgentRunResult(
+                returncode=code,
+                stdout=blob,
+                stderr=report,
+                session_id=handle.get("session_id"),
+                incomplete=False,
+                incomplete_reasons=[],
+                progress=0,
+                backend=self.name,
+            )
         logger.info(
-            f"[codex] exec finished returncode={code} duration={elapsed:.1f}s "
+            f"[codex] exit ok returncode={code} duration={elapsed:.1f}s "
             f"thread={handle.get('session_id') or '-'}"
         )
         return AgentRunResult(
             returncode=code,
             stdout=blob,
-            stderr="" if code == 0 else f"[codex] exit {code}",
+            stderr="",
             session_id=handle.get("session_id"),
             incomplete=False,
             incomplete_reasons=[],
-            progress=100 if code == 0 else 0,
+            progress=100,
             backend=self.name,
         )
 
