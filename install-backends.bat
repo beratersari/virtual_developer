@@ -13,6 +13,7 @@ REM
 REM Paths:
 REM   OpenCode  %USERPROFILE%\.opencode
 REM   Codex     %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
+REM             (tar extract of vendor\codex-package-*.tar.gz + dummy ~/.codex)
 REM
 REM IMPORTANT (cmd.exe): never write unescaped "->" in echo lines.
 REM =============================================================================
@@ -32,8 +33,9 @@ if not exist "%PS1%" (
 )
 
 if /i "%WHICH%"=="codex" (
-    if not exist "%SCRIPT_DIR%\vendor\bin\codex.exe" (
-        echo [ERROR] vendor\bin\codex.exe missing. This script needs the CI offline zip.
+    if not exist "%SCRIPT_DIR%\vendor\codex-package-x86_64-pc-windows-msvc.tar.gz" (
+        echo [ERROR] Codex package missing. Need vendor\codex-package-x86_64-pc-windows-msvc.tar.gz
+        echo         ^(this installer only extracts that tar.gz; it does not use vendor\bin\codex.exe^)
         call :maybe_pause
         exit /b 1
     )

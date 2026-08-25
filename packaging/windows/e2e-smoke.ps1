@@ -187,9 +187,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "opencode --version failed (exit $LASTEXITCODE): $ver"
 }
 
-$vendorCodex = Join-Path $PayloadDir "vendor\bin\codex.exe"
-if (-not (Test-Path -LiteralPath $vendorCodex)) {
-    throw "vendor\bin\codex.exe missing — offline zip must ship pinned Codex CLI"
+$vendorPkg = Join-Path $PayloadDir "vendor\codex-package-x86_64-pc-windows-msvc.tar.gz"
+if (-not (Test-Path -LiteralPath $vendorPkg)) {
+    throw "vendor Codex package missing — ship vendor\codex-package-x86_64-pc-windows-msvc.tar.gz"
 }
 $codexHome = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
 if (-not (Test-Path -LiteralPath $codexHome)) {
@@ -202,6 +202,10 @@ if (Test-Path -LiteralPath (Join-Path $ocHome "bin\codex.exe")) {
 if ($LASTEXITCODE -ne 0) { throw "codex.exe AMD64 assert failed" }
 $cxVer = & $codexHome --version 2>&1
 Write-Host "codex --version => $cxVer"
+$codexUserCfg = Join-Path $env:USERPROFILE ".codex\config.toml"
+if (-not (Test-Path -LiteralPath $codexUserCfg)) {
+    throw "dummy Codex config missing after install: $codexUserCfg"
+}
 
 # Regression: unescaped "echo ... -> path" used to overwrite opencode.json with "[OK] config ..."
 $homeCfg = Join-Path $ocHome "opencode.json"

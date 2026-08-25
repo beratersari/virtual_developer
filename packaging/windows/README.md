@@ -36,7 +36,10 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
      - OpenCode to **`%USERPROFILE%\.opencode`**
      - Optional: `install-backends.bat opencode` (OpenCode only)
    - **`install-codex.bat`** — **Codex CLI only**:
+     - Extracts **`vendor\codex-package-x86_64-pc-windows-msvc.tar.gz`** with **`tar.exe`**
+       (or downloads that asset from GitHub when vendor is missing)
      - Codex to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**
+     - Dummy **`%USERPROFILE%\.codex\config.toml`** if that file is not already there
      - Does not touch OpenCode or Python
    - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network):
      - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)

@@ -103,7 +103,7 @@ def test_pinned_codex_version_in_versions_env():
         Path(__file__).resolve().parents[1] / "packaging" / "windows" / "versions.env"
     ).read_text(encoding="utf-8")
     assert "CODEX_VERSION=0.149.0" in text
-    assert "CODEX_WINDOWS_ASSET=codex-x86_64-pc-windows-msvc.exe.zip" in text
+    assert "CODEX_WINDOWS_ASSET=codex-package-x86_64-pc-windows-msvc.tar.gz" in text
 
 
 def test_build_codex_argv_has_no_secrets_and_prompt_last():

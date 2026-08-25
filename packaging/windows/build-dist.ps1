@@ -209,7 +209,7 @@ $CODEX_VERSION = $ver["CODEX_VERSION"]
 $CODEX_WINDOWS_ASSET = if ($ver["CODEX_WINDOWS_ASSET"]) {
     $ver["CODEX_WINDOWS_ASSET"]
 } else {
-    "codex-x86_64-pc-windows-msvc.exe.zip"
+    "codex-package-x86_64-pc-windows-msvc.tar.gz"
 }
 $NODE_FULL_VERSION = if ($ver["NODE_FULL_VERSION"]) { $ver["NODE_FULL_VERSION"] } else { "20.19.0" }
 $PYTHON_MIN_VERSION = if ($ver["PYTHON_MIN_VERSION"]) { $ver["PYTHON_MIN_VERSION"] } else { "3.10" }
@@ -488,26 +488,39 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 3b) Fetch Codex Windows CLI (pinned rust-vX.Y.Z)
+# 3b) Fetch Codex Windows package (pinned rust-vX.Y.Z tar.gz)
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "Step 3b: Fetching Codex CLI v$CODEX_VERSION..."
 
-$codexZip = Join-Path $dl $CODEX_WINDOWS_ASSET
+$codexPkg = Join-Path $dl $CODEX_WINDOWS_ASSET
 $codexUrl = "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_WINDOWS_ASSET"
-Write-Host "  Asset: $CODEX_WINDOWS_ASSET (AMD64 / 64-bit Windows)"
-Download-File $codexUrl $codexZip
+Write-Host "  Asset: $CODEX_WINDOWS_ASSET (AMD64 / 64-bit Windows, extract with tar)"
+Download-File $codexUrl $codexPkg
 
 $codexExtract = Join-Path $dl "codex-extract"
 if (Test-Path -LiteralPath $codexExtract) {
     Remove-Item -LiteralPath $codexExtract -Recurse -Force
 }
-Expand-ZipSafe $codexZip $codexExtract
+Ensure-Dir $codexExtract
+# Same tar extract the installer uses (not Expand-Archive).
+Push-Location $codexExtract
+try {
+    & tar --force-local -xf $codexPkg
+    if ($LASTEXITCODE -ne 0) {
+        & tar -xf $codexPkg
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar extract failed for $codexPkg"
+    }
+} finally {
+    Pop-Location
+}
 
 $codexExe = Get-ChildItem -Path $codexExtract -Filter "codex*.exe" -Recurse -File |
     Select-Object -First 1
 if (-not $codexExe) {
-    throw "codex.exe not found inside $codexZip"
+    throw "codex.exe not found inside $codexPkg"
 }
 & $assertPe -Path $codexExe.FullName -MinBytes 5MB
 if ($LASTEXITCODE -ne 0) {
@@ -541,11 +554,14 @@ $vendorBin = Join-Path $vendor "bin"
 Ensure-Dir $vendorBin
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $vendorBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $vendorBin "glab.exe") -Force
-Copy-Item -LiteralPath $codexExe.FullName -Destination (Join-Path $vendorBin "codex.exe") -Force
+# Codex is shipped as the official tar.gz only. Installers extract with tar.
+Copy-Item -LiteralPath $codexPkg -Destination (Join-Path $vendor $CODEX_WINDOWS_ASSET) -Force
+$dummyCodexCfg = Join-Path $root "packaging\windows\codex-config.toml"
+if (Test-Path -LiteralPath $dummyCodexCfg) {
+    Copy-Item -LiteralPath $dummyCodexCfg -Destination (Join-Path $vendor "codex-config.toml") -Force
+}
 & $assertPe -Path (Join-Path $vendorBin "opencode.exe")
 if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
-& $assertPe -Path (Join-Path $vendorBin "codex.exe") -MinBytes 5MB
-if ($LASTEXITCODE -ne 0) { throw "vendor\bin\codex.exe failed AMD64 check" }
 
 # Record architecture for install-time checks / support
 @(
@@ -560,7 +576,7 @@ if ($LASTEXITCODE -ne 0) { throw "vendor\bin\codex.exe failed AMD64 check" }
     "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
     "BACKUP=vendor\bin\opencode.exe"
     "CODEX_INSTALL=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe"
-    "BACKUP_CODEX=vendor\bin\codex.exe"
+    "CODEX_PACKAGE=vendor\$CODEX_WINDOWS_ASSET"
 ) | Set-Content -Path (Join-Path $ocBin "ARCH.txt") -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $ocBin "ARCH.txt") -Destination (Join-Path $vendorBin "ARCH.txt") -Force
 
