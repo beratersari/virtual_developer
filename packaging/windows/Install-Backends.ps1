@@ -10,6 +10,9 @@
   OpenCode: %USERPROFILE%\.opencode
   Codex:    %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
             (official standalone path, same as chatgpt.com/codex/install.ps1)
+            Extracted from vendor\codex-package-x86_64-pc-windows-msvc.tar.gz
+            with tar.exe (offline CI zip only). Dummy config is copied
+            to %USERPROFILE%\.codex\config.toml when that file is missing.
   Callers:  install-backends.bat (default both; -OpenCode / -Codex)
             install-codex.bat    (-Codex only)
 
@@ -19,7 +22,8 @@
 param(
     [string]$RepoRoot = "",
     [switch]$OpenCode,
-    [switch]$Codex
+    [switch]$Codex,
+    [string]$CodexExtract = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -105,6 +109,65 @@ function Assert-JsonFile([string]$Path) {
     $null = $raw | ConvertFrom-Json
 }
 
+function Expand-TarGz([string]$Archive, [string]$Dest) {
+    if (-not (Test-Path -LiteralPath $Archive)) {
+        throw "Archive missing: $Archive"
+    }
+    if (Test-Path -LiteralPath $Dest) {
+        Remove-Item -LiteralPath $Dest -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+    $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (-not (Test-Path -LiteralPath $tar)) {
+        $cmd = Get-Command tar.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $tar = $cmd.Source } else { $tar = "tar" }
+    }
+    $absArchive = [IO.Path]::GetFullPath($Archive)
+    $absDest = [IO.Path]::GetFullPath($Dest)
+    Write-Host "  tar extract: $absArchive"
+    Push-Location $absDest
+    try {
+        & $tar --force-local -xf $absArchive
+        if ($LASTEXITCODE -ne 0) {
+            & $tar -xf $absArchive
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "tar extract failed (exit $LASTEXITCODE): $absArchive"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Find-CodexExe([string]$Root) {
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+    $hit = Get-ChildItem -Path $Root -Filter "codex.exe" -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($hit) { return $hit.FullName }
+    $hit = Get-ChildItem -Path $Root -Filter "codex-*.exe" -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($hit) { return $hit.FullName }
+    return $null
+}
+
+function Install-DummyCodexConfig([string]$DummySrc, [string]$UserHome) {
+    $cfgDir = Join-Path $UserHome ".codex"
+    $cfg = Join-Path $cfgDir "config.toml"
+    if (-not (Test-Path -LiteralPath $cfgDir)) {
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $cfg) {
+        Write-Host "[OK] Keeping existing $cfg"
+        return
+    }
+    if (-not $DummySrc -or -not (Test-Path -LiteralPath $DummySrc)) {
+        Write-Host "[WARNING] Dummy Codex config not found: $DummySrc"
+        return
+    }
+    Copy-Item -LiteralPath $DummySrc -Destination $cfg -Force
+    Write-Host "[OK] Seeded dummy config.toml at $cfg"
+}
+
 function Restore-Pe([string]$Target, [string]$Backup, [long]$MinBytes) {
     $assert = Join-Path $PSScriptRoot "Assert-Amd64Pe.ps1"
     $ok = (Test-Path -LiteralPath $Target) -and ((Get-Item -LiteralPath $Target).Length -ge $MinBytes)
@@ -133,6 +196,11 @@ if (Test-Path -LiteralPath (Join-Path $vendor "versions.env")) {
 $ver = Read-Versions $verFile
 $omoVer = if ($ver["OH_MY_OPENCODE_VERSION"]) { $ver["OH_MY_OPENCODE_VERSION"] } else { "4.19.3" }
 $codexVer = if ($ver["CODEX_VERSION"]) { $ver["CODEX_VERSION"] } else { "0.149.0" }
+$codexAsset = if ($ver["CODEX_WINDOWS_ASSET"]) {
+    $ver["CODEX_WINDOWS_ASSET"]
+} else {
+    "codex-package-x86_64-pc-windows-msvc.tar.gz"
+}
 
 $userHome = $env:USERPROFILE
 if (-not $userHome) { $userHome = $env:HOME }
@@ -298,20 +366,41 @@ if ($doOpenCode) {
 
 if ($doCodex) {
     Write-Host ""
-    Write-Host "Step 4: Installing Codex CLI $codexVer (official path)..."
-    $backupCx = Join-Path $vendor "bin\codex.exe"
-    if (-not (Test-Path -LiteralPath $backupCx)) {
-        throw "vendor\bin\codex.exe missing. Use the CI offline zip."
+    Write-Host "Step 4: Installing Codex CLI $codexVer from $codexAsset ..."
+    $vendorPkg = Join-Path $vendor $codexAsset
+    $dummyCfg = Join-Path $pkgWin "codex-config.toml"
+    if (-not (Test-Path -LiteralPath $dummyCfg)) {
+        $dummyCfg = Join-Path $vendor "codex-config.toml"
     }
+    $srcExe = $null
+    $extractDir = ""
+
+    if ($CodexExtract -and (Test-Path -LiteralPath $CodexExtract)) {
+        $srcExe = Find-CodexExe $CodexExtract
+        if ($srcExe) {
+            Write-Host "  Using pre-extracted package: $CodexExtract"
+        }
+    }
+
+    if (-not $srcExe -and (Test-Path -LiteralPath $vendorPkg)) {
+        $extractDir = Join-Path $env:TEMP "vd-codex-pkg-ps"
+        Expand-TarGz $vendorPkg $extractDir
+        $srcExe = Find-CodexExe $extractDir
+    }
+
+    if (-not $srcExe) {
+        throw "Codex package missing. Need vendor\$codexAsset in the CI offline zip. No download; no vendor\bin\codex.exe."
+    }
+
     New-Item -ItemType Directory -Path $codexBin -Force | Out-Null
-    Copy-Item -LiteralPath $backupCx -Destination $codexExe -Force
+    Copy-Item -LiteralPath $srcExe -Destination $codexExe -Force
     Unblock-File -LiteralPath $codexExe -ErrorAction SilentlyContinue
-    Restore-Pe -Target $codexExe -Backup $backupCx -MinBytes 5MB
     $stale = Join-Path $ocBin "codex.exe"
     if (Test-Path -LiteralPath $stale) {
         Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
         Write-Host "  Removed leftover $stale"
     }
+    Install-DummyCodexConfig $dummyCfg $userHome
     $cxOut = & $codexExe --version 2>&1
     Write-Host ($cxOut | Out-String)
     if ($LASTEXITCODE -ne 0) {

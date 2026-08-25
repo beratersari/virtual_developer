@@ -65,9 +65,6 @@ set "CODEX_BIN=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin"
 if exist "%CODEX_BIN%\codex.exe" (
     set "PATH=%CODEX_BIN%;%PATH%"
     echo Codex   : %CODEX_BIN%\codex.exe
-) else if exist "%SCRIPT_DIR%\vendor\bin\codex.exe" (
-    set "PATH=%SCRIPT_DIR%\vendor\bin;%PATH%"
-    echo Codex   : %SCRIPT_DIR%\vendor\bin\codex.exe
 )
 
 if not exist "%SCRIPT_DIR%\.env" (
