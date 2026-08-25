@@ -3,6 +3,7 @@
  */
 import {
   findPromptForJobPath,
+  jobPromptPaths,
   jobSessionPaths,
   normalizePath,
   pathBasename,
@@ -47,7 +48,30 @@ assert(miss === undefined, 'no fail-open match')
 assert(sessionLogRetryLabel('KAN-1_20260101_120000.log') === 'initial', 'initial label')
 assert(sessionLogRetryLabel('KAN-1_20260101_120100_retry1.log') === 'retry1', 'retry1 label')
 assert(sessionLogRetryLabel('KAN-1_20260101_120200_retry2.log') === 'retry2', 'retry2 label')
+assert(
+  sessionLogRetryLabel('KAN-1_20260101_120100_retry1.prompt.txt') === 'retry1',
+  'prompt retry1 label',
+)
+assert(
+  sessionLogRetryLabel('KAN-1_20260101_120000.prompt.txt') === 'initial',
+  'prompt initial label',
+)
 assert(sessionLogSortKey('x_retry2.log') > sessionLogSortKey('x_retry1.log'), 'sort retry')
+assert(
+  sessionLogSortKey('x_retry2.prompt.txt') > sessionLogSortKey('x.prompt.txt'),
+  'sort prompt retry after initial',
+)
+
+const promptList = jobPromptPaths(
+  {
+    prompt_path: '/s/final_retry1.prompt.txt',
+    prompt_paths: ['/s/first.prompt.txt'],
+  },
+  [{ path: '/s/first.prompt.txt' }, { path: '/s/final_retry1.prompt.txt' }],
+)
+assert(promptList.length === 2, 'two prompt paths')
+assert(promptList.includes('/s/first.prompt.txt'), 'keeps first prompt')
+assert(promptList.includes('/s/final_retry1.prompt.txt'), 'keeps latest prompt')
 
 const nested = jobSessionPaths({
   session_log_path: '/s/final_retry1.log',

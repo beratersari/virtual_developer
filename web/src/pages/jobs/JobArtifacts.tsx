@@ -3,6 +3,7 @@ import type { JobItem, JobRetryAttempt, TextArtifact } from '../../api/types'
 import {
   findLogForJobPath,
   findPromptForJobPath,
+  jobPromptPaths,
   jobSessionPaths,
   pathBasename,
   sessionLogRetryLabel,
@@ -17,24 +18,129 @@ export function JobPromptTab({
   job: JobItem
   prompts: TextArtifact[]
 }) {
-  const match = findPromptForJobPath(prompts, job.prompt_path, job.session_log_path)
+  const entries = useMemo(() => {
+    const raw = jobPromptPaths(job, prompts)
+    const paths = raw
+      .slice()
+      .sort((a, b) => sessionLogSortKey(a) - sessionLogSortKey(b) || a.localeCompare(b))
+    return paths.map((path, idx) => {
+      const match =
+        findPromptForJobPath(prompts, path, null) ||
+        findPromptForJobPath(prompts, null, path.replace(/\.prompt\.txt$/i, '.log'))
+      return {
+        path,
+        label: sessionLogRetryLabel(path),
+        index: idx,
+        match,
+      }
+    })
+  }, [job, prompts])
+
+  const promptKey = entries.map((e) => e.path).join('|')
+  const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    const paths = promptKey ? promptKey.split('|') : []
+    const next: Record<string, boolean> = {}
+    paths.forEach((p, i) => {
+      next[p] = i === paths.length - 1
+    })
+    setOpenKeys(next)
+  }, [promptKey])
+
+  if (entries.length === 0) {
+    return (
+      <div className="vd-alert vd-alert-warning">
+        {job.prompt_path || job.session_log_path
+          ? `Could not load prompt file${job.prompt_path ? ` (${pathBasename(job.prompt_path)})` : ''}.`
+          : 'No prompt_path on this job record yet.'}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-3 text-sm">
-      <p className="text-xs text-text-muted">Exact text sent to the agent for this job.</p>
-      {match ? (
-        <PromptBlock
-          highlight
-          title={`Prompt · ${job.job_id}${match.truncated ? ' (truncated)' : ''}`}
-          meta={pathBasename(match.path)}
-          body={match.content || match.error || '(empty)'}
-        />
-      ) : (
-        <div className="vd-alert vd-alert-warning">
-          {job.prompt_path || job.session_log_path
-            ? `Could not load prompt file${job.prompt_path ? ` (${pathBasename(job.prompt_path)})` : ''}.`
-            : 'No prompt_path on this job record yet.'}
-        </div>
-      )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-text-muted">
+          Exact text sent to the agent. Latest attempt opens by default.
+        </p>
+        {entries.length > 1 && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="vd-btn-ghost text-[11px]"
+              onClick={() => {
+                const next: Record<string, boolean> = {}
+                for (const e of entries) next[e.path] = true
+                setOpenKeys(next)
+              }}
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              className="vd-btn-ghost text-[11px]"
+              onClick={() => {
+                const next: Record<string, boolean> = {}
+                for (const e of entries) next[e.path] = false
+                setOpenKeys(next)
+              }}
+            >
+              Collapse all
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="space-y-2">
+        {entries.map((entry) => {
+          const isLatest = entry.index === entries.length - 1
+          const isOpen = openKeys[entry.path] ?? isLatest
+          const titleLabel = entry.label === 'initial' ? 'initial' : `_${entry.label}`
+          const body =
+            entry.match?.content || entry.match?.error || (entry.match ? '(empty)' : '')
+          return (
+            <details
+              key={entry.path}
+              className={`group rounded-lg border ${
+                isLatest ? 'border-accent/40 bg-accent-muted/20' : 'border-border bg-bg'
+              }`}
+              open={isOpen}
+              onToggle={(ev) => {
+                const el = ev.currentTarget
+                setOpenKeys((prev) => ({ ...prev, [entry.path]: el.open }))
+              }}
+            >
+              <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 px-3 py-2.5 text-xs marker:content-none [&::-webkit-details-marker]:hidden">
+                <span className="inline-block w-3 text-text-muted">▸</span>
+                <span className="rounded border border-border bg-bg-elevated px-2 py-0.5 font-mono font-semibold">
+                  {titleLabel}
+                </span>
+                {isLatest && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-accent-text">
+                    latest
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate font-mono text-text-muted">
+                  {pathBasename(entry.path)}
+                </span>
+                {entry.match?.truncated ? (
+                  <span className="text-text-muted">(truncated)</span>
+                ) : null}
+              </summary>
+              <div className="border-t border-border">
+                {entry.match ? (
+                  <pre className="max-h-[min(60vh,36rem)] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-relaxed text-text">
+                    {body}
+                  </pre>
+                ) : (
+                  <div className="vd-alert vd-alert-warning m-3">
+                    Could not load {pathBasename(entry.path)}
+                  </div>
+                )}
+              </div>
+            </details>
+          )
+        })}
+      </div>
     </div>
   )
 }

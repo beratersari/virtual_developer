@@ -287,7 +287,7 @@ export function JobDetailPage() {
       <Tabs
         tabs={[
           { id: 'overview', label: 'Details' },
-          { id: 'prompt', label: 'Prompt' },
+          { id: 'prompt', label: 'Prompt', count: prompts.length },
           { id: 'chat', label: 'Transcript' },
           { id: 'output', label: 'Output' },
           { id: 'logs', label: 'Daemon', count: systemLogs.length },
