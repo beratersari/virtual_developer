@@ -253,13 +253,13 @@ def test_run_agent_registers_for_cancel():
     assert "self._running_tasks[task.task_id] = process" in src
 
 
-def test_agent_env_strips_secrets(monkeypatch):
+def test_agent_env_passes_all_process_vars(monkeypatch):
     monkeypatch.setenv("JIRA_API_TOKEN", "secret-jira")
     monkeypatch.setenv("GITLAB_PAT", "secret-pat")
     monkeypatch.setenv("PATH", "/usr/bin")
     env = _agent_subprocess_env()
-    assert "JIRA_API_TOKEN" not in env
-    assert "GITLAB_PAT" not in env
+    assert env.get("JIRA_API_TOKEN") == "secret-jira"
+    assert env.get("GITLAB_PAT") == "secret-pat"
     assert env.get("PATH") == "/usr/bin"
 
 

@@ -20,8 +20,8 @@ def bootstrap_dotenv_into_environ(
 
     Pydantic Settings only maps *declared* fields (``extra=ignore``), so project
     build tokens (NPM_TOKEN, AWS_*, DOCKER_*, NuGet, etc.) written in ``.env``
-    never reached agent children. This bootstrap keeps those keys available to
-    the process and therefore to ``_agent_subprocess_env``.
+    never reached agent children. This bootstrap copies every ``.env`` key into
+    the process so ``_agent_subprocess_env`` can inherit the full host env.
 
     Existing process environment wins unless ``override=True``.
     Returns the number of keys newly applied (approx).

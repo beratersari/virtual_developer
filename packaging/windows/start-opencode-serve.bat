@@ -96,7 +96,7 @@ timeout /t 1 /nobreak >nul
 
 echo Starting OpenCode serve in window "VD-OpenCode-Serve"...
 REM Prefer PATH entry under %%USERPROFILE%%\.opencode\bin (same as start-opencode.bat)
-start "VD-OpenCode-Serve" /D "%SCRIPT_DIR%" cmd /c "set OPENCODE_DISABLE_MODELS_FETCH=1&& set PATH=%USERPROFILE%\.opencode\bin;%PATH%&& opencode serve --port %SERVE_PORT% --hostname %SERVE_HOST% --print-logs --log-level INFO & echo. & echo OpenCode serve exited. & pause"
+start "VD-OpenCode-Serve" /D "%SCRIPT_DIR%" cmd /c "set OPENCODE_DISABLE_MODELS_FETCH=1&& set GIT_TERMINAL_PROMPT=0&& set GCM_INTERACTIVE=never&& set GCM_MODAL_PROMPT=false&& set GCM_GUI_PROMPT=false&& set PATH=%USERPROFILE%\.opencode\bin;%PATH%&& opencode serve --port %SERVE_PORT% --hostname %SERVE_HOST% --print-logs --log-level INFO & echo. & echo OpenCode serve exited. & pause"
 echo Waiting for http://127.0.0.1:%SERVE_PORT%/global/health ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PKG_WIN%\Wait-Http.ps1" -Url "http://127.0.0.1:%SERVE_PORT%/global/health" -TimeoutSec 60 -OkPattern "healthy"
 if errorlevel 1 (

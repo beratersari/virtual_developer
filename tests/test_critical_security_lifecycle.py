@@ -115,14 +115,16 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
     ]
     assert any("oauth2:super-secret-pat-xyz@" in str(v) for v in rewrite), env
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    assert env.get("GCM_INTERACTIVE") == "never"
     assert env.get("GIT_ASKPASS")
     assert env.get("VD_GIT_PASSWORD") == "super-secret-pat-xyz"
+    assert "credential.helper=" in cmd
 
 
 def test_push_applies_settings_pat_to_origin_without_clearing_helpers(
     tmp_path, monkeypatch
 ):
-    """Push with settings PAT sets origin URL temporarily; no credential.helper=."""
+    """Push with settings PAT sets origin URL temporarily; helper GUI disabled."""
     from src.config import settings as real_settings
 
     monkeypatch.chdir(tmp_path)
@@ -156,9 +158,10 @@ def test_push_applies_settings_pat_to_origin_without_clearing_helpers(
     # set-url with oauth2:PAT before push
     set_urls = [c for c in captured if c[:3] == ["git", "remote", "set-url"]]
     assert any("oauth2:settings-pat-from-dashboard@" in " ".join(c) for c in set_urls)
-    # Never disable Windows credential helper
-    for c in captured:
-        assert "credential.helper=" not in c
+    # Unattended: empty helper on argv so Windows GCM cannot pop a dialog
+    push_cmds = [c for c in captured if "push" in c]
+    assert push_cmds
+    assert any("credential.helper=" in c for c in push_cmds)
 
 
 def test_push_without_settings_pat_leaves_helpers_available(tmp_path, monkeypatch):

@@ -118,6 +118,27 @@ def test_host_from_url_edges():
     assert GitManager._host_from_url("") == ""
     assert GitManager._host_from_url("gitlab.example.com/group/repo") == "gitlab.example.com"
     assert GitManager._host_from_url("https://GitLab.Example.COM/a/b") == "gitlab.example.com"
+    assert GitManager._host_from_url("https://gitlab.example.com:443/a/b.git") == (
+        "gitlab.example.com"
+    )
+    assert GitManager._host_from_url("git@gitlab.example.com:group/repo.git") == (
+        "gitlab.example.com"
+    )
+
+
+def test_normalize_remote_url_strips_ssh_and_userinfo():
+    assert GitManager.normalize_remote_url(
+        "git@gitlab.example.com:group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "https://git@gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "https://gitlab.example.com:443/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "ssh://git@gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
 
 
 # --- Setup / temp dir ---
@@ -185,7 +206,8 @@ def test_ensure_askpass_script_unix(tmp_path, monkeypatch):
     # rewrite when content differs
     path.write_text("stale", encoding="utf-8")
     path2 = GitManager._ensure_askpass_script()
-    assert "VD_GIT_PASSWORD" in path2.read_text(encoding="utf-8")
+    py = path2.with_name("vd-git-askpass.py")
+    assert "VD_GIT_PASSWORD" in py.read_text(encoding="utf-8")
 
 
 def test_ensure_askpass_script_windows(tmp_path, monkeypatch):
@@ -198,8 +220,11 @@ def test_ensure_askpass_script_windows(tmp_path, monkeypatch):
             path = GitManager._ensure_askpass_script()
             assert path.name == "vd-git-askpass.cmd"
             text = path.read_text(encoding="utf-8")
-            assert "VD_GIT_PASSWORD" in text
-            assert "oauth2" in text
+            assert "vd-git-askpass.py" in text
+            py = path.with_name("vd-git-askpass.py")
+            py_text = py.read_text(encoding="utf-8")
+            assert "VD_GIT_PASSWORD" in py_text
+            assert "oauth2" in py_text
 
 
 def test_ensure_askpass_chmod_oserror(tmp_path, monkeypatch):
