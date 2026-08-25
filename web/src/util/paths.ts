@@ -60,15 +60,35 @@ export function findLogForJobPath<T extends { path: string }>(
 }
 
 export function sessionLogRetryLabel(pathOrName: string): string {
-  const base = pathBasename(pathOrName)
-  const m = base.match(/_retry(\d+)\.log$/i)
+  const stem = pathStem(pathOrName)
+  const m = stem.match(/_retry(\d+)$/i)
   if (m) return `retry${m[1]}`
-  const legacy = base.match(/_(\d+)\.log$/i)
-  if (legacy && !/_\d{8}_\d{6}\.log$/i.test(base)) {
+  const base = pathBasename(pathOrName)
+  const legacy = base.match(/_(\d+)\.(?:log|txt)$/i)
+  if (legacy && !/_\d{8}_\d{6}(?:_retry\d+)?\.(?:log|prompt\.txt)$/i.test(base)) {
     const n = Number(legacy[1])
     if (n > 0) return `retry${n}`
   }
   return 'initial'
+}
+
+export function jobPromptPaths(
+  job: {
+    prompt_path?: string | null
+    prompt_paths?: string[] | null
+  },
+  loaded: Array<{ path: string }> = [],
+): string[] {
+  const out: string[] = []
+  const add = (p?: string | null) => {
+    if (!p) return
+    if (out.some((x) => pathsMatch(x, p))) return
+    out.push(p)
+  }
+  for (const p of job.prompt_paths || []) add(p)
+  add(job.prompt_path)
+  for (const item of loaded || []) add(item.path)
+  return out
 }
 
 export function jobSessionPaths(job: {

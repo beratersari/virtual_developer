@@ -708,6 +708,17 @@ def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
     latest = j.get("prompt_path")
     if latest and latest not in paths:
         paths.append(str(latest))
+    for log in _job_session_log_paths(j):
+        if not str(log).lower().endswith(".log"):
+            continue
+        sib = str(log)[:-4] + ".prompt.txt"
+        if sib in paths:
+            continue
+        try:
+            if Path(sib).is_file():
+                paths.append(sib)
+        except OSError:
+            continue
     return paths
 
 

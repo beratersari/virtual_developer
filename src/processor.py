@@ -1460,10 +1460,25 @@ class JobProcessor:
         if not job_id:
             return
         patch: Dict[str, Any] = {}
+        existing = self.job_store.get_job(job_id) or {}
         if session_path:
             patch["session_log_path"] = session_path
+            logs = [
+                str(p)
+                for p in (existing.get("session_log_paths") or [])
+                if p
+            ]
+            if session_path not in logs:
+                logs.append(session_path)
+            patch["session_log_paths"] = logs
         if prompt_path:
             patch["prompt_path"] = prompt_path
+            prompts = [
+                str(p) for p in (existing.get("prompt_paths") or []) if p
+            ]
+            if prompt_path not in prompts:
+                prompts.append(prompt_path)
+            patch["prompt_paths"] = prompts
         if not patch:
             return
         try:
