@@ -1858,11 +1858,27 @@ class JobProcessor:
         except Exception as e:
             logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
+        live_job_id = self._active_jobs.get(issue_key)
         cancelled = self._cancel_issue_state(
             issue_key,
             message=reason,
             status=TaskStatus.CANCELLED,
         )
+        # Drop leftover queued/running rows so a later schedule of this issue
+        # is not blocked forever by a stale ``running`` claim.
+        try:
+            nq = self.queue_store.finish_open_for_issue(
+                issue_key,
+                status="cancelled",
+                error_message=reason,
+                job_id=live_job_id,
+            )
+            if nq:
+                logger.info(
+                    f"Job cancelled via API: {issue_key} closed {nq} queue row(s)"
+                )
+        except Exception as e:
+            logger.warning(f"cancel_job queue finish failed for {issue_key}: {e}")
         try:
             self._release_context(issue_key, success=False)
         except Exception as e:
@@ -1887,7 +1903,11 @@ class JobProcessor:
                 "process_signalled": killed,
             }
 
-        logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
+        jid = (refreshed.metadata or {}).get("current_job_id") if refreshed else None
+        logger.info(
+            f"Job cancelled via API: {issue_key} killed={killed} "
+            f"job_id={jid or '-'}"
+        )
         return {
             "ok": True,
             "issue_key": issue_key,
@@ -3170,7 +3190,14 @@ class JobProcessor:
             work_branch=work,
             target_branch=tgt,
             lock_key=lock,
+            job_id=self._active_jobs.get(key),
             payload=event,
+        )
+        logger.info(
+            f"{key}: scheduled/enqueued queue_id={rec.get('queue_id')} "
+            f"schedule_id={event.get('schedule_id') or '-'} "
+            f"job_id={rec.get('job_id') or self._active_jobs.get(key) or '-'} "
+            f"lock={lock or '-'}"
         )
         await self.dispatch_queue()
         live = self.queue_store.get(rec["queue_id"]) or rec
@@ -3183,6 +3210,59 @@ class JobProcessor:
             "status": live.get("status"),
         }
 
+    def _reap_stale_queue_running(self) -> int:
+        """Finish ``running`` queue rows whose issue is no longer live.
+
+        After dashboard Stop the worker may still be winding down, but the
+        issue is CANCELLED and ``_contexts`` is empty. A leftover running
+        row then blocks ``claim_next`` for that issue (and can fill
+        ``max_running``). Reap those orphans before claiming.
+        """
+        n = 0
+        live = {
+            (k or "").strip().upper()
+            for k in self.list_live_processing_keys()
+            if k
+        }
+        for rec in list(self.queue_store.list_items(status="running", limit=500)):
+            ik = (rec.get("issue_key") or "").strip()
+            if not ik or ik.upper() in live:
+                continue
+            st = self.state_manager.get_state(ik)
+            if st and st.status in self.IN_FLIGHT_STATUSES:
+                continue
+            # A brand-new claim after Stop still sees local CANCELLED until
+            # process_event resets it. Only reap rows that started *before*
+            # the terminal write (the leftover claim from the stopped job).
+            if st and st.completed_at and rec.get("started_at"):
+                done_at = st.completed_at
+                if hasattr(done_at, "isoformat"):
+                    done_at = done_at.isoformat(timespec="milliseconds")
+                if str(rec.get("started_at") or "") >= str(done_at):
+                    continue
+            qid = rec.get("queue_id") or ""
+            if not qid:
+                continue
+            term = "skipped"
+            if st and st.status == TaskStatus.CANCELLED:
+                term = "cancelled"
+            elif st and st.status == TaskStatus.ERROR:
+                term = "error"
+            elif st and st.status == TaskStatus.COMPLETED:
+                term = "completed"
+            self.queue_store.finish(
+                qid,
+                status=term,
+                error_message="Reaped stale running queue row (issue not live)",
+                job_id=(st.metadata or {}).get("current_job_id") if st else None,
+            )
+            n += 1
+            logger.info(
+                f"Queue reap {qid} issue={ik} status={term} "
+                f"(not live; local={st.status.value if st else 'none'})"
+            )
+        return n
+
     async def dispatch_queue(self) -> int:
         """Claim and start every currently runnable queue item."""
         started = 0
@@ -3192,6 +3272,9 @@ class JobProcessor:
             self._queue_dispatch_again = True
             return 0
         async with self._queue_dispatch_lock:
+            reaped = self._reap_stale_queue_running()
+            if reaped:
+                logger.info(f"Queue dispatch reaped {reaped} stale running row(s)")
             while True:
                 self._queue_dispatch_again = False
                 max_jobs = max(1, int(settings.max_concurrent_jobs or 1))
@@ -3214,6 +3297,13 @@ class JobProcessor:
         source = (rec.get("source") or "jira").strip().lower()
         job_id = None
         try:
+            live_row = self.queue_store.get(qid) if qid else None
+            if not live_row or live_row.get("status") not in {"queued", "running"}:
+                logger.info(
+                    f"Queue item {qid} no longer open "
+                    f"(status={live_row.get('status') if live_row else 'missing'}); skip"
+                )
+                return
             if source == "gitlab":
                 from src.gitlab.webhook import GitlabMrNoteEvent
 
