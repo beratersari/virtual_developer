@@ -11,3 +11,8 @@ export function modelSelectValue(
   if (value && known.has(value)) return value
   return ''
 }
+
+/** Model-id text field is only for "Other id…". Listed models hide it. */
+export function showCustomModelId(selectValue: string, custom: boolean): boolean {
+  return Boolean(custom) || selectValue === CUSTOM_MODEL
+}
