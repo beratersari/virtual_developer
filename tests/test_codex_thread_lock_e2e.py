@@ -224,6 +224,113 @@ def test_lock_blob_from_kan12371_is_detected():
     assert is_codex_thread_lock_error(LOCK_LOG) is True
 
 
+def test_leftover_writer_keeps_live_thread(tmp_path):
+    """KAN-12375: the live exec is the writer — keep that thread."""
+    runner = AgentRunner(working_directory=tmp_path)
+    task = AgentTask(
+        description="d",
+        prompt="BUILD",
+        agent="build",
+        backend="codex",
+        session_id=THREAD_ID,
+    )
+    runner._resume_codex_after_lock(
+        task, THREAD_ID, lock_hits=1, leftover_writer=True
+    )
+    assert task.session_id == THREAD_ID
+    assert task.abandoned_session_id is None
+    assert task.prompt == DEFAULT_CODEX_RESUME_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_stream_overflow_retry_keeps_live_thread(tmp_path, monkeypatch):
+    """Huge-line crash must continue the thread that is still writing."""
+    monkeypatch.chdir(tmp_path)
+    runner = AgentRunner(working_directory=tmp_path)
+    seen: List[Dict[str, Optional[str]]] = []
+    delays: List[float] = []
+    session_file = tmp_path / "kan12375.log"
+    session_file.write_text(
+        "[codex] Separator is not found, and chunk exceed the limit\n",
+        encoding="utf-8",
+    )
+    overflow = {
+        "task_id": "t0",
+        "returncode": -1,
+        "stdout": '{"id":"item_9","type":"command_execution"}\n',
+        "stderr": (
+            "[codex] LimitOverrunError: Separator is not found, "
+            "and chunk exceed the limit"
+        ),
+        "session_file": str(session_file),
+        "opencode_session_id": THREAD_ID,
+        "incomplete": False,
+        "timed_out": False,
+        "backend": "codex",
+        "stream_overflow": True,
+        "leftover_writer": True,
+        "thread_locked": True,
+    }
+
+    async def fake_run(task, **kwargs):
+        seen.append({"sid": task.session_id, "prompt": task.prompt or ""})
+        if len(seen) == 1:
+            return overflow
+        assert task.session_id == THREAD_ID
+        return {
+            "task_id": task.task_id,
+            "returncode": 0,
+            "stdout": "continued the live thread",
+            "stderr": "",
+            "session_file": str(session_file),
+            "opencode_session_id": THREAD_ID,
+            "incomplete": False,
+            "backend": "codex",
+        }
+
+    def on_retry(attempt, delay, reason, *rest):
+        delays.append(float(delay))
+        assert reason == "thread_locked"
+
+    async def _instant(_delay):
+        return None
+
+    with patch.object(runner, "run_agent", side_effect=fake_run):
+        with patch("src.orchestrator.agent_runner.settings") as s:
+            s.agent_task_max_retries = 3
+            s.agent_task_max_incomplete_retries = 256
+            s.agent_task_retry_delay_seconds = 5
+            s.agent_task_retry_backoff_multiplier = 2.0
+            s.agent_task_retry_on_timeout = True
+            s.agent_task_retry_on_error = True
+            task = AgentTask(
+                description="KAN-12375 mock diff overflow",
+                prompt="BUILD",
+                agent="build",
+                issue_key="KAN-12375",
+                backend="codex",
+                session_id=THREAD_ID,
+            )
+            with patch(
+                "src.orchestrator.agent_runner.asyncio.sleep",
+                side_effect=_instant,
+            ):
+                result = await runner.run_agent_with_retry(
+                    task,
+                    max_retries=3,
+                    max_incomplete_retries=256,
+                    on_retry=on_retry,
+                )
+
+    assert result["returncode"] == 0
+    assert len(seen) == 2
+    assert seen[0]["sid"] == THREAD_ID
+    assert seen[1]["sid"] == THREAD_ID
+    assert seen[1]["prompt"] == DEFAULT_CODEX_RESUME_PROMPT
+    assert DEFAULT_CODEX_COLD_CONTINUE_PROMPT not in [row["prompt"] for row in seen]
+    assert delays and delays[0] >= 10.0
+
+
 def test_codex_resume_helper_skips_opencode_db(tmp_path):
     runner = AgentRunner(working_directory=tmp_path)
     task = AgentTask(

@@ -539,17 +539,22 @@ class AgentRunner:
     @staticmethod
     def _result_thread_locked(result: Optional[Dict[str, Any]]) -> bool:
         data = result if isinstance(result, dict) else {}
-        if data.get("thread_locked"):
+        if data.get("thread_locked") or data.get("leftover_writer"):
             return True
         blob = " ".join(
             [str(data.get("stderr") or "")]
+            + [str(data.get("stdout") or "")]
             + [str(r) for r in (data.get("incomplete_reasons") or [])]
         ).lower()
-        return (
+        if (
             "active writer" in blob
             or "thread-store conflict" in blob
             or "codex thread locked" in blob
-        )
+        ):
+            return True
+        from src.backends.codex import is_codex_stream_overflow_error
+
+        return is_codex_stream_overflow_error(blob)
 
     def _resume_codex_after_lock(
         self,
@@ -557,12 +562,17 @@ class AgentRunner:
         session_id: Optional[str],
         *,
         lock_hits: int,
+        leftover_writer: bool = False,
     ) -> None:
         """Retry the same Codex thread once, then start a new thread.
 
         Codex refuses ``exec resume`` while another writer holds the store.
         Flooding the same id with OpenCode finish-todos prompts does not
         release the lock and burns the incomplete retry budget.
+
+        A leftover writer is the original ``codex exec`` still running.
+        Keep that thread: wait, then continue it. Do not start a second
+        writer on the same clone (KAN-12375).
         """
         from src.backends.codex import (
             DEFAULT_CODEX_COLD_CONTINUE_PROMPT,
@@ -570,6 +580,14 @@ class AgentRunner:
         )
 
         sid = (session_id or "").strip()
+        if leftover_writer and sid:
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            logger.warning(
+                f"Retry after leftover writer: keep Codex thread {sid} "
+                "(live exec still writing; wait, then continue this thread)"
+            )
+            return
         if sid and lock_hits < 2:
             task.session_id = sid
             task.prompt = DEFAULT_CODEX_RESUME_PROMPT
@@ -1465,9 +1483,26 @@ class AgentRunner:
 
             if should_retry:
                 sid = result.get("opencode_session_id") or last_session_id
+                keep_live_writer = False
                 if retry_reason == "thread_locked":
+                    from src.backends.codex import is_codex_stream_overflow_error
+
+                    overflow_blob = " ".join(
+                        [
+                            str(result.get("stderr") or ""),
+                            str(result.get("stdout") or ""),
+                        ]
+                    )
+                    keep_live_writer = bool(
+                        result.get("leftover_writer")
+                        or result.get("stream_overflow")
+                        or is_codex_stream_overflow_error(overflow_blob)
+                    )
                     self._resume_codex_after_lock(
-                        task, sid, lock_hits=lock_used + 1
+                        task,
+                        sid,
+                        lock_hits=lock_used + 1,
+                        leftover_writer=keep_live_writer,
                     )
                 else:
                     self._resume_opencode_session_for_retry(
@@ -1502,11 +1537,19 @@ class AgentRunner:
 
                 # Lock conflicts fail in seconds; do not apply the
                 # incomplete-session exponential (5 * 2^n → hours).
+                # A leftover writer is still doing work — wait longer
+                # before touching the same thread.
                 if retry_reason == "thread_locked":
-                    delay = min(
-                        float(retry_delay or 5) * (2 ** max(0, lock_used - 1)),
-                        15.0,
-                    )
+                    if keep_live_writer:
+                        delay = min(
+                            30.0,
+                            max(10.0, float(retry_delay or 5) * 2),
+                        )
+                    else:
+                        delay = min(
+                            float(retry_delay or 5) * (2 ** max(0, lock_used - 1)),
+                            15.0,
+                        )
                 else:
                     delay = retry_delay * (backoff_multiplier ** (attempt - 1))
 
