@@ -3719,10 +3719,10 @@ class JobProcessor:
         delivery_note: str = "",
     ) -> str:
         """Format the Virtual Developer note posted back on the MR."""
-        answer = (stdout or "").strip() or "(no output)"
-        # GitLab notes are large, but keep the dashboard/job comment readable.
-        if len(answer) > 8000:
-            answer = answer[:8000].rstrip() + "\n\n…(truncated)"
+        from src.backends.codex import format_agent_answer_for_comment
+
+        # Codex stdout is the exec JSONL stream — post the assistant markdown.
+        answer = format_agent_answer_for_comment(stdout, limit=8000)
         parts = ["*Yaver*", "", answer]
         if pushed:
             extra = ["", "---", ""]
@@ -5394,10 +5394,12 @@ class JobProcessor:
                 return
 
             if result["returncode"] == 0:
+                from src.backends.codex import format_agent_answer_for_comment
+
                 self.reporter.post_oracle_response(
                     state.issue_key,
                     question=state.description,
-                    answer=result["stdout"],
+                    answer=format_agent_answer_for_comment(result.get("stdout") or ""),
                 )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
@@ -5475,7 +5477,12 @@ class JobProcessor:
             result = await runner.run_agent(task)
 
             if result["returncode"] == 0:
-                self.reporter.post_comment_response(issue_key, result["stdout"])
+                from src.backends.codex import format_agent_answer_for_comment
+
+                self.reporter.post_comment_response(
+                    issue_key,
+                    format_agent_answer_for_comment(result.get("stdout") or ""),
+                )
             else:
                 err = result.get("stderr") or "Agent failed for free-form request"
                 self.reporter.post_comment_response(

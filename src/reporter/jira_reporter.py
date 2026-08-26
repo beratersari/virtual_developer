@@ -20,6 +20,16 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 20].rstrip() + "\n... (truncated)"
 
 
+def _human_agent_answer(text: str) -> str:
+    """Codex JSONL → last assistant markdown. OpenCode / plain text unchanged."""
+    from src.backends.codex import extract_codex_answer, looks_like_codex_jsonl
+
+    raw = text or ""
+    if looks_like_codex_jsonl(raw):
+        return extract_codex_answer(raw)
+    return raw
+
+
 class JiraReporter:
     """Posts updates and reports to JIRA issues."""
 
@@ -388,7 +398,8 @@ Please review the details above and advise how to proceed (for example, move the
         response: str,
     ) -> Optional[str]:
         """Post response to a comment."""
-        text = (response or "").strip() or (
+        text = _human_agent_answer(response)
+        text = (text or "").strip() or (
             "_The agent returned an empty response. Retry the @mention or check logs._"
         )
         text = _clip(text, _MAX_RESPONSE_CHARS)
@@ -412,7 +423,8 @@ Please review the details above and advise how to proceed (for example, move the
     ) -> Optional[str]:
         """Post architecture consultation response."""
         q = (question or "").strip() or "(no question provided)"
-        a = (answer or "").strip() or (
+        a = _human_agent_answer(answer)
+        a = (a or "").strip() or (
             "_The Oracle agent returned an empty answer. Rephrase the question or check logs._"
         )
         a = _clip(a, _MAX_RESPONSE_CHARS)
