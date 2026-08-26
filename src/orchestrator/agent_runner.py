@@ -37,7 +37,10 @@ OPENCODE_AGENT_ALIASES: Dict[str, str] = {
 
 def _default_sessions_dir() -> Path:
     """Session logs root. Tests patch this so nothing lands in the real repo tree."""
-    return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("sessions").resolve()
 
 
 def resolve_opencode_agent_name(agent: str) -> str:
@@ -237,7 +240,9 @@ def _agent_subprocess_env(
 
 
 def _unattended_git_wrapper_dir() -> Path:
-    return (Path.cwd() / ".jira-agent" / "bin" / "git-wrap").resolve()
+    from src.paths import agent_subdir
+
+    return agent_subdir("bin", "git-wrap").resolve()
 
 
 def _ensure_unattended_git_wrapper() -> Optional[Path]:

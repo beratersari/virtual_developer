@@ -20,7 +20,10 @@ _TERMINAL = frozenset({"completed", "cancelled", "error", "skipped"})
 
 
 def _default_queue_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "queue"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("queue")
 
 
 def _now_iso() -> str:

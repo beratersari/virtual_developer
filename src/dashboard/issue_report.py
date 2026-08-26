@@ -379,7 +379,9 @@ def _add_dir_logs(zf: zipfile.ZipFile, logs_dir: Path, prefix: str) -> None:
 
 
 def _add_job_system_log_files(zf: zipfile.ZipFile) -> None:
-    jobs_dir = Path.cwd() / ".jira-agent" / "jobs"
+    from src.paths import agent_subdir
+
+    jobs_dir = agent_subdir("jobs")
     if not jobs_dir.is_dir():
         return
     added = 0

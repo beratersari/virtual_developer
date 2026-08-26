@@ -339,6 +339,9 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+    # Durable locations (outside the install folder on Windows)
+    data_dir: str = ""
+    temp_dir_base: str = ""
 
 
 class ProjectRepositoryItem(BaseModel):

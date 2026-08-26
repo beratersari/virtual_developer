@@ -14,7 +14,10 @@ from src.logger import logger
 
 
 def _default_jobs_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "jobs"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("jobs")
 
 
 def extract_task_description_from_prompt(text: str) -> str:
@@ -74,7 +77,9 @@ def description_from_prompt_path(prompt_path: Optional[str]) -> str:
             except ValueError:
                 return False
 
-        allowed = _under(Path.cwd() / ".jira-agent") or _under(_default_jobs_dir())
+        from src.paths import under_agent_data
+
+        allowed = under_agent_data(path) or _under(_default_jobs_dir())
         if not allowed:
             logger.debug(f"Refusing prompt path outside agent dirs: {path}")
             return ""

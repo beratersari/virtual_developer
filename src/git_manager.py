@@ -960,7 +960,10 @@ class GitManager:
     def _ensure_askpass_script() -> Path:
         """Create (once) a small cross-platform askpass helper under temp."""
         # Prefer a stable path under the agent runtime so we do not rewrite each call
-        base = Path.cwd() / ".jira-agent" / "bin"
+        from src.paths import agent_subdir, ensure_agent_data_dir
+
+        ensure_agent_data_dir()
+        base = agent_subdir("bin")
         base.mkdir(parents=True, exist_ok=True)
         py = base / "vd-git-askpass.py"
         py_content = (

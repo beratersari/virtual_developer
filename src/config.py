@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.logger import logger
@@ -363,8 +363,29 @@ class Settings(BaseSettings):
     # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(
         default=Path(".temp"),
-        description="Base directory for temp working folders (relative to agent root)"
+        description=(
+            "Base directory for temp clones. On Windows / WSL-on-C: the default "
+            "``.temp`` is remapped to C:\\vd\\t so reinstall does not wipe workspaces."
+        ),
     )
+    @field_validator("temp_dir_base", mode="after")
+    @classmethod
+    def _durable_temp_dir(cls, v: Path) -> Path:
+        from src.paths import (
+            _under_pytest,
+            coerce_win_path,
+            default_temp_dir,
+            uses_windows_layout,
+        )
+
+        v = coerce_win_path(v)
+        if _under_pytest() or v.is_absolute():
+            return v
+        text = str(v).replace("\\", "/").strip()
+        if uses_windows_layout() and text in {".temp", "temp", "./.temp"}:
+            return default_temp_dir()
+        return v
+
     temp_cleanup_policy: str = Field(
         default="age",
         description=(
@@ -472,8 +493,9 @@ class Settings(BaseSettings):
     
     @property
     def state_dir(self) -> Path:
-        from pathlib import Path as PathLib
-        return PathLib.cwd() / ".jira-agent" / "state"
+        from src.paths import agent_subdir
+
+        return agent_subdir("state")
     
     @property
     def jira_projects_list(self) -> List[str]:
@@ -664,7 +686,7 @@ _current_temp_dir: Optional[Path] = None
 
 # Dashboard runtime overrides (survive process restart; win over .env).
 # Written by apply_settings_update; applied after Settings() loads env.
-_RUNTIME_SETTINGS_REL = Path(".jira-agent") / "runtime_settings.json"
+_RUNTIME_SETTINGS_NAME = "runtime_settings.json"
 
 # Keys the dashboard may persist (no secrets).
 _RUNTIME_PERSIST_KEYS = frozenset(
@@ -718,7 +740,14 @@ def _normalize_intake_mode(raw: Any) -> str:
 
 def runtime_settings_path() -> Path:
     """Path to JSON file holding dashboard runtime overrides."""
-    return (Path.cwd() / _RUNTIME_SETTINGS_REL).resolve()
+    from src.paths import agent_data_dir
+
+    dest = agent_data_dir()
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return (dest / _RUNTIME_SETTINGS_NAME).resolve()
 
 
 def load_runtime_settings() -> Dict[str, Any]:

@@ -4,6 +4,7 @@ import asyncio
 import platform
 import signal
 import sys
+from pathlib import Path
 from typing import Optional
 
 import uvicorn
@@ -41,8 +42,17 @@ class JiraAgentDaemon:
         # run_coroutine_threadsafe on a closed/stale loop reference.
         self._main_loop = asyncio.get_running_loop()
 
+        from src.paths import agent_data_dir, ensure_agent_data_dir
+
         logger.info("Starting Yaver daemon")
         logger.info(f"project_root={settings.project_root}")
+        logger.info(f"data_dir={agent_data_dir()}")
+        logger.info(f"temp_dir_base={settings.temp_dir_base}")
+        ensure_agent_data_dir(migrate=True)
+        try:
+            Path(settings.temp_dir_base).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not create TEMP_DIR_BASE {settings.temp_dir_base}: {e}")
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
         intake = (

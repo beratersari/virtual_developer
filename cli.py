@@ -441,12 +441,33 @@ def schedule_cancel(schedule_id: str):
 @cli.command()
 def init():
     """Initialize the project structure."""
+    from src.paths import (
+        agent_data_dir,
+        agent_subdir,
+        default_temp_dir,
+        ensure_agent_data_dir,
+        uses_windows_layout,
+    )
+    from src.config import upsert_dotenv_keys
+
+    ensure_agent_data_dir(migrate=True)
     dirs = [
         settings.state_dir,
-        settings.project_root / ".jira-agent" / "sessions",
+        agent_subdir("sessions"),
         settings.full_plans_dir,
         Path("logs"),
     ]
+    if uses_windows_layout():
+        upsert_dotenv_keys(
+            {
+                "YAVER_DATA_DIR": str(agent_data_dir()),
+                "TEMP_DIR_BASE": str(
+                    settings.temp_dir_base
+                    if Path(settings.temp_dir_base).is_absolute()
+                    else default_temp_dir()
+                ),
+            }
+        )
     
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)

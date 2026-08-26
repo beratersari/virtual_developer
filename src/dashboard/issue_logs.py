@@ -16,7 +16,10 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 
 def _default_jobs_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "jobs"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("jobs")
 
 
 def job_system_log_path(job_id: str, *, jobs_dir: Optional[Path] = None) -> Optional[Path]:

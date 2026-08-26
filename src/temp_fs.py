@@ -16,7 +16,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from src.logger import logger
 
@@ -176,6 +176,90 @@ def force_rmtree(path: Path | str) -> None:
         shutil.rmtree(target, onerror=_rmtree_onerror)
     if target.exists():
         raise OSError(f"force delete left remnants at {target}")
+
+
+def _collect_tree_entries(root: Path) -> List[Path]:
+    """Files then child dirs (deepest first), then ``root``."""
+    found: List[Path] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+            dp = Path(dirpath)
+            for name in filenames:
+                found.append(dp / name)
+            for name in dirnames:
+                found.append(dp / name)
+    except OSError:
+        pass
+    found.append(root)
+    return found
+
+
+def _remove_one(path: Path) -> None:
+    """Unlink a file / reserved name, or rmdir an empty directory."""
+    _chmod_writable(path)
+    try:
+        if path.is_symlink() or path.is_file():
+            if is_windows():
+                try:
+                    os.unlink(win_long_path(path))
+                    return
+                except OSError:
+                    _win_unlink_one(path)
+                    return
+            os.unlink(path)
+            return
+        if path.is_dir():
+            if is_windows():
+                try:
+                    os.rmdir(win_long_path(path))
+                    return
+                except OSError:
+                    _win_unlink_one(path)
+                    return
+            os.rmdir(path)
+            return
+    except OSError:
+        if is_windows():
+            _win_unlink_one(path)
+        elif _stem_reserved(path.name):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def force_rmtree_progress(
+    path: Path | str,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """Hard-delete ``path``, calling ``on_progress(done, total)`` as entries go.
+
+    Entry-by-entry so the dashboard can show a percent. Remnants fall back to
+    ``force_rmtree`` (Windows ``rd /s /q`` + reserved-name unlink).
+    """
+    target = Path(path)
+    if not target.exists():
+        if on_progress is not None:
+            on_progress(1, 1)
+        return
+    entries = _collect_tree_entries(target)
+    total = max(1, len(entries))
+    if on_progress is not None:
+        on_progress(0, total)
+    done = 0
+    for entry in entries:
+        try:
+            if entry.exists() or entry.is_symlink():
+                _remove_one(entry)
+        except OSError as e:
+            logger.warning(f"force delete entry {entry}: {e}")
+        done += 1
+        if on_progress is not None:
+            on_progress(done, total)
+    if target.exists():
+        force_rmtree(target)
+    if on_progress is not None:
+        on_progress(total, total)
 
 
 def format_bytes(n: int) -> str:

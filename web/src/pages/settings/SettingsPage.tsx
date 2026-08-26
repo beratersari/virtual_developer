@@ -738,6 +738,21 @@ export function SettingsPage() {
         </span>
       </label>
 
+      <div className="text-sm font-semibold text-text">Data locations</div>
+      <p className="text-xs text-text-muted">
+        These live outside the install folder on Windows so a zip reinstall keeps
+        sessions and clones. Change <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
+        <span className="font-mono">TEMP_DIR_BASE</span> in .env.
+      </p>
+      <dl className="space-y-1 font-mono text-[11px] text-text-secondary">
+        <div>
+          Sessions / jobs: {settings.data_dir || '(default)'}
+        </div>
+        <div>
+          Clones: {settings.temp_dir_base || '(default)'}
+        </div>
+      </dl>
+
       <p className="quiet">
         Jira token {settings.jira_token_configured ? 'set' : 'missing'} · GitLab{' '}
         {settings.gitlab_pat_configured ? 'set' : 'missing'} · dashboard{' '}

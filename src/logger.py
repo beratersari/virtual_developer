@@ -214,7 +214,10 @@ _DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024
 
 def daemon_log_path() -> Path:
     """Durable daemon log (plain text). Isolated under ``.jira-agent``."""
-    return Path.cwd() / ".jira-agent" / "logs" / "daemon.log"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("logs") / "daemon.log"
 
 
 def _append_daemon_log_file(plain: str) -> None:
