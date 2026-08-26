@@ -23,6 +23,12 @@ def gm(tmp_path, monkeypatch):
     monkeypatch.setattr(
         real_settings, "gitlab_allowed_hosts", "gitlab.example.com"
     )
+    monkeypatch.setattr(real_settings, "gitlab_pat", "test-pat")
+    monkeypatch.setattr(
+        real_settings,
+        "gitlab_host_pats",
+        '{"gitlab.example.com":"test-pat"}',
+    )
     with patch.object(GitManager, "_setup_temp_working_dir"):
         g = GitManager(issue_key="GM-1")
     g.temp_dir = tmp_path / "repo"

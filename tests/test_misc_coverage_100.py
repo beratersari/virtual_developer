@@ -38,7 +38,8 @@ def test_agent_subprocess_env_passes_all(monkeypatch):
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh.sock")
 
     env = _agent_subprocess_env()
-    assert env.get("PATH") == "/usr/bin"
+    path = env.get("PATH") or ""
+    assert path == "/usr/bin" or path.endswith(os.pathsep + "/usr/bin")
     assert env.get("MVCC_HOME") == "/opt/mvcc"
     assert env.get("CMAKE_PREFIX_PATH") == "/opt/cmake"
     assert env.get("INCLUDE") == "C:\\SDK\\include"
@@ -49,6 +50,15 @@ def test_agent_subprocess_env_passes_all(monkeypatch):
     assert env.get("GITLAB_PAT") == "gl-from-env"
     assert env.get("JIRA_API_TOKEN") == "jira-from-env"
     assert env.get("SSH_AUTH_SOCK") == "/tmp/ssh.sock"
+    assert env.get("GCM_INTERACTIVE") == "never"
+    wrap = env.get("PATH", "").split(os.pathsep)[0]
+    if env.get("VD_REAL_GIT"):
+        assert "git-wrap" in wrap.replace("\\", "/")
+        shim = Path(wrap) / ("git.cmd" if os.name == "nt" else "git")
+        assert shim.is_file()
+        text = shim.read_text(encoding="utf-8")
+        assert "credential.helper=" in text
+        assert "VD_REAL_GIT" in text
 
 
 def test_agent_subprocess_env_skips_none_values(monkeypatch):
@@ -64,7 +74,8 @@ def test_agent_subprocess_env_skips_none_values(monkeypatch):
     with patch("src.orchestrator.agent_runner.os.environ") as env_mock:
         env_mock.items.return_value = fake_items
         env = _agent_subprocess_env()
-    assert env.get("PATH") == "/bin"
+    path = env.get("PATH") or ""
+    assert path == "/bin" or path.endswith(os.pathsep + "/bin")
     assert "HOME" not in env
     assert env.get("LC_FOO") == "bar"
     assert env.get("JIRA_API_TOKEN") == "secret"

@@ -900,9 +900,9 @@ class GitManager:
         """Build ``https://oauth2:PAT@host/...`` from settings, or None.
 
         Used only for VD child-process clone/push/fetch so the **settings** PAT
-        is preferred without clearing the user's Windows credential helpers.
-        When credentials are already in the URL, git does not call helpers.
-        Origin is scrubbed back to a clean URL after the operation.
+        authenticates. Windows credential helpers are disabled for that child
+        (``-c credential.helper=``). Origin is scrubbed back to a clean URL
+        after the operation.
         """
         base = self.normalize_remote_url(url or self.remote_url or "")
         if not base:
@@ -2230,8 +2230,22 @@ class GitManager:
             )
             return False
 
-        # auth=True → settings PAT on origin for the push when configured;
-        # otherwise host Windows credential helpers remain available.
+        # Settings PAT only. Never Windows Credential Manager / stored host git
+        # creds — those show up as the operator's account on GitLab.
+        pat = (self._pat_for_remote(self.remote_url or "") or "").strip()
+        host = self._host_from_url(
+            self.normalize_remote_url(self.remote_url or "")
+            or (self.remote_url or "")
+        )
+        if not pat:
+            self.last_push_error = (
+                f"No GitLab PAT in Settings for host `{host or '(unknown)'}`. "
+                "Yaver does not use Windows / host git credentials for push. "
+                "Add this host and a write PAT in dashboard Settings."
+            )
+            logger.error(self.last_push_error)
+            return False
+        logger.info(f"Push using settings PAT for host={host or '-'}")
         try:
             self._with_auth_remote()
             try:

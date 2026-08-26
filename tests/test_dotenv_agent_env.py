@@ -46,7 +46,8 @@ def test_agent_env_passes_all_process_vars(monkeypatch):
     assert env.get("GITLAB_HOST_PATS") == '{"gitlab.com":"glpat-x"}'
     assert env.get("NPM_TOKEN") == "npm-from-env"
     assert env.get("CODEX_API_KEY") == "sk-codex-from-process"
-    assert env.get("PATH") == "/bin"
+    path = env.get("PATH") or ""
+    assert path == "/bin" or path.endswith(os.pathsep + "/bin")
 
 
 def test_agent_env_fills_codex_key_from_pc_system(monkeypatch):
