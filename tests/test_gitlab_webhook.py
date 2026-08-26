@@ -251,6 +251,36 @@ def test_gitlab_client_posts_note(monkeypatch):
     assert captured["json"]["in_reply_to_discussion_id"] == "d1"
 
 
+def test_is_gitlab_triggered_uses_source_metadata():
+    from src.processor import JobProcessor
+    from src.state.models import JiraAgentState, TaskStatus
+
+    proc = object.__new__(JobProcessor)
+    sm = MagicMock()
+    proc.state_manager = sm
+    jira_state = JiraAgentState(
+        issue_key="KAN-12",
+        issue_summary="s",
+        description="d",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "jira"},
+    )
+    gitlab_state = JiraAgentState(
+        issue_key="KAN-12",
+        issue_summary="s",
+        description="d",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "gitlab", "workflow_type": "gitlab_mr"},
+    )
+    assert proc._is_gitlab_triggered("GL-ACME-DEMO-4") is True
+    assert proc._is_gitlab_triggered("KAN-12", gitlab_state) is True
+    assert proc._is_gitlab_triggered("KAN-12", jira_state) is False
+    sm.get_state.return_value = gitlab_state
+    assert proc._is_gitlab_triggered("KAN-12") is True
+    sm.get_state.return_value = jira_state
+    assert proc._is_gitlab_triggered("KAN-12") is False
+
+
 def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     from src.processor import JobProcessor
 
@@ -389,9 +419,8 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert "thread.started" not in body
     assert "command_execution" not in body
     assert "[codex] cwd" not in body
-    jira_bodies = [c["body"] for c in fake_jira.comments]
-    assert any("## Login" in b and "AuthService" in b for b in jira_bodies)
-    assert any("Work Completed" in b for b in jira_bodies)
+    assert not any("Work Completed" in (c.get("body") or "") for c in fake_jira.comments)
+    assert not any("AuthService" in (c.get("body") or "") for c in fake_jira.comments)
     git.push.assert_not_called()
 
 
@@ -486,8 +515,10 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     assert task.session_id == "ses_gl1"
     assert posted.get("mr_iid") == 4
     assert "*Yaver*" in (posted.get("body") or "")
-    jira_bodies = [c["body"] for c in fake_jira.comments]
-    assert any("Login is wired in src/auth.cpp" in b for b in jira_bodies)
+    assert not any(
+        "Login is wired in src/auth.cpp" in (c.get("body") or "")
+        for c in fake_jira.comments
+    )
     jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
     assert jobs
     assert jobs[0]["source"] == "gitlab"

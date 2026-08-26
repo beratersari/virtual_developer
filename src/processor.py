@@ -211,6 +211,25 @@ class JobProcessor:
             return WorkflowType.EXECUTION
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
+    def _is_gitlab_triggered(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """True when this run was started by a GitLab MR comment.
+
+        Synthetic ``GL-…`` keys are always GitLab. A real Jira key in the MR
+        title (``feat(KAN-12): …``) is still a GitLab trigger — answers go
+        to the MR, not the Jira ticket.
+        """
+        from src.gitlab.keys import is_gitlab_issue_key
+
+        if is_gitlab_issue_key(issue_key):
+            return True
+        st = state or self.state_manager.get_state(issue_key)
+        meta = (getattr(st, "metadata", None) if st is not None else None) or {}
+        if str(meta.get("source") or "").strip().lower() == "gitlab":
+            return True
+        return str(meta.get("workflow_type") or "").strip().lower() == "gitlab_mr"
+
     def _mark_jira_in_progress(self, issue_key: str) -> bool:
         """Move the Jira issue to an In Progress-like status when work starts.
 
@@ -221,9 +240,7 @@ class JobProcessor:
         Returns True only when Jira accepted an In Progress transition (so the
         poller tracker may honestly record ``in progress``).
         """
-        from src.gitlab.keys import is_gitlab_issue_key
-
-        if is_gitlab_issue_key(issue_key):
+        if self._is_gitlab_triggered(issue_key):
             return False
         try:
             client = self.jira_client
@@ -319,9 +336,7 @@ class JobProcessor:
             + (f"\nSuggestion: {suggestion}" if suggestion else "")
         )
         try:
-            from src.gitlab.keys import is_gitlab_issue_key
-
-            gitlab_job = is_gitlab_issue_key(issue_key)
+            gitlab_job = self._is_gitlab_triggered(issue_key)
             # Leave To Do when work fails (missing Mode / {params}, agent crash).
             # Poller + workflow also try this; fail path is the last guarantee.
             moved_ip = False if gitlab_job else self._mark_jira_in_progress(issue_key)
@@ -4143,17 +4158,6 @@ class JobProcessor:
                     logger.error(
                         f"{state.issue_key}: agent succeeded but MR note failed"
                     )
-                try:
-                    self.reporter.post_completion(
-                        live,
-                        summary="",
-                        agent_answer=answer,
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"{state.issue_key}: agent succeeded but Jira "
-                        f"answer comment failed: {e}"
-                    )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
                     expected_statuses={TaskStatus.EXECUTING},
@@ -4783,17 +4787,24 @@ class JobProcessor:
         )
         logger.info(f"State updated to COMPLETED for {state.issue_key}")
 
-        summary = (execution_summary or "").strip() or (
-            "All tasks completed successfully."
-        )
-        try:
-            self.reporter.post_completion(
-                self.state_manager.get_state(state.issue_key),
-                summary=summary,
-                agent_answer=agent_answer,
+        live = self.state_manager.get_state(state.issue_key) or state
+        if self._is_gitlab_triggered(state.issue_key, live):
+            logger.info(
+                f"{state.issue_key}: GitLab-triggered run — "
+                "skipping Jira completion comment"
             )
-        except Exception as e:
-            logger.error(f"Failed to post completion for {state.issue_key}: {e}")
+        else:
+            summary = (execution_summary or "").strip() or (
+                "All tasks completed successfully."
+            )
+            try:
+                self.reporter.post_completion(
+                    live,
+                    summary=summary,
+                    agent_answer=agent_answer,
+                )
+            except Exception as e:
+                logger.error(f"Failed to post completion for {state.issue_key}: {e}")
 
         self._release_context(state.issue_key, success=True)
         logger.info(f"Work completed for {state.issue_key}")
