@@ -119,7 +119,10 @@ def _codex_home_for(cwd: str) -> Path:
     key = hashlib.sha1(os.path.abspath(cwd or os.getcwd()).encode("utf-8")).hexdigest()[
         :16
     ]
-    home = Path.cwd() / ".jira-agent" / "codex-homes" / key
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    home = agent_subdir("codex-homes") / key
     home.mkdir(parents=True, exist_ok=True)
     return home
 

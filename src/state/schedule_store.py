@@ -22,7 +22,10 @@ _TERMINAL = frozenset({"dispatched", "cancelled", "error"})
 
 
 def _default_schedules_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "schedules"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("schedules")
 
 
 def _now_iso() -> str:

@@ -404,7 +404,9 @@ class GitManager:
             except OSError:
                 nonempty = True
             if nonempty:
-                shutil.rmtree(self.temp_dir)
+                from src.temp_fs import force_rmtree
+
+                force_rmtree(self.temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _refresh_existing_clone(self) -> None:
@@ -958,7 +960,10 @@ class GitManager:
     def _ensure_askpass_script() -> Path:
         """Create (once) a small cross-platform askpass helper under temp."""
         # Prefer a stable path under the agent runtime so we do not rewrite each call
-        base = Path.cwd() / ".jira-agent" / "bin"
+        from src.paths import agent_subdir, ensure_agent_data_dir
+
+        ensure_agent_data_dir()
+        base = agent_subdir("bin")
         base.mkdir(parents=True, exist_ok=True)
         py = base / "vd-git-askpass.py"
         py_content = (
@@ -1267,7 +1272,9 @@ class GitManager:
         def _rm() -> None:
             try:
                 if path.exists():
-                    shutil.rmtree(path)
+                    from src.temp_fs import force_rmtree
+
+                    force_rmtree(path)
             except Exception as e:
                 err.append(e)
 
@@ -2719,7 +2726,9 @@ class GitManager:
             return True
 
         try:
-            shutil.rmtree(self.temp_dir)
+            from src.temp_fs import force_rmtree
+
+            force_rmtree(self.temp_dir)
             logger.info(f"Removed temp directory: {self.temp_dir}")
             self.temp_dir = None
             return True
@@ -2795,7 +2804,9 @@ def purge_stale_temp_dirs(
         if mtime >= cutoff:
             continue
         try:
-            shutil.rmtree(entry)
+            from src.temp_fs import force_rmtree
+
+            force_rmtree(entry)
             removed += 1
             logger.info(f"Purged stale temp directory (>{age}d): {entry}")
         except Exception as e:

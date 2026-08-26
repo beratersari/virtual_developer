@@ -9,6 +9,22 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.brand import PRODUCT_NAME
 
 
+class TempFolderDeleteRequest(BaseModel):
+    """Body for POST /api/storage/delete — one clone folder under TEMP_DIR_BASE."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def _name_ok(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("name is required")
+        if "/" in text or "\\" in text or text in {".", ".."}:
+            raise ValueError("name must be a single folder under the temp base")
+        return text
+
+
 class MetaResponse(BaseModel):
     version: str
     server_time: str
@@ -323,6 +339,9 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+    # Durable locations (outside the install folder on Windows)
+    data_dir: str = ""
+    temp_dir_base: str = ""
 
 
 class ProjectRepositoryItem(BaseModel):

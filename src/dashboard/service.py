@@ -213,6 +213,13 @@ def _settings_project_repositories() -> List[ProjectRepositoryItem]:
     return [ProjectRepositoryItem(**item) for item in parse_project_repositories(raw)]
 
 
+def _settings_data_dir() -> str:
+    from src.paths import agent_data_dir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return str(agent_data_dir())
+
+
 def build_settings_view() -> SettingsView:
     """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
 
@@ -278,6 +285,8 @@ def build_settings_view() -> SettingsView:
             getattr(settings, "trigger_assignee_names", "") or ""
         ).strip(),
         project_repositories=_settings_project_repositories(),
+        data_dir=_settings_data_dir(),
+        temp_dir_base=str(getattr(settings, "temp_dir_base", "") or ""),
     )
 
 
@@ -1148,7 +1157,9 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         except ValueError:
             return False
 
-    allowed = _under(Path.cwd() / ".jira-agent")
+    from src.paths import under_agent_data
+
+    allowed = under_agent_data(path)
     if not allowed:
         return None
     blocked = {"etc", "proc", "sys", "windows", "system32"}
@@ -1158,9 +1169,7 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         path.unlink()
         # Sibling session_id marker next to log
         sid = Path(str(path) + ".session_id")
-        if sid.is_file() and (
-            _under(Path.cwd() / ".jira-agent") or ".jira-agent" in sid.parts
-        ):
+        if sid.is_file() and (under_agent_data(sid) or ".jira-agent" in sid.parts):
             try:
                 sid.unlink()
             except OSError:
@@ -1384,7 +1393,9 @@ def _sessions_dir() -> Path:
 
         return _default_sessions_dir()
     except Exception:
-        return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+        from src.paths import agent_subdir
+
+        return agent_subdir("sessions").resolve()
 
 
 def _path_under(root: Path, path: Path) -> bool:
@@ -1465,7 +1476,10 @@ def _collect_session_artifacts(issue_key: str) -> Dict[str, Any]:
 
 
 def _artifacts_root() -> Path:
-    return (Path.cwd() / ".jira-agent").resolve()
+    from src.paths import agent_data_dir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_data_dir().resolve()
 
 
 def _codex_thread_id(job: Dict[str, Any]) -> str:

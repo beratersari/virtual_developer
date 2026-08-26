@@ -16,6 +16,8 @@ import type {
   SchedulesPayload,
   SettingsPatch,
   SettingsPayload,
+  StorageDeletesPayload,
+  StoragePayload,
   TaskDetail,
   QueuePayload,
 } from './types'
@@ -298,6 +300,29 @@ export function fetchIssueTypes(projectKey?: string) {
   if (projectKey?.trim()) params.set('project_key', projectKey.trim())
   const q = params.toString() ? `?${params.toString()}` : ''
   return request<JiraIssueTypesPayload>(`/api/jira/issue-types${q}`)
+}
+
+export function fetchStorage(opts?: { refresh?: boolean }) {
+  const q = opts?.refresh ? '?refresh=1' : ''
+  return request<StoragePayload>(`/api/storage${q}`)
+}
+
+export function fetchStorageDeletes() {
+  return request<StorageDeletesPayload>('/api/storage/deletes')
+}
+
+export function deleteTempFolder(name: string) {
+  return request<{
+    ok: boolean
+    accepted?: boolean
+    name: string
+    path?: string
+    status?: string
+    percent?: number
+  }>('/api/storage/delete', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
 }
 
 export function fetchOpencodeSessions() {

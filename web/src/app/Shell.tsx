@@ -8,6 +8,7 @@ const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
   { to: '/scheduled', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
   { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
+  { to: '/storage', label: 'Storage', match: (p: string) => p.startsWith('/storage') },
   { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
   { to: '/settings', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
 ] as const
@@ -47,6 +48,16 @@ function IconSession() {
     </svg>
   )
 }
+function IconDisk() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="2" y="3" width="12" height="10" rx="1.4" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M2 6.5h12" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="11" cy="10" r="1" fill="currentColor" />
+    </svg>
+  )
+}
+
 function IconGear() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -61,7 +72,7 @@ function IconGear() {
   )
 }
 
-const ICONS = [IconJobs, IconClock, IconSession, IconBoard, IconGear]
+const ICONS = [IconJobs, IconClock, IconSession, IconDisk, IconBoard, IconGear]
 
 export function Shell() {
   const live = useLive()

@@ -98,6 +98,8 @@ export type SettingsPayload = {
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
+  data_dir?: string
+  temp_dir_base?: string
 }
 
 export type GitlabHostCredentialDraft = {
@@ -491,4 +493,53 @@ export type SettingsPatch = Partial<
   jira_webhook_secret?: string
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
+}
+
+export type StorageDisk = {
+  volume: string
+  path: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  total_label: string
+  used_label: string
+  free_label: string
+  used_percent: number
+}
+
+export type StorageFolderDelete = {
+  status: 'deleting' | 'error' | 'done' | string
+  percent: number
+  error?: string | null
+}
+
+export type StorageFolder = {
+  name: string
+  path: string
+  size_bytes: number
+  size_label?: string | null
+  size_pending?: boolean
+  modified_at?: string | null
+  in_use: boolean
+  delete?: StorageFolderDelete | null
+}
+
+export type StoragePayload = {
+  disk: StorageDisk
+  folders: StorageFolder[]
+  folder_count: number
+  folders_bytes: number
+  folders_label: string
+  sizes_pending?: boolean
+  server_time?: string
+}
+
+export type StorageDeleteJob = StorageFolderDelete & {
+  name: string
+  path?: string | null
+}
+
+export type StorageDeletesPayload = {
+  deletes: StorageDeleteJob[]
+  server_time?: string
 }

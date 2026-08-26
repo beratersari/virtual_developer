@@ -20,7 +20,10 @@ from src.logger import logger
 
 
 def _default_binds_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "opencode-binds"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("opencode-binds")
 
 
 def _now_iso() -> str:

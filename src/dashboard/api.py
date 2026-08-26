@@ -20,6 +20,7 @@ from src.dashboard.schemas import (
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     SettingsUpdate,
+    TempFolderDeleteRequest,
 )
 from src.dashboard.service import (
     apply_settings_update,
@@ -573,6 +574,46 @@ def create_dashboard_app(
             "message": result.get("message"),
             "server_time": build_meta().server_time,
         }
+
+    @app.get("/api/storage")
+    def storage_view(refresh: bool = Query(default=False)) -> dict:
+        """Disk usage + folder list. Folder sizes are filled in the background."""
+        from src.dashboard.temp_storage import (
+            TempStorageError,
+            build_storage_view,
+            reset_size_cache,
+        )
+
+        if refresh:
+            reset_size_cache()
+        try:
+            payload = build_storage_view()
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        payload["server_time"] = build_meta().server_time
+        return payload
+
+    @app.get("/api/storage/deletes")
+    def storage_deletes() -> dict:
+        """In-flight force-delete progress (no disk walk)."""
+        from src.dashboard.temp_storage import list_delete_dtos
+
+        return {
+            "deletes": list_delete_dtos(),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.post("/api/storage/delete", status_code=202)
+    def storage_delete(body: TempFolderDeleteRequest) -> dict:
+        """Queue a force-delete (returns immediately; poll GET /api/storage for %)."""
+        from src.dashboard.temp_storage import TempStorageError, queue_delete_temp_folder
+
+        try:
+            result = queue_delete_temp_folder(body.name)
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        result["server_time"] = build_meta().server_time
+        return result
 
     @app.get("/api/opencode-sessions")
     def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
