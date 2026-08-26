@@ -90,6 +90,38 @@ def test_retry_counts_persist_and_reloads(tmp_path, monkeypatch):
     assert dumped.agent_task_max_incomplete_retries == 40
 
 
+def test_settings_import_with_runtime_intake_mode(tmp_path):
+    """Daemon start must not circular-import when runtime has jira_intake_mode."""
+    import os
+    import subprocess
+    import sys
+
+    agent = tmp_path / ".jira-agent"
+    agent.mkdir()
+    (agent / "runtime_settings.json").write_text(
+        json.dumps({"jira_intake_mode": "webhook", "jira_board_id": "1"}),
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("JIRA_INTAKE_MODE", None)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from src.config import settings; print(settings.jira_intake_mode)",
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "webhook"
+
+
 def test_begin_workflow_uses_live_timeout(tmp_path, monkeypatch, state_manager):
     """_begin_workflow_run freezes current settings.agent_task_timeout_seconds."""
     from src.config import settings

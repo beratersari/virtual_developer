@@ -621,9 +621,7 @@ class Settings(BaseSettings):
     @property
     def jira_intake_mode_normalized(self) -> str:
         """``poll`` or ``webhook`` (default poll)."""
-        from src.jira.webhook import normalize_intake_mode
-
-        return normalize_intake_mode(self.jira_intake_mode)
+        return _normalize_intake_mode(self.jira_intake_mode)
 
     @property
     def gitlab_bot_mentions_list(self) -> List[str]:
@@ -710,6 +708,14 @@ _RUNTIME_ENV_MIRROR = {
 }
 
 
+def _normalize_intake_mode(raw: Any) -> str:
+    """``poll`` or ``webhook``. Local so Settings bootstrap never imports jira."""
+    text = str(raw or "").strip().lower()
+    if text in {"webhook", "webhooks", "hook", "push", "http"}:
+        return "webhook"
+    return "poll"
+
+
 def runtime_settings_path() -> Path:
     """Path to JSON file holding dashboard runtime overrides."""
     return (Path.cwd() / _RUNTIME_SETTINGS_REL).resolve()
@@ -791,9 +797,7 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 continue
             value = text
         if key == "jira_intake_mode":
-            from src.jira.webhook import normalize_intake_mode
-
-            value = normalize_intake_mode(value)
+            value = _normalize_intake_mode(value)
         if key == "project_repositories":
             from src.dashboard.project_repos import project_repositories_to_json
 
