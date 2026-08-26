@@ -1591,8 +1591,16 @@ class ServeOrchestrator:
                 incomplete_reasons=[str(e)],
             )
 
-        # Session — create once, then every Continue POST uses the same id
-        sid = session_id
+        # Session — create once, then every Continue POST uses the same id.
+        # A leftover Codex thread UUID must not be sent to OpenCode (ses_* only).
+        sid = (session_id or "").strip() or None
+        if sid and not sid.startswith("ses_"):
+            _emit(
+                "stdout",
+                f"[serve] ignoring non-OpenCode session id {sid} "
+                "(Codex thread ids cannot be resumed on opencode serve)",
+            )
+            sid = None
         if not sid:
             try:
                 sess = await self.client.create_session(title=title or "VD agent task")
@@ -1696,24 +1704,13 @@ class ServeOrchestrator:
                         if len(known_models) > 12
                         else ""
                     )
-                    note = (
-                        f"[serve] model {model!r} is not registered on this "
-                        f"OpenCode serve. Available (sample): {sample}{more}. "
-                        "Set DEFAULT_MODEL / dashboard model to a "
-                        "provider/model OpenCode has."
+                    _emit(
+                        "stdout",
+                        f"[serve] model {model!r} is not in OpenCode inventory "
+                        f"(sample: {sample}{more}). Using OpenCode's configured "
+                        "default instead of failing (Codex-only ids are ignored).",
                     )
-                    _emit("stderr", note)
-                    return ServeTurnResult(
-                        session_id=sid,
-                        returncode=1,
-                        stdout="\n".join(lines),
-                        stderr=note,
-                        incomplete=False,
-                        incomplete_reasons=[f"unknown model: {model}"],
-                        compact_events=compact_total,
-                        continue_count=continue_count,
-                        turns=turns,
-                    )
+                    model = None
             except Exception as e:
                 _emit("stdout", f"[serve] model list check skipped: {e}")
 

@@ -1190,16 +1190,32 @@ class JobProcessor:
             relocate_session_directories,
         )
 
+        from src.backends.base import (
+            BACKEND_CODEX,
+            BACKEND_OPENCODE,
+            is_codex_thread_id,
+            is_opencode_session_id,
+            normalize_backend_name,
+        )
+
+        backend = normalize_backend_name(getattr(task, "backend", None))
+
         chosen: Optional[str] = None
         for sid in sids:
             if sid in forgotten:
+                continue
+            # Production always sets task.backend. Never give OpenCode a
+            # Codex UUID (serve requires ses_*). Unset backend = legacy pick.
+            if backend == BACKEND_CODEX and not is_codex_thread_id(sid):
+                continue
+            if backend == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                 continue
             chosen = sid
             break
         if not chosen:
             return None
 
-        is_opencode = chosen.startswith("ses_")
+        is_opencode = is_opencode_session_id(chosen)
         if is_opencode:
             stored_dir: Optional[str] = None
             try:
