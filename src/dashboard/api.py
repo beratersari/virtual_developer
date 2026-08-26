@@ -20,6 +20,7 @@ from src.dashboard.schemas import (
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     SettingsUpdate,
+    TempFolderDeleteRequest,
 )
 from src.dashboard.service import (
     apply_settings_update,
@@ -573,6 +574,30 @@ def create_dashboard_app(
             "message": result.get("message"),
             "server_time": build_meta().server_time,
         }
+
+    @app.get("/api/storage")
+    def storage_view() -> dict:
+        """Disk usage for TEMP_DIR_BASE plus clone folders under it."""
+        from src.dashboard.temp_storage import TempStorageError, build_storage_view
+
+        try:
+            payload = build_storage_view()
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        payload["server_time"] = build_meta().server_time
+        return payload
+
+    @app.post("/api/storage/delete")
+    def storage_delete(body: TempFolderDeleteRequest) -> dict:
+        """Force-delete one clone folder (Windows ``nul`` / reserved names included)."""
+        from src.dashboard.temp_storage import TempStorageError, force_delete_temp_folder
+
+        try:
+            result = force_delete_temp_folder(body.name)
+        except TempStorageError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message) from e
+        result["server_time"] = build_meta().server_time
+        return result
 
     @app.get("/api/opencode-sessions")
     def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:

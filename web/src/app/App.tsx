@@ -6,6 +6,7 @@ import { PollPage } from '../pages/poll/PollPage'
 import { SchedulesPage } from '../pages/schedules/SchedulesPage'
 import { SessionsPage } from '../pages/sessions/SessionsPage'
 import { SettingsPage } from '../pages/settings/SettingsPage'
+import { StoragePage } from '../pages/storage/StoragePage'
 import { LiveProvider } from './LiveProvider'
 import { Shell } from './Shell'
 
@@ -25,6 +26,7 @@ export default function App() {
             <Route path="/scheduled" element={<SchedulesPage />} />
             <Route path="/schedules" element={<Navigate to="/scheduled" replace />} />
             <Route path="/sessions" element={<SessionsPage />} />
+            <Route path="/storage" element={<StoragePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/jobs" replace />} />
           </Route>

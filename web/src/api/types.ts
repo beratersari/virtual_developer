@@ -492,3 +492,33 @@ export type SettingsPatch = Partial<
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
 }
+
+export type StorageDisk = {
+  volume: string
+  path: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  total_label: string
+  used_label: string
+  free_label: string
+  used_percent: number
+}
+
+export type StorageFolder = {
+  name: string
+  path: string
+  size_bytes: number
+  size_label: string
+  modified_at?: string | null
+  in_use: boolean
+}
+
+export type StoragePayload = {
+  disk: StorageDisk
+  folders: StorageFolder[]
+  folder_count: number
+  folders_bytes: number
+  folders_label: string
+  server_time?: string
+}
