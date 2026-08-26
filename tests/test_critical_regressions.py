@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -260,7 +261,8 @@ def test_agent_env_passes_all_process_vars(monkeypatch):
     env = _agent_subprocess_env()
     assert env.get("JIRA_API_TOKEN") == "secret-jira"
     assert env.get("GITLAB_PAT") == "secret-pat"
-    assert env.get("PATH") == "/usr/bin"
+    path = env.get("PATH") or ""
+    assert path == "/usr/bin" or path.endswith(os.pathsep + "/usr/bin")
 
 
 def test_router_implementation_beats_oracle():

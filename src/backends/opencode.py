@@ -29,6 +29,14 @@ class OpenCodeBackend:
         timeout_seconds = float(request.timeout_seconds or 1800)
         handle = request.handle
         log_lines = request.log_lines if request.log_lines is not None else []
+        sid = (request.session_id or "").strip() or None
+        if sid and not sid.startswith("ses_"):
+            logger.warning(
+                f"[opencode] ignoring non-OpenCode session id {sid} "
+                "(Codex thread ids are not valid on opencode serve)"
+            )
+            sid = None
+            request.session_id = None
 
         client = OpenCodeServeClient(
             base,
@@ -38,7 +46,7 @@ class OpenCodeBackend:
         handle["mode"] = "serve"
         handle["backend"] = self.name
         handle["client"] = client
-        handle["session_id"] = request.session_id
+        handle["session_id"] = sid
         handle["cancel"] = False
 
         def _on_out(stream: str, line: str) -> None:
@@ -69,7 +77,7 @@ class OpenCodeBackend:
                     title=request.title,
                     agent=agent_name,
                     model=model,
-                    session_id=request.session_id,
+                    session_id=sid,
                     abort_busy_session=bool(request.abort_busy_session),
                     on_output=_on_out,
                     on_session=_remember,

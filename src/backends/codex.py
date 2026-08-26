@@ -525,6 +525,167 @@ def daemon_worthy_codex_summary(summary: Optional[str]) -> bool:
     return s.startswith("[codex] error")
 
 
+# Distinctive ``codex exec --json`` events. Do NOT include a bare
+# ``{"type":"error"}`` — OpenCode answers may contain JSON objects.
+_CODEX_JSONL_EVENT_TYPES = frozenset(
+    {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "item.completed",
+    }
+)
+_CODEX_ASSISTANT_ITEM_TYPES = frozenset(
+    {"agent_message", "message", "agentmessage"}
+)
+
+
+def _content_parts_text(value: Any) -> str:
+    """Pull markdown text from a string, dict, or content-part list."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return _content_parts_text(value.get("text") or value.get("content") or "")
+    if isinstance(value, list):
+        bits: List[str] = []
+        for part in value:
+            text = _content_parts_text(part)
+            if text:
+                bits.append(text)
+        return "\n".join(bits)
+    return ""
+
+
+def _codex_item_text(item: Dict[str, Any], obj: Dict[str, Any]) -> str:
+    for candidate in (
+        item.get("text"),
+        item.get("content"),
+        obj.get("text"),
+        obj.get("content"),
+        obj.get("last_agent_message"),
+        obj.get("final_message"),
+        obj.get("output_text"),
+        obj.get("message"),
+    ):
+        text = _content_parts_text(candidate)
+        if text.strip():
+            return text
+    return ""
+
+
+def looks_like_codex_jsonl(blob: str) -> bool:
+    """True when ``blob`` is a ``codex exec --json`` event stream.
+
+    Must not fire on OpenCode stdout that happens to include a JSON object
+    (config snippet, ``{"type":"error"}`` in a code fence, etc.).
+    """
+    for raw in (blob or "").splitlines():
+        line = raw.strip()
+        if line.startswith("[codex]"):
+            return True
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get("type") or "") in _CODEX_JSONL_EVENT_TYPES:
+            return True
+        item = obj.get("item")
+        if isinstance(item, dict) and str(item.get("type") or "").lower() in {
+            "agent_message",
+            "command_execution",
+            "command",
+            "reasoning",
+            "todo_list",
+            "todolist",
+            "mcp_tool_call",
+            "mcptoolcall",
+            "web_search",
+            "websearch",
+            "file_change",
+            "filechange",
+        }:
+            return True
+    return False
+
+
+def extract_codex_answer(blob: str, *, limit: int = 8000) -> str:
+    """Last completed assistant markdown from a ``codex exec --json`` stream.
+
+    GitLab / Jira comments get only the final answer after the run, not
+    mid-turn chatter, commands, reasoning, or the raw JSONL. Session logs
+    still keep the full stream.
+    """
+    completed: List[str] = []
+    fallback: List[str] = []
+
+    for raw in (blob or "").splitlines():
+        line = (raw or "").strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        etype = str(obj.get("type") or "")
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+        item_type = str(item.get("type") or "").lower()
+        role = str(item.get("role") or obj.get("role") or "").lower()
+        is_assistant = (
+            item_type in _CODEX_ASSISTANT_ITEM_TYPES
+            or role == "assistant"
+            or etype in {"agent_message", "message"}
+        )
+        if etype == "turn.completed":
+            text = _codex_item_text(item, obj)
+            if text.strip():
+                completed.append(text)
+            continue
+        if not is_assistant:
+            continue
+        text = _codex_item_text(item, obj)
+        if not text.strip():
+            continue
+        if etype in {"item.completed", "message", "response.completed", "agent_message"}:
+            completed.append(text)
+        else:
+            fallback.append(text)
+
+    last = ""
+    if completed:
+        last = completed[-1].strip()
+    elif fallback:
+        last = fallback[-1].strip()
+    if not last:
+        return ""
+    if len(last) <= limit:
+        return last
+    return last[:limit].rstrip() + "\n\n…(truncated)"
+
+
+def format_agent_answer_for_comment(stdout: str, *, limit: int = 8000) -> str:
+    """Comment body for GitLab/Jira: Codex JSONL → markdown, else pass through."""
+    raw = stdout or ""
+    if looks_like_codex_jsonl(raw):
+        answer = extract_codex_answer(raw, limit=limit)
+    else:
+        answer = raw.strip()
+        if len(answer) > limit:
+            answer = answer[:limit].rstrip() + "\n\n…(truncated)"
+    return answer or "(no output)"
+
+
 def extract_codex_failure_detail(blob: str, *, limit: int = 8000) -> str:
     """Structured failure dump from a ``codex exec`` JSONL stream."""
     errors: List[str] = []

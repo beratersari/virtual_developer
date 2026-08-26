@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,9 +26,12 @@ from src.backends.codex import (
     seed_isolated_codex_home,
     summarize_codex_exec_line,
     daemon_worthy_codex_summary,
+    extract_codex_answer,
     extract_codex_failure_detail,
+    format_agent_answer_for_comment,
     format_failure_report,
     is_codex_stream_overflow_error,
+    looks_like_codex_jsonl,
     CodexExecLineReader,
 )
 from src.backends.registry import get_agent_backend, resolve_backend_name
@@ -282,6 +286,109 @@ def test_summarize_codex_exec_line_steps():
     assert "duration_s=12.5" in report
     assert "--- stderr ---" in report
     assert "writer still holds" in report
+
+
+def test_extract_codex_answer_keeps_markdown_not_jsonl():
+    blob = "\n".join(
+        [
+            "[codex] cwd=/tmp model=gpt",
+            '{"type":"thread.started","thread_id":"tid-1"}',
+            '{"type":"item.started","item":{"type":"command_execution","command":"ls"}}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"ls","exit_code":0,"aggregated_output":"src"}}',
+            '{"type":"item.started","item":{"type":"agent_message","text":"partial"}}',
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": (
+                            "## Login\n\n"
+                            "The handler uses JWT.\n\n"
+                            "```python\nreturn token\n```"
+                        ),
+                    },
+                }
+            ),
+        ]
+    )
+    assert looks_like_codex_jsonl(blob)
+    answer = extract_codex_answer(blob)
+    assert answer.startswith("## Login")
+    assert "The handler uses JWT." in answer
+    assert "```python" in answer
+    assert "return token" in answer
+    assert '{"type"' not in answer
+    assert "[codex] cwd" not in answer
+    assert "partial" not in answer
+    comment = format_agent_answer_for_comment(blob)
+    assert comment == answer
+    assert format_agent_answer_for_comment("Plain OpenCode reply.") == (
+        "Plain OpenCode reply."
+    )
+    assert not looks_like_codex_jsonl("Plain OpenCode reply.")
+    assert format_agent_answer_for_comment("") == "(no output)"
+
+
+def test_format_agent_answer_leaves_opencode_stdout_untouched():
+    """OpenCode serve logs + a JSON snippet must not be treated as Codex JSONL."""
+    opencode = "\n".join(
+        [
+            "[serve] session created: ses_abc",
+            "[serve] turn=task sending message…",
+            "Login uses JWT in `src/auth.cpp`.",
+            "",
+            "Example payload:",
+            '{"type":"error","message":"not a codex stream"}',
+            "",
+            "```json",
+            '{"ok": true, "item": {"type": "note"}}',
+            "```",
+            "[serve] assessment complete=true reasons=[]",
+        ]
+    )
+    assert not looks_like_codex_jsonl(opencode)
+    assert format_agent_answer_for_comment(opencode) == opencode
+    assert format_agent_answer_for_comment(
+        "Fixed the login bug.\n\nSee `src/auth.cpp`."
+    ) == "Fixed the login bug.\n\nSee `src/auth.cpp`."
+
+
+def test_extract_codex_answer_only_last_completed_assistant():
+    blob = "\n".join(
+        [
+            '{"type":"item.completed","item":{"type":"agent_message","text":"I will inspect login next."}}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"rg login","exit_code":0}}',
+            '{"type":"item.completed","item":{"type":"agent_message","content":[{"type":"output_text","text":"First note."}]}}',
+            '{"type":"item.completed","item":{"type":"agent_message","content":[{"type":"text","text":"## Final\\n\\n* uses JWT\\n* no extra login"}]}}',
+        ]
+    )
+    answer = extract_codex_answer(blob)
+    assert answer.startswith("## Final")
+    assert "* uses JWT" in answer
+    assert "no extra login" in answer
+    assert "I will inspect login next." not in answer
+    assert "First note." not in answer
+    assert "rg login" not in answer
+
+
+def test_extract_codex_answer_truncates_last_when_over_limit():
+    first = "A" * 200
+    last = "B" * 300
+    blob = "\n".join(
+        [
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": first}}
+            ),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": last}}
+            ),
+        ]
+    )
+    answer = extract_codex_answer(blob, limit=250)
+    assert answer.startswith("B")
+    assert "A" not in answer
+    assert answer.endswith("…(truncated)")
+    assert len(answer) < 280
 
 
 @pytest.mark.asyncio

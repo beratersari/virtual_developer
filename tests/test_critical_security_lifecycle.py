@@ -164,8 +164,10 @@ def test_push_applies_settings_pat_to_origin_without_clearing_helpers(
     assert any("credential.helper=" in c for c in push_cmds)
 
 
-def test_push_without_settings_pat_leaves_helpers_available(tmp_path, monkeypatch):
-    """No settings PAT → push still runs (Windows/host helpers may authenticate)."""
+def test_push_without_settings_pat_refuses_windows_credentials(
+    tmp_path, monkeypatch
+):
+    """No settings PAT → push fails. Windows Credential Manager is not used."""
     from src.config import settings as real_settings
 
     monkeypatch.chdir(tmp_path)
@@ -195,10 +197,9 @@ def test_push_without_settings_pat_leaves_helpers_available(tmp_path, monkeypatc
             with patch.object(gm, "_scrub_remote_credentials"):
                 ok = gm.push("feature/x")
 
-    assert ok is True
-    assert any("push" in c for c in captured)
-    # No oauth2 embed when no settings PAT
-    assert not any("oauth2:" in " ".join(c) for c in captured)
+    assert ok is False
+    assert "Windows" in (gm.last_push_error or "")
+    assert not any("push" in c for c in captured)
 
 
 def test_https_url_with_settings_pat_builds_oauth2_url(tmp_path, monkeypatch):

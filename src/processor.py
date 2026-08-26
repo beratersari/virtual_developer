@@ -1190,16 +1190,32 @@ class JobProcessor:
             relocate_session_directories,
         )
 
+        from src.backends.base import (
+            BACKEND_CODEX,
+            BACKEND_OPENCODE,
+            is_codex_thread_id,
+            is_opencode_session_id,
+            normalize_backend_name,
+        )
+
+        backend = normalize_backend_name(getattr(task, "backend", None))
+
         chosen: Optional[str] = None
         for sid in sids:
             if sid in forgotten:
+                continue
+            # Production always sets task.backend. Never give OpenCode a
+            # Codex UUID (serve requires ses_*). Unset backend = legacy pick.
+            if backend == BACKEND_CODEX and not is_codex_thread_id(sid):
+                continue
+            if backend == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                 continue
             chosen = sid
             break
         if not chosen:
             return None
 
-        is_opencode = chosen.startswith("ses_")
+        is_opencode = is_opencode_session_id(chosen)
         if is_opencode:
             stored_dir: Optional[str] = None
             try:
@@ -3719,10 +3735,10 @@ class JobProcessor:
         delivery_note: str = "",
     ) -> str:
         """Format the Virtual Developer note posted back on the MR."""
-        answer = (stdout or "").strip() or "(no output)"
-        # GitLab notes are large, but keep the dashboard/job comment readable.
-        if len(answer) > 8000:
-            answer = answer[:8000].rstrip() + "\n\n…(truncated)"
+        from src.backends.codex import format_agent_answer_for_comment
+
+        # Codex stdout is the exec JSONL stream — post the assistant markdown.
+        answer = format_agent_answer_for_comment(stdout, limit=8000)
         parts = ["*Yaver*", "", answer]
         if pushed:
             extra = ["", "---", ""]
@@ -5394,10 +5410,12 @@ class JobProcessor:
                 return
 
             if result["returncode"] == 0:
+                from src.backends.codex import format_agent_answer_for_comment
+
                 self.reporter.post_oracle_response(
                     state.issue_key,
                     question=state.description,
-                    answer=result["stdout"],
+                    answer=format_agent_answer_for_comment(result.get("stdout") or ""),
                 )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
@@ -5475,7 +5493,12 @@ class JobProcessor:
             result = await runner.run_agent(task)
 
             if result["returncode"] == 0:
-                self.reporter.post_comment_response(issue_key, result["stdout"])
+                from src.backends.codex import format_agent_answer_for_comment
+
+                self.reporter.post_comment_response(
+                    issue_key,
+                    format_agent_answer_for_comment(result.get("stdout") or ""),
+                )
             else:
                 err = result.get("stderr") or "Agent failed for free-form request"
                 self.reporter.post_comment_response(

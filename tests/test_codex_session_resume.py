@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.backends.base import is_session_or_thread_id
+from src.backends.base import (
+    is_codex_thread_id,
+    is_opencode_session_id,
+    is_session_or_thread_id,
+)
 from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
 from src.dashboard.service import collect_job_text_artifacts
 from src.orchestrator.agent_runner import AgentTask
@@ -47,6 +51,31 @@ def test_is_session_or_thread_id_accepts_codex_uuid():
     assert is_session_or_thread_id(THREAD) is True
     assert is_session_or_thread_id("ses_abc123xyz") is True
     assert is_session_or_thread_id("nope") is False
+    assert is_opencode_session_id("ses_abc123xyz") is True
+    assert is_opencode_session_id(THREAD) is False
+    assert is_codex_thread_id(THREAD) is True
+    assert is_codex_thread_id("ses_abc123xyz") is False
+
+
+def test_attach_opencode_skips_codex_thread_id(tmp_path, monkeypatch):
+    """OpenCode serve requires ses_*; a leftover Codex UUID must not be resumed."""
+    proc, sm, _binds, _jobs = _proc(tmp_path, monkeypatch)
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    git = _git(clone)
+    sm.create_state("KAN-9", "s", "d")
+    proc._contexts["KAN-9"] = {"git": git, "runner": None}
+    proc._upsert_session_bind("KAN-9", THREAD)
+    task = AgentTask(
+        description="build",
+        prompt="do it",
+        agent="build",
+        issue_key="KAN-9",
+        backend="opencode",
+    )
+    sid = proc._attach_bound_opencode_session("KAN-9", task, git)
+    assert sid is None
+    assert task.session_id is None
 
 
 def test_resume_candidates_include_bound_codex_thread(tmp_path, monkeypatch):

@@ -251,6 +251,128 @@ def test_gitlab_client_posts_note(monkeypatch):
     assert captured["json"]["in_reply_to_discussion_id"] == "d1"
 
 
+def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
+    from src.processor import JobProcessor
+
+    jsonl = "\n".join(
+        [
+            "[codex] cwd=/tmp model=gpt",
+            '{"type":"thread.started","thread_id":"tid-1"}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"ls","exit_code":0,"aggregated_output":"src"}}',
+            (
+                '{"type":"item.completed","item":{"type":"agent_message","text":'
+                '"## Login\\n\\nThe handler uses JWT.\\n\\n'
+                '```python\\nreturn token\\n```"}}'
+            ),
+        ]
+    )
+    proc = object.__new__(JobProcessor)
+    body = JobProcessor._gitlab_mr_reply_body(proc, jsonl, pushed=False)
+    assert body.startswith("*Yaver*")
+    assert "## Login" in body
+    assert "The handler uses JWT." in body
+    assert "```python" in body
+    assert "return token" in body
+    assert '{"type"' not in body
+    assert "thread.started" not in body
+    assert "[codex] cwd" not in body
+    assert "command_execution" not in body
+
+    plain = JobProcessor._gitlab_mr_reply_body(
+        proc, "Fixed the login bug.", pushed=True, branch="feature/login"
+    )
+    assert "Fixed the login bug." in plain
+    assert "Pushed new commits" in plain
+    assert "`feature/login`" in plain
+
+
+@pytest.mark.asyncio
+async def test_processor_gitlab_posts_codex_answer_not_jsonl(
+    tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts
+):
+    from src.gitlab.webhook import decide_gitlab_note_webhook
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    git = MagicMock()
+    git.remote_url = "https://gitlab.example.com/acme/demo.git"
+    git.work_branch = "feature/login"
+    git.target_branch = "develop"
+    git.get_working_directory.return_value = clone
+    git.ensure_feature_branch.return_value = "feature/login"
+    git.ensure_on_work_branch.return_value = True
+    git.get_last_commit_sha.return_value = "aaa111baseline"
+    git.commits_ahead_of_target.return_value = 0
+
+    jsonl = "\n".join(
+        [
+            "[codex] cwd=/tmp model=gpt",
+            '{"type":"thread.started","thread_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}',
+            '{"type":"item.completed","item":{"type":"command_execution","command":"rg login","exit_code":0}}',
+            (
+                '{"type":"item.completed","item":{"type":"agent_message","text":'
+                '"## Login\\n\\n`AuthService` issues a JWT and stores it in the cookie."}}'
+            ),
+        ]
+    )
+    runner = MagicMock()
+    runner.run_agent_with_retry = AsyncMock(
+        return_value={
+            "returncode": 0,
+            "stdout": jsonl,
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+            "backend": "codex",
+        }
+    )
+
+    posted = {}
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 202}
+
+    decision = decide_gitlab_note_webhook(
+        _mr_payload(note="@berat_ai what does login do?"),
+        headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
+        secret="s",
+        bot_mentions=["@berat_ai"],
+    )
+    assert decision.event
+
+    def fake_init(*_a, **_k):
+        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc.git_manager = git
+        proc.agent_runner = runner
+        return git
+
+    with patch.object(proc, "_init_git_manager", side_effect=fake_init), patch.object(
+        proc, "_runner_for", return_value=runner
+    ), patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
+        await proc.handle_gitlab_mr_comment(decision.event)
+
+    body = posted.get("body") or ""
+    assert posted.get("mr_iid") == 4
+    assert "*Yaver*" in body
+    assert "## Login" in body
+    assert "`AuthService` issues a JWT" in body
+    assert '{"type"' not in body
+    assert "thread.started" not in body
+    assert "command_execution" not in body
+    assert "[codex] cwd" not in body
+    git.push.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import platform
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -215,15 +216,61 @@ def _agent_subprocess_env(
     }
     _merge_host_system_environ(env, read_host_system_environ())
 
-    # Harden git so the agent cannot push with host credentials.
+    # Harden git so the agent cannot push with Windows / host credentials.
+    # GIT_CONFIG_* empty helper is not enough on Git-for-Windows (system
+    # credential.helper=manager still runs and uses Credential Manager).
     # Do NOT rewrite HOME/USERPROFILE — OpenCode loads plugins from
     # ~/.opencode, ~/.config/opencode, ~/.cache/opencode.
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
+    env["GCM_MODAL_PROMPT"] = "false"
+    env["GCM_GUI_PROMPT"] = "false"
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "credential.helper"
     env["GIT_CONFIG_VALUE_0"] = ""
+    real_git = shutil.which("git")
+    wrap_dir = _ensure_unattended_git_wrapper()
+    if wrap_dir is not None and real_git:
+        env["VD_REAL_GIT"] = real_git
+        env["PATH"] = str(wrap_dir) + os.pathsep + (env.get("PATH") or "")
     return env
+
+
+def _unattended_git_wrapper_dir() -> Path:
+    return (Path.cwd() / ".jira-agent" / "bin" / "git-wrap").resolve()
+
+
+def _ensure_unattended_git_wrapper() -> Optional[Path]:
+    """``git`` shim that forces ``-c credential.helper=`` on every agent git.
+
+    Git-for-Windows ignores ``GIT_CONFIG_* credential.helper=`` and still
+    calls GCM, which silently uses the operator's Windows credentials.
+    """
+    wrap = _unattended_git_wrapper_dir()
+    try:
+        wrap.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            path = wrap / "git.cmd"
+            content = (
+                "@echo off\r\n"
+                "if \"%VD_REAL_GIT%\"==\"\" exit /b 1\r\n"
+                "\"%VD_REAL_GIT%\" -c credential.helper= %*\r\n"
+            )
+        else:
+            path = wrap / "git"
+            content = (
+                "#!/bin/sh\n"
+                "if [ -z \"$VD_REAL_GIT\" ]; then exit 1; fi\n"
+                "exec \"$VD_REAL_GIT\" -c credential.helper= \"$@\"\n"
+            )
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            path.write_text(content, encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(path.stat().st_mode | 0o111)
+        return wrap
+    except OSError as e:
+        logger.warning(f"Could not write unattended git wrapper: {e}")
+        return None
 
 
 @dataclass

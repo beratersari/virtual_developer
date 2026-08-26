@@ -200,14 +200,61 @@ def test_post_comment_response():
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     assert r.post_comment_response("R-1", "hello") is not None
+    body = client.comments[-1]["body"]
+    assert "hello" in body
+    assert "AI Agent — Response" in body
 
 
+def test_post_comment_response_formats_codex_jsonl_keeps_opencode():
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    jsonl = "\n".join(
+        [
+            "[codex] cwd=/tmp model=gpt",
+            '{"type":"item.completed","item":{"type":"agent_message","text":"I will look next."}}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"## Login\\n\\nUses JWT."}}',
+        ]
+    )
+    r.post_comment_response("R-1", jsonl)
+    body = client.comments[-1]["body"]
+    assert "## Login" in body
+    assert "Uses JWT." in body
+    assert "I will look next." not in body
+    assert '{"type"' not in body
+    assert "[codex] cwd" not in body
+
+    opencode = (
+        "[serve] session created: ses_1\n"
+        "Login uses JWT in `src/auth.cpp`.\n"
+        '{"type":"error","message":"not a stream"}'
+    )
+    r.post_comment_response("R-1", opencode)
+    oc = client.comments[-1]["body"]
+    assert "Login uses JWT in `src/auth.cpp`." in oc
+    assert "[serve] session created: ses_1" in oc
+    assert '{"type":"error","message":"not a stream"}' in oc
 
 
 def test_post_oracle_response():
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     assert r.post_oracle_response("R-1", "q?", "a!") is not None
+    body = client.comments[-1]["body"]
+    assert "a!" in body
+
+
+def test_post_oracle_response_formats_codex_jsonl():
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    jsonl = (
+        "[codex] cwd=/tmp\n"
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Use Postgres."}}'
+    )
+    r.post_oracle_response("R-1", "which db?", jsonl)
+    body = client.comments[-1]["body"]
+    assert "Use Postgres." in body
+    assert '{"type"' not in body
+    assert "[codex]" not in body
 
 
 def test_update_issue_status_and_attach():
