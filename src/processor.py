@@ -4143,6 +4143,17 @@ class JobProcessor:
                     logger.error(
                         f"{state.issue_key}: agent succeeded but MR note failed"
                     )
+                try:
+                    self.reporter.post_completion(
+                        live,
+                        summary="",
+                        agent_answer=answer,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"{state.issue_key}: agent succeeded but Jira "
+                        f"answer comment failed: {e}"
+                    )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
                     expected_statuses={TaskStatus.EXECUTING},
@@ -4662,6 +4673,7 @@ class JobProcessor:
                             "Prior branch commits / an existing merge request were "
                             "*not* re-attributed to this job."
                         ),
+                        agent_answer=str(result.get("stdout") or ""),
                     )
                     return
 
@@ -4718,6 +4730,7 @@ class JobProcessor:
             await self._complete_work(
                 self.state_manager.get_state(state.issue_key),
                 execution_summary="All tasks completed successfully.",
+                agent_answer=str(result.get("stdout") or ""),
             )
         else:
             self.state_manager.update_state(
@@ -4732,7 +4745,11 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
 
     async def _complete_work(
-        self, state: JiraAgentState, execution_summary: str = ""
+        self,
+        state: JiraAgentState,
+        execution_summary: str = "",
+        *,
+        agent_answer: str = "",
     ) -> None:
         """Mark work completed and notify Jira (no automated code-review phase)."""
         if state is None:
@@ -4773,6 +4790,7 @@ class JobProcessor:
             self.reporter.post_completion(
                 self.state_manager.get_state(state.issue_key),
                 summary=summary,
+                agent_answer=agent_answer,
             )
         except Exception as e:
             logger.error(f"Failed to post completion for {state.issue_key}: {e}")

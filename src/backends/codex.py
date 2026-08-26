@@ -677,13 +677,37 @@ def extract_codex_answer(blob: str, *, limit: int = 8000) -> str:
     return last[:limit].rstrip() + "\n\n…(truncated)"
 
 
+_ORCHESTRATOR_LOG_LINE = re.compile(
+    r"^\s*\[(?:serve|opencode)\](?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def strip_orchestrator_comment_lines(text: str) -> str:
+    """Drop OpenCode serve / opencode control-loop lines from a posted answer.
+
+    Session logs keep the full stream. GitLab/Jira comments should only show
+    the assistant text (and any GLM/OpenCode model prose).
+    """
+    kept: List[str] = []
+    for line in (text or "").splitlines():
+        if _ORCHESTRATOR_LOG_LINE.match(line):
+            continue
+        kept.append(line)
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept).strip()
+
+
 def format_agent_answer_for_comment(stdout: str, *, limit: int = 8000) -> str:
-    """Comment body for GitLab/Jira: Codex JSONL → markdown, else pass through."""
+    """Comment body for GitLab/Jira: Codex JSONL → markdown; OpenCode logs stripped."""
     raw = stdout or ""
     if looks_like_codex_jsonl(raw):
         answer = extract_codex_answer(raw, limit=limit)
     else:
-        answer = raw.strip()
+        answer = strip_orchestrator_comment_lines(raw)
         if len(answer) > limit:
             answer = answer[:limit].rstrip() + "\n\n…(truncated)"
     return answer or "(no output)"

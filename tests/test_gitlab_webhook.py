@@ -285,6 +285,25 @@ def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     assert "Pushed new commits" in plain
     assert "`feature/login`" in plain
 
+    serve = "\n".join(
+        [
+            "[serve] health={'healthy': True, 'version': '1.18.10'}",
+            "[serve] session resumed: ses_fc27f0da3ffegKGY7nd9GFFawC",
+            "[serve] turn=initial sending message…",
+            "main.cpp içindeki değişken değerleri a = 4, b = 2 olarak güncellendi",
+            "[serve] turn=initial done finish='stop' summary=None elapsed=126.66s",
+            "[serve] assessment complete=True premature=False reasons=[]",
+        ]
+    )
+    body = JobProcessor._gitlab_mr_reply_body(
+        proc, serve, pushed=True, branch="testt", commit_sha="b1b1b8ca"
+    )
+    assert "a = 4, b = 2" in body
+    assert "[serve]" not in body
+    assert "ses_fc27f0da" not in body
+    assert "Pushed new commits" in body
+    assert "`testt`" in body
+
 
 @pytest.mark.asyncio
 async def test_processor_gitlab_posts_codex_answer_not_jsonl(
@@ -370,6 +389,9 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert "thread.started" not in body
     assert "command_execution" not in body
     assert "[codex] cwd" not in body
+    jira_bodies = [c["body"] for c in fake_jira.comments]
+    assert any("## Login" in b and "AuthService" in b for b in jira_bodies)
+    assert any("Work Completed" in b for b in jira_bodies)
     git.push.assert_not_called()
 
 
@@ -464,6 +486,8 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     assert task.session_id == "ses_gl1"
     assert posted.get("mr_iid") == 4
     assert "*Yaver*" in (posted.get("body") or "")
+    jira_bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Login is wired in src/auth.cpp" in b for b in jira_bodies)
     jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
     assert jobs
     assert jobs[0]["source"] == "gitlab"

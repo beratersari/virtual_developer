@@ -196,6 +196,26 @@ def test_post_error_not_timed_out_not_exhausted(state):
     assert "Retries exhausted" not in body
 
 
+def test_post_completion_prefers_cleaned_agent_answer(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    raw = "\n".join(
+        [
+            "[serve] session resumed: ses_xyz",
+            "[serve] turn=initial sending message…",
+            "Değişkenler a = 4, b = 2 olarak güncellendi.",
+            "[serve] assessment complete=True premature=False reasons=[]",
+        ]
+    )
+    cid = r.post_completion(state, "All tasks completed successfully.", agent_answer=raw)
+    assert cid is not None
+    body = client.comments[-1]["body"]
+    assert "Work Completed" in body
+    assert "a = 4, b = 2" in body
+    assert "[serve]" not in body
+    assert "ses_xyz" not in body
+
+
 def test_post_comment_response():
     client = FakeJiraClient()
     r = JiraReporter(client=client)
@@ -231,7 +251,7 @@ def test_post_comment_response_formats_codex_jsonl_keeps_opencode():
     r.post_comment_response("R-1", opencode)
     oc = client.comments[-1]["body"]
     assert "Login uses JWT in `src/auth.cpp`." in oc
-    assert "[serve] session created: ses_1" in oc
+    assert "[serve] session created: ses_1" not in oc
     assert '{"type":"error","message":"not a stream"}' in oc
 
 

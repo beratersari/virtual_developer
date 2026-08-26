@@ -329,12 +329,13 @@ def test_extract_codex_answer_keeps_markdown_not_jsonl():
     assert format_agent_answer_for_comment("") == "(no output)"
 
 
-def test_format_agent_answer_leaves_opencode_stdout_untouched():
-    """OpenCode serve logs + a JSON snippet must not be treated as Codex JSONL."""
+def test_format_agent_answer_strips_opencode_serve_logs():
+    """OpenCode serve telemetry is dropped; assistant text (incl. JSON) stays."""
     opencode = "\n".join(
         [
+            "[serve] health={'healthy': True, 'version': '1.18.10'}",
             "[serve] session created: ses_abc",
-            "[serve] turn=task sending message…",
+            "[serve] turn=initial sending message…",
             "Login uses JWT in `src/auth.cpp`.",
             "",
             "Example payload:",
@@ -343,11 +344,19 @@ def test_format_agent_answer_leaves_opencode_stdout_untouched():
             "```json",
             '{"ok": true, "item": {"type": "note"}}',
             "```",
-            "[serve] assessment complete=true reasons=[]",
+            "[serve] turn=initial done finish='stop' summary=None elapsed=126.66s",
+            "[serve] assessment complete=True premature=False reasons=[]",
         ]
     )
     assert not looks_like_codex_jsonl(opencode)
-    assert format_agent_answer_for_comment(opencode) == opencode
+    comment = format_agent_answer_for_comment(opencode)
+    assert comment.startswith("Login uses JWT")
+    assert "`src/auth.cpp`" in comment
+    assert '{"type":"error","message":"not a codex stream"}' in comment
+    assert "```json" in comment
+    assert "[serve]" not in comment
+    assert "ses_abc" not in comment
+    assert "elapsed=126.66s" not in comment
     assert format_agent_answer_for_comment(
         "Fixed the login bug.\n\nSee `src/auth.cpp`."
     ) == "Fixed the login bug.\n\nSee `src/auth.cpp`."
