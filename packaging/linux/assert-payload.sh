@@ -7,6 +7,7 @@ if [[ ! -d "$p" ]]; then
   exit 1
 fi
 for rel in \
+  .env.example \
   install-dashboard.sh \
   install-backends.sh \
   install-codex.sh \

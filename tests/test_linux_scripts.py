@@ -84,6 +84,8 @@ def test_linux_dist_ci_and_offline_vendor_hooks():
     assert_sh = (LINUX / "assert-payload.sh").read_text(encoding="utf-8")
     assert "vendor/opencode-home.zip" in assert_sh
     assert "vendor/python-wheels" in assert_sh
+    assert ".env.example" in assert_sh
+    assert "include-hidden-files: true" in text
     versions = (ROOT / "packaging" / "windows" / "versions.env").read_text(
         encoding="utf-8"
     )
