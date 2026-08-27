@@ -77,6 +77,10 @@ copy_items=(
 for item in "${copy_items[@]}"; do
   src="$ROOT/$item"
   if [[ ! -e "$src" ]]; then
+    if [[ "$item" == ".env.example" ]]; then
+      echo "Required payload file missing: $item" >&2
+      exit 1
+    fi
     echo "  skip missing: $item"
     continue
   fi

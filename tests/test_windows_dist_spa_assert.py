@@ -55,6 +55,12 @@ def _web_src_blob() -> str:
     return "\n".join(p.read_text(encoding="utf-8") for p in _SOURCE_FILES)
 
 
+def test_windows_dist_ships_env_example():
+    text = _workflow_text()
+    assert '".env.example"' in text
+    assert "include-hidden-files: true" in text
+
+
 def test_spa_freshness_needles_exist_in_dashboard_source():
     blob = _web_src_blob()
     needles = _required_needles()

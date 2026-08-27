@@ -99,6 +99,7 @@ jobs:
         run: |
           $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
           foreach ($rel in @(
+            ".env.example",
             "install-dashboard.bat",
             "install-dashboard-system-python.bat",
             "install-opencode-online.bat",
@@ -178,6 +179,7 @@ jobs:
         with:
           name: ${{ steps.meta.outputs.dist_name }}
           path: dist/stage/${{ steps.meta.outputs.dist_name }}/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
           compression-level: 6

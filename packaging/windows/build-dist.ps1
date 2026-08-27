@@ -278,6 +278,9 @@ $copyItems = @(
 foreach ($item in $copyItems) {
     $src = Join-Path $root $item
     if (-not (Test-Path -LiteralPath $src)) {
+        if ($item -eq ".env.example") {
+            throw "Required payload file missing: $item"
+        }
         Write-Host "  skip missing: $item"
         continue
     }
