@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
 import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
+import { sortJobsByCreatedAt } from '../../util/jobs'
 import {
   jobIsDeletable,
   jobMatchesFilter,
@@ -18,8 +19,7 @@ import { JobsTable } from './JobsTable'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
-  { id: 'live', label: 'Live' },
-  { id: 'active', label: 'Active' },
+  { id: 'active', label: 'In flight' },
   { id: 'queue', label: 'Queue' },
   { id: 'error', label: 'Error' },
   { id: 'completed', label: 'Completed' },
@@ -110,8 +110,10 @@ export function JobsPage() {
     () =>
       showQueue
         ? []
-        : (payload?.jobs ?? []).filter((j) =>
-            jobMatchesFilter(j.status, Boolean(j.live), statusFilter),
+        : sortJobsByCreatedAt(
+            (payload?.jobs ?? []).filter((j) =>
+              jobMatchesFilter(j.status, Boolean(j.live), statusFilter),
+            ),
           ),
     [payload, statusFilter, showQueue],
   )
@@ -189,7 +191,7 @@ export function JobsPage() {
   const from = total === 0 ? 0 : (currentPage - 1) * size + 1
   const to = Math.min(currentPage * size, total)
   const selectedCount = selectedIds.size
-  const liveJobs = (payload?.jobs ?? []).filter((j) => j.live)
+  const liveJobs = sortJobsByCreatedAt((payload?.jobs ?? []).filter((j) => j.live))
   const badgeQueued = live.queueQueued ?? queueQueued
 
   return (
@@ -215,7 +217,7 @@ export function JobsPage() {
         }
       />
 
-      {liveJobs.length > 0 && statusFilter !== 'live' && statusFilter !== 'queue' && (
+      {liveJobs.length > 0 && statusFilter !== 'active' && statusFilter !== 'queue' && (
         <div className="vd-panel flex flex-wrap items-center gap-3 px-4 py-3">
           <LiveDot label={`${liveJobs.length} running`} />
           {liveJobs.slice(0, 4).map((j) => (
@@ -285,7 +287,13 @@ export function JobsPage() {
         )}
       </div>
 
-      {statusFilter !== 'all' && statusFilter !== 'queue' && (
+      {statusFilter === 'active' && (
+        <p className="text-xs text-text-muted">
+          Running in this daemon now, plus tickets still planning/executing after a
+          restart. Queue is waiting messages, not these runs.
+        </p>
+      )}
+      {statusFilter !== 'all' && statusFilter !== 'queue' && statusFilter !== 'active' && (
         <p className="text-xs text-text-muted">
           Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
           Issue search hits the server.
@@ -293,7 +301,8 @@ export function JobsPage() {
       )}
       {showQueue && (
         <p className="text-xs text-text-muted">
-          Only messages waiting for a free issue/workspace slot. Live runs stay under Live / All.
+          Only messages waiting for a free issue/workspace slot. Running work is under
+          In flight / All.
         </p>
       )}
 
@@ -424,7 +433,7 @@ export function JobsPage() {
         open={confirmOpen}
         title={`Delete ${selectedCount} job(s)?`}
         body={
-          'Removes job history records and linked session/prompt files under .jira-agent.\n' +
+          'Removes job history records and linked session/prompt files under YAVER_DATA_DIR.\n' +
           'Does not change Jira issues. Live / in-flight jobs are skipped.'
         }
         confirmLabel="Delete"

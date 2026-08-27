@@ -36,7 +36,7 @@ OPENCODE_AGENT_ALIASES: Dict[str, str] = {
 
 
 def _default_sessions_dir() -> Path:
-    """Session logs root. Tests patch this so nothing lands in the real repo tree."""
+    """Session logs root (``YAVER_DATA_DIR/sessions``). Tests patch this."""
     from src.paths import agent_subdir, ensure_agent_data_dir
 
     ensure_agent_data_dir()
@@ -379,14 +379,28 @@ class AgentRunner:
             f"attempt={attempt_number}"
         )
         
-        # Use configured timeout if not overridden (allow explicit 0)
-        effective_timeout = (
-            settings.agent_task_timeout_seconds
-            if timeout_seconds is None
-            else timeout_seconds
-        )
+        # Use configured timeout if not overridden (allow explicit 0).
+        # Re-read live settings so a dashboard save of 7200 is not ignored
+        # because the job began under the 1800 default.
+        from src.config import live_agent_timeout_seconds
+
+        live_timeout = live_agent_timeout_seconds()
+        if timeout_seconds is None:
+            effective_timeout = live_timeout
+        else:
+            try:
+                passed = int(timeout_seconds)
+            except (TypeError, ValueError):
+                passed = live_timeout
+            # Operator raised the dashboard budget above the 1800 default —
+            # honor it even if this job froze 1800 at start. Do not override
+            # explicit short test timeouts while live is still 1800.
+            if live_timeout > 1800:
+                effective_timeout = max(passed, live_timeout)
+            else:
+                effective_timeout = passed
         start_time = asyncio.get_event_loop().time()
-        logger.debug(f"Effective timeout: {effective_timeout}s")
+        logger.info(f"OpenCode/agent timeout: {effective_timeout}s")
 
         # Create session file for this task with naming convention: JIRAID_DATETIME_RETRYCOUNT
         session_file = self._get_session_file(

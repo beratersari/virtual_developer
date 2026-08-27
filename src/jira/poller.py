@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.config import settings
 from src.dashboard.snapshot import poll_snapshot_store
 from src.jira.client import JiraClient
+from src.jira.triggers import poller_triggers_on
 from src.logger import logger
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -243,9 +244,15 @@ class JiraPoller:
                 assigned_to_bot_count += 1
             is_todo = self._is_todo_status(fields)
             seen = issue_key in self._seen_issues
-            should_process = has_label or (
-                is_assigned_to_bot and bool(settings.trigger_on_assignment)
+            should_process = poller_triggers_on(
+                has_trigger_label=has_label,
+                assigned_to_bot=is_assigned_to_bot,
             )
+            if (has_label or is_assigned_to_bot) and not should_process:
+                logger.info(
+                    f"Skip {issue_key}: poller requires trigger label AND bot "
+                    f"assignee (label={has_label} assignee={is_assigned_to_bot})"
+                )
             # will_process decided after reprocess pass; provisional for new
             provisional_new = should_process and is_todo and not seen
 

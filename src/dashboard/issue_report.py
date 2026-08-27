@@ -147,7 +147,7 @@ def _readme(kind: str, job_item: Any) -> str:
         "sessions.json            OpenCode session binds (repo + branch)",
         "states.json              Local issue state machine",
         "system/daemon.log        In-process daemon log ring",
-        "system/daemon-file.log   Durable .jira-agent/logs/daemon.log (if any)",
+        "system/daemon-file.log   Durable YAVER_DATA_DIR/logs/daemon.log (if any)",
         "system/logs/             Files from the local logs/ directory (if any)",
         "system/job-logs/         Per-job durable system logs",
         "system/opencode-logs/    Recent OpenCode CLI log files (if present)",
@@ -701,7 +701,7 @@ def _git_missing_explanation(
         "",
         "This is not the Yaver repo and not sample_project/.",
         "Jira/GitLab jobs clone the Repository URL from the issue {params}",
-        "into a temp folder under TEMP_DIR_BASE (default .temp/).",
+        "into a temp folder under TEMP_DIR_BASE (C:\\vd\\t, /vd/t, or ~/vd/t).",
         f"sample_project/ (PROJECT_ROOT={project_root}) is only used by",
         "`cli.py test-issue`. It is never this job's working tree.",
         "",
@@ -724,7 +724,9 @@ def _git_missing_explanation(
             "Temp folders still on disk:",
         ]
     )
-    temp_base = Path(str(getattr(settings, "temp_dir_base", None) or ".temp"))
+    from src.paths import resolve_temp_dir_base
+
+    temp_base = resolve_temp_dir_base(getattr(settings, "temp_dir_base", None))
     if not temp_base.is_absolute():
         temp_base = Path.cwd() / temp_base
     leftover = []

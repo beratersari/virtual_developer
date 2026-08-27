@@ -84,6 +84,7 @@ export function SettingsPage() {
   const [jiraTesting, setJiraTesting] = useState(false)
   const [gitlabTestingIdx, setGitlabTestingIdx] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
 
   const mark = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDirty(true)
@@ -100,7 +101,7 @@ export function SettingsPage() {
   }, [])
 
   const onSave = async () => {
-    if (!draft) return
+    if (!draft || modelsLoading) return
     setSaving(true)
     setError(null)
     try {
@@ -188,7 +189,10 @@ export function SettingsPage() {
           <button
             key={id}
             type="button"
-            onClick={() => setSection(id)}
+            onClick={() => {
+              if (id === 'model' && section !== 'model') setModelsLoading(true)
+              setSection(id)
+            }}
             className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-transform duration-150 active:scale-95 ${
               section === id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
             }`}
@@ -555,7 +559,10 @@ export function SettingsPage() {
         <span>Worker</span>
         <select
           value={draft.agent_backend}
-          onChange={(e) => mark('agent_backend', e.target.value)}
+          onChange={(e) => {
+            setModelsLoading(true)
+            mark('agent_backend', e.target.value)
+          }}
         >
           <option value="opencode">OpenCode</option>
           <option value="codex">Codex</option>
@@ -577,6 +584,7 @@ export function SettingsPage() {
         backend={draft.agent_backend}
         allowEmpty={false}
         showRefresh
+        onLoadingChange={setModelsLoading}
       />
       </div>
       )}
@@ -651,7 +659,7 @@ export function SettingsPage() {
           placeholder="devbot,jira ai bot"
         />
         <span className="text-xs text-text-muted">
-          Assignment to a matching user starts a job. Unassign does not.
+          Poller requires this assignment and a trigger label. Unassign does not start work.
         </span>
       </label>
       <label className="field">
@@ -674,6 +682,9 @@ export function SettingsPage() {
       <label className="field">
         <span>Trigger labels</span>
         <input value={draft.trigger_labels} onChange={(e) => mark('trigger_labels', e.target.value)} />
+        <span className="text-xs text-text-muted">
+          Poller requires one of these labels and a matching bot assignee.
+        </span>
       </label>
       <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
         <input
@@ -681,7 +692,7 @@ export function SettingsPage() {
           checked={draft.trigger_on_assignment}
           onChange={(e) => mark('trigger_on_assignment', e.target.checked)}
         />
-        <span style={{ margin: 0 }}>Trigger on bot assignment</span>
+        <span style={{ margin: 0 }}>Webhook: also trigger on bot assignment</span>
       </label>
       <label className="field">
         <span>Max concurrent jobs</span>
@@ -700,6 +711,10 @@ export function SettingsPage() {
           value={draft.agent_task_timeout_seconds}
           onChange={(e) => mark('agent_task_timeout_seconds', Number(e.target.value))}
         />
+        <span className="text-xs text-text-muted">
+          Wall-clock budget for the OpenCode/Codex turn. Save applies immediately,
+          including an in-flight job (not only the next ticket). Default 1800 = 30 min.
+        </span>
       </label>
       <div className="text-sm font-semibold text-text">Retries &amp; compaction</div>
       <p className="text-xs text-text-muted">
@@ -740,8 +755,9 @@ export function SettingsPage() {
 
       <div className="text-sm font-semibold text-text">Data locations</div>
       <p className="text-xs text-text-muted">
-        These live outside the install folder on Windows so a zip reinstall keeps
-        sessions and clones. Change <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
+        Same durable layout on Windows and Linux (not next to the install folder
+        or a leftover .jira-agent). Change{' '}
+        <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
         <span className="font-mono">TEMP_DIR_BASE</span> in .env.
       </p>
       <dl className="space-y-1 font-mono text-[11px] text-text-secondary">
@@ -765,12 +781,16 @@ export function SettingsPage() {
         <button
           type="button"
           className="go"
-          disabled={saving || (!dirty && !saved)}
+          disabled={saving || modelsLoading || (!dirty && !saved)}
           onClick={() => void onSave()}
         >
           {saving ? (
             <>
               <Spinner /> Saving…
+            </>
+          ) : modelsLoading ? (
+            <>
+              <Spinner /> Loading models…
             </>
           ) : saved ? (
             'Saved'

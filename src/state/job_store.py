@@ -282,7 +282,15 @@ class JobStore:
                 jobs.append(job)
             except Exception as e:
                 logger.error(f"Error loading {path}: {e}")
-        jobs.sort(key=lambda j: j.get("started_at") or j.get("updated_at") or "", reverse=True)
+        jobs.sort(
+            key=lambda j: (
+                j.get("started_at")
+                or j.get("created_at")
+                or j.get("updated_at")
+                or ""
+            ),
+            reverse=True,
+        )
         off = max(0, int(offset or 0))
         lim = max(1, int(limit or 1))
         return jobs[off : off + lim]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { fetchModels } from '../api/client'
 import type { ModelsPayload } from '../api/types'
 import { CUSTOM_MODEL, modelSelectValue, showCustomModelId } from '../util/modelPicker'
@@ -12,6 +12,7 @@ export function ModelField({
   allowEmpty = true,
   showRefresh = false,
   label = 'Model',
+  onLoadingChange,
 }: {
   value: string
   onChange: (v: string) => void
@@ -20,27 +21,49 @@ export function ModelField({
   allowEmpty?: boolean
   showRefresh?: boolean
   label?: string
+  onLoadingChange?: (loading: boolean) => void
 }) {
   const [inventory, setInventory] = useState<ModelsPayload | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loadedWorker, setLoadedWorker] = useState<string | null>(null)
+  const [fetching, setFetching] = useState(true)
   const [custom, setCustom] = useState(false)
+  const loadGen = useRef(0)
   const worker = (backend || '').trim().toLowerCase() || 'opencode'
   const isCodex = worker === 'codex'
+  const loading = fetching || loadedWorker !== worker
 
   const load = async (refresh: boolean) => {
-    setLoading(true)
+    const req = ++loadGen.current
+    setFetching(true)
     try {
-      setInventory(await fetchModels(refresh, worker))
+      const inv = await fetchModels(refresh, worker)
+      if (req !== loadGen.current) return
+      setInventory(inv)
     } catch {
+      if (req !== loadGen.current) return
       setInventory(null)
     } finally {
-      setLoading(false)
+      if (req === loadGen.current) {
+        setLoadedWorker(worker)
+        setFetching(false)
+      }
     }
   }
 
   useEffect(() => {
     void load(false)
+    return () => {
+      loadGen.current += 1
+    }
   }, [worker])
+
+  useEffect(() => {
+    onLoadingChange?.(loading)
+  }, [loading, onLoadingChange])
+
+  useEffect(() => {
+    return () => onLoadingChange?.(false)
+  }, [onLoadingChange])
 
   const options = inventory?.models ?? []
   const known = new Set(options.map((m) => m.id))
@@ -81,6 +104,8 @@ export function ModelField({
         <span>{showRefresh ? 'Choose' : label}</span>
         <select
           value={selectValue}
+          disabled={loading}
+          aria-busy={loading}
           onChange={(e) => {
             const v = e.target.value
             if (v === CUSTOM_MODEL) {
@@ -114,6 +139,7 @@ export function ModelField({
             type="text"
             autoComplete="off"
             value={value}
+            disabled={loading}
             onChange={(e) => {
               setCustom(true)
               onChange(e.target.value)

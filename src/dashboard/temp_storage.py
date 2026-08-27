@@ -43,14 +43,17 @@ class TempStorageError(Exception):
 
 def resolve_temp_base() -> Path:
     """Absolute ``TEMP_DIR_BASE`` (relative paths are against process cwd)."""
-    raw = getattr(settings, "temp_dir_base", None) or Path(".temp")
-    base = Path(raw)
-    if not base.is_absolute():
-        base = Path.cwd() / base
-    try:
-        return base.resolve()
-    except OSError:
-        return base.absolute()
+    from src.paths import resolve_temp_dir_base
+
+    return resolve_temp_dir_base(getattr(settings, "temp_dir_base", None))
+
+
+def resolve_sessions_dir() -> Path:
+    """Absolute session-log directory under the durable data dir."""
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("sessions")
 
 
 def _safe_child(base: Path, name: str) -> Path:
@@ -192,12 +195,13 @@ def list_delete_jobs() -> Dict[str, Dict[str, Any]]:
 def list_delete_dtos() -> List[Dict[str, Any]]:
     """Cheap progress snapshot — no disk walk."""
     out: List[Dict[str, Any]] = []
-    for name, job in list_delete_jobs().items():
+    for key, job in list_delete_jobs().items():
         row = _delete_dto(job)
-        row["name"] = name
+        row["name"] = job.get("name") or key
+        row["area"] = job.get("area") or ("sessions" if str(key).startswith("sessions:") else "temp")
         row["path"] = job.get("path")
         out.append(row)
-    out.sort(key=lambda r: str(r.get("name") or "").lower())
+    out.sort(key=lambda r: (str(r.get("area") or ""), str(r.get("name") or "").lower()))
     return out
 
 
@@ -350,6 +354,7 @@ def build_storage_view() -> Dict[str, Any]:
             "free_label": format_bytes(int(usage.free)),
             "used_percent": used_pct,
         },
+        "temp_dir": str(base),
         "folders": folders,
         "folder_count": len(folders),
         "folders_bytes": folders_bytes,
@@ -358,7 +363,54 @@ def build_storage_view() -> Dict[str, Any]:
     }
 
 
-def _validate_delete_target(name: str) -> Path:
+def _list_session_files(*, limit: int = 400) -> List[Dict[str, Any]]:
+    """Newest session/prompt files first (flat ``YAVER_DATA_DIR/sessions``)."""
+    root = resolve_sessions_dir()
+    out: List[Dict[str, Any]] = []
+    if not root.is_dir():
+        return out
+    try:
+        entries = list(root.iterdir())
+    except OSError as e:
+        logger.warning(f"Cannot list sessions dir {root}: {e}")
+        return out
+    rows: List[tuple] = []
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            st = entry.stat()
+        except OSError:
+            continue
+        rows.append((st.st_mtime, entry, st.st_size))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    for mtime, entry, size in rows[: max(1, int(limit))]:
+        try:
+            modified = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except (OSError, OverflowError, ValueError):
+            modified = None
+        out.append(
+            {
+                "name": entry.name,
+                "path": str(entry),
+                "size_bytes": int(size),
+                "size_label": format_bytes(int(size)),
+                "size_pending": False,
+                "modified_at": modified,
+                "in_use": False,
+                "kind": "file",
+                "area": "sessions",
+            }
+        )
+    return out
+
+
+def _validate_delete_target(name: str, *, area: str = "temp") -> Path:
+    kind = (area or "temp").strip().lower() or "temp"
+    if kind != "temp":
+        raise TempStorageError("Storage delete is only for temp clones", status_code=400)
     base = resolve_temp_base()
     target = _safe_child(base, name)
     if not target.exists():
@@ -368,11 +420,33 @@ def _validate_delete_target(name: str) -> Path:
     return target
 
 
-def force_delete_temp_folder(name: str) -> Dict[str, Any]:
-    """Synchronous hard-delete (tests / callers that wait)."""
-    target = _validate_delete_target(name)
+def _validate_session_target(name: str) -> Path:
+    base = resolve_sessions_dir()
     try:
-        force_rmtree_progress(target)
+        base_res = base.resolve()
+    except OSError:
+        base_res = base
+    target = _safe_child(base, name)
+    if not target.exists():
+        raise TempStorageError(f"Session file not found: {name}", status_code=404)
+    if not target.is_file():
+        raise TempStorageError("Only session files can be deleted here", status_code=400)
+    try:
+        target.resolve().relative_to(base_res)
+    except (ValueError, OSError) as e:
+        raise TempStorageError("Session file is outside the sessions dir") from e
+    return target
+
+
+def force_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]:
+    """Synchronous hard-delete (tests / callers that wait)."""
+    kind = (area or "temp").strip().lower() or "temp"
+    target = _validate_delete_target(name, area=kind)
+    try:
+        if kind == "sessions":
+            _delete_session_file(target)
+        else:
+            force_rmtree_progress(target)
     except OSError as e:
         logger.warning(f"Force delete failed for {target}: {e}")
         raise TempStorageError(
@@ -382,22 +456,25 @@ def force_delete_temp_folder(name: str) -> Dict[str, Any]:
         raise TempStorageError(
             f"Force delete left remnants in {name}", status_code=500
         )
-    logger.info(f"Dashboard force-deleted temp folder {target}")
-    return {"ok": True, "name": name, "path": str(target)}
+    logger.info(f"Dashboard force-deleted {kind} {target}")
+    return {"ok": True, "name": name, "path": str(target), "area": kind}
 
 
-def queue_delete_temp_folder(name: str) -> Dict[str, Any]:
+def queue_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]:
     """Start a background force-delete and return immediately."""
-    target = _validate_delete_target(name)
+    kind = (area or "temp").strip().lower() or "temp"
+    target = _validate_delete_target(name, area=kind)
+    job_key = name if kind == "temp" else f"sessions:{name}"
     with _jobs_lock:
-        existing = _jobs.get(name)
+        existing = _jobs.get(job_key)
         if existing and existing.get("status") == "deleting":
             raise TempStorageError(
                 f"Delete already in progress for {name}", status_code=409
             )
         size_bytes = int((existing or {}).get("size_bytes") or 0)
-        _jobs[name] = {
+        _jobs[job_key] = {
             "name": name,
+            "area": kind,
             "path": str(target),
             "status": "deleting",
             "percent": 0,
@@ -406,23 +483,32 @@ def queue_delete_temp_folder(name: str) -> Dict[str, Any]:
         }
     worker = threading.Thread(
         target=_run_delete_job,
-        args=(name, target),
-        name=f"temp-del-{name}",
+        args=(job_key, target, kind),
+        name=f"stor-del-{job_key}",
         daemon=True,
     )
     worker.start()
-    logger.info(f"Dashboard queued force-delete of temp folder {target}")
+    logger.info(f"Dashboard queued force-delete of {kind} {target}")
     return {
         "ok": True,
         "accepted": True,
         "name": name,
+        "area": kind,
         "path": str(target),
         "status": "deleting",
         "percent": 0,
     }
 
 
-def _run_delete_job(name: str, target: Path) -> None:
+def _delete_session_file(target: Path) -> None:
+    """Unlink one session artifact (log / prompt / sid file)."""
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _run_delete_job(name: str, target: Path, area: str = "temp") -> None:
     last_emit = [0.0]
     last_pct = [-1]
 
@@ -438,12 +524,16 @@ def _run_delete_job(name: str, target: Path) -> None:
             _set_job(name, percent=pct, status="deleting")
 
     try:
-        force_rmtree_progress(target, on_progress=on_progress)
+        if area == "sessions":
+            _delete_session_file(target)
+            on_progress(1, 1)
+        else:
+            force_rmtree_progress(target, on_progress=on_progress)
         if target.exists():
             raise OSError(f"force delete left remnants at {target}")
         _set_job(name, percent=100, status="done", error=None)
         _drop_size(name)
-        logger.info(f"Dashboard force-deleted temp folder {target}")
+        logger.info(f"Dashboard force-deleted {area} {target}")
         timer = threading.Timer(_DONE_KEEP_SECONDS, lambda: _pop_job(name))
         timer.daemon = True
         timer.start()

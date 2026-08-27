@@ -577,7 +577,7 @@ def create_dashboard_app(
 
     @app.get("/api/storage")
     def storage_view(refresh: bool = Query(default=False)) -> dict:
-        """Disk usage + folder list. Folder sizes are filled in the background."""
+        """Disk usage + temp-clone folder list. Folder sizes fill in the background."""
         from src.dashboard.temp_storage import (
             TempStorageError,
             build_storage_view,
@@ -609,7 +609,9 @@ def create_dashboard_app(
         from src.dashboard.temp_storage import TempStorageError, queue_delete_temp_folder
 
         try:
-            result = queue_delete_temp_folder(body.name)
+            result = queue_delete_temp_folder(
+                body.name, area=getattr(body, "area", None) or "temp"
+            )
         except TempStorageError as e:
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
         result["server_time"] = build_meta().server_time
@@ -783,7 +785,7 @@ def create_dashboard_app(
         job_id: str,
         delete_artifacts: bool = Query(
             default=True,
-            description="Also delete linked session log / prompt under .jira-agent",
+            description="Also delete linked session log / prompt under YAVER_DATA_DIR",
         ),
     ) -> dict:
         """Permanently delete a historical job record.

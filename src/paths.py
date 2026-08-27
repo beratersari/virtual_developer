@@ -1,11 +1,15 @@
 """Durable on-disk locations for clones and agent state.
 
-The install folder is replaced on every Windows zip reinstall. Session logs,
-job records, and OpenCode binds must live *outside* that folder — default
-``C:\\vd\\yaver`` (WSL: ``/mnt/c/vd/yaver``). Temp clones default to
-``C:\\vd\\t`` so they stay short (MAX_PATH) and also survive reinstall.
+Session logs, jobs, state, and OpenCode binds live *outside* the install
+folder (zip reinstall on Windows, or a git pull on Linux):
 
-Override with ``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
+* Windows: ``C:\\vd\\yaver`` and ``C:\\vd\\t`` (short TEMP for MAX_PATH)
+* WSL:     ``/mnt/c/vd/yaver`` and ``/mnt/c/vd/t``
+* Linux:   ``/vd/yaver`` and ``/vd/t`` (or ``~/vd/…`` if ``/vd`` is not writable)
+
+``C:\\vd\\…`` in ``.env`` is remapped on Linux. Override with
+``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
+Legacy ``.jira-agent/`` next to the repo is only a migrate/read fallback.
 """
 
 from __future__ import annotations
@@ -21,17 +25,79 @@ WIN_DATA_DIR = Path(r"C:\vd\yaver")
 WIN_TEMP_DIR = Path(r"C:\vd\t")
 WSL_DATA_DIR = Path("/mnt/c/vd/yaver")
 WSL_TEMP_DIR = Path("/mnt/c/vd/t")
+LINUX_ROOT_DATA_DIR = Path("/vd/yaver")
+LINUX_ROOT_TEMP_DIR = Path("/vd/t")
 _LEGACY_NAME = ".jira-agent"
 
 
 def coerce_win_path(path: Path | str) -> Path:
-    """``C:\\vd\\yaver`` in WSL becomes ``/mnt/c/vd/yaver``."""
+    """Map a Windows path onto this host.
+
+    WSL (``/mnt/c`` present): ``C:\\vd\\yaver`` → ``/mnt/c/vd/yaver``.
+    Native Linux: ``C:\\vd\\yaver`` → ``/vd/yaver`` (or ``~/vd/yaver``).
+    """
     raw = str(path).strip()
     if os.name != "nt" and len(raw) >= 2 and raw[1] == ":":
         drive = raw[0].lower()
         rest = raw[2:].replace("\\", "/").lstrip("/")
-        return Path(f"/mnt/{drive}/{rest}")
+        mnt = Path(f"/mnt/{drive}")
+        try:
+            if mnt.is_dir():
+                return Path(f"/mnt/{drive}/{rest}")
+        except OSError:
+            pass
+        return _linux_path_from_win_rest(rest)
     return Path(raw).expanduser()
+
+
+def _linux_path_from_win_rest(rest: str) -> Path:
+    """``vd/yaver`` / ``vd/t`` from a ``C:\\…`` path when ``/mnt/c`` is absent."""
+    low = (rest or "").strip("/").lower()
+    if low in {"vd/yaver", "vd/yaver/"}:
+        return default_linux_data_dir()
+    if low in {"vd/t", "vd/t/"}:
+        return default_linux_temp_dir()
+    if low.startswith("vd/"):
+        preferred = Path("/") / rest
+        if _dir_usable(preferred):
+            return preferred
+        return Path.home() / rest
+    return Path("/") / rest if rest else default_linux_data_dir()
+
+
+def _dir_usable(path: Path) -> bool:
+    """True when ``path`` exists and is writable, or can be created."""
+    try:
+        if path.exists():
+            return path.is_dir() and os.access(path, os.W_OK)
+        cur = path.parent
+        while not cur.exists() and cur != cur.parent:
+            cur = cur.parent
+        return cur.is_dir() and os.access(cur, os.W_OK)
+    except OSError:
+        return False
+
+
+def linux_home_data_dir() -> Path:
+    return Path.home() / "vd" / "yaver"
+
+
+def linux_home_temp_dir() -> Path:
+    return Path.home() / "vd" / "t"
+
+
+def default_linux_data_dir() -> Path:
+    """``/vd/yaver`` when writable, otherwise ``~/vd/yaver``."""
+    if _dir_usable(LINUX_ROOT_DATA_DIR):
+        return LINUX_ROOT_DATA_DIR
+    return linux_home_data_dir()
+
+
+def default_linux_temp_dir() -> Path:
+    """``/vd/t`` when writable, otherwise ``~/vd/t``."""
+    if _dir_usable(LINUX_ROOT_TEMP_DIR):
+        return LINUX_ROOT_TEMP_DIR
+    return linux_home_temp_dir()
 
 
 def _env_path(*names: str) -> Optional[Path]:
@@ -63,19 +129,38 @@ def uses_windows_layout() -> bool:
 
 
 def default_data_dir() -> Path:
+    if _under_pytest():
+        return Path.cwd() / _LEGACY_NAME
     if os.name == "nt":
         return WIN_DATA_DIR
     if uses_windows_layout():
         return WSL_DATA_DIR
-    return Path.cwd() / _LEGACY_NAME
+    return default_linux_data_dir()
 
 
 def default_temp_dir() -> Path:
+    if _under_pytest():
+        return Path(".temp")
     if os.name == "nt":
         return WIN_TEMP_DIR
     if uses_windows_layout():
         return WSL_TEMP_DIR
-    return Path(".temp")
+    return default_linux_temp_dir()
+
+
+def resolve_temp_dir_base(raw: Path | str | None = None) -> Path:
+    """Absolute temp-clone root (relative values are against process cwd)."""
+    if raw is None:
+        from src.config import settings
+
+        raw = getattr(settings, "temp_dir_base", None) or default_temp_dir()
+    p = coerce_win_path(raw)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
 
 
 def agent_data_dir() -> Path:

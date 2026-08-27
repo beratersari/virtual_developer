@@ -10,9 +10,10 @@ from src.brand import PRODUCT_NAME
 
 
 class TempFolderDeleteRequest(BaseModel):
-    """Body for POST /api/storage/delete — one clone folder under TEMP_DIR_BASE."""
+    """Body for POST /api/storage/delete — one temp clone folder."""
 
     name: str = Field(..., min_length=1, max_length=255)
+    area: str = Field(default="temp", description="temp clones only")
 
     @field_validator("name")
     @classmethod
@@ -21,7 +22,15 @@ class TempFolderDeleteRequest(BaseModel):
         if not text:
             raise ValueError("name is required")
         if "/" in text or "\\" in text or text in {".", ".."}:
-            raise ValueError("name must be a single folder under the temp base")
+            raise ValueError("name must be a single folder or file name")
+        return text
+
+    @field_validator("area")
+    @classmethod
+    def _area_ok(cls, v: str) -> str:
+        text = (v or "temp").strip().lower() or "temp"
+        if text != "temp":
+            raise ValueError("area must be temp")
         return text
 
 
@@ -339,7 +348,7 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
-    # Durable locations (outside the install folder on Windows)
+    # Durable locations (YAVER_DATA_DIR / TEMP_DIR_BASE on Windows and Linux)
     data_dir: str = ""
     temp_dir_base: str = ""
 

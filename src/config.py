@@ -364,25 +364,20 @@ class Settings(BaseSettings):
     temp_dir_base: Path = Field(
         default=Path(".temp"),
         description=(
-            "Base directory for temp clones. On Windows / WSL-on-C: the default "
-            "``.temp`` is remapped to C:\\vd\\t so reinstall does not wipe workspaces."
+            "Base directory for temp clones. Relative ``.temp`` is remapped to "
+            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, /vd/t, or ~/vd/t)."
         ),
     )
     @field_validator("temp_dir_base", mode="after")
     @classmethod
     def _durable_temp_dir(cls, v: Path) -> Path:
-        from src.paths import (
-            _under_pytest,
-            coerce_win_path,
-            default_temp_dir,
-            uses_windows_layout,
-        )
+        from src.paths import _under_pytest, coerce_win_path, default_temp_dir
 
         v = coerce_win_path(v)
         if _under_pytest() or v.is_absolute():
             return v
         text = str(v).replace("\\", "/").strip()
-        if uses_windows_layout() and text in {".temp", "temp", "./.temp"}:
+        if text in {".temp", "temp", "./.temp"}:
             return default_temp_dir()
         return v
 
@@ -825,6 +820,14 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 )
                 continue
             value = text
+        if key == "agent_task_timeout_seconds":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Ignoring invalid runtime agent_task_timeout_seconds={value!r}"
+                )
+                continue
         if key == "jira_intake_mode":
             value = _normalize_intake_mode(value)
         if key == "project_repositories":
@@ -849,6 +852,22 @@ def get_settings() -> Settings:
         # Dashboard overrides win over .env so agent timeout changes stick.
         apply_runtime_settings_to(_settings)
     return _settings
+
+
+def live_agent_timeout_seconds(*, default: int = 1800) -> int:
+    """Current OpenCode/agent wall-clock budget (dashboard + runtime + env).
+
+    Re-read on every call so a Settings save of 7200 applies to the in-flight
+    serve turn / next retry, not only jobs that started after the save.
+    """
+    live = get_settings()
+    raw = getattr(live, "agent_task_timeout_seconds", None)
+    try:
+        if raw is None or isinstance(raw, bool):
+            return int(default)
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
 
 def set_current_temp_dir(temp_dir: Optional[Path]) -> None:
     global _current_temp_dir

@@ -48,7 +48,7 @@ Yaver is a Python daemon that:
 
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
-- **To Do + trigger = rework** (intentional). Local `completed` / `error` /
+- **To Do + trigger label + bot assignee = rework** (intentional). Local `completed` / `error` /
   `cancelled` on a To Do-like ticket with `bot` / `ai-assist` (or bot assignee)
   is re-queued: reset and run again. Putting the issue back on To Do *or*
   leaving it on To Do after a finished run is the operator rework signal.
@@ -62,10 +62,12 @@ Yaver is a Python daemon that:
 
 ### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
 
-Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) mean
-the issue is eligible for intake **whenever it is To Do-like**, including after
-a previous completed/error/cancelled run. In-flight (`planning` / `executing`)
-is never restarted from poll noise. **`plan_ready`** still does not auto-build.
+Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) **and**
+assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** mean the issue is eligible
+for poller intake **whenever it is To Do-like**, including after a previous
+completed/error/cancelled run. Label-only or assignee-only is not enough.
+In-flight (`planning` / `executing`) is never restarted from poll noise.
+**`plan_ready`** still does not auto-build.
 
 Typical **plan** lifecycle:
 
@@ -90,12 +92,12 @@ To Do + bot (or ai-assist)
 
 | Situation | Poller / processor behaviour |
 |-----------|------------------------------|
-| No local state + To Do + trigger label | Accept as **new** work |
+| No local state + To Do + trigger label + bot assignee | Accept as **new** work |
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
 | Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
 | Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
 | Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
-| Local `error` / `cancelled` / `completed` + To Do + trigger label | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
+| Local `error` / `cancelled` / `completed` + To Do + trigger label + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
 **Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
 only `bot`. Operators will see “stuck on To Do with bot label” after a successful
@@ -301,7 +303,7 @@ JIRA_API_TOKEN=your-api-token-here
 
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
-- Poller focuses on board/sprint + To Do + trigger labels / bot assignee (`JIRA_INTAKE_MODE=poll`).
+- Poller focuses on board/sprint + To Do + trigger label **and** bot assignee (`JIRA_INTAKE_MODE=poll`).
 - **Webhook intake** (`JIRA_INTAKE_MODE=webhook`): `POST /webhooks/jira`. Triggers only on **assignment to** the bot (changelog `assignee.to`; unassign is ignored) or a **comment that mentions** the bot. Bot-authored / `*Yaver*` comments are ignored (loop guard). Poller sleeps while webhook mode is on.
 
 ### Config checklist (common)
@@ -312,8 +314,10 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
-| `TRIGGER_LABELS` | Labels that make an issue eligible (e.g. `ai-assist,bot`) |
-| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments for bot-assignment trigger (e.g. `devbot,jira ai bot`) |
+| `TRIGGER_LABELS` | Poller requires one of these labels **and** a bot assignee |
+| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller also requires (e.g. `devbot,jira ai bot`) |
+| `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
+| `YAVER_DATA_DIR` | Sessions, jobs, state: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `TEMP_CLEANUP_POLICY` | `age` (default) / `always` / `on_success` / `never` |
 | `TEMP_CLEANUP_MAX_AGE_DAYS` | Age cutoff for temp clones (default `1` = 24 hours) |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
@@ -516,9 +520,9 @@ glab mr create --title "feat(auth): bearer-only jira token" --description "..." 
 
 ```bash
 cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITLAB_PAT as needed
-./install.sh           # or install-dashboard.bat + install-backends.bat + install-codex.bat
-.venv/bin/python cli.py init
-.venv/bin/python -m src.daemon   # or project’s documented start command
+./install-dashboard.sh
+./install-backends.sh  # or ./install.sh (dashboard then backends)
+./start-backend.sh     # or ./start.sh
 ```
 
 **Windows (offline zip from CI):** extract artifact → `install-dashboard.bat` + `install-backends.bat` (OpenCode) + `install-codex.bat` (Codex) → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
@@ -733,6 +737,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
+| `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `agent/PLAN_PROMPT.md` | Plan-mode agent prompt (`Mode: plan`) |

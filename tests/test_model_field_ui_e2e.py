@@ -42,6 +42,30 @@ def test_e2e_schedule_and_settings_use_shared_model_field():
     assert 'label="Default model"' in settings
 
 
+def test_e2e_model_field_disabled_until_inventory_loads():
+    """Backend change refetches models; picker and related actions stay locked."""
+    field = MODEL_FIELD.read_text(encoding="utf-8")
+    schedules = SCHEDULES.read_text(encoding="utf-8")
+    settings = SETTINGS.read_text(encoding="utf-8")
+
+    assert "const loading = fetching || loadedWorker !== worker" in field
+    assert "disabled={loading}" in field
+    assert "onLoadingChange?: (loading: boolean) => void" in field
+    assert "onLoadingChange?.(loading)" in field
+
+    assert settings.count("onLoadingChange={setModelsLoading}") == 1
+    assert "setModelsLoading(true)" in settings
+    assert "if (!draft || modelsLoading) return" in settings
+    assert "disabled={saving || modelsLoading || (!dirty && !saved)}" in settings
+    assert "Loading models…" in settings
+
+    assert schedules.count("onLoadingChange={setModelsLoading}") == 2
+    assert schedules.count("setModelsLoading(true)") >= 3
+    assert "disabled={busy || modelsLoading}" in schedules
+    assert schedules.count("disabled={busy || modelsLoading}") >= 4
+    assert "Loading models…" in schedules
+
+
 def test_e2e_models_api_lists_settings_default_without_forcing_custom_id(monkeypatch):
     """Schedule/Settings dropdown can pick a listed id; empty custom is valid."""
     from unittest.mock import patch

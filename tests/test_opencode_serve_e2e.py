@@ -8,6 +8,7 @@ when a serve turn would otherwise look finished mid-task.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
@@ -892,6 +893,47 @@ async def test_e2e_http_timeout_idle_waits_for_auto_resume_no_second_prompt():
     assert backend.message_calls == 1
     assert backend.prompts == ["# Build mode\ndo the work"]
     assert all("Finish remaining todos" not in p for p in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_e2e_full_http_budget_timeout_aborts_hung_busy_session(monkeypatch):
+    """POST already used the full HTTP budget while serve stayed busy.
+
+    Must not start another job-length compact wait (poll 200+ for hours).
+    Abort the hung turn and mark timed_out.
+    """
+    monkeypatch.setattr(
+        "src.config.live_agent_timeout_seconds",
+        lambda **_kw: 1800,
+    )
+
+    class SlowTimeoutBusy(FakeServeBackend):
+        async def send_message(self, session_id, text, **kwargs):
+            self.prompts.append(text)
+            await asyncio.sleep(0.25)
+            raise httpx.ReadTimeout("")
+
+    backend = SlowTimeoutBusy(required_compacts=0)
+    backend.busy_until_aborted = True
+    client = FakeServeClient(backend)
+    client.timeout_seconds = 0.2
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=30.0,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    t0 = time.time()
+    result = await orch.run(prompt="do work", title="KAN-HUNG")
+    elapsed = time.time() - t0
+    assert elapsed < 8.0, f"hung wait lasted {elapsed:.1f}s"
+    assert result.timed_out is True
+    assert result.returncode == -1
+    assert backend.aborted is True
+    assert "HTTP budget exhausted" in (result.stderr or "") or (
+        "did not finish" in (result.stderr or "")
+    )
+    assert "waiting for auto-compact (poll 100" not in (result.stdout or "")
 
 
 def _http_500() -> httpx.HTTPStatusError:

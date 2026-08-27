@@ -163,9 +163,9 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
-        # Ops list: only issues the Virtual Developer can act on (trigger
-        # label and/or bot assignee). Full board rows stay in the raw
-        # snapshot for counts / debug; UI must not show noise.
+        # Ops list: trigger label and/or bot assignee (partial matches stay
+        # visible so operators see why will_process is false). Full board
+        # rows stay in the raw snapshot; UI must not show noise.
         matched_label = bool(row.get("matched_label"))
         matched_assignee = bool(row.get("matched_assignee"))
         if not (matched_label or matched_assignee or row.get("will_process")):
@@ -525,9 +525,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["agent_task_timeout_seconds"] = (
             settings.agent_task_timeout_seconds
         )
+        dotenv_updates["AGENT_TASK_TIMEOUT_SECONDS"] = str(
+            settings.agent_task_timeout_seconds
+        )
         logger.info(
             f"Agent/OpenCode timeout set to "
-            f"{settings.agent_task_timeout_seconds}s (next job uses this)"
+            f"{settings.agent_task_timeout_seconds}s "
+            "(in-flight and next jobs use this)"
         )
     if "agent_task_max_retries" in data and data["agent_task_max_retries"] is not None:
         settings.agent_task_max_retries = int(data["agent_task_max_retries"])
@@ -940,6 +944,23 @@ def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:
     return out
 
 
+def job_created_stamp(job: Any) -> str:
+    """Created/started time for list order (newest first).
+
+    Jobs are not grouped by issue key. ``started_at`` is set when the row is
+    created; fall back to ``created_at`` / ``updated_at`` for older records.
+    """
+    if isinstance(job, dict):
+        started = job.get("started_at")
+        created = job.get("created_at")
+        updated = job.get("updated_at")
+    else:
+        started = getattr(job, "started_at", None)
+        created = getattr(job, "created_at", None)
+        updated = getattr(job, "updated_at", None)
+    return str(started or created or updated or "")
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
@@ -987,14 +1008,8 @@ def build_jobs(
             or st in {"executing", "planning", "running", "pending"}
         )
         (inflight if live else rest).append(j)
-    inflight.sort(
-        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-        reverse=True,
-    )
-    rest.sort(
-        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-        reverse=True,
-    )
+    inflight.sort(key=job_created_stamp, reverse=True)
+    rest.sort(key=job_created_stamp, reverse=True)
     raw = inflight + rest
 
     total = len(raw)
@@ -1140,7 +1155,7 @@ def _resolve_job_dict(
 
 
 def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
-    """Delete a session log / prompt under .jira-agent only. Returns path if deleted."""
+    """Delete a session log / prompt under YAVER_DATA_DIR only. Returns path if deleted."""
     if not path_str:
         return None
     try:

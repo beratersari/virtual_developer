@@ -205,6 +205,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [looking, setLooking] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
 
   const get = async () => {
     setErr(null)
@@ -212,6 +213,7 @@ function Existing({ onDone }: { onDone: () => void }) {
     try {
       const p = await previewScheduleIssue(key.trim().toUpperCase())
       setPreview(p)
+      if (p.ok && p.template_valid) setModelsLoading(true)
       setKey(p.issue_key || key)
       if (p.model) setModel(p.model)
       if (p.backend) setBackend(p.backend)
@@ -225,7 +227,7 @@ function Existing({ onDone }: { onDone: () => void }) {
 
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
-    if (!preview?.ok) return
+    if (!preview?.ok || modelsLoading) return
     setBusy(true)
     setErr(null)
     try {
@@ -266,7 +268,10 @@ function Existing({ onDone }: { onDone: () => void }) {
           </p>
           <BackendField
             value={backend}
-            onChange={setBackend}
+            onChange={(v) => {
+              setModelsLoading(true)
+              setBackend(v)
+            }}
             fallback={live.settings?.agent_backend || 'opencode'}
           />
           <ModelField
@@ -274,16 +279,21 @@ function Existing({ onDone }: { onDone: () => void }) {
             onChange={setModel}
             fallback={live.settings?.default_model || ''}
             backend={backend || live.settings?.agent_backend || 'opencode'}
+            onLoadingChange={setModelsLoading}
           />
           <label className="field">
             <span>Run at</span>
             <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
           </label>
           <p className="actions">
-            <button type="submit" className="go" disabled={busy}>
+            <button type="submit" className="go" disabled={busy || modelsLoading}>
               {busy ? (
                 <>
                   <Spinner /> Scheduling…
+                </>
+              ) : modelsLoading ? (
+                <>
+                  <Spinner /> Loading models…
                 </>
               ) : (
                 'Schedule'
@@ -292,7 +302,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             <button
               type="button"
               className="vd-btn vd-btn-secondary"
-              disabled={busy}
+              disabled={busy || modelsLoading}
               onClick={(e) => void submit(e, true)}
             >
               Run now
@@ -337,6 +347,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [when, setWhen] = useState(defaultWhen)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(true)
   const seeded = useRef(false)
 
   useEffect(() => {
@@ -379,6 +390,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
 
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
+    if (modelsLoading) return
     setBusy(true)
     setErr(null)
     try {
@@ -536,7 +548,10 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       </label>
       <BackendField
         value={backend}
-        onChange={setBackend}
+        onChange={(v) => {
+          setModelsLoading(true)
+          setBackend(v)
+        }}
         fallback={live.settings?.agent_backend || 'opencode'}
       />
       <ModelField
@@ -544,6 +559,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         onChange={setModel}
         fallback={live.settings?.default_model || ''}
         backend={backend || live.settings?.agent_backend || 'opencode'}
+        onLoadingChange={setModelsLoading}
       />
       <label className="field">
         <span>Run at</span>
@@ -551,10 +567,14 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       </label>
       {err && <p className="err">{err}</p>}
       <p className="actions">
-        <button type="submit" className="go" disabled={busy}>
+        <button type="submit" className="go" disabled={busy || modelsLoading}>
           {busy ? (
             <>
               <Spinner /> Creating…
+            </>
+          ) : modelsLoading ? (
+            <>
+              <Spinner /> Loading models…
             </>
           ) : (
             'Create schedule'
@@ -563,7 +583,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         <button
           type="button"
           className="vd-btn vd-btn-secondary"
-          disabled={busy}
+          disabled={busy || modelsLoading}
           onClick={(e) => void submit(e, true)}
         >
           Create & run now

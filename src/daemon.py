@@ -366,7 +366,7 @@ class JiraAgentDaemon:
             issue_key,
             message,
             suggestion=(
-                "Check session logs under .jira-agent/sessions/, then "
+                "Check session logs under YAVER_DATA_DIR/sessions/, then "
                 "move the issue back to TO DO to re-queue."
             ),
         )
@@ -453,7 +453,9 @@ class JiraAgentDaemon:
                     if state.status not in in_flight:
                         continue
 
-                    timeout = state.timeout_seconds or settings.agent_task_timeout_seconds
+                    from src.config import live_agent_timeout_seconds
+
+                    timeout = live_agent_timeout_seconds()
                     # Treat falsy 0 as a real zero retries; only None falls back to settings
                     retries = (
                         state.max_retries

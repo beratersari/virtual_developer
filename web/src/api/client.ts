@@ -316,12 +316,13 @@ export function deleteTempFolder(name: string) {
     ok: boolean
     accepted?: boolean
     name: string
+    area?: string
     path?: string
     status?: string
     percent?: number
   }>('/api/storage/delete', {
     method: 'POST',
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, area: 'temp' }),
   })
 }
 

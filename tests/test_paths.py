@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def isolate_jira_agent_artifacts():
+    """No-op: conftest walks ``.jira-agent`` on /mnt/c and can stall WSL 9p."""
+    yield
+
 from src.paths import (
     WSL_DATA_DIR,
     WSL_TEMP_DIR,
@@ -21,11 +27,15 @@ from src.paths import (
 def test_coerce_win_path_on_posix():
     import os
 
+    from src.paths import default_linux_data_dir
+
     got = coerce_win_path(r"C:\vd\yaver")
     if os.name == "nt":
         assert "vd" in str(got) and "yaver" in str(got)
-    else:
+    elif Path("/mnt/c").is_dir():
         assert got == Path("/mnt/c/vd/yaver")
+    else:
+        assert got == default_linux_data_dir()
 
 
 def test_agent_data_dir_honors_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -62,6 +72,24 @@ def test_under_agent_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     inside.write_text("x", encoding="utf-8")
     assert under_agent_data(inside) is True
     assert under_agent_data(tmp_path / "secret.txt") is False
+
+
+def test_linux_defaults_prefer_home_when_root_unusable(monkeypatch: pytest.MonkeyPatch):
+    from src import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_dir_usable", lambda p: False)
+    assert paths_mod.default_linux_data_dir() == Path.home() / "vd" / "yaver"
+    assert paths_mod.default_linux_temp_dir() == Path.home() / "vd" / "t"
+
+
+def test_coerce_win_path_native_linux_without_mnt(monkeypatch: pytest.MonkeyPatch):
+    from src import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_dir_usable", lambda p: False)
+    got = paths_mod._linux_path_from_win_rest("vd/yaver")
+    assert got == Path.home() / "vd" / "yaver"
+    got_t = paths_mod._linux_path_from_win_rest("vd/t")
+    assert got_t == Path.home() / "vd" / "t"
 
 
 def test_pytest_stays_on_local_defaults(monkeypatch: pytest.MonkeyPatch):
