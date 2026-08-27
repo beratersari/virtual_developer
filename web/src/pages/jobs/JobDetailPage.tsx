@@ -376,7 +376,7 @@ export function JobDetailPage() {
       <ConfirmDialog
         open={confirm === 'delete'}
         title={`Delete job ${job?.job_id}?`}
-        body="Removes the job history record and linked session/prompt files under .jira-agent. Does not change the Jira issue."
+        body="Removes the job history record and linked session/prompt files under YAVER_DATA_DIR. Does not change the Jira issue."
         confirmLabel="Delete job"
         danger
         busy={busy}

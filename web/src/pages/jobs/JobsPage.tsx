@@ -433,7 +433,7 @@ export function JobsPage() {
         open={confirmOpen}
         title={`Delete ${selectedCount} job(s)?`}
         body={
-          'Removes job history records and linked session/prompt files under .jira-agent.\n' +
+          'Removes job history records and linked session/prompt files under YAVER_DATA_DIR.\n' +
           'Does not change Jira issues. Live / in-flight jobs are skipped.'
         }
         confirmLabel="Delete"

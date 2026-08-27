@@ -45,7 +45,7 @@ Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated,
 | **Agent runner** | Spawns OpenCode with plan/build mode prompts; streams session logs |
 | **Jira client** | REST API v2 + Agile; Bearer (on-prem PAT) or Basic (Cloud email+token) |
 | **Git manager** | Clone, branch, commit identity, push, MR via `glab` / GitLab API |
-| **State store** | Per-issue JSON under `.jira-agent/state/`; job records for the dashboard |
+| **State store** | Per-issue JSON under `YAVER_DATA_DIR/state/`; job records for the dashboard |
 | **Ops dashboard** | REST + WebSocket + static SPA from `web/dist` |
 
 ### Agents (stock OpenCode)
@@ -71,26 +71,38 @@ Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated,
 
 ## Quick start
 
-### Linux / macOS
+### Linux
+
+Same split as Windows: dashboard (Python) vs agent CLIs (OpenCode / Codex).
+See [packaging/linux/README.md](packaging/linux/README.md).
+
+Offline zip (same idea as Windows): download the **Linux Distribution**
+artifact, extract so `vendor/` sits next to the install scripts, then:
+
+```bash
+./install-dashboard.sh    # .venv from vendor/python-wheels
+./install-backends.sh     # OpenCode from vendor/opencode-home.zip
+./install-codex.sh        # Codex from vendor/codex-*.tar.gz
+```
+
+From a git checkout (needs network unless you already have `vendor/`):
 
 ```bash
 # From repo root
-cp .env.example .env
-# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID, GITLAB_* as needed
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Optional installer (deps + OpenCode + glab heuristics)
+./install-dashboard.sh    # .venv, requirements, .env, cli.py init
+./install-backends.sh     # OpenCode (+ Codex if no args)
+# Or one shot:
 ./install.sh
 
-python cli.py init
-python cli.py start
+# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID
+./start-backend.sh        # API + SPA on :8080 (foreground)
+# ./start.sh              # backend + frontend in the background
+# ./start-frontend.sh     # SPA proxy on :5173 (does not kill the daemon)
+# ./stop.sh
 ```
 
-Ops dashboard (default): **http://127.0.0.1:8080**  
-Stop the daemon with **Ctrl+C**.
+Ops dashboard: **http://127.0.0.1:8080**  
+OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`).
 
 ### Windows (offline zip)
 
@@ -146,11 +158,12 @@ All of the following roughly apply **for first intake**:
 
 - Issue is on the configured **board**  
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
-- Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and/or** assignee name looks like the bot (when `TRIGGER_ON_ASSIGNMENT=true`)  
+- Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and**
+  assignee name matches `TRIGGER_ASSIGNEE_NAMES` (both required)  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-**To Do + trigger = rework (intentional).** A ticket in a To Do-like column with
-`bot` / `ai-assist` (or bot assignee) is eligible, including after a previous
+**To Do + label + bot assignee = rework (intentional).** A ticket in a To Do-like
+column with `bot` / `ai-assist` **and** the bot assignee is eligible, including after a previous
 `completed` / `error` / `cancelled` run. The poller **re-queues** that work
 (reset and run again). After accept, the bot moves the board to **In Progress**
 so the next poll does not start another job until the issue is To Do again.
@@ -453,14 +466,20 @@ Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents wor
 
 ## State on disk
 
+Durable paths (not next to the install / git checkout):
+
 ```text
-.jira-agent/
-  state/          # per-issue JSON (status, tokens, plan path, metadata)
-  sessions/       # agent stdout/stderr session logs (not auto-deleted by temp cleanup)
-.temp/            # per-issue git clones (cleanup policy from env)
-.sisyphus/plans/  # plan markdown when using local plans dir
-logs/             # local log directory (stdout/stderr; not configured via env)
+YAVER_DATA_DIR          # C:\vd\yaver  |  /mnt/c/vd/yaver  |  /vd/yaver or ~/vd/yaver
+  state/                # per-issue JSON (status, plan path, metadata)
+  sessions/             # agent session logs (not auto-deleted by temp cleanup)
+  jobs/                 # dashboard job records + per-job system logs
+  logs/                 # durable daemon.log
+TEMP_DIR_BASE           # C:\vd\t  |  /mnt/c/vd/t  |  /vd/t or ~/vd/t
+  {remote12}_{hash12}/  # per-issue git clones (TEMP_CLEANUP_POLICY)
+.sisyphus/plans/        # plan markdown when using the local plans dir
 ```
+
+Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 
 ---
 
@@ -471,7 +490,7 @@ logs/             # local log directory (stdout/stderr; not configured via env)
 | Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
 | Ticket on To Do with `bot` but bot does nothing | If local status is **`plan_ready`**, that wait is intentional (`bot` alone does not auto-build). Add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). If local status is `completed` / `error` / `cancelled`, To Do + trigger **is** rework — check the poll snapshot `will_process` and logs. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
-| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
+| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
 | Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
 | Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install-backends.bat`; see `packaging/windows/` diag notes |

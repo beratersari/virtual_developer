@@ -342,42 +342,6 @@ def build_storage_view() -> Dict[str, Any]:
     folders.sort(key=lambda r: str(r.get("name") or "").lower())
     if sizes_pending:
         _ensure_size_scan()
-    sessions = _list_session_files()
-    listed_sessions: Set[str] = set()
-    for row in sessions:
-        listed_sessions.add(str(row["name"]))
-        job = jobs.get(f"sessions:{row['name']}")
-        if job:
-            if job.get("status") == "done":
-                _pop_job(f"sessions:{row['name']}")
-            else:
-                row["delete"] = _delete_dto(job)
-    for key, job in jobs.items():
-        if not str(key).startswith("sessions:"):
-            continue
-        sname = str(job.get("name") or str(key).split(":", 1)[-1])
-        if sname in listed_sessions:
-            continue
-        if job.get("status") not in {"deleting", "error", "done"}:
-            continue
-        sessions.append(
-            {
-                "name": sname,
-                "path": str(job.get("path") or (resolve_sessions_dir() / sname)),
-                "size_bytes": int(job.get("size_bytes") or 0),
-                "size_label": format_bytes(int(job.get("size_bytes") or 0)),
-                "size_pending": False,
-                "modified_at": None,
-                "in_use": False,
-                "kind": "file",
-                "area": "sessions",
-                "delete": _delete_dto(job),
-            }
-        )
-    sessions_bytes = sum(int(s.get("size_bytes") or 0) for s in sessions)
-    from src.paths import agent_data_dir
-
-    data_dir = agent_data_dir()
     return {
         "disk": {
             "volume": volume,
@@ -390,17 +354,11 @@ def build_storage_view() -> Dict[str, Any]:
             "free_label": format_bytes(int(usage.free)),
             "used_percent": used_pct,
         },
-        "data_dir": str(data_dir),
         "temp_dir": str(base),
-        "sessions_dir": str(resolve_sessions_dir()),
         "folders": folders,
         "folder_count": len(folders),
         "folders_bytes": folders_bytes,
         "folders_label": format_bytes(folders_bytes),
-        "sessions": sessions,
-        "session_count": len(sessions),
-        "sessions_bytes": sessions_bytes,
-        "sessions_label": format_bytes(sessions_bytes),
         "sizes_pending": sizes_pending,
     }
 
@@ -451,10 +409,8 @@ def _list_session_files(*, limit: int = 400) -> List[Dict[str, Any]]:
 
 def _validate_delete_target(name: str, *, area: str = "temp") -> Path:
     kind = (area or "temp").strip().lower() or "temp"
-    if kind == "sessions":
-        return _validate_session_target(name)
     if kind != "temp":
-        raise TempStorageError("area must be 'temp' or 'sessions'", status_code=400)
+        raise TempStorageError("Storage delete is only for temp clones", status_code=400)
     base = resolve_temp_base()
     target = _safe_child(base, name)
     if not target.exists():

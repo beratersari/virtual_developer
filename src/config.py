@@ -365,7 +365,7 @@ class Settings(BaseSettings):
         default=Path(".temp"),
         description=(
             "Base directory for temp clones. Relative ``.temp`` is remapped to "
-            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, or /vd/t)."
+            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, /vd/t, or ~/vd/t)."
         ),
     )
     @field_validator("temp_dir_base", mode="after")

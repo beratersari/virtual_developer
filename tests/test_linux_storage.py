@@ -1,4 +1,4 @@
-"""Linux durable storage paths + session-file delete via the storage API."""
+"""Linux durable storage paths + temp-clone delete via the storage API."""
 
 from __future__ import annotations
 
@@ -30,28 +30,31 @@ def _reset_storage():
     reset_size_cache()
 
 
-def test_storage_lists_and_deletes_session_files(tmp_path, monkeypatch):
+def test_storage_lists_and_deletes_temp_clones_only(tmp_path, monkeypatch):
     from src.config import settings
 
     monkeypatch.setenv("YAVER_DATA_DIR", str(tmp_path / "yaver-data"))
     monkeypatch.setattr(settings, "temp_dir_base", tmp_path / ".temp")
-    (tmp_path / ".temp").mkdir()
+    clone = tmp_path / ".temp" / "repo12_deadbeef1234"
+    clone.mkdir(parents=True)
+    (clone / "README").write_text("x", encoding="utf-8")
     ensure_agent_data_dir()
     sessions = agent_subdir("sessions")
     sessions.mkdir(parents=True, exist_ok=True)
     log = sessions / "KAN-1_20260827_120000.log"
     log.write_text("session\n", encoding="utf-8")
     view = build_storage_view()
-    names = [s["name"] for s in view.get("sessions") or []]
-    assert "KAN-1_20260827_120000.log" in names
-    assert view.get("data_dir")
-    assert view.get("sessions_dir")
-    out = force_delete_temp_folder("KAN-1_20260827_120000.log", area="sessions")
+    names = [s["name"] for s in view.get("folders") or []]
+    assert "repo12_deadbeef1234" in names
+    assert not (view.get("sessions") or [])
+    assert "sessions_dir" not in view
+    out = force_delete_temp_folder("repo12_deadbeef1234")
     assert out["ok"] is True
-    assert not log.exists()
+    assert not clone.exists()
+    assert log.exists(), "session files must not be deleted from Storage"
 
 
-def test_storage_api_deletes_session_file(tmp_path, monkeypatch):
+def test_storage_api_rejects_session_delete(tmp_path, monkeypatch):
     from src.config import settings
 
     monkeypatch.setenv("YAVER_DATA_DIR", str(tmp_path / "yaver-data"))
@@ -67,14 +70,7 @@ def test_storage_api_deletes_session_file(tmp_path, monkeypatch):
     listed = client.get("/api/storage")
     assert listed.status_code == 200
     body = listed.json()
-    assert any(s["name"] == name for s in body.get("sessions") or [])
+    assert not (body.get("sessions") or [])
     gone = client.post("/api/storage/delete", json={"name": name, "area": "sessions"})
-    assert gone.status_code == 202
-    assert gone.json().get("ok") is True
-    # File is small; wait briefly for the worker.
-    import time
-
-    deadline = time.time() + 3
-    while (sessions / name).exists() and time.time() < deadline:
-        time.sleep(0.05)
-    assert not (sessions / name).exists()
+    assert gone.status_code == 422
+    assert (sessions / name).exists()

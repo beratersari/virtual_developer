@@ -311,7 +311,7 @@ export function fetchStorageDeletes() {
   return request<StorageDeletesPayload>('/api/storage/deletes')
 }
 
-export function deleteTempFolder(name: string, area: 'temp' | 'sessions' = 'temp') {
+export function deleteTempFolder(name: string) {
   return request<{
     ok: boolean
     accepted?: boolean
@@ -322,7 +322,7 @@ export function deleteTempFolder(name: string, area: 'temp' | 'sessions' = 'temp
     percent?: number
   }>('/api/storage/delete', {
     method: 'POST',
-    body: JSON.stringify({ name, area }),
+    body: JSON.stringify({ name, area: 'temp' }),
   })
 }
 

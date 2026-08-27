@@ -307,7 +307,7 @@ _Completed by the AI agent. Please review and verify before merging or closing._
 
         suggestion_text = (suggestion or "").strip() or (
             "Move the issue back to To Do to re-queue, or check session logs under "
-            ".jira-agent/sessions/."
+            "YAVER_DATA_DIR/sessions/."
         )
         suggestion_section = f"\n*Suggestion:* {suggestion_text}\n"
 

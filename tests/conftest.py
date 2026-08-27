@@ -20,11 +20,12 @@ def _snapshot_paths(root: Path) -> Set[str]:
 def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Route job/session writes into tmp and scrub any real-tree leaks.
 
-    Production uses ``Path.cwd()/.jira-agent/...`` and a module-level
-    ``job_store`` singleton. Without isolation, tests leave files in the repo
-    after assertions. Isolated paths live under ``tmp_path/_vd_runtime`` (auto-
-    deleted by pytest); any *new* files under the real project ``.jira-agent``
-    are removed on teardown as a safety net.
+    Production uses ``YAVER_DATA_DIR`` (``C:\\vd\\yaver``, ``/vd/yaver``, …)
+    and a module-level ``job_store`` singleton. Without isolation, tests
+    leave files in the durable dir or leftover ``.jira-agent``. Isolated
+    paths live under ``tmp_path/_vd_runtime`` (auto-deleted by pytest);
+    any *new* files under the real project ``.jira-agent`` are removed on
+    teardown as a safety net.
     """
     project_root = Path.cwd()
     real_agent = (project_root / ".jira-agent").resolve()

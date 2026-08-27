@@ -2,7 +2,7 @@
 
 Live lines go into a process-wide ring (recent activity / task filters).
 When a ``job_id`` is present, the same line is **appended** to
-``.jira-agent/jobs/{job_id}.system.log`` so job detail survives daemon restarts.
+``YAVER_DATA_DIR/jobs/{job_id}.system.log`` so job detail survives daemon restarts.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class IssueLogRing:
         self._lines: Deque[Tuple[str, str, Optional[str], Optional[str]]] = deque(
             maxlen=maxlen
         )
-        self._jobs_dir = jobs_dir  # None → resolve at write time from cwd
+        self._jobs_dir = jobs_dir  # None → YAVER_DATA_DIR/jobs at write time
         self._persist = persist
         self._file_locks: Dict[str, threading.Lock] = {}
         self._file_locks_guard = threading.Lock()

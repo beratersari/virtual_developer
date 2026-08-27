@@ -163,9 +163,9 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
-        # Ops list: only issues the Virtual Developer can act on (trigger
-        # label and/or bot assignee). Full board rows stay in the raw
-        # snapshot for counts / debug; UI must not show noise.
+        # Ops list: trigger label and/or bot assignee (partial matches stay
+        # visible so operators see why will_process is false). Full board
+        # rows stay in the raw snapshot; UI must not show noise.
         matched_label = bool(row.get("matched_label"))
         matched_assignee = bool(row.get("matched_assignee"))
         if not (matched_label or matched_assignee or row.get("will_process")):
@@ -1155,7 +1155,7 @@ def _resolve_job_dict(
 
 
 def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
-    """Delete a session log / prompt under .jira-agent only. Returns path if deleted."""
+    """Delete a session log / prompt under YAVER_DATA_DIR only. Returns path if deleted."""
     if not path_str:
         return None
     try:

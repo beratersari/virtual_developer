@@ -36,7 +36,7 @@ OPENCODE_AGENT_ALIASES: Dict[str, str] = {
 
 
 def _default_sessions_dir() -> Path:
-    """Session logs root. Tests patch this so nothing lands in the real repo tree."""
+    """Session logs root (``YAVER_DATA_DIR/sessions``). Tests patch this."""
     from src.paths import agent_subdir, ensure_agent_data_dir
 
     ensure_agent_data_dir()

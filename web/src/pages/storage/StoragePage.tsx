@@ -5,72 +5,50 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 
-function deleteKey(area: string | undefined, name: string) {
-  return `${area || 'temp'}:${name}`
-}
-
 function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]): StoragePayload | null {
   if (!prev) return prev
-  const byKey = new Map(deletes.map((d) => [deleteKey(d.area, d.name), d]))
+  const byName = new Map(
+    deletes.filter((d) => (d.area || 'temp') === 'temp').map((d) => [d.name, d]),
+  )
 
-  const patchList = (list: StorageFolder[], defaultArea: 'temp' | 'sessions') => {
-    const next = list.map((folder) => {
-      const job = byKey.get(deleteKey(folder.area || defaultArea, folder.name))
-      if (!job) {
-        if (folder.delete?.status === 'deleting' || folder.delete?.status === 'done') {
-          return { ...folder, delete: undefined }
-        }
-        return folder
+  const next = prev.folders.map((folder) => {
+    const job = byName.get(folder.name)
+    if (!job) {
+      if (folder.delete?.status === 'deleting' || folder.delete?.status === 'done') {
+        return { ...folder, delete: undefined }
       }
-      return {
-        ...folder,
-        delete: { status: job.status, percent: job.percent, error: job.error },
-      }
-    })
-    for (const job of deletes) {
-      const area = (job.area || defaultArea) as 'temp' | 'sessions'
-      if (area !== defaultArea) continue
-      if (next.some((f) => f.name === job.name)) continue
-      next.push({
-        name: job.name,
-        path: job.path || job.name,
-        size_bytes: 0,
-        size_label: '',
-        in_use: false,
-        area,
-        delete: { status: job.status, percent: job.percent, error: job.error },
-      })
+      return folder
     }
-    return next
+    return {
+      ...folder,
+      delete: { status: job.status, percent: job.percent, error: job.error },
+    }
+  })
+  for (const job of byName.values()) {
+    if (next.some((f) => f.name === job.name)) continue
+    next.push({
+      name: job.name,
+      path: job.path || job.name,
+      size_bytes: 0,
+      size_label: '',
+      in_use: false,
+      area: 'temp',
+      delete: { status: job.status, percent: job.percent, error: job.error },
+    })
   }
-
-  const folders = patchList(prev.folders, 'temp')
-  const sessions = patchList(prev.sessions || [], 'sessions')
-  return {
-    ...prev,
-    folders,
-    folder_count: folders.length,
-    sessions,
-    session_count: sessions.length,
-  }
+  return { ...prev, folders: next, folder_count: next.length }
 }
 
-function markDeleting(
-  prev: StoragePayload | null,
-  name: string,
-  area: 'temp' | 'sessions',
-): StoragePayload | null {
+function markDeleting(prev: StoragePayload | null, name: string): StoragePayload | null {
   if (!prev) return prev
-  const bump = (list: StorageFolder[]) =>
-    list.map((folder) =>
+  return {
+    ...prev,
+    folders: prev.folders.map((folder) =>
       folder.name === name
         ? { ...folder, delete: { status: 'deleting', percent: folder.delete?.percent ?? 0 } }
         : folder,
-    )
-  if (area === 'sessions') {
-    return { ...prev, sessions: bump(prev.sessions || []) }
+    ),
   }
-  return { ...prev, folders: bump(prev.folders) }
 }
 
 function StorageList({
@@ -152,9 +130,7 @@ function StorageList({
 export function StoragePage() {
   const [data, setData] = useState<StoragePayload | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [pending, setPending] = useState<(StorageFolder & { area: 'temp' | 'sessions' }) | null>(
-    null,
-  )
+  const [pending, setPending] = useState<StorageFolder | null>(null)
 
   const reload = async (refresh = false) => {
     try {
@@ -170,9 +146,7 @@ export function StoragePage() {
     void reload()
   }, [])
 
-  const deleting = [...(data?.folders || []), ...(data?.sessions || [])].some(
-    (folder) => folder.delete?.status === 'deleting',
-  )
+  const deleting = (data?.folders || []).some((folder) => folder.delete?.status === 'deleting')
   const sizesPending = Boolean(data?.sizes_pending)
   useEffect(() => {
     if (!deleting && !sizesPending) return
@@ -203,12 +177,11 @@ export function StoragePage() {
   const onDelete = () => {
     if (!pending) return
     const name = pending.name
-    const area = pending.area
     setPending(null)
-    setData((prev) => markDeleting(prev, name, area))
+    setData((prev) => markDeleting(prev, name))
     void (async () => {
       try {
-        await deleteTempFolder(name, area)
+        await deleteTempFolder(name)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Delete failed')
         await reload()
@@ -224,7 +197,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Durable host storage: temp clones (TEMP_DIR_BASE) and session logs (YAVER_DATA_DIR/sessions). Same layout on Windows and Linux."
+        description="Temp clones under TEMP_DIR_BASE. Delete a folder to reclaim disk. Same path layout on Windows and Linux."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
@@ -260,17 +233,9 @@ export function StoragePage() {
               title={`${usedPct}% used`}
             />
           </div>
-          <div className="mt-2 space-y-1 text-xs text-text-secondary">
-            <div>
-              {data.folder_count} clone folder{data.folder_count === 1 ? '' : 's'}
-              {data.sizes_pending ? ' · measuring sizes…' : ` · ${data.folders_label}`}
-            </div>
-            <div className="font-mono text-[11px] text-text-muted">
-              data {data.data_dir || '—'}
-            </div>
-            <div className="font-mono text-[11px] text-text-muted">
-              sessions {data.sessions_dir || '—'}
-            </div>
+          <div className="mt-2 text-xs text-text-secondary">
+            {data.folder_count} clone folder{data.folder_count === 1 ? '' : 's'}
+            {data.sizes_pending ? ' · measuring sizes…' : ` · ${data.folders_label}`}
           </div>
         </div>
       )}
@@ -278,29 +243,14 @@ export function StoragePage() {
         title="Temp clones"
         empty="No clone folders under this path."
         items={data?.folders || []}
-        onDelete={(folder) => setPending({ ...folder, area: 'temp' })}
-      />
-      <StorageList
-        title="Session files"
-        empty="No session logs under the data dir."
-        items={data?.sessions || []}
-        extra={
-          data
-            ? `${data.session_count ?? 0} file${(data.session_count ?? 0) === 1 ? '' : 's'}${
-                data.sessions_label ? ` · ${data.sessions_label}` : ''
-              }`
-            : undefined
-        }
-        onDelete={(folder) => setPending({ ...folder, area: 'sessions' })}
+        onDelete={(folder) => setPending(folder)}
       />
       <ConfirmDialog
         open={Boolean(pending)}
-        title={pending?.area === 'sessions' ? 'Delete this session file?' : 'Force-delete this clone?'}
+        title="Force-delete this clone?"
         body={
           pending
-            ? pending.area === 'sessions'
-              ? `Permanently delete ${pending.path}\n\nThis cannot be undone.`
-              : `Permanently delete ${pending.path}\n\nThis cannot be undone.`
+            ? `Permanently delete ${pending.path}\n\nThis cannot be undone.`
             : ''
         }
         confirmLabel="Delete"

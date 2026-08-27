@@ -5424,7 +5424,7 @@ class JobProcessor:
 
         Always binds to the given issue_key (never reuses another issue's runner).
         Prefers a full git workspace when possible; falls back to an empty
-        sandbox under ``.temp/`` — never the daemon project_root.
+        sandbox under ``TEMP_DIR_BASE`` — never the daemon project_root.
         """
         existing = self._contexts.get(issue_key)
         if existing and existing.get("runner") is not None:

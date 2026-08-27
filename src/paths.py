@@ -1,11 +1,15 @@
 """Durable on-disk locations for clones and agent state.
 
-The install folder is replaced on every Windows zip reinstall. Session logs,
-job records, and OpenCode binds must live *outside* that folder — default
-``C:\\vd\\yaver`` (WSL: ``/mnt/c/vd/yaver``). Temp clones default to
-``C:\\vd\\t`` so they stay short (MAX_PATH) and also survive reinstall.
+Session logs, jobs, state, and OpenCode binds live *outside* the install
+folder (zip reinstall on Windows, or a git pull on Linux):
 
-Override with ``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
+* Windows: ``C:\\vd\\yaver`` and ``C:\\vd\\t`` (short TEMP for MAX_PATH)
+* WSL:     ``/mnt/c/vd/yaver`` and ``/mnt/c/vd/t``
+* Linux:   ``/vd/yaver`` and ``/vd/t`` (or ``~/vd/…`` if ``/vd`` is not writable)
+
+``C:\\vd\\…`` in ``.env`` is remapped on Linux. Override with
+``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
+Legacy ``.jira-agent/`` next to the repo is only a migrate/read fallback.
 """
 
 from __future__ import annotations

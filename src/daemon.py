@@ -366,7 +366,7 @@ class JiraAgentDaemon:
             issue_key,
             message,
             suggestion=(
-                "Check session logs under .jira-agent/sessions/, then "
+                "Check session logs under YAVER_DATA_DIR/sessions/, then "
                 "move the issue back to TO DO to re-queue."
             ),
         )
