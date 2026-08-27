@@ -121,21 +121,229 @@ def descendant_pids(pid: int) -> List[int]:
 
 
 def pid_cwd(pid: int) -> Optional[Path]:
-    """Working directory of ``pid``, or None. Single ``/proc`` read."""
-    if pid <= 0 or os.name == "nt":
+    """Working directory of ``pid``, or None."""
+    if pid <= 0:
         return None
+    if os.name == "nt":
+        return _pid_cwd_windows(int(pid))
     try:
         return Path(os.readlink(f"/proc/{int(pid)}/cwd"))
     except OSError:
         return None
 
 
+def pid_cmdline(pid: int) -> str:
+    """Process command line. Empty on failure."""
+    if pid <= 0:
+        return ""
+    if os.name == "nt":
+        return ""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+
+
+def pid_exe(pid: int) -> str:
+    """Full executable path, or empty."""
+    if pid <= 0:
+        return ""
+    if os.name == "nt":
+        return _pid_exe_windows(int(pid))
+    try:
+        return os.readlink(f"/proc/{int(pid)}/exe")
+    except OSError:
+        return ""
+
+
 def _path_is_under(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root)
-        return True
-    except (OSError, ValueError):
+        resolved = path.resolve()
+        base = root.resolve()
+    except OSError:
         return False
+    try:
+        resolved.relative_to(base)
+        return True
+    except ValueError:
+        if os.name != "nt":
+            return False
+        try:
+            Path(str(resolved).lower()).relative_to(Path(str(base).lower()))
+            return True
+        except ValueError:
+            return False
+
+
+_GENERIC_WORKSPACE_ROOTS = frozenset(
+    {
+        Path("/"),
+        Path("/tmp"),
+        Path("/var/tmp"),
+        Path("/home"),
+        Path("/Users"),
+        Path("/mnt"),
+        Path("/mnt/c"),
+    }
+)
+
+
+def _cmdline_mentions_workspace(cmd: str, root: Path) -> bool:
+    """True when ``cmd`` names this clone (not a generic ``/tmp``)."""
+    if not cmd:
+        return False
+    try:
+        resolved = root.resolve()
+    except OSError:
+        resolved = root
+    if resolved in _GENERIC_WORKSPACE_ROOTS:
+        return False
+    needle = str(resolved)
+    if len(needle) < 12:
+        return False
+    lowered = cmd.lower()
+    if needle.lower() in lowered:
+        return True
+    alt = needle.replace("\\", "/")
+    return bool(alt) and alt.lower() in lowered
+
+
+def _pid_cwd_windows(pid: int) -> Optional[Path]:
+    """Read another process's cwd via PEB (64-bit and 32-bit same-arch)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+
+    process_query = 0x0400
+    process_vm_read = 0x0010
+    process_query_limited = 0x1000
+
+    class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("Reserved1", ctypes.c_void_p),
+            ("PebBaseAddress", ctypes.c_void_p),
+            ("Reserved2", ctypes.c_void_p * 2),
+            ("UniqueProcessId", ctypes.c_void_p),
+            ("Reserved3", ctypes.c_void_p),
+        ]
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", ctypes.c_void_p),
+        ]
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ntdll = ctypes.WinDLL("ntdll")
+    except Exception:
+        return None
+
+    handle = kernel32.OpenProcess(
+        process_query | process_vm_read, False, int(pid)
+    )
+    if not handle:
+        handle = kernel32.OpenProcess(
+            process_query_limited | process_vm_read, False, int(pid)
+        )
+    if not handle:
+        return None
+    try:
+        pbi = PROCESS_BASIC_INFORMATION()
+        status = ntdll.NtQueryInformationProcess(
+            handle, 0, ctypes.byref(pbi), ctypes.sizeof(pbi), None
+        )
+        if status != 0 or not pbi.PebBaseAddress:
+            return None
+        ptr_size = ctypes.sizeof(ctypes.c_void_p)
+        peb = int(pbi.PebBaseAddress)
+        params_off = 0x20 if ptr_size == 8 else 0x10
+        params_addr = ctypes.c_void_p()
+        nread = ctypes.c_size_t()
+        if not kernel32.ReadProcessMemory(
+            handle,
+            ctypes.c_void_p(peb + params_off),
+            ctypes.byref(params_addr),
+            ptr_size,
+            ctypes.byref(nread),
+        ):
+            return None
+        if not params_addr.value:
+            return None
+        curdir_off = 0x38 if ptr_size == 8 else 0x24
+        us = UNICODE_STRING()
+        if not kernel32.ReadProcessMemory(
+            handle,
+            ctypes.c_void_p(int(params_addr.value) + curdir_off),
+            ctypes.byref(us),
+            ctypes.sizeof(us),
+            ctypes.byref(nread),
+        ):
+            return None
+        if not us.Buffer or us.Length == 0:
+            return None
+        nchars = max(1, int(us.Length) // 2)
+        buf = ctypes.create_unicode_buffer(nchars + 1)
+        if not kernel32.ReadProcessMemory(
+            handle,
+            ctypes.c_void_p(int(us.Buffer)),
+            buf,
+            int(us.Length),
+            ctypes.byref(nread),
+        ):
+            return None
+        text = (buf.value or "").rstrip("\\/\0 ")
+        return Path(text) if text else None
+    except Exception:
+        return None
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
+
+def _pid_exe_windows(pid: int) -> str:
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return ""
+    process_query_limited = 0x1000
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return ""
+    handle = kernel32.OpenProcess(process_query_limited, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(32768)
+        q = getattr(kernel32, "QueryFullProcessImageNameW", None)
+        if q is None:
+            return ""
+        q.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        q.restype = wintypes.BOOL
+        if not q(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return (buf.value or "").strip()
+    except Exception:
+        return ""
+    finally:
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
 
 
 def opencode_serve_pids() -> List[int]:
@@ -189,19 +397,36 @@ def kill_workspace_processes(
 
     Walks descendants of this process (git/codex we spawned) and of
     ``opencode serve`` (agent tools). Does **not** kill the daemon or serve.
+    Tracked ``extra_root_pids`` are killed even when ``workspace`` is unknown.
     """
+    extra = extra_root_pids or ()
     if workspace is None:
-        return 0
+        return _kill_tracked_pids(extra, force=force)
     try:
         root = Path(workspace).resolve()
     except OSError:
-        return 0
+        return _kill_tracked_pids(extra, force=force)
     if not str(root):
-        return 0
+        return _kill_tracked_pids(extra, force=force)
 
     if os.name == "nt":
-        return _kill_workspace_windows(root, extra_root_pids or (), force=force)
-    return _kill_workspace_unix(root, extra_root_pids or (), force=force)
+        return _kill_workspace_windows(root, extra, force=force)
+    return _kill_workspace_unix(root, extra, force=force)
+
+
+def _kill_tracked_pids(extra_root_pids: Iterable[int], *, force: bool) -> int:
+    """Kill known job PIDs (and their children) with no workspace path yet."""
+    protected = _protect_pids()
+    killed = 0
+    seen: Set[int] = set()
+    for ip in _iter_int_pids(extra_root_pids):
+        for pid in (ip, *descendant_pids(ip)):
+            if pid <= 0 or pid in seen or pid in protected:
+                continue
+            seen.add(pid)
+            kill_pid(pid, force=force)
+            killed += 1
+    return killed
 
 
 def _protect_pids() -> Set[int]:
@@ -224,6 +449,44 @@ def _iter_int_pids(raw: Iterable[int]) -> List[int]:
     return out
 
 
+def _pid_belongs_to_workspace(pid: int, root: Path) -> bool:
+    cwd = pid_cwd(pid)
+    if cwd is not None and _path_is_under(cwd, root):
+        return True
+    if _cmdline_mentions_workspace(pid_cmdline(pid), root):
+        return True
+    return _cmdline_mentions_workspace(pid_exe(pid), root)
+
+
+def _pgrep_workspace_pids(root: Path) -> List[int]:
+    """PIDs whose argv names this clone. One ``pgrep`` — not a /proc walk."""
+    try:
+        needle = str(root.resolve())
+    except OSError:
+        needle = str(root)
+    if len(needle) < 12:
+        return []
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", needle],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return []
+    found: List[int] = []
+    for tok in (r.stdout or "").split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid > 0:
+            found.append(pid)
+    return found
+
+
 def _kill_workspace_unix(
     root: Path,
     extra_root_pids: Iterable[int],
@@ -231,22 +494,90 @@ def _kill_workspace_unix(
     force: bool,
 ) -> int:
     protected = _protect_pids()
-    walk_from = {os.getpid(), *protected, *_iter_int_pids(extra_root_pids)}
+    extra = _iter_int_pids(extra_root_pids)
     targets: List[int] = []
     seen: Set[int] = set()
+
+    def _take(pid: int) -> None:
+        if pid <= 0 or pid in seen or pid in protected:
+            return
+        seen.add(pid)
+        targets.append(pid)
+
+    # Tracked git/Codex PIDs die even when cwd is the parent of the clone.
+    for ip in extra:
+        _take(ip)
+        for child in descendant_pids(ip):
+            _take(child)
+
+    walk_from = {os.getpid(), *protected, *extra}
     for rp in walk_from:
         for child in descendant_pids(rp):
             if child in seen or child in protected:
                 continue
-            seen.add(child)
-            cwd = pid_cwd(child)
-            if cwd is not None and _path_is_under(cwd, root):
-                targets.append(child)
+            if _pid_belongs_to_workspace(child, root):
+                _take(child)
+
+    for pid in _pgrep_workspace_pids(root):
+        if pid in protected:
+            continue
+        cmd = pid_cmdline(pid).lower()
+        if "pgrep" in cmd:
+            continue
+        if _pid_belongs_to_workspace(pid, root) or _cmdline_mentions_workspace(
+            cmd, root
+        ):
+            _take(pid)
+
     killed = 0
     for pid in reversed(targets):
         kill_pid(pid, force=force)
         killed += 1
     return killed
+
+
+def _windows_row_is_serve(row: dict) -> bool:
+    name = (row.get("name") or "").lower()
+    cmd = (row.get("cmd") or "").lower()
+    if "serve" not in cmd:
+        return False
+    return "opencode" in name or "opencode" in cmd
+
+
+def _windows_children_by_ppid(rows: List[dict]) -> dict:
+    by_ppid: dict = {}
+    for row in rows:
+        ppid = row.get("ppid")
+        pid = row.get("pid")
+        if not isinstance(ppid, int) or not isinstance(pid, int):
+            continue
+        by_ppid.setdefault(ppid, []).append(pid)
+    return by_ppid
+
+
+def _windows_descendants(root_pids: Iterable[int], rows: List[dict]) -> List[int]:
+    by_ppid = _windows_children_by_ppid(rows)
+    out: List[int] = []
+    seen: Set[int] = set()
+    stack = [int(p) for p in root_pids if int(p) > 0]
+    while stack:
+        cur = stack.pop()
+        for child in by_ppid.get(cur, []):
+            if child in seen or child <= 0:
+                continue
+            seen.add(child)
+            out.append(child)
+            stack.append(child)
+    return out
+
+
+def _windows_text_names_workspace(text: str, needle: str, alt_needle: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    if needle and needle in lowered:
+        return True
+    return bool(alt_needle) and alt_needle in lowered
 
 
 def _kill_workspace_windows(
@@ -255,43 +586,64 @@ def _kill_workspace_windows(
     *,
     force: bool,
 ) -> int:
-    """Kill tracked trees; also any process whose command line names ``root``.
+    """Kill tracked trees and any job child (cmdline, exe path, or cwd).
 
-    WMIC is removed on current Windows; prefer CIM. Also walk children of
-    extra/serve PIDs so a ``git checkout`` that only has the clone as cwd
-    (path not on argv) is still found via lock-holder reclaim afterwards.
+    Same rules as Linux: extra/Codex/git trees, then anything whose
+    command line / executable / working directory names this clone.
+    Never kill the daemon or shared ``opencode serve``.
     """
     protected = _protect_pids()
-    killed = 0
     extra = _iter_int_pids(extra_root_pids)
+    killed_ids: Set[int] = set()
+
+    def _kill_one(pid: int) -> None:
+        if pid <= 0 or pid in protected or pid in killed_ids:
+            return
+        kill_pid(pid, force=force)
+        killed_ids.add(pid)
+
+    # taskkill /T on tracked git/Codex trees (cwd may be the parent folder).
     for ip in extra:
-        if ip in protected:
-            continue
-        kill_pid(ip, force=force)
-        killed += 1
+        _kill_one(ip)
+
     needle = str(root).replace("/", "\\").lower()
-    if not needle:
-        return killed
     alt_needle = str(root).replace("\\", "/").lower()
+    if not needle:
+        return len(killed_ids)
+
     rows = _windows_process_rows()
+    serve_pids = [int(r["pid"]) for r in rows if _windows_row_is_serve(r) and r.get("pid")]
+    for sp in serve_pids:
+        protected.add(sp)
+
     for row in rows:
         pid = row.get("pid")
-        if pid is None or pid in protected:
+        if not isinstance(pid, int) or pid in protected:
             continue
-        cmd = (row.get("cmd") or "").lower()
-        name = (row.get("name") or "").lower()
-        if "opencode" in name and "serve" in cmd:
+        if _windows_row_is_serve(row):
             continue
-        if "opencode" in cmd and "serve" in cmd:
+        cmd = row.get("cmd") or ""
+        exe = row.get("exe") or ""
+        if _windows_text_names_workspace(cmd, needle, alt_needle) or (
+            _windows_text_names_workspace(exe, needle, alt_needle)
+        ):
+            _kill_one(pid)
+
+    # OpenCode tools usually inherit the clone as cwd and omit it from argv
+    # (`git status`, `npm test`). Walk serve/daemon/tracked trees and match cwd.
+    walk_from = {os.getpid(), *serve_pids, *extra, *protected}
+    for child in _windows_descendants(walk_from, rows):
+        if child in protected or child in killed_ids:
             continue
-        # git checkout typically has the clone as cwd, not on argv. Those
-        # leftover processes are killed via lock-file holders in
-        # ``reclaim_workspace``. Here we only match an explicit path.
-        if needle not in cmd and alt_needle not in cmd:
+        cwd = pid_cwd(child)
+        if cwd is not None and _path_is_under(cwd, root):
+            _kill_one(child)
             continue
-        kill_pid(pid, force=force)
-        killed += 1
-    return killed
+        exe = pid_exe(child)
+        if _windows_text_names_workspace(exe, needle, alt_needle):
+            _kill_one(child)
+
+    return len(killed_ids)
 
 
 def _windows_process_rows() -> List[dict]:
@@ -305,7 +657,7 @@ def _windows_process_rows() -> List[dict]:
 def _windows_process_rows_cim() -> List[dict]:
     ps = (
         "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath | "
         "ConvertTo-Csv -NoTypeInformation"
     )
     try:
@@ -334,7 +686,7 @@ def _windows_process_rows_wmic() -> List[dict]:
                 "wmic",
                 "process",
                 "get",
-                "ProcessId,ParentProcessId,Name,CommandLine",
+                "ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath",
                 "/FORMAT:CSV",
             ],
             capture_output=True,
@@ -358,6 +710,7 @@ def _parse_windows_process_csv(raw: str) -> List[dict]:
         ppid_k = fieldmap.get("parentprocessid") or fieldmap.get("parent process id")
         name_k = fieldmap.get("name")
         cmd_k = fieldmap.get("commandline") or fieldmap.get("command line")
+        exe_k = fieldmap.get("executablepath") or fieldmap.get("executable path")
         if not pid_k:
             return _parse_windows_process_csv_loose(raw)
         for row in reader:
@@ -379,6 +732,7 @@ def _parse_windows_process_csv(raw: str) -> List[dict]:
                     "ppid": ppid,
                     "name": str(row.get(name_k) or "") if name_k else "",
                     "cmd": str(row.get(cmd_k) or "") if cmd_k else "",
+                    "exe": str(row.get(exe_k) or "") if exe_k else "",
                 }
             )
     except Exception:
@@ -398,7 +752,7 @@ def _parse_windows_process_csv_loose(raw: str) -> List[dict]:
                 break
         if pid is None or pid <= 0:
             continue
-        out.append({"pid": pid, "ppid": 0, "name": "", "cmd": line})
+        out.append({"pid": pid, "ppid": 0, "name": "", "cmd": line, "exe": ""})
     return out
 
 
@@ -640,13 +994,13 @@ def reclaim_workspace(
 
     Safe to call on cancel and again before the next checkout on a reused clone.
     """
+    extra = list(extra_root_pids or ())
     if workspace is None:
-        return 0
+        return kill_workspace_processes(None, extra_root_pids=extra, force=force)
     try:
         root = Path(workspace).resolve()
     except OSError:
-        return 0
-    extra = list(extra_root_pids or ())
+        return kill_workspace_processes(None, extra_root_pids=extra, force=force)
     killed = kill_workspace_processes(root, extra_root_pids=extra, force=force)
     locks = list_git_lock_files(root)
     for lock in locks:

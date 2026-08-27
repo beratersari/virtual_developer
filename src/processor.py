@@ -2022,9 +2022,11 @@ class JobProcessor:
                 "status": state.status.value,
             }
 
-        # Kill first — never block behind process_event's long-held issue lock
+        # Kill first — never block behind process_event's long-held issue lock.
+        # Stage does not matter: clone, checkout, serve/Codex, push, MR.
         killed = False
         try:
+            await self._abort_serve_sessions_for_issue(issue_key)
             runner = self._runner_for(issue_key)
             if runner and state.current_task_id:
                 killed = bool(runner.cancel_task(state.current_task_id))
@@ -2176,6 +2178,68 @@ class JobProcessor:
         self._kill_git_for_issue(issue_key)
         self._kill_workspace_for_issue(issue_key, extra_root_pids=extra_pids)
 
+    async def _abort_serve_sessions_for_issue(self, issue_key: str) -> None:
+        """POST /session/{id}/abort for every known ses_* on this issue.
+
+        OpenCode tools keep running until the session is aborted (or we
+        reclaim the clone). Session id may live on the runner handle, state,
+        or a ``.session_id`` sidecar — do not require current_task_id.
+        """
+        sids: set[str] = set()
+        client = None
+        state = self.state_manager.get_state(issue_key)
+        if state:
+            for raw in (
+                state.current_opencode_session_id,
+                (state.metadata or {}).get("last_opencode_session_id"),
+            ):
+                sid = str(raw or "").strip()
+                if sid.startswith("ses_"):
+                    sids.add(sid)
+            for raw in (state.metadata or {}).get("opencode_session_ids") or []:
+                sid = str(raw or "").strip()
+                if sid.startswith("ses_"):
+                    sids.add(sid)
+        runner = self._runner_for(issue_key)
+        tasks = getattr(runner, "_running_tasks", None) or {}
+        for handle in list(tasks.values()):
+            if not isinstance(handle, dict):
+                continue
+            sid = str(handle.get("session_id") or "").strip()
+            if sid.startswith("ses_"):
+                sids.add(sid)
+            if handle.get("client") is not None:
+                client = handle.get("client")
+        if not sids:
+            return
+        owned = False
+        if client is None:
+            try:
+                from src.opencode_serve import OpenCodeServeClient
+
+                base = (
+                    getattr(settings, "opencode_serve_url", None)
+                    or "http://127.0.0.1:4096"
+                )
+                client = OpenCodeServeClient(base, timeout_seconds=15.0)
+                owned = True
+            except Exception as e:
+                logger.debug(f"{issue_key}: serve abort client skipped: {e}")
+                return
+        try:
+            for sid in sids:
+                try:
+                    await client.abort(sid)
+                    logger.info(f"{issue_key}: aborted OpenCode session {sid}")
+                except Exception as e:
+                    logger.debug(f"{issue_key}: abort {sid} failed: {e}")
+        finally:
+            if owned:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
     def _tracked_pids_for_issue(self, issue_key: str, runner: Any = None) -> list:
         """PIDs we already know about (git Popen, Codex proc)."""
         pids: list = []
@@ -2198,6 +2262,27 @@ class JobProcessor:
         return pids
 
     def _workspace_path_for_issue(self, issue_key: str) -> Optional[Path]:
+        paths = self._workspace_paths_for_issue(issue_key)
+        return paths[0] if paths else None
+
+    def _workspace_paths_for_issue(self, issue_key: str) -> List[Path]:
+        """Every clone/sandbox path we know for this issue (any stage)."""
+        found: List[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any) -> None:
+            if raw is None:
+                return
+            try:
+                path = Path(str(raw)).resolve()
+            except OSError:
+                path = Path(str(raw))
+            key = str(path)
+            if not key or key in seen:
+                return
+            seen.add(key)
+            found.append(path)
+
         git = self._git_for(issue_key) or GitManager.live_for(issue_key)
         if git is not None:
             getter = getattr(git, "get_working_directory", None)
@@ -2207,36 +2292,57 @@ class JobProcessor:
                     wd = getter()
                 except Exception:
                     wd = None
-            wd = wd or getattr(git, "temp_dir", None)
-            if wd:
-                return Path(str(wd))
+            _add(wd or getattr(git, "temp_dir", None))
         runner = self._runner_for(issue_key)
-        wd = getattr(runner, "working_directory", None) if runner else None
-        if wd:
-            return Path(str(wd))
+        if runner is not None:
+            _add(getattr(runner, "working_directory", None))
         job_id = self._active_jobs.get(issue_key)
-        if job_id:
+        job_ids = [job_id] if job_id else []
+        state = self.state_manager.get_state(issue_key)
+        meta = (state.metadata or {}) if state else {}
+        for extra_id in meta.get("job_ids") or []:
+            if extra_id and extra_id not in job_ids:
+                job_ids.append(extra_id)
+        if meta.get("current_job_id") and meta["current_job_id"] not in job_ids:
+            job_ids.append(meta["current_job_id"])
+        for jid in job_ids:
+            if not jid:
+                continue
             try:
-                job = self.job_store.get_job(job_id)
+                job = self.job_store.get_job(jid)
             except Exception:
                 job = None
-            if isinstance(job, dict) and job.get("working_directory"):
-                return Path(str(job["working_directory"]))
-        return None
+            if isinstance(job, dict):
+                _add(job.get("working_directory"))
+        try:
+            from src.state.session_bind_store import session_bind_store
+
+            rec = session_bind_store.find_by_issue_key(issue_key)
+        except Exception:
+            rec = None
+        if isinstance(rec, dict):
+            _add(rec.get("working_directory"))
+        return found
 
     def _kill_workspace_for_issue(
         self, issue_key: str, *, extra_root_pids: Optional[list] = None
     ) -> int:
         """Force-kill leftover bash/npm/git still running in the job clone."""
-        wd = self._workspace_path_for_issue(issue_key)
-        if wd is None:
+        paths = self._workspace_paths_for_issue(issue_key)
+        extra = list(extra_root_pids or [])
+        if not paths and not extra:
             return 0
         try:
             from src.process_kill import reclaim_workspace
 
-            n = reclaim_workspace(
-                wd, extra_root_pids=extra_root_pids or [], force=True
-            )
+            n = 0
+            if not paths:
+                # Still have tracked PIDs (clone dest not recorded yet).
+                n += int(reclaim_workspace(None, extra_root_pids=extra, force=True) or 0)
+            for wd in paths or []:
+                n += int(
+                    reclaim_workspace(wd, extra_root_pids=extra, force=True) or 0
+                )
             if n:
                 logger.info(
                     f"{issue_key}: force-killed {n} leftover workspace process(es)"
