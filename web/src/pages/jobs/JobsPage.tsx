@@ -19,8 +19,7 @@ import { JobsTable } from './JobsTable'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
-  { id: 'live', label: 'Live' },
-  { id: 'active', label: 'Active' },
+  { id: 'active', label: 'In flight' },
   { id: 'queue', label: 'Queue' },
   { id: 'error', label: 'Error' },
   { id: 'completed', label: 'Completed' },
@@ -218,7 +217,7 @@ export function JobsPage() {
         }
       />
 
-      {liveJobs.length > 0 && statusFilter !== 'live' && statusFilter !== 'queue' && (
+      {liveJobs.length > 0 && statusFilter !== 'active' && statusFilter !== 'queue' && (
         <div className="vd-panel flex flex-wrap items-center gap-3 px-4 py-3">
           <LiveDot label={`${liveJobs.length} running`} />
           {liveJobs.slice(0, 4).map((j) => (
@@ -288,7 +287,13 @@ export function JobsPage() {
         )}
       </div>
 
-      {statusFilter !== 'all' && statusFilter !== 'queue' && (
+      {statusFilter === 'active' && (
+        <p className="text-xs text-text-muted">
+          Running in this daemon now, plus tickets still planning/executing after a
+          restart. Queue is waiting messages, not these runs.
+        </p>
+      )}
+      {statusFilter !== 'all' && statusFilter !== 'queue' && statusFilter !== 'active' && (
         <p className="text-xs text-text-muted">
           Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
           Issue search hits the server.
@@ -296,7 +301,8 @@ export function JobsPage() {
       )}
       {showQueue && (
         <p className="text-xs text-text-muted">
-          Only messages waiting for a free issue/workspace slot. Live runs stay under Live / All.
+          Only messages waiting for a free issue/workspace slot. Running work is under
+          In flight / All.
         </p>
       )}
 

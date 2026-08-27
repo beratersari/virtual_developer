@@ -53,7 +53,11 @@ export function jobMatchesFilter(
     case 'all':
       return true
     case 'live':
-      return live
+      // Same set as Active / In flight. Kept so old links do not go empty.
+      return (
+        live ||
+        ['pending', 'planning', 'executing', 'running'].includes(s)
+      )
     case 'active':
       return (
         live ||

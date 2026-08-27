@@ -1,7 +1,7 @@
 /**
  * Run: npx tsx src/lib/status.test.ts
  */
-import { jobIsCancellable, jobIsDeletable } from './status'
+import { jobIsCancellable, jobIsDeletable, jobMatchesFilter } from './status'
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg)
@@ -19,5 +19,13 @@ assert(jobIsCancellable('completed', true) === false, 'completed not cancellable
 assert(jobIsDeletable('completed', false) === true, 'completed deletable')
 assert(jobIsDeletable('executing', false) === false, 'executing not deletable')
 assert(jobIsDeletable('completed', true) === false, 'live not deletable')
+
+assert(jobMatchesFilter('executing', true, 'active') === true, 'live executing is in flight')
+assert(jobMatchesFilter('executing', false, 'active') === true, 'stuck executing is in flight')
+assert(jobMatchesFilter('completed', false, 'active') === false, 'completed not in flight')
+assert(
+  jobMatchesFilter('executing', false, 'live') === jobMatchesFilter('executing', false, 'active'),
+  'live filter matches active (one In flight tab)',
+)
 
 console.log('status.test.ts: ok')
