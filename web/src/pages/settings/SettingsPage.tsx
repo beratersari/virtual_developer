@@ -84,6 +84,7 @@ export function SettingsPage() {
   const [jiraTesting, setJiraTesting] = useState(false)
   const [gitlabTestingIdx, setGitlabTestingIdx] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
 
   const mark = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDirty(true)
@@ -100,7 +101,7 @@ export function SettingsPage() {
   }, [])
 
   const onSave = async () => {
-    if (!draft) return
+    if (!draft || modelsLoading) return
     setSaving(true)
     setError(null)
     try {
@@ -188,7 +189,10 @@ export function SettingsPage() {
           <button
             key={id}
             type="button"
-            onClick={() => setSection(id)}
+            onClick={() => {
+              if (id === 'model' && section !== 'model') setModelsLoading(true)
+              setSection(id)
+            }}
             className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-transform duration-150 active:scale-95 ${
               section === id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
             }`}
@@ -555,7 +559,10 @@ export function SettingsPage() {
         <span>Worker</span>
         <select
           value={draft.agent_backend}
-          onChange={(e) => mark('agent_backend', e.target.value)}
+          onChange={(e) => {
+            setModelsLoading(true)
+            mark('agent_backend', e.target.value)
+          }}
         >
           <option value="opencode">OpenCode</option>
           <option value="codex">Codex</option>
@@ -577,6 +584,7 @@ export function SettingsPage() {
         backend={draft.agent_backend}
         allowEmpty={false}
         showRefresh
+        onLoadingChange={setModelsLoading}
       />
       </div>
       )}
@@ -773,12 +781,16 @@ export function SettingsPage() {
         <button
           type="button"
           className="go"
-          disabled={saving || (!dirty && !saved)}
+          disabled={saving || modelsLoading || (!dirty && !saved)}
           onClick={() => void onSave()}
         >
           {saving ? (
             <>
               <Spinner /> Saving…
+            </>
+          ) : modelsLoading ? (
+            <>
+              <Spinner /> Loading models…
             </>
           ) : saved ? (
             'Saved'

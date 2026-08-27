@@ -520,6 +520,13 @@ body {
   color: var(--text);
   padding: 0.55rem 0.8rem;
 }
+.field input:disabled,
+.field select:disabled,
+.field textarea:disabled {
+  color: var(--text-muted);
+  opacity: 0.65;
+  cursor: not-allowed;
+}
 .field textarea { min-height: 5rem; }
 .go {
   display: inline-flex;
