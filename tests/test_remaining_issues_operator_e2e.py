@@ -55,6 +55,7 @@ class JiraWorld:
             "description": description,
             "labels": list(labels or []),
             "status": status,
+            "assignee": {"displayName": "DevBot"},
             "comments": [],
         }
         self.issues[issue_key] = rec
@@ -79,7 +80,7 @@ class JiraWorld:
                     },
                 },
                 "issuetype": {"name": "Task", "id": "10003", "subtask": False},
-                "assignee": None,
+                "assignee": rec.get("assignee") or {"displayName": "DevBot"},
             },
         }
 
@@ -257,8 +258,8 @@ def jira():
 def trigger_settings():
     with patch("src.jira.poller.settings") as s:
         s.trigger_labels_list = ["bot", "ai-assist"]
-        s.trigger_assignee_names_list = []
-        s.trigger_on_assignment = False
+        s.trigger_assignee_names_list = ["devbot"]
+        s.trigger_on_assignment = True
         yield s
 
 

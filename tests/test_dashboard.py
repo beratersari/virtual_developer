@@ -982,7 +982,7 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
         "fields": {
             "summary": "fix",
             "labels": ["ai-assist"],
-            "assignee": {"displayName": "Alice"},
+            "assignee": {"displayName": "DevBot"},
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
         },
     }
@@ -995,11 +995,12 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
     p.state_manager = state_manager
     with patch("src.jira.poller.settings") as s:
         s.trigger_labels_list = ["ai-assist", "bot"]
-        s.trigger_assignee_names_list = []
-        s.trigger_on_assignment = False
+        s.trigger_assignee_names_list = ["devbot"]
+        s.trigger_on_assignment = True
         out = p.poll_board()
     assert len(out) == 1
     snap = store.snapshot()
     assert snap["issues"]
     assert snap["issues"][0]["matched_label"] is True
+    assert snap["issues"][0]["matched_assignee"] is True
     assert snap["issues"][0]["will_process"] is True

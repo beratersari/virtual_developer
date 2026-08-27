@@ -21,7 +21,7 @@ export function PollPage() {
         description={
           poll.source === 'webhook'
             ? 'Jira intake is in webhook mode. The board poller is idle; jobs start from assignment-to-bot or a mention.'
-            : 'What the poller saw last cycle. Only tickets with a trigger label or bot assignee are listed.'
+            : 'What the poller saw last cycle. Work starts only when a trigger label and bot assignee both match.'
         }
       />
 

@@ -128,6 +128,7 @@ def test_m3_pending_on_todo_is_not_requeued(state_manager):
                 "status": {"name": "To Do"},
                 "labels": ["bot"],
                 "summary": "pending",
+                "assignee": {"displayName": "DevBot"},
             },
         },
         {
@@ -136,12 +137,13 @@ def test_m3_pending_on_todo_is_not_requeued(state_manager):
                 "status": {"name": "To Do"},
                 "labels": ["bot"],
                 "summary": "executing",
+                "assignee": {"displayName": "DevBot"},
             },
         },
     ]
     with patch("src.jira.poller.settings") as s:
         s.trigger_labels_list = ["bot"]
-        s.trigger_assignee_names_list = []
+        s.trigger_assignee_names_list = ["devbot"]
         result = poller.poll_board()
     keys = {i["key"] for i in result}
     assert "PEND-1" not in keys
