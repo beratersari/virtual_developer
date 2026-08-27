@@ -362,6 +362,41 @@ def test_format_agent_answer_strips_opencode_serve_logs():
     ) == "Fixed the login bug.\n\nSee `src/auth.cpp`."
 
 
+def test_format_agent_answer_strips_inline_orchestrator_tags():
+    """[serve]/[opencode] mid-sentence must not leak into Jira/GitLab comments."""
+    from src.backends.codex import strip_orchestrator_comment_lines
+
+    tail = format_agent_answer_for_comment(
+        "Login uses JWT in `src/auth.cpp`. "
+        "[serve] assessment complete=True premature=False reasons=[]"
+    )
+    assert tail == "Login uses JWT in `src/auth.cpp`."
+    assert "[serve]" not in tail
+    assert "assessment" not in tail
+
+    mid = format_agent_answer_for_comment(
+        "Updated a=4, b=2 [serve] turn=initial done finish='stop' and saved."
+    )
+    assert "Updated a=4, b=2" in mid
+    assert "and saved." in mid
+    assert "[serve]" not in mid
+    assert "turn=initial" not in mid
+    assert "finish=" not in mid
+
+    prose = format_agent_answer_for_comment("See [serve] the handler next.")
+    assert prose == "See the handler next."
+
+    oc = format_agent_answer_for_comment("Done. [opencode] cwd=/tmp/job")
+    assert oc == "Done."
+    assert "[opencode]" not in oc
+
+    both = strip_orchestrator_comment_lines(
+        "Fixed it. [serve] session resumed: ses_abc [opencode] cwd=/tmp"
+    )
+    assert both == "Fixed it."
+    assert "ses_abc" not in both
+
+
 def test_extract_codex_answer_only_last_completed_assistant():
     blob = "\n".join(
         [

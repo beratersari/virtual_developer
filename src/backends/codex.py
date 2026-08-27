@@ -677,23 +677,72 @@ def extract_codex_answer(blob: str, *, limit: int = 8000) -> str:
     return last[:limit].rstrip() + "\n\n…(truncated)"
 
 
+_ORCHESTRATOR_TAG = re.compile(r"\[(?:serve|opencode)\]", re.IGNORECASE)
 _ORCHESTRATOR_LOG_LINE = re.compile(
     r"^\s*\[(?:serve|opencode)\](?:\s|$)",
     re.IGNORECASE,
 )
 
+# Tag plus following control-loop tokens (key=value, session ids, serve verbs).
+# Stops before ordinary prose so "See [serve] the handler" keeps the sentence.
+_ORCHESTRATOR_SPAN = re.compile(
+    r"""
+    \[ (?:serve|opencode) \]
+    (?:
+        (?: [ \t]+ | [ \t]* [—–-]+ [ \t]* )
+        (?:
+            \w+=(?:\{[^{}]*\}|\S+)
+            | \{ [^{}]* \}
+            | session (?: [ \t]+ (?:created|resumed) )? :?
+            | ses_[A-Za-z0-9_-]+
+            | assessment
+            | complete(?:=\S+)?
+            | premature(?:=\S+)?
+            | reasons(?:=\S+)?
+            | sending
+            | message(?:…|\.\.\.)?
+            | done
+            | poll
+            | idle
+            | waiting
+            | auto-resume
+            | assistant
+            | asked
+            | clarifying
+            | question [.]?
+            | leaving
+            | compact
+            | HTTP
+            | timed
+            | out
+            | after
+            | \d+(?:\.\d+)?s
+        )
+    )*
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 def strip_orchestrator_comment_lines(text: str) -> str:
-    """Drop OpenCode serve / opencode control-loop lines from a posted answer.
+    """Drop OpenCode serve / opencode control-loop text from a posted answer.
 
     Session logs keep the full stream. GitLab/Jira comments should only show
-    the assistant text (and any GLM/OpenCode model prose).
+    the assistant text (and any GLM/OpenCode model prose). Whole log lines
+    and mid-sentence ``[serve]`` / ``[opencode]`` tags are removed.
     """
     kept: List[str] = []
     for line in (text or "").splitlines():
         if _ORCHESTRATOR_LOG_LINE.match(line):
             continue
-        kept.append(line)
+        if not _ORCHESTRATOR_TAG.search(line):
+            kept.append(line)
+            continue
+        cleaned = _ORCHESTRATOR_SPAN.sub("", line)
+        cleaned = _ORCHESTRATOR_TAG.sub("", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+        if cleaned.strip():
+            kept.append(cleaned)
     while kept and not kept[0].strip():
         kept.pop(0)
     while kept and not kept[-1].strip():
