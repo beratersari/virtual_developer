@@ -251,6 +251,90 @@ def test_gitlab_client_posts_note(monkeypatch):
     assert captured["json"]["in_reply_to_discussion_id"] == "d1"
 
 
+def test_is_gitlab_triggered_uses_source_metadata():
+    from src.processor import JobProcessor
+    from src.state.models import JiraAgentState, TaskStatus
+
+    proc = object.__new__(JobProcessor)
+    sm = MagicMock()
+    proc.state_manager = sm
+    jira_state = JiraAgentState(
+        issue_key="KAN-12",
+        issue_summary="s",
+        description="d",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "jira"},
+    )
+    gitlab_state = JiraAgentState(
+        issue_key="KAN-12",
+        issue_summary="s",
+        description="d",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "gitlab", "workflow_type": "gitlab_mr"},
+    )
+    assert proc._is_gitlab_triggered("GL-ACME-DEMO-4") is True
+    assert proc._is_gitlab_triggered("KAN-12", gitlab_state) is True
+    assert proc._is_gitlab_triggered("KAN-12", jira_state) is False
+    sm.get_state.return_value = gitlab_state
+    assert proc._is_gitlab_triggered("KAN-12") is True
+    sm.get_state.return_value = jira_state
+    assert proc._is_gitlab_triggered("KAN-12") is False
+
+
+@pytest.mark.asyncio
+async def test_complete_work_jira_gets_cleaned_answer_gitlab_source_skips(
+    tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts
+):
+    """Jira jobs get a cleaned answer; GitLab-sourced KAN-12 does not comment Jira."""
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+
+    raw = "\n".join(
+        [
+            "[serve] session created: ses_abc",
+            "[serve] turn=initial sending message…",
+            "Login uses JWT in src/auth.cpp.",
+            "[serve] assessment complete=True reasons=[]",
+        ]
+    )
+
+    sm.create_state("KAN-12", "feat login", "d")
+    sm.update_state("KAN-12", status=TaskStatus.EXECUTING, metadata={"source": "jira"})
+    await proc._complete_work(
+        sm.get_state("KAN-12"),
+        execution_summary="All tasks completed successfully.",
+        agent_answer=raw,
+    )
+    bodies = [c.get("body") or "" for c in fake_jira.comments]
+    assert any("Work Completed" in b for b in bodies)
+    assert any("Login uses JWT" in b for b in bodies)
+    assert not any("[serve]" in b for b in bodies)
+    assert not any("ses_abc" in b for b in bodies)
+    assert sm.get_state("KAN-12").status == TaskStatus.COMPLETED
+
+    before = len(fake_jira.comments)
+    sm.create_state("KAN-99", "feat(KAN-99): from MR", "d")
+    sm.update_state(
+        "KAN-99",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "gitlab", "workflow_type": "gitlab_mr"},
+    )
+    await proc._complete_work(
+        sm.get_state("KAN-99"),
+        execution_summary="All tasks completed successfully.",
+        agent_answer=raw,
+    )
+    assert sm.get_state("KAN-99").status == TaskStatus.COMPLETED
+    assert len(fake_jira.comments) == before
+
+
 def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     from src.processor import JobProcessor
 
@@ -284,6 +368,25 @@ def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     assert "Fixed the login bug." in plain
     assert "Pushed new commits" in plain
     assert "`feature/login`" in plain
+
+    serve = "\n".join(
+        [
+            "[serve] health={'healthy': True, 'version': '1.18.10'}",
+            "[serve] session resumed: ses_fc27f0da3ffegKGY7nd9GFFawC",
+            "[serve] turn=initial sending message…",
+            "main.cpp içindeki değişken değerleri a = 4, b = 2 olarak güncellendi",
+            "[serve] turn=initial done finish='stop' summary=None elapsed=126.66s",
+            "[serve] assessment complete=True premature=False reasons=[]",
+        ]
+    )
+    body = JobProcessor._gitlab_mr_reply_body(
+        proc, serve, pushed=True, branch="testt", commit_sha="b1b1b8ca"
+    )
+    assert "a = 4, b = 2" in body
+    assert "[serve]" not in body
+    assert "ses_fc27f0da" not in body
+    assert "Pushed new commits" in body
+    assert "`testt`" in body
 
 
 @pytest.mark.asyncio
@@ -370,6 +473,8 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert "thread.started" not in body
     assert "command_execution" not in body
     assert "[codex] cwd" not in body
+    assert not any("Work Completed" in (c.get("body") or "") for c in fake_jira.comments)
+    assert not any("AuthService" in (c.get("body") or "") for c in fake_jira.comments)
     git.push.assert_not_called()
 
 
@@ -464,6 +569,10 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     assert task.session_id == "ses_gl1"
     assert posted.get("mr_iid") == 4
     assert "*Yaver*" in (posted.get("body") or "")
+    assert not any(
+        "Login is wired in src/auth.cpp" in (c.get("body") or "")
+        for c in fake_jira.comments
+    )
     jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
     assert jobs
     assert jobs[0]["source"] == "gitlab"
