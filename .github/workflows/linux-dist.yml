@@ -1,0 +1,113 @@
+# Build a Linux x64 offline distribution (same split as Windows):
+#   install-dashboard.sh  (Python .venv + SPA)
+#   install-backends.sh   (OpenCode from vendor/opencode-home.zip)
+#   install-codex.sh      (Codex from vendor/codex-*.tar.gz)
+#
+# Users: download artifact → extract once → run the scripts (no network).
+
+name: Linux Distribution
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      dist_suffix:
+        description: "Optional SemVer-safe suffix for non-release builds"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  package-linux:
+    name: Package Linux x64 archive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load pinned dependency versions
+        id: versions
+        run: |
+          set -euo pipefail
+          while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"
+            line="$(echo "$line" | tr -d '\r')"
+            [ -z "${line// }" ] && continue
+            key="${line%%=*}"
+            val="${line#*=}"
+            case "$key" in
+              OPENCODE_VERSION|GLAB_VERSION|CODEX_VERSION|PYTHON_VERSION|NODE_VERSION|OPENCODE_LINUX_ASSET|CODEX_LINUX_ASSET)
+                echo "$key=$val" >> "$GITHUB_OUTPUT"
+                echo "$key=$val"
+                ;;
+            esac
+          done < packaging/windows/versions.env
+          for k in OPENCODE_VERSION GLAB_VERSION CODEX_VERSION PYTHON_VERSION NODE_VERSION; do
+            if ! grep -q "^${k}=" "$GITHUB_OUTPUT"; then
+              echo "Missing $k in versions.env"
+              exit 1
+            fi
+          done
+
+      - name: Resolve product version (SemVer)
+        id: meta
+        run: |
+          chmod +x packaging/linux/resolve-version.sh
+          ./packaging/linux/resolve-version.sh \
+            "${{ github.workspace }}" \
+            "virtual_developer-linux-x64" \
+            "${{ github.event.inputs.dist_suffix }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.versions.outputs.PYTHON_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.versions.outputs.NODE_VERSION }}
+
+      - name: Build distribution
+        env:
+          VD_PRODUCT_VERSION: ${{ steps.meta.outputs.version }}
+          VD_DIST_NAME: ${{ steps.meta.outputs.dist_name }}
+          VD_REPO_ROOT: ${{ github.workspace }}
+          VD_OUT_DIR: ${{ github.workspace }}/dist
+        run: |
+          chmod +x packaging/linux/build-dist.sh
+          ./packaging/linux/build-dist.sh
+
+      - name: Assert payload layout
+        run: |
+          chmod +x packaging/linux/assert-payload.sh
+          ./packaging/linux/assert-payload.sh "dist/stage/${{ steps.meta.outputs.dist_name }}"
+
+      - name: Upload folder artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}
+          path: dist/stage/${{ steps.meta.outputs.dist_name }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload archives
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}-archives
+          path: |
+            dist/${{ steps.meta.outputs.dist_name }}.tar.gz
+            dist/${{ steps.meta.outputs.dist_name }}.zip
+          if-no-files-found: error
+          retention-days: 30
