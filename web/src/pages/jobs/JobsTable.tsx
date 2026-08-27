@@ -1,4 +1,5 @@
 import type { JobItem } from '../../api/types'
+import { sortJobsByCreatedAt } from '../../util/jobs'
 import { jobIsDeletable, statusToneClass } from '../../util/status'
 import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
@@ -27,9 +28,11 @@ export function JobsTable({
     )
   }
 
+  const ordered = sortJobsByCreatedAt(jobs)
+
   return (
     <div className={compact ? 'space-y-2' : 'space-y-2.5'}>
-      {jobs.map((j) => {
+      {ordered.map((j) => {
         const canSelect = jobIsDeletable(j.status, Boolean(j.live))
         const isChecked = Boolean(selectedIds?.has(j.job_id))
         return (

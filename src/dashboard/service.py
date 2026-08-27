@@ -940,6 +940,23 @@ def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:
     return out
 
 
+def job_created_stamp(job: Any) -> str:
+    """Created/started time for list order (newest first).
+
+    Jobs are not grouped by issue key. ``started_at`` is set when the row is
+    created; fall back to ``created_at`` / ``updated_at`` for older records.
+    """
+    if isinstance(job, dict):
+        started = job.get("started_at")
+        created = job.get("created_at")
+        updated = job.get("updated_at")
+    else:
+        started = getattr(job, "started_at", None)
+        created = getattr(job, "created_at", None)
+        updated = getattr(job, "updated_at", None)
+    return str(started or created or updated or "")
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
@@ -987,14 +1004,8 @@ def build_jobs(
             or st in {"executing", "planning", "running", "pending"}
         )
         (inflight if live else rest).append(j)
-    inflight.sort(
-        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-        reverse=True,
-    )
-    rest.sort(
-        key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-        reverse=True,
-    )
+    inflight.sort(key=job_created_stamp, reverse=True)
+    rest.sort(key=job_created_stamp, reverse=True)
     raw = inflight + rest
 
     total = len(raw)

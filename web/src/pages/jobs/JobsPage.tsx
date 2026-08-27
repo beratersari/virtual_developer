@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
 import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
+import { sortJobsByCreatedAt } from '../../util/jobs'
 import {
   jobIsDeletable,
   jobMatchesFilter,
@@ -110,8 +111,10 @@ export function JobsPage() {
     () =>
       showQueue
         ? []
-        : (payload?.jobs ?? []).filter((j) =>
-            jobMatchesFilter(j.status, Boolean(j.live), statusFilter),
+        : sortJobsByCreatedAt(
+            (payload?.jobs ?? []).filter((j) =>
+              jobMatchesFilter(j.status, Boolean(j.live), statusFilter),
+            ),
           ),
     [payload, statusFilter, showQueue],
   )
@@ -189,7 +192,7 @@ export function JobsPage() {
   const from = total === 0 ? 0 : (currentPage - 1) * size + 1
   const to = Math.min(currentPage * size, total)
   const selectedCount = selectedIds.size
-  const liveJobs = (payload?.jobs ?? []).filter((j) => j.live)
+  const liveJobs = sortJobsByCreatedAt((payload?.jobs ?? []).filter((j) => j.live))
   const badgeQueued = live.queueQueued ?? queueQueued
 
   return (

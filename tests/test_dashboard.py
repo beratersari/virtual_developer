@@ -516,6 +516,27 @@ def test_git_deliveries_dedupe_same_mr_from_job_history_and_legacy():
     assert deliveries[0]["feature_branch"] == branch
 
 
+def test_build_jobs_sorts_by_created_date_not_issue_key(tmp_path):
+    from src.dashboard.service import build_jobs, job_created_stamp
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    old = jobs.create_job(issue_key="KAN-1", summary="old same issue")
+    newer_other = jobs.create_job(issue_key="KAN-9", summary="newer other issue")
+    mid = jobs.create_job(issue_key="KAN-1", summary="mid same issue")
+    jobs.update_job(old["job_id"], started_at="2026-08-01T10:00:00")
+    jobs.update_job(newer_other["job_id"], started_at="2026-08-20T12:00:00")
+    jobs.update_job(mid["job_id"], started_at="2026-08-10T09:00:00")
+
+    listed = build_jobs(page=1, page_size=10, store=jobs, state_manager=sm)
+    ids = [j.job_id for j in listed.jobs]
+    assert ids[0] == newer_other["job_id"]
+    assert ids[1] == mid["job_id"]
+    assert ids[2] == old["job_id"]
+    assert job_created_stamp(listed.jobs[0]) >= job_created_stamp(listed.jobs[1])
+
+
 def test_build_jobs_pagination(tmp_path):
     from src.dashboard.service import build_jobs
     from src.state.job_store import JobStore
