@@ -353,6 +353,10 @@ DEFAULT_UNATTENDED_NUDGE_PROMPT = (
 # Do not POST a user "Continue" while compact is running — that pollutes chat
 # and fights the built-in compact loop.
 DEFAULT_COMPACT_WAIT_SECONDS = 180.0
+# After POST /message already burned the full HTTP budget, do not start
+# another full-timeout compact wait (KAN-95 style 2h+2h hang). Probe briefly
+# in case compact is actually finishing, then abort the hung turn.
+FULL_BUDGET_HANG_WAIT_SECONDS = 60.0
 DEFAULT_COMPACT_POLL_SECONDS = 2.0
 # After the session goes idle, wait this long for auto-resume to start.
 # Compact-then-stop often idles briefly before OpenCode replays the last turn.
@@ -610,16 +614,25 @@ class OpenCodeServeClient:
         return coerce_json_list(r.json())
 
     async def session_status(self) -> Dict[str, Any]:
-        r = await self._client.get("/session/status", headers=self._headers())
+        # Cheap probe — never inherit the 2h POST /message budget or a hung
+        # OpenCode stalls every compact-wait poll for the full job timeout.
+        probe = min(30.0, max(2.0, float(self.timeout_seconds or 30.0)))
+        r = await self._client.get(
+            "/session/status",
+            headers=self._headers(),
+            timeout=probe,
+        )
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, dict) else {}
 
     async def abort(self, session_id: str) -> bool:
         try:
+            probe = min(30.0, max(5.0, float(self.timeout_seconds or 30.0)))
             r = await self._client.post(
                 f"/session/{session_id}/abort",
                 headers=self._headers(),
+                timeout=probe,
             )
             return r.status_code in (200, 204)
         except Exception as e:
@@ -952,6 +965,7 @@ class ServeOrchestrator:
         _emit: Callable[[str, str], None],
         _aborted: Callable[[], bool],
         compact_total: int = 0,
+        max_wait_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Poll until OpenCode finishes auto-compact / auto-resume.
 
@@ -959,8 +973,14 @@ class ServeOrchestrator:
         briefly idle; OpenCode then auto-resumes. A short idle is **not**
         done: we re-assess and keep waiting (no user POST) until the session
         is actually complete, auto-resume goes busy again, or the budget ends.
+
+        ``max_wait_seconds`` overrides the compact budget (used after a
+        full-budget HTTP timeout so we do not wait another 7200s).
         """
-        wait_s = self._compact_wait_budget()
+        if max_wait_seconds is not None:
+            wait_s = max(0.2, float(max_wait_seconds))
+        else:
+            wait_s = self._compact_wait_budget()
         poll_s = max(0.05, float(self.compact_poll_seconds or DEFAULT_COMPACT_POLL_SECONDS))
         settle_s = min(
             max(0.05, float(self.compact_settle_seconds or DEFAULT_COMPACT_SETTLE_SECONDS)),
@@ -1834,6 +1854,91 @@ class ServeOrchestrator:
                     )
                 note = f"[serve] message failed: {err}"
                 _emit("stderr", note)
+                elapsed_send = time.time() - t0
+                budget = float(getattr(self.client, "timeout_seconds", 0) or 0)
+                remaining = max(0.0, budget - elapsed_send) if budget > 0 else 0.0
+                # Do not require elapsed >= 1s — tiny test budgets (0.2s) and
+                # a 7200s production wait both qualify once 85% is spent.
+                full_budget_timeout = bool(
+                    timed_out_send
+                    and budget > 0
+                    and elapsed_send >= budget * 0.85
+                )
+                if full_budget_timeout:
+                    hang_wait = min(
+                        FULL_BUDGET_HANG_WAIT_SECONDS,
+                        max(2.0, budget * 0.02),
+                    )
+                    _emit(
+                        "stderr",
+                        f"[serve] HTTP budget exhausted after {elapsed_send:.0f}s "
+                        f"— probing {hang_wait:.0f}s then aborting if still hung "
+                        f"(not another {budget:.0f}s compact wait)",
+                    )
+                    try:
+                        status = await self.client.session_status()
+                        still_running = session_is_busy(status, sid)
+                    except Exception:
+                        still_running = True
+                    if still_running:
+                        wait_info = await self._wait_for_auto_compact(
+                            sid,
+                            _emit=_emit,
+                            _aborted=_aborted,
+                            compact_total=compact_total,
+                            max_wait_seconds=hang_wait,
+                        )
+                        if wait_info.get("aborted") or (
+                            wait_info.get("complete") and not wait_info.get("timeout")
+                        ):
+                            return await self._turn_after_compact_wait(
+                                sid,
+                                wait_info=wait_info,
+                                compact_total=compact_total,
+                                continue_count=continue_count,
+                                turns=turns,
+                                lines=lines,
+                                http_note=note,
+                                _emit=_emit,
+                            )
+                        try:
+                            await self.client.abort(sid)
+                        except Exception as abort_err:
+                            _emit(
+                                "stderr",
+                                f"[serve] abort after hung HTTP budget failed: {abort_err}",
+                            )
+                        hung = (
+                            f"[TIMEOUT] OpenCode did not finish after {elapsed_send:.0f}s "
+                            "HTTP wait (session still busy / not responding). "
+                            "Aborted the hung turn. Restart opencode serve if it "
+                            "stays unresponsive."
+                        )
+                        _emit("stderr", hung)
+                        return ServeTurnResult(
+                            session_id=sid,
+                            returncode=-1,
+                            stdout="\n".join(lines),
+                            stderr=f"{note}\n{hung}",
+                            incomplete=False,
+                            incomplete_reasons=["http budget exhausted"],
+                            compact_events=compact_total,
+                            continue_count=continue_count,
+                            turns=turns,
+                            timed_out=True,
+                        )
+                    # Idle after a full HTTP budget — assess once; do not wait
+                    # another job-length compact poll.
+                    return await self._turn_after_compact_wait(
+                        sid,
+                        wait_info={"timeout": True, "polls": 0, "busy": False},
+                        compact_total=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        lines=lines,
+                        http_note=note,
+                        _emit=_emit,
+                    )
                 if not timed_out_send:
                     # Only wait when status shows busy, or body says conflict.
                     # Generic 500 (missing dir/agent/model) must fail immediately.
@@ -1885,9 +1990,11 @@ class ServeOrchestrator:
                         turns=turns,
                         timed_out=False,
                     )
-                # HTTP wait ended. Compact often idles the session for a few
-                # seconds before auto-resume. Always wait — do not treat idle
-                # as a hard timeout and retry with the original BUILD prompt.
+                # HTTP wait ended early (not a full-budget hang). Compact
+                # often idles briefly before auto-resume. Wait that out —
+                # do not treat idle as a hard timeout and retry BUILD —
+                # but never start another full live timeout on top of time
+                # already spent (7200s HTTP + 7200s compact = 4h hang).
                 try:
                     status = await self.client.session_status()
                     status_ok = True
@@ -1895,6 +2002,12 @@ class ServeOrchestrator:
                     status = {}
                     status_ok = False
                 still_running = (not status_ok) or session_is_busy(status, sid)
+                compact_cap = self._compact_wait_budget()
+                if budget > 0:
+                    compact_cap = min(
+                        compact_cap,
+                        max(FULL_BUDGET_HANG_WAIT_SECONDS, remaining),
+                    )
                 _emit(
                     "stdout",
                     "[serve] HTTP wait ended "
@@ -1906,6 +2019,7 @@ class ServeOrchestrator:
                     _emit=_emit,
                     _aborted=_aborted,
                     compact_total=compact_total,
+                    max_wait_seconds=compact_cap,
                 )
                 if await _try_restart_after_loop(wait_info):
                     continue
