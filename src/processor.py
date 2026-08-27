@@ -2207,9 +2207,9 @@ class JobProcessor:
         if wd is None:
             return 0
         try:
-            from src.process_kill import kill_workspace_processes
+            from src.process_kill import reclaim_workspace
 
-            n = kill_workspace_processes(
+            n = reclaim_workspace(
                 wd, extra_root_pids=extra_root_pids or [], force=True
             )
             if n:
@@ -2246,12 +2246,18 @@ class JobProcessor:
         # Incomplete clone is not in ``_contexts`` yet — delete it now so a
         # killed ``git clone`` cannot keep writing, and so age-policy cleanup
         # does not keep a half-downloaded tree.
-        if issue_key not in self._contexts and isinstance(git, GitManager):
+        if isinstance(git, GitManager):
             try:
-                if git.should_discard_on_cancel():
+                if issue_key not in self._contexts and git.should_discard_on_cancel():
                     git.discard_workspace()
+                else:
+                    # Reused complete clone: leftover git / index.lock must
+                    # still die so the next prompt can checkout.
+                    reclaim = getattr(git, "reclaim_workspace", None)
+                    if callable(reclaim):
+                        reclaim()
             except Exception as e:
-                logger.warning(f"Could not discard clone for {issue_key}: {e}")
+                logger.warning(f"Could not discard/reclaim clone for {issue_key}: {e}")
         return killed
 
     def _cancel_issue_state(
@@ -5338,10 +5344,10 @@ class JobProcessor:
         safe = "".join(
             c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
         )[:80]
-        sandbox = (
-            Path.cwd()
-            / settings.temp_dir_base
-            / f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        from src.paths import resolve_temp_dir_base
+
+        sandbox = resolve_temp_dir_base(settings.temp_dir_base) / (
+            f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         sandbox.mkdir(parents=True, exist_ok=True)
         runner = AgentRunner(working_directory=sandbox)

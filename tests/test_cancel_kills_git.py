@@ -308,6 +308,26 @@ def test_run_tracked_delegates_to_patched_subprocess_run():
         _cleanup_gm(gm)
 
 
+def test_reclaim_workspace_none_and_missing():
+    from src.process_kill import clear_stale_git_locks, reclaim_workspace
+
+    assert reclaim_workspace(None) == 0
+    assert clear_stale_git_locks(None) == 0
+
+
+def test_kill_file_holders_skips_protected(tmp_path):
+    from src.process_kill import kill_file_holders
+
+    lock = tmp_path / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    with patch("src.process_kill.pids_holding_path", return_value=[1, 99]):
+        with patch("src.process_kill._protect_pids", return_value={1}):
+            with patch("src.process_kill.kill_pid") as kill:
+                n = kill_file_holders(lock, force=True)
+    assert n == 1
+    kill.assert_called_once_with(99, force=True)
+
+
 def test_process_kill_none_and_tree():
     from src.process_kill import kill_pid, kill_process_tree
 
@@ -383,6 +403,117 @@ def test_codex_cancel_force_kills_immediately():
     assert handle["cancel"] is True
     kill.assert_called_once()
     assert kill.call_args.kwargs.get("force") is True
+
+
+def test_reclaim_workspace_removes_stale_index_lock():
+    from src.process_kill import reclaim_workspace
+
+    root = _native_dir()
+    git_dir = root / ".git"
+    git_dir.mkdir()
+    lock = git_dir / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    (git_dir / "HEAD.lock").write_text("", encoding="utf-8")
+    refs = git_dir / "refs" / "heads"
+    refs.mkdir(parents=True)
+    (refs / "feature.lock").write_text("", encoding="utf-8")
+    try:
+        n = reclaim_workspace(root, force=True)
+        assert n >= 0
+        assert not lock.exists()
+        assert not (git_dir / "HEAD.lock").exists()
+        assert not (refs / "feature.lock").exists()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_reclaim_workspace_kills_lock_holders(tmp_path):
+    from src.process_kill import reclaim_workspace
+
+    root = tmp_path / "clone"
+    git_dir = root / ".git"
+    git_dir.mkdir(parents=True)
+    lock = git_dir / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    with patch("src.process_kill.kill_workspace_processes", return_value=0):
+        with patch("src.process_kill.pids_holding_path", side_effect=[[4242], [], []]):
+            with patch("src.process_kill.kill_pid") as kill:
+                with patch("src.process_kill.time.sleep"):
+                    n = reclaim_workspace(root, force=True)
+    assert n >= 1
+    kill.assert_any_call(4242, force=True)
+    assert not lock.exists()
+
+
+def test_clear_stale_git_locks_skips_when_holder_alive(tmp_path):
+    from src.process_kill import clear_stale_git_locks
+
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    lock = git_dir / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    with patch("src.process_kill.pids_holding_path", return_value=[99]):
+        with patch("src.process_kill._protect_pids", return_value=set()):
+            assert clear_stale_git_locks(tmp_path) == 0
+    assert lock.exists()
+
+
+def test_parse_windows_process_csv_and_loose():
+    from src.process_kill import (
+        _parse_windows_process_csv,
+        _parse_windows_process_csv_loose,
+        resolve_git_dir,
+    )
+
+    csv_text = (
+        "ProcessId,ParentProcessId,Name,CommandLine\n"
+        '111,1,git.exe,"git checkout -B feature/X D:\\yaver\\t\\repo"\n'
+        "bad,1,x,y\n"
+        "0,1,x,y\n"
+    )
+    rows = _parse_windows_process_csv(csv_text)
+    assert any(r["pid"] == 111 and "checkout" in r["cmd"] for r in rows)
+    loose = _parse_windows_process_csv_loose('foo,bar,"git.exe",222')
+    assert loose and loose[0]["pid"] == 222
+    assert resolve_git_dir(Path("/no/such/repo")) is None
+
+
+def test_resolve_git_dir_worktree_file(tmp_path):
+    from src.process_kill import list_git_lock_files, resolve_git_dir
+
+    real = tmp_path / "real.git"
+    real.mkdir()
+    (real / "index.lock").write_text("", encoding="utf-8")
+    ws = tmp_path / "work"
+    ws.mkdir()
+    (ws / ".git").write_text(f"gitdir: {real}\n", encoding="utf-8")
+    assert resolve_git_dir(ws) == real
+    locks = list_git_lock_files(ws)
+    assert any(p.name == "index.lock" for p in locks)
+
+
+@pytest.mark.asyncio
+async def test_cancel_job_clears_index_lock_on_reused_clone(
+    processor, state_manager, tmp_path
+):
+    """Stop mid-checkout must drop index.lock so the next prompt can checkout."""
+    key = "CX-LOCK-1"
+    state_manager.create_state(key, "s", "d")
+    state_manager.update_state(key, status=TaskStatus.EXECUTING)
+    processor._contexts[key] = {"git": None, "runner": None}
+
+    gm = _bare_gm(tmp_path, issue_key=key)
+    git_dir = gm.temp_dir / ".git"
+    git_dir.mkdir()
+    lock = git_dir / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    gm._clone_in_progress = False
+    processor._contexts[key]["git"] = gm
+
+    out = await processor.cancel_job(key, reason="stop then new prompt")
+    assert out["ok"] is True
+    assert gm.temp_dir.exists(), "complete clone must be kept for reuse"
+    assert not lock.exists(), "stale index.lock must be removed on cancel"
 
 
 def test_cancel_all_tasks_force_kills_codex_handle(tmp_path):

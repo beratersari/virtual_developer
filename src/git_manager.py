@@ -22,7 +22,7 @@ from urllib.parse import quote, urlparse, urlunparse
 
 from src.config import settings, set_current_temp_dir
 from src.logger import logger
-from src.process_kill import kill_process_tree
+from src.process_kill import kill_process_tree, reclaim_workspace
 
 
 class GitCloneError(RuntimeError):
@@ -205,6 +205,7 @@ class GitManager:
             )
             self._refresh_existing_clone()
         else:
+            self.reclaim_workspace()
             self._reset_temp_dir_for_clone()
             logger.info("Starting repository clone...")
             self._clone_into_temp()
@@ -296,7 +297,9 @@ class GitManager:
         OpenCode ``session.directory`` are rewritten so serve resume still
         matches the live clone.
         """
-        base_temp = (Path.cwd() / settings.temp_dir_base).resolve()
+        from src.paths import resolve_temp_dir_base
+
+        base_temp = resolve_temp_dir_base(settings.temp_dir_base)
         base_temp.mkdir(parents=True, exist_ok=True)
         logger.debug(f"Base temp directory: {base_temp}")
 
@@ -413,6 +416,9 @@ class GitManager:
         """Fetch remotes in a reused clone (work branch checkout happens later)."""
         if not self.temp_dir:
             raise RuntimeError("Temp directory not initialized")
+        # Previous job may have been Stop'd mid-checkout — evict leftover
+        # git and drop index.lock before we touch this tree again.
+        self.reclaim_workspace()
         self._assert_remote_host_allowed(self.remote_url or "")
         issue_tag = self.issue_key or "(unknown)"
         logger.info(f"Refreshing reused clone for {issue_tag}: {self.temp_dir}")
@@ -464,6 +470,21 @@ class GitManager:
         ]
 
     @staticmethod
+    def _looks_like_git_lock_error(result: object) -> bool:
+        """True when git failed because ``index.lock`` (or similar) exists."""
+        stderr = str(getattr(result, "stderr", "") or "")
+        stdout = str(getattr(result, "stdout", "") or "")
+        text = f"{stderr}\n{stdout}".lower()
+        if not text.strip():
+            return False
+        return (
+            "index.lock" in text
+            or "another git process seems to be running" in text
+            or ".lock': file exists" in text
+            or '.lock": file exists' in text
+        )
+
+    @staticmethod
     def _looks_like_lfs_filter_noise(text: str) -> bool:
         low = (text or "").lower()
         if "git lfs" not in low and "git-lfs" not in low and "lfs" not in low:
@@ -498,12 +519,19 @@ class GitManager:
         host = self._host_from_url(target)
         if not pat or not host:
             return out
-        askpass = self._ensure_askpass_script()
-        out["GIT_ASKPASS"] = str(askpass)
-        out["SSH_ASKPASS"] = str(askpass)
-        out["SSH_ASKPASS_REQUIRE"] = "never"
+        # insteadOf + extraHeader is enough; askpass is a backup. Never fail
+        # workspace prep because the shared helper is locked by leftover git.
+        try:
+            askpass = self._ensure_askpass_script()
+        except OSError as e:
+            logger.warning(f"askpass helper unavailable: {e}")
+            askpass = None
         out["VD_GIT_PASSWORD"] = pat
         out["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        if askpass is not None:
+            out["GIT_ASKPASS"] = str(askpass)
+            out["SSH_ASKPASS"] = str(askpass)
+            out["SSH_ASKPASS_REQUIRE"] = "never"
         basic = base64.b64encode(f"oauth2:{pat}".encode("utf-8")).decode("ascii")
         rewrite_from = (
             f"https://{host}/",
@@ -521,7 +549,8 @@ class GitManager:
         # Empty helper resets system GCM / manager-core for this child.
         pairs.append(("credential.helper", ""))
         pairs.append((f"credential.https://{host}.helper", ""))
-        pairs.append(("core.askPass", str(askpass)))
+        if askpass is not None:
+            pairs.append(("core.askPass", str(askpass)))
         pairs.append(("http.extraHeader", f"Authorization: Basic {basic}"))
         try:
             base_count = int(out.get("GIT_CONFIG_COUNT") or "0")
@@ -956,15 +985,48 @@ class GitManager:
         """Same unattended env as clone/fetch/push (legacy name, tests still call it)."""
         return self._apply_pat_to_git_env(self._base_git_env(), url=url or self.remote_url or "")
 
+    _askpass_lock = threading.Lock()
+
     @staticmethod
-    def _ensure_askpass_script() -> Path:
-        """Create (once) a small cross-platform askpass helper under temp."""
-        # Prefer a stable path under the agent runtime so we do not rewrite each call
+    def _write_helper_file(path: Path, content: str) -> bool:
+        """Write ``path`` if needed. Never raise — leftover git may lock it."""
+        try:
+            if path.is_file():
+                try:
+                    if path.read_text(encoding="utf-8") == content:
+                        return True
+                except OSError:
+                    return True
+                try:
+                    mode = path.stat().st_mode
+                    if not (mode & 0o200):
+                        path.chmod(mode | 0o200)
+                except OSError:
+                    pass
+            path.write_text(content, encoding="utf-8")
+            return True
+        except OSError as e:
+            logger.warning(f"Could not write git helper {path}: {e}")
+            return path.is_file()
+
+    @staticmethod
+    def _ensure_askpass_script() -> Optional[Path]:
+        """Create (once) a small cross-platform askpass helper under temp.
+
+        The helper is shared across jobs. A leftover ``git`` from a cancelled
+        job can lock ``vd-git-askpass.cmd`` on Windows (Permission denied).
+        Never fail workspace prep for that — reuse the existing file, or
+        write a pid-suffixed fallback, or return None (insteadOf still auths).
+        """
         from src.paths import agent_subdir, ensure_agent_data_dir
 
         ensure_agent_data_dir()
         base = agent_subdir("bin")
-        base.mkdir(parents=True, exist_ok=True)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not create askpass dir {base}: {e}")
+            return None
         py = base / "vd-git-askpass.py"
         py_content = (
             "import os, sys\n"
@@ -974,30 +1036,52 @@ class GitManager:
             "else:\n"
             "    sys.stdout.write(os.environ.get(\"VD_GIT_PASSWORD\", \"\") + \"\\n\")\n"
         )
-        if not py.exists() or py.read_text(encoding="utf-8") != py_content:
-            py.write_text(py_content, encoding="utf-8")
-        if os.name == "nt":
-            path = base / "vd-git-askpass.cmd"
-            exe = str(Path(sys.executable).resolve())
-            content = (
-                "@echo off\r\n"
-                f"\"{exe}\" \"%~dp0vd-git-askpass.py\" %*\r\n"
+        with GitManager._askpass_lock:
+            GitManager._write_helper_file(py, py_content)
+            if os.name == "nt":
+                path = base / "vd-git-askpass.cmd"
+                exe = str(Path(sys.executable).resolve())
+                content = (
+                    "@echo off\r\n"
+                    f"\"{exe}\" \"%~dp0vd-git-askpass.py\" %*\r\n"
+                )
+            else:
+                path = base / "vd-git-askpass.sh"
+                content = (
+                    "#!/bin/sh\n"
+                    f"exec '{sys.executable}' '{py}' \"$@\"\n"
+                )
+            wrote = GitManager._write_helper_file(path, content)
+            if wrote:
+                if os.name != "nt":
+                    try:
+                        path.chmod(0o700)
+                        if py.is_file():
+                            py.chmod(0o700)
+                    except OSError:
+                        pass
+                return path
+            if path.is_file():
+                return path
+            fallback = base / (
+                f"vd-git-askpass-{os.getpid()}.cmd"
+                if os.name == "nt"
+                else f"vd-git-askpass-{os.getpid()}.sh"
             )
-        else:
-            path = base / "vd-git-askpass.sh"
-            content = (
-                "#!/bin/sh\n"
-                f"exec '{sys.executable}' '{py}' \"$@\"\n"
-            )
-        if not path.exists() or path.read_text(encoding="utf-8") != content:
-            path.write_text(content, encoding="utf-8")
-            if os.name != "nt":
-                try:
-                    path.chmod(0o700)
-                    py.chmod(0o700)
-                except OSError:
-                    pass
-        return path
+            if GitManager._write_helper_file(fallback, content):
+                if os.name != "nt":
+                    try:
+                        fallback.chmod(0o700)
+                    except OSError:
+                        pass
+                return fallback
+            if py.is_file():
+                logger.warning(
+                    f"Reusing askpass python helper {py} "
+                    "(wrapper locked by another process)"
+                )
+                return py
+            return None
 
     def _build_clone_url(self, base_url: str, pat: str) -> str:
         """Return a clean remote URL.
@@ -1235,7 +1319,11 @@ class GitManager:
         with self._proc_lock:
             procs = list(self._live_procs)
         killed = 0
+        extra_pids: List[int] = []
         for proc in procs:
+            pid = getattr(proc, "pid", None)
+            if pid:
+                extra_pids.append(int(pid))
             if getattr(proc, "poll", lambda: None)() is not None:
                 continue
             kill_process_tree(proc, force=True)
@@ -1247,7 +1335,32 @@ class GitManager:
                 except Exception:
                     pass
             killed += 1
+        # Agent-spawned git is not in ``_live_procs``. Evict it and drop
+        # stale index.lock so the next prompt can reuse this clone.
+        killed += self.reclaim_workspace(extra_root_pids=extra_pids)
         return killed
+
+    def reclaim_workspace(
+        self, *, extra_root_pids: Optional[List[int]] = None
+    ) -> int:
+        """Kill leftover clone users and remove stale ``.git/*.lock`` files."""
+        self._init_proc_state()
+        if not self.temp_dir:
+            return 0
+        extra = list(extra_root_pids or [])
+        with self._proc_lock:
+            for proc in list(self._live_procs):
+                pid = getattr(proc, "pid", None)
+                if pid:
+                    extra.append(int(pid))
+        try:
+            return int(
+                reclaim_workspace(self.temp_dir, extra_root_pids=extra, force=True)
+                or 0
+            )
+        except Exception as e:
+            logger.warning(f"Could not reclaim git workspace {self.temp_dir}: {e}")
+            return 0
 
     def should_discard_on_cancel(self) -> bool:
         """True when cancel should delete this workspace (incomplete clone)."""
@@ -1360,36 +1473,60 @@ class GitManager:
             else self._git_command_timeout()
         )
         git_env = self._apply_pat_to_git_env(self._base_git_env())
+        result: Optional[subprocess.CompletedProcess] = None
+        lock_retried = False
         try:
-            result = self._run_tracked(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=cmd_timeout,
-                env=git_env,
-            )
-        except GitCancelledError:
-            raise
-        except subprocess.TimeoutExpired as e:
-            safe_err = f"git command timed out after {cmd_timeout}s: git {' '.join(safe_args)}"
-            logger.error(safe_err)
-            if check:
-                raise RuntimeError(safe_err) from e
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=-1,
-                stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
-                stderr=safe_err,
-            )
+            while True:
+                try:
+                    result = self._run_tracked(
+                        cmd,
+                        cwd=cwd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=cmd_timeout,
+                        env=git_env,
+                    )
+                except GitCancelledError:
+                    raise
+                except subprocess.TimeoutExpired as e:
+                    safe_err = (
+                        f"git command timed out after {cmd_timeout}s: "
+                        f"git {' '.join(safe_args)}"
+                    )
+                    logger.error(safe_err)
+                    if check:
+                        raise RuntimeError(safe_err) from e
+                    return subprocess.CompletedProcess(
+                        args=cmd,
+                        returncode=-1,
+                        stdout=(e.stdout or "") if isinstance(e.stdout, str) else "",
+                        stderr=safe_err,
+                    )
+                if (
+                    result.returncode != 0
+                    and not lock_retried
+                    and self._looks_like_git_lock_error(result)
+                ):
+                    logger.warning(
+                        f"Git lock leftover in {cwd}; "
+                        "killing holders and retrying: "
+                        f"git {' '.join(safe_args)}"
+                    )
+                    self.reclaim_workspace()
+                    lock_retried = True
+                    continue
+                break
         finally:
             if applied_settings_pat:
                 try:
                     self._scrub_remote_credentials()
                 except Exception:
                     pass
+
+        if result is None:
+            raise RuntimeError("git command produced no result")
 
         if result.returncode != 0:
             combined = (result.stdout or "") + "\n" + (result.stderr or "")
@@ -1996,6 +2133,7 @@ class GitManager:
             f"ensure_feature_branch for {key}: "
             f"params source={self.source_branch!r} target={self.target_branch!r}"
         )
+        self.reclaim_workspace()
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(key)
         checked_out = self._prepare_work_branch(work, target)
@@ -2768,7 +2906,9 @@ def purge_stale_temp_dirs(
 
     base = base_dir
     if base is None:
-        base = (Path.cwd() / settings.temp_dir_base).resolve()
+        from src.paths import resolve_temp_dir_base
+
+        base = resolve_temp_dir_base(settings.temp_dir_base)
     if not base.exists() or not base.is_dir():
         return 0
 
