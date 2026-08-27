@@ -521,21 +521,31 @@ export type StorageFolder = {
   size_pending?: boolean
   modified_at?: string | null
   in_use: boolean
+  kind?: 'file' | 'dir' | string
+  area?: 'temp' | 'sessions' | string
   delete?: StorageFolderDelete | null
 }
 
 export type StoragePayload = {
   disk: StorageDisk
+  data_dir?: string
+  temp_dir?: string
+  sessions_dir?: string
   folders: StorageFolder[]
   folder_count: number
   folders_bytes: number
   folders_label: string
+  sessions?: StorageFolder[]
+  session_count?: number
+  sessions_bytes?: number
+  sessions_label?: string
   sizes_pending?: boolean
   server_time?: string
 }
 
 export type StorageDeleteJob = StorageFolderDelete & {
   name: string
+  area?: string
   path?: string | null
 }
 

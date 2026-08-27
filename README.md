@@ -342,8 +342,8 @@ Repo URL and branches always come from the issue `{params}` block.
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
 | `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
-| `TEMP_DIR_BASE` | `C:\vd\t` (Windows) / `.temp` (Linux) | Temp clone root. Outside the install folder so a zip reinstall keeps workspaces. Keep it short on Windows (MAX_PATH). |
-| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `<cwd>/.jira-agent` (Linux) | Sessions, jobs, OpenCode binds, runtime settings. Survives reinstall. |
+| `TEMP_DIR_BASE` | `C:\vd\t` (Windows) / `/vd/t` or `~/vd/t` (Linux) | Temp clone root. Outside the install folder so a zip reinstall keeps workspaces. Keep it short on Windows (MAX_PATH). |
+| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `/vd/yaver` or `~/vd/yaver` (Linux) | Sessions, jobs, OpenCode binds, runtime settings. Survives reinstall. |
 | `TEMP_CLEANUP_POLICY` | `age` / `never` | Cleanup policy (see `.env.example`) |
 
 List or set models:

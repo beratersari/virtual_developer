@@ -724,7 +724,9 @@ def _git_missing_explanation(
             "Temp folders still on disk:",
         ]
     )
-    temp_base = Path(str(getattr(settings, "temp_dir_base", None) or ".temp"))
+    from src.paths import resolve_temp_dir_base
+
+    temp_base = resolve_temp_dir_base(getattr(settings, "temp_dir_base", None))
     if not temp_base.is_absolute():
         temp_base = Path.cwd() / temp_base
     leftover = []

@@ -364,25 +364,20 @@ class Settings(BaseSettings):
     temp_dir_base: Path = Field(
         default=Path(".temp"),
         description=(
-            "Base directory for temp clones. On Windows / WSL-on-C: the default "
-            "``.temp`` is remapped to C:\\vd\\t so reinstall does not wipe workspaces."
+            "Base directory for temp clones. Relative ``.temp`` is remapped to "
+            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, or /vd/t)."
         ),
     )
     @field_validator("temp_dir_base", mode="after")
     @classmethod
     def _durable_temp_dir(cls, v: Path) -> Path:
-        from src.paths import (
-            _under_pytest,
-            coerce_win_path,
-            default_temp_dir,
-            uses_windows_layout,
-        )
+        from src.paths import _under_pytest, coerce_win_path, default_temp_dir
 
         v = coerce_win_path(v)
         if _under_pytest() or v.is_absolute():
             return v
         text = str(v).replace("\\", "/").strip()
-        if uses_windows_layout() and text in {".temp", "temp", "./.temp"}:
+        if text in {".temp", "temp", "./.temp"}:
             return default_temp_dir()
         return v
 

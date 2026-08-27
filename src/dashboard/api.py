@@ -609,7 +609,9 @@ def create_dashboard_app(
         from src.dashboard.temp_storage import TempStorageError, queue_delete_temp_folder
 
         try:
-            result = queue_delete_temp_folder(body.name)
+            result = queue_delete_temp_folder(
+                body.name, area=getattr(body, "area", None) or "temp"
+            )
         except TempStorageError as e:
             raise HTTPException(status_code=e.status_code, detail=e.message) from e
         result["server_time"] = build_meta().server_time

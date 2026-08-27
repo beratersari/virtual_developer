@@ -10,9 +10,10 @@ from src.brand import PRODUCT_NAME
 
 
 class TempFolderDeleteRequest(BaseModel):
-    """Body for POST /api/storage/delete — one clone folder under TEMP_DIR_BASE."""
+    """Body for POST /api/storage/delete — one clone folder or session file."""
 
     name: str = Field(..., min_length=1, max_length=255)
+    area: str = Field(default="temp", description="temp clones or sessions files")
 
     @field_validator("name")
     @classmethod
@@ -21,7 +22,15 @@ class TempFolderDeleteRequest(BaseModel):
         if not text:
             raise ValueError("name is required")
         if "/" in text or "\\" in text or text in {".", ".."}:
-            raise ValueError("name must be a single folder under the temp base")
+            raise ValueError("name must be a single folder or file name")
+        return text
+
+    @field_validator("area")
+    @classmethod
+    def _area_ok(cls, v: str) -> str:
+        text = (v or "temp").strip().lower() or "temp"
+        if text not in {"temp", "sessions"}:
+            raise ValueError("area must be temp or sessions")
         return text
 
 
