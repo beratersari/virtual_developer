@@ -525,9 +525,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["agent_task_timeout_seconds"] = (
             settings.agent_task_timeout_seconds
         )
+        dotenv_updates["AGENT_TASK_TIMEOUT_SECONDS"] = str(
+            settings.agent_task_timeout_seconds
+        )
         logger.info(
             f"Agent/OpenCode timeout set to "
-            f"{settings.agent_task_timeout_seconds}s (next job uses this)"
+            f"{settings.agent_task_timeout_seconds}s "
+            "(in-flight and next jobs use this)"
         )
     if "agent_task_max_retries" in data and data["agent_task_max_retries"] is not None:
         settings.agent_task_max_retries = int(data["agent_task_max_retries"])

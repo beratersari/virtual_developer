@@ -42,6 +42,19 @@ def _plain_int(val: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _live_agent_timeout_seconds(state: Optional[JiraAgentState] = None) -> int:
+    """Dashboard/runtime timeout, not a value frozen at job begin.
+
+    Saving 7200 after a job started at 1800 must still reach OpenCode.
+    """
+    from src.config import live_agent_timeout_seconds
+
+    timeout = live_agent_timeout_seconds()
+    if state is not None:
+        state.timeout_seconds = timeout
+    return timeout
+
+
 class _JobSlotLimiter:
     """Async concurrency limiter that supports live resize without over-admit.
 
@@ -1659,6 +1672,20 @@ class JobProcessor:
             if patch:
                 self.job_store.update_job(job_id, **patch)
 
+    def _live_timeout_seconds(self, state: Optional[JiraAgentState] = None) -> int:
+        """Live dashboard timeout, persisted onto ``state`` when it changes."""
+        timeout = _live_agent_timeout_seconds(state)
+        if state is not None and state.issue_key:
+            try:
+                cur = self.state_manager.get_state(state.issue_key)
+                if cur is not None and cur.timeout_seconds != timeout:
+                    self.state_manager.update_state(
+                        state.issue_key, timeout_seconds=timeout
+                    )
+            except Exception:
+                pass
+        return timeout
+
     def _begin_workflow_run(
         self,
         state: JiraAgentState,
@@ -1685,12 +1712,10 @@ class JobProcessor:
         # Reject terminal statuses: cancel/fail can land between accept and begin
         # without holding the issue lock.
         # Always re-read live settings (dashboard may have changed timeout)
-        from src.config import get_settings
+        from src.config import get_settings, live_agent_timeout_seconds
 
         live = get_settings()
-        timeout_s = _plain_int(
-            getattr(live, "agent_task_timeout_seconds", None), 1800
-        )
+        timeout_s = live_agent_timeout_seconds()
         max_retries = _plain_int(getattr(live, "agent_task_max_retries", None), 0)
         max_incomplete = _plain_int(
             getattr(live, "agent_task_max_incomplete_retries", None), 0
@@ -3899,11 +3924,7 @@ class JobProcessor:
                 on_session_id=lambda sid: self._link_job_opencode_session(
                     state.issue_key, sid
                 ),
-                timeout_seconds=(
-                    state.timeout_seconds
-                    if state.timeout_seconds is not None
-                    else settings.agent_task_timeout_seconds
-                ),
+                timeout_seconds=self._live_timeout_seconds(state),
                 max_retries=(
                     state.max_retries
                     if state.max_retries is not None
@@ -4147,12 +4168,7 @@ class JobProcessor:
         from src.config import get_settings as _get_settings
 
         _live = _get_settings()
-        # Prefer values frozen on state at job begin (already from live settings)
-        _timeout = (
-            state.timeout_seconds
-            if state.timeout_seconds is not None
-            else _live.agent_task_timeout_seconds
-        )
+        _timeout = self._live_timeout_seconds(state)
         _retries = (
             state.max_retries
             if state.max_retries is not None
@@ -4453,11 +4469,7 @@ class JobProcessor:
         from src.config import get_settings as _get_settings
 
         _live = _get_settings()
-        _timeout = (
-            state.timeout_seconds
-            if state.timeout_seconds is not None
-            else _live.agent_task_timeout_seconds
-        )
+        _timeout = self._live_timeout_seconds(state)
         _retries = (
             state.max_retries
             if state.max_retries is not None

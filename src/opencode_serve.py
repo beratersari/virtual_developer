@@ -932,6 +932,15 @@ class ServeOrchestrator:
     def _compact_wait_budget(self) -> float:
         explicit = float(self.compact_wait_seconds or 0)
         if explicit > 0:
+            try:
+                from src.config import live_agent_timeout_seconds
+
+                live = float(live_agent_timeout_seconds())
+            except Exception:
+                live = 0.0
+            # Raise a stale 1800 wait when Settings was saved to 7200.
+            if live > 1800:
+                return max(0.2, explicit, live)
             return max(0.2, explicit)
         client_budget = float(getattr(self.client, "timeout_seconds", 0) or 0)
         return max(1.0, client_budget or DEFAULT_COMPACT_WAIT_SECONDS)

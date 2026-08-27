@@ -820,6 +820,14 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 )
                 continue
             value = text
+        if key == "agent_task_timeout_seconds":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Ignoring invalid runtime agent_task_timeout_seconds={value!r}"
+                )
+                continue
         if key == "jira_intake_mode":
             value = _normalize_intake_mode(value)
         if key == "project_repositories":
@@ -844,6 +852,22 @@ def get_settings() -> Settings:
         # Dashboard overrides win over .env so agent timeout changes stick.
         apply_runtime_settings_to(_settings)
     return _settings
+
+
+def live_agent_timeout_seconds(*, default: int = 1800) -> int:
+    """Current OpenCode/agent wall-clock budget (dashboard + runtime + env).
+
+    Re-read on every call so a Settings save of 7200 applies to the in-flight
+    serve turn / next retry, not only jobs that started after the save.
+    """
+    live = get_settings()
+    raw = getattr(live, "agent_task_timeout_seconds", None)
+    try:
+        if raw is None or isinstance(raw, bool):
+            return int(default)
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
 
 def set_current_temp_dir(temp_dir: Optional[Path]) -> None:
     global _current_temp_dir

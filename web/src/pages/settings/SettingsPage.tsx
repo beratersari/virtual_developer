@@ -700,6 +700,10 @@ export function SettingsPage() {
           value={draft.agent_task_timeout_seconds}
           onChange={(e) => mark('agent_task_timeout_seconds', Number(e.target.value))}
         />
+        <span className="text-xs text-text-muted">
+          Wall-clock budget for the OpenCode/Codex turn. Save applies immediately,
+          including an in-flight job (not only the next ticket). Default 1800 = 30 min.
+        </span>
       </label>
       <div className="text-sm font-semibold text-text">Retries &amp; compaction</div>
       <p className="text-xs text-text-muted">
