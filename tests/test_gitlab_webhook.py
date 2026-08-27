@@ -281,6 +281,60 @@ def test_is_gitlab_triggered_uses_source_metadata():
     assert proc._is_gitlab_triggered("KAN-12") is False
 
 
+@pytest.mark.asyncio
+async def test_complete_work_jira_gets_cleaned_answer_gitlab_source_skips(
+    tmp_path, monkeypatch, fake_jira, reporter, isolate_jira_agent_artifacts
+):
+    """Jira jobs get a cleaned answer; GitLab-sourced KAN-12 does not comment Jira."""
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+
+    raw = "\n".join(
+        [
+            "[serve] session created: ses_abc",
+            "[serve] turn=initial sending message…",
+            "Login uses JWT in src/auth.cpp.",
+            "[serve] assessment complete=True reasons=[]",
+        ]
+    )
+
+    sm.create_state("KAN-12", "feat login", "d")
+    sm.update_state("KAN-12", status=TaskStatus.EXECUTING, metadata={"source": "jira"})
+    await proc._complete_work(
+        sm.get_state("KAN-12"),
+        execution_summary="All tasks completed successfully.",
+        agent_answer=raw,
+    )
+    bodies = [c.get("body") or "" for c in fake_jira.comments]
+    assert any("Work Completed" in b for b in bodies)
+    assert any("Login uses JWT" in b for b in bodies)
+    assert not any("[serve]" in b for b in bodies)
+    assert not any("ses_abc" in b for b in bodies)
+    assert sm.get_state("KAN-12").status == TaskStatus.COMPLETED
+
+    before = len(fake_jira.comments)
+    sm.create_state("KAN-99", "feat(KAN-99): from MR", "d")
+    sm.update_state(
+        "KAN-99",
+        status=TaskStatus.EXECUTING,
+        metadata={"source": "gitlab", "workflow_type": "gitlab_mr"},
+    )
+    await proc._complete_work(
+        sm.get_state("KAN-99"),
+        execution_summary="All tasks completed successfully.",
+        agent_answer=raw,
+    )
+    assert sm.get_state("KAN-99").status == TaskStatus.COMPLETED
+    assert len(fake_jira.comments) == before
+
+
 def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     from src.processor import JobProcessor
 
