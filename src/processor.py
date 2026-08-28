@@ -5074,36 +5074,32 @@ class JobProcessor:
         *,
         existing_mr_url: Optional[str] = None,
     ) -> str:
-        """Push/MR when this job created commits (success or agent error).
+        """Always try to push after an agent result; complete only with new commits.
 
         Returns ``delivered``, ``none``, ``push_failed``, or ``aborted``.
-        ``none`` means HEAD did not move this job (or delivery is not ready).
-        An already-pushed tip is ``delivered`` — ``_push_and_create_mr``
-        treats a remote HEAD match as success.
+        Push is attempted even when HEAD did not move this job (already
+        on remote / up-to-date is not an error). MR + complete only when
+        this job created commits. An already-pushed tip with new commits
+        is ``delivered``.
         """
         if self._is_aborted(state.issue_key):
             return "aborted"
-        delivery_err = self._assert_build_delivery(state.issue_key)
-        if delivery_err:
-            logger.info(
-                f"{state.issue_key}: no new commits to deliver after agent "
-                f"result ({delivery_err[:160]})"
-            )
-            return "none"
+        has_new = self._assert_build_delivery(state.issue_key) is None
         logger.info(
-            f"{state.issue_key}: this job has new commits — pushing "
-            "(agent success or error does not skip delivery)"
+            f"{state.issue_key}: attempting push after agent result "
+            f"(new_commits={has_new})"
         )
-        if self._is_aborted(state.issue_key):
-            return "aborted"
         push_ok = await self._push_and_create_mr(
-            state, existing_mr_url=existing_mr_url
+            state,
+            existing_mr_url=existing_mr_url,
+            open_mr=has_new,
+            notify_on_fail=has_new,
         )
         if self._is_aborted(state.issue_key):
             return "aborted"
-        if not push_ok:
-            return "push_failed"
-        return "delivered"
+        if has_new:
+            return "delivered" if push_ok else "push_failed"
+        return "none"
 
     def _durable_plan_path(self, issue_key: str) -> Path:
         """Host-side plan path that survives temp-clone cleanup."""
@@ -5218,6 +5214,8 @@ class JobProcessor:
         state: JiraAgentState,
         *,
         existing_mr_url: Optional[str] = None,
+        open_mr: bool = True,
+        notify_on_fail: bool = True,
     ) -> bool:
         """Push prepared work_branch and open MR.
 
@@ -5240,6 +5238,13 @@ class JobProcessor:
         When ``existing_mr_url`` is set (GitLab MR comment jobs), push onto
         that branch and reuse the URL — do not open a second MR, and do not
         post Jira progress (the caller replies on the MR).
+
+        ``open_mr=False`` stops after push (or already-on-remote). Used when
+        we always try to push after an agent error but only open an MR when
+        this job created commits.
+
+        ``notify_on_fail=False`` skips Jira push-failure comments (speculative
+        push after an agent error with no new commits).
         """
         if self._is_aborted(state.issue_key):
             logger.info(
@@ -5251,11 +5256,12 @@ class JobProcessor:
         if not git:
             logger.warning(f"No git manager for {state.issue_key}")
             msg = "No git workspace available; cannot push or open a merge request."
-            self._record_delivery_failure(state.issue_key, msg)
-            try:
-                self.reporter.post_progress_update(state, msg)
-            except Exception:
-                pass
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
 
         logger.info(f"Starting push and MR creation for {state.issue_key}")
@@ -5274,11 +5280,12 @@ class JobProcessor:
                 f"`{getattr(git, 'work_branch', None)}`."
             )
             logger.error(msg)
-            self._record_delivery_failure(state.issue_key, msg)
-            try:
-                self.reporter.post_progress_update(state, msg)
-            except Exception:
-                pass
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
 
         branch_name = (getattr(git, "work_branch", None) or "").strip()
@@ -5304,11 +5311,12 @@ class JobProcessor:
                 f"(MR source → target `{getattr(git, 'target_branch', '')}`)."
             )
             logger.error(msg)
-            self._record_delivery_failure(state.issue_key, msg)
-            try:
-                self.reporter.post_progress_update(state, msg)
-            except Exception:
-                pass
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
 
         # Always record branch for completion messages (even if push fails later)
@@ -5360,20 +5368,28 @@ class JobProcessor:
                     f"Push failed or remote not configured for {state.issue_key}: "
                     f"{reason[:200]}"
                 )
-                self._record_delivery_failure(state.issue_key, reason)
-                try:
-                    detail = reason
-                    comment = (
-                        f"Git push failed for branch `{branch_name or 'unknown'}`.\n\n"
-                        f"{detail}\n\n"
-                        "Local work may still exist in the agent temp workspace; "
-                        "no merge request was created. Check GitLab credentials "
-                        "(GITLAB_PAT) and remote access, then re-queue from To Do."
-                    )
-                    self.reporter.post_progress_update(state, comment)
-                except Exception:
-                    pass
+                if notify_on_fail:
+                    self._record_delivery_failure(state.issue_key, reason)
+                    try:
+                        detail = reason
+                        comment = (
+                            f"Git push failed for branch `{branch_name or 'unknown'}`.\n\n"
+                            f"{detail}\n\n"
+                            "Local work may still exist in the agent temp workspace; "
+                            "no merge request was created. Check GitLab credentials "
+                            "(GITLAB_PAT) and remote access, then re-queue from To Do."
+                        )
+                        self.reporter.post_progress_update(state, comment)
+                    except Exception:
+                        pass
                 return False
+
+        if not open_mr:
+            logger.info(
+                f"{state.issue_key}: push ok (or already on remote); "
+                "skipping MR (open_mr=False)"
+            )
+            return True
 
         commit_subject = git.get_last_commit_subject()
         commit_body = git.get_last_commit_message()

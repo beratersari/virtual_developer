@@ -442,7 +442,7 @@ async def test_execution_error_already_pushed_is_not_delivery_error(
 async def test_execution_error_without_new_commits_still_fails(
     processor, state_manager, tmp_path, fake_jira
 ):
-    """No new commits + agent error → still ERROR (do not fake a delivery)."""
+    """No new commits + agent error → still ERROR, but push is still attempted."""
     state = state_manager.create_state("EX-NONE", "s", "d")
     git, runner = _mock_git_and_agent(
         processor,
@@ -452,6 +452,7 @@ async def test_execution_error_without_new_commits_still_fails(
     )
     git.get_last_commit_sha.side_effect = None
     git.get_last_commit_sha.return_value = "baseline000001"
+    git.push.return_value = True
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.default_agent = "atlas"
@@ -463,7 +464,43 @@ async def test_execution_error_without_new_commits_still_fails(
             await processor._start_execution_workflow(state)
     st = state_manager.get_state("EX-NONE")
     assert st.status == TaskStatus.ERROR
-    git.push.assert_not_called()
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_error_no_new_commits_already_pushed_still_agent_error(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """Already-on-remote with no new commits is not a push error and not complete."""
+    state = state_manager.create_state("EX-UPTODATE", "s", "d")
+    git, runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] open todos: 1 pending, 0 in_progress",
+    )
+    git.get_last_commit_sha.side_effect = None
+    git.get_last_commit_sha.return_value = "baseline000001"
+    git.push.return_value = False
+    git.last_push_error = "everything up-to-date"
+    git.head_is_on_remote.return_value = True
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "main"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-UPTODATE")
+    assert st.status == TaskStatus.ERROR
+    git.push.assert_called()
+    git.head_is_on_remote.assert_called()
+    git.create_merge_request.assert_not_called()
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert not any("Git push failed" in b for b in bodies)
 
 
 @pytest.mark.asyncio
