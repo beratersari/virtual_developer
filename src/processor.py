@@ -4183,6 +4183,74 @@ class JobProcessor:
                     )
                     success = True
             else:
+                outcome = await self._deliver_if_new_commits(
+                    state, existing_mr_url=event.mr_url or None
+                )
+                if outcome == "aborted":
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if outcome == "delivered":
+                    live = self.state_manager.get_state(state.issue_key) or state
+                    meta = dict(live.metadata or {})
+                    note = (
+                        "Agent session reported an error or incomplete stop, "
+                        "but this job left new commits. Orchestrator pushed "
+                        "onto the existing MR."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": note,
+                        },
+                    )
+                    answer = (result.get("stdout") or "").strip() or note
+                    self._post_gitlab_mr_reply(
+                        live,
+                        self._gitlab_mr_reply_body(
+                            answer,
+                            pushed=True,
+                            branch=str(
+                                meta.get("feature_branch") or work_branch or ""
+                            ),
+                            commit_sha=str(meta.get("last_commit_sha") or ""),
+                            commit_url=str(meta.get("last_commit_url") or ""),
+                            delivery_note=note,
+                        ),
+                    )
+                    updated = self.state_manager.update_state_if(
+                        state.issue_key,
+                        expected_statuses={TaskStatus.EXECUTING},
+                        reject_statuses=self.ABORTED_STATUSES,
+                        status=TaskStatus.COMPLETED,
+                        completed_at=datetime.now(),
+                        progress_percentage=100,
+                        current_task_id=None,
+                    )
+                    if updated is None:
+                        success = False
+                    else:
+                        self._finish_job_record(
+                            state.issue_key,
+                            status="completed",
+                            progress_percentage=100,
+                        )
+                        success = True
+                    return
+                if outcome == "push_failed":
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check GitLab remote/credentials, then comment "
+                            "on the MR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
                 self._fail_from_agent_result(
                     state.issue_key,
                     result,
@@ -4747,6 +4815,46 @@ class JobProcessor:
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
+            outcome = await self._deliver_if_new_commits(state)
+            if outcome == "aborted":
+                self._release_context(state.issue_key, success=False)
+                return
+            if outcome == "delivered":
+                note = (
+                    "Agent session reported an error or incomplete stop, "
+                    "but this job left new commits. Orchestrator pushed "
+                    "the work branch and opened (or reused) the merge request."
+                )
+                agent_err = (result.get("stderr") or "").strip()
+                self.state_manager.update_state(
+                    state.issue_key,
+                    metadata={
+                        "delivery_status": "delivered",
+                        "delivery_note": note,
+                    },
+                )
+                await self._complete_work(
+                    self.state_manager.get_state(state.issue_key),
+                    execution_summary=(
+                        note
+                        + (f"\n\nAgent: {agent_err[:1500]}" if agent_err else "")
+                    ),
+                    agent_answer=str(result.get("stdout") or ""),
+                )
+                return
+            if outcome == "push_failed":
+                self._fail_issue(
+                    state.issue_key,
+                    self._format_push_fail_error(
+                        self._push_failure_reason(state.issue_key),
+                        existing_mr=False,
+                    ),
+                    suggestion=(
+                        "Check GitLab remote/credentials, then re-queue from To Do."
+                    ),
+                )
+                self._release_context(state.issue_key, success=False)
+                return
             self._fail_from_agent_result(
                 state.issue_key,
                 result,
@@ -4959,6 +5067,43 @@ class JobProcessor:
                 "Agent exit code was 0 but nothing was delivered."
             )
         return None
+
+    async def _deliver_if_new_commits(
+        self,
+        state: JiraAgentState,
+        *,
+        existing_mr_url: Optional[str] = None,
+    ) -> str:
+        """Push/MR when this job created commits (success or agent error).
+
+        Returns ``delivered``, ``none``, ``push_failed``, or ``aborted``.
+        ``none`` means HEAD did not move this job (or delivery is not ready).
+        An already-pushed tip is ``delivered`` — ``_push_and_create_mr``
+        treats a remote HEAD match as success.
+        """
+        if self._is_aborted(state.issue_key):
+            return "aborted"
+        delivery_err = self._assert_build_delivery(state.issue_key)
+        if delivery_err:
+            logger.info(
+                f"{state.issue_key}: no new commits to deliver after agent "
+                f"result ({delivery_err[:160]})"
+            )
+            return "none"
+        logger.info(
+            f"{state.issue_key}: this job has new commits — pushing "
+            "(agent success or error does not skip delivery)"
+        )
+        if self._is_aborted(state.issue_key):
+            return "aborted"
+        push_ok = await self._push_and_create_mr(
+            state, existing_mr_url=existing_mr_url
+        )
+        if self._is_aborted(state.issue_key):
+            return "aborted"
+        if not push_ok:
+            return "push_failed"
+        return "delivered"
 
     def _durable_plan_path(self, issue_key: str) -> Path:
         """Host-side plan path that survives temp-clone cleanup."""
