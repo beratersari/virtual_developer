@@ -191,6 +191,42 @@ async def test_real_git_always_pushes_when_no_new_commits(
 
 
 @pytest.mark.asyncio
+async def test_real_git_prior_unpushed_commit_still_delivered(
+    processor, state_manager, origin_and_clone
+):
+    """Prior job committed; this job HEAD is unchanged — still push the tip."""
+    origin, clone = origin_and_clone
+    key = "REAL-PRIOR"
+    work = "feature/REAL-PRIOR"
+    _git(clone, "checkout", "-B", work)
+    gm = _real_gm(clone, origin, key, work)
+    state = state_manager.create_state(key, "prior commit", "d")
+    processor._contexts[key] = {"git": gm, "runner": None}
+
+    # Previous job committed, then failed before push.
+    (clone / "lead_test.c").write_text("int ok(void) { return 1; }\n")
+    _git(clone, "add", "lead_test.c")
+    _git(clone, "commit", "-m", "[kan] test: lead service unit tests")
+    prior_sha = gm.get_last_commit_sha()
+    assert prior_sha
+    assert not _remote_has(origin, work, prior_sha)
+
+    # This job starts at that same SHA (OpenCode makes no new commit).
+    gm.delivery_baseline_sha = prior_sha
+    processor._snapshot_delivery_baseline(key, gm)
+    assert gm.get_last_commit_sha() == prior_sha
+    assert gm.commits_ahead_of_target(work) >= 1
+
+    pat, allow = _allow_local_push(gm)
+    with pat, allow:
+        outcome = await processor._deliver_if_new_commits(state)
+
+    assert outcome == "delivered"
+    assert _remote_has(origin, work, prior_sha)
+    assert gm.head_is_on_remote(work) is True
+
+
+@pytest.mark.asyncio
 async def test_real_execution_error_pushes_real_commit(
     processor, state_manager, origin_and_clone, tmp_path
 ):
@@ -259,3 +295,70 @@ async def test_real_execution_error_pushes_real_commit(
     assert st.status == TaskStatus.COMPLETED
     assert new_sha_box["sha"]
     assert _remote_has(origin, work, new_sha_box["sha"])
+
+
+@pytest.mark.asyncio
+async def test_real_execution_success_pushes_prior_unpushed_commit(
+    processor, state_manager, origin_and_clone, tmp_path
+):
+    """Success + no new SHA this job still pushes a prior unpushed commit."""
+    from unittest.mock import AsyncMock
+
+    origin, clone = origin_and_clone
+    key = "REAL-RERUN"
+    work = "feature/REAL-RERUN"
+    _git(clone, "checkout", "-B", work)
+    gm = _real_gm(clone, origin, key, work)
+    state = state_manager.create_state(key, "rerun", "d")
+
+    (clone / "lead.c").write_text("int lead(void) { return 0; }\n")
+    _git(clone, "add", "lead.c")
+    _git(clone, "commit", "-m", "[kan] test: lead service unit tests")
+    prior_sha = gm.get_last_commit_sha()
+    assert prior_sha
+    assert not _remote_has(origin, work, prior_sha)
+
+    async def fake_prepare(_state):
+        processor._contexts[key] = {"git": gm, "runner": runner}
+        processor.git_manager = gm
+        processor.agent_runner = runner
+        return gm
+
+    runner = type("R", (), {})()
+
+    async def fake_agent(_task, **_kw):
+        return {
+            "returncode": 0,
+            "stdout": "Work is already done on this branch.",
+            "stderr": "",
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_rerun",
+            "retry_info": {"attempts": 1, "retried": False},
+            "timed_out": False,
+        }
+
+    runner.run_agent_with_retry = fake_agent
+    runner.cancel_task = lambda *_a, **_k: True
+    runner.cancel_all_tasks = lambda *_a, **_k: 0
+
+    pat, allow = _allow_local_push(gm)
+    with pat, allow:
+        with patch.object(
+            processor, "_prepare_git_workspace", new_callable=AsyncMock
+        ) as prep:
+            prep.side_effect = fake_prepare
+            with patch("src.processor.settings") as s:
+                s.default_agent = "atlas"
+                s.agent_task_timeout_seconds = 30
+                s.agent_task_max_retries = 0
+                s.agent_task_max_incomplete_retries = 0
+                s.default_branch = "develop"
+                s.full_plans_dir = tmp_path / "plans"
+                s.sisyphus_plans_dir = Path(".sisyphus/plans")
+                await processor._start_execution_workflow(state)
+
+    st = state_manager.get_state(key)
+    assert st is not None
+    assert st.status == TaskStatus.COMPLETED
+    assert (st.metadata or {}).get("delivery_status") == "delivered"
+    assert _remote_has(origin, work, prior_sha)

@@ -347,7 +347,9 @@ def create_dashboard_app(
 
         proc = app.state.processor
         store = getattr(proc, "queue_store", None) if proc is not None else qstore
-        return build_queue(status=status, limit=limit, store=store).model_dump()
+        return build_queue(
+            status=status, limit=limit, store=store, processor=proc
+        ).model_dump()
 
     @app.delete("/api/queue/{queue_id}")
     def queue_cancel(queue_id: str) -> dict:

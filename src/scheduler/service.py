@@ -1021,9 +1021,9 @@ async def _dispatch_claimed_schedule(
 ) -> None:
     """Hand work to the work queue (same path as poller/GitLab) then finish.
 
-    Uses ``enqueue_jira_event`` so a second dispatch while the issue is live
-    stays ``queued`` and is visible on the Jobs page. Does **not** await the
-    full agent run (queue worker owns that).
+    Uses ``enqueue_jira_event`` so a busy issue is not started twice.
+    A live issue is treated as already started (no extra Queue row).
+    Does **not** await the full agent run (queue worker owns that).
     """
     try:
         live = store.get(schedule_id) or claimed_rec or {}

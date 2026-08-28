@@ -1037,24 +1037,73 @@ def build_jobs(
     )
 
 
+def _queue_live_issue_keys(processor: Any = None) -> set:
+    """Issue keys that are already in-flight and must not appear as waiting."""
+    live: set = set()
+    if processor is None:
+        return live
+    list_fn = getattr(processor, "list_live_processing_keys", None)
+    if callable(list_fn):
+        try:
+            live = {(k or "").strip().upper() for k in (list_fn() or []) if k}
+        except Exception:
+            live = set()
+    sm = getattr(processor, "state_manager", None)
+    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
+    get_all = getattr(sm, "get_all_states", None) if sm is not None else None
+    if callable(get_all) and inflight:
+        try:
+            for st in get_all() or []:
+                if getattr(st, "status", None) in inflight:
+                    key = (getattr(st, "issue_key", None) or "").strip().upper()
+                    if key:
+                        live.add(key)
+        except Exception:
+            pass
+    return live
+
+
 def build_queue(
     *,
     status: Optional[str] = None,
     limit: int = 200,
     store: Any = None,
+    processor: Any = None,
 ) -> QueueResponse:
-    """List work-queue items for the dashboard (Jira + GitLab)."""
+    """List work-queue items for the dashboard (Jira + GitLab).
+
+    Waiting rows whose issue is already in-flight are omitted so the same
+    ticket is not listed under both In flight and Queue.
+    """
     from src.state.queue_store import work_queue_store as default_queue
 
     qs = store or default_queue
+    live_keys = _queue_live_issue_keys(processor)
+
+    def _waiting_and_live(rec: Dict[str, Any]) -> bool:
+        if (rec.get("status") or "") != "queued":
+            return False
+        ik = (rec.get("issue_key") or "").strip().upper()
+        if ik and ik in live_keys:
+            return True
+        check = getattr(processor, "_issue_is_in_flight", None) if processor else None
+        return bool(ik and callable(check) and check(ik))
+
     if status:
         raw = qs.list_items(status=status, limit=limit)
     else:
         raw = qs.list_items(status="queued", limit=limit) + qs.list_items(
             status="running", limit=limit
         )
+    raw = [rec for rec in raw if not _waiting_and_live(rec)]
     items: List[QueueItem] = []
-    queued = len(qs.list_items(status="queued", limit=500))
+    queued = len(
+        [
+            rec
+            for rec in qs.list_items(status="queued", limit=500)
+            if not _waiting_and_live(rec)
+        ]
+    )
     running = len(qs.list_items(status="running", limit=500))
     for rec in raw:
         st = rec.get("status") or "queued"
@@ -1118,7 +1167,7 @@ def build_dashboard_payload(
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "settings": build_settings_view().model_dump(),
-        "queue": build_queue().model_dump(),
+        "queue": build_queue(processor=processor).model_dump(),
     }
 
 

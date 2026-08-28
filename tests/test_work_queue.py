@@ -277,10 +277,10 @@ def test_queue_store_fifo_and_cancel(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_second_jira_enqueue_while_running_stays_queued(
+async def test_second_jira_enqueue_while_running_does_not_appear_in_queue(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
 ):
-    """Second dispatch of the same issue while first is live → visible queued row."""
+    """Second dispatch while the issue is live must not add a Queue row."""
     monkeypatch.chdir(tmp_path)
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
@@ -323,23 +323,54 @@ async def test_second_jira_enqueue_while_running_stays_queued(
     proc.dispatch_queue = no_dispatch  # type: ignore[method-assign]
     r2 = await proc.enqueue_jira_event(event)
     assert r2.get("ok") is True
-    assert r2.get("status") == "queued"
-    assert r2.get("duplicate") is not True
+    assert r2.get("duplicate") is True
+    assert r2.get("status") == "running"
+    assert r2.get("queued") is False
     open_rows = [
         r
         for r in proc.queue_store.list_items(limit=50)
         if r.get("status") in ("queued", "running") and r.get("issue_key") == "KAN-7"
     ]
     statuses = {r["status"] for r in open_rows}
-    assert "running" in statuses
-    assert "queued" in statuses
-    # API shape used by Jobs page
+    assert statuses == {"running"}
     from src.dashboard.service import build_queue
 
-    payload = build_queue(store=proc.queue_store)
-    assert payload.queued_count >= 1
+    payload = build_queue(store=proc.queue_store, processor=proc)
     waiting = [i for i in payload.items if i.status == "queued" and i.issue_key == "KAN-7"]
-    assert len(waiting) >= 1
+    assert waiting == []
+
+
+@pytest.mark.asyncio
+async def test_leftover_queued_row_hidden_and_skipped_when_issue_live(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """A leftover queued row for a live issue must not show on Queue or re-run."""
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-DUP", "s", "d")
+    state_manager.update_state("KAN-DUP", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-DUP"] = {"git": None, "runner": None}
+    leftover = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-DUP",
+        summary="duplicate wait",
+    )
+    assert leftover["status"] == "queued"
+
+    from src.dashboard.service import build_queue
+
+    payload = build_queue(store=proc.queue_store, processor=proc)
+    assert payload.queued_count == 0
+    assert not any(i.queue_id == leftover["queue_id"] for i in payload.items)
+
+    n = proc._skip_queued_while_in_flight()
+    assert n == 1
+    assert proc.queue_store.get(leftover["queue_id"])["status"] == "skipped"
 
 
 @pytest.mark.asyncio

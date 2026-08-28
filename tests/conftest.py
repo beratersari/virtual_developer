@@ -13,7 +13,12 @@ import pytest
 def _snapshot_paths(root: Path) -> Set[str]:
     if not root.is_dir():
         return set()
-    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+    # Full rglob of a production .jira-agent on WSL/NTFS can hang the
+    # autouse fixture for minutes. Top-level files still catch leaks.
+    try:
+        return {p.name for p in root.iterdir() if p.is_file()}
+    except OSError:
+        return set()
 
 
 @pytest.fixture(autouse=True)

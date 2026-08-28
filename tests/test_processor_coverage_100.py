@@ -914,8 +914,8 @@ def test_assert_build_delivery_failures(processor, tmp_path):
 
     git.ensure_on_work_branch.return_value = True
     git.commits_ahead_of_target.return_value = 0
-    git.get_last_commit_sha.return_value = "aaa111"
-    git.delivery_baseline_sha = None
+    git.get_last_commit_sha.return_value = "bbb222"
+    git.delivery_baseline_sha = "aaa111"
     err = processor._assert_build_delivery("BD-1")
     assert "No commits" in err
 
@@ -928,10 +928,14 @@ def test_assert_build_delivery_failures(processor, tmp_path):
     git.delivery_baseline_sha = "aaa111"  # new commits since start
     assert processor._assert_build_delivery("BD-1") is None
 
-    # Re-queue on existing source: ahead of target but HEAD unchanged → fail
+    # Re-queue on existing source: ahead of target, HEAD unchanged → still deliver
     git.delivery_baseline_sha = "bbb222"
     git.get_last_commit_sha.return_value = "bbb222"
     git.commits_ahead_of_target.return_value = 5
+    assert processor._assert_build_delivery("BD-1") is None
+
+    # HEAD unchanged and nothing ahead of target → soft no-op
+    git.commits_ahead_of_target.return_value = 0
     err = processor._assert_build_delivery("BD-1")
     assert err is not None
     assert "No new commits" in err
@@ -1116,6 +1120,22 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.get_last_commit_subject.return_value = None
     git.get_last_commit_message.return_value = None
     assert await processor._push_and_create_mr(state) is True
+
+    # HEAD == job-start baseline (prior unpushed commit) still records delivery
+    git.ensure_on_work_branch.return_value = True
+    git.work_branch = "feature/PU-1"
+    git.get_current_branch.return_value = "feature/PU-1"
+    git.push.return_value = True
+    git.delivery_baseline_sha = "6958c0ce96f1"
+    git.get_last_commit_sha.return_value = "6958c0ce96f1"
+    git.get_last_commit_subject.return_value = "[kan] test: lead service unit tests"
+    git.get_last_commit_message.return_value = "[kan] test: lead service unit tests"
+    git.create_merge_request.return_value = "http://mr/prior"
+    processor.reporter.post_progress_update = MagicMock()
+    assert await processor._push_and_create_mr(state) is True
+    git.create_merge_request.assert_called()
+    recorded = (state_manager.get_state("PU-1").metadata or {}).get("merge_request_url")
+    assert recorded == "http://mr/prior"
 
     # reporter raises on progress — still returns
     processor.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))

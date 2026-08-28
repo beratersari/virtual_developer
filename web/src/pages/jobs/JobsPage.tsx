@@ -54,10 +54,15 @@ export function JobsPage() {
     return () => window.clearTimeout(t)
   }, [issueFilter])
 
-  const loadQueue = useCallback(async () => {
+  const loadQueue = useCallback(async (liveIssueKeys?: Set<string>) => {
     try {
       const q = await fetchQueue({ status: 'queued', limit: 200 })
-      const rows = (q.items || []).filter((r) => r.status === 'queued')
+      const live = liveIssueKeys ?? new Set<string>()
+      const rows = (q.items || []).filter((r) => {
+        if (r.status !== 'queued') return false
+        const key = (r.issue_key || '').toUpperCase()
+        return !key || !live.has(key)
+      })
       rows.sort((a, b) =>
         String(b.created_at || '').localeCompare(String(a.created_at || '')),
       )
@@ -84,6 +89,14 @@ export function JobsPage() {
         rememberJobsPayload(data)
         setPayload(data)
         setError(null)
+        const liveKeys = new Set(
+          (data.jobs || [])
+            .filter((j) => j.live)
+            .map((j) => (j.issue_key || '').toUpperCase())
+            .filter(Boolean),
+        )
+        void loadQueue(liveKeys)
+        return
       } catch (e) {
         if (req !== reqId.current) return
         setError(e instanceof Error ? e.message : 'Failed to load jobs')
@@ -455,7 +468,16 @@ export function JobsPage() {
           setCancelQueueId(null)
           if (!id) return
           void cancelQueueItem(id)
-            .then(() => loadQueue())
+            .then(() =>
+              loadQueue(
+                new Set(
+                  (payload?.jobs || [])
+                    .filter((j) => j.live)
+                    .map((j) => (j.issue_key || '').toUpperCase())
+                    .filter(Boolean),
+                ),
+              ),
+            )
             .catch((e) => {
               setError(e instanceof Error ? e.message : 'Cancel queue item failed')
             })
