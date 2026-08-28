@@ -136,6 +136,11 @@ class IssueGitConfigError(Exception):
         super().__init__(user_message)
 
 
+def _strip_wiki_field_bold(text: str) -> str:
+    """Turn Jira ``*Model:* foo`` / ``*Backend:* bar`` into ``Model: foo``."""
+    return re.sub(r"(?im)^([ \t]*)\*([^*\n]+)\*\s*", r"\1\2 ", text or "")
+
+
 def _expand_links(text: str) -> str:
     """Turn Jira/markdown links into bare URLs / keys for field parsing.
 
@@ -185,46 +190,60 @@ def _normalize_model_id(raw: str) -> str:
     return mid
 
 
-def upsert_params_model(description: str, model: str) -> str:
-    """Set or replace ``Model:`` inside the first ``{params}`` block."""
-    mid = _normalize_model_id(model)
+def _upsert_params_field(
+    description: str,
+    *,
+    key_re: str,
+    label: str,
+    value: str,
+    present: Optional[re.Pattern[str]],
+) -> str:
+    """Set or replace one ``Key:`` line inside the first ``{params}`` block."""
     text = description or ""
-    if not mid:
+    if not value:
         return text
     m = _PARAMS_BLOCK.search(text)
     if not m:
         return text
-    inner = m.group(1)
-    if _MODEL_FIELD.search(inner):
-        inner2 = re.sub(
-            rf"(?im)^(\s*(?:model|llm|opencode\s*model|default\s*model)\s*:\s*)\S+",
-            rf"\g<1>{mid}",
+    inner = _strip_wiki_field_bold(m.group(1))
+    inner2, n = re.subn(
+        rf"(?im)^([ \t]*\*?[ \t]*(?:{key_re})[ \t]*\*?\s*:\s*)\S+",
+        rf"\g<1>{value}",
+        inner,
+        count=1,
+    )
+    if n == 0 and present is not None and present.search(inner):
+        inner2, n = re.subn(
+            rf"(?is)((?:{key_re})\s*:\s*)\S+",
+            rf"\g<1>{value}",
             inner,
+            count=1,
         )
-    else:
-        inner2 = inner.rstrip() + f"\nModel: {mid}\n"
+    if n == 0:
+        inner2 = inner.rstrip() + f"\n{label}: {value}\n"
     return text[: m.start(1)] + inner2 + text[m.end(1) :]
+
+
+def upsert_params_model(description: str, model: str) -> str:
+    """Set or replace ``Model:`` inside the first ``{params}`` block."""
+    return _upsert_params_field(
+        description,
+        key_re=_MODEL_KEY,
+        label="Model",
+        value=_normalize_model_id(model),
+        present=_MODEL_FIELD,
+    )
 
 
 def upsert_params_backend(description: str, backend: str) -> str:
     """Set or replace ``Backend:`` inside the first ``{params}`` block."""
-    bid = _normalize_backend_id(backend)
-    text = description or ""
-    if not bid:
-        return text
-    m = _PARAMS_BLOCK.search(text)
-    if not m:
-        return text
-    inner = m.group(1)
-    if _BACKEND_FIELD.search(inner):
-        inner2 = re.sub(
-            rf"(?im)^(\s*(?:backend|agent\s*backend|worker)\s*:\s*)\S+",
-            rf"\g<1>{bid}",
-            inner,
-        )
-    else:
-        inner2 = inner.rstrip() + f"\nBackend: {bid}\n"
-    return text[: m.start(1)] + inner2 + text[m.end(1) :]
+    return _upsert_params_field(
+        description,
+        key_re=_BACKEND_KEY,
+        label="Backend",
+        value=_normalize_backend_id(backend),
+        present=_BACKEND_FIELD,
+    )
 
 
 def _normalize_branch(raw: str) -> str:
@@ -390,7 +409,7 @@ def parse_issue_git_spec(
             "{code}"
         )
 
-    text = block
+    text = _strip_wiki_field_bold(block)
     repo = _extract_repo(text)
     source_m = _SOURCE_FIELD.search(text)
     target_m = _TARGET_FIELD.search(text)

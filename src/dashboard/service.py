@@ -7,7 +7,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from src.config import save_runtime_settings, settings, upsert_dotenv_keys
+from src.config import (
+    jira_host_is_cloud,
+    save_runtime_settings,
+    settings,
+    upsert_dotenv_keys,
+)
 from src.dashboard.issue_logs import issue_log_ring
 from src.logger import logger
 from src.dashboard.project_repos import (
@@ -384,8 +389,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     the next daemon start
     use the saved values. Token is never returned in the view.
 
-    Every Settings save clears ``JIRA_EMAIL`` (runtime + .env) so later
-    auth is Bearer token only. Email from ``.env`` is used only until that save.
+    Cloud (``*.atlassian.net``) keeps ``JIRA_EMAIL`` so API tokens stay
+    HTTP Basic. On-prem hosts still clear email so auth is Bearer PAT.
 
     Callers should refresh live Jira clients when host/token/email change
     (see ``refresh_runtime_jira_clients``).
@@ -591,11 +596,17 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["trigger_assignee_names"] = settings.trigger_assignee_names
         dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = settings.trigger_assignee_names
 
-    # Settings save always drops JIRA_EMAIL. Until this first save, .env email
-    # (if any) is used for Cloud Basic. After save, auth is token-only Bearer.
-    settings.jira_email = ""
-    dotenv_updates["JIRA_EMAIL"] = ""
-    runtime_persist["jira_email"] = ""
+    # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
+    # email (Basic). On-prem stays token-only Bearer.
+    if jira_host_is_cloud(getattr(settings, "jira_host", "")):
+        email = (getattr(settings, "jira_email", "") or "").strip()
+        if email:
+            runtime_persist["jira_email"] = email
+            dotenv_updates["JIRA_EMAIL"] = email
+    else:
+        settings.jira_email = ""
+        dotenv_updates["JIRA_EMAIL"] = ""
+        runtime_persist["jira_email"] = ""
 
     if runtime_persist:
         # Persist so the next job (and process restart) does not fall back to .env
@@ -1037,24 +1048,73 @@ def build_jobs(
     )
 
 
+def _queue_live_issue_keys(processor: Any = None) -> set:
+    """Issue keys that are already in-flight and must not appear as waiting."""
+    live: set = set()
+    if processor is None:
+        return live
+    list_fn = getattr(processor, "list_live_processing_keys", None)
+    if callable(list_fn):
+        try:
+            live = {(k or "").strip().upper() for k in (list_fn() or []) if k}
+        except Exception:
+            live = set()
+    sm = getattr(processor, "state_manager", None)
+    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
+    get_all = getattr(sm, "get_all_states", None) if sm is not None else None
+    if callable(get_all) and inflight:
+        try:
+            for st in get_all() or []:
+                if getattr(st, "status", None) in inflight:
+                    key = (getattr(st, "issue_key", None) or "").strip().upper()
+                    if key:
+                        live.add(key)
+        except Exception:
+            pass
+    return live
+
+
 def build_queue(
     *,
     status: Optional[str] = None,
     limit: int = 200,
     store: Any = None,
+    processor: Any = None,
 ) -> QueueResponse:
-    """List work-queue items for the dashboard (Jira + GitLab)."""
+    """List work-queue items for the dashboard (Jira + GitLab).
+
+    Waiting rows whose issue is already in-flight are omitted so the same
+    ticket is not listed under both In flight and Queue.
+    """
     from src.state.queue_store import work_queue_store as default_queue
 
     qs = store or default_queue
+    live_keys = _queue_live_issue_keys(processor)
+
+    def _waiting_and_live(rec: Dict[str, Any]) -> bool:
+        if (rec.get("status") or "") != "queued":
+            return False
+        ik = (rec.get("issue_key") or "").strip().upper()
+        if ik and ik in live_keys:
+            return True
+        check = getattr(processor, "_issue_is_in_flight", None) if processor else None
+        return bool(ik and callable(check) and check(ik))
+
     if status:
         raw = qs.list_items(status=status, limit=limit)
     else:
         raw = qs.list_items(status="queued", limit=limit) + qs.list_items(
             status="running", limit=limit
         )
+    raw = [rec for rec in raw if not _waiting_and_live(rec)]
     items: List[QueueItem] = []
-    queued = len(qs.list_items(status="queued", limit=500))
+    queued = len(
+        [
+            rec
+            for rec in qs.list_items(status="queued", limit=500)
+            if not _waiting_and_live(rec)
+        ]
+    )
     running = len(qs.list_items(status="running", limit=500))
     for rec in raw:
         st = rec.get("status") or "queued"
@@ -1118,7 +1178,7 @@ def build_dashboard_payload(
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "settings": build_settings_view().model_dump(),
-        "queue": build_queue().model_dump(),
+        "queue": build_queue(processor=processor).model_dump(),
     }
 
 

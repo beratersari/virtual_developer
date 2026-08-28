@@ -281,6 +281,7 @@ def preview_existing_issue(
                 "error": _plain_template_error(err or "Invalid {params} template"),
                 "issue_key": key,
                 "title": summary,
+                "description": description,
                 "jira_status": status_name,
                 "template_valid": False,
             }
@@ -316,12 +317,15 @@ def schedule_existing_issue(
     scheduled_at: str,
     model: str = "",
     backend: str = "",
+    description: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
     """Schedule an existing Jira issue for later dispatch (no new issue create).
 
     Hard-fails if the issue cannot be loaded or the template is invalid.
+    ``description`` (optional) is the operator-edited Jira prompt; when set
+    it replaces the live ticket body after a template check.
     Soft-fails: In Progress transition and SCHEDULED_AI_JOB label.
     """
     key = (issue_key or "").strip().upper()
@@ -382,49 +386,48 @@ def schedule_existing_issue(
                     "schedule": existing,
                 }
 
-        desc = preview.get("description") or ""
+        operator_desc = (description or "").strip()
+        desc = operator_desc or (preview.get("description") or "")
+        if operator_desc:
+            spec, err = parse_issue_git_spec(
+                preview.get("title") or key, operator_desc
+            )
+            if err or spec is None:
+                return {
+                    "ok": False,
+                    "error": _plain_template_error(
+                        err or "Edited prompt is missing a valid {params} block"
+                    ),
+                    "issue_key": key,
+                    "template_valid": False,
+                }
         mid = _normalize_model_id(model) or (preview.get("model") or "")
         mid = _normalize_model_id(mid)
         bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
         bid = _normalize_backend_id(bid)
         if mid:
-            rewritten = upsert_params_model(desc, mid)
-            if rewritten != desc:
-                try:
-                    if hasattr(client, "update_issue"):
-                        ok_upd = client.update_issue(
-                            key, fields={"description": rewritten}
-                        )
-                        if ok_upd:
-                            desc = rewritten
-                            logger.info(f"{key}: set Model: {mid} on issue")
-                        else:
-                            logger.warning(
-                                f"{key}: could not write Model: {mid} to Jira "
-                                f"(schedule still records it)"
-                            )
-                except Exception as e:
-                    logger.warning(f"{key}: Model description update soft-failed: {e}")
+            desc = upsert_params_model(desc, mid)
         if bid:
-            rewritten_b = upsert_params_backend(desc, bid)
-            if rewritten_b != desc:
-                try:
-                    if hasattr(client, "update_issue"):
-                        ok_upd = client.update_issue(
-                            key, fields={"description": rewritten_b}
-                        )
-                        if ok_upd:
-                            desc = rewritten_b
-                            logger.info(f"{key}: set Backend: {bid} on issue")
-                        else:
-                            logger.warning(
-                                f"{key}: could not write Backend: {bid} to Jira "
-                                f"(schedule still records it)"
-                            )
-                except Exception as e:
-                    logger.warning(
-                        f"{key}: Backend description update soft-failed: {e}"
+            desc = upsert_params_backend(desc, bid)
+        if desc != (preview.get("description") or ""):
+            try:
+                if hasattr(client, "update_issue"):
+                    ok_upd = client.update_issue(
+                        key, fields={"description": desc}
                     )
+                    if ok_upd:
+                        logger.info(
+                            f"{key}: wrote dashboard prompt/model/backend to Jira"
+                        )
+                    else:
+                        logger.warning(
+                            f"{key}: could not write prompt/model/backend to Jira "
+                            f"(schedule still uses the dashboard text)"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"{key}: description update soft-failed: {e}"
+                )
 
         rec = ss.create(
             title=preview.get("title") or key,
@@ -809,53 +812,60 @@ def _issue_payload_for_dispatch(
     *,
     jira_client: Any = None,
 ) -> Dict[str, Any]:
-    """Build a poller-shaped issue dict. Prefer live Jira; fall back to local copy."""
+    """Build a poller-shaped issue dict.
+
+    Summary/labels prefer live Jira. The work description prefers the
+    schedule snapshot (dashboard-edited prompt + model/backend) so a
+    ticket that already had Model/Backend set cannot override the form.
+    """
     issue_key = (rec.get("issue_key") or "").upper()
     summary = rec.get("title") or ""
-    description = rec.get("issue_description") or ""
+    snapshot = rec.get("issue_description") or ""
+    description = snapshot
     labels = [SCHEDULE_LABEL]
+    live_id = None
+    assignee = None
+    status = {"name": "In Progress"}
 
     client = jira_client
     if client is not None and issue_key:
         try:
             live = client.get_issue(issue_key)
-            if live:
+            if isinstance(live, dict) and live:
                 fields = live.get("fields") or {}
                 if fields.get("summary"):
                     summary = fields["summary"]
-                desc = fields.get("description")
-                if isinstance(desc, str) and desc.strip():
-                    description = desc
-                elif desc is not None and not isinstance(desc, str):
-                    description = str(desc)
+                live_id = live.get("id")
+                assignee = fields.get("assignee")
+                if fields.get("status"):
+                    status = fields.get("status")
                 lab = fields.get("labels") or []
                 if isinstance(lab, list) and lab:
                     labels = [str(x) for x in lab]
-                return {
-                    "key": issue_key,
-                    "id": live.get("id"),
-                    "fields": {
-                        "summary": summary,
-                        "description": description,
-                        "labels": labels,
-                        "status": fields.get("status") or {"name": "In Progress"},
-                        "assignee": fields.get("assignee"),
-                    },
-                }
+                if not snapshot.strip():
+                    description = _description_to_text(fields.get("description"))
         except Exception as e:
             logger.warning(
                 f"{issue_key}: Jira fetch soft-failed at dispatch: {e}; "
                 f"using local schedule snapshot"
             )
 
+    mid = _normalize_model_id(rec.get("model") or "")
+    bid = _normalize_backend_id(rec.get("backend") or "")
+    if mid:
+        description = upsert_params_model(description, mid)
+    if bid:
+        description = upsert_params_backend(description, bid)
+
     return {
         "key": issue_key,
+        "id": live_id,
         "fields": {
             "summary": summary,
             "description": description,
             "labels": labels,
-            "status": {"name": "In Progress"},
-            "assignee": None,
+            "status": status,
+            "assignee": assignee,
         },
     }
 
@@ -1021,9 +1031,9 @@ async def _dispatch_claimed_schedule(
 ) -> None:
     """Hand work to the work queue (same path as poller/GitLab) then finish.
 
-    Uses ``enqueue_jira_event`` so a second dispatch while the issue is live
-    stays ``queued`` and is visible on the Jobs page. Does **not** await the
-    full agent run (queue worker owns that).
+    Uses ``enqueue_jira_event`` so a busy issue is not started twice.
+    A live issue is treated as already started (no extra Queue row).
+    Does **not** await the full agent run (queue worker owns that).
     """
     try:
         live = store.get(schedule_id) or claimed_rec or {}
@@ -1047,8 +1057,11 @@ async def _dispatch_claimed_schedule(
             )
             return
         if event is None:
+            client = jira_client
+            if client is None:
+                client = getattr(processor, "jira_client", None)
             issue = _issue_payload_for_dispatch(
-                claimed_rec or live, jira_client=jira_client
+                claimed_rec or live, jira_client=client
             )
             live = store.get(schedule_id) or live
             if (live.get("status") or "").lower() != "dispatching":
@@ -1150,6 +1163,100 @@ async def _dispatch_claimed_schedule(
         _INFLIGHT_DISPATCHES.pop(schedule_id, None)
 
 
+_STALE_REAP_SKIP = "Reaped stale running queue row"
+
+
+def _latest_queue_row_for_schedule(queue_store: Any, schedule_id: str) -> Optional[Dict[str, Any]]:
+    """Newest queue row whose payload was created by this schedule fire."""
+    sid = (schedule_id or "").strip()
+    if not sid or queue_store is None or not hasattr(queue_store, "list_items"):
+        return None
+    best: Optional[Dict[str, Any]] = None
+    try:
+        rows = queue_store.list_items(limit=500)
+    except Exception:
+        return None
+    for rec in rows:
+        payload = rec.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("schedule_id") or "") != sid:
+            continue
+        if best is None or (rec.get("created_at") or "") >= (best.get("created_at") or ""):
+            best = rec
+    return best
+
+
+def _reopen_skipped_dispatched_schedules(
+    processor: Any,
+    store: ScheduleStore,
+    *,
+    now: Optional[datetime] = None,
+) -> int:
+    """Turn ``dispatched`` + stale-reap skip back into a due schedule.
+
+    Enqueue marks the schedule dispatched before the queue worker runs. If
+    the row is then reaped as skipped (never started), the UI stays
+    Dispatched and Run now is refused. Re-open those so the next tick fires.
+    """
+    qs = getattr(processor, "queue_store", None)
+    if qs is None:
+        return 0
+    when = (now or datetime.now()).isoformat(timespec="seconds")
+    pending_keys: Set[str] = set()
+    try:
+        for other in store.list_schedules(limit=500):
+            st = (other.get("status") or "").lower()
+            if st in ("scheduled", "dispatching"):
+                k = (other.get("issue_key") or "").strip().upper()
+                if k:
+                    pending_keys.add(k)
+    except Exception:
+        pending_keys = set()
+    n = 0
+    for rec in store.list_schedules(status="dispatched", limit=500):
+        sid = rec.get("schedule_id") or ""
+        key = (rec.get("issue_key") or "").strip()
+        if not sid:
+            continue
+        if key and key.upper() in pending_keys:
+            continue
+        if _issue_in_flight_reason(processor, key):
+            continue
+        live_fn = getattr(processor, "list_live_processing_keys", None)
+        if callable(live_fn):
+            try:
+                live = {(k or "").strip().upper() for k in (live_fn() or []) if k}
+            except Exception:
+                live = set()
+            if key and key.upper() in live:
+                continue
+        find_open = getattr(qs, "find_open_jira", None)
+        if callable(find_open) and key:
+            try:
+                if find_open(key):
+                    continue
+            except Exception:
+                pass
+        qrow = _latest_queue_row_for_schedule(qs, sid)
+        if not qrow or (qrow.get("status") or "") != "skipped":
+            continue
+        if _STALE_REAP_SKIP not in str(qrow.get("error_message") or ""):
+            continue
+        store.update(
+            sid,
+            status="scheduled",
+            scheduled_at=when,
+            error_message=None,
+        )
+        n += 1
+        logger.info(
+            f"Schedule {sid} re-opened after skipped queue "
+            f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+        )
+    return n
+
+
 async def dispatch_due_schedules(
     *,
     processor: "JobProcessor",
@@ -1185,55 +1292,55 @@ async def dispatch_due_schedules(
             logger.info(f"Schedule dispatch: recovered {n} stuck dispatching row(s)")
     except Exception as e:
         logger.warning(f"Schedule dispatch: stuck recovery failed: {e}")
+    try:
+        n = _reopen_skipped_dispatched_schedules(processor, ss, now=now)
+        if n:
+            logger.info(
+                f"Schedule dispatch: re-opened {n} skipped dispatched schedule(s)"
+            )
+    except Exception as e:
+        logger.warning(f"Schedule dispatch: skipped-dispatch recovery failed: {e}")
     due = ss.list_due(now=now)
     claimed = 0
     launched = 0
     failed = 0
 
+    # Use the caller client or the processor's long-lived client. Do not
+    # open+close a tick-scoped client: workers are async and would hit
+    # "Cannot send a request, as the client has been closed."
     client = jira_client
-    close_client = False
-    if client is None and due:
+    if client is None:
+        proc_client = getattr(processor, "jira_client", None)
+        if proc_client is not None and callable(
+            getattr(proc_client, "get_issue", None)
+        ):
+            client = proc_client
+
+    for rec in due:
+        sid = rec.get("schedule_id") or ""
+        claimed_rec = ss.claim_due(sid)
+        if not claimed_rec:
+            continue
+        claimed += 1
+        issue_key = (claimed_rec.get("issue_key") or "").upper()
         try:
-            from src.jira.client import create_jira_client
-
-            client = create_jira_client()
-            close_client = True
+            _start_claimed_worker(
+                claimed_rec,
+                processor=processor,
+                store=ss,
+                jira_client=client,
+            )
+            launched += 1
         except Exception as e:
-            logger.warning(f"Schedule dispatch: could not open Jira client: {e}")
-            client = None
-
-    try:
-        for rec in due:
-            sid = rec.get("schedule_id") or ""
-            claimed_rec = ss.claim_due(sid)
-            if not claimed_rec:
-                continue
-            claimed += 1
-            issue_key = (claimed_rec.get("issue_key") or "").upper()
-            try:
-                _start_claimed_worker(
-                    claimed_rec,
-                    processor=processor,
-                    store=ss,
-                    jira_client=client,
-                )
-                launched += 1
-            except Exception as e:
-                failed += 1
-                logger.exception(
-                    f"Schedule {sid} dispatch failed for {issue_key}: {e}", e
-                )
-                ss.update(
-                    sid,
-                    status="error",
-                    error_message=str(e)[:1000],
-                )
-    finally:
-        if close_client and client is not None and hasattr(client, "close"):
-            try:
-                client.close()
-            except Exception:
-                pass
+            failed += 1
+            logger.exception(
+                f"Schedule {sid} dispatch failed for {issue_key}: {e}", e
+            )
+            ss.update(
+                sid,
+                status="error",
+                error_message=str(e)[:1000],
+            )
 
     return {
         "ok": True,

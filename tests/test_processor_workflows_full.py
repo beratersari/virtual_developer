@@ -334,9 +334,12 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
 
     assert state_manager.get_state("EX-1").status == TaskStatus.COMPLETED
 
-    # execution fail
+    # execution fail — nothing ahead of target (HEAD unchanged)
     state_f = state_manager.create_state("EX-F", "s", "d")
     git_f, runner_f = _mock_git_and_agent(processor, tmp_path, returncode=1, stderr="exec fail")
+    git_f.get_last_commit_sha.side_effect = None
+    git_f.get_last_commit_sha.return_value = "baseline000001"
+    git_f.commits_ahead_of_target.return_value = 0
     with patch.object(processor, "_init_git_manager", return_value=git_f):
         with patch("src.processor.settings") as s:
             s.default_agent = "atlas"
@@ -364,9 +367,12 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             await processor._start_execution_workflow(state_d)
     assert state_manager.get_state("DX-1").status == TaskStatus.COMPLETED
 
-    # direct fail
+    # direct fail — nothing ahead of target
     state_df = state_manager.create_state("DX-F", "fix", "fix")
     git_df, runner_df = _mock_git_and_agent(processor, tmp_path, returncode=1, stderr="nope")
+    git_df.get_last_commit_sha.side_effect = None
+    git_df.get_last_commit_sha.return_value = "baseline000001"
+    git_df.commits_ahead_of_target.return_value = 0
     with patch.object(processor, "_init_git_manager", return_value=git_df):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
@@ -375,6 +381,128 @@ async def test_execution_and_direct_and_review(processor, state_manager, tmp_pat
             await processor._start_execution_workflow(state_df)
     assert state_manager.get_state("DX-F").status == TaskStatus.ERROR
 
+
+@pytest.mark.asyncio
+async def test_execution_error_still_pushes_new_commits(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """OpenCode incomplete/error must still push if this job committed."""
+    state = state_manager.create_state("EX-PUSH", "s", "d")
+    git, runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] session still incomplete: open todos: 2 pending, 1 in_progress",
+    )
+    git.commits_ahead_of_target.return_value = 1
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "main"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-PUSH")
+    assert st.status == TaskStatus.COMPLETED
+    git.push.assert_called()
+    assert (st.metadata or {}).get("delivery_status") == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_execution_error_already_pushed_is_not_delivery_error(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """Agent already pushed the tip — treat remote HEAD match as delivered."""
+    state = state_manager.create_state("EX-REMOTE", "s", "d")
+    git, runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] open todos: 1 pending, 0 in_progress",
+    )
+    git.push.return_value = False
+    git.last_push_error = "everything up-to-date"
+    git.head_is_on_remote.return_value = True
+    git.commits_ahead_of_target.return_value = 1
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "main"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-REMOTE")
+    assert st.status == TaskStatus.COMPLETED
+    git.head_is_on_remote.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_error_without_new_commits_still_fails(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """No new commits + agent error → still ERROR, but push is still attempted."""
+    state = state_manager.create_state("EX-NONE", "s", "d")
+    git, runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] session still incomplete: open todos: 2 pending, 1 in_progress",
+    )
+    git.get_last_commit_sha.side_effect = None
+    git.get_last_commit_sha.return_value = "baseline000001"
+    git.push.return_value = True
+    git.commits_ahead_of_target.return_value = 0
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "main"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-NONE")
+    assert st.status == TaskStatus.ERROR
+    git.push.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_error_no_new_commits_already_pushed_still_agent_error(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """Already-on-remote with no new commits is not a push error and not complete."""
+    state = state_manager.create_state("EX-UPTODATE", "s", "d")
+    git, runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] open todos: 1 pending, 0 in_progress",
+    )
+    git.get_last_commit_sha.side_effect = None
+    git.get_last_commit_sha.return_value = "baseline000001"
+    git.push.return_value = False
+    git.last_push_error = "everything up-to-date"
+    git.head_is_on_remote.return_value = True
+    git.commits_ahead_of_target.return_value = 0
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "main"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-UPTODATE")
+    assert st.status == TaskStatus.ERROR
+    git.push.assert_called()
+    git.head_is_on_remote.assert_called()
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert not any("Git push failed" in b for b in bodies)
 
 
 @pytest.mark.asyncio
@@ -416,6 +544,68 @@ async def test_push_and_create_mr_branches(processor, state_manager, tmp_path, f
         await processor._push_and_create_mr(state)
     loaded = state_manager.get_state("MR-1")
     assert loaded.metadata.get("merge_request_url") == "http://mr/2"
+
+
+@pytest.mark.asyncio
+async def test_execution_success_prior_unpushed_commits_pushes_and_opens_mr(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """KAN-12757: prior job committed, this job no new SHA — still push + MR."""
+    state = state_manager.create_state("KAN-12757", "lead tests", "d")
+    git, _runner = _mock_git_and_agent(processor, tmp_path, returncode=0)
+    git.get_last_commit_sha.side_effect = None
+    git.get_last_commit_sha.return_value = "6958c0ce96f1"
+    git.commits_ahead_of_target.return_value = 1
+    git.push.return_value = True
+    git.create_merge_request.return_value = "http://gitlab/mr/12757"
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "develop"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("KAN-12757")
+    assert st.status == TaskStatus.COMPLETED
+    assert (st.metadata or {}).get("delivery_status") == "delivered"
+    assert (st.metadata or {}).get("merge_request_url") == "http://gitlab/mr/12757"
+    git.push.assert_called()
+    git.create_merge_request.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_error_prior_unpushed_commits_still_delivers(
+    processor, state_manager, tmp_path, fake_jira
+):
+    """Agent error + prior unpushed commits ahead of target → push + MR + complete."""
+    state = state_manager.create_state("EX-PRIOR", "s", "d")
+    git, _runner = _mock_git_and_agent(
+        processor,
+        tmp_path,
+        returncode=2,
+        stderr="[INCOMPLETE] session still incomplete: open todos: 2 pending",
+    )
+    git.get_last_commit_sha.side_effect = None
+    git.get_last_commit_sha.return_value = "6958c0ce96f1"
+    git.commits_ahead_of_target.return_value = 1
+    git.push.return_value = True
+    git.create_merge_request.return_value = "http://gitlab/mr/prior"
+    with patch.object(processor, "_init_git_manager", return_value=git):
+        with patch("src.processor.settings") as s:
+            s.default_agent = "atlas"
+            s.agent_task_timeout_seconds = 10
+            s.agent_task_max_retries = 1
+            s.default_branch = "develop"
+            s.full_plans_dir = tmp_path / "plans"
+            s.sisyphus_plans_dir = Path(".sisyphus/plans")
+            await processor._start_execution_workflow(state)
+    st = state_manager.get_state("EX-PRIOR")
+    assert st.status == TaskStatus.COMPLETED
+    assert (st.metadata or {}).get("delivery_status") == "delivered"
+    git.push.assert_called()
+    git.create_merge_request.assert_called()
 
 
 @pytest.mark.asyncio

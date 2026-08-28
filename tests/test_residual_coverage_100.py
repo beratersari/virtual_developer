@@ -41,6 +41,7 @@ def _git_agent(processor, key, tmp_path, **kw):
     git.ensure_on_work_branch.return_value = True
     git.commits_ahead_of_target.return_value = 1
     git.push.return_value = kw.get("push_ok", True)
+    git.head_is_on_remote.return_value = False
     git.get_last_commit_subject.return_value = kw.get("subject", "feat: x")
     git.get_last_commit_message.return_value = "body"
     _sha_calls = {"n": 0}
@@ -205,6 +206,7 @@ async def test_planning_reporter_exceptions_still_plan_ready(
 async def test_push_reporter_exceptions(processor, state_manager, tmp_path):
     state = state_manager.create_state("MR-X", "s", "d")
     git, _ = _git_agent(processor, "MR-X", tmp_path, push_ok=False)
+    git.head_is_on_remote.return_value = False
     processor.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))
     assert await processor._push_and_create_mr(state) is False
 

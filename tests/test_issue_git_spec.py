@@ -72,6 +72,31 @@ Mode: build
     assert two.lower().count("model:") == 1
 
 
+def test_upsert_params_model_replaces_wiki_bold_line():
+    from src.issue_git_spec import upsert_params_backend, upsert_params_model
+
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "Mode: build\n"
+        "*Model:* old-model\n"
+        "*Backend:* opencode\n"
+        "{params}\n"
+    )
+    out = upsert_params_model(desc, "opencode/hy3-free")
+    spec, err = parse_issue_git_spec("", out)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/hy3-free"
+    out2 = upsert_params_backend(out, "codex")
+    spec2, err2 = parse_issue_git_spec("", out2)
+    assert err2 is None
+    assert spec2 is not None
+    assert spec2.backend == "codex"
+
+
 def test_params_required():
     """Fields outside {params} are ignored."""
     desc = (

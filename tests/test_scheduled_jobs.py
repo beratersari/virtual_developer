@@ -707,6 +707,7 @@ def test_preview_existing_issue_invalid_template():
 
     out = preview_existing_issue("KAN-21", jira_client=client)
     assert out["ok"] is False
+    assert out.get("description") == "just text"
     assert "params" in out["error"].lower() or "template" in out["error"].lower() or "could not" in out["error"].lower()
 
 
@@ -1086,3 +1087,106 @@ def test_api_from_issue_run_now_stamps_scheduled_at_now(tmp_path, monkeypatch):
     assert got <= after + timedelta(seconds=2)
     assert abs((got - parse_schedule_at(picker)).total_seconds()) >= 60
     assert r.json()["dispatched"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tick_does_not_close_processor_jira_client(tmp_path):
+    """Workers fetch Jira after the tick returns — do not close that client."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(seconds=30)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Live fetch",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-CLIENT",
+        issue_description="snapshot desc",
+    )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.closed = False
+            self.got: list[str] = []
+
+        def get_issue(self, key: str):
+            assert not self.closed, "Jira client was closed before get_issue"
+            self.got.append(key)
+            return {
+                "key": key,
+                "fields": {"summary": "from jira", "description": "live desc"},
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = _Client()
+    processor = MagicMock()
+    processor.jira_client = client
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+
+    result = await dispatch_due_schedules(processor=processor, store=store)
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+    assert client.closed is False
+    assert client.got == ["KAN-CLIENT"]
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["fields"]["summary"] == "from jira"
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_skipped_dispatched_schedule_refires_on_next_tick(tmp_path):
+    """Dispatched + stale-reap skip must become due again and start work."""
+    from src.state.queue_store import WorkQueueStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Was skipped",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-SKIPPED",
+        issue_description="d",
+    )
+    store.update(rec["schedule_id"], status="dispatching")
+    store.update(rec["schedule_id"], status="dispatched")
+
+    qs = WorkQueueStore(queue_dir=tmp_path / "queue")
+    qrow = qs.enqueue(
+        source="jira",
+        issue_key="KAN-SKIPPED",
+        summary="Was skipped",
+        payload={"schedule_id": rec["schedule_id"]},
+    )
+    claimed = qs.claim_next(max_running=4)
+    assert claimed["queue_id"] == qrow["queue_id"]
+    qs.finish(
+        qrow["queue_id"],
+        status="skipped",
+        error_message="Reaped stale running queue row (issue not live)",
+    )
+
+    processor = MagicMock()
+    processor.queue_store = qs
+    processor.list_live_processing_keys = MagicMock(return_value=[])
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+
+    result = await dispatch_due_schedules(processor=processor, store=store)
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+    processor.process_event.assert_awaited_once()
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["key"] == "KAN-SKIPPED"
+    assert event["scheduled_job"] is True
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"

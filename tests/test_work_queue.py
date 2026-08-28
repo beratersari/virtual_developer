@@ -162,6 +162,105 @@ def test_reap_stale_running_after_cancel(
     assert proc.queue_store.get(rec["queue_id"])["status"] == "cancelled"
 
 
+def test_reap_does_not_skip_fresh_claim_without_local_state(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """A just-claimed first-run row has no local state and is not live yet.
+
+    Reaping it as skipped drops scheduled work that waited for a free slot.
+    """
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    rec = proc.queue_store.enqueue(
+        source="jira", issue_key="KAN-NEW", summary="scheduled first run"
+    )
+    claimed = proc.queue_store.claim_next(max_running=4)
+    assert claimed["queue_id"] == rec["queue_id"]
+    assert proc.queue_store.get(rec["queue_id"])["status"] == "running"
+    n = proc._reap_stale_queue_running()
+    assert n == 0
+    assert proc.queue_store.get(rec["queue_id"])["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_queued_first_run_starts_after_concurrency_slot_frees(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """Scheduled first-run work must start when a slot frees, not skip.
+
+    Production: the finishing job releases context (``_kick_queue``) and
+    ``_run_queue_item`` also dispatches. The second dispatch used to reap
+    the fresh claim (no local state, not live yet) as skipped.
+    """
+    from src.config import settings
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.job_store = isolate_jira_agent_artifacts["job_store"]
+
+    state_manager.create_state("KAN-LIVE", "s", "d")
+    state_manager.update_state("KAN-LIVE", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-LIVE"] = {"git": None, "runner": None}
+    live_q = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-LIVE",
+        summary="occupying slot",
+        lock_key="lock_live",
+    )
+    claimed_live = proc.queue_store.claim_next(max_running=1)
+    assert claimed_live["queue_id"] == live_q["queue_id"]
+
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "scheduled_job": True,
+        "schedule_id": "sch_wait",
+        "issue": {
+            "key": "KAN-WAIT",
+            "fields": {
+                "summary": "scheduled first run",
+                "description": (
+                    "{params}\nRepository: https://gitlab.com/g/r.git\n"
+                    "Source branch: develop\nTarget branch: develop\n"
+                    "Mode: build\n{params}\n"
+                ),
+            },
+        },
+    }
+    started = {"n": 0}
+
+    async def fake_process(ev):
+        started["n"] += 1
+        key = ev.get("issue", {}).get("key")
+        proc._contexts[key] = {"git": None, "runner": None}
+        return {"ok": True, "work_started": True}
+
+    proc.process_event = fake_process  # type: ignore[method-assign]
+    r2 = await proc.enqueue_jira_event(event)
+    assert r2.get("ok") is True
+    assert r2.get("status") == "queued"
+
+    proc.queue_store.finish(live_q["queue_id"], status="completed")
+    proc._release_context("KAN-LIVE", success=True)
+    await proc.dispatch_queue()
+
+    for _ in range(50):
+        if started["n"]:
+            break
+        await asyncio.sleep(0.01)
+    assert started["n"] == 1
+    waiting = proc.queue_store.get(r2["queue_id"])
+    assert waiting["status"] != "skipped"
+    assert waiting["status"] in {"running", "completed"}
+
+
 def test_queue_store_fifo_and_cancel(tmp_path):
     qs = WorkQueueStore(queue_dir=tmp_path / "q")
     a = qs.enqueue(source="jira", issue_key="KAN-1", summary="a", message="first")
@@ -178,10 +277,10 @@ def test_queue_store_fifo_and_cancel(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_second_jira_enqueue_while_running_stays_queued(
+async def test_second_jira_enqueue_while_running_does_not_appear_in_queue(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
 ):
-    """Second dispatch of the same issue while first is live → visible queued row."""
+    """Second dispatch while the issue is live must not add a Queue row."""
     monkeypatch.chdir(tmp_path)
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
@@ -224,23 +323,54 @@ async def test_second_jira_enqueue_while_running_stays_queued(
     proc.dispatch_queue = no_dispatch  # type: ignore[method-assign]
     r2 = await proc.enqueue_jira_event(event)
     assert r2.get("ok") is True
-    assert r2.get("status") == "queued"
-    assert r2.get("duplicate") is not True
+    assert r2.get("duplicate") is True
+    assert r2.get("status") == "running"
+    assert r2.get("queued") is False
     open_rows = [
         r
         for r in proc.queue_store.list_items(limit=50)
         if r.get("status") in ("queued", "running") and r.get("issue_key") == "KAN-7"
     ]
     statuses = {r["status"] for r in open_rows}
-    assert "running" in statuses
-    assert "queued" in statuses
-    # API shape used by Jobs page
+    assert statuses == {"running"}
     from src.dashboard.service import build_queue
 
-    payload = build_queue(store=proc.queue_store)
-    assert payload.queued_count >= 1
+    payload = build_queue(store=proc.queue_store, processor=proc)
     waiting = [i for i in payload.items if i.status == "queued" and i.issue_key == "KAN-7"]
-    assert len(waiting) >= 1
+    assert waiting == []
+
+
+@pytest.mark.asyncio
+async def test_leftover_queued_row_hidden_and_skipped_when_issue_live(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """A leftover queued row for a live issue must not show on Queue or re-run."""
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-DUP", "s", "d")
+    state_manager.update_state("KAN-DUP", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-DUP"] = {"git": None, "runner": None}
+    leftover = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-DUP",
+        summary="duplicate wait",
+    )
+    assert leftover["status"] == "queued"
+
+    from src.dashboard.service import build_queue
+
+    payload = build_queue(store=proc.queue_store, processor=proc)
+    assert payload.queued_count == 0
+    assert not any(i.queue_id == leftover["queue_id"] for i in payload.items)
+
+    n = proc._skip_queued_while_in_flight()
+    assert n == 1
+    assert proc.queue_store.get(leftover["queue_id"])["status"] == "skipped"
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""E2E: JIRA_EMAIL from .env until Settings save, then token-only Bearer."""
+"""E2E: Cloud keeps JIRA_EMAIL (Basic); on-prem Settings save is Bearer."""
 
 from __future__ import annotations
 
@@ -28,11 +28,11 @@ def test_e2e_settings_page_has_no_jira_email_field():
     assert "jira_email" not in src
     assert 'type="email"' not in src
     assert "Cloud: account email" not in src
-    assert "JIRA_EMAIL" in src  # help text about .env / save-clears
+    assert "JIRA_EMAIL" in src  # help text about Cloud .env email
 
 
 def test_e2e_env_email_uses_basic_until_settings_save(tmp_path, monkeypatch):
-    """Exact flow: .env email → Basic; Settings save → empty email → Bearer."""
+    """Cloud .env email stays Basic after a Settings save."""
     from src.config import load_runtime_settings, settings
 
     env_path = tmp_path / ".env"
@@ -62,31 +62,51 @@ def test_e2e_env_email_uses_basic_until_settings_save(tmp_path, monkeypatch):
     assert before.json()["jira_email"] == "dev@example.com"
     assert before.json()["jira_email_configured"] is True
 
-    # Any Settings save (even poll interval only) must wipe email.
+    # Cloud Settings save must keep email (API tokens need Basic).
     saved = http.patch("/api/settings", json={"poll_interval_seconds": 45})
     assert saved.status_code == 200
     body = saved.json()
-    assert body["jira_email"] == ""
-    assert body["jira_email_configured"] is False
-    assert settings.jira_email == ""
+    assert body["jira_email"] == "dev@example.com"
+    assert body["jira_email_configured"] is True
+    assert settings.jira_email == "dev@example.com"
     assert settings.poll_interval_seconds == 45
 
     env_text = env_path.read_text(encoding="utf-8")
-    assert "dev@example.com" not in env_text
-    assert "JIRA_EMAIL=" in env_text
+    assert "JIRA_EMAIL=dev@example.com" in env_text
 
     runtime = load_runtime_settings()
-    assert runtime.get("jira_email") == ""
+    assert runtime.get("jira_email") == "dev@example.com"
 
     after = http.get("/api/settings")
-    assert after.json()["jira_email"] == ""
-    assert after.json()["jira_email_configured"] is False
+    assert after.json()["jira_email"] == "dev@example.com"
+    assert after.json()["jira_email_configured"] is True
 
     with patch("src.jira.client.httpx.Client") as mock_cls:
         JiraClient()
         kwargs = mock_cls.call_args.kwargs
-        assert kwargs.get("auth") is None
-        assert kwargs["headers"]["Authorization"] == "Bearer cloud-token"
+        assert kwargs.get("auth") == ("dev@example.com", "cloud-token")
+        assert "Authorization" not in kwargs.get("headers", {})
+
+
+def test_e2e_empty_runtime_email_does_not_wipe_cloud_dotenv(tmp_path, monkeypatch):
+    """Old runtime_settings.json with jira_email='' must not clear Cloud .env."""
+    from src.config import Settings, apply_runtime_settings_to, save_runtime_settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://ex.atlassian.net\n"
+        "JIRA_EMAIL=keep@example.com\n"
+        "JIRA_API_TOKEN=tok\n",
+        encoding="utf-8",
+    )
+    save_runtime_settings({"jira_email": "", "jira_host": "https://ex.atlassian.net"})
+    obj = Settings(
+        jira_host="https://ex.atlassian.net",
+        jira_email="keep@example.com",
+        jira_api_token="tok",
+    )
+    apply_runtime_settings_to(obj)
+    assert obj.jira_email == "keep@example.com"
 
 
 def test_e2e_settings_save_ignores_posted_jira_email(tmp_path, monkeypatch):
@@ -113,7 +133,7 @@ def test_e2e_settings_save_ignores_posted_jira_email(tmp_path, monkeypatch):
 
 
 def test_e2e_settings_save_refreshes_processor_client_to_bearer(tmp_path, monkeypatch):
-    """Live processor Jira client must switch from Basic to Bearer after save."""
+    """Cloud Settings save must keep Basic on the live processor client."""
     from src.config import settings
     from src.processor import JobProcessor
 
@@ -144,8 +164,7 @@ def test_e2e_settings_save_refreshes_processor_client_to_bearer(tmp_path, monkey
         http = TestClient(app)
         r = http.patch("/api/settings", json={"trigger_labels": "bot"})
         assert r.status_code == 200
-        assert settings.jira_email == ""
-        assert len(created) >= 2
+        assert settings.jira_email == "ops@example.com"
+        # Poll-label-only save does not rebuild the client when email stays.
         last = created[-1]
-        assert last.get("auth") is None
-        assert last.get("headers", {}).get("Authorization") == "Bearer tok-123"
+        assert last.get("auth") == ("ops@example.com", "tok-123")

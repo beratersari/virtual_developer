@@ -117,6 +117,8 @@ class ScheduleExistingRequest(BaseModel):
     dispatch_now: bool = False
     model: str = Field(default="", max_length=200)
     backend: str = Field(default="", max_length=40)
+    # Operator-edited Jira description (prompt + {params}). Empty = live ticket.
+    description: str = Field(default="", max_length=100_000)
 
 
 class ScheduleItem(BaseModel):
@@ -437,7 +439,7 @@ class SettingsUpdate(BaseModel):
     jira_email: Optional[str] = Field(
         default=None,
         max_length=320,
-        description="Ignored on save. Settings always clears JIRA_EMAIL (Bearer).",
+        description="Ignored on save. Cloud keeps existing JIRA_EMAIL; on-prem stays Bearer.",
     )
     jira_api_token: Optional[str] = Field(
         default=None,

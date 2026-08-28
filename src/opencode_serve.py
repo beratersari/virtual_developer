@@ -14,9 +14,11 @@ Agent jobs use ``opencode serve``. The control loop here:
    and send **one** unattended nudge (not the full BUILD kit). Auto-resume
    never answers a human; spinning on "waiting for auto-resume" with
    reasons containing "clarifying question" is a bug (see AGENTS.md §2).
-6. After the nudge, only the **last** assistant turn decides "still asking";
-   stale open todos alone after a clean finish=stop may be accepted
-   (todo API lag). Timeout/error resume may still send Continue; compact never does.
+6. After the nudge **or** idle-stuck Continue, only the **last** assistant
+   turn decides "still asking"; stale open todos alone after a clean
+   finish=stop may be accepted (todo API lag). Do not accept that on the
+   first compact-then-stop (no Continue yet). Timeout/error resume may
+   still send Continue; compact-in-progress never does.
 7. INTENTIONAL: after the nudge, **wait** if the turn compact-then-stopped.
    A compaction *recap* that quotes the earlier "Shall I…?" is **not** a new
    question. ``should_wait_after_nudge`` must test compact / ``last_is_summary``
@@ -2402,6 +2404,35 @@ class ServeOrchestrator:
                     session_completeness=assessment,
                     progress=50,
                 )
+
+            # After idle-stuck / compact-loop Continue: finish=stop + only
+            # leftover todos is todo-API lag (same as post-nudge). Do not
+            # apply this on the first compact-then-stop (continue_count==0).
+            if (
+                continue_count > 0
+                and reasons_are_open_todos_only(reasons)
+                and not asked_question
+            ):
+                assessment = await self._assess_after_unattended_nudge(
+                    sid,
+                    compact_total=compact_total,
+                    output_text=reply_text,
+                    _emit=_emit,
+                )
+                if not assessment.get("premature"):
+                    return ServeTurnResult(
+                        session_id=sid,
+                        returncode=0,
+                        stdout="\n".join(lines),
+                        stderr="",
+                        incomplete=False,
+                        compact_events=compact_total,
+                        continue_count=continue_count,
+                        turns=turns,
+                        session_completeness=assessment,
+                        progress=100,
+                    )
+                reasons = list(assessment.get("reasons") or reasons)
 
             # Still incomplete (non-compact, non-question). Do not inject Continue.
             note = (

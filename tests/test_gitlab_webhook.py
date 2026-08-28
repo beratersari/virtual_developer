@@ -475,7 +475,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert "[codex] cwd" not in body
     assert not any("Work Completed" in (c.get("body") or "") for c in fake_jira.comments)
     assert not any("AuthService" in (c.get("body") or "") for c in fake_jira.comments)
-    git.push.assert_not_called()
+    git.push.assert_called()
 
 
 @pytest.mark.asyncio
@@ -578,8 +578,8 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     assert jobs[0]["source"] == "gitlab"
     assert jobs[0]["status"] == "completed"
     assert jobs[0]["workflow_type"] == "gitlab_mr"
-    # Same SHA before/after → no new commits; still reply, do not push.
-    git.push.assert_not_called()
+    # Same SHA before/after but branch is ahead of target: still push + reuse MR.
+    git.push.assert_called()
     assert "what does login do?" in task.prompt
     assert "build" in task.prompt.lower()
     assert "existing MR" in task.prompt or "existing merge request" in task.prompt.lower()

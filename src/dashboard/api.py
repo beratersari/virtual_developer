@@ -347,7 +347,9 @@ def create_dashboard_app(
 
         proc = app.state.processor
         store = getattr(proc, "queue_store", None) if proc is not None else qstore
-        return build_queue(status=status, limit=limit, store=store).model_dump()
+        return build_queue(
+            status=status, limit=limit, store=store, processor=proc
+        ).model_dump()
 
     @app.delete("/api/queue/{queue_id}")
     def queue_cancel(queue_id: str) -> dict:
@@ -494,15 +496,18 @@ def create_dashboard_app(
         """Load an existing issue and validate the ``{params}`` template.
 
         Used by the Scheduled tab before showing the run-at picker.
-        Hard-fails (400) if issue missing or template invalid.
+        400 only if the issue cannot be loaded. An invalid ``{params}``
+        block is 200 with ``ok=false`` so the operator can edit the prompt.
         """
         result = preview_existing_issue(issue_key)
         result["server_time"] = build_meta().server_time
         if not result.get("ok"):
-            raise HTTPException(
-                status_code=400,
-                detail=result.get("error") or "Issue preview failed",
-            )
+            loaded = bool(result.get("title") or result.get("description") is not None)
+            if not loaded:
+                raise HTTPException(
+                    status_code=400,
+                    detail=result.get("error") or "Issue preview failed",
+                )
         return result
 
     @app.post("/api/schedules/from-issue")
@@ -517,6 +522,7 @@ def create_dashboard_app(
             scheduled_at=body.scheduled_at,
             model=body.model or "",
             backend=body.backend or "",
+            description=body.description or "",
             store=schedule_store,
         )
         if not result.get("ok"):
@@ -919,17 +925,18 @@ def create_dashboard_app(
     @app.patch("/api/settings")
     def patch_settings(body: SettingsUpdate) -> dict:
         # Detect auth/connection changes before apply (for client refresh).
-        # Settings save always clears JIRA_EMAIL — treat a previously set email
-        # as an auth change so live clients switch to Bearer.
         auth_keys = ("jira_host", "jira_api_token")
         dumped = body.model_dump(exclude_unset=True)
         email_before = (getattr(settings, "jira_email", "") or "").strip()
-        auth_changed = any(k in dumped for k in auth_keys) or bool(email_before)
+        auth_changed = any(k in dumped for k in auth_keys)
 
         try:
             view = apply_settings_update(body)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        email_after = (getattr(settings, "jira_email", "") or "").strip()
+        if email_before != email_after:
+            auth_changed = True
         poller = getattr(app.state, "poller", None)
         proc = app.state.processor
         if poller is not None and body.poll_interval_seconds is not None:
