@@ -1030,6 +1030,110 @@ async def test_three_idle_after_compact_logs_sends_continue_not_error():
 
 
 @pytest.mark.asyncio
+async def test_continue_after_idle_compact_stale_todos_is_success():
+    """Continue + finish=stop + stale todo API must not mark INCOMPLETE.
+
+    Production: idle-after-compact sent Continue; the model stopped with
+    'task is fully complete' but list_todos still showed 2 pending /
+    1 in_progress. Assessment then failed the job.
+    """
+
+    class IdleCompactThenDoneStaleTodos(FakeServeBackend):
+        def __init__(self):
+            super().__init__(required_compacts=1)
+            self.auto_complete_on_idle = False
+            self.session_id = "ses_a1b2c3d4e5f6g7h8i9j0"
+            self.todos = [
+                {"content": "Fix incomplete type", "status": "completed"},
+                {"content": "Build and test", "status": "pending"},
+                {"content": "Commit", "status": "pending"},
+                {"content": "Cleanup", "status": "in_progress"},
+            ]
+
+        async def send_message(self, session_id, text, **kwargs):
+            self.message_calls += 1
+            self.prompts.append(text)
+            self.messages.append(
+                {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "user",
+                        "finish": None,
+                        "summary": {"diffs": []},
+                    },
+                    "parts": [{"type": "text", "text": text}],
+                }
+            )
+            if self.message_calls == 1:
+                self.messages.append(
+                    {
+                        "info": {
+                            "id": self._next_id("msg"),
+                            "role": "user",
+                            "finish": None,
+                            "summary": {"diffs": []},
+                        },
+                        "parts": [{"type": "compaction", "auto": True}],
+                    }
+                )
+                reply = {
+                    "info": {
+                        "id": self._next_id("msg"),
+                        "role": "assistant",
+                        "finish": "stop",
+                        "summary": True,
+                    },
+                    "parts": [
+                        {
+                            "type": "text",
+                            "text": "## Compaction summary\nWork was in progress.",
+                        }
+                    ],
+                }
+                self.messages.append(reply)
+                return reply
+            # Continue: model says done. Leave todos stale (API lag).
+            final = {
+                "info": {
+                    "id": self._next_id("msg"),
+                    "role": "assistant",
+                    "finish": "stop",
+                    "summary": None,
+                },
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "There are no remaining todos. The task is "
+                            "fully complete."
+                        ),
+                    }
+                ],
+            }
+            self.messages.append(final)
+            return final
+
+    backend = IdleCompactThenDoneStaleTodos()
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=8.0,
+        compact_poll_seconds=0.02,
+        compact_settle_seconds=0.02,
+    )
+    result = await orch.run(prompt="do the work", title="KAN-STALE-CONT")
+    assert result.returncode == 0, result.stderr
+    assert result.incomplete is False
+    assert backend.message_calls == 2
+    assert any(
+        p == DEFAULT_CONTINUE_PROMPT or (p or "").startswith("Continue")
+        for p in backend.prompts
+    )
+    assert "[INCOMPLETE]" not in (result.stderr or "")
+    assert "session still incomplete" not in (result.stderr or "")
+
+
+@pytest.mark.asyncio
 async def test_resume_with_old_compact_markers_does_not_enter_compact_wait():
     """Reused session history must not start a 6h auto-compact busy poll.
 

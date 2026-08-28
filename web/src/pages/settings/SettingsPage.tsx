@@ -218,18 +218,6 @@ export function SettingsPage() {
         <input value={draft.jira_host} onChange={(e) => mark('jira_host', e.target.value)} />
       </label>
       <label className="field">
-        <span>Board ID</span>
-        <input
-          inputMode="numeric"
-          value={draft.jira_board_id}
-          onChange={(e) => mark('jira_board_id', e.target.value)}
-          placeholder="1"
-        />
-        <span className="text-xs text-text-muted">
-          Numeric Agile id from the board URL (/jira/software/projects/…/boards/<strong>1</strong>)
-        </span>
-      </label>
-      <label className="field">
         <span>
           API token {settings.jira_token_configured ? '(set — blank keeps it)' : '(missing)'}
         </span>
@@ -670,6 +658,9 @@ export function SettingsPage() {
           onChange={(e) => mark('jira_board_id', e.target.value)}
           placeholder="1"
         />
+        <span className="text-xs text-text-muted">
+          Numeric Agile id from the board URL (/jira/software/projects/…/boards/<strong>1</strong>)
+        </span>
       </label>
       <label className="field">
         <span>Poll interval (seconds)</span>

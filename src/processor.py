@@ -3645,6 +3645,12 @@ class JobProcessor:
             st = self.state_manager.get_state(ik)
             if st and st.status in self.IN_FLIGHT_STATUSES:
                 continue
+            # First-run / scheduled claim: process_event has not created
+            # local state yet. A second dispatch (``_release_context``
+            # kicks the queue while the finishing item also dispatches)
+            # must not treat this as a leftover after Stop.
+            if not st:
+                continue
             # A brand-new claim after Stop still sees local CANCELLED until
             # process_event resets it. Only reap rows that started *before*
             # the terminal write (the leftover claim from the stopped job).

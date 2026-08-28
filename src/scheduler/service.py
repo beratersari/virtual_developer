@@ -819,7 +819,7 @@ def _issue_payload_for_dispatch(
     if client is not None and issue_key:
         try:
             live = client.get_issue(issue_key)
-            if live:
+            if isinstance(live, dict) and live:
                 fields = live.get("fields") or {}
                 if fields.get("summary"):
                     summary = fields["summary"]
@@ -1047,8 +1047,11 @@ async def _dispatch_claimed_schedule(
             )
             return
         if event is None:
+            client = jira_client
+            if client is None:
+                client = getattr(processor, "jira_client", None)
             issue = _issue_payload_for_dispatch(
-                claimed_rec or live, jira_client=jira_client
+                claimed_rec or live, jira_client=client
             )
             live = store.get(schedule_id) or live
             if (live.get("status") or "").lower() != "dispatching":
@@ -1150,6 +1153,100 @@ async def _dispatch_claimed_schedule(
         _INFLIGHT_DISPATCHES.pop(schedule_id, None)
 
 
+_STALE_REAP_SKIP = "Reaped stale running queue row"
+
+
+def _latest_queue_row_for_schedule(queue_store: Any, schedule_id: str) -> Optional[Dict[str, Any]]:
+    """Newest queue row whose payload was created by this schedule fire."""
+    sid = (schedule_id or "").strip()
+    if not sid or queue_store is None or not hasattr(queue_store, "list_items"):
+        return None
+    best: Optional[Dict[str, Any]] = None
+    try:
+        rows = queue_store.list_items(limit=500)
+    except Exception:
+        return None
+    for rec in rows:
+        payload = rec.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("schedule_id") or "") != sid:
+            continue
+        if best is None or (rec.get("created_at") or "") >= (best.get("created_at") or ""):
+            best = rec
+    return best
+
+
+def _reopen_skipped_dispatched_schedules(
+    processor: Any,
+    store: ScheduleStore,
+    *,
+    now: Optional[datetime] = None,
+) -> int:
+    """Turn ``dispatched`` + stale-reap skip back into a due schedule.
+
+    Enqueue marks the schedule dispatched before the queue worker runs. If
+    the row is then reaped as skipped (never started), the UI stays
+    Dispatched and Run now is refused. Re-open those so the next tick fires.
+    """
+    qs = getattr(processor, "queue_store", None)
+    if qs is None:
+        return 0
+    when = (now or datetime.now()).isoformat(timespec="seconds")
+    pending_keys: Set[str] = set()
+    try:
+        for other in store.list_schedules(limit=500):
+            st = (other.get("status") or "").lower()
+            if st in ("scheduled", "dispatching"):
+                k = (other.get("issue_key") or "").strip().upper()
+                if k:
+                    pending_keys.add(k)
+    except Exception:
+        pending_keys = set()
+    n = 0
+    for rec in store.list_schedules(status="dispatched", limit=500):
+        sid = rec.get("schedule_id") or ""
+        key = (rec.get("issue_key") or "").strip()
+        if not sid:
+            continue
+        if key and key.upper() in pending_keys:
+            continue
+        if _issue_in_flight_reason(processor, key):
+            continue
+        live_fn = getattr(processor, "list_live_processing_keys", None)
+        if callable(live_fn):
+            try:
+                live = {(k or "").strip().upper() for k in (live_fn() or []) if k}
+            except Exception:
+                live = set()
+            if key and key.upper() in live:
+                continue
+        find_open = getattr(qs, "find_open_jira", None)
+        if callable(find_open) and key:
+            try:
+                if find_open(key):
+                    continue
+            except Exception:
+                pass
+        qrow = _latest_queue_row_for_schedule(qs, sid)
+        if not qrow or (qrow.get("status") or "") != "skipped":
+            continue
+        if _STALE_REAP_SKIP not in str(qrow.get("error_message") or ""):
+            continue
+        store.update(
+            sid,
+            status="scheduled",
+            scheduled_at=when,
+            error_message=None,
+        )
+        n += 1
+        logger.info(
+            f"Schedule {sid} re-opened after skipped queue "
+            f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+        )
+    return n
+
+
 async def dispatch_due_schedules(
     *,
     processor: "JobProcessor",
@@ -1185,55 +1282,55 @@ async def dispatch_due_schedules(
             logger.info(f"Schedule dispatch: recovered {n} stuck dispatching row(s)")
     except Exception as e:
         logger.warning(f"Schedule dispatch: stuck recovery failed: {e}")
+    try:
+        n = _reopen_skipped_dispatched_schedules(processor, ss, now=now)
+        if n:
+            logger.info(
+                f"Schedule dispatch: re-opened {n} skipped dispatched schedule(s)"
+            )
+    except Exception as e:
+        logger.warning(f"Schedule dispatch: skipped-dispatch recovery failed: {e}")
     due = ss.list_due(now=now)
     claimed = 0
     launched = 0
     failed = 0
 
+    # Use the caller client or the processor's long-lived client. Do not
+    # open+close a tick-scoped client: workers are async and would hit
+    # "Cannot send a request, as the client has been closed."
     client = jira_client
-    close_client = False
-    if client is None and due:
+    if client is None:
+        proc_client = getattr(processor, "jira_client", None)
+        if proc_client is not None and callable(
+            getattr(proc_client, "get_issue", None)
+        ):
+            client = proc_client
+
+    for rec in due:
+        sid = rec.get("schedule_id") or ""
+        claimed_rec = ss.claim_due(sid)
+        if not claimed_rec:
+            continue
+        claimed += 1
+        issue_key = (claimed_rec.get("issue_key") or "").upper()
         try:
-            from src.jira.client import create_jira_client
-
-            client = create_jira_client()
-            close_client = True
+            _start_claimed_worker(
+                claimed_rec,
+                processor=processor,
+                store=ss,
+                jira_client=client,
+            )
+            launched += 1
         except Exception as e:
-            logger.warning(f"Schedule dispatch: could not open Jira client: {e}")
-            client = None
-
-    try:
-        for rec in due:
-            sid = rec.get("schedule_id") or ""
-            claimed_rec = ss.claim_due(sid)
-            if not claimed_rec:
-                continue
-            claimed += 1
-            issue_key = (claimed_rec.get("issue_key") or "").upper()
-            try:
-                _start_claimed_worker(
-                    claimed_rec,
-                    processor=processor,
-                    store=ss,
-                    jira_client=client,
-                )
-                launched += 1
-            except Exception as e:
-                failed += 1
-                logger.exception(
-                    f"Schedule {sid} dispatch failed for {issue_key}: {e}", e
-                )
-                ss.update(
-                    sid,
-                    status="error",
-                    error_message=str(e)[:1000],
-                )
-    finally:
-        if close_client and client is not None and hasattr(client, "close"):
-            try:
-                client.close()
-            except Exception:
-                pass
+            failed += 1
+            logger.exception(
+                f"Schedule {sid} dispatch failed for {issue_key}: {e}", e
+            )
+            ss.update(
+                sid,
+                status="error",
+                error_message=str(e)[:1000],
+            )
 
     return {
         "ok": True,
