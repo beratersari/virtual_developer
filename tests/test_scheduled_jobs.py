@@ -707,6 +707,7 @@ def test_preview_existing_issue_invalid_template():
 
     out = preview_existing_issue("KAN-21", jira_client=client)
     assert out["ok"] is False
+    assert out.get("description") == "just text"
     assert "params" in out["error"].lower() or "template" in out["error"].lower() or "could not" in out["error"].lower()
 
 

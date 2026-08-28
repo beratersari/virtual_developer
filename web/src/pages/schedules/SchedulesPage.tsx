@@ -23,7 +23,13 @@ import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
-import { datetimeLocalToNaiveIso, localNaiveNowIso } from '../../util/time'
+import {
+  datetimeLocalToNaiveIso,
+  formatScheduleWhen,
+  joinDatetimeLocal,
+  localNaiveNowIso,
+  splitDatetimeLocal,
+} from '../../util/time'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
 const CUSTOM_REPO = '__custom__'
@@ -123,7 +129,7 @@ export function SchedulesPage() {
                 · <span className="font-mono text-xs text-text-secondary">{s.model}</span>
               </>
             ) : null}{' '}
-            · {s.scheduled_at} · <StatusBadge status={s.status} size="sm" />
+            · {formatScheduleWhen(s.scheduled_at)} · <StatusBadge status={s.status} size="sm" />
             {(s.status === 'scheduled' || s.status === 'error') && (
               <>
                 {' '}
@@ -199,6 +205,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const live = useLive()
   const [key, setKey] = useState('')
   const [preview, setPreview] = useState<SchedulePreview | null>(null)
+  const [prompt, setPrompt] = useState('')
   const [when, setWhen] = useState(defaultWhen)
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
@@ -215,10 +222,13 @@ function Existing({ onDone }: { onDone: () => void }) {
       setPreview(p)
       if (p.ok && p.template_valid) setModelsLoading(true)
       setKey(p.issue_key || key)
-      if (p.model) setModel(p.model)
-      if (p.backend) setBackend(p.backend)
+      setPrompt(p.description || '')
+      setModel(p.model || '')
+      setBackend(p.backend || '')
+      if (!p.ok && p.error) setErr(p.error)
     } catch (e) {
       setPreview(null)
+      setPrompt('')
       setErr(e instanceof Error ? e.message : 'Preview failed')
     } finally {
       setLooking(false)
@@ -227,19 +237,21 @@ function Existing({ onDone }: { onDone: () => void }) {
 
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
-    if (!preview?.ok || modelsLoading) return
+    if (!preview || modelsLoading) return
     setBusy(true)
     setErr(null)
     try {
       await scheduleExistingIssue({
-        issue_key: preview.issue_key,
+        issue_key: preview.issue_key || key.trim().toUpperCase(),
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
         dispatch_now: dispatchNow,
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
+        description: prompt,
       })
       setPreview(null)
       setKey('')
+      setPrompt('')
       setModel('')
       setBackend('')
       onDone()
@@ -261,11 +273,24 @@ function Existing({ onDone }: { onDone: () => void }) {
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
-      {preview?.ok && preview.template_valid && (
+      {preview && (preview.ok || Boolean(prompt)) && (
         <>
           <p className="quiet">
             {preview.issue_key} — {preview.title} · {preview.mode} · {preview.repository_url}
           </p>
+          <label className="field">
+            <span>Jira prompt</span>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={14}
+              className="min-h-[12rem] font-mono text-xs"
+            />
+            <span className="mt-1 block text-xs text-text-muted">
+              Fetched from the ticket. Edit before Schedule / Run now. Keep the{' '}
+              <span className="font-mono">{'{params}'}</span> block valid.
+            </span>
+          </label>
           <BackendField
             value={backend}
             onChange={(v) => {
@@ -281,10 +306,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             backend={backend || live.settings?.agent_backend || 'opencode'}
             onLoadingChange={setModelsLoading}
           />
-          <label className="field">
-            <span>Run at</span>
-            <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
-          </label>
+          <ScheduleWhenField value={when} onChange={setWhen} />
           <p className="actions">
             <button type="submit" className="go" disabled={busy || modelsLoading}>
               {busy ? (
@@ -561,10 +583,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         backend={backend || live.settings?.agent_backend || 'opencode'}
         onLoadingChange={setModelsLoading}
       />
-      <label className="field">
-        <span>Run at</span>
-        <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
-      </label>
+      <ScheduleWhenField value={when} onChange={setWhen} />
       {err && <p className="err">{err}</p>}
       <p className="actions">
         <button type="submit" className="go" disabled={busy || modelsLoading}>
@@ -590,6 +609,54 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         </button>
       </p>
     </form>
+  )
+}
+
+function ScheduleWhenField({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (v: string) => void
+}) {
+  const { date, time } = splitDatetimeLocal(value)
+  const [timeDraft, setTimeDraft] = useState(time)
+  useEffect(() => {
+    if (time) setTimeDraft(time)
+  }, [time])
+  return (
+    <label className="field">
+      <span>Run at (24-hour)</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="date"
+          value={date}
+          onChange={(e) =>
+            onChange(joinDatetimeLocal(e.target.value, timeDraft || time || '00:00'))
+          }
+        />
+        <input
+          type="text"
+          inputMode="numeric"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="14:30"
+          pattern="(?:[01]\d|2[0-3]):[0-5]\d"
+          title="24-hour time, HH:mm"
+          value={timeDraft}
+          onChange={(e) => {
+            const next = e.target.value.replace(/[^\d:]/g, '').slice(0, 5)
+            setTimeDraft(next)
+            if (date && joinDatetimeLocal(date, next)) {
+              onChange(joinDatetimeLocal(date, next))
+            }
+          }}
+        />
+      </div>
+      <span className="mt-1 block text-xs text-text-muted">
+        Time is 24-hour, for example 14:30 — not am/pm.
+      </span>
+    </label>
   )
 }
 

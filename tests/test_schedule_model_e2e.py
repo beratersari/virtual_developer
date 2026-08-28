@@ -263,8 +263,8 @@ def test_e2e_schedule_existing_update_false_still_records_model(tmp_path):
     )
     assert out["ok"] is True
     assert out["schedule"]["model"] == "opencode/hy3-free"
-    # Jira write failed — local description stays the original (no Model line)
-    assert "Model:" not in (out["schedule"]["issue_description"] or "")
+    # Jira write failed — local snapshot still carries the dashboard Model
+    assert "Model: opencode/hy3-free" in (out["schedule"]["issue_description"] or "")
 
 
 def test_e2e_schedule_existing_update_raises_soft(tmp_path):
@@ -366,6 +366,83 @@ def test_e2e_schedule_existing_empty_model_does_not_write(tmp_path):
     assert out["ok"] is True
     assert out["schedule"]["model"] == ""
     client.update_issue.assert_not_called()
+
+
+def test_e2e_schedule_existing_writes_operator_prompt(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = _issue("KAN-ED", description=_params())
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    edited = (
+        "Please add unit tests for lead service.\n\n"
+        + _params()
+        + "\nUse pytest.\n"
+    )
+    out = schedule_existing_issue(
+        "KAN-ED",
+        scheduled_at="2026-12-01T12:00:00",
+        description=edited,
+        model="opencode/hy3-free",
+        backend="codex",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    snap = out["schedule"]["issue_description"]
+    assert "Please add unit tests for lead service." in snap
+    assert "Model: opencode/hy3-free" in snap
+    assert "Backend: codex" in snap
+    client.update_issue.assert_called()
+    written = client.update_issue.call_args.kwargs["fields"]["description"]
+    assert written == snap
+
+
+def test_e2e_schedule_existing_rejects_broken_edited_prompt(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = _issue("KAN-BAD", description=_params())
+    out = schedule_existing_issue(
+        "KAN-BAD",
+        scheduled_at="2026-12-01T12:00:00",
+        description="I deleted the params block",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is False
+    assert out.get("template_valid") is False
+    assert store.list_schedules() == []
+
+
+def test_dispatch_uses_snapshot_and_overlays_dashboard_model(tmp_path):
+    from src.scheduler.service import _issue_payload_for_dispatch
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="t",
+        description="d",
+        repository_url="https://gitlab.com/org/app.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at="2026-12-01T12:00:00",
+        issue_key="KAN-OV",
+        issue_description=_params(model="dashboard-model"),
+        model="dashboard-model",
+        backend="codex",
+    )
+    client = MagicMock()
+    client.get_issue.return_value = _issue(
+        "KAN-OV", description=_params(model="ticket-model", extra="Backend: opencode\n")
+    )
+    payload = _issue_payload_for_dispatch(rec, jira_client=client)
+    desc = payload["fields"]["description"]
+    spec, err = parse_issue_git_spec("", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "dashboard-model"
+    assert spec.backend == "codex"
 
 
 # ---------------------------------------------------------------------------

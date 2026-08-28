@@ -99,6 +99,42 @@ export function datetimeLocalToNaiveIso(local: string): string {
   return raw.length === 16 ? `${raw}:00` : raw
 }
 
+/** Split ``YYYY-MM-DDTHH:mm`` into date + 24-hour ``HH:mm``. */
+export function splitDatetimeLocal(local: string): { date: string; time: string } {
+  const raw = (local || '').trim()
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
+  if (!m) return { date: '', time: '' }
+  return { date: m[1], time: m[2] }
+}
+
+/** Keep only a 24-hour ``HH:mm`` clock (rejects 12-hour am/pm text). */
+export function normalizeTime24h(raw: string): string {
+  const t = (raw || '').trim()
+  const m = t.match(/^(\d{1,2}):(\d{2})$/)
+  if (!m) return ''
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (!Number.isInteger(h) || !Number.isInteger(min)) return ''
+  if (h < 0 || h > 23 || min < 0 || min > 59) return ''
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`
+}
+
+export function joinDatetimeLocal(date: string, time: string): string {
+  const d = (date || '').trim()
+  const t = normalizeTime24h(time)
+  if (!d || !t) return ''
+  return `${d}T${t}`
+}
+
+/** Schedule list label: ``2026-08-28 14:30`` (24-hour, no am/pm). */
+export function formatScheduleWhen(iso: string | null | undefined): string {
+  const raw = (iso || '').trim()
+  if (!raw) return '—'
+  const { date, time } = splitDatetimeLocal(raw)
+  if (date && time) return `${date} ${time}`
+  return raw.replace('T', ' ').replace(/:\d{2}$/, '').replace(/Z$/, '')
+}
+
 /** Local wall-clock now as naive ISO (same convention as scheduled_at). */
 export function localNaiveNowIso(now: Date = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0')

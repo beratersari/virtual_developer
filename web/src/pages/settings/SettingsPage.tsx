@@ -173,7 +173,7 @@ export function SettingsPage() {
       <PageHeader
         kicker="Runtime"
         title="Settings"
-        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value. Saving Settings clears JIRA_EMAIL so later auth is token-only."
+        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value. Cloud keeps JIRA_EMAIL from .env (Basic). On-prem saves stay token-only."
       />
 
       <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
@@ -210,8 +210,8 @@ export function SettingsPage() {
       <div className="text-sm font-semibold text-text">Jira connection</div>
       <p className="text-xs text-text-muted">
         Host + API token / PAT. Test uses the values below; a blank token tests
-        the last saved token. If JIRA_EMAIL is set in .env it is used until you
-        save Settings; a save clears it and later auth is token-only.
+        the last saved token. Cloud uses JIRA_EMAIL from .env as HTTP Basic.
+        On-prem / PAT hosts stay token-only after save.
       </p>
       <label className="field">
         <span>Host</span>

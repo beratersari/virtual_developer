@@ -3,13 +3,17 @@
  */
 import {
   datetimeLocalToNaiveIso,
+  formatScheduleWhen,
+  joinDatetimeLocal,
   localNaiveNowIso,
   elapsedSecondsBetween,
   formatChatTime,
   formatDashboardClock,
   formatElapsedBetween,
   formatElapsedSeconds,
+  normalizeTime24h,
   parseTimeMs,
+  splitDatetimeLocal,
 } from './time'
 
 function assert(cond: unknown, msg: string) {
@@ -41,6 +45,16 @@ assert(localNaiveNowIso(fixed) === '2026-08-14T14:21:50', 'naive now is local wa
 const naive = localNaiveNowIso()
 assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(naive), 'naive now shape')
 assert(!naive.endsWith('Z'), 'naive now has no Z')
+assert(splitDatetimeLocal('2026-08-28T14:30').date === '2026-08-28', 'split date')
+assert(splitDatetimeLocal('2026-08-28T14:30').time === '14:30', 'split 24h time')
+assert(normalizeTime24h('9:05') === '09:05', 'pad hour')
+assert(normalizeTime24h('23:59') === '23:59', 'late evening')
+assert(normalizeTime24h('24:00') === '', 'reject 24:00')
+assert(normalizeTime24h('2:30 PM') === '', 'reject am/pm')
+assert(joinDatetimeLocal('2026-08-28', '14:30') === '2026-08-28T14:30', 'join')
+assert(formatScheduleWhen('2026-08-28T14:30:00') === '2026-08-28 14:30', 'list 24h')
+assert(!formatScheduleWhen('2026-08-28T14:30:00').toLowerCase().includes('pm'), 'no pm')
+assert(!formatScheduleWhen('2026-08-28T14:30:00').toLowerCase().includes('am'), 'no am')
 assert(formatElapsedBetween(start, null, now) === '30s', 'running format')
 
 const chatLabel = formatChatTime('2026-08-09T16:04:18+00:00')

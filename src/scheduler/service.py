@@ -281,6 +281,7 @@ def preview_existing_issue(
                 "error": _plain_template_error(err or "Invalid {params} template"),
                 "issue_key": key,
                 "title": summary,
+                "description": description,
                 "jira_status": status_name,
                 "template_valid": False,
             }
@@ -316,12 +317,15 @@ def schedule_existing_issue(
     scheduled_at: str,
     model: str = "",
     backend: str = "",
+    description: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
     """Schedule an existing Jira issue for later dispatch (no new issue create).
 
     Hard-fails if the issue cannot be loaded or the template is invalid.
+    ``description`` (optional) is the operator-edited Jira prompt; when set
+    it replaces the live ticket body after a template check.
     Soft-fails: In Progress transition and SCHEDULED_AI_JOB label.
     """
     key = (issue_key or "").strip().upper()
@@ -382,49 +386,48 @@ def schedule_existing_issue(
                     "schedule": existing,
                 }
 
-        desc = preview.get("description") or ""
+        operator_desc = (description or "").strip()
+        desc = operator_desc or (preview.get("description") or "")
+        if operator_desc:
+            spec, err = parse_issue_git_spec(
+                preview.get("title") or key, operator_desc
+            )
+            if err or spec is None:
+                return {
+                    "ok": False,
+                    "error": _plain_template_error(
+                        err or "Edited prompt is missing a valid {params} block"
+                    ),
+                    "issue_key": key,
+                    "template_valid": False,
+                }
         mid = _normalize_model_id(model) or (preview.get("model") or "")
         mid = _normalize_model_id(mid)
         bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
         bid = _normalize_backend_id(bid)
         if mid:
-            rewritten = upsert_params_model(desc, mid)
-            if rewritten != desc:
-                try:
-                    if hasattr(client, "update_issue"):
-                        ok_upd = client.update_issue(
-                            key, fields={"description": rewritten}
-                        )
-                        if ok_upd:
-                            desc = rewritten
-                            logger.info(f"{key}: set Model: {mid} on issue")
-                        else:
-                            logger.warning(
-                                f"{key}: could not write Model: {mid} to Jira "
-                                f"(schedule still records it)"
-                            )
-                except Exception as e:
-                    logger.warning(f"{key}: Model description update soft-failed: {e}")
+            desc = upsert_params_model(desc, mid)
         if bid:
-            rewritten_b = upsert_params_backend(desc, bid)
-            if rewritten_b != desc:
-                try:
-                    if hasattr(client, "update_issue"):
-                        ok_upd = client.update_issue(
-                            key, fields={"description": rewritten_b}
-                        )
-                        if ok_upd:
-                            desc = rewritten_b
-                            logger.info(f"{key}: set Backend: {bid} on issue")
-                        else:
-                            logger.warning(
-                                f"{key}: could not write Backend: {bid} to Jira "
-                                f"(schedule still records it)"
-                            )
-                except Exception as e:
-                    logger.warning(
-                        f"{key}: Backend description update soft-failed: {e}"
+            desc = upsert_params_backend(desc, bid)
+        if desc != (preview.get("description") or ""):
+            try:
+                if hasattr(client, "update_issue"):
+                    ok_upd = client.update_issue(
+                        key, fields={"description": desc}
                     )
+                    if ok_upd:
+                        logger.info(
+                            f"{key}: wrote dashboard prompt/model/backend to Jira"
+                        )
+                    else:
+                        logger.warning(
+                            f"{key}: could not write prompt/model/backend to Jira "
+                            f"(schedule still uses the dashboard text)"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"{key}: description update soft-failed: {e}"
+                )
 
         rec = ss.create(
             title=preview.get("title") or key,
@@ -809,11 +812,20 @@ def _issue_payload_for_dispatch(
     *,
     jira_client: Any = None,
 ) -> Dict[str, Any]:
-    """Build a poller-shaped issue dict. Prefer live Jira; fall back to local copy."""
+    """Build a poller-shaped issue dict.
+
+    Summary/labels prefer live Jira. The work description prefers the
+    schedule snapshot (dashboard-edited prompt + model/backend) so a
+    ticket that already had Model/Backend set cannot override the form.
+    """
     issue_key = (rec.get("issue_key") or "").upper()
     summary = rec.get("title") or ""
-    description = rec.get("issue_description") or ""
+    snapshot = rec.get("issue_description") or ""
+    description = snapshot
     labels = [SCHEDULE_LABEL]
+    live_id = None
+    assignee = None
+    status = {"name": "In Progress"}
 
     client = jira_client
     if client is not None and issue_key:
@@ -823,39 +835,37 @@ def _issue_payload_for_dispatch(
                 fields = live.get("fields") or {}
                 if fields.get("summary"):
                     summary = fields["summary"]
-                desc = fields.get("description")
-                if isinstance(desc, str) and desc.strip():
-                    description = desc
-                elif desc is not None and not isinstance(desc, str):
-                    description = str(desc)
+                live_id = live.get("id")
+                assignee = fields.get("assignee")
+                if fields.get("status"):
+                    status = fields.get("status")
                 lab = fields.get("labels") or []
                 if isinstance(lab, list) and lab:
                     labels = [str(x) for x in lab]
-                return {
-                    "key": issue_key,
-                    "id": live.get("id"),
-                    "fields": {
-                        "summary": summary,
-                        "description": description,
-                        "labels": labels,
-                        "status": fields.get("status") or {"name": "In Progress"},
-                        "assignee": fields.get("assignee"),
-                    },
-                }
+                if not snapshot.strip():
+                    description = _description_to_text(fields.get("description"))
         except Exception as e:
             logger.warning(
                 f"{issue_key}: Jira fetch soft-failed at dispatch: {e}; "
                 f"using local schedule snapshot"
             )
 
+    mid = _normalize_model_id(rec.get("model") or "")
+    bid = _normalize_backend_id(rec.get("backend") or "")
+    if mid:
+        description = upsert_params_model(description, mid)
+    if bid:
+        description = upsert_params_backend(description, bid)
+
     return {
         "key": issue_key,
+        "id": live_id,
         "fields": {
             "summary": summary,
             "description": description,
             "labels": labels,
-            "status": {"name": "In Progress"},
-            "assignee": None,
+            "status": status,
+            "assignee": assignee,
         },
     }
 

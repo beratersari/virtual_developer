@@ -463,7 +463,18 @@ export function scheduleExistingIssue(body: {
   dispatch_now?: boolean
   model?: string
   backend?: string
+  description?: string
 }) {
+  const payload: Record<string, unknown> = {
+    issue_key: body.issue_key,
+    scheduled_at: body.scheduled_at,
+  }
+  if (body.dispatch_now) payload.dispatch_now = true
+  if (body.model) payload.model = body.model
+  if (body.backend) payload.backend = body.backend
+  if (body.description != null && body.description !== '') {
+    payload.description = body.description
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem
@@ -472,6 +483,6 @@ export function scheduleExistingIssue(body: {
     dispatch_error?: string
   }>(
     '/api/schedules/from-issue',
-    { method: 'POST', body: JSON.stringify(body) },
+    { method: 'POST', body: JSON.stringify(payload) },
   )
 }

@@ -725,6 +725,12 @@ _RUNTIME_ENV_MIRROR = {
 }
 
 
+def jira_host_is_cloud(host: Any = None) -> bool:
+    """True for Atlassian Cloud (``*.atlassian.net``). Cloud API tokens need Basic."""
+    text = str(host if host is not None else "").strip().lower()
+    return "atlassian.net" in text
+
+
 def _normalize_intake_mode(raw: Any) -> str:
     """``poll`` or ``webhook``. Local so Settings bootstrap never imports jira."""
     text = str(raw or "").strip().lower()
@@ -827,6 +833,12 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
                 logger.warning(
                     f"Ignoring invalid runtime agent_task_timeout_seconds={value!r}"
                 )
+                continue
+        if key == "jira_email":
+            # Cloud API tokens need email+token Basic. An empty runtime
+            # override (from an old Settings save) must not wipe .env email.
+            host = getattr(settings_obj, "jira_host", "") or data.get("jira_host")
+            if jira_host_is_cloud(host) and not str(value or "").strip():
                 continue
         if key == "jira_intake_mode":
             value = _normalize_intake_mode(value)

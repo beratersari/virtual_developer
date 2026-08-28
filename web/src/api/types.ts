@@ -278,6 +278,15 @@ export type SchedulesPayload = {
   server_time?: string
 }
 
+export type ScheduleExistingBody = {
+  issue_key: string
+  scheduled_at: string
+  dispatch_now?: boolean
+  model?: string
+  backend?: string
+  description?: string
+}
+
 export type ScheduleCreateBody = {
   title: string
   description?: string

@@ -7,7 +7,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from src.config import save_runtime_settings, settings, upsert_dotenv_keys
+from src.config import (
+    jira_host_is_cloud,
+    save_runtime_settings,
+    settings,
+    upsert_dotenv_keys,
+)
 from src.dashboard.issue_logs import issue_log_ring
 from src.logger import logger
 from src.dashboard.project_repos import (
@@ -384,8 +389,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     the next daemon start
     use the saved values. Token is never returned in the view.
 
-    Every Settings save clears ``JIRA_EMAIL`` (runtime + .env) so later
-    auth is Bearer token only. Email from ``.env`` is used only until that save.
+    Cloud (``*.atlassian.net``) keeps ``JIRA_EMAIL`` so API tokens stay
+    HTTP Basic. On-prem hosts still clear email so auth is Bearer PAT.
 
     Callers should refresh live Jira clients when host/token/email change
     (see ``refresh_runtime_jira_clients``).
@@ -591,11 +596,17 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["trigger_assignee_names"] = settings.trigger_assignee_names
         dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = settings.trigger_assignee_names
 
-    # Settings save always drops JIRA_EMAIL. Until this first save, .env email
-    # (if any) is used for Cloud Basic. After save, auth is token-only Bearer.
-    settings.jira_email = ""
-    dotenv_updates["JIRA_EMAIL"] = ""
-    runtime_persist["jira_email"] = ""
+    # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
+    # email (Basic). On-prem stays token-only Bearer.
+    if jira_host_is_cloud(getattr(settings, "jira_host", "")):
+        email = (getattr(settings, "jira_email", "") or "").strip()
+        if email:
+            runtime_persist["jira_email"] = email
+            dotenv_updates["JIRA_EMAIL"] = email
+    else:
+        settings.jira_email = ""
+        dotenv_updates["JIRA_EMAIL"] = ""
+        runtime_persist["jira_email"] = ""
 
     if runtime_persist:
         # Persist so the next job (and process restart) does not fall back to .env
