@@ -253,6 +253,182 @@ def _in_use_paths() -> Set[Path]:
     return found
 
 
+def _path_lookup_keys(raw: Any) -> List[str]:
+    """Stable keys so Windows/WSL path spellings still match a clone folder."""
+    if raw is None:
+        return []
+    text = str(raw).strip()
+    if not text:
+        return []
+    keys: List[str] = []
+    name = Path(text.replace("\\", "/")).name
+    if name:
+        keys.append(name.lower())
+    try:
+        resolved = Path(text).resolve()
+        keys.append(str(resolved).replace("\\", "/").lower())
+        if resolved.name:
+            keys.append(resolved.name.lower())
+    except (OSError, RuntimeError):
+        keys.append(text.replace("\\", "/").lower())
+    out: List[str] = []
+    seen: Set[str] = set()
+    for key in keys:
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _put_clone_issue(
+    index: Dict[str, Dict[str, Any]],
+    path: Any,
+    *,
+    issue_key: str,
+    summary: str = "",
+    job_id: str = "",
+    when: str = "",
+    prefer: bool = False,
+) -> None:
+    key = (issue_key or "").strip().upper()
+    if not key:
+        return
+    rec = {
+        "issue_key": key,
+        "summary": (summary or "").strip(),
+        "job_id": (job_id or "").strip() or None,
+        "_when": (when or "").strip(),
+    }
+    for lookup in _path_lookup_keys(path):
+        prev = index.get(lookup)
+        newer = bool(
+            prev is not None
+            and rec["_when"]
+            and rec["_when"] > str(prev.get("_when") or "")
+        )
+        if prev is None or prefer or newer:
+            if prev:
+                if not rec["summary"]:
+                    rec["summary"] = prev.get("summary") or ""
+                if not rec["job_id"]:
+                    rec["job_id"] = prev.get("job_id")
+                if not rec["_when"]:
+                    rec["_when"] = prev.get("_when") or ""
+            index[lookup] = rec
+            continue
+        if not prev.get("summary") and rec["summary"]:
+            prev["summary"] = rec["summary"]
+        if not prev.get("job_id") and rec["job_id"]:
+            prev["job_id"] = rec["job_id"]
+        if not prev.get("_when") and rec["_when"]:
+            prev["_when"] = rec["_when"]
+
+
+def _fill_missing_summaries(index: Dict[str, Dict[str, Any]]) -> None:
+    """Best-effort title fill from issue state — only keys still missing a title."""
+    need: Set[str] = set()
+    for rec in index.values():
+        ik = (rec.get("issue_key") or "").strip().upper()
+        if ik and not (rec.get("summary") or "").strip():
+            need.add(ik)
+    if not need:
+        return
+    try:
+        from src.state.manager import JiraStateManager
+
+        sm = JiraStateManager()
+        for ik in need:
+            st = sm.get_state(ik)
+            title = ((st.issue_summary if st else "") or "").strip()
+            if not title:
+                continue
+            for rec in index.values():
+                if (rec.get("issue_key") or "").strip().upper() == ik and not rec.get(
+                    "summary"
+                ):
+                    rec["summary"] = title
+    except Exception as e:
+        logger.debug(f"storage issue index from state failed: {e}")
+
+
+def _clone_issue_index() -> Dict[str, Dict[str, Any]]:
+    """Map clone path / folder name → latest Jira key, title, and job id."""
+    index: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        from src.state.job_store import job_store
+
+        n = job_store.count_jobs()
+        for job in job_store.list_jobs(limit=max(int(n or 0), 1)):
+            wd = (job.get("working_directory") or "").strip()
+            if not wd:
+                continue
+            _put_clone_issue(
+                index,
+                wd,
+                issue_key=str(job.get("issue_key") or ""),
+                summary=str(job.get("summary") or ""),
+                job_id=str(job.get("job_id") or ""),
+                when=str(
+                    job.get("started_at") or job.get("updated_at") or ""
+                ),
+            )
+    except Exception as e:
+        logger.debug(f"storage issue index from jobs failed: {e}")
+
+    try:
+        from src.state.session_bind_store import session_bind_store
+
+        for rec in session_bind_store.list_binds(limit=500):
+            wd = (rec.get("working_directory") or "").strip()
+            if not wd:
+                continue
+            _put_clone_issue(
+                index,
+                wd,
+                issue_key=str(rec.get("issue_key") or ""),
+                summary="",
+                job_id=str(rec.get("job_id") or ""),
+            )
+    except Exception as e:
+        logger.debug(f"storage issue index from binds failed: {e}")
+
+    try:
+        from src.git_manager import GitManager
+
+        live = getattr(GitManager, "_live_by_issue", None) or {}
+        for ik, gm in list(live.items()):
+            td = getattr(gm, "temp_dir", None)
+            if not td:
+                continue
+            _put_clone_issue(
+                index,
+                td,
+                issue_key=str(ik or ""),
+                summary="",
+                prefer=True,
+            )
+    except Exception as e:
+        logger.debug(f"storage issue index from live git failed: {e}")
+
+    _fill_missing_summaries(index)
+    return index
+
+
+def _issue_fields_for(
+    path: Any, name: str, index: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    for lookup in _path_lookup_keys(path) + _path_lookup_keys(name):
+        hit = index.get(lookup)
+        if hit:
+            return {
+                "issue_key": hit.get("issue_key"),
+                "summary": hit.get("summary") or "",
+                "job_id": hit.get("job_id"),
+            }
+    return {"issue_key": None, "summary": "", "job_id": None}
+
+
 def build_storage_view() -> Dict[str, Any]:
     base = resolve_temp_base()
     try:
@@ -265,6 +441,7 @@ def build_storage_view() -> Dict[str, Any]:
     if usage.total > 0:
         used_pct = round(100.0 * float(usage.used) / float(usage.total), 1)
     in_use = _in_use_paths()
+    issue_index = _clone_issue_index()
     jobs = list_delete_jobs()
     folders: List[Dict[str, Any]] = []
     folders_bytes = 0
@@ -314,6 +491,7 @@ def build_storage_view() -> Dict[str, Any]:
                 "size_pending": size_pending,
                 "modified_at": modified,
                 "in_use": resolved in in_use,
+                **_issue_fields_for(resolved, entry.name, issue_index),
             }
             if job:
                 if job.get("status") == "done":
@@ -327,16 +505,18 @@ def build_storage_view() -> Dict[str, Any]:
             continue
         if job.get("status") not in {"deleting", "error", "done"}:
             continue
+        gone_path = job.get("path") or (base / name)
         folders.append(
             {
                 "name": name,
-                "path": str(job.get("path") or (base / name)),
+                "path": str(gone_path),
                 "size_bytes": int(job.get("size_bytes") or 0),
                 "size_label": format_bytes(int(job.get("size_bytes") or 0)),
                 "size_pending": False,
                 "modified_at": None,
                 "in_use": False,
                 "delete": _delete_dto(job),
+                **_issue_fields_for(gone_path, name, issue_index),
             }
         )
     folders.sort(key=lambda r: str(r.get("name") or "").lower())

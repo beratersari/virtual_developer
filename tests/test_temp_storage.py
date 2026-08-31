@@ -256,6 +256,125 @@ def test_storage_api_queue_delete_returns_before_gone(
     _wait_gone(clone)
 
 
+def test_storage_view_attaches_jira_issue_from_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.state.job_store import job_store
+
+    base = tmp_path / ".temp"
+    clone = base / "repo_deadbeef1234"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("z", encoding="utf-8")
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.chdir(tmp_path)
+
+    job = job_store.create_job(
+        issue_key="STOR-42",
+        summary="Login ekranini duzelt",
+        workflow_type="direct",
+    )
+    job_store.update_job(job["job_id"], working_directory=str(clone.resolve()))
+
+    view = build_storage_view()
+    row = next(f for f in view["folders"] if f["name"] == "repo_deadbeef1234")
+    assert row["issue_key"] == "STOR-42"
+    assert row["summary"] == "Login ekranini duzelt"
+    assert row["job_id"] == job["job_id"]
+
+    other = base / "orphan_clone"
+    other.mkdir()
+    view = build_storage_view()
+    orphan = next(f for f in view["folders"] if f["name"] == "orphan_clone")
+    assert orphan["issue_key"] is None
+    assert orphan.get("summary") == ""
+
+
+def test_storage_view_prefers_newest_job_for_same_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.state.job_store import job_store
+
+    base = tmp_path / ".temp"
+    clone = base / "repo_cafebabe9999"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.chdir(tmp_path)
+
+    older = job_store.create_job(issue_key="STOR-1", summary="Eski baslik")
+    job_store.update_job(
+        older["job_id"],
+        working_directory=str(clone.resolve()),
+        started_at="2026-08-01T10:00:00",
+        updated_at="2026-08-01T10:00:00",
+    )
+    newer = job_store.create_job(issue_key="STOR-1", summary="Yeni baslik")
+    job_store.update_job(
+        newer["job_id"],
+        working_directory=str(clone.resolve()),
+        started_at="2026-08-31T12:00:00",
+        updated_at="2026-08-31T12:00:00",
+    )
+
+    row = next(f for f in build_storage_view()["folders"] if f["name"] == clone.name)
+    assert row["issue_key"] == "STOR-1"
+    assert row["summary"] == "Yeni baslik"
+    assert row["job_id"] == newer["job_id"]
+
+
+def test_storage_view_attaches_issue_from_session_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.state.session_bind_store import session_bind_store
+
+    base = tmp_path / ".temp"
+    clone = base / "repo_bindonly0001"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.chdir(tmp_path)
+
+    rec = session_bind_store.upsert(
+        repository_url="https://git.example.com/g/r.git",
+        branch="feature/STOR-7",
+        session_id="ses_stor7",
+        issue_key="STOR-7",
+        working_directory=str(clone.resolve()),
+        target_branch="develop",
+        job_id="job_bindonly",
+    )
+    assert rec is not None
+
+    row = next(f for f in build_storage_view()["folders"] if f["name"] == clone.name)
+    assert row["issue_key"] == "STOR-7"
+    assert row["job_id"] == "job_bindonly"
+
+
+def test_storage_api_includes_issue_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.state.job_store import job_store
+
+    base = tmp_path / ".temp"
+    clone = base / "repo_apiissue01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("z", encoding="utf-8")
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.chdir(tmp_path)
+    job = job_store.create_job(issue_key="STOR-9", summary="API title")
+    job_store.update_job(job["job_id"], working_directory=str(clone.resolve()))
+
+    app = create_dashboard_app()
+    client = TestClient(app)
+    body = client.get("/api/storage").json()
+    row = next(f for f in body["folders"] if f["name"] == clone.name)
+    assert row["issue_key"] == "STOR-9"
+    assert row["summary"] == "API title"
+    assert row["job_id"] == job["job_id"]
+
+
 def test_storage_view_returns_before_size_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

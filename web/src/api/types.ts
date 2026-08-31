@@ -532,6 +532,9 @@ export type StorageFolder = {
   in_use: boolean
   kind?: 'file' | 'dir' | string
   area?: 'temp' | 'sessions' | string
+  issue_key?: string | null
+  summary?: string | null
+  job_id?: string | null
   delete?: StorageFolderDelete | null
 }
 

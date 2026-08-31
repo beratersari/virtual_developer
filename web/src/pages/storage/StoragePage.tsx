@@ -1,9 +1,25 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { deleteTempFolder, fetchStorage, fetchStorageDeletes } from '../../api/client'
 import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
+
+function folderHref(folder: StorageFolder): string | null {
+  if (folder.job_id) return `/jobs/${encodeURIComponent(folder.job_id)}`
+  if (folder.issue_key) return `/tasks/${encodeURIComponent(folder.issue_key)}`
+  return null
+}
+
+function folderLabel(folder: StorageFolder): string {
+  const key = folder.issue_key?.trim()
+  const title = folder.summary?.trim()
+  if (key && title) return `${key} — ${title}`
+  if (key) return key
+  if (title) return title
+  return folder.name
+}
 
 function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]): StoragePayload | null {
   if (!prev) return prev
@@ -33,6 +49,9 @@ function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]):
       size_label: '',
       in_use: false,
       area: 'temp',
+      issue_key: null,
+      summary: '',
+      job_id: null,
       delete: { status: job.status, percent: job.percent, error: job.error },
     })
   }
@@ -77,13 +96,39 @@ function StorageList({
           const del = folder.delete
           const isDeleting = del?.status === 'deleting' || del?.status === 'done'
           const pct = Math.max(0, Math.min(100, del?.percent ?? 0))
+          const href = folderHref(folder)
           return (
             <li
               key={folder.path || folder.name}
               className="flex flex-wrap items-start justify-between gap-3 py-3 text-sm"
             >
               <div className="min-w-0 flex-1 space-y-0.5">
-                <div className="font-mono text-sm font-semibold text-text">{folder.name}</div>
+                {folder.issue_key ? (
+                  <>
+                    <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                      {href ? (
+                        <Link
+                          to={href}
+                          className="font-mono text-sm font-semibold text-accent-text hover:underline"
+                        >
+                          {folder.issue_key}
+                        </Link>
+                      ) : (
+                        <span className="font-mono text-sm font-semibold text-text">
+                          {folder.issue_key}
+                        </span>
+                      )}
+                      {folder.summary ? (
+                        <span className="min-w-0 truncate text-sm text-text">{folder.summary}</span>
+                      ) : null}
+                    </div>
+                    <div className="truncate font-mono text-[11px] text-text-muted">
+                      {folder.name}
+                    </div>
+                  </>
+                ) : (
+                  <div className="font-mono text-sm font-semibold text-text">{folder.name}</div>
+                )}
                 <div className="truncate font-mono text-[11px] text-text-muted">{folder.path}</div>
                 <div className="text-xs text-text-secondary">
                   {folder.size_pending ? 'Measuring…' : folder.size_label || '0 B'}
@@ -197,7 +242,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Delete a folder to reclaim disk. Same path layout on Windows and Linux."
+        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue that created it. Delete a folder to reclaim disk."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
@@ -250,7 +295,7 @@ export function StoragePage() {
         title="Force-delete this clone?"
         body={
           pending
-            ? `Permanently delete ${pending.path}\n\nThis cannot be undone.`
+            ? `Permanently delete ${folderLabel(pending)}\n${pending.path}\n\nThis cannot be undone.`
             : ''
         }
         confirmLabel="Delete"
