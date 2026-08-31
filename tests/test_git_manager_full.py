@@ -806,35 +806,62 @@ def test_mr_and_comments(gm):
             assert gm.create_merge_request("t") == "http://mr/1"
 
         with patch.object(gm, "_get_existing_mr_url", return_value=None):
-            with patch(
-                "src.git_manager.subprocess.run",
-                return_value=_cp(stdout="https://gitlab.com/mr/2\n"),
-            ):
-                assert "http" in gm.create_merge_request("t", "body")
+            with patch.object(gm, "commits_ahead_of_target", return_value=1):
+                with patch(
+                    "src.git_manager.subprocess.run",
+                    return_value=_cp(stdout="https://gitlab.com/mr/2\n"),
+                ):
+                    assert "http" in gm.create_merge_request("t", "body")
 
-            with patch(
-                "src.git_manager.subprocess.run",
-                return_value=_cp(stdout="created ok\n"),
-            ):
-                assert gm.create_merge_request("t") == "created"
+            with patch.object(gm, "commits_ahead_of_target", return_value=1):
+                with patch(
+                    "src.git_manager.subprocess.run",
+                    return_value=_cp(stdout="created ok\n"),
+                ):
+                    assert gm.create_merge_request("t") == "created"
 
-            with patch(
-                "src.git_manager.subprocess.run",
-                return_value=_cp(returncode=1, stderr="already exists"),
-            ):
-                with patch.object(gm, "_get_existing_mr_url", return_value="http://mr/3"):
-                    assert gm.create_merge_request("t") == "http://mr/3"
+            with patch.object(gm, "commits_ahead_of_target", return_value=1):
+                with patch(
+                    "src.git_manager.subprocess.run",
+                    return_value=_cp(returncode=1, stderr="already exists"),
+                ):
+                    with patch.object(gm, "_get_existing_mr_url", return_value="http://mr/3"):
+                        assert gm.create_merge_request("t") == "http://mr/3"
 
-            with patch(
-                "src.git_manager.subprocess.run",
-                return_value=_cp(returncode=1, stderr="other error"),
-            ):
+                with patch(
+                    "src.git_manager.subprocess.run",
+                    return_value=_cp(returncode=1, stderr="other error"),
+                ):
+                    assert gm.create_merge_request("t") is None
+
+                with patch("src.git_manager.subprocess.run", side_effect=FileNotFoundError):
+                    assert gm.create_merge_request("t") is None
+                with patch("src.git_manager.subprocess.run", side_effect=RuntimeError("x")):
+                    assert gm.create_merge_request("t") is None
+
+
+def test_should_open_merge_request_requires_ahead(gm):
+    gm.work_branch = "feature/x"
+    gm.target_branch = "develop"
+    with patch.object(gm, "commits_ahead_of_target", return_value=2):
+        assert gm.should_open_merge_request() is True
+    with patch.object(gm, "commits_ahead_of_target", return_value=0):
+        assert gm.should_open_merge_request() is False
+    gm.work_branch = "develop"
+    gm.target_branch = "develop"
+    with patch.object(gm, "commits_ahead_of_target", return_value=5):
+        assert gm.should_open_merge_request() is False
+
+
+def test_create_merge_request_skips_when_not_ahead(gm):
+    gm.remote_enabled = True
+    gm.work_branch = "feature/x"
+    gm.target_branch = "develop"
+    with patch.object(gm, "_get_existing_mr_url", return_value=None):
+        with patch.object(gm, "commits_ahead_of_target", return_value=0):
+            with patch.object(gm, "_run_glab") as glab:
                 assert gm.create_merge_request("t") is None
-
-            with patch("src.git_manager.subprocess.run", side_effect=FileNotFoundError):
-                assert gm.create_merge_request("t") is None
-            with patch("src.git_manager.subprocess.run", side_effect=RuntimeError("x")):
-                assert gm.create_merge_request("t") is None
+    glab.assert_not_called()
 
 
 def test_create_mr_prefers_api_for_turkish_title(gm):
@@ -844,11 +871,12 @@ def test_create_mr_prefers_api_for_turkish_title(gm):
     gm.target_branch = "develop"
     title = "feat: Türkçe karakterler ğüşıöç"
     with patch.object(gm, "_get_existing_mr_url", return_value=None):
-        with patch.object(
-            gm, "_create_mr_via_api", return_value="https://gitlab.example.com/mr/9"
-        ) as api:
-            with patch.object(gm, "_run_glab") as glab:
-                url = gm.create_merge_request(title, body="açıklama")
+        with patch.object(gm, "commits_ahead_of_target", return_value=1):
+            with patch.object(
+                gm, "_create_mr_via_api", return_value="https://gitlab.example.com/mr/9"
+            ) as api:
+                with patch.object(gm, "_run_glab") as glab:
+                    url = gm.create_merge_request(title, body="açıklama")
     assert url == "https://gitlab.example.com/mr/9"
     api.assert_called_once()
     assert api.call_args[0][0] == title

@@ -4818,9 +4818,12 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
-            # Always try push + open/reuse MR after a finished agent, even
-            # when this job did not create a new SHA (prior run committed).
-            push_ok = await self._push_and_create_mr(state)
+            # Push + MR only when the work branch is ahead of the target
+            # (this job or a prior unpushed run). Same-branch / 0-ahead
+            # must not open an empty merge request.
+            push_ok = await self._push_and_create_mr(
+                state, open_mr=delivery_err is None
+            )
             # Abort wins over delivery bookkeeping even if push already ran
             if self._is_aborted(state.issue_key):
                 logger.info(
@@ -5158,6 +5161,41 @@ class JobProcessor:
             )
         return None
 
+    @staticmethod
+    def _source_is_ahead_of_target(
+        git: object,
+        source: Optional[str],
+        target: Optional[str],
+    ) -> bool:
+        """Open a new MR only when source differs from target and is ahead.
+
+        Unknown ahead counts (test doubles) do not block; same-branch always does.
+        """
+        src = (source or "").strip()
+        tgt = (target or getattr(git, "target_branch", None) or "").strip()
+        if not src or not tgt:
+            return False
+        if src.lower() == tgt.lower():
+            return False
+        decide = getattr(git, "should_open_merge_request", None)
+        if callable(decide):
+            try:
+                result = decide(src, tgt)
+                if isinstance(result, bool):
+                    return result
+            except Exception:
+                pass
+        ahead_fn = getattr(git, "commits_ahead_of_target", None)
+        if not callable(ahead_fn):
+            return True
+        try:
+            n = ahead_fn(src)
+        except Exception:
+            return True
+        if isinstance(n, bool) or not isinstance(n, int):
+            return True
+        return n >= 1
+
     async def _deliver_if_new_commits(
         self,
         state: JiraAgentState,
@@ -5182,7 +5220,7 @@ class JobProcessor:
         push_ok = await self._push_and_create_mr(
             state,
             existing_mr_url=existing_mr_url,
-            open_mr=True,
+            open_mr=has_work,
             notify_on_fail=has_work,
         )
         if self._is_aborted(state.issue_key):
@@ -5311,8 +5349,8 @@ class JobProcessor:
 
         Delivery contract (build jobs; see AGENTS.md §2 OpenCode serve):
         - Agent **committed only** → orchestrator pushes and opens MR.
-        - Agent **already pushed** → still open MR (push may no-op / already
-          on remote); do not skip MR creation.
+        - Agent **already pushed** → still open MR when source is ahead of
+          target (push may no-op / already on remote).
         - Always prefer ``git.work_branch`` (not drifted HEAD) — B5.
 
         Returns True when the branch is on the remote and delivery was
@@ -5527,6 +5565,12 @@ class JobProcessor:
                 f"{state.issue_key}: reusing existing MR {mr_url} "
                 f"(not opening a new one)"
             )
+        elif not self._source_is_ahead_of_target(git, branch_name, target_branch):
+            logger.info(
+                f"{state.issue_key}: skipping new MR — `{branch_name}` is not "
+                f"ahead of `{target_branch or ''}`"
+            )
+            mr_url = None
         else:
             mr_url = await asyncio.to_thread(
                 git.create_merge_request,

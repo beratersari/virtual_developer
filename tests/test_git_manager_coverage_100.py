@@ -654,6 +654,7 @@ def test_create_mr_glab_already_exists(gm):
     gm.remote_enabled = True
     gm.work_branch = "feature/ok"
     gm.target_branch = "develop"
+    gm.commits_ahead_of_target = lambda branch_name=None: 1
     with patch.object(gm, "_get_existing_mr_url", side_effect=[None, "https://mr/ex"]):
         with patch.object(
             gm,
@@ -667,6 +668,7 @@ def test_create_mr_target_missing_then_api(gm):
     gm.remote_enabled = True
     gm.work_branch = "feature/ok"
     gm.target_branch = "develop"
+    gm.commits_ahead_of_target = lambda branch_name=None: 1
     with patch.object(gm, "_get_existing_mr_url", return_value=None):
         with patch.object(
             gm,
@@ -685,6 +687,7 @@ def test_create_mr_glab_auth_fail_api_ok(gm):
     gm.remote_enabled = True
     gm.work_branch = "feature/ok"
     gm.target_branch = "develop"
+    gm.commits_ahead_of_target = lambda branch_name=None: 1
     with patch.object(gm, "_get_existing_mr_url", return_value=None):
         with patch.object(
             gm,
@@ -701,6 +704,7 @@ def test_create_mr_file_not_found_uses_api(gm):
     gm.remote_enabled = True
     gm.work_branch = "feature/ok"
     gm.target_branch = "develop"
+    gm.commits_ahead_of_target = lambda branch_name=None: 1
     with patch.object(gm, "_get_existing_mr_url", return_value=None):
         with patch.object(gm, "_run_glab", side_effect=FileNotFoundError):
             with patch.object(
@@ -715,6 +719,7 @@ def test_create_mr_generic_exception_api_fallback(gm):
     gm.remote_enabled = True
     gm.work_branch = "feature/ok"
     gm.target_branch = "develop"
+    gm.commits_ahead_of_target = lambda branch_name=None: 1
     with patch.object(gm, "_get_existing_mr_url", return_value=None):
         with patch.object(gm, "_run_glab", side_effect=RuntimeError("boom")):
             with patch.object(
