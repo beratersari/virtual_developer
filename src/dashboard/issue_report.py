@@ -719,7 +719,7 @@ def _git_missing_explanation(
             f"Job started: {started}",
             f"Job completed: {completed}",
             f"Temp cleanup: policy={policy} max_age_days={max_age}",
-            "After that age (and on daemon start) the clone is deleted.",
+            "Job-end policy only; the daemon does not auto-purge other clones.",
             "",
             "Temp folders still on disk:",
         ]

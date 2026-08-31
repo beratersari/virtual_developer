@@ -99,18 +99,6 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Startup queue dispatch failed: {e}", e)
 
-        # Age-based temp clone sweep (default: delete dirs older than 24h)
-        try:
-            from src.git_manager import purge_stale_temp_dirs, session_bound_workspace_paths
-
-            purged = purge_stale_temp_dirs(
-                protect_paths=session_bound_workspace_paths()
-            )
-            if purged:
-                logger.info(f"Startup temp purge removed {purged} stale clone(s)")
-        except Exception as e:
-            logger.exception(f"Startup temp purge failed: {e}", e)
-
         self._running = True
         self._stopping = False
 
@@ -177,11 +165,6 @@ class JiraAgentDaemon:
         logger.info("Starting schedule dispatcher...")
         schedule_task = asyncio.create_task(self._run_schedule_dispatcher())
         tasks.append(schedule_task)
-
-        # Periodic purge of temp clones older than temp_cleanup_max_age_days
-        logger.info("Starting temp cleanup sweeper...")
-        cleanup_task = asyncio.create_task(self._run_temp_cleanup_sweeper())
-        tasks.append(cleanup_task)
 
         logger.info("Daemon started. Press Ctrl+C to stop.")
 
@@ -392,40 +375,6 @@ class JiraAgentDaemon:
                     )
             except Exception as e:
                 logger.exception(f"Schedule dispatcher tick failed: {e}", e)
-            await asyncio.sleep(interval)
-
-    async def _run_temp_cleanup_sweeper(self):
-        """Delete temp clone directories older than configured max age (default 24h)."""
-        from src.git_manager import purge_stale_temp_dirs
-
-        # Hourly is enough; startup already runs one sweep
-        interval = 3600
-        while self._running:
-            try:
-                policy = (settings.temp_cleanup_policy or "age").strip().lower()
-                # Always allow age purge when policy is age; also run when always
-                # is set so long-lived dirs still get collected
-                if policy in {"age", "always"}:
-                    protect = set()
-                    try:
-                        for ctx in (self.processor._contexts or {}).values():
-                            git = ctx.get("git") if isinstance(ctx, dict) else None
-                            td = getattr(git, "temp_dir", None) if git is not None else None
-                            if td:
-                                protect.add(td)
-                    except Exception:
-                        protect = set()
-                    try:
-                        from src.git_manager import session_bound_workspace_paths
-
-                        protect.update(session_bound_workspace_paths())
-                    except Exception:
-                        pass
-                    n = purge_stale_temp_dirs(protect_paths=protect)
-                    if n:
-                        logger.info(f"Periodic temp purge removed {n} stale clone(s)")
-            except Exception as e:
-                logger.exception(f"Temp cleanup sweeper failed: {e}", e)
             await asyncio.sleep(interval)
 
     async def _monitor_active_issues(self):

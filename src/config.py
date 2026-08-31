@@ -384,16 +384,17 @@ class Settings(BaseSettings):
     temp_cleanup_policy: str = Field(
         default="age",
         description=(
-            "Temp folder cleanup policy: 'always', 'on_success', 'never', 'age' "
-            "(delete this clone when older than temp_cleanup_max_age_days; also "
-            "sweep the temp base for dirs past that age)"
+            "Temp folder cleanup when a job ends: 'always', 'on_success', "
+            "'never', 'age' (delete this clone when older than "
+            "temp_cleanup_max_age_days). The daemon does not auto-purge "
+            "other clones on start or on a timer."
         ),
     )
     temp_cleanup_max_age_days: float = Field(
         default=1.0,
         description=(
-            "When temp_cleanup_policy is 'age', delete temp clones older than "
-            "this many days (default 1.0 = 24 hours)"
+            "When temp_cleanup_policy is 'age', delete this job's clone at "
+            "job end if it is older than this many days (default 1.0 = 24 hours)"
         ),
     )
     

@@ -58,7 +58,7 @@ Yaver is a Python daemon that:
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
-- Temp clones: default policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h); purge on daemon start and hourly.
+- Temp clones: default job-end policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h). No daemon start or hourly auto-purge (dashboard Storage delete is manual).
 
 ### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
 

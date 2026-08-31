@@ -621,6 +621,103 @@ def test_summarize_git_error():
     )
 
 
+def test_summarize_git_error_redacts_embedded_pat():
+    from src.git_manager import summarize_git_error
+
+    pat = "glpat-TEST-SECRET-REDACT-9f3a"
+    raw = (
+        "git cancelled: git remote set-url origin "
+        f"https://oauth2:{pat}@gitlab.example.com/g/r.git"
+    )
+    out = summarize_git_error(raw)
+    assert pat not in out
+    assert "oauth2:***@" in out
+
+
+def test_git_cancelled_error_redacts_pat_in_cmd(gm):
+    from src.git_manager import GitCancelledError
+
+    pat = "glpat-TEST-SECRET-REDACT-9f3a"
+    gm._cancelled = True
+    gm._init_proc_state()
+    with pytest.raises(GitCancelledError) as ei:
+        gm._run_tracked(
+            ["git", "remote", "set-url", "origin", f"https://oauth2:{pat}@h/r.git"]
+        )
+    assert pat not in str(ei.value)
+    assert "oauth2:***@" in str(ei.value)
+
+
+def test_apply_settings_pat_logs_redact_timeout(gm):
+    pat = "glpat-TEST-SECRET-REDACT-9f3a"
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    gm._https_url_with_settings_pat = lambda url="": (
+        f"https://oauth2:{pat}@gitlab.example.com/g/r.git"
+    )
+
+    def boom(cmd, **kwargs):
+        raise TimeoutError(
+            "timeout: " + " ".join(str(c) for c in cmd[:6])
+        )
+
+    gm._run_tracked = boom
+    with patch("src.git_manager.logger") as log:
+        assert gm._apply_settings_pat_to_origin() is False
+        warned = " ".join(str(c.args[0]) for c in log.warning.call_args_list)
+    assert pat not in warned
+    assert "oauth2:***@" in warned or "***" in warned
+
+
+def test_push_does_not_swallow_cancel_as_push_fail(gm):
+    from src.git_manager import GitCancelledError
+
+    pat = "glpat-TEST-SECRET-REDACT-9f3a"
+    gm.remote_enabled = True
+    gm.last_push_error = None
+    gm._pat_for_remote = lambda url: pat
+    gm._host_from_url = lambda url: "gitlab.example.com"
+    gm.normalize_remote_url = lambda url: url
+    gm.head_is_on_remote = lambda branch: False
+    gm._with_auth_remote = lambda: None
+    gm._scrub_remote_credentials = lambda: None
+
+    def run_git(*a, **k):
+        raise GitCancelledError(
+            f"git cancelled: git remote set-url origin "
+            f"https://oauth2:{pat}@gitlab.example.com/g/r.git"
+        )
+
+    gm._run_git = run_git
+    with pytest.raises(GitCancelledError):
+        gm.push("feature/x")
+    assert gm.last_push_error is None
+
+
+def test_push_merge_fail_redacts_pat_in_last_push_error(gm):
+    pat = "glpat-TEST-SECRET-REDACT-9f3a"
+    leak = (
+        f"git cancelled: git remote set-url origin "
+        f"https://oauth2:{pat}@gitlab.example.com/g/r.git"
+    )
+    gm.remote_enabled = True
+    gm.last_push_error = None
+    gm._pat_for_remote = lambda url: pat
+    gm._host_from_url = lambda url: "gitlab.example.com"
+    gm.normalize_remote_url = lambda url: url
+    gm.head_is_on_remote = lambda branch: False
+    gm._with_auth_remote = lambda: None
+    gm._scrub_remote_credentials = lambda: None
+
+    def run_git(*a, **k):
+        raise RuntimeError(leak)
+
+    gm._run_git = run_git
+    assert gm.push("feature/x") is False
+    err = gm.last_push_error or ""
+    assert pat not in err
+    assert "oauth2:***@" in err
+
+
 def test_push_paths(gm):
     gm.remote_enabled = False
     assert gm.push() is False

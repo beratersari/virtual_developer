@@ -75,7 +75,7 @@ def summarize_git_error(exc: object, *, limit: int = 800) -> str:
         body = "\n".join(lines[1:])
     else:
         body = "\n".join(lines[-4:])
-    return body[:limit].strip()
+    return GitManager._redact_secret_text(body[:limit].strip())
 
 
 # Primary integration bases — never used as the agent work branch
@@ -978,7 +978,10 @@ class GitManager:
         except GitCancelledError:
             raise
         except Exception as e:
-            logger.warning(f"Could not apply settings PAT to origin: {e}")
+            logger.warning(
+                f"Could not apply settings PAT to origin: "
+                f"{self._redact_secret_text(str(e))}"
+            )
             return False
 
     def _git_auth_env(self, *, url: str = "") -> Dict[str, str]:
@@ -1101,7 +1104,10 @@ class GitManager:
             self._run_git(["remote", "set-url", "origin", self.remote_url], check=False)
             logger.debug("Scrubbed credentials from origin remote URL")
         except Exception as e:
-            logger.warning(f"Could not scrub origin credentials: {e}")
+            logger.warning(
+                f"Could not scrub origin credentials: "
+                f"{self._redact_secret_text(str(e))}"
+            )
 
     def _with_auth_remote(self) -> None:
         """Ensure origin uses the clean URL; auth is supplied via env/askpass.
@@ -1152,7 +1158,10 @@ class GitManager:
             finally:
                 self._scrub_remote_credentials()
         except Exception as e:
-            logger.warning(f"Could not fetch job branches {branches}: {e}")
+            logger.warning(
+                f"Could not fetch job branches {branches}: "
+                f"{self._redact_secret_text(str(e))}"
+            )
 
     def _sync_remote_branches(self) -> None:
         """Backward-compatible alias: only materialize source/target, not all remotes."""
@@ -1226,7 +1235,9 @@ class GitManager:
         self._init_proc_state()
         if self._cancelled:
             raise GitCancelledError(
-                f"git cancelled before start: {' '.join(str(c) for c in cmd[:6])}"
+                self._redact_secret_text(
+                    f"git cancelled before start: {' '.join(str(c) for c in cmd[:6])}"
+                )
             )
         run_kwargs: Dict[str, Any] = {
             "cwd": cwd,
@@ -1294,12 +1305,16 @@ class GitManager:
                     stdout, stderr = ("", "") if text or encoding else (b"", b"")
                 if self._cancelled:
                     raise GitCancelledError(
-                        f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                        self._redact_secret_text(
+                            f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                        )
                     )
                 raise
             if self._cancelled:
                 raise GitCancelledError(
-                    f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                    self._redact_secret_text(
+                        f"git cancelled: {' '.join(str(c) for c in cmd[:6])}"
+                    )
                 )
             return subprocess.CompletedProcess(
                 args=cmd,
@@ -2397,6 +2412,8 @@ class GitManager:
                 self._run_git(["push", "-u", "origin", "--", branch], auth=True)
                 logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
+            except GitCancelledError:
+                raise
             except RuntimeError:
                 logger.warning(f"Push failed, attempting to pull and merge...")
                 try:
@@ -2408,18 +2425,23 @@ class GitManager:
                     self._run_git(["push", "-u", "origin", "--", branch], auth=True)
                     logger.info(f"Pushed branch '{branch}' after merge.")
                     return True
+                except GitCancelledError:
+                    raise
                 except RuntimeError as e2:
                     # Agent may have already pushed the same tip (or further).
                     if self.head_is_on_remote(branch):
+                        safe = self._redact_secret_text(str(e2))
                         logger.info(
                             f"Push failed but HEAD is already on origin/{branch} "
                             f"(agent likely pushed); treating push as success so "
-                            f"the orchestrator can open an MR. Detail: {e2}"
+                            f"the orchestrator can open an MR. Detail: {safe}"
                         )
                         return True
-                    reason = summarize_git_error(e2) or str(e2).strip()
+                    reason = self._redact_secret_text(
+                        summarize_git_error(e2) or str(e2).strip()
+                    )
                     self.last_push_error = reason or "git push failed"
-                    logger.error(f"Push failed after merge attempt: {e2}")
+                    logger.error(f"Push failed after merge attempt: {reason}")
                     return False
         finally:
             self._scrub_remote_credentials()
@@ -2815,7 +2837,6 @@ class GitManager:
         - always: delete directory
         - on_success: delete only when success is True
         - age: delete this directory only if older than temp_cleanup_max_age_days
-          (also call ``purge_stale_temp_dirs`` for a full base sweep)
         """
         self._unregister_live()
         if not self.temp_dir or not self.temp_dir.exists():
@@ -2894,9 +2915,8 @@ def purge_stale_temp_dirs(
     """Delete temp clone directories older than ``max_age_days`` under the temp base.
 
     Returns the number of directories removed. Safe to call when the base is missing.
-    Used on daemon start and periodically so ``age`` policy actually frees disk.
-    ``protect_paths`` are live clone dirs that must not be removed.
-    Session-bound workspaces are always protected.
+    The daemon does not call this automatically. ``protect_paths`` are clone dirs
+    that must not be removed. Session-bound workspaces are always protected.
     """
     age = max_age_days
     if age is None:

@@ -175,10 +175,23 @@ def test_purge_stale_temp_dirs_removes_old_only(tmp_path):
     assert new.exists()
 
 
+def test_daemon_does_not_auto_purge_temp_clones():
+    """Startup + hourly sweeper must not exist (live clones were deleted)."""
+    import inspect
+
+    from src import daemon as daemon_mod
+
+    source = inspect.getsource(daemon_mod.JiraAgentDaemon)
+    assert "_run_temp_cleanup_sweeper" not in source
+    assert "purge_stale_temp_dirs" not in source
+    assert not hasattr(daemon_mod.JiraAgentDaemon, "_run_temp_cleanup_sweeper")
+
+
 def test_cleanup_age_keeps_fresh_dir(tmp_path):
     d = tmp_path / "fresh"
     d.mkdir()
     gm = GitManager.__new__(GitManager)
+    gm.issue_key = "CL-AGE"
     gm.temp_dir = d
     with patch("src.git_manager.settings") as s:
         s.temp_cleanup_policy = "age"
@@ -202,8 +215,33 @@ async def test_push_and_create_mr_skips_when_aborted(processor, state_manager):
 
     ok = await processor._push_and_create_mr(state_manager.get_state("AB-1"))
     assert ok is False
-    git.push.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_cancel_during_push_skips_notify(
+    processor, state_manager, fake_jira
+):
+    """Cancel mid-push must not treat GitCancelledError as a push-fail comment."""
+    from src.git_manager import GitCancelledError
+
+    state_manager.create_state("AB-2", "s", "d")
+    state_manager.update_state("AB-2", status=TaskStatus.EXECUTING)
+    git = MagicMock()
+    git.work_branch = "feature/AB-2"
+    git.target_branch = "develop"
+    git.get_current_branch.return_value = "feature/AB-2"
+    git.ensure_on_work_branch.return_value = True
+    git.push.side_effect = GitCancelledError(
+        "git cancelled: git remote set-url origin https://oauth2:***@h/r.git"
+    )
+    processor._contexts = {"AB-2": {"git": git, "runner": MagicMock()}}
+
+    ok = await processor._push_and_create_mr(state_manager.get_state("AB-2"))
+    assert ok is False
+    git.push.assert_called_once()
     git.create_merge_request.assert_not_called()
+    bodies = [c.get("body", "") for c in getattr(fake_jira, "comments", [])]
+    assert not any("push failed" in b.lower() for b in bodies)
 
 
 @pytest.mark.asyncio

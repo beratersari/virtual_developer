@@ -5420,7 +5420,13 @@ class JobProcessor:
             )
             return False
 
-        push_success = await asyncio.to_thread(git.push, branch_name)
+        try:
+            push_success = await asyncio.to_thread(git.push, branch_name)
+        except GitCancelledError:
+            logger.info(
+                f"Abort during push for {state.issue_key}; skipping remote delivery"
+            )
+            return False
         if self._is_aborted(state.issue_key):
             # Push may have already completed; do not open MR or stamp delivery.
             logger.warning(
