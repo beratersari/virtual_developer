@@ -211,50 +211,6 @@ def test_cleanup_keeps_temp_dir(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_push_and_create_mr_skips_when_source_not_ahead(
-    processor, state_manager
-):
-    state_manager.create_state("MR-AHEAD", "s", "d")
-    state_manager.update_state("MR-AHEAD", status=TaskStatus.EXECUTING)
-    git = MagicMock()
-    git.work_branch = "feature/MR-AHEAD"
-    git.target_branch = "develop"
-    git.get_current_branch.return_value = "feature/MR-AHEAD"
-    git.ensure_on_work_branch.return_value = True
-    git.push.return_value = True
-    git.commits_ahead_of_target.return_value = 0
-    git.should_open_merge_request.return_value = False
-    git.get_last_commit_subject.return_value = "feat: x"
-    git.get_last_commit_message.return_value = "body"
-    git.get_last_commit_sha.return_value = "abc"
-    processor._contexts = {"MR-AHEAD": {"git": git, "runner": MagicMock()}}
-
-    ok = await processor._push_and_create_mr(state_manager.get_state("MR-AHEAD"))
-    assert ok is True
-    git.create_merge_request.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_push_and_create_mr_skips_when_source_equals_target(
-    processor, state_manager
-):
-    state_manager.create_state("MR-SAME", "s", "d")
-    state_manager.update_state("MR-SAME", status=TaskStatus.EXECUTING)
-    git = MagicMock()
-    git.work_branch = "develop"
-    git.target_branch = "develop"
-    git.get_current_branch.return_value = "develop"
-    git.ensure_on_work_branch.return_value = True
-    git.push.return_value = True
-    git.commits_ahead_of_target.return_value = 3
-    processor._contexts = {"MR-SAME": {"git": git, "runner": MagicMock()}}
-
-    ok = await processor._push_and_create_mr(state_manager.get_state("MR-SAME"))
-    assert ok is False
-    git.create_merge_request.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_push_and_create_mr_skips_when_aborted(processor, state_manager):
     """Cancel/watchdog before delivery must not push or open MR."""
     state_manager.create_state("AB-1", "s", "d")

@@ -208,20 +208,17 @@ def test_git_mr_already_exists_stderr(tmp_path):
     g.source_branch = "feature/x"
     g.target_branch = "main"
     with patch.object(g, "get_current_branch", return_value="feature/x"):
-        with patch.object(g, "commits_ahead_of_target", return_value=1):
+        with patch.object(g, "_get_existing_mr_url", side_effect=[None, "http://mr/9"]):
             with patch.object(
-                g, "_get_existing_mr_url", side_effect=[None, "http://mr/9"]
+                g,
+                "_run_glab",
+                return_value=subprocess.CompletedProcess(
+                    [], 1, "", "Error: already exists (409)"
+                ),
             ):
-                with patch.object(
-                    g,
-                    "_run_glab",
-                    return_value=subprocess.CompletedProcess(
-                        [], 1, "", "Error: already exists (409)"
-                    ),
-                ):
-                    with patch("src.git_manager.settings") as s:
-                        s.gitlab_pat = "token"
-                        assert g.create_merge_request("t") == "http://mr/9"
+                with patch("src.git_manager.settings") as s:
+                    s.gitlab_pat = "token"
+                    assert g.create_merge_request("t") == "http://mr/9"
 
 # ---------------------------------------------------------------------------
 # poller process without summary

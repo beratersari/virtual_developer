@@ -2294,25 +2294,6 @@ class GitManager:
         except ValueError:
             return 0
 
-    def should_open_merge_request(
-        self,
-        source_branch: Optional[str] = None,
-        target_branch: Optional[str] = None,
-    ) -> bool:
-        """True only when source exists, differs from target, and is ahead."""
-        source = (
-            source_branch or self.work_branch or self.get_current_branch() or ""
-        ).strip()
-        target = (target_branch or self.target_branch or "").strip()
-        if not source or not target:
-            return False
-        if source.lower() == target.lower():
-            return False
-        try:
-            return self.commits_ahead_of_target(source) >= 1
-        except Exception:
-            return False
-
     def ensure_on_work_branch(self) -> bool:
         """Checkout prepared ``work_branch`` if HEAD drifted. Returns False on failure."""
         work = (self.work_branch or "").strip()
@@ -2700,11 +2681,6 @@ class GitManager:
             return existing_mr
         if not target_branch:
             logger.error("Cannot create MR: no target branch on GitManager")
-            return None
-        if not self.should_open_merge_request(branch, target_branch):
-            logger.info(
-                f"Skipping new MR: `{branch}` is not ahead of `{target_branch}`"
-            )
             return None
 
         # Issue target branch only (no silent fall back to main/develop)
