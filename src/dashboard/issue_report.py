@@ -691,8 +691,6 @@ def _git_missing_explanation(
     """Explain a missing clone — do not imply the product repo has no history."""
     params = _job_parameters(job or raw, raw or job)
     repo = ((params.get("issue_params") or {}) or {}).get("repository_url") or ""
-    policy = str(getattr(settings, "temp_cleanup_policy", "age") or "age")
-    max_age = getattr(settings, "temp_cleanup_max_age_days", 1)
     project_root = str(getattr(settings, "project_root", "sample_project") or "")
     started = job.get("started_at") or raw.get("started_at") or "?"
     completed = job.get("completed_at") or raw.get("completed_at") or "?"
@@ -718,8 +716,7 @@ def _git_missing_explanation(
             f"Issue repository from {{params}}: {repo or '(none parsed)'}",
             f"Job started: {started}",
             f"Job completed: {completed}",
-            f"Temp cleanup: policy={policy} max_age_days={max_age}",
-            "Job-end policy only; the daemon does not auto-purge other clones.",
+            "Clones are not auto-deleted; remove them from dashboard Storage.",
             "",
             "Temp folders still on disk:",
         ]

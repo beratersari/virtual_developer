@@ -320,7 +320,7 @@ async def test_stuck_without_started_at_errors(state_manager, reporter, fake_jir
     assert any("stuck" in c["body"].lower() or "timestamp" in c["body"].lower() for c in fake_jira.comments)
 
 
-def test_cleanup_always_deletes(tmp_path, monkeypatch):
+def test_cleanup_keeps_clone(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 
     monkeypatch.chdir(tmp_path)
@@ -330,7 +330,5 @@ def test_cleanup_always_deletes(tmp_path, monkeypatch):
         gm = GitManager(issue_key="CL-1")
     gm.temp_dir = d
     gm.remote_enabled = True
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "always"
-        assert gm.cleanup() is True
-    assert not d.exists()
+    assert gm.cleanup() is True
+    assert d.exists()

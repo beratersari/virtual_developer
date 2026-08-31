@@ -453,13 +453,13 @@ async def test_e2e_dashboard_lists_working_directory_then_reset_cold(harness):
 
 
 @pytest.mark.asyncio
-async def test_e2e_cleanup_always_keeps_bound_then_deletes_after_reset(
+async def test_e2e_cleanup_keeps_clone_after_session_reset(
     harness, monkeypatch
 ):
-    monkeypatch.setattr("src.git_manager.settings.temp_cleanup_policy", "always")
     d1 = await harness.run_build("CLN-A", agent_sid="ses_cln")
     assert d1.exists()
     gm = GitManager.__new__(GitManager)
+    gm.issue_key = "CLN-A"
     gm.temp_dir = d1
     assert gm.cleanup(success=True) is True
     assert d1.exists()
@@ -469,7 +469,7 @@ async def test_e2e_cleanup_always_keeps_bound_then_deletes_after_reset(
     assert client.delete(f"/api/opencode-sessions/{bind_id}").status_code == 200
     gm.temp_dir = d1
     assert gm.cleanup(success=True) is True
-    assert not d1.exists()
+    assert d1.exists()
 
 
 @pytest.mark.asyncio

@@ -106,8 +106,6 @@ def test_discard_workspace_deletes_incomplete_clone_despite_age_policy(
     gm = _bare_gm()
     (gm.temp_dir / "partial.pack").write_text("in-flight", encoding="utf-8")
     gm._clone_in_progress = True
-    monkeypatch.setattr("src.git_manager.settings.temp_cleanup_policy", "age")
-    monkeypatch.setattr("src.git_manager.settings.temp_cleanup_max_age_days", 30.0)
 
     path = gm.temp_dir
     assert gm.should_discard_on_cancel() is True

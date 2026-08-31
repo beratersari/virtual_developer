@@ -176,28 +176,33 @@ def test_purge_stale_temp_dirs_removes_old_only(tmp_path):
 
 
 def test_daemon_does_not_auto_purge_temp_clones():
-    """Startup + hourly sweeper must not exist (live clones were deleted)."""
+    """No automatic clone deletion (start, hourly, or job-end policy)."""
     import inspect
+    from pathlib import Path
 
     from src import daemon as daemon_mod
+    from src.config import Settings
 
     source = inspect.getsource(daemon_mod.JiraAgentDaemon)
     assert "_run_temp_cleanup_sweeper" not in source
     assert "purge_stale_temp_dirs" not in source
     assert not hasattr(daemon_mod.JiraAgentDaemon, "_run_temp_cleanup_sweeper")
+    assert "temp_cleanup_policy" not in Settings.model_fields
+    assert "temp_cleanup_max_age_days" not in Settings.model_fields
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    text = example.read_text(encoding="utf-8")
+    assert "TEMP_CLEANUP_POLICY" not in text
+    assert "TEMP_CLEANUP_MAX_AGE_DAYS" not in text
 
 
-def test_cleanup_age_keeps_fresh_dir(tmp_path):
+def test_cleanup_keeps_temp_dir(tmp_path):
     d = tmp_path / "fresh"
     d.mkdir()
     gm = GitManager.__new__(GitManager)
     gm.issue_key = "CL-AGE"
     gm.temp_dir = d
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "age"
-        s.temp_cleanup_max_age_days = 1.0
-        assert gm.cleanup(success=True) is True
-        assert d.exists()
+    assert gm.cleanup(success=True) is True
+    assert d.exists()
 
 
 # ---------------------------------------------------------------------------

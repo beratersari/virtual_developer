@@ -2830,70 +2830,16 @@ class GitManager:
         return self.temp_dir
 
     def cleanup(self, *, success: Optional[bool] = None) -> bool:
-        """Clean up the temp directory according to temp_cleanup_policy.
+        """Unregister this live clone. Never auto-deletes the temp directory.
 
-        Policies:
-        - never: keep directory
-        - always: delete directory
-        - on_success: delete only when success is True
-        - age: delete this directory only if older than temp_cleanup_max_age_days
+        ``success`` is accepted for call-site compatibility. Operators delete
+        clones from dashboard Storage.
         """
+        _ = success
         self._unregister_live()
-        if not self.temp_dir or not self.temp_dir.exists():
-            return True
-
-        try:
-            resolved = self.temp_dir.resolve()
-        except OSError:
-            resolved = None
-        if resolved is not None and resolved in session_bound_workspace_paths():
-            logger.info(
-                f"Keeping session-bound temp directory: {self.temp_dir}"
-            )
-            return True
-
-        policy = (settings.temp_cleanup_policy or "age").strip().lower()
-
-        if policy == "never":
+        if self.temp_dir and self.temp_dir.exists():
             logger.info(f"Keeping temp directory: {self.temp_dir}")
-            return True
-
-        if policy == "age":
-            max_age = float(getattr(settings, "temp_cleanup_max_age_days", 1.0) or 1.0)
-            try:
-                mtime = self.temp_dir.stat().st_mtime
-            except OSError as e:
-                logger.warning(f"Could not stat temp dir {self.temp_dir}: {e}")
-                return False
-            age_days = (time.time() - mtime) / 86400.0
-            if age_days < max_age:
-                logger.info(
-                    f"Cleanup policy age: keeping {self.temp_dir} "
-                    f"(age {age_days:.2f}d < {max_age}d)"
-                )
-                return True
-            should_delete = True
-        else:
-            should_delete = policy == "always" or (
-                policy == "on_success" and success is True
-            )
-
-        if not should_delete:
-            logger.info(
-                f"Cleanup policy '{policy}' - temp directory preserved: {self.temp_dir}"
-            )
-            return True
-
-        try:
-            from src.temp_fs import force_rmtree
-
-            force_rmtree(self.temp_dir)
-            logger.info(f"Removed temp directory: {self.temp_dir}")
-            self.temp_dir = None
-            return True
-        except Exception as e:
-            logger.error(f"Failed to remove temp directory {self.temp_dir}: {e}")
-            return False
+        return True
 
 
 def session_bound_workspace_paths() -> Set[Path]:
@@ -2918,9 +2864,7 @@ def purge_stale_temp_dirs(
     The daemon does not call this automatically. ``protect_paths`` are clone dirs
     that must not be removed. Session-bound workspaces are always protected.
     """
-    age = max_age_days
-    if age is None:
-        age = float(getattr(settings, "temp_cleanup_max_age_days", 1.0) or 1.0)
+    age = 1.0 if max_age_days is None else float(max_age_days)
     if age < 0:
         age = 0.0
 

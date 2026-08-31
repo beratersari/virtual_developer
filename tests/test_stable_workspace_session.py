@@ -149,7 +149,6 @@ def test_cleanup_keeps_session_bound_workspace(tmp_path, monkeypatch):
         working_directory=str(gm.temp_dir),
     )
     monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
-    monkeypatch.setattr("src.git_manager.settings.temp_cleanup_policy", "always")
     assert gm.cleanup(success=True) is True
     assert gm.temp_dir is not None and gm.temp_dir.exists()
 

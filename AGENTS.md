@@ -58,7 +58,7 @@ Yaver is a Python daemon that:
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
-- Temp clones: default job-end policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h). No daemon start or hourly auto-purge (dashboard Storage delete is manual).
+- Temp clones are kept. Operators delete them from dashboard Storage. No daemon start, hourly, or job-end auto-purge.
 
 ### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
 
@@ -318,8 +318,6 @@ JIRA_API_TOKEN=your-api-token-here
 | `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller also requires (e.g. `devbot,jira ai bot`) |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
-| `TEMP_CLEANUP_POLICY` | `age` (default) / `always` / `on_success` / `never` |
-| `TEMP_CLEANUP_MAX_AGE_DAYS` | Age cutoff for temp clones (default `1` = 24 hours) |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
 | `JIRA_INTAKE_MODE` | `poll` (default, board poller) or `webhook` (`POST /webhooks/jira`) |
 | `JIRA_WEBHOOK_SECRET` | Shared token for `/webhooks/jira?token=` (required in webhook mode) |

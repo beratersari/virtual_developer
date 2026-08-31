@@ -731,14 +731,12 @@ def test_get_mr_url_exception(gm):
         assert gm.get_mr_url() is None
 
 
-def test_cleanup_rmtree_fails(gm, tmp_path):
-    d = tmp_path / "killme"
+def test_cleanup_keeps_dir_without_rmtree(gm, tmp_path):
+    d = tmp_path / "keepme"
     d.mkdir()
     gm.temp_dir = d
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "always"
-        with patch("src.git_manager.shutil.rmtree", side_effect=OSError("busy")):
-            assert gm.cleanup() is False
+    assert gm.cleanup() is True
+    assert d.exists()
 
 
 def test_delete_local_branch_switch_paths(gm):

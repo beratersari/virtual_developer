@@ -916,17 +916,9 @@ def test_working_dir_and_cleanup(gm, tmp_path):
     keep_dir = tmp_path / "keep"
     keep_dir.mkdir()
     gm.temp_dir = keep_dir
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "never"
-        assert gm.cleanup() is True
-        assert keep_dir.exists()
-
-        s.temp_cleanup_policy = "on_success"
-        assert gm.cleanup(success=False) is True
-        assert keep_dir.exists()
-
-        s.temp_cleanup_policy = "always"
-        assert gm.cleanup() is True
-        assert not keep_dir.exists()
+    assert gm.cleanup() is True
+    assert keep_dir.exists()
+    assert gm.cleanup(success=True) is True
+    assert keep_dir.exists()
     gm.temp_dir = None
     assert gm.cleanup() is True

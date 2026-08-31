@@ -381,23 +381,6 @@ class Settings(BaseSettings):
             return default_temp_dir()
         return v
 
-    temp_cleanup_policy: str = Field(
-        default="age",
-        description=(
-            "Temp folder cleanup when a job ends: 'always', 'on_success', "
-            "'never', 'age' (delete this clone when older than "
-            "temp_cleanup_max_age_days). The daemon does not auto-purge "
-            "other clones on start or on a timer."
-        ),
-    )
-    temp_cleanup_max_age_days: float = Field(
-        default=1.0,
-        description=(
-            "When temp_cleanup_policy is 'age', delete this job's clone at "
-            "job end if it is older than this many days (default 1.0 = 24 hours)"
-        ),
-    )
-    
     # Agent / OpenCode Task Configuration (single wall-clock budget for both)
     agent_task_timeout_seconds: int = Field(
         default=1800,
