@@ -93,7 +93,10 @@ def test_linux_dist_ci_and_offline_vendor_hooks():
     assert "CODEX_LINUX_ASSET=" in versions
     be = (LINUX / "install-backends.sh").read_text(encoding="utf-8")
     assert "vendor/opencode-home.zip" in be
+    assert "opencoderman" in be
     assert "Linux Distribution" in be
+    assert_sh = (LINUX / "assert-payload.sh").read_text(encoding="utf-8")
+    assert "opencoderman/install.py" in assert_sh
     cx = (LINUX / "install-codex.sh").read_text(encoding="utf-8")
     assert "vendor/codex" in cx
     build = LINUX / "build-dist.sh"

@@ -168,6 +168,25 @@ function Install-DummyCodexConfig([string]$DummySrc, [string]$UserHome) {
     Write-Host "[OK] Seeded dummy config.toml at $cfg"
 }
 
+function Invoke-VdPython([string]$RepoRoot, [string[]]$PyArgs) {
+    $venvPy = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPy) {
+        & $venvPy @PyArgs
+        return $LASTEXITCODE
+    }
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) {
+        & $cmd.Source @PyArgs
+        return $LASTEXITCODE
+    }
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py -and $py.Source) {
+        & $py.Source -3 @PyArgs
+        return $LASTEXITCODE
+    }
+    throw "Python not found. Run install-dashboard.bat first, or install Python 3.10+."
+}
+
 function Restore-Pe([string]$Target, [string]$Backup, [long]$MinBytes) {
     $assert = Join-Path $PSScriptRoot "Assert-Amd64Pe.ps1"
     $ok = (Test-Path -LiteralPath $Target) -and ((Get-Item -LiteralPath $Target).Length -ge $MinBytes)
@@ -229,77 +248,60 @@ Write-Host "========================================"
 Write-Host "  Virtual Developer - Backends only"
 Write-Host "========================================"
 Write-Host "Project     : $RepoRoot"
-Write-Host "OpenCode    : $(if ($doOpenCode) { $ocHome } else { 'skip' })"
+Write-Host "OpenCode    : $(if ($doOpenCode) { $userOc } else { 'skip' }) (opencoderman)"
 Write-Host "Codex       : $(if ($doCodex) { $codexExe } else { 'skip' })"
 Write-Host "Python/venv : not installed by this script"
 Write-Host ""
 
 if ($doOpenCode) {
+    $ocm = Join-Path $RepoRoot "opencoderman"
+    $installer = Join-Path $RepoRoot "packaging\install_opencode.py"
+    if (-not (Test-Path -LiteralPath (Join-Path $ocm "install.py"))) {
+        throw "opencoderman submodule missing ($ocm). Run: git submodule update --init --recursive"
+    }
+    if (-not (Test-Path -LiteralPath $installer)) {
+        throw "Missing $installer"
+    }
     $zip = Join-Path $vendor "opencode-home.zip"
     $expanded = Join-Path $vendor "opencode-home\bin\opencode.exe"
-    if (-not (Test-Path -LiteralPath $zip) -and -not (Test-Path -LiteralPath $expanded)) {
-        throw "vendor\opencode-home.zip missing. Use the CI offline zip."
+    $vendorExe = Join-Path $vendor "bin\opencode.exe"
+    $ocmExe = Join-Path $ocm "vendor\bin\windows\opencode.exe"
+    if (
+        -not (Test-Path -LiteralPath $zip) -and
+        -not (Test-Path -LiteralPath $expanded) -and
+        -not (Test-Path -LiteralPath $vendorExe) -and
+        -not (Test-Path -LiteralPath $ocmExe)
+    ) {
+        throw "No OpenCode CLI. Need opencoderman\vendor\bin\windows\opencode.exe, vendor\bin\opencode.exe, or vendor\opencode-home.zip (CI zip). Online: install-opencode-online.bat"
     }
 
-    Write-Host "Step 1: Cleaning previous OpenCode install at $ocHome ..."
-    $installingDefaultHome = (
-        $ocHome.ToLowerInvariant() -eq $userOc.ToLowerInvariant()
+    Write-Host "Step 1-3: OpenCode via opencoderman (backup ~/.opencode, CLI + agents + skills)..."
+    $pyArgs = @(
+        $installer,
+        "--repo-root", $RepoRoot,
+        "--opencoderman-root", $ocm,
+        "--vendor-root", $vendor,
+        "--require-binary"
     )
-    Remove-UserPath (Join-Path $legacy1 "bin")
-    Remove-UserPath (Join-Path $legacy2 "bin")
-    Remove-UserPath $ocBin
-    if ($installingDefaultHome) {
-        Remove-UserPath (Join-Path $userOc "bin")
-        $cfgDir = Join-Path $userHome ".config\opencode"
-        foreach ($name in @("opencode.json", "oh-my-opencode.json", "package.json")) {
-            $p = Join-Path $cfgDir $name
-            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
-        }
-        Remove-Tree (Join-Path $cfgDir "node_modules")
-        Remove-Tree (Join-Path $userHome ".cache\opencode")
-        if ($env:APPDATA) {
-            Remove-Tree (Join-Path $env:APPDATA "opencode\node_modules")
-        }
-        Remove-Tree $userOc
-    } else {
-        # Isolated VD_OPENCODE_ROOT: never touch the user's default OpenCode home/cache.
-        Remove-Tree $ocHome
-    }
-    if ($legacy1.ToLowerInvariant() -ne $ocHome.ToLowerInvariant()) { Remove-Tree $legacy1 }
-    if ($legacy2.ToLowerInvariant() -ne $ocHome.ToLowerInvariant()) { Remove-Tree $legacy2 }
+    $ec = Invoke-VdPython $RepoRoot $pyArgs
+    if ($ec -ne 0) { throw "opencoderman install failed (exit $ec)" }
 
-    $cfgDir = Join-Path $userHome ".config\opencode"
-    $cache = Join-Path $userHome ".cache\opencode"
-    if (-not $installingDefaultHome) {
-        $cfgDir = Join-Path $ocHome ".config-opencode"
-        $cache = Join-Path $ocHome ".cache-opencode"
-    }
-
-    New-Item -ItemType Directory -Path $ocBin -Force | Out-Null
-
-    Write-Host "Step 2: Installing OpenCode..."
-    $extract = Join-Path $pkgWin "extract-opencode-home.ps1"
-    if (Test-Path -LiteralPath $zip) {
-        if (-not (Test-Path -LiteralPath $extract)) {
-            throw "Missing $extract"
-        }
-        & $extract -Zip $zip -Dest $ocHome
-        if ($LASTEXITCODE -ne 0) { throw "extract-opencode-home failed" }
-    } else {
-        $src = Join-Path $vendor "opencode-home"
-        $rc = Start-Process -FilePath "robocopy.exe" -ArgumentList @(
-            $src, $ocHome, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np", "/R:2", "/W:1"
-        ) -Wait -PassThru -NoNewWindow
-        if ($rc.ExitCode -ge 8) { throw "robocopy of expanded opencode-home failed" }
-    }
-
-    $ocExe = Join-Path $ocBin "opencode.exe"
+    $ocExe = Join-Path $userOc "bin\opencode.exe"
     $backupOc = Join-Path $vendor "bin\opencode.exe"
-    Restore-Pe -Target $ocExe -Backup $backupOc -MinBytes 10MB
-    $backupGl = Join-Path $vendor "bin\glab.exe"
-    if (Test-Path -LiteralPath $backupGl) {
-        Copy-Item -LiteralPath $backupGl -Destination (Join-Path $ocBin "glab.exe") -Force
-        Unblock-File -LiteralPath (Join-Path $ocBin "glab.exe") -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $backupOc) {
+        Restore-Pe -Target $ocExe -Backup $backupOc -MinBytes 10MB
+    }
+    if (-not (Test-Path -LiteralPath $ocExe)) {
+        throw "opencode.exe missing after opencoderman install: $ocExe"
+    }
+    $homeCfg = Join-Path $userOc "opencode.json"
+    if (-not (Test-Path -LiteralPath $homeCfg)) {
+        throw "opencode.json missing under $userOc"
+    }
+    Assert-JsonFile $homeCfg
+    $review = Join-Path $userOc "agents\gitlab-reviewer.md"
+    if (-not (Test-Path -LiteralPath $review)) {
+        throw "opencoderman agent missing: $review"
     }
 
     $verOut = & $ocExe --version 2>&1
@@ -307,60 +309,8 @@ if ($doOpenCode) {
     if ($LASTEXITCODE -ne 0) { throw "opencode --version failed" }
     Write-Host "[OK] OpenCode at $ocExe"
 
-    Write-Host "Step 3: OpenCode stock config (no oh-my-openagent)..."
-    foreach ($name in @("opencode.json", "package.json")) {
-        $dest = Join-Path $ocHome $name
-        $src = Join-Path $pkgWin $name
-        if ((-not (Test-Path -LiteralPath $dest)) -and (Test-Path -LiteralPath $src)) {
-            Copy-Item -LiteralPath $src -Destination $dest -Force
-        }
-    }
-    $homeCfg = Join-Path $ocHome "opencode.json"
-    if (-not (Test-Path -LiteralPath $homeCfg)) {
-        throw "opencode.json missing under $ocHome"
-    }
-    try {
-        Assert-JsonFile $homeCfg
-    } catch {
-        if (Test-Path -LiteralPath (Join-Path $pkgWin "opencode.json")) {
-            Copy-Item -LiteralPath (Join-Path $pkgWin "opencode.json") -Destination $homeCfg -Force
-        }
-        Assert-JsonFile $homeCfg
-    }
-    $pin = Join-Path $pkgWin "Pin-OpencodePlugin.ps1"
-    if (Test-Path -LiteralPath $pin) {
-        & $pin -ConfigPath $homeCfg
-    }
-
-    if (-not (Test-Path -LiteralPath $cfgDir)) {
-        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-    }
-    foreach ($name in @("opencode.json", "package.json")) {
-        $src = Join-Path $ocHome $name
-        if (Test-Path -LiteralPath $src) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $cfgDir $name) -Force
-        }
-    }
-    Assert-JsonFile (Join-Path $cfgDir "opencode.json")
-    Write-Host "[OK] Mirrored stock config to $cfgDir"
-
-    $rgSrc = Join-Path $vendor "bin\rg.exe"
-    if (-not (Test-Path -LiteralPath $rgSrc)) {
-        $rgSrc = Join-Path $ocBin "rg.exe"
-    }
-    if (Test-Path -LiteralPath $rgSrc) {
-        $rgDir = Join-Path $cache "bin"
-        New-Item -ItemType Directory -Path $rgDir -Force | Out-Null
-        Copy-Item -LiteralPath $rgSrc -Destination (Join-Path $rgDir "rg.exe") -Force
-        Copy-Item -LiteralPath $rgSrc -Destination (Join-Path $ocBin "rg.exe") -Force
-        Write-Host "[OK] ripgrep seeded"
-    }
-
-    [Environment]::SetEnvironmentVariable("OPENCODE_DISABLE_MODELS_FETCH", "1", "User")
+    $ocBin = Join-Path $userOc "bin"
     $env:OPENCODE_DISABLE_MODELS_FETCH = "1"
-
-    # Isolated VD_OPENCODE_ROOT stays isolated. Do not junction over %USERPROFILE%\.opencode.
-    Add-UserPath $ocBin
     $env:Path = $ocBin + ";" + $env:Path
 }
 
