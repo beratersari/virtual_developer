@@ -3868,6 +3868,104 @@ class JobProcessor:
         )
         return posted is not None
 
+    async def handle_gitlab_mr_lifecycle(self, event: Any) -> Dict[str, Any]:
+        """Persist MR state and delete the temp clone when the MR is merged.
+
+        Does not take the long-held issue lock — delete must not wait on a job.
+        """
+        from src.gitlab.webhook import GitlabMrLifecycleEvent
+
+        if not isinstance(event, GitlabMrLifecycleEvent):
+            logger.warning("handle_gitlab_mr_lifecycle: invalid event")
+            return {"ok": False, "reason": "invalid event", "deleted": []}
+        state_name = (event.state or "").strip().lower()
+        if event.is_merged:
+            state_name = "merged"
+        elif (event.action or "").lower() in {"close", "closed"}:
+            state_name = "closed"
+        elif (event.action or "").lower() in {"reopen", "open", "opened"}:
+            state_name = "opened"
+        elif not state_name:
+            state_name = (event.action or "").strip().lower() or "unknown"
+
+        self._record_merge_request_state(
+            issue_key=event.issue_key,
+            mr_url=event.mr_url,
+            project_path=event.project_path,
+            mr_iid=event.mr_iid,
+            state=state_name,
+        )
+        if not event.is_merged:
+            return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
+
+        from src.dashboard.temp_storage import delete_clones_for_merge_request
+
+        deleted = delete_clones_for_merge_request(
+            mr_url=event.mr_url,
+            project_path=event.project_path,
+            mr_iid=event.mr_iid,
+            issue_key=event.issue_key,
+            source_branch=event.source_branch,
+        )
+        logger.info(
+            f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} merged — "
+            f"deleted clones {deleted or '(none)'}"
+        )
+        return {
+            "ok": True,
+            "reason": "merged",
+            "deleted": deleted,
+        }
+
+    def _record_merge_request_state(
+        self,
+        *,
+        issue_key: str,
+        mr_url: str,
+        project_path: str,
+        mr_iid: int,
+        state: str,
+    ) -> None:
+        """Write merge_request_state onto matching jobs and issue metadata."""
+        url = (mr_url or "").strip().rstrip("/")
+        key = (issue_key or "").strip().upper()
+        path = (project_path or "").strip()
+        try:
+            n = self.job_store.count_jobs()
+            for job in self.job_store.list_jobs(limit=max(int(n or 0), 1)):
+                job_url = str(job.get("merge_request_url") or "").strip().rstrip("/")
+                same_url = bool(url and job_url.lower() == url.lower())
+                same_iid = (
+                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
+                    and int(mr_iid or 0) > 0
+                    and (
+                        not path
+                        or str(job.get("gitlab_project") or "").strip().lower()
+                        == path.lower()
+                    )
+                )
+                same_issue = bool(key) and str(job.get("issue_key") or "").upper() == key
+                if not (same_url or same_iid or (same_issue and url)):
+                    continue
+                patch: Dict[str, Any] = {"merge_request_state": state}
+                if url:
+                    patch["merge_request_url"] = url
+                if path:
+                    patch["gitlab_project"] = path
+                if mr_iid:
+                    patch["gitlab_mr_iid"] = int(mr_iid)
+                self.job_store.update_job(str(job.get("job_id") or ""), **patch)
+        except Exception as e:
+            logger.warning(f"Could not persist MR state on jobs: {e}")
+        if key:
+            try:
+                meta: Dict[str, Any] = {"merge_request_state": state}
+                if url:
+                    meta["merge_request_url"] = url
+                self.state_manager.update_state(key, metadata=meta)
+            except Exception as e:
+                logger.warning(f"Could not persist MR state on {key}: {e}")
+
     async def handle_gitlab_mr_comment(self, event: Any) -> None:
         """Clone the MR source branch, run a build, push if needed, reply on the MR."""
         from src.gitlab.webhook import GitlabMrNoteEvent
@@ -5622,14 +5720,16 @@ class JobProcessor:
 
         if job_id:
             try:
-                self.job_store.update_job(
-                    job_id,
-                    feature_branch=feature_branch or None,
-                    merge_request_url=merge_request_url or None,
-                    commit_sha=commit_sha or None,
-                    commit_subject=commit_subject or None,
-                    commit_url=commit_url or None,
-                )
+                patch: Dict[str, Any] = {
+                    "feature_branch": feature_branch or None,
+                    "merge_request_url": merge_request_url or None,
+                    "commit_sha": commit_sha or None,
+                    "commit_subject": commit_subject or None,
+                    "commit_url": commit_url or None,
+                }
+                if merge_request_url:
+                    patch["merge_request_state"] = "opened"
+                self.job_store.update_job(job_id, **patch)
             except Exception as e:
                 logger.warning(
                     f"Could not persist git delivery on job {job_id}: {e}"
@@ -5655,6 +5755,7 @@ class JobProcessor:
         }
         if merge_request_url:
             meta_patch["merge_request_url"] = merge_request_url
+            meta_patch.setdefault("merge_request_state", "opened")
         if commit_sha:
             meta_patch["last_commit_sha"] = commit_sha
         if commit_url:

@@ -323,6 +323,29 @@ def test_storage_view_prefers_newest_job_for_same_clone(
     assert row["job_id"] == newer["job_id"]
 
 
+def test_storage_view_shows_merge_request_link_and_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.state.job_store import job_store
+
+    base = tmp_path / ".temp"
+    clone = base / "repo_mrstatus01"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    monkeypatch.chdir(tmp_path)
+    job = job_store.create_job(issue_key="STOR-22", summary="MR job")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.example.com/g/r/-/merge_requests/9",
+        merge_request_state="opened",
+    )
+    row = next(f for f in build_storage_view()["folders"] if f["name"] == clone.name)
+    assert row["merge_request_url"] == "https://gitlab.example.com/g/r/-/merge_requests/9"
+    assert row["merge_request_state"] == "opened"
+
+
 def test_storage_view_attaches_issue_from_session_bind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

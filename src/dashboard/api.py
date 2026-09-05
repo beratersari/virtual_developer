@@ -192,13 +192,18 @@ def create_dashboard_app(
 
     @app.post("/webhooks/gitlab")
     async def gitlab_webhook(request: Request) -> dict:
-        """GitLab Note Hook (MR comments). CE and EE / all plans.
+        """GitLab project webhook (CE and EE).
 
-        Register on the **project**: Comments only. Secret → X-Gitlab-Token.
+        Register on the **project**: Comments + Merge request events.
+        Secret → X-Gitlab-Token.
         """
         from fastapi.responses import JSONResponse
 
-        from src.gitlab.webhook import decide_gitlab_note_webhook
+        from src.gitlab.webhook import (
+            GITLAB_MR_EVENTS,
+            decide_gitlab_mr_webhook,
+            decide_gitlab_note_webhook,
+        )
 
         headers = {k: v for k, v in request.headers.items()}
         try:
@@ -207,14 +212,36 @@ def create_dashboard_app(
             return JSONResponse(
                 {"ok": False, "reason": "invalid json"}, status_code=400
             )
-        decision = decide_gitlab_note_webhook(
-            payload,
-            headers=headers,
-            enabled=bool(getattr(settings, "gitlab_webhook_enabled", False)),
-            secret=str(getattr(settings, "gitlab_webhook_secret", "") or ""),
-            bot_mentions=list(settings.gitlab_bot_mentions_list),
-            bot_usernames=list(settings.gitlab_bot_usernames_list),
-        )
+        event_name = ""
+        for key, val in headers.items():
+            if str(key).lower() == "x-gitlab-event":
+                event_name = str(val or "")
+                break
+        kind = ""
+        if isinstance(payload, dict):
+            kind = str(payload.get("object_kind") or payload.get("event_type") or "")
+        enabled = bool(getattr(settings, "gitlab_webhook_enabled", False))
+        secret = str(getattr(settings, "gitlab_webhook_secret", "") or "")
+        is_mr = event_name in GITLAB_MR_EVENTS or kind.lower() in {
+            "merge_request",
+            "mergerequest",
+        }
+        if is_mr:
+            decision = decide_gitlab_mr_webhook(
+                payload,
+                headers=headers,
+                enabled=enabled,
+                secret=secret,
+            )
+        else:
+            decision = decide_gitlab_note_webhook(
+                payload,
+                headers=headers,
+                enabled=enabled,
+                secret=secret,
+                bot_mentions=list(settings.gitlab_bot_mentions_list),
+                bot_usernames=list(settings.gitlab_bot_usernames_list),
+            )
         if not decision.accepted:
             status = int(decision.http_status or 200)
             return JSONResponse(
@@ -226,6 +253,18 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=503, detail="processor not bound; start the daemon"
             )
+        if is_mr:
+            result = await proc.handle_gitlab_mr_lifecycle(decision.event)
+            return {
+                "ok": True,
+                "kind": "merge_request",
+                "issue_key": getattr(decision.event, "issue_key", ""),
+                "action": getattr(decision.event, "action", ""),
+                "state": getattr(decision.event, "state", ""),
+                "deleted": result.get("deleted") or [],
+                "reason": result.get("reason") or "accepted",
+                "server_time": build_meta().server_time,
+            }
         result = await proc.enqueue_gitlab_note(decision.event)
         return {
             "ok": True,

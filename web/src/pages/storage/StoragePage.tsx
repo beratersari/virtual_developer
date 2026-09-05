@@ -12,6 +12,13 @@ function folderHref(folder: StorageFolder): string | null {
   return null
 }
 
+function mrStateLabel(state?: string | null): string {
+  const raw = (state || '').trim().toLowerCase()
+  if (!raw) return ''
+  if (raw === 'opened' || raw === 'open') return 'open'
+  return raw
+}
+
 function folderLabel(folder: StorageFolder): string {
   const key = folder.issue_key?.trim()
   const title = folder.summary?.trim()
@@ -52,6 +59,8 @@ function applyDeletes(prev: StoragePayload | null, deletes: StorageDeleteJob[]):
       issue_key: null,
       summary: '',
       job_id: null,
+      merge_request_url: null,
+      merge_request_state: null,
       delete: { status: job.status, percent: job.percent, error: job.error },
     })
   }
@@ -130,6 +139,23 @@ function StorageList({
                   <div className="font-mono text-sm font-semibold text-text">{folder.name}</div>
                 )}
                 <div className="truncate font-mono text-[11px] text-text-muted">{folder.path}</div>
+                {folder.merge_request_url ? (
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                    <a
+                      href={folder.merge_request_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="truncate font-mono text-accent-text hover:underline"
+                    >
+                      {folder.merge_request_url}
+                    </a>
+                    {mrStateLabel(folder.merge_request_state) ? (
+                      <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+                        {mrStateLabel(folder.merge_request_state)}
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="text-xs text-text-secondary">
                   {folder.size_pending ? 'Measuring…' : folder.size_label || '0 B'}
                   {folder.modified_at ? ` · ${folder.modified_at}` : ''}
@@ -242,7 +268,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue that created it. Delete a folder to reclaim disk."
+        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue and merge request when one exists. Merged MRs delete the clone automatically."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
