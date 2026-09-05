@@ -287,6 +287,8 @@ def _put_clone_issue(
     issue_key: str,
     summary: str = "",
     job_id: str = "",
+    merge_request_url: str = "",
+    merge_request_state: str = "",
     when: str = "",
     prefer: bool = False,
 ) -> None:
@@ -297,6 +299,8 @@ def _put_clone_issue(
         "issue_key": key,
         "summary": (summary or "").strip(),
         "job_id": (job_id or "").strip() or None,
+        "merge_request_url": (merge_request_url or "").strip() or None,
+        "merge_request_state": (merge_request_state or "").strip() or None,
         "_when": (when or "").strip(),
     }
     for lookup in _path_lookup_keys(path):
@@ -312,6 +316,10 @@ def _put_clone_issue(
                     rec["summary"] = prev.get("summary") or ""
                 if not rec["job_id"]:
                     rec["job_id"] = prev.get("job_id")
+                if not rec["merge_request_url"]:
+                    rec["merge_request_url"] = prev.get("merge_request_url")
+                if not rec["merge_request_state"]:
+                    rec["merge_request_state"] = prev.get("merge_request_state")
                 if not rec["_when"]:
                     rec["_when"] = prev.get("_when") or ""
             index[lookup] = rec
@@ -320,6 +328,10 @@ def _put_clone_issue(
             prev["summary"] = rec["summary"]
         if not prev.get("job_id") and rec["job_id"]:
             prev["job_id"] = rec["job_id"]
+        if not prev.get("merge_request_url") and rec["merge_request_url"]:
+            prev["merge_request_url"] = rec["merge_request_url"]
+        if not prev.get("merge_request_state") and rec["merge_request_state"]:
+            prev["merge_request_state"] = rec["merge_request_state"]
         if not prev.get("_when") and rec["_when"]:
             prev["_when"] = rec["_when"]
 
@@ -369,6 +381,8 @@ def _clone_issue_index() -> Dict[str, Dict[str, Any]]:
                 issue_key=str(job.get("issue_key") or ""),
                 summary=str(job.get("summary") or ""),
                 job_id=str(job.get("job_id") or ""),
+                merge_request_url=str(job.get("merge_request_url") or ""),
+                merge_request_state=str(job.get("merge_request_state") or ""),
                 when=str(
                     job.get("started_at") or job.get("updated_at") or ""
                 ),
@@ -412,7 +426,38 @@ def _clone_issue_index() -> Dict[str, Dict[str, Any]]:
         logger.debug(f"storage issue index from live git failed: {e}")
 
     _fill_missing_summaries(index)
+    _fill_missing_mr(index)
     return index
+
+
+def _fill_missing_mr(index: Dict[str, Dict[str, Any]]) -> None:
+    """Fill MR url/state from issue metadata when the job row has none."""
+    need: Set[str] = set()
+    for rec in index.values():
+        if rec.get("issue_key") and not rec.get("merge_request_url"):
+            need.add(str(rec["issue_key"]).upper())
+    if not need:
+        return
+    try:
+        from src.state.manager import JiraStateManager
+
+        sm = JiraStateManager()
+        for ik in need:
+            st = sm.get_state(ik)
+            meta = (st.metadata or {}) if st else {}
+            url = str(meta.get("merge_request_url") or "").strip()
+            state = str(meta.get("merge_request_state") or "").strip()
+            if not url and not state:
+                continue
+            for rec in index.values():
+                if (rec.get("issue_key") or "").strip().upper() != ik:
+                    continue
+                if url and not rec.get("merge_request_url"):
+                    rec["merge_request_url"] = url
+                if state and not rec.get("merge_request_state"):
+                    rec["merge_request_state"] = state
+    except Exception as e:
+        logger.debug(f"storage MR fill from state failed: {e}")
 
 
 def _issue_fields_for(
@@ -425,8 +470,16 @@ def _issue_fields_for(
                 "issue_key": hit.get("issue_key"),
                 "summary": hit.get("summary") or "",
                 "job_id": hit.get("job_id"),
+                "merge_request_url": hit.get("merge_request_url"),
+                "merge_request_state": hit.get("merge_request_state"),
             }
-    return {"issue_key": None, "summary": "", "job_id": None}
+    return {
+        "issue_key": None,
+        "summary": "",
+        "job_id": None,
+        "merge_request_url": None,
+        "merge_request_state": None,
+    }
 
 
 def build_storage_view() -> Dict[str, Any]:
@@ -638,6 +691,123 @@ def force_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]
         )
     logger.info(f"Dashboard force-deleted {kind} {target}")
     return {"ok": True, "name": name, "path": str(target), "area": kind}
+
+
+def _norm_mr_url(url: str) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def clone_folder_names_for_mr(
+    *,
+    mr_url: str = "",
+    project_path: str = "",
+    mr_iid: int = 0,
+    issue_key: str = "",
+    source_branch: str = "",
+) -> List[str]:
+    """Temp-clone folder names tied to this merge request."""
+    names: List[str] = []
+    seen: Set[str] = set()
+
+    def _add(path: Any) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        name = Path(text.replace("\\", "/")).name
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    want_url = _norm_mr_url(mr_url)
+    want_path = (project_path or "").strip().lower()
+    want_key = (issue_key or "").strip().upper()
+    want_branch = (source_branch or "").strip()
+
+    try:
+        from src.state.job_store import job_store
+
+        n = job_store.count_jobs()
+        for job in job_store.list_jobs(limit=max(int(n or 0), 1)):
+            job_url = _norm_mr_url(str(job.get("merge_request_url") or ""))
+            same_url = bool(want_url and job_url == want_url)
+            same_iid = (
+                int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
+                and int(mr_iid or 0) > 0
+                and (
+                    not want_path
+                    or str(job.get("gitlab_project") or "").strip().lower()
+                    == want_path
+                )
+            )
+            same_issue = bool(want_key) and str(job.get("issue_key") or "").upper() == want_key
+            if same_url or same_iid or (same_issue and (same_url or not want_url)):
+                _add(job.get("working_directory"))
+    except Exception as e:
+        logger.debug(f"MR clone lookup from jobs failed: {e}")
+
+    try:
+        from src.state.session_bind_store import session_bind_store
+
+        for rec in session_bind_store.list_binds(limit=500):
+            if want_key and str(rec.get("issue_key") or "").upper() == want_key:
+                _add(rec.get("working_directory"))
+                continue
+            if want_branch and str(rec.get("branch") or "").strip() == want_branch:
+                _add(rec.get("working_directory"))
+    except Exception as e:
+        logger.debug(f"MR clone lookup from binds failed: {e}")
+
+    if want_key:
+        try:
+            from src.git_manager import GitManager
+
+            live = getattr(GitManager, "_live_by_issue", None) or {}
+            gm = live.get(want_key) or live.get(issue_key)
+            if gm is not None:
+                _add(getattr(gm, "temp_dir", None))
+        except Exception as e:
+            logger.debug(f"MR clone lookup from live git failed: {e}")
+    return names
+
+
+def delete_clones_for_merge_request(
+    *,
+    mr_url: str = "",
+    project_path: str = "",
+    mr_iid: int = 0,
+    issue_key: str = "",
+    source_branch: str = "",
+) -> List[str]:
+    """Queue force-delete of temp clones for a merged MR. Skips in-use folders."""
+    names = clone_folder_names_for_mr(
+        mr_url=mr_url,
+        project_path=project_path,
+        mr_iid=mr_iid,
+        issue_key=issue_key,
+        source_branch=source_branch,
+    )
+    deleted: List[str] = []
+    in_use = _in_use_paths()
+    for name in names:
+        try:
+            target = _validate_delete_target(name, area="temp")
+        except TempStorageError as e:
+            logger.info(f"Skip MR-merge delete of {name}: {e}")
+            continue
+        try:
+            resolved = target.resolve()
+        except OSError:
+            resolved = target
+        if resolved in in_use:
+            logger.info(f"Skip MR-merge delete of {name}: clone is in use")
+            continue
+        try:
+            queue_delete_temp_folder(name, area="temp")
+            deleted.append(name)
+        except TempStorageError as e:
+            logger.warning(f"Could not queue MR-merge delete of {name}: {e}")
+    return deleted
 
 
 def queue_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]:

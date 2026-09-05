@@ -18,7 +18,11 @@ from src.gitlab.mentions import (
     parse_mention_list,
     strip_bot_mentions,
 )
-from src.gitlab.webhook import decide_gitlab_note_webhook, validate_webhook_token
+from src.gitlab.webhook import (
+    decide_gitlab_mr_webhook,
+    decide_gitlab_note_webhook,
+    validate_webhook_token,
+)
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
 
@@ -58,6 +62,38 @@ def _mr_payload(
             "source_branch": source,
             "target_branch": target,
             "web_url": "https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        },
+        "repository": {"url": "https://gitlab.example.com/acme/demo.git"},
+    }
+
+
+def _mr_lifecycle_payload(
+    *,
+    action: str = "merge",
+    state: str = "merged",
+    title: str = "feat(KAN-12): add login",
+    source: str = "feature/KAN-12",
+    target: str = "develop",
+    iid: int = 4,
+) -> dict:
+    return {
+        "object_kind": "merge_request",
+        "event_type": "merge_request",
+        "project": {
+            "id": 1,
+            "path_with_namespace": "acme/demo",
+            "http_url_to_repo": "https://gitlab.example.com/acme/demo.git",
+            "web_url": "https://gitlab.example.com/acme/demo",
+        },
+        "object_attributes": {
+            "iid": iid,
+            "action": action,
+            "state": state,
+            "title": title,
+            "description": "desc",
+            "source_branch": source,
+            "target_branch": target,
+            "url": f"https://gitlab.example.com/acme/demo/-/merge_requests/{iid}",
         },
         "repository": {"url": "https://gitlab.example.com/acme/demo.git"},
     }
@@ -728,3 +764,82 @@ def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "nope"},
     )
     assert resp.status_code == 401
+
+
+def test_decide_gitlab_mr_webhook_accepts_merge(monkeypatch):
+    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    d = decide_gitlab_mr_webhook(
+        _mr_lifecycle_payload(),
+        headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
+        enabled=True,
+        secret="s",
+    )
+    assert d.accepted
+    assert d.event is not None
+    assert d.event.is_merged
+    assert d.event.issue_key == "KAN-12"
+    assert d.event.mr_iid == 4
+
+
+def test_decide_gitlab_mr_webhook_records_close_without_merge(monkeypatch):
+    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    d = decide_gitlab_mr_webhook(
+        _mr_lifecycle_payload(action="close", state="closed"),
+        headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
+        enabled=True,
+        secret="s",
+    )
+    assert d.accepted
+    assert d.event is not None
+    assert not d.event.is_merged
+    assert d.event.state == "closed"
+
+
+def test_dashboard_mr_merge_webhook_deletes_clone(
+    tmp_path, monkeypatch, fake_jira
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.dashboard.temp_storage import reset_delete_jobs
+    from src.processor import JobProcessor
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "repo_merged01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    monkeypatch.chdir(tmp_path)
+
+    job = job_store.create_job(issue_key="KAN-12", summary="add login")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        gitlab_project="acme/demo",
+        gitlab_mr_iid=4,
+        merge_request_state="opened",
+    )
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    app = create_dashboard_app(processor=proc)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhooks/gitlab",
+            json=_mr_lifecycle_payload(),
+            headers={
+                "X-Gitlab-Event": "Merge Request Hook",
+                "X-Gitlab-Token": "tok",
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["kind"] == "merge_request"
+    assert "repo_merged01" in body["deleted"]
+    updated = job_store.get_job(job["job_id"])
+    assert updated["merge_request_state"] == "merged"
