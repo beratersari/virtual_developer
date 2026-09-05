@@ -119,6 +119,12 @@ class ScheduleExistingRequest(BaseModel):
     backend: str = Field(default="", max_length=40)
     # Operator-edited Jira description (prompt + {params}). Empty = live ticket.
     description: str = Field(default="", max_length=100_000)
+    # Picker overrides when the live ticket has no valid {params} block.
+    repository_url: str = ""
+    source_branch: str = ""
+    target_branch: str = ""
+    mode: str = ""
+    source_branch_mode: str = ""
 
 
 class ScheduleItem(BaseModel):

@@ -258,6 +258,7 @@ export type SchedulePreview = {
   issue_key: string
   title: string
   description?: string
+  prompt?: string
   jira_status?: string
   issue_type?: string
   labels?: string[]
@@ -285,6 +286,11 @@ export type ScheduleExistingBody = {
   model?: string
   backend?: string
   description?: string
+  repository_url?: string
+  source_branch?: string
+  target_branch?: string
+  mode?: 'plan' | 'build' | string
+  source_branch_mode?: 'custom' | 'issue_key'
 }
 
 export type ScheduleCreateBody = {

@@ -22,6 +22,8 @@ from src.issue_git_spec import (
     _normalize_model_id,
     _normalize_repo_url,
     parse_issue_git_spec,
+    peek_issue_git_fields,
+    strip_params_block,
     upsert_params_backend,
     upsert_params_model,
 )
@@ -274,26 +276,38 @@ def preview_existing_issue(
         if not isinstance(labels, list):
             labels = []
 
+        peek = peek_issue_git_fields(summary, description)
         spec, err = parse_issue_git_spec(summary, description)
-        if err or spec is None:
-            return {
-                "ok": False,
-                "error": _plain_template_error(err or "Invalid {params} template"),
-                "issue_key": key,
-                "title": summary,
-                "description": description,
-                "jira_status": status_name,
-                "template_valid": False,
-            }
-
-        return {
-            "ok": True,
+        base = {
             "issue_key": str(issue.get("key") or key).upper(),
             "title": summary,
             "description": description,
+            "prompt": strip_params_block(description),
             "jira_status": status_name,
             "issue_type": itype_name,
             "labels": [str(x) for x in labels],
+            "repository_url": peek.get("repository_url") or "",
+            "source_branch": peek.get("source_branch") or "",
+            "target_branch": peek.get("target_branch") or "",
+            "mode": peek.get("mode") or "",
+            "model": peek.get("model") or "",
+            "backend": peek.get("backend") or "",
+        }
+        if err or spec is None:
+            return {
+                **base,
+                "ok": False,
+                "error": _plain_template_error(err or "Invalid {params} template"),
+                "template_valid": False,
+                "message": (
+                    "Issue loaded. {params} is missing or invalid — "
+                    "pick project and branches, then Schedule or Run now."
+                ),
+            }
+
+        return {
+            **base,
+            "ok": True,
             "template_valid": True,
             "repository_url": spec.repository_url,
             "source_branch": spec.source_branch,
@@ -318,15 +332,23 @@ def schedule_existing_issue(
     model: str = "",
     backend: str = "",
     description: str = "",
+    repository_url: str = "",
+    source_branch: str = "",
+    target_branch: str = "",
+    mode: str = "",
+    source_branch_mode: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
     """Schedule an existing Jira issue for later dispatch (no new issue create).
 
-    Hard-fails if the issue cannot be loaded or the template is invalid.
+    Hard-fails if the issue cannot be loaded. An invalid ``{params}`` block
+    is allowed when the operator supplies picker fields (repo / branches /
+    mode); those are written back onto the Jira description.
     ``description`` (optional) is the operator-edited Jira prompt; when set
-    it replaces the live ticket body after a template check.
-    Soft-fails: In Progress transition and SCHEDULED_AI_JOB label.
+    it replaces the live ticket body after a template check (or is wrapped
+    with a new ``{params}`` block from the picker).
+    Soft-fails: In Progress transition, PAT-user assign, SCHEDULED_AI_JOB label.
     """
     key = (issue_key or "").strip().upper()
     if not key:
@@ -349,8 +371,99 @@ def schedule_existing_issue(
     try:
         # Re-validate at schedule time (issue may have changed since preview)
         preview = preview_existing_issue(key, jira_client=client)
-        if not preview.get("ok"):
+        loaded = bool(preview.get("title") or preview.get("description") is not None)
+        if not preview.get("ok") and not loaded:
             return preview
+
+        picker_repo = _normalize_repo_url(repository_url)
+        picker_src_mode = (source_branch_mode or "").strip().lower().replace("-", "_")
+        if picker_src_mode in ("issue", "jira", "jira_key", "from_issue", "new_issue"):
+            picker_src_mode = _SOURCE_MODE_ISSUE_KEY
+        picker_used = bool(
+            picker_repo
+            or (source_branch or "").strip()
+            or (target_branch or "").strip()
+            or (mode or "").strip()
+            or picker_src_mode == _SOURCE_MODE_ISSUE_KEY
+        )
+        if not preview.get("ok") and not picker_used:
+            return preview
+
+        repo = picker_repo or (preview.get("repository_url") or "")
+        if picker_src_mode == _SOURCE_MODE_ISSUE_KEY:
+            src = work_branch_for_issue_key(key)
+        else:
+            src = _normalize_branch(source_branch) or (
+                preview.get("source_branch") or ""
+            )
+        tgt = _normalize_branch(target_branch) or (preview.get("target_branch") or "")
+        try:
+            mode_c = _canonical_mode(mode) if (mode or "").strip() else ""
+        except ValueError as e:
+            return {"ok": False, "error": str(e), "issue_key": key}
+        if not mode_c:
+            mode_c = preview.get("mode") or "build"
+
+        operator_desc = (description or "").strip()
+        live_desc = preview.get("description") or ""
+        if picker_used:
+            if not repo:
+                return {
+                    "ok": False,
+                    "error": "repository_url is required when {params} is missing",
+                    "issue_key": key,
+                    "template_valid": False,
+                }
+            if not src:
+                return {
+                    "ok": False,
+                    "error": "source_branch is required when {params} is missing",
+                    "issue_key": key,
+                    "template_valid": False,
+                }
+            if not tgt:
+                tgt = src
+            prompt_body = strip_params_block(operator_desc or live_desc)
+            mid = _normalize_model_id(model) or (preview.get("model") or "")
+            mid = _normalize_model_id(mid)
+            bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
+            bid = _normalize_backend_id(bid)
+            desc = build_issue_description(
+                description=prompt_body,
+                repository_url=repo,
+                source_branch=src,
+                target_branch=tgt,
+                mode=mode_c,
+                model=mid,
+                backend=bid,
+            )
+        else:
+            desc = operator_desc or live_desc
+            if operator_desc:
+                spec, err = parse_issue_git_spec(
+                    preview.get("title") or key, operator_desc
+                )
+                if err or spec is None:
+                    return {
+                        "ok": False,
+                        "error": _plain_template_error(
+                            err or "Edited prompt is missing a valid {params} block"
+                        ),
+                        "issue_key": key,
+                        "template_valid": False,
+                    }
+                repo = spec.repository_url
+                src = spec.source_branch
+                tgt = spec.target_branch
+                mode_c = spec.mode or mode_c
+            mid = _normalize_model_id(model) or (preview.get("model") or "")
+            mid = _normalize_model_id(mid)
+            bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
+            bid = _normalize_backend_id(bid)
+            if mid:
+                desc = upsert_params_model(desc, mid)
+            if bid:
+                desc = upsert_params_backend(desc, bid)
 
         # Soft: In Progress
         try:
@@ -365,6 +478,14 @@ def schedule_existing_issue(
                     )
         except Exception as e:
             logger.warning(f"{key}: In Progress soft-failed: {e}")
+
+        # Soft: assign to the PAT user so the board shows who is handling it
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            assign_to_pat_user(client, key)
+        except Exception as e:
+            logger.warning(f"{key}: PAT assign soft-failed: {e}")
 
         # Soft: ensure schedule label
         try:
@@ -386,30 +507,7 @@ def schedule_existing_issue(
                     "schedule": existing,
                 }
 
-        operator_desc = (description or "").strip()
-        desc = operator_desc or (preview.get("description") or "")
-        if operator_desc:
-            spec, err = parse_issue_git_spec(
-                preview.get("title") or key, operator_desc
-            )
-            if err or spec is None:
-                return {
-                    "ok": False,
-                    "error": _plain_template_error(
-                        err or "Edited prompt is missing a valid {params} block"
-                    ),
-                    "issue_key": key,
-                    "template_valid": False,
-                }
-        mid = _normalize_model_id(model) or (preview.get("model") or "")
-        mid = _normalize_model_id(mid)
-        bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
-        bid = _normalize_backend_id(bid)
-        if mid:
-            desc = upsert_params_model(desc, mid)
-        if bid:
-            desc = upsert_params_backend(desc, bid)
-        if desc != (preview.get("description") or ""):
+        if desc != live_desc:
             try:
                 if hasattr(client, "update_issue"):
                     ok_upd = client.update_issue(
@@ -417,11 +515,11 @@ def schedule_existing_issue(
                     )
                     if ok_upd:
                         logger.info(
-                            f"{key}: wrote dashboard prompt/model/backend to Jira"
+                            f"{key}: wrote dashboard prompt/params to Jira"
                         )
                     else:
                         logger.warning(
-                            f"{key}: could not write prompt/model/backend to Jira "
+                            f"{key}: could not write prompt/params to Jira "
                             f"(schedule still uses the dashboard text)"
                         )
             except Exception as e:
@@ -432,10 +530,10 @@ def schedule_existing_issue(
         rec = ss.create(
             title=preview.get("title") or key,
             description=desc[:4000],
-            repository_url=preview.get("repository_url") or "",
-            source_branch=preview.get("source_branch") or "",
-            target_branch=preview.get("target_branch") or "",
-            mode=preview.get("mode") or "",
+            repository_url=repo or (preview.get("repository_url") or ""),
+            source_branch=src or (preview.get("source_branch") or ""),
+            target_branch=tgt or (preview.get("target_branch") or ""),
+            mode=mode_c or (preview.get("mode") or ""),
             model=mid,
             backend=bid,
             scheduled_at=scheduled_iso,
@@ -629,6 +727,13 @@ def create_scheduled_job(
                 f"{issue_key}: In Progress transition soft-failed: {e} "
                 f"(schedule still saved)"
             )
+
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            assign_to_pat_user(client, issue_key)
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
 
         ss = store or schedule_store
         rec = ss.create(

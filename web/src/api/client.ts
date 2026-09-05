@@ -464,6 +464,11 @@ export function scheduleExistingIssue(body: {
   model?: string
   backend?: string
   description?: string
+  repository_url?: string
+  source_branch?: string
+  target_branch?: string
+  mode?: string
+  source_branch_mode?: 'custom' | 'issue_key'
 }) {
   const payload: Record<string, unknown> = {
     issue_key: body.issue_key,
@@ -475,6 +480,11 @@ export function scheduleExistingIssue(body: {
   if (body.description != null && body.description !== '') {
     payload.description = body.description
   }
+  if (body.repository_url) payload.repository_url = body.repository_url
+  if (body.source_branch) payload.source_branch = body.source_branch
+  if (body.target_branch) payload.target_branch = body.target_branch
+  if (body.mode) payload.mode = body.mode
+  if (body.source_branch_mode) payload.source_branch_mode = body.source_branch_mode
   return request<{
     ok: boolean
     schedule: ScheduleItem

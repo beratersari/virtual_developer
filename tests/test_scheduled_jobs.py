@@ -708,6 +708,11 @@ def test_preview_existing_issue_invalid_template():
     out = preview_existing_issue("KAN-21", jira_client=client)
     assert out["ok"] is False
     assert out.get("description") == "just text"
+    assert out.get("template_valid") is False
+    assert out.get("issue_type") == "Task"
+    assert out.get("title") == "No params"
+    assert out.get("prompt") == "just text"
+    assert out.get("repository_url") == ""
     assert "params" in out["error"].lower() or "template" in out["error"].lower() or "could not" in out["error"].lower()
 
 
@@ -767,6 +772,9 @@ def test_create_with_custom_issue_type(tmp_path):
     client = MagicMock()
     client.create_issue.return_value = {"key": "KAN-77"}
     client.transition_to_in_progress.return_value = True
+    client.get_myself.return_value = {"name": "devbot", "key": "devbot"}
+    client.assign_issue.return_value = True
+    client.is_cloud = False
 
     out = create_scheduled_job(
         title="Bugfix",
@@ -784,6 +792,7 @@ def test_create_with_custom_issue_type(tmp_path):
     assert out["ok"] is True
     assert out["schedule"]["issue_type"] == "ExtBug"
     assert client.create_issue.call_args.kwargs["issue_type"] == "ExtBug"
+    client.assign_issue.assert_called_once_with("KAN-77", "devbot")
 
 
 def test_api_schedules(tmp_path, monkeypatch):

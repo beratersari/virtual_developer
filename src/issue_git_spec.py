@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 # First {params} ... {params} block (case-insensitive tag; body may span lines)
@@ -321,6 +321,56 @@ def _params_block_text(summary: str = "", description: str = "") -> Optional[str
     else:
         block = _expand_links(block)
     return block
+
+
+def peek_issue_git_fields(summary: str = "", description: str = "") -> Dict[str, str]:
+    """Best-effort ``{params}`` field peek for dashboard prefills.
+
+    Unlike ``parse_issue_git_spec`` this never fails: missing or invalid
+    fields are empty strings so the operator can complete them in the picker.
+    """
+    empty = {
+        "repository_url": "",
+        "source_branch": "",
+        "target_branch": "",
+        "mode": "",
+        "model": "",
+        "backend": "",
+    }
+    spec, _err = parse_issue_git_spec(summary, description)
+    if spec is not None:
+        return {
+            "repository_url": spec.repository_url or "",
+            "source_branch": spec.source_branch or "",
+            "target_branch": spec.target_branch or "",
+            "mode": spec.mode or "",
+            "model": spec.model or "",
+            "backend": spec.backend or "",
+        }
+    block = _params_block_text(summary, description)
+    if not block:
+        return empty
+    text = _strip_wiki_field_bold(block)
+    repo = _extract_repo(text)
+    source_m = _SOURCE_FIELD.search(text)
+    target_m = _TARGET_FIELD.search(text)
+    mode_m = _MODE_FIELD.search(text)
+    model_m = _MODEL_FIELD.search(text)
+    backend_m = _BACKEND_FIELD.search(text)
+    source = _normalize_branch(source_m.group(1)) if source_m else ""
+    target = _normalize_branch(target_m.group(1)) if target_m else ""
+    mode_raw = (
+        (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
+    )
+    mode = _MODE_ALIASES.get(mode_raw, "")
+    return {
+        "repository_url": repo if _looks_like_git_url(repo) else "",
+        "source_branch": source if _looks_like_branch(source) else "",
+        "target_branch": target if _looks_like_branch(target) else "",
+        "mode": mode,
+        "model": _normalize_model_id(model_m.group(1)) if model_m else "",
+        "backend": _normalize_backend_id(backend_m.group(1)) if backend_m else "",
+    }
 
 
 def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:

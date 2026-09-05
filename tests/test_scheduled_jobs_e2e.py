@@ -199,7 +199,7 @@ def test_e2e_preview_jira_unavailable():
     assert "KAN-404" in out["error"]
 
 
-def test_e2e_preview_missing_mode_hard_fail():
+def test_e2e_preview_missing_mode_defaults_to_build():
     client = MagicMock()
     client.get_issue.return_value = _issue_payload(
         "KAN-NOMODE",
@@ -212,8 +212,9 @@ def test_e2e_preview_missing_mode_hard_fail():
         ),
     )
     out = preview_existing_issue("KAN-NOMODE", jira_client=client)
-    assert out["ok"] is False
-    assert out.get("template_valid") is False
+    assert out["ok"] is True
+    assert out.get("template_valid") is True
+    assert out.get("mode") == "build"
 
 
 def test_e2e_schedule_existing_soft_fail_transition_and_labels(tmp_path):

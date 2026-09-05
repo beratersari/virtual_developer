@@ -536,7 +536,8 @@ def create_dashboard_app(
 
         Used by the Scheduled tab before showing the run-at picker.
         400 only if the issue cannot be loaded. An invalid ``{params}``
-        block is 200 with ``ok=false`` so the operator can edit the prompt.
+        block is 200 with ``ok=false`` and any partial repo/branch fields
+        so the operator can complete the same picker as a new issue.
         """
         result = preview_existing_issue(issue_key)
         result["server_time"] = build_meta().server_time
@@ -553,8 +554,10 @@ def create_dashboard_app(
     async def schedules_from_issue(body: ScheduleExistingRequest) -> dict:
         """Schedule an existing Jira issue (no new issue created).
 
-        Hard-fails if issue cannot be loaded or template is invalid.
-        Soft: In Progress transition + SCHEDULED_AI_JOB label.
+        Hard-fails if the issue cannot be loaded. Missing/invalid
+        ``{params}`` is allowed when the body includes picker fields
+        (repository / branches / mode); those are written back to Jira.
+        Soft: In Progress transition, PAT-user assign, SCHEDULED_AI_JOB label.
         """
         result = schedule_existing_issue(
             body.issue_key,
@@ -562,6 +565,11 @@ def create_dashboard_app(
             model=body.model or "",
             backend=body.backend or "",
             description=body.description or "",
+            repository_url=body.repository_url or "",
+            source_branch=body.source_branch or "",
+            target_branch=body.target_branch or "",
+            mode=body.mode or "",
+            source_branch_mode=body.source_branch_mode or "",
             store=schedule_store,
         )
         if not result.get("ok"):

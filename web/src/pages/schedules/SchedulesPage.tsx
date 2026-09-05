@@ -79,8 +79,10 @@ export function SchedulesPage() {
         title="Scheduled"
         description={
           <>
-            Queue a run for a chosen time. Existing issues need a valid{' '}
-            <span className="font-mono">{'{params}'}</span> template.
+            Queue a run for a chosen time. If an existing issue has no valid{' '}
+            <span className="font-mono">{'{params}'}</span> block, pick the
+            project and branches here — same as a new issue — and we write
+            them back to Jira on Schedule / Run now.
           </>
         }
       />
@@ -213,6 +215,56 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [looking, setLooking] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
+  const [projects, setProjects] = useState<ProjectRepository[]>(
+    live.settings?.project_repositories || [],
+  )
+  const [repo, setRepo] = useState('')
+  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
+  const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
+  const [source, setSource] = useState('develop')
+  const [target, setTarget] = useState('develop')
+  const [mode, setMode] = useState<'plan' | 'build'>('build')
+
+  const needsParams = Boolean(preview && !preview.template_valid)
+
+  useEffect(() => {
+    const rows = live.settings?.project_repositories
+    if (rows) setProjects(rows)
+  }, [live.settings])
+
+  const seedPicker = (p: SchedulePreview, rows: ProjectRepository[]) => {
+    const last = (() => {
+      try {
+        return window.localStorage.getItem(LAST_REPO_KEY) || ''
+      } catch {
+        return ''
+      }
+    })()
+    const fromIssue = (p.repository_url || '').trim()
+    const preferred =
+      rows.find((r) => r.url === fromIssue) ||
+      rows.find((r) => r.url === last) ||
+      (rows.length === 1 ? rows[0] : null)
+    if (fromIssue && !preferred) {
+      setRepoPick(CUSTOM_REPO)
+      setRepo(fromIssue)
+    } else if (preferred) {
+      setRepoPick(preferred.url)
+      applyProject(preferred, setRepo, setTarget, setSource)
+      if (fromIssue) setRepo(fromIssue)
+    } else {
+      setRepoPick(CUSTOM_REPO)
+      setRepo(fromIssue)
+    }
+    if (p.source_branch) {
+      setSrcMode('custom')
+      setSource(p.source_branch)
+    } else {
+      setSrcMode('issue_key')
+    }
+    if (p.target_branch) setTarget(p.target_branch)
+    if (p.mode === 'plan' || p.mode === 'build') setMode(p.mode)
+  }
 
   const get = async () => {
     setErr(null)
@@ -220,12 +272,16 @@ function Existing({ onDone }: { onDone: () => void }) {
     try {
       const p = await previewScheduleIssue(key.trim().toUpperCase())
       setPreview(p)
-      if (p.ok && p.template_valid) setModelsLoading(true)
+      setModelsLoading(true)
       setKey(p.issue_key || key)
-      setPrompt(p.description || '')
+      const body = p.template_valid ? p.description || '' : p.prompt || p.description || ''
+      setPrompt(body)
       setModel(p.model || '')
       setBackend(p.backend || '')
-      if (!p.ok && p.error) setErr(p.error)
+      const rows = live.settings?.project_repositories || projects
+      seedPicker(p, rows)
+      if (!p.template_valid && p.error) setErr(null)
+      else if (!p.ok && p.error) setErr(p.error)
     } catch (e) {
       setPreview(null)
       setPrompt('')
@@ -238,6 +294,10 @@ function Existing({ onDone }: { onDone: () => void }) {
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
     if (!preview || modelsLoading) return
+    if (needsParams && !repo.trim()) {
+      setErr('Pick a project or enter a repository URL')
+      return
+    }
     setBusy(true)
     setErr(null)
     try {
@@ -248,6 +308,15 @@ function Existing({ onDone }: { onDone: () => void }) {
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
         description: prompt,
+        ...(needsParams
+          ? {
+              repository_url: repo.trim(),
+              source_branch: srcMode === 'custom' ? source.trim() : undefined,
+              target_branch: target.trim(),
+              mode,
+              source_branch_mode: srcMode,
+            }
+          : {}),
       })
       setPreview(null)
       setKey('')
@@ -262,6 +331,8 @@ function Existing({ onDone }: { onDone: () => void }) {
     }
   }
 
+  const loaded = Boolean(preview && (preview.ok || preview.title || prompt))
+
   return (
     <form onSubmit={(e) => void submit(e)}>
       <label className="field">
@@ -273,24 +344,61 @@ function Existing({ onDone }: { onDone: () => void }) {
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
-      {preview && (preview.ok || Boolean(prompt)) && (
+      {loaded && preview && (
         <>
           <p className="quiet">
-            {preview.issue_key} — {preview.title} · {preview.mode} · {preview.repository_url}
+            {preview.issue_key} — {preview.title}
+            {preview.jira_status ? ` · ${preview.jira_status}` : ''}
+            {preview.template_valid
+              ? ` · ${preview.mode} · ${preview.repository_url}`
+              : ' · {params} missing or invalid'}
           </p>
+          {needsParams && preview.message ? (
+            <p className="quiet text-xs">{preview.message}</p>
+          ) : null}
           <label className="field">
             <span>Jira prompt</span>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              rows={14}
+              rows={needsParams ? 8 : 14}
               className="min-h-[12rem] font-mono text-xs"
             />
             <span className="mt-1 block text-xs text-text-muted">
-              Fetched from the ticket. Edit before Schedule / Run now. Keep the{' '}
-              <span className="font-mono">{'{params}'}</span> block valid.
+              {needsParams ? (
+                <>
+                  Fetched from the ticket. Project and branches below become a new{' '}
+                  <span className="font-mono">{'{params}'}</span> block on Schedule /
+                  Run now.
+                </>
+              ) : (
+                <>
+                  Fetched from the ticket. Edit before Schedule / Run now. Keep the{' '}
+                  <span className="font-mono">{'{params}'}</span> block valid.
+                </>
+              )}
             </span>
           </label>
+          {needsParams && (
+            <ProjectBranchFields
+              projects={projects}
+              repo={repo}
+              setRepo={setRepo}
+              repoPick={repoPick}
+              setRepoPick={setRepoPick}
+              srcMode={srcMode}
+              setSrcMode={setSrcMode}
+              source={source}
+              setSource={setSource}
+              target={target}
+              setTarget={setTarget}
+              mode={mode}
+              setMode={setMode}
+              showRemember={false}
+              rememberRepo={false}
+              setRememberRepo={() => undefined}
+            />
+          )}
           <BackendField
             value={backend}
             onChange={(v) => {
@@ -346,6 +454,130 @@ function applyProject(
   setRepo(p.url)
   if (p.target_branch) setTarget(p.target_branch)
   if (p.source_branch) setSource(p.source_branch)
+}
+
+function ProjectBranchFields({
+  projects,
+  repo,
+  setRepo,
+  repoPick,
+  setRepoPick,
+  srcMode,
+  setSrcMode,
+  source,
+  setSource,
+  target,
+  setTarget,
+  mode,
+  setMode,
+  showRemember,
+  rememberRepo,
+  setRememberRepo,
+}: {
+  projects: ProjectRepository[]
+  repo: string
+  setRepo: (v: string) => void
+  repoPick: string
+  setRepoPick: (v: string) => void
+  srcMode: 'issue_key' | 'custom'
+  setSrcMode: (v: 'issue_key' | 'custom') => void
+  source: string
+  setSource: (v: string) => void
+  target: string
+  setTarget: (v: string) => void
+  mode: 'plan' | 'build'
+  setMode: (v: 'plan' | 'build') => void
+  showRemember: boolean
+  rememberRepo: boolean
+  setRememberRepo: (v: boolean) => void
+}) {
+  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
+  return (
+    <>
+      {projects.length > 0 && (
+        <label className="field">
+          <span>Project</span>
+          <select
+            value={repoPick}
+            onChange={(e) => {
+              const v = e.target.value
+              setRepoPick(v)
+              if (v === CUSTOM_REPO) {
+                setRepo('')
+                return
+              }
+              const hit = projects.find((p) => p.url === v)
+              if (hit) applyProject(hit, setRepo, setTarget, setSource)
+            }}
+          >
+            {projects.map((p) => (
+              <option key={p.url} value={p.url}>
+                {p.label || p.url}
+              </option>
+            ))}
+            <option value={CUSTOM_REPO}>Other URL…</option>
+          </select>
+        </label>
+      )}
+      {(isCustom || projects.length === 0) && (
+        <>
+          <label className="field">
+            <span>Repository</span>
+            <input
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              placeholder="https://gitlab.com/group/repo.git"
+              required
+            />
+          </label>
+          {showRemember && (
+            <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={rememberRepo}
+                onChange={(e) => setRememberRepo(e.target.checked)}
+              />
+              <span style={{ margin: 0 }}>Remember this project</span>
+            </label>
+          )}
+        </>
+      )}
+      {!isCustom && repo ? (
+        <p className="quiet font-mono text-xs">{repo}</p>
+      ) : null}
+      <p className="quiet text-xs">
+        Saved remotes live in{' '}
+        <Link to="/settings" className="text-accent-text hover:underline">
+          Settings → Projects
+        </Link>
+        .
+      </p>
+      <label className="field">
+        <span>Source</span>
+        <select value={srcMode} onChange={(e) => setSrcMode(e.target.value === 'custom' ? 'custom' : 'issue_key')}>
+          <option value="issue_key">feature/&lt;issue key&gt;</option>
+          <option value="custom">named branch</option>
+        </select>
+      </label>
+      {srcMode === 'custom' && (
+        <label className="field">
+          <span>Branch</span>
+          <input value={source} onChange={(e) => setSource(e.target.value)} required />
+        </label>
+      )}
+      <label className="field">
+        <span>Target</span>
+        <input value={target} onChange={(e) => setTarget(e.target.value)} required />
+      </label>
+      <label className="field">
+        <span>Mode</span>
+        <select value={mode} onChange={(e) => setMode(e.target.value === 'plan' ? 'plan' : 'build')}>
+          <option value="build">build</option>
+          <option value="plan">plan</option>
+        </select>
+      </label>
+    </>
+  )
 }
 
 function CreateNew({ onDone }: { onDone: () => void }) {
@@ -408,7 +640,6 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   }, [])
 
   const selectable = useMemo(() => types.filter((t) => !t.subtask), [types])
-  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
 
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
@@ -474,86 +705,24 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         <span>Description</span>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
-      {projects.length > 0 && (
-        <label className="field">
-          <span>Project</span>
-          <select
-            value={repoPick}
-            onChange={(e) => {
-              const v = e.target.value
-              setRepoPick(v)
-              if (v === CUSTOM_REPO) {
-                setRepo('')
-                return
-              }
-              const hit = projects.find((p) => p.url === v)
-              if (hit) applyProject(hit, setRepo, setTarget, setSource)
-            }}
-          >
-            {projects.map((p) => (
-              <option key={p.url} value={p.url}>
-                {p.label || p.url}
-              </option>
-            ))}
-            <option value={CUSTOM_REPO}>Other URL…</option>
-          </select>
-        </label>
-      )}
-      {(isCustom || projects.length === 0) && (
-        <>
-          <label className="field">
-            <span>Repository</span>
-            <input
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              placeholder="https://gitlab.com/group/repo.git"
-              required
-            />
-          </label>
-          <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <input
-              type="checkbox"
-              checked={rememberRepo}
-              onChange={(e) => setRememberRepo(e.target.checked)}
-            />
-            <span style={{ margin: 0 }}>Remember this project</span>
-          </label>
-        </>
-      )}
-      {!isCustom && repo ? (
-        <p className="quiet font-mono text-xs">{repo}</p>
-      ) : null}
-      <p className="quiet text-xs">
-        Saved remotes live in{' '}
-        <Link to="/settings" className="text-accent-text hover:underline">
-          Settings → Projects
-        </Link>
-        .
-      </p>
-      <label className="field">
-        <span>Source</span>
-        <select value={srcMode} onChange={(e) => setSrcMode(e.target.value === 'custom' ? 'custom' : 'issue_key')}>
-          <option value="issue_key">feature/&lt;new issue key&gt;</option>
-          <option value="custom">named branch</option>
-        </select>
-      </label>
-      {srcMode === 'custom' && (
-        <label className="field">
-          <span>Branch</span>
-          <input value={source} onChange={(e) => setSource(e.target.value)} required />
-        </label>
-      )}
-      <label className="field">
-        <span>Target</span>
-        <input value={target} onChange={(e) => setTarget(e.target.value)} required />
-      </label>
-      <label className="field">
-        <span>Mode</span>
-        <select value={mode} onChange={(e) => setMode(e.target.value === 'plan' ? 'plan' : 'build')}>
-          <option value="build">build</option>
-          <option value="plan">plan</option>
-        </select>
-      </label>
+      <ProjectBranchFields
+        projects={projects}
+        repo={repo}
+        setRepo={setRepo}
+        repoPick={repoPick}
+        setRepoPick={setRepoPick}
+        srcMode={srcMode}
+        setSrcMode={setSrcMode}
+        source={source}
+        setSource={setSource}
+        target={target}
+        setTarget={setTarget}
+        mode={mode}
+        setMode={setMode}
+        showRemember
+        rememberRepo={rememberRepo}
+        setRememberRepo={setRememberRepo}
+      />
       <label className="field">
         <span>Issue type</span>
         {selectable.length ? (
