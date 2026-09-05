@@ -172,6 +172,12 @@ class FakeJiraClient:
     def get_myself(self):
         return {"name": "devbot", "displayName": "DevBot", "key": "devbot"}
 
+    def assign_issue(self, issue_key: str, username: str) -> bool:
+        self.updated.append(
+            {"issue_key": issue_key, "fields": {"assignee": username}, "labels": None}
+        )
+        return True
+
     def list_webhooks(self):
         return []
 

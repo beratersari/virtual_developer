@@ -691,6 +691,13 @@ class JiraPoller:
             # status *change* (prev is still "to do") and reprocess is skipped.
             self._last_jira_status[issue_key] = "in progress"
 
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            assign_to_pat_user(self.client, issue_key, issue=issue)
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
+
         if self._handler:
             event = {
                 "webhookEvent": "jira:issue_updated" if is_update else "jira:issue_created",

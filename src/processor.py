@@ -243,6 +243,7 @@ class JobProcessor:
         """
         if self._is_gitlab_triggered(issue_key):
             return False
+        moved = False
         try:
             client = self.jira_client
             if client is None:
@@ -254,15 +255,29 @@ class JobProcessor:
                     poller = getattr(self, "_poller", None)
                     if poller is not None and hasattr(poller, "_last_jira_status"):
                         poller._last_jira_status[issue_key] = "in progress"
-                    return True
-                logger.warning(
-                    f"{issue_key}: could not transition to In Progress "
-                    f"(no matching transition or already in progress)"
-                )
-                return False
-            return False
+                    moved = True
+                else:
+                    logger.warning(
+                        f"{issue_key}: could not transition to In Progress "
+                        f"(no matching transition or already in progress)"
+                    )
+            self._assign_jira_to_pat_user(issue_key)
+            return moved
         except Exception as e:
             logger.warning(f"{issue_key}: In Progress transition failed: {e}")
+            self._assign_jira_to_pat_user(issue_key)
+            return False
+
+    def _assign_jira_to_pat_user(self, issue_key: str) -> bool:
+        """Set the Jira assignee to the PAT user. Never used for GitLab jobs."""
+        if self._is_gitlab_triggered(issue_key):
+            return False
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            return bool(assign_to_pat_user(self.jira_client, issue_key))
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign failed: {e}")
             return False
 
     def _poller_tracks_in_progress(self, issue_key: str) -> bool:

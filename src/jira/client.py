@@ -745,6 +745,10 @@ class JiraClient:
             logger.error(f"Error fetching Jira myself: {e}")
             return None
 
+    def assign_to_pat_user(self, issue_key: str) -> bool:
+        """Assign ``issue_key`` to the Jira user of this client's PAT."""
+        return assign_to_pat_user(self, issue_key)
+
     def list_webhooks(self) -> List[Dict[str, Any]]:
         """Admin webhook list (Server/DC 9.4 + Cloud ``/rest/webhooks/1.0``)."""
         try:
@@ -852,6 +856,122 @@ class JiraClient:
     
     def __exit__(self, *args):
         self.close()
+
+
+def _is_gitlab_assign_skip(
+    issue_key: str,
+    *,
+    issue: Optional[Dict[str, Any]] = None,
+    source: str = "",
+) -> bool:
+    """True when this is a GitLab MR job — never write a Jira assignee."""
+    from src.gitlab.keys import is_gitlab_issue_key
+
+    if is_gitlab_issue_key(issue_key):
+        return True
+    src = str(source or "").strip().lower()
+    if src in {"gitlab", "gitlab_mr"}:
+        return True
+    if isinstance(issue, dict):
+        fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+        extra = issue.get("metadata") if isinstance(issue.get("metadata"), dict) else {}
+        blob = {**fields, **extra, **issue}
+        if str(blob.get("source") or "").strip().lower() == "gitlab":
+            return True
+        wf = str(blob.get("workflow_type") or "").strip().lower()
+        if wf == "gitlab_mr":
+            return True
+    return False
+
+
+def assign_ident_from_myself(me: Any, *, is_cloud: bool = False) -> str:
+    """Pick the REST identity Jira expects for assign from ``GET /myself``.
+
+    Cloud: ``accountId``. Server/DC: ``name`` (username), then ``key``.
+    """
+    if not isinstance(me, dict):
+        return ""
+    if is_cloud:
+        return str(me.get("accountId") or me.get("name") or "").strip()
+    return str(
+        me.get("name") or me.get("key") or me.get("accountId") or ""
+    ).strip()
+
+
+def _assignee_already_pat_user(
+    assignee: Any, ident: str, *, is_cloud: bool = False
+) -> bool:
+    if not ident or not isinstance(assignee, dict):
+        return False
+    current = assign_ident_from_myself(assignee, is_cloud=is_cloud)
+    if current and current == ident:
+        return True
+    for key in ("name", "key", "accountId"):
+        if str(assignee.get(key) or "").strip() == ident:
+            return True
+    return False
+
+
+def assign_to_pat_user(
+    client: Any,
+    issue_key: str,
+    *,
+    issue: Optional[Dict[str, Any]] = None,
+    source: str = "",
+) -> bool:
+    """Assign a **Jira** issue to the user authenticated by the configured PAT.
+
+    GitLab trigger points never assign (synthetic ``GL-…`` keys, or
+    ``source=gitlab`` / ``workflow_type=gitlab_mr``). Soft-fails (logs +
+    ``False``) — never blocks poll / schedule / start. Skips the write when
+    the ticket is already that user.
+    """
+    key = (issue_key or "").strip()
+    if not key or client is None or not hasattr(client, "assign_issue"):
+        return False
+    if _is_gitlab_assign_skip(key, issue=issue, source=source):
+        logger.debug(f"{key}: skip PAT assign (GitLab trigger, not a Jira handle)")
+        return False
+    try:
+        is_cloud = bool(getattr(client, "is_cloud", False))
+        ident = getattr(client, "_pat_assign_ident", None)
+        if not isinstance(ident, str) or not ident.strip():
+            me = client.get_myself() if hasattr(client, "get_myself") else None
+            ident = assign_ident_from_myself(me, is_cloud=is_cloud)
+            if ident:
+                try:
+                    setattr(client, "_pat_assign_ident", ident)
+                except Exception:
+                    pass
+        if not ident:
+            logger.warning(f"{key}: cannot assign PAT user (GET /myself empty)")
+            return False
+
+        fields: Dict[str, Any] = {}
+        if isinstance(issue, dict):
+            fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
+        elif hasattr(client, "get_issue"):
+            try:
+                live = client.get_issue(key, fields=["assignee"])
+                if isinstance(live, dict):
+                    raw = live.get("fields")
+                    fields = raw if isinstance(raw, dict) else {}
+            except Exception:
+                fields = {}
+        if _assignee_already_pat_user(
+            fields.get("assignee"), ident, is_cloud=is_cloud
+        ):
+            return True
+
+        ok = client.assign_issue(key, ident)
+        if ok:
+            logger.info(f"{key}: assigned to PAT user {ident}")
+            return True
+        logger.warning(f"{key}: assign to PAT user {ident} failed")
+        return False
+    except Exception as e:
+        logger.warning(f"{key}: assign to PAT user soft-failed: {e}")
+        return False
 
 
 def create_jira_client(simulated: bool = False):

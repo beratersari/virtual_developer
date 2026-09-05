@@ -322,6 +322,10 @@ def decide_jira_webhook(
         fields = _as_dict(issue.get("fields"))
         if not assignee_looks_like_bot(fields.get("assignee"), needles=needles):
             return JiraWebhookDecision(False, "created issue not assigned to bot")
+        actor = _as_dict(data.get("user") or data.get("account"))
+        if actor and author_looks_like_bot(actor, needles=needles):
+            # Dashboard/schedule create uses the PAT user — do not auto-start.
+            return JiraWebhookDecision(False, "ignored bot-created issue")
         event_id = f"created:{key}"
         event = _build_event(
             webhook_event="jira:issue_created",
@@ -350,6 +354,10 @@ def decide_jira_webhook(
         if not key:
             return JiraWebhookDecision(False, "update event missing issue key")
         if changelog_assigned_to_bot(changelog, needles=needles):
+            actor = _as_dict(data.get("user") or data.get("account"))
+            if actor and author_looks_like_bot(actor, needles=needles):
+                # We assign the PAT user on schedule/poll — do not re-intake.
+                return JiraWebhookDecision(False, "ignored self-assignment")
             clid = _changelog_id(changelog) or key
             event_id = f"assignee:{clid}"
             event = _build_event(

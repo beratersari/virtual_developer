@@ -183,11 +183,16 @@ def test_process_issue_create_and_update(poller):
     poller._handler = lambda e: events.append(e)
     poller.client = MagicMock()
     poller.client.transition_to_in_progress.return_value = True
-    issue = {"key": "P-1", "fields": {"summary": "s"}}
+    poller.client.get_myself.return_value = {"name": "devbot", "key": "devbot"}
+    poller.client.assign_issue.return_value = True
+    poller.client.is_cloud = False
+    issue = {"key": "P-1", "fields": {"summary": "s", "assignee": None}}
     poller.process_issue(issue, is_update=False)
     poller.process_issue(issue, is_update=True)
     assert events[0]["webhookEvent"] == "jira:issue_created"
     assert events[1]["webhookEvent"] == "jira:issue_updated"
+    assert poller.client.assign_issue.call_count >= 1
+    poller.client.assign_issue.assert_any_call("P-1", "devbot")
 
 
 def test_process_issue_no_handler(poller):
