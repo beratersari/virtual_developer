@@ -21,11 +21,17 @@ def runner(tmp_path):
 
 
 def test_resolve_opencode_agent_name_stock_build():
+    assert resolve_opencode_agent_name("derman-build") == "derman-build"
+    assert resolve_opencode_agent_name("derman-plan") == "derman-plan"
+    assert resolve_opencode_agent_name("forge") == "derman-build"
+    assert resolve_opencode_agent_name("blueprint") == "derman-plan"
+    assert resolve_opencode_agent_name("implement") == "derman-build"
+    assert resolve_opencode_agent_name("planner") == "derman-plan"
     assert resolve_opencode_agent_name("build") == "build"
     assert resolve_opencode_agent_name("plan") == "plan"
-    assert resolve_opencode_agent_name("sisyphus") == "build"
-    assert resolve_opencode_agent_name("prometheus") == "plan"
-    assert resolve_opencode_agent_name("atlas") == "build"
+    assert resolve_opencode_agent_name("sisyphus") == "derman-build"
+    assert resolve_opencode_agent_name("prometheus") == "derman-plan"
+    assert resolve_opencode_agent_name("atlas") == "derman-build"
     assert resolve_opencode_agent_name("oracle") == "oracle"
 
 

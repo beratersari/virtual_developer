@@ -33,9 +33,7 @@ def test_gitlab_comment_prompt_has_mr_context():
     assert "develop" in p
     assert "what does login do?" in p
     assert "Add login" in p
-    # Build mode (same BUILD_PROMPT.md as Jira execution)
-    assert "Build mode" in p or "delivery" in p.lower()
-    assert "Git policy" in p
+    assert "derman-build" in p.lower()
     assert "existing" in p.lower() and "merge request" in p.lower()
     assert "Do **not** push" in p or "Do not push" in p
     assert "new merge request" in p.lower()
@@ -47,7 +45,7 @@ def test_plan_path_includes_title_and_description():
     assert "A-1" in p
     assert "Jira title" in p and "sum title" in p
     assert "Jira description" in p and "full description body" in p
-    assert "Plan mode" in p or "planning" in p.lower()
+    assert "derman-plan" in p.lower()
     assert ".sisyphus/plans/A-1.md" in p
 
 
@@ -68,19 +66,20 @@ def test_build_path_includes_title_description_and_plan():
         plan_path="/plans/A-1.md",
         work_branch="feature/A-1",
     )
-    assert "Build mode" in p or "delivery" in p.lower()
+    assert "derman-build" in p.lower()
     assert "Jira title" in p and "Build the feature" in p
     assert "Jira description" in p and "Do the work carefully" in p
     assert "/plans/A-1.md" in p
     assert "feature/A-1" in p
-    assert "[A-1]" in p
-    assert "Git policy" in p
+    assert "A-1" in p
+    assert "git log" in p.lower() or "AGENTS.md" in p
 
 
 def test_plan_path_requires_commit_todo_in_plan_file_instructions():
     p = PromptBuilder.build_plan_prompt("KAN-7", "title", "desc")
-    assert "Commit with the conventional format" in p
-    assert "[KAN-7]" in p
+    assert "derman-plan" in p.lower()
+    assert ".sisyphus/plans/KAN-7.md" in p
+    assert "KAN-7" in p
 
 
 def test_build_without_plan_still_has_description():
