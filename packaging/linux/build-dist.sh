@@ -30,8 +30,25 @@ read_versions() {
   return 1
 }
 
-OPENCODE_VERSION="$(read_versions OPENCODE_VERSION)"
-OPENCODE_LINUX_ASSET="$(read_versions OPENCODE_LINUX_ASSET || true)"
+read_ocm_versions() {
+  local key="$1"
+  local file="$ROOT/opencoderman/packaging/versions.env"
+  [[ -f "$file" ]] || return 1
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | tr -d '\r')"
+    [[ -z "${line// }" ]] && continue
+    if [[ "$line" == "$key="* ]]; then
+      printf '%s\n' "${line#*=}"
+      return 0
+    fi
+  done <"$file"
+  return 1
+}
+
+OPENCODE_VERSION="$(read_ocm_versions OPENCODE_VERSION || read_versions OPENCODE_VERSION)"
+OPENCODE_LINUX_ASSET="$(read_ocm_versions OPENCODE_LINUX_ASSET || read_versions OPENCODE_LINUX_ASSET || true)"
 OPENCODE_LINUX_ASSET="${OPENCODE_LINUX_ASSET:-opencode-linux-x64.tar.gz}"
 GLAB_VERSION="$(read_versions GLAB_VERSION)"
 CODEX_VERSION="$(read_versions CODEX_VERSION)"
@@ -72,7 +89,7 @@ copy_items=(
   install.sh install-dashboard.sh install-backends.sh install-codex.sh
   start.sh start-backend.sh start-frontend.sh start-opencode.sh
   start-opencode-serve.sh stop.sh
-  src agent sample_project packaging
+  src agent sample_project packaging opencoderman
 )
 for item in "${copy_items[@]}"; do
   src="$ROOT/$item"
@@ -89,6 +106,12 @@ for item in "${copy_items[@]}"; do
 done
 chmod +x "$PAYLOAD"/install*.sh "$PAYLOAD"/start*.sh "$PAYLOAD"/stop.sh \
   "$PAYLOAD/packaging/linux/"*.sh 2>/dev/null || true
+if [[ ! -f "$PAYLOAD/opencoderman/install.py" ]]; then
+  echo "opencoderman/install.py missing from payload — init the submodule" >&2
+  exit 1
+fi
+rm -rf "$PAYLOAD/opencoderman/.git"
+find "$PAYLOAD/opencoderman" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo
 echo "Step 1b: Building ops dashboard frontend (web/)..."
@@ -149,7 +172,11 @@ if [[ -z "$OC_BIN" || ! -f "$OC_BIN" ]]; then
 fi
 chmod +x "$OC_BIN"
 cp -f "$OC_BIN" "$VENDOR/bin/opencode"
+mkdir -p "$PAYLOAD/opencoderman/vendor/bin/linux"
+cp -f "$OC_BIN" "$PAYLOAD/opencoderman/vendor/bin/linux/opencode"
+chmod +x "$PAYLOAD/opencoderman/vendor/bin/linux/opencode"
 echo "  OpenCode SHA256: $(sha256sum "$VENDOR/bin/opencode" | awk '{print $1}')"
+echo "  + opencoderman/vendor/bin/linux/opencode"
 
 echo
 echo "Step 3: Fetching glab v$GLAB_VERSION..."
@@ -250,6 +277,7 @@ glab=$GLAB_VERSION
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=${WHEEL_VERS}
 OpenCodeHome=vendor/opencode-home.zip
+OpenCoderman=opencoderman/
 EOF
 printf '%s\n' "$PRODUCT_VERSION" >"$PAYLOAD/VERSION"
 

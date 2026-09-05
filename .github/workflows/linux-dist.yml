@@ -1,6 +1,6 @@
 # Build a Linux x64 offline distribution (same split as Windows):
 #   install-dashboard.sh  (Python .venv + SPA)
-#   install-backends.sh   (OpenCode from vendor/opencode-home.zip)
+#   install-backends.sh   (OpenCode via opencoderman/install.py)
 #   install-codex.sh      (Codex from vendor/codex-*.tar.gz)
 #
 # Users: download artifact → extract once → run the scripts (no network).
@@ -33,6 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: true
 
       - name: Load pinned dependency versions
         id: versions

@@ -201,6 +201,16 @@ if (-not (Test-Path -LiteralPath $versionsFile)) {
     throw "versions.env not found: $versionsFile"
 }
 $ver = Read-Versions $versionsFile
+$ocmVersions = Join-Path $root "opencoderman\packaging\versions.env"
+if (Test-Path -LiteralPath $ocmVersions) {
+    $ov = Read-Versions $ocmVersions
+    foreach ($k in @("OPENCODE_VERSION", "OPENCODE_WINDOWS_ASSET", "OPENCODE_LINUX_ASSET", "OPENCODE_REPO")) {
+        if ($ov.ContainsKey($k) -and $ov[$k]) { $ver[$k] = $ov[$k] }
+    }
+    Write-Host "OpenCode pins from opencoderman/packaging/versions.env"
+} else {
+    Write-Host "[WARNING] opencoderman/packaging/versions.env missing; using packaging/windows/versions.env"
+}
 
 $OPENCODE_VERSION = $ver["OPENCODE_VERSION"]
 $OH_MY_OPENCODE_VERSION = $ver["OH_MY_OPENCODE_VERSION"]
@@ -272,7 +282,8 @@ $copyItems = @(
     "src",
     "agent",
     "sample_project",
-    "packaging"
+    "packaging",
+    "opencoderman"
 )
 
 foreach ($item in $copyItems) {
@@ -293,6 +304,16 @@ foreach ($item in $copyItems) {
         Copy-Item -LiteralPath $src -Destination $dest -Force
     }
     Write-Host "  + $item"
+}
+
+$stagedOcm = Join-Path $payload "opencoderman"
+if (Test-Path -LiteralPath (Join-Path $stagedOcm ".git")) {
+    Remove-Item -LiteralPath (Join-Path $stagedOcm ".git") -Recurse -Force
+}
+Get-ChildItem -Path $stagedOcm -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+if (-not (Test-Path -LiteralPath (Join-Path $stagedOcm "install.py"))) {
+    throw "opencoderman/install.py missing from payload — init the submodule"
 }
 
 # Root launchers (backend / frontend / both)
@@ -421,8 +442,9 @@ Codex=$CODEX_VERSION
 CodexAsset=$CODEX_WINDOWS_ASSET
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
-OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install-backends.bat)
-PortableNode=vendor/node (node.exe + npm for install-opencode-online.bat)
+OpenCodeHome=vendor/opencode-home.zip (CLI fallback; install via opencoderman/install.py)
+OpenCoderman=opencoderman/ (agents, skills, install.py, vendored CLI)
+PortableNode=vendor/node (optional; online OpenCode uses opencoderman + Python)
 NodeFull=$NODE_FULL_VERSION
 "@
 Set-Content -Path (Join-Path $payload "DIST_VERSION.txt") -Value $marker -Encoding UTF8
@@ -557,6 +579,10 @@ $vendorBin = Join-Path $vendor "bin"
 Ensure-Dir $vendorBin
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $vendorBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $vendorBin "glab.exe") -Force
+$ocmWinBin = Join-Path $payload "opencoderman\vendor\bin\windows"
+Ensure-Dir $ocmWinBin
+Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $ocmWinBin "opencode.exe") -Force
+Write-Host "  + opencoderman/vendor/bin/windows/opencode.exe"
 # Codex is shipped as the official tar.gz only. Installers extract with tar.
 Copy-Item -LiteralPath $codexPkg -Destination (Join-Path $vendor $CODEX_WINDOWS_ASSET) -Force
 $dummyCodexCfg = Join-Path $root "packaging\windows\codex-config.toml"
@@ -663,7 +689,7 @@ try {
 # Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "  vendor\opencode-home.zip ready (install-backends.bat extracts to %USERPROFILE%\.opencode)"
+Write-Host "  vendor\opencode-home.zip ready (CLI fallback for packaging/install_opencode.py)"
 
 # ---------------------------------------------------------------------------
 # 4b) Portable Node win-x64 (node.exe + npm) for install-opencode-online.bat
@@ -775,7 +801,7 @@ PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode + Codex), install-codex.bat (Codex only), or install-opencode-online.bat (OpenCode via network + vendor\node).
+NOTE=Run install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode via opencoderman + Codex), install-codex.bat (Codex only), or install-opencode-online.bat (OpenCode via opencoderman, needs network + Python).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -790,10 +816,9 @@ JIRA Virtual Developer — Windows offline package
 4. Install:
       install-dashboard.bat                 — Python + ops dashboard (.venv)
       install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
-      install-backends.bat                  — OpenCode + Codex (no Python)
+      install-backends.bat                  — OpenCode (opencoderman) + Codex
       install-codex.bat                     — Codex CLI only
-      install-opencode-online.bat — ONLINE OpenCode only (requires vendor\node;
-                                    edit vendor\npm-online.npmrc registry= for your mirror)
+      install-opencode-online.bat — ONLINE OpenCode (opencoderman; needs Python + network)
 5. Edit .env with Jira / GitLab settings
 6. Start:
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
@@ -806,7 +831,7 @@ JIRA Virtual Developer — Windows offline package
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
-Portable Node (online OpenCode): vendor\node\node.exe (v$NODE_FULL_VERSION)
+OpenCode pack: opencoderman/ (install.py + agents + skills)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 

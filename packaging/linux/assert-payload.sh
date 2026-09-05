@@ -22,6 +22,10 @@ for rel in \
   web/dist/index.html \
   vendor/opencode-home.zip \
   vendor/bin/opencode \
+  opencoderman/install.py \
+  opencoderman/agents/gitlab-reviewer.md \
+  opencoderman/vendor/bin/linux/opencode \
+  packaging/install_opencode.py \
   vendor/bin/glab \
   vendor/bin/codex \
   vendor/python-wheels \
