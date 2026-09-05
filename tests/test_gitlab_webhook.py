@@ -767,7 +767,7 @@ def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
 
 
 def test_decide_gitlab_mr_webhook_accepts_merge(monkeypatch):
-    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
     d = decide_gitlab_mr_webhook(
         _mr_lifecycle_payload(),
         headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
@@ -782,7 +782,7 @@ def test_decide_gitlab_mr_webhook_accepts_merge(monkeypatch):
 
 
 def test_decide_gitlab_mr_webhook_records_close_without_merge(monkeypatch):
-    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
     d = decide_gitlab_mr_webhook(
         _mr_lifecycle_payload(action="close", state="closed"),
         headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
@@ -792,6 +792,8 @@ def test_decide_gitlab_mr_webhook_records_close_without_merge(monkeypatch):
     assert d.accepted
     assert d.event is not None
     assert not d.event.is_merged
+    assert d.event.is_closed
+    assert d.event.should_delete_clone
     assert d.event.state == "closed"
 
 
@@ -811,7 +813,7 @@ def test_dashboard_mr_merge_webhook_deletes_clone(
     monkeypatch.setattr("src.config.settings.temp_dir_base", base)
     monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
     monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
-    monkeypatch.setattr("src.config.settings.jira_projects_list", ["KAN"])
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
     monkeypatch.chdir(tmp_path)
 
     job = job_store.create_job(issue_key="KAN-12", summary="add login")
@@ -843,3 +845,69 @@ def test_dashboard_mr_merge_webhook_deletes_clone(
     assert "repo_merged01" in body["deleted"]
     updated = job_store.get_job(job["job_id"])
     assert updated["merge_request_state"] == "merged"
+
+
+def test_dashboard_mr_close_webhook_deletes_clone(
+    tmp_path, monkeypatch, fake_jira
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.dashboard.temp_storage import reset_delete_jobs
+    from src.processor import JobProcessor
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "repo_closed01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
+    monkeypatch.chdir(tmp_path)
+
+    job = job_store.create_job(issue_key="KAN-12", summary="add login")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        gitlab_project="acme/demo",
+        gitlab_mr_iid=4,
+        merge_request_state="opened",
+    )
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    app = create_dashboard_app(processor=proc)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhooks/gitlab",
+            json=_mr_lifecycle_payload(action="close", state="closed"),
+            headers={
+                "X-Gitlab-Event": "Merge Request Hook",
+                "X-Gitlab-Token": "tok",
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["kind"] == "merge_request"
+    assert body["reason"] == "closed"
+    assert "repo_closed01" in body["deleted"]
+    updated = job_store.get_job(job["job_id"])
+    assert updated["merge_request_state"] == "closed"
+
+
+def test_decide_gitlab_mr_reopen_does_not_delete(monkeypatch):
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
+    d = decide_gitlab_mr_webhook(
+        _mr_lifecycle_payload(action="reopen", state="opened"),
+        headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
+        enabled=True,
+        secret="s",
+    )
+    assert d.accepted
+    assert d.event is not None
+    assert not d.event.is_merged
+    assert not d.event.is_closed
+    assert not d.event.should_delete_clone

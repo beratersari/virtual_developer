@@ -123,6 +123,18 @@ class GitlabMrLifecycleEvent:
     def is_merged(self) -> bool:
         return self.action == "merge" or self.state == "merged"
 
+    @property
+    def is_closed(self) -> bool:
+        """True for a closed (not merged) MR. Merged is a separate state."""
+        if self.is_merged:
+            return False
+        return self.action in {"close", "closed"} or self.state == "closed"
+
+    @property
+    def should_delete_clone(self) -> bool:
+        """Temp clone is disposable once the linked MR is merged or closed."""
+        return self.is_merged or self.is_closed
+
 
 @dataclass
 class WebhookDecision:

@@ -3884,7 +3884,7 @@ class JobProcessor:
         return posted is not None
 
     async def handle_gitlab_mr_lifecycle(self, event: Any) -> Dict[str, Any]:
-        """Persist MR state and delete the temp clone when the MR is merged.
+        """Persist MR state and delete the temp clone when the MR is merged or closed.
 
         Does not take the long-held issue lock — delete must not wait on a job.
         """
@@ -3896,7 +3896,7 @@ class JobProcessor:
         state_name = (event.state or "").strip().lower()
         if event.is_merged:
             state_name = "merged"
-        elif (event.action or "").lower() in {"close", "closed"}:
+        elif event.is_closed:
             state_name = "closed"
         elif (event.action or "").lower() in {"reopen", "open", "opened"}:
             state_name = "opened"
@@ -3910,7 +3910,7 @@ class JobProcessor:
             mr_iid=event.mr_iid,
             state=state_name,
         )
-        if not event.is_merged:
+        if not event.should_delete_clone:
             return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
@@ -3923,12 +3923,12 @@ class JobProcessor:
             source_branch=event.source_branch,
         )
         logger.info(
-            f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} merged — "
-            f"deleted clones {deleted or '(none)'}"
+            f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
+            f"{state_name} — deleted clones {deleted or '(none)'}"
         )
         return {
             "ok": True,
-            "reason": "merged",
+            "reason": state_name,
             "deleted": deleted,
         }
 

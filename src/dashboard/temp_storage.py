@@ -779,7 +779,10 @@ def delete_clones_for_merge_request(
     issue_key: str = "",
     source_branch: str = "",
 ) -> List[str]:
-    """Queue force-delete of temp clones for a merged MR. Skips in-use folders."""
+    """Queue force-delete of temp clones for a merged or closed MR.
+
+    Skips in-use folders.
+    """
     names = clone_folder_names_for_mr(
         mr_url=mr_url,
         project_path=project_path,

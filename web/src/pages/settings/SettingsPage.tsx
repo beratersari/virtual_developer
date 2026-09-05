@@ -275,7 +275,7 @@ export function SettingsPage() {
         <div className="text-sm font-semibold text-text">GitLab project webhook</div>
         <p className="mt-1 text-xs text-text-muted">
           Project hook (GitLab.com / CE / EE). Events: Comments and Merge
-          request. Merged MRs delete the matching temp clone. Secret is{' '}
+          request. Merged or closed MRs delete the matching temp clone. Secret is{' '}
           <span className="font-mono">X-Gitlab-Token</span>.
         </p>
         <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
