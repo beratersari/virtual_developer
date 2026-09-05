@@ -535,6 +535,8 @@ export type StorageFolder = {
   issue_key?: string | null
   summary?: string | null
   job_id?: string | null
+  merge_request_url?: string | null
+  merge_request_state?: string | null
   delete?: StorageFolderDelete | null
 }
 

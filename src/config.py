@@ -274,7 +274,7 @@ class Settings(BaseSettings):
     # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
     gitlab_webhook_enabled: bool = Field(
         default=False,
-        description="Accept GitLab Note webhooks on /webhooks/gitlab",
+        description="Accept GitLab Note and Merge Request webhooks on /webhooks/gitlab",
     )
     gitlab_webhook_secret: str = Field(
         default="",

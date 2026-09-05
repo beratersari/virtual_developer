@@ -272,9 +272,10 @@ export function SettingsPage() {
       {section === 'gitlab' && (
       <div key="gitlab" className="vd-fade space-y-3">
       <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
-        <div className="text-sm font-semibold text-text">MR comment webhook</div>
+        <div className="text-sm font-semibold text-text">GitLab project webhook</div>
         <p className="mt-1 text-xs text-text-muted">
-          Project hook (GitLab.com / CE / EE). Event: Comments only. Secret is{' '}
+          Project hook (GitLab.com / CE / EE). Events: Comments and Merge
+          request. Merged MRs delete the matching temp clone. Secret is{' '}
           <span className="font-mono">X-Gitlab-Token</span>.
         </p>
         <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
