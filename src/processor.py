@@ -164,7 +164,8 @@ class JobProcessor:
         
         self.jira_client = create_jira_client(simulated=use_simulated)
         logger.debug(
-            f"JobProcessor initialized - default_agent: {settings.default_agent}"
+            f"JobProcessor initialized - derman-build={settings.default_agent} "
+            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')}"
         )
     
     # Statuses where an agent is actively running — never restart these from updates
@@ -4013,7 +4014,7 @@ class JobProcessor:
                     comment=event.prompt,
                     work_branch=event.source_branch,
                 ),
-                agent=settings.default_agent,
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=state.issue_key,
                 model=self._model_for_issue(state),
                 backend=self._backend_for_issue(state),
@@ -4023,7 +4024,7 @@ class JobProcessor:
                 status=TaskStatus.EXECUTING,
                 task=task,
                 workflow_type="gitlab_mr",
-                agent=settings.default_agent,
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 job_status="executing",
             )
             if job_id is None:
@@ -4361,7 +4362,7 @@ class JobProcessor:
                 summary=state.issue_summary or "",
                 description=state.description or "",
             ),
-            agent=settings.default_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -4371,7 +4372,7 @@ class JobProcessor:
             status=TaskStatus.PLANNING,
             task=task,
             workflow_type="planning",
-            agent=settings.default_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
             job_status="planning",
             started_at=workflow_start_time,
         )
@@ -4628,7 +4629,7 @@ class JobProcessor:
                 description=state.description or "",
                 plan_path=plan_for_prompt or None,
             ),
-            agent=settings.default_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -4640,7 +4641,7 @@ class JobProcessor:
             status=TaskStatus.EXECUTING,
             task=task,
             workflow_type="execution",
-            agent=settings.default_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
             job_status="executing",
             started_at=workflow_start_time,
         )
@@ -5891,7 +5892,7 @@ class JobProcessor:
             task = AgentTask(
                 description=f"Comment request: {issue_key}",
                 prompt=prompt,
-                agent=settings.default_agent,
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=issue_key,
                 model=self._model_for_issue(state),
                 backend=self._backend_for_issue(state),

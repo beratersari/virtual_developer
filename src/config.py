@@ -292,11 +292,16 @@ class Settings(BaseSettings):
         ),
     )
     
-    # OpenCode agent name for plan + build runs (oracle consult uses "oracle").
-    # Mode (plan vs build) selects the prompt file; agent name does not change prompts.
+    # OpenCode agent for Mode: build (and other implementation jobs).
+    # OpenCoderman derman-build, not stock OpenCode ``build``.
     default_agent: str = Field(
-        default="build",
-        description="OpenCode agent for plan and build jobs (stock build; not Sisyphus/Atlas)",
+        default="derman-build",
+        description="OpenCode agent for build jobs (opencoderman derman-build)",
+    )
+    # OpenCode agent for Mode: plan. OpenCoderman derman-plan, not stock ``plan``.
+    default_plan_agent: str = Field(
+        default="derman-plan",
+        description="OpenCode agent for plan jobs (opencoderman derman-plan)",
     )
 
     # Exactly two mode prompts (agent name does not change prompt text)

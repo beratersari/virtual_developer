@@ -112,7 +112,14 @@ class WorkflowRouter:
         """OpenCode agent for this workflow (oracle consult is fixed)."""
         if workflow_type == WorkflowType.ORACLE_CONSULT:
             return "oracle"
-        return settings.default_agent
+        if workflow_type == WorkflowType.PLANNING:
+            plan = getattr(settings, "default_plan_agent", None)
+            if isinstance(plan, str) and plan.strip():
+                return plan.strip()
+        agent = getattr(settings, "default_agent", None)
+        if isinstance(agent, str) and agent.strip():
+            return agent.strip()
+        return "derman-build"
 
     @classmethod
     def extract_mention_command(cls, comment_text: str) -> Optional[str]:

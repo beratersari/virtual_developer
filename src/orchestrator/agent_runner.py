@@ -17,18 +17,24 @@ from src.logger import logger
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
 
-# Stock OpenCode agents (no oh-my-openagent). Old plugin names map here so
-# existing tickets / DEFAULT_AGENT=atlas still run.
+# OpenCoderman derman-build / derman-plan are the Yaver defaults. Stock
+# OpenCode build/plan stay available. Old names map to the OpenCoderman pair.
 OPENCODE_AGENT_ALIASES: Dict[str, str] = {
+    "derman-build": "derman-build",
+    "derman-plan": "derman-plan",
+    "forge": "derman-build",
+    "blueprint": "derman-plan",
+    "implement": "derman-build",
+    "planner": "derman-plan",
     "build": "build",
     "plan": "plan",
-    "atlas": "build",
-    "sisyphus": "build",
-    "sisyphus-junior": "build",
-    "hephaestus": "build",
-    "prometheus": "plan",
-    "metis": "plan",
-    "momus": "plan",
+    "atlas": "derman-build",
+    "sisyphus": "derman-build",
+    "sisyphus-junior": "derman-build",
+    "hephaestus": "derman-build",
+    "prometheus": "derman-plan",
+    "metis": "derman-plan",
+    "momus": "derman-plan",
     "oracle": "oracle",
     "explore": "explore",
     "librarian": "librarian",
@@ -44,7 +50,7 @@ def _default_sessions_dir() -> Path:
 
 
 def resolve_opencode_agent_name(agent: str) -> str:
-    """Map short / legacy plugin names to stock OpenCode agent ids (build, plan)."""
+    """Map short / legacy names to OpenCode agent ids (derman-build, derman-plan, …)."""
     if not agent:
         return agent
     key = agent.strip()
