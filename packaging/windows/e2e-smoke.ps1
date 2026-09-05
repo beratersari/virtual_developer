@@ -31,6 +31,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-codex.bat"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "vendor\opencode-home.zip"))) {
     throw "vendor\opencode-home.zip missing — outer package must not expand node_modules"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "opencoderman\install.py"))) {
+    throw "opencoderman\install.py missing — init the submodule and restage the zip"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "packaging\install_opencode.py"))) {
+    throw "packaging\install_opencode.py missing"
+}
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "start.bat"))) {
     throw "start.bat missing at payload root (backend + dashboard launcher)"
 }

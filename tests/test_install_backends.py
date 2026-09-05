@@ -32,6 +32,7 @@ def test_combined_install_bat_is_removed():
     assert "python-wheels" in dash
     assert "opencode-home.zip" not in dash
     be = BAT.read_text(encoding="utf-8")
+    assert "opencoderman" in be
     assert "opencode-home.zip" in be
     assert "venv" not in be.lower() or "no Python" in be
 
@@ -68,6 +69,8 @@ def test_install_backends_bat_has_no_echo_redirect():
 def test_install_backends_ps1_uses_official_codex_path():
     text = PS1.read_text(encoding="utf-8")
     assert r"Programs\OpenAI\Codex\bin" in text
+    assert "install_opencode.py" in text
+    assert "opencoderman" in text
     assert "opencode-home.zip" in text
     assert "Expand-TarGz" in text
     assert "codex-package-x86_64-pc-windows-msvc.tar.gz" in text
@@ -78,6 +81,24 @@ def test_install_backends_ps1_uses_official_codex_path():
     assert "$pid" not in text
     assert "venv" in text.lower()
     assert "not installed by this script" in text
+
+
+def test_install_opencode_online_uses_opencoderman():
+    bat = ROOT / "install-opencode-online.bat"
+    text = bat.read_text(encoding="utf-8")
+    assert bat.is_file()
+    assert "opencoderman" in text
+    assert "Install-OpencodeOnline.ps1" in text
+    assert "vendor\\node\\node.exe" not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("echo ") and " -> " in stripped:
+            raise AssertionError(f"cmd.exe redirect landmine: {stripped}")
+    ps1 = ROOT / "packaging" / "windows" / "Install-OpencodeOnline.ps1"
+    ptext = ps1.read_text(encoding="utf-8")
+    assert "install_opencode.py" in ptext
+    assert "--online" in ptext
+    assert "oh-my-openagent" not in ptext
 
 
 def test_dummy_codex_config_exists():

@@ -11,7 +11,7 @@ REM   install-backends.bat opencode     OpenCode only
 REM   install-backends.bat codex        Codex only (prefer install-codex.bat)
 REM
 REM Paths:
-REM   OpenCode  %USERPROFILE%\.opencode
+REM   OpenCode  %USERPROFILE%\.opencode  (via opencoderman\install.py)
 REM   Codex     %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
 REM             (tar extract of vendor\codex-package-*.tar.gz + dummy ~/.codex)
 REM
@@ -41,16 +41,31 @@ if /i not "%WHICH%"=="opencode" (
     )
 )
 if /i not "%WHICH%"=="codex" (
-    if not exist "%SCRIPT_DIR%\vendor\opencode-home.zip" (
-        echo [ERROR] vendor\opencode-home.zip missing. This script needs the CI offline zip.
+    if not exist "%SCRIPT_DIR%\opencoderman\install.py" (
+        echo [ERROR] opencoderman\install.py missing.
+        echo         From a git checkout: git submodule update --init --recursive
+        echo         From a CI zip: re-download so the opencoderman folder is present.
         call :maybe_pause
         exit /b 1
+    )
+    if not exist "%SCRIPT_DIR%\opencoderman\vendor\bin\windows\opencode.exe" (
+        if not exist "%SCRIPT_DIR%\vendor\bin\opencode.exe" (
+            if not exist "%SCRIPT_DIR%\vendor\opencode-home.zip" (
+                echo [ERROR] No OpenCode CLI. Need one of:
+                echo         opencoderman\vendor\bin\windows\opencode.exe
+                echo         vendor\bin\opencode.exe
+                echo         vendor\opencode-home.zip ^(CI offline zip^)
+                echo         Online: install-opencode-online.bat
+                call :maybe_pause
+                exit /b 1
+            )
+        )
     )
 )
 
 echo ========================================
 echo   Virtual Developer - Backends only
-echo   OpenCode + Codex ^(no Python / dashboard^)
+echo   OpenCode via opencoderman + Codex ^(no Python venv / dashboard^)
 echo ========================================
 echo.
 echo Project : %SCRIPT_DIR%

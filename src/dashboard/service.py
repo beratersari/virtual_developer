@@ -47,7 +47,7 @@ from src.opencode_sessions import (
     strip_omo_mode_wrap,
     is_omo_mode_wrap_text,
 )
-from src.orchestrator.workflow_router import WorkflowType
+from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.state.job_store import (
     JobStore,
     description_from_prompt_path,
@@ -1848,9 +1848,11 @@ def _reconstruct_prompts(state) -> Dict[str, Any]:
     """
     workflow = (state.metadata or {}).get("workflow_type") or "execution"
     if workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
-        agent_name = "oracle"
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT)
+    elif workflow in ("planning", "plan"):
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING)
     else:
-        agent_name = settings.default_agent
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION)
 
     return {
         "workflow_type": workflow,

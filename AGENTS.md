@@ -159,8 +159,11 @@ Rework in that case still happens because the ticket is To Do + trigger
 
 Jobs run **unattended** over `opencode serve` (HTTP). There is **no human reply
 path** (no Jira-comment intake for agent Q&A, no interactive TUI for the job).
-Prompts (`agent/BUILD_PROMPT.md`, `agent/PLAN_PROMPT.md`) order the model not to
-ask clarifying questions. Treat violations as product failures to recover from —
+OpenCoderman agents **derman-build** / **derman-plan** (not stock OpenCode
+`build` / `plan`) order the model not to ask clarifying questions. The
+per-job user message is only Jira + branch + plan path
+(`agent/BUILD_PROMPT.md`, `agent/PLAN_PROMPT.md`).
+Treat clarifying-question violations as product failures to recover from —
 not as multi-turn chat.
 
 #### Control loop (intentional)
@@ -431,7 +434,11 @@ When this daemon’s agents commit inside a **customer/project** temp clone:
 
 - Branch: `feature/{JIRA_ISSUE_ID}` (see `commitMsgFormat.md` / `GitManager`).
 - The **system** pushes and creates the MR; agents should not push.
-- MR title and commit messages for those product MRs must still follow the conventional pattern in §6 (include the issue key in the scope or body, e.g. `feat(PROJ-123): add retry guard`).
+- Commit subjects must **match that repo**: read its `AGENTS.md` and
+  `git log -20 --format=%s`, then copy the dominant pattern and place
+  the Jira key the way that history already does. Fall back to §6
+  (with the issue key in the scope or as `[KEY]`) only when docs and
+  history have no clear format.
 
 ---
 
@@ -517,13 +524,14 @@ glab mr create --title "feat(auth): bearer-only jira token" --description "..." 
 ## 7. Local setup (quick)
 
 ```bash
+git submodule update --init --recursive   # opencoderman (OpenCode CLI + agents/skills)
 cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITLAB_PAT as needed
 ./install-dashboard.sh
-./install-backends.sh  # or ./install.sh (dashboard then backends)
+./install-backends.sh  # OpenCode via opencoderman/install.py; or ./install.sh
 ./start-backend.sh     # or ./start.sh
 ```
 
-**Windows (offline zip from CI):** extract artifact → `install-dashboard.bat` + `install-backends.bat` (OpenCode) + `install-codex.bat` (Codex) → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
+**Windows (offline zip from CI):** extract artifact → `install-dashboard.bat` + `install-backends.bat` (OpenCode via **opencoderman**) + `install-codex.bat` (Codex) → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
 
 ---
 
@@ -559,12 +567,12 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 
 | Item | Rule |
 |------|------|
-| OpenCode home | **`%USERPROFILE%\.opencode` only** (bin, plugin `node_modules`, configs). No second install at `C:\vd\opencode` unless `VD_OPENCODE_ROOT` is set on purpose. |
-| Global config | Mirror valid JSON to **`%USERPROFILE%\.config\opencode\`** (OpenCode’s real discovery path). |
-| Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
+| OpenCode home | **`%USERPROFILE%\.opencode` only** (CLI, stock `opencode.json`, **opencoderman** agents/skills). Install via `opencoderman/install.py` (wrapper: `packaging/install_opencode.py`). The pack **backs up** `~/.opencode` instead of deleting it. Do not write a second tree under `~/.config/opencode`. |
+| OpenCode source | Git submodule **`opencoderman/`** (`https://github.com/beratersari/opencoderman.git`). Pins live in `opencoderman/packaging/versions.env`. Do not re-implement a parallel installer. |
+| Plugin cache | Stock OpenCode only (`plugin: []`). Seed **`rg.exe`** into `%USERPROFILE%\.cache\opencode\bin` from `vendor\bin\rg.exe`. Do **not** junction or copy an oh-my plugin tree. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
-| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Requires **`vendor/node`**. Edit **`npm-online.npmrc`** `registry=` for private/FTP-backed HTTP mirrors. Offline OpenCode remains **`vendor/opencode-home.zip`**. |
+| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Runs `opencoderman/packaging/build_artifact.py --in-place` then `install.py`. Needs **Python** + network to the official OpenCode GitHub release. Offline CLI sources: `opencoderman/vendor/bin/<os>/`, `vendor/bin/opencode`, or `vendor/opencode-home.zip`. |
 | Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
 | Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
@@ -574,12 +582,15 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 1. **Never `echo ... -> path` in `.bat` files.** In cmd, `>` is redirect.  
    `echo [OK] config -> %OPENCODE_HOME%\opencode.json` **overwrites** `opencode.json` with the text `[OK] config -` (exactly the “invalid JSON” failure users hit).  
    Same pattern can clobber `opencode.exe`. Always use `^>` or rephrase without `>`.
-2. **`install-backends.bat` must be idempotent:** wipe previous `.opencode`, legacy short paths, stale PATH entries, and broken managed configs before extract — users should only re-run the installer.
+2. **`install-backends.bat` must be idempotent:** `opencoderman/install.py` **renames** `~/.opencode` to `~/.opencode_backup_YYYYMMDD_HHMMSS` (and leftover `~/.config/opencode` the same way), unhooks other OpenCode dirs from PATH, then writes a fresh home. Do not delete those backups. Users should only re-run the installer.
 3. Prefer **PowerShell `-File` scripts** for non-trivial logic; never use PowerShell parameter name **`$args`** (automatic variable — breaks `Start-Process -ArgumentList`).
 
 ### 9.3 oh-my-openagent / oh-my-opencode plugin — **do not install**
 
-Jobs use OpenCode's **stock `build` / `plan` agents**. Do **not** register or npm-install `oh-my-openagent` / `oh-my-opencode`. `opencode.json` must be `"plugin": []` and `autoupdate: false`.
+Jobs use OpenCoderman **derman-build** / **derman-plan** (not stock
+`build` / `plan`, and not oh-my-openagent). Do **not** register or
+npm-install `oh-my-openagent` / `oh-my-opencode`. `opencode.json` must
+be `"plugin": []` and `autoupdate: false`.
 
 Historical table (why we used to pin the plugin). Keep it so nobody "fixes" a black screen by re-adding the plugin:
 
@@ -621,9 +632,9 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 ### 9.5 CI / packaging process (do not weaken)
 
-1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
+1. **Build** on `windows-latest`: checkout **with submodules**, then `build-dist.ps1` → stage **`opencoderman/`** (no `.git`) + `vendor/opencode-home.zip` as a CLI fallback (never expand `node_modules` into the outer artifact).
 2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
-3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `vendor/opencode-home.zip`, **`vendor/codex-package-x86_64-pc-windows-msvc.tar.gz`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
+3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `opencoderman/install.py`, `opencoderman/vendor/bin/windows/opencode.exe`, `vendor/opencode-home.zip`, **`vendor/codex-package-x86_64-pc-windows-msvc.tar.gz`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
 4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).
@@ -734,12 +745,16 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |
+| `opencoderman/` | Git submodule: OpenCode installer, agents, skills, CLI pins |
+| `packaging/install_opencode.py` | Yaver wrapper around `opencoderman/install.py` (CLI sources + rg/glab extras) |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
-| `agent/PLAN_PROMPT.md` | Plan-mode agent prompt (`Mode: plan`) |
-| `agent/BUILD_PROMPT.md` | Build-mode agent prompt (`Mode: build`) |
+| `opencoderman/agents/derman-plan.md` | derman-plan — unattended planner (not stock `plan`) |
+| `opencoderman/agents/derman-build.md` | derman-build — unattended implementer (not stock `build`) |
+| `agent/PLAN_PROMPT.md` | Short plan-job user stub (`Mode: plan`) |
+| `agent/BUILD_PROMPT.md` | Short build-job user stub + git subject format |
 | `src/opencode_serve.py` | Serve loop: compact wait, unattended nudge (see §2 OpenCode serve) |
 | `src/opencode_sessions.py` | Session completeness + clarifying-question detection |
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |

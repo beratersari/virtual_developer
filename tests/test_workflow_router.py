@@ -73,11 +73,13 @@ def test_should_auto_start_planning_never():
 
 def test_get_agent_for_workflow_all_types():
     with patch("src.orchestrator.workflow_router.settings") as s:
-        s.default_agent = "atlas"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "atlas"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "atlas"
+        s.default_agent = "derman-build"
+        s.default_plan_agent = "derman-plan"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "derman-plan"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "derman-build"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT) == "oracle"
         s.default_agent = "sisyphus"
+        s.default_plan_agent = None
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "sisyphus"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "sisyphus"
 

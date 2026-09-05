@@ -1,7 +1,8 @@
-"""Build prompts for plan vs build: two files + Jira title/description.
+"""Build short per-job user prompts: job facts + Jira title/description.
 
-Mode is the only switch (``Mode: plan`` vs ``Mode: build``). OpenCode agent
-names do not change prompt text.
+Stable unattended rules live on the OpenCoderman ``derman-plan`` /
+``derman-build`` agents. These files only pass issue key, branch, plan
+path, and Jira text.
 """
 
 from __future__ import annotations
@@ -17,16 +18,14 @@ from src.orchestrator.prompt_kit import substitute_placeholders
 
 
 class PromptBuilder:
-    """Exactly two prompts: **plan** and **build**.
+    """Short user stubs for **derman-plan** and **derman-build**.
 
     Each run is:
 
-    1. Full text from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
+    1. Job facts from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
        (placeholders ``{ISSUE_KEY}``, ``{WORK_BRANCH}``, ``{PLAN_PATH}``)
     2. Jira title (summary)
     3. Jira description
-
-    Agent selection (prometheus/atlas/…) does **not** change the prompt body.
     """
 
     @staticmethod
@@ -210,7 +209,11 @@ class PromptBuilder:
         marker = "## Git policy"
         if marker in body:
             return marker + body.split(marker, 1)[1]
-        return f"## Git policy\n\nCommit as `[{issue_key}] <type>: <short description>`."
+        return (
+            f"## Git policy\n\n"
+            f"Match this repo's AGENTS.md and git log. "
+            f"If no pattern exists, commit as `[{issue_key}] <type>: <short description>`."
+        )
 
     @staticmethod
     def build_gitlab_comment_prompt(

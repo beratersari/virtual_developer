@@ -258,7 +258,11 @@ def config():
     
     table.add_row("JIRA Host", settings.jira_host)
     table.add_row("Projects", ", ".join(settings.jira_projects_list))
-    table.add_row("Agent", settings.default_agent)
+    table.add_row("Implement agent", settings.default_agent)
+    table.add_row(
+        "Planner agent",
+        getattr(settings, "default_plan_agent", "derman-plan"),
+    )
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Poll Interval (s)", str(settings.poll_interval_seconds))
     table.add_row("Board ID", settings.jira_board_id or "(not set)")
@@ -500,7 +504,7 @@ def init():
     "--agent",
     "-a",
     default=None,
-    help="OpenCode agent (default: DEFAULT_AGENT from settings; use oracle for consult)",
+    help="OpenCode agent (default: derman-build / derman-plan by mode; use oracle for consult)",
 )
 @click.option("--plan-only", is_flag=True, help="Only create a plan (Mode: plan path), don't execute")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running agent")
@@ -538,7 +542,7 @@ def test_issue(
     from src.state.manager import JiraStateManager
     from src.state.models import TaskStatus
 
-    agent = (agent or settings.default_agent).strip() or settings.default_agent
+    explicit_agent = (agent or "").strip()
     
     # Generate a fake issue key
     issue_key = f"TEST-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -547,7 +551,6 @@ def test_issue(
     console.print(f"Project: {project}")
     console.print(f"Title: {title}")
     console.print(f"Description: {description}")
-    console.print(f"Agent: {agent}")
     console.print()
     
     if dry_run:
@@ -565,7 +568,14 @@ def test_issue(
     
     # Determine workflow
     workflow = WorkflowRouter.route_issue(issue_key, title, description)
-    console.print(f"Detected workflow: [green]{workflow.value}[/green]\n")
+    if explicit_agent:
+        agent = explicit_agent
+    elif plan_only:
+        agent = WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING)
+    else:
+        agent = WorkflowRouter.get_agent_for_workflow(workflow)
+    console.print(f"Detected workflow: [green]{workflow.value}[/green]")
+    console.print(f"Agent: [green]{agent}[/green]\n")
     
     async def run_agent():
         project_path = Path(project).resolve()

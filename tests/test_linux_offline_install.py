@@ -77,9 +77,11 @@ def test_offline_install_backends_and_codex(tmp_path, monkeypatch):
     oc = home / ".opencode" / "bin" / "opencode"
     assert oc.is_file(), proc.stdout
     assert oc.stat().st_mode & stat.S_IXUSR
-    cfg = home / ".config" / "opencode" / "opencode.json"
+    cfg = home / ".opencode" / "opencode.json"
     assert cfg.is_file()
     assert '"plugin": []' in cfg.read_text(encoding="utf-8")
+    assert (home / ".opencode" / "agents" / "gitlab-reviewer.md").is_file()
+    assert not (home / ".config" / "opencode" / "opencode.json").exists()
 
     proc2 = subprocess.run(
         ["bash", str(ROOT / "packaging" / "linux" / "install-codex.sh")],
@@ -114,6 +116,10 @@ def test_assert_payload_script_accepts_minimal_tree(tmp_path):
         "web/dist/assets/index-abc.js",
         "vendor/opencode-home.zip",
         "vendor/bin/opencode",
+        "opencoderman/install.py",
+        "opencoderman/agents/gitlab-reviewer.md",
+        "opencoderman/vendor/bin/linux/opencode",
+        "packaging/install_opencode.py",
         "vendor/bin/glab",
         "vendor/bin/codex",
         "vendor/python-wheels/.keep",
