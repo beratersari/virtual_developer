@@ -133,11 +133,14 @@ export function JobsPage() {
 
   const visibleQueue = useMemo(() => {
     if (!showQueue) return []
-    const needle = debouncedFilter.trim().toUpperCase()
+    const needle = debouncedFilter.trim().toLocaleLowerCase()
     if (!needle) return queueItems
-    return queueItems.filter((q) =>
-      (q.issue_key || '').toUpperCase().includes(needle),
-    )
+    return queueItems.filter((q) => {
+      const key = (q.issue_key || '').toLocaleLowerCase()
+      const title = (q.summary || '').toLocaleLowerCase()
+      const body = (q.message || '').toLocaleLowerCase()
+      return key.includes(needle) || title.includes(needle) || body.includes(needle)
+    })
   }, [queueItems, debouncedFilter, showQueue])
 
   const visibleIdKey = filteredJobs.map((j) => j.job_id).join('|')
@@ -219,10 +222,10 @@ export function JobsPage() {
         }
         actions={
           <label className="block text-xs text-text-muted">
-            Find issue
+            Search
             <input
-              className="vd-input mt-1 w-52 font-mono"
-              placeholder="KAN-12"
+              className="vd-input mt-1 w-64"
+              placeholder="Key, title, or description"
               value={issueFilter}
               onChange={(e) => setIssueFilter(e.target.value)}
             />
@@ -309,7 +312,7 @@ export function JobsPage() {
       {statusFilter !== 'all' && statusFilter !== 'queue' && statusFilter !== 'active' && (
         <p className="text-xs text-text-muted">
           Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
-          Issue search hits the server.
+          Search matches issue key, title, and description.
         </p>
       )}
       {showQueue && (

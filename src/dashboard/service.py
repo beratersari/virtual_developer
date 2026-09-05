@@ -972,6 +972,34 @@ def job_created_stamp(job: Any) -> str:
     return str(started or created or updated or "")
 
 
+def _job_matches_search(
+    job: Dict[str, Any],
+    needle: Optional[str],
+    summaries: Optional[Dict[str, str]] = None,
+    descriptions: Optional[Dict[str, str]] = None,
+) -> bool:
+    """True when *needle* appears in issue key, title, or description."""
+    text = (needle or "").strip()
+    if not text:
+        return True
+    n = text.casefold()
+    key = str(job.get("issue_key") or "")
+    title = str(job.get("summary") or "")
+    if not title and summaries:
+        title = str(summaries.get(key) or summaries.get(key.upper()) or "")
+    body = str(job.get("description") or "")
+    if not body.strip() and descriptions:
+        body = str(descriptions.get(key) or descriptions.get(key.upper()) or "")
+    if body:
+        try:
+            from src.issue_git_spec import strip_params_block
+
+            body = strip_params_block(body) or body
+        except Exception:
+            pass
+    return n in key.casefold() or n in title.casefold() or n in body.casefold()
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
@@ -995,9 +1023,11 @@ def build_jobs(
         active_job_ids = set((processor._active_jobs or {}).values())
 
     summaries: Dict[str, str] = {}
+    descriptions: Dict[str, str] = {}
     if state_manager is not None:
         for st in state_manager.get_all_states():
             summaries[st.issue_key] = st.issue_summary or ""
+            descriptions[st.issue_key] = st.description or ""
 
     size = int(page_size if page_size is not None else limit or 25)
     size = max(1, min(size, 100))
@@ -1007,8 +1037,13 @@ def build_jobs(
     # JobStore only — never synthesize legacy_* rows from session files.
     # Retries live under the parent job (session_log_paths / retry_attempts).
     fetch_cap = 2000
-    raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
+    raw = js.list_jobs(limit=fetch_cap, offset=0)
     raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
+    raw = [
+        j
+        for j in raw
+        if _job_matches_search(j, issue_key, summaries, descriptions)
+    ]
     inflight: List[Dict[str, Any]] = []
     rest: List[Dict[str, Any]] = []
     for j in raw:

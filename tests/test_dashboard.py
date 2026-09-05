@@ -564,6 +564,47 @@ def test_build_jobs_pagination(tmp_path):
     assert len(ids) == 7
 
 
+def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
+    from src.dashboard.service import build_jobs
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    login = jobs.create_job(
+        issue_key="KAN-12",
+        summary="Add login page",
+        description="Use session cookies and rotate the refresh token.",
+    )
+    jobs.create_job(
+        issue_key="KAN-99",
+        summary="Unrelated billing",
+        description="Invoice export only.",
+    )
+    by_key = build_jobs(issue_key="kan-12", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert {j.job_id for j in by_key.jobs} == {login["job_id"]}
+    by_title = build_jobs(issue_key="login", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert {j.job_id for j in by_title.jobs} == {login["job_id"]}
+    by_desc = build_jobs(
+        issue_key="refresh token", page=1, page_size=20, store=jobs, state_manager=sm
+    )
+    assert {j.job_id for j in by_desc.jobs} == {login["job_id"]}
+    by_word = build_jobs(issue_key="KAN", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert len(by_word.jobs) == 2
+    jobs.create_job(
+        issue_key="KAN-50",
+        summary="Params only",
+        description=(
+            "Operator text here.\n\n"
+            "{params}\nRepository: https://gitlab.com/a/b.git\n"
+            "Source branch: develop\nTarget branch: develop\nMode: build\n{params}"
+        ),
+    )
+    by_params = build_jobs(
+        issue_key="gitlab.com", page=1, page_size=20, store=jobs, state_manager=sm
+    )
+    assert by_params.jobs == []
+
+
 def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):
     from src.dashboard.service import build_one_job
     from src.state.job_store import JobStore
