@@ -9,7 +9,8 @@ OpenCode / Codex. Scripts live here and are invoked from the repo root
 GitHub Actions workflow **Linux Distribution** (`.github/workflows/linux-dist.yml`)
 builds `virtual_developer-linux-x64-*` with:
 
-- `vendor/opencode-home.zip` + `vendor/bin/opencode`
+- `opencoderman/` (install.py, agents, skills, `vendor/bin/linux/opencode`)
+- `vendor/opencode-home.zip` + `vendor/bin/opencode` (CLI fallback)
 - `vendor/codex-*.tar.gz` + `vendor/bin/codex`
 - `vendor/python-wheels` (manylinux)
 - prebuilt `web/dist`
@@ -18,12 +19,12 @@ Extract the artifact so the install scripts sit next to `vendor/` and `src/`, th
 
 ```bash
 ./install-dashboard.sh    # .venv from vendor/python-wheels (no network)
-./install-backends.sh     # OpenCode from vendor/opencode-home.zip
+./install-backends.sh     # OpenCode via opencoderman/install.py
 ./install-codex.sh        # Codex from vendor/codex-*.tar.gz
 ./start-backend.sh
 ```
 
-Without that zip, the same scripts fall back to the network (PyPI / opencode.ai / npm).
+Without that zip, OpenCode falls back to `opencoderman/packaging/build_artifact.py --in-place` (official GitHub release). Dashboard still uses PyPI when wheels are missing.
 
 ## Online / from git
 

@@ -32,20 +32,22 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
      - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
      - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
-   - **`install-backends.bat`** — **OpenCode** (no Python / dashboard); also installs Codex when run with no args:
-     - OpenCode to **`%USERPROFILE%\.opencode`**
+   - **`install-backends.bat`** — **OpenCode** via the **opencoderman** submodule (plus Codex when run with no args):
+     - Calls `packaging/install_opencode.py` → `opencoderman/install.py`
+     - OpenCode to **`%USERPROFILE%\.opencode`** (CLI + agents + skills; stock `plugin: []`)
+     - CLI from `opencoderman/vendor/bin/windows/`, `vendor/bin/opencode.exe`, or `vendor/opencode-home.zip`
      - Optional: `install-backends.bat opencode` (OpenCode only)
+     - Needs Python (project `.venv` or `python` / `py` on PATH)
    - **`install-codex.bat`** — **Codex CLI only**:
      - Extracts **`vendor\codex-package-x86_64-pc-windows-msvc.tar.gz`** with **`tar.exe`**
        (that file is put in the CI zip; no network at install time)
      - Codex to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**
      - Dummy **`%USERPROFILE%\.codex\config.toml`** if that file is not already there
      - Does not touch OpenCode or Python
-   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network):
-     - **Requires** portable **`vendor\node\node.exe`** + `npm.cmd` (no system Node)
-     - Edit **`vendor\npm-online.npmrc`** (or `packaging\windows\npm-online.npmrc`) → set `registry=` to your npm mirror
-     - Optional: **`vendor\online-sources.env`** for `OPENCODE_ZIP_URL` / `NPM_REGISTRY` pointing at your HTTP file server
-     - **Offline workers still use `install-backends.bat` + `vendor\opencode-home.zip`**
+   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network + Python):
+     - Vendors the CLI with `opencoderman/packaging/build_artifact.py --in-place` (version from the submodule)
+     - Then the same `install.py` as the offline path
+     - **Offline workers still use `install-backends.bat`** (CI zip / vendored CLI)
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
    - **`start-backend.bat`** — ensures OpenCode serve on **:4096**, then daemon on **http://0.0.0.0:8080/** (API + SPA)
@@ -75,8 +77,8 @@ Do **not** ship `web\node_modules` in the zip. Only `web\dist`.
 
 **CI note:** full `e2e-smoke.ps1` is not run on every push (too slow). Build asserts payload layout.
 
-OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
-Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
+OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, stock config, opencoderman agents/skills).
+`opencoderman/install.py` backs up a leftover **`%USERPROFILE%\.config\opencode\`** and does not write it back.
 
 Do **not** expect a second install at `C:\vd\opencode` (that was a short-lived workaround).
 Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
@@ -85,11 +87,11 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
 
 | Problem | Fix |
 |---------|-----|
-| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install-backends.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
+| Path too long / slow extract of `node_modules` | Outer zip keeps **`vendor/opencode-home.zip`** as a CLI fallback only. Install goes through **opencoderman** (CLI + agents/skills), not a full home unzip. |
 | Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
 | `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
 | Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
-| Dirty re-install | `install-backends.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
+| Dirty re-install | `opencoderman/install.py` **renames** prior `%USERPROFILE%\.opencode` to a timestamped backup and unhooks other OpenCode dirs from PATH |
 | Black/blank TUI / default agents | OpenCode Bun-installs plugins into `~/.cache/opencode`; installer **full-copies** the complete `oh-my-opencode` tree (agents + skill `.md`), pins version, seeds `node_modules` + `packages` + `.config` |
 
 ## Files
@@ -101,7 +103,8 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
 | `opencode.json` | Stock OpenCode config (`plugin: []`, built-in build/plan) |
 | `oh-my-opencode.json` | Default plugin config stub |
 | `Install-Backends.ps1` | Offline OpenCode and/or Codex (called by root `install-backends.bat` / `install-codex.bat`) |
-| `Install-OpencodeOnline.ps1` | Online OpenCode CLI install (called by root bat; not used by offline `install-backends.bat`) |
+| `../install_opencode.py` | Yaver wrapper around `opencoderman/install.py` |
+| `Install-OpencodeOnline.ps1` | Online OpenCode via opencoderman (`build_artifact.py --in-place` + install.py) |
 | `npm-online.npmrc` | Editable npm `registry=` for online install only |
 | `online-sources.env` | Optional `OPENCODE_ZIP_URL` / `NPM_REGISTRY` mirrors |
 | `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
@@ -110,7 +113,7 @@ Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
 | `e2e-smoke.ps1` | CI: deep-path install + assert SPA + launchers + OpenCode |
 | `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
 
-Payload also ships **`vendor/node/`** (official Node win-x64 tree: `node.exe`, `npm.cmd`, npm deps) for online OpenCode installs without a system Node.
+Payload still ships **`vendor/node/`** (Node win-x64) for other tooling. Online OpenCode no longer needs it — it uses the opencoderman vendor script + Python.
 
 ## Bumping versions
 

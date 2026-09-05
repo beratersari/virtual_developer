@@ -52,8 +52,9 @@ Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated,
 
 | Setting | Role |
 |---------|------|
-| **`DEFAULT_AGENT`** (`build`) | OpenCode stock agent for both `Mode: plan` and `Mode: build` |
-| **Plan vs build text** | `agent/PLAN_PROMPT.md` vs `agent/BUILD_PROMPT.md` (mode only) |
+| **`DEFAULT_AGENT`** (`derman-build`) | OpenCoderman **derman-build** for `Mode: build` (not stock `build`) |
+| **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
+| **Plan vs build user text** | Short job facts in `agent/PLAN_PROMPT.md` / `agent/BUILD_PROMPT.md`; rules live on the agents |
 | **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
@@ -81,7 +82,7 @@ artifact, extract so `vendor/` sits next to the install scripts, then:
 
 ```bash
 ./install-dashboard.sh    # .venv from vendor/python-wheels
-./install-backends.sh     # OpenCode from vendor/opencode-home.zip
+./install-backends.sh     # OpenCode via opencoderman (vendor CLI / opencode-home.zip)
 ./install-codex.sh        # Codex from vendor/codex-*.tar.gz
 ```
 
@@ -89,8 +90,9 @@ From a git checkout (needs network unless you already have `vendor/`):
 
 ```bash
 # From repo root
+git submodule update --init --recursive   # opencoderman
 ./install-dashboard.sh    # .venv, requirements, .env, cli.py init
-./install-backends.sh     # OpenCode (+ Codex if no args)
+./install-backends.sh     # OpenCode via opencoderman (+ Codex if no args)
 # Or one shot:
 ./install.sh
 
@@ -350,7 +352,8 @@ Repo URL and branches always come from the issue `{params}` block.
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
 | `DEFAULT_MODEL` | (see `.env.example`) | Job model for OpenCode and Codex (provider/auth stay in each tool's config) |
-| `DEFAULT_AGENT` | `build` | OpenCode stock agent for plan and build jobs |
+| `DEFAULT_AGENT` | `derman-build` | OpenCoderman derman-build for build jobs |
+| `DEFAULT_PLAN_AGENT` | `derman-plan` | OpenCoderman derman-plan for plan jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
 | `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
@@ -408,8 +411,9 @@ virtual_developer/
 ├── VERSION                # SemVer product version
 ├── .env.example           # Config template
 ├── requirements.txt
-├── agent/PLAN_PROMPT.md   # Plan mode prompt
-├── agent/BUILD_PROMPT.md  # Build mode prompt
+├── agent/PLAN_PROMPT.md   # Short plan-job user stub
+├── agent/BUILD_PROMPT.md  # Short implement-job user stub
+├── opencoderman/          # Submodule: derman-build + derman-plan agents + skills
 ├── src/
 │   ├── daemon.py          # Process entry: poller + dashboard + monitor
 │   ├── config.py
@@ -518,8 +522,10 @@ python cli.py show PROJ-123
 | Doc | Purpose |
 |-----|---------|
 | [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
-| [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Plan-mode prompt |
-| [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Build-mode prompt |
+| [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | derman-plan — unattended planner |
+| [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | derman-build — unattended implementer |
+| [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Short plan-job user stub |
+| [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Short implement-job user stub |
 | [packaging/windows/README.md](packaging/windows/README.md) | Offline zip design and versioning |
 | [`.env.example`](.env.example) | Full environment template with comments |
 | [web/README.md](web/README.md) | Frontend notes (if present) |
