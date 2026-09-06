@@ -42,6 +42,13 @@ def _plain_int(val: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _issue_text(value: Any) -> str:
+    """Plain text from a Jira summary/description (wiki string or Cloud ADF)."""
+    from src.jira.triggers import jira_body_to_text
+
+    return jira_body_to_text(value)
+
+
 def _live_agent_timeout_seconds(state: Optional[JiraAgentState] = None) -> int:
     """Dashboard/runtime timeout, not a value frozen at job begin.
 
@@ -2725,11 +2732,8 @@ class JobProcessor:
         fields = issue.get("fields", {})
         scheduled_job = bool(event.get("scheduled_job"))
         
-        summary = fields.get("summary", "")
-        description = fields.get("description", "") or ""
-        if not isinstance(description, str):
-            # On-prem is usually plain text; tolerate accidental non-string payloads
-            description = str(description)
+        summary = _issue_text(fields.get("summary", ""))
+        description = _issue_text(fields.get("description", "") or "")
         
         logger.info(f"Handling issue created for {issue_key}: {summary[:80]}")
         logger.debug(f"Issue description length: {len(description)} chars")
@@ -2970,10 +2974,8 @@ class JobProcessor:
                 "ai-start-work" in label_set or "ai-execute" in label_set
             )
 
-            summary = fields.get("summary", "") or state.issue_summary or ""
-            description = fields.get("description", "") or ""
-            if not isinstance(description, str):
-                description = str(description)
+            summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
+            description = _issue_text(fields.get("description", "") or "")
             if not description:
                 description = state.description or ""
 
@@ -3048,10 +3050,8 @@ class JobProcessor:
 
         if state and state.status == TaskStatus.PLAN_READY:
             fields = issue.get("fields") or {}
-            summary = fields.get("summary", "") or state.issue_summary or ""
-            description = fields.get("description", "") or ""
-            if not isinstance(description, str):
-                description = str(description)
+            summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
+            description = _issue_text(fields.get("description", "") or "")
             if not description:
                 description = state.description or ""
             if summary:
@@ -3214,13 +3214,13 @@ class JobProcessor:
             fields = issue.get("fields") or {}
             live_summary = fields.get("summary")
             live_desc = fields.get("description")
-            if live_summary is not None and str(live_summary).strip():
-                summary = str(live_summary)
+            if live_summary is not None:
+                text = _issue_text(live_summary)
+                if text.strip():
+                    summary = text
             if live_desc is not None:
-                if not isinstance(live_desc, str):
-                    live_desc = str(live_desc)
                 # Allow empty description only when API returned a value
-                description = live_desc
+                description = _issue_text(live_desc)
             if st and (summary != (st.issue_summary or "") or description != (st.description or "")):
                 logger.info(
                     f"{issue_key}: refreshed summary/description from live Jira "
@@ -3561,10 +3561,8 @@ class JobProcessor:
         issue = event.get("issue") or {}
         key = (issue.get("key") or "").strip()
         fields = issue.get("fields") or {}
-        summary = fields.get("summary") or ""
-        desc = fields.get("description") or ""
-        if not isinstance(desc, str):
-            desc = str(desc) if desc is not None else ""
+        summary = _issue_text(fields.get("summary") or "")
+        desc = _issue_text(fields.get("description") or "")
         if not key:
             return {"ok": False, "reason": "missing issue key"}
         event_id = str(event.get("jira_event_id") or "").strip()
