@@ -1,0 +1,226 @@
+# Freeze Yaver into standalone Windows / Linux executables (PyInstaller onedir).
+# Additive to windows-dist.yml / linux-dist.yml — does not replace the offline zips.
+#
+# Config: packaging/pyinstaller/versions.env + yaver.spec
+# Users: extract artifact → copy .env.example to .env → yaver start
+
+name: Standalone Executables
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      dist_suffix:
+        description: "Optional SemVer-safe suffix for non-release builds"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  freeze:
+    name: Freeze ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            platform: windows
+            product: yaver-windows-x64
+          - os: ubuntu-latest
+            label: Linux x64
+            platform: linux
+            product: yaver-linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load freeze versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"
+            line="$(echo "$line" | tr -d '\r')"
+            [ -z "${line// }" ] && continue
+            key="${line%%=*}"
+            val="${line#*=}"
+            case "$key" in
+              PYTHON_VERSION|NODE_VERSION|PYINSTALLER_VERSION|PYINSTALLER_MODE)
+                echo "$key=$val" >> "$GITHUB_OUTPUT"
+                echo "$key=$val"
+                ;;
+            esac
+          done < packaging/pyinstaller/versions.env
+          for k in PYTHON_VERSION NODE_VERSION PYINSTALLER_VERSION; do
+            if ! grep -q "^${k}=" "$GITHUB_OUTPUT"; then
+              echo "Missing $k in packaging/pyinstaller/versions.env"
+              exit 1
+            fi
+          done
+
+      - name: Resolve product version (Windows)
+        if: runner.os == 'Windows'
+        id: meta_win
+        shell: pwsh
+        run: |
+          & .\packaging\windows\resolve-version.ps1 `
+            -RepoRoot "${{ github.workspace }}" `
+            -DistSuffix "${{ github.event.inputs.dist_suffix }}" `
+            -ProductName "${{ matrix.product }}"
+
+      - name: Resolve product version (Linux)
+        if: runner.os != 'Windows'
+        id: meta_linux
+        run: |
+          chmod +x packaging/linux/resolve-version.sh
+          ./packaging/linux/resolve-version.sh \
+            "${{ github.workspace }}" \
+            "${{ matrix.product }}" \
+            "${{ github.event.inputs.dist_suffix }}"
+
+      - name: Version outputs
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "version=${{ steps.meta_win.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "version_safe=${{ steps.meta_win.outputs.version_safe }}" >> "$GITHUB_OUTPUT"
+            echo "dist_name=${{ steps.meta_win.outputs.dist_name }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ steps.meta_win.outputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "base_version=${{ steps.meta_win.outputs.base_version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ steps.meta_linux.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "version_safe=${{ steps.meta_linux.outputs.version_safe }}" >> "$GITHUB_OUTPUT"
+            echo "dist_name=${{ steps.meta_linux.outputs.dist_name }}" >> "$GITHUB_OUTPUT"
+            echo "channel=${{ steps.meta_linux.outputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "base_version=${{ steps.meta_linux.outputs.base_version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.versions.outputs.PYTHON_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.versions.outputs.NODE_VERSION }}
+
+      - name: Build ops dashboard SPA
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+        env:
+          # SPA is display-only; no secrets in the bundle.
+          CI: true
+
+      - name: Install Python deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "pyinstaller==${{ steps.versions.outputs.PYINSTALLER_VERSION }}"
+
+      - name: Freeze executable
+        env:
+          VD_PRODUCT_VERSION: ${{ steps.meta.outputs.version }}
+          VD_DIST_NAME: ${{ steps.meta.outputs.dist_name }}
+        run: python packaging/pyinstaller/build.py --clean --out-dir dist --dist-name "${{ steps.meta.outputs.dist_name }}"
+
+      - name: Assert payload layout
+        run: python packaging/pyinstaller/assert_payload.py "dist/stage/${{ steps.meta.outputs.dist_name }}" --platform "${{ matrix.platform }}"
+
+      - name: Smoke --help and --version
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="dist/stage/${{ steps.meta.outputs.dist_name }}"
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            exe="$payload/yaver.exe"
+          else
+            exe="$payload/yaver"
+            chmod +x "$exe"
+          fi
+          "$exe" --version
+          "$exe" --help
+
+      - name: Upload folder artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}
+          path: dist/stage/${{ steps.meta.outputs.dist_name }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload zip archive
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}-zip
+          path: dist/${{ steps.meta.outputs.dist_name }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload tar.gz archive (Linux)
+        if: matrix.platform == 'linux' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/'))
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.dist_name }}-tar
+          path: dist/${{ steps.meta.outputs.dist_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "## Standalone executable (${{ matrix.label }})"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Product version | \`${{ steps.meta.outputs.version }}\` |"
+            echo "| Channel | \`${{ steps.meta.outputs.channel }}\` |"
+            echo "| Dist name | \`${{ steps.meta.outputs.dist_name }}\` |"
+            echo "| PyInstaller | \`${{ steps.versions.outputs.PYINSTALLER_VERSION }}\` |"
+            echo "| Layout | onedir |"
+            echo ""
+            echo "Extract the artifact, copy \`.env.example\` to \`.env\`, run \`yaver start\`."
+            echo "OpenCode / Codex are **not** inside this binary."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach to GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Virtual Developer ${{ steps.meta.outputs.version }}
+          files: |
+            dist/${{ steps.meta.outputs.dist_name }}.zip
+            dist/${{ steps.meta.outputs.dist_name }}.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          body: |
+            Standalone executable `${{ steps.meta.outputs.dist_name }}`.
+
+            1. Extract the zip / tar
+            2. Copy `.env.example` → `.env` and set Jira credentials
+            3. Run `yaver start` (Windows: `yaver.exe start`)
+            4. Open http://127.0.0.1:8080
+
+            OpenCode and Codex are **not** bundled. Use the full offline
+            zip (`install-backends`) or install those CLIs yourself.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

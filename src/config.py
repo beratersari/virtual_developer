@@ -35,9 +35,19 @@ def bootstrap_dotenv_into_environ(
     if paths:
         candidates.extend(Path(p) for p in paths if p)
     else:
-        # CWD first (how operators run the daemon), then package root next to src/
+        # CWD first (how operators run the daemon), then the install folder
+        # (repo root, or the directory next to a frozen yaver.exe), then the
+        # package root next to src/. Frozen resource trees are read-only.
         candidates.append(Path.cwd() / ".env")
         candidates.append(Path.cwd() / ".env.agent")
+        try:
+            from src.install_paths import install_root
+
+            root = install_root()
+            candidates.append(root / ".env")
+            candidates.append(root / ".env.agent")
+        except Exception:
+            pass
         try:
             pkg_root = Path(__file__).resolve().parent.parent
             candidates.append(pkg_root / ".env")

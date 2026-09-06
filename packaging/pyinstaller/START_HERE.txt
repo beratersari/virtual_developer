@@ -1,0 +1,27 @@
+Yaver standalone executable
+===========================
+
+This folder is the daemon + ops dashboard CLI. It does NOT include
+OpenCode or Codex — install those separately (install-backends from
+the full Windows/Linux offline zip, or your own OpenCode/Codex install).
+
+1. Copy .env.example to .env
+2. Edit .env (at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID)
+3. Start:
+
+   Windows:  yaver.exe start
+   Linux:    ./yaver start
+
+4. Open http://127.0.0.1:8080
+
+Other commands (same as ``python cli.py``):
+
+   yaver --help
+   yaver --version
+   yaver process KEY-123
+
+Config is the .env file next to this binary. Secrets are never baked
+into the executable. Durable data still goes to YAVER_DATA_DIR
+(C:\vd\yaver on Windows, /vd/yaver or ~/vd/yaver on Linux).
+
+Git and glab must be on PATH for clone / push / merge requests.

@@ -31,11 +31,31 @@ class PromptBuilder:
     @staticmethod
     def _agent_dir() -> Path:
         """Directory containing PLAN_PROMPT.md / BUILD_PROMPT.md."""
+        candidates: list[Path] = []
         custom = getattr(settings, "agent_prompts_dir", None)
         if custom:
             p = Path(custom)
-            return p if p.is_absolute() else Path.cwd() / p
-        return Path.cwd() / "agent"
+            candidates.append(p if p.is_absolute() else Path.cwd() / p)
+        candidates.append(Path.cwd() / "agent")
+        try:
+            from src.install_paths import bundled_agent_dir, install_root
+
+            candidates.append(install_root() / "agent")
+            candidates.append(bundled_agent_dir())
+        except Exception:
+            pass
+        seen: set[str] = set()
+        for path in candidates:
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if path.is_dir():
+                return path
+        return candidates[0] if candidates else Path.cwd() / "agent"
 
     @staticmethod
     def plan_prompt_path() -> Path:
