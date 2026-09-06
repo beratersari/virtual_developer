@@ -316,6 +316,36 @@ async def test_error_no_retry_when_retry_on_error_false():
 
 
 @pytest.mark.asyncio
+async def test_unknown_agent_is_not_retried():
+    """Serve missing derman-build cannot be fixed by retrying the same id."""
+    runner = AgentRunner()
+    calls = {"n": 0}
+
+    fail_res = _fail_result(
+        stderr="[serve] agent 'derman-build' is not registered"
+    )
+    fail_res["incomplete_reasons"] = ["unknown agent: derman-build"]
+
+    async def fail_unknown(*a, **k):
+        calls["n"] += 1
+        return dict(fail_res)
+
+    with patch.object(runner, "run_agent", side_effect=fail_unknown):
+        with _SettingsCtx(
+            max_retries=3,
+            delay=0.001,
+            retry_on_timeout=True,
+            retry_on_error=True,
+        ):
+            task = AgentTask(description="d", prompt="p", agent="derman-build")
+            result = await runner.run_agent_with_retry(task, max_retries=3)
+
+    assert calls["n"] == 1
+    assert result["returncode"] == 1
+    assert result["retry_info"]["retried"] is False
+
+
+@pytest.mark.asyncio
 async def test_error_retries_when_flag_true_even_if_timeout_flag_false():
     """Non-timeout failure uses elif retry_on_error; timeout flag irrelevant."""
     runner = AgentRunner()

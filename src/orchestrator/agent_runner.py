@@ -628,6 +628,17 @@ class AgentRunner:
 
         return is_codex_stream_overflow_error(blob)
 
+    @staticmethod
+    def _result_unknown_agent(result: Optional[Dict[str, Any]]) -> bool:
+        """True when serve rejected the agent id (retry cannot fix that)."""
+        data = result if isinstance(result, dict) else {}
+        blob = " ".join(
+            [str(data.get("stderr") or "")]
+            + [str(data.get("stdout") or "")]
+            + [str(r) for r in (data.get("incomplete_reasons") or [])]
+        ).lower()
+        return "unknown agent" in blob or "is not registered" in blob
+
     def _resume_codex_after_lock(
         self,
         task: AgentTask,
@@ -1546,6 +1557,11 @@ class AgentRunner:
                             f"task_id={task.task_id} "
                             f"(resume {incomplete_used + 1}/{incomplete_budget})"
                         )
+            elif self._result_unknown_agent(result):
+                logger.error(
+                    f"Unknown OpenCode agent — not retrying: "
+                    f"task_id={task.task_id} attempt={attempt + 1}"
+                )
             elif retry_on_error and error_used < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
