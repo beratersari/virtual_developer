@@ -1036,6 +1036,7 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git = MagicMock()
     git.work_branch = "feature/PU-1"
     git.target_branch = "develop"
+    git.commits_ahead_of_target.return_value = 1
     git.ensure_on_work_branch.return_value = False
     processor._contexts["PU-1"] = {"git": git, "runner": None}
     assert await processor._push_and_create_mr(state) is False
@@ -1141,6 +1142,29 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     processor.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))
     git.ensure_on_work_branch.return_value = False
     assert await processor._push_and_create_mr(state) is False
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_skips_when_not_ahead_of_target(
+    processor, state_manager, fake_jira
+):
+    """KAN-218 / job_7435790adfb0: 0-ahead branch may push, must not open an MR."""
+    state = state_manager.create_state("KAN-218", "s", "d")
+    git = MagicMock()
+    git.work_branch = "feature/KAN-218"
+    git.target_branch = "main"
+    git.ensure_on_work_branch.return_value = True
+    git.get_current_branch.return_value = "feature/KAN-218"
+    git.commits_ahead_of_target.return_value = 0
+    git.push.return_value = True
+    git.create_merge_request.return_value = "https://gitlab.example.com/mr/34"
+    processor._contexts["KAN-218"] = {"git": git, "runner": None}
+    assert await processor._push_and_create_mr(state) is True
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+    assert (state_manager.get_state("KAN-218").metadata or {}).get(
+        "merge_request_url"
+    ) in (None, "")
 
 
 # ---------------------------------------------------------------------------

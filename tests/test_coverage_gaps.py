@@ -506,6 +506,10 @@ async def test_push_progress_exceptions(proc, state_manager):
         await proc._push_and_create_mr(state)
 
     git.get_current_branch.return_value = "feature/x"
+    git.work_branch = "feature/x"
+    git.target_branch = "develop"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = False
     await proc._push_and_create_mr(state)
 

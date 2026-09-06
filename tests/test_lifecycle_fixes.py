@@ -236,6 +236,7 @@ async def test_push_and_create_mr_cancel_during_push_skips_notify(
     git.target_branch = "develop"
     git.get_current_branch.return_value = "feature/AB-2"
     git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.side_effect = GitCancelledError(
         "git cancelled: git remote set-url origin https://oauth2:***@h/r.git"
     )
@@ -258,6 +259,7 @@ async def test_push_skips_mr_when_aborted_after_push(processor, state_manager):
     git.ensure_on_work_branch = MagicMock(return_value=True)
     git.work_branch = "feature/AB-2"
     git.target_branch = "develop"
+    git.commits_ahead_of_target = MagicMock(return_value=1)
     git.push = MagicMock(return_value=True)
     git.get_last_commit_subject = MagicMock(return_value="feat: x")
     git.get_last_commit_message = MagicMock(return_value="feat: x")

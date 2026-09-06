@@ -574,6 +574,22 @@ class JobProcessor:
             or "thread-store conflict" in blob
             or "codex thread locked" in blob
         )
+        unknown_agent = (
+            "unknown agent" in blob or "is not registered" in blob
+        )
+        if unknown_agent:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode serve does not have this agent (derman-build / "
+                    "derman-plan). Install OpenCoderman agents into ~/.opencode "
+                    "and restart `opencode serve`, then re-queue from To Do."
+                ),
+                category="unknown_agent",
+            )
+            return
         if locked:
             self._fail_issue(
                 issue_key,
@@ -4284,10 +4300,15 @@ class JobProcessor:
                     )
                     self._release_context(state.issue_key, success=False)
                     return
-                # Always push + reuse the existing MR after a finished agent
-                # (including HEAD unchanged this job — prior unpushed commits).
+                # Always try push onto the existing MR source. Do not open
+                # a *new* MR when this run has nothing ahead of target.
+                has_unique = not (
+                    delivery_err and self._is_noop_delivery_message(delivery_err)
+                )
                 push_ok = await self._push_and_create_mr(
-                    state, existing_mr_url=event.mr_url or None
+                    state,
+                    existing_mr_url=event.mr_url or None,
+                    open_mr=has_unique,
                 )
                 if self._is_aborted(state.issue_key):
                     logger.info(
@@ -4296,40 +4317,37 @@ class JobProcessor:
                     )
                     self._release_context(state.issue_key, success=False)
                     return
-                if not push_ok:
-                    if delivery_err and self._is_noop_delivery_message(
-                        delivery_err
-                    ):
-                        logger.info(
-                            f"{state.issue_key}: GitLab MR build finished "
-                            f"with no unique commits to deliver — still "
-                            f"posting MR reply"
-                        )
-                        delivery_note = (
-                            "No unique commits to deliver on this run; "
-                            "existing MR was not re-attributed."
-                        )
-                        self.state_manager.update_state(
-                            state.issue_key,
-                            metadata={
-                                "delivery_status": "no_new_commits",
-                                "delivery_note": delivery_err[:2000],
-                            },
-                        )
-                    else:
-                        self._fail_issue(
-                            state.issue_key,
-                            self._format_push_fail_error(
-                                self._push_failure_reason(state.issue_key),
-                                existing_mr=True,
-                            ),
-                            suggestion=(
-                                "Check GitLab remote/credentials, then comment "
-                                "on the MR again."
-                            ),
-                        )
-                        self._release_context(state.issue_key, success=False)
-                        return
+                if not has_unique:
+                    logger.info(
+                        f"{state.issue_key}: GitLab MR build finished "
+                        f"with no unique commits to deliver — still "
+                        f"posting MR reply"
+                    )
+                    delivery_note = (
+                        "No unique commits to deliver on this run; "
+                        "existing MR was not re-attributed."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "no_new_commits",
+                            "delivery_note": (delivery_err or delivery_note)[:2000],
+                        },
+                    )
+                elif not push_ok:
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check GitLab remote/credentials, then comment "
+                            "on the MR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
                 else:
                     pushed = True
                     self.state_manager.update_state(
@@ -4377,7 +4395,9 @@ class JobProcessor:
                     success = True
             else:
                 outcome = await self._deliver_if_new_commits(
-                    state, existing_mr_url=event.mr_url or None
+                    state,
+                    existing_mr_url=event.mr_url or None,
+                    require_new_sha=True,
                 )
                 if outcome == "aborted":
                     self._release_context(state.issue_key, success=False)
@@ -4930,9 +4950,13 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
-            # Always try push + open/reuse MR after a finished agent, even
-            # when this job did not create a new SHA (prior run committed).
-            push_ok = await self._push_and_create_mr(state)
+            # Always try push. Open an MR only when the work branch is
+            # ahead of the target (a 0-ahead feature/{KEY} must not get
+            # an empty MR).
+            has_unique = not (
+                delivery_err and self._is_noop_delivery_message(delivery_err)
+            )
+            push_ok = await self._push_and_create_mr(state, open_mr=has_unique)
             # Abort wins over delivery bookkeeping even if push already ran
             if self._is_aborted(state.issue_key):
                 logger.info(
@@ -4941,45 +4965,45 @@ class JobProcessor:
                 )
                 self._release_context(state.issue_key, success=False)
                 return
+            if not has_unique:
+                note = (delivery_err or "Nothing ahead of the target branch.")[:2000]
+                logger.info(
+                    f"{state.issue_key}: completing without MR — {note[:160]}"
+                )
+                self.state_manager.update_state(
+                    state.issue_key,
+                    execution_duration_seconds=duration,
+                    metadata={
+                        "delivery_status": "no_new_commits",
+                        "delivery_note": note,
+                    },
+                )
+                jid = self._active_jobs.get(state.issue_key)
+                if jid:
+                    try:
+                        self.job_store.update_job(
+                            jid,
+                            delivery_status="no_new_commits",
+                            delivery_note=note,
+                            merge_request_url=None,
+                            commit_sha=None,
+                            commit_subject=None,
+                            commit_url=None,
+                        )
+                    except Exception:
+                        pass
+                await self._complete_work(
+                    self.state_manager.get_state(state.issue_key),
+                    execution_summary=(
+                        "Agent finished successfully with **no unique git "
+                        "delivery** for this run (nothing ahead of the "
+                        "target; branch was pushed without opening an MR).\n\n"
+                        f"{note}"
+                    ),
+                    agent_answer=str(result.get("stdout") or ""),
+                )
+                return
             if not push_ok:
-                if delivery_err and self._is_noop_delivery_message(delivery_err):
-                    logger.info(
-                        f"{state.issue_key}: completing without new delivery — "
-                        f"{delivery_err[:160]}"
-                    )
-                    self.state_manager.update_state(
-                        state.issue_key,
-                        execution_duration_seconds=duration,
-                        metadata={
-                            "delivery_status": "no_new_commits",
-                            "delivery_note": delivery_err[:2000],
-                        },
-                    )
-                    jid = self._active_jobs.get(state.issue_key)
-                    if jid:
-                        try:
-                            self.job_store.update_job(
-                                jid,
-                                delivery_status="no_new_commits",
-                                delivery_note=delivery_err[:2000],
-                                merge_request_url=None,
-                                commit_sha=None,
-                                commit_subject=None,
-                                commit_url=None,
-                            )
-                        except Exception:
-                            pass
-                    await self._complete_work(
-                        self.state_manager.get_state(state.issue_key),
-                        execution_summary=(
-                            "Agent finished successfully with **no unique git "
-                            "delivery** for this run (nothing ahead of the "
-                            "target after a push attempt).\n\n"
-                            f"{delivery_err}"
-                        ),
-                        agent_answer=str(result.get("stdout") or ""),
-                    )
-                    return
                 self._fail_issue(
                     state.issue_key,
                     self._format_push_fail_error(
@@ -5010,7 +5034,9 @@ class JobProcessor:
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
-            outcome = await self._deliver_if_new_commits(state)
+            outcome = await self._deliver_if_new_commits(
+                state, require_new_sha=True
+            )
             if outcome == "aborted":
                 self._release_context(state.issue_key, success=False)
                 return
@@ -5270,11 +5296,36 @@ class JobProcessor:
             )
         return None
 
+    def _head_moved_this_job(self, issue_key: str) -> bool:
+        """True when HEAD is a different SHA than the job-start baseline."""
+        git = self._git_for(issue_key)
+        if git is None:
+            return False
+        try:
+            raw = git.get_last_commit_sha() if hasattr(git, "get_last_commit_sha") else None
+            head = str(raw).strip() if raw is not None else ""
+        except Exception:
+            head = ""
+        baseline = self._resolve_delivery_baseline(issue_key, git) or ""
+        return bool(head and baseline and head != baseline)
+
+    @staticmethod
+    def _commits_ahead_of_target(git: Any, branch: str) -> int:
+        """Commits on ``branch`` not in the target; 0 if unknown."""
+        if git is None or not hasattr(git, "commits_ahead_of_target"):
+            return 0
+        try:
+            raw = git.commits_ahead_of_target(branch)
+            return max(0, int(raw))
+        except (TypeError, ValueError, Exception):
+            return 0
+
     async def _deliver_if_new_commits(
         self,
         state: JiraAgentState,
         *,
         existing_mr_url: Optional[str] = None,
+        require_new_sha: bool = False,
     ) -> str:
         """Always try to push and open/reuse an MR after an agent result.
 
@@ -5283,9 +5334,38 @@ class JobProcessor:
         (prior unpushed commits, or already on remote). ``delivered`` when
         the branch is ahead of the target and the remote tip is ready.
         Already-on-remote is not a push error.
+
+        ``require_new_sha=True`` (agent *failed*): do not treat older
+        commits already on this work branch as this job's delivery. An
+        unknown-agent / no-work failure must stay ERROR.
+
+        Never open an MR when the work branch is not ahead of the target
+        (empty ``feature/{KEY}`` cut from main must not get a 0-commit MR).
+        Push is still attempted so the remote branch exists.
         """
         if self._is_aborted(state.issue_key):
             return "aborted"
+        if require_new_sha and not self._head_moved_this_job(state.issue_key):
+            # Prior unique commits on this branch are not this job's delivery.
+            # A 0-ahead cut from the target may still be pushed (no MR).
+            has_prior = self._assert_build_delivery(state.issue_key) is None
+            if has_prior:
+                logger.info(
+                    f"{state.issue_key}: agent failed and HEAD did not move "
+                    "this job — not delivering prior branch commits"
+                )
+                return "none"
+            logger.info(
+                f"{state.issue_key}: agent failed, HEAD unchanged, branch "
+                "not ahead of target — push only, no MR"
+            )
+            await self._push_and_create_mr(
+                state,
+                existing_mr_url=existing_mr_url,
+                open_mr=False,
+                notify_on_fail=False,
+            )
+            return "none"
         has_work = self._assert_build_delivery(state.issue_key) is None
         logger.info(
             f"{state.issue_key}: attempting push after agent result "
@@ -5294,7 +5374,7 @@ class JobProcessor:
         push_ok = await self._push_and_create_mr(
             state,
             existing_mr_url=existing_mr_url,
-            open_mr=True,
+            open_mr=has_work,
             notify_on_fail=has_work,
         )
         if self._is_aborted(state.issue_key):
@@ -5443,8 +5523,11 @@ class JobProcessor:
 
         ``open_mr=False`` stops after push (or already-on-remote).
 
-        ``notify_on_fail=False`` skips Jira push-failure comments (speculative
-        push when the branch is not ahead of the target).
+        ``notify_on_fail=False`` skips Jira push-failure comments.
+
+        A new merge request is opened only when the work branch is ahead
+        of the target. Push still runs when the branch is not ahead so
+        the remote feature branch exists; a 0-ahead cut must not get an MR.
         """
         if self._is_aborted(state.issue_key):
             logger.info(
@@ -5518,6 +5601,15 @@ class JobProcessor:
                 except Exception:
                     pass
             return False
+
+        ahead = self._commits_ahead_of_target(git, branch_name)
+        if ahead < 1 and open_mr and not updating_existing_mr:
+            logger.info(
+                f"{state.issue_key}: `{branch_name}` is not ahead of target "
+                f"`{getattr(git, 'target_branch', '') or '?'}` "
+                f"(ahead={ahead}) — will push but skip opening an MR"
+            )
+            open_mr = False
 
         # Always record branch for completion messages (even if push fails later)
         if not self._is_aborted(state.issue_key):

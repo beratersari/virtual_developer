@@ -227,6 +227,163 @@ async def test_real_git_prior_unpushed_commit_still_delivered(
 
 
 @pytest.mark.asyncio
+async def test_unknown_agent_no_new_sha_stays_error(
+    processor, state_manager, origin_and_clone, tmp_path
+):
+    """Follow-up on a branch that already has commits: unknown agent is ERROR.
+
+    Prior tip ahead of target must not be attributed as this job succeeding.
+    """
+    from unittest.mock import AsyncMock
+
+    origin, clone = origin_and_clone
+    key = "KAN-238"
+    work = "feature/KAN-1905"
+    _git(clone, "checkout", "-B", work)
+    gm = _real_gm(clone, origin, key, work)
+    state = state_manager.create_state(key, "follow-up", "d")
+
+    (clone / "old.c").write_text("int old(void) { return 1; }\n")
+    _git(clone, "add", "old.c")
+    _git(clone, "commit", "-m", "[KAN-7] prior work")
+    prior = gm.get_last_commit_sha()
+    assert prior
+    gm.delivery_baseline_sha = prior
+    processor._snapshot_delivery_baseline(key, gm)
+    assert gm.commits_ahead_of_target(work) >= 1
+
+    async def fake_prepare(_state):
+        processor._contexts[key] = {"git": gm, "runner": runner}
+        processor.git_manager = gm
+        processor.agent_runner = runner
+        return gm
+
+    runner = type("R", (), {})()
+
+    async def fake_agent(_task, **_kw):
+        return {
+            "returncode": 1,
+            "stdout": "[serve] session resumed: ses_f8d3ef9c6ffeBocBaLipXLltEs",
+            "stderr": (
+                "[serve] agent 'derman-build' is not registered on this "
+                "OpenCode serve. Available (sample): build, plan."
+            ),
+            "incomplete": False,
+            "incomplete_reasons": ["unknown agent: derman-build"],
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_f8d3ef9c6ffeBocBaLipXLltEs",
+            "retry_info": {"attempts": 1, "retried": False},
+            "timed_out": False,
+        }
+
+    runner.run_agent_with_retry = fake_agent
+    runner.cancel_task = lambda *_a, **_k: True
+    runner.cancel_all_tasks = lambda *_a, **_k: 0
+
+    pat, allow = _allow_local_push(gm)
+    with pat, allow:
+        with patch.object(
+            processor, "_prepare_git_workspace", new_callable=AsyncMock
+        ) as prep:
+            prep.side_effect = fake_prepare
+            with patch("src.processor.settings") as s:
+                s.default_agent = "derman-build"
+                s.agent_task_timeout_seconds = 30
+                s.agent_task_max_retries = 3
+                s.agent_task_max_incomplete_retries = 0
+                s.default_branch = "develop"
+                s.full_plans_dir = tmp_path / "plans"
+                s.sisyphus_plans_dir = Path(".sisyphus/plans")
+                await processor._start_execution_workflow(state)
+
+    st = state_manager.get_state(key)
+    assert st is not None
+    assert st.status == TaskStatus.ERROR, st.status
+    assert "not registered" in (st.error_message or "")
+    jid = (st.metadata or {}).get("current_job_id") or processor._active_jobs.get(key)
+    if jid:
+        job = processor.job_store.get_job(jid) or {}
+        assert job.get("status") == "error"
+
+
+@pytest.mark.asyncio
+async def test_zero_ahead_branch_does_not_open_mr_after_agent_error(
+    processor, state_manager, origin_and_clone, tmp_path
+):
+    """KAN-218 / job_7435790adfb0: new feature branch == target → no empty MR.
+
+    Agent failed (unknown agent). Work branch was cut from the target and
+    has 0 unique commits. Push + create_merge_request must not run.
+    """
+    from unittest.mock import AsyncMock
+
+    origin, clone = origin_and_clone
+    key = "KAN-218"
+    work = "feature/KAN-218"
+    _git(clone, "checkout", "-B", work)
+    gm = _real_gm(clone, origin, key, work)
+    state = state_manager.create_state(key, "new session", "d")
+    baseline = gm.get_last_commit_sha()
+    assert baseline
+    gm.delivery_baseline_sha = baseline
+    processor._snapshot_delivery_baseline(key, gm)
+    assert gm.commits_ahead_of_target(work) == 0
+
+    async def fake_prepare(_state):
+        processor._contexts[key] = {"git": gm, "runner": runner}
+        processor.git_manager = gm
+        processor.agent_runner = runner
+        return gm
+
+    runner = type("R", (), {})()
+
+    async def fake_agent(_task, **_kw):
+        return {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": (
+                "[serve] agent 'derman-build' is not registered on this "
+                "OpenCode serve. Available (sample): build, plan."
+            ),
+            "incomplete": False,
+            "incomplete_reasons": ["unknown agent: derman-build"],
+            "session_file": str(tmp_path / "s.log"),
+            "opencode_session_id": "ses_kan218",
+            "retry_info": {"attempts": 1, "retried": False},
+            "timed_out": False,
+        }
+
+    runner.run_agent_with_retry = fake_agent
+    runner.cancel_task = lambda *_a, **_k: True
+    runner.cancel_all_tasks = lambda *_a, **_k: 0
+
+    pat, allow = _allow_local_push(gm)
+    with pat, allow:
+        with patch.object(
+            processor, "_prepare_git_workspace", new_callable=AsyncMock
+        ) as prep:
+            prep.side_effect = fake_prepare
+            with patch.object(gm, "create_merge_request") as create_mr:
+                with patch("src.processor.settings") as s:
+                    s.default_agent = "derman-build"
+                    s.agent_task_timeout_seconds = 30
+                    s.agent_task_max_retries = 0
+                    s.agent_task_max_incomplete_retries = 0
+                    s.default_branch = "develop"
+                    s.full_plans_dir = tmp_path / "plans"
+                    s.sisyphus_plans_dir = Path(".sisyphus/plans")
+                    await processor._start_execution_workflow(state)
+                create_mr.assert_not_called()
+
+    st = state_manager.get_state(key)
+    assert st is not None
+    assert st.status == TaskStatus.ERROR, st.status
+    assert "not registered" in (st.error_message or "")
+    assert not (st.metadata or {}).get("merge_request_url")
+    # Push is allowed; an empty MR must not be opened.
+
+
+@pytest.mark.asyncio
 async def test_real_execution_error_pushes_real_commit(
     processor, state_manager, origin_and_clone, tmp_path
 ):

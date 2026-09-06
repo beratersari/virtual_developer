@@ -444,7 +444,7 @@ async def test_execution_error_already_pushed_is_not_delivery_error(
 async def test_execution_error_without_new_commits_still_fails(
     processor, state_manager, tmp_path, fake_jira
 ):
-    """No new commits + agent error → still ERROR, but push is still attempted."""
+    """No new commits + agent error → ERROR and no empty MR."""
     state = state_manager.create_state("EX-NONE", "s", "d")
     git, runner = _mock_git_and_agent(
         processor,
@@ -468,13 +468,14 @@ async def test_execution_error_without_new_commits_still_fails(
     st = state_manager.get_state("EX-NONE")
     assert st.status == TaskStatus.ERROR
     git.push.assert_called()
+    git.create_merge_request.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_execution_error_no_new_commits_already_pushed_still_agent_error(
     processor, state_manager, tmp_path, fake_jira
 ):
-    """Already-on-remote with no new commits is not a push error and not complete."""
+    """Already-on-remote with nothing ahead of target: ERROR, no empty MR."""
     state = state_manager.create_state("EX-UPTODATE", "s", "d")
     git, runner = _mock_git_and_agent(
         processor,
@@ -500,7 +501,7 @@ async def test_execution_error_no_new_commits_already_pushed_still_agent_error(
     st = state_manager.get_state("EX-UPTODATE")
     assert st.status == TaskStatus.ERROR
     git.push.assert_called()
-    git.head_is_on_remote.assert_called()
+    git.create_merge_request.assert_not_called()
     bodies = [c["body"] for c in fake_jira.comments]
     assert not any("Git push failed" in b for b in bodies)
 
@@ -525,6 +526,7 @@ async def test_push_and_create_mr_branches(processor, state_manager, tmp_path, f
 
     git.work_branch = "feature/MR-1"
     git.get_current_branch.return_value = "feature/MR-1"
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = False
     await processor._push_and_create_mr(state)
 
@@ -579,7 +581,7 @@ async def test_execution_success_prior_unpushed_commits_pushes_and_opens_mr(
 async def test_execution_error_prior_unpushed_commits_still_delivers(
     processor, state_manager, tmp_path, fake_jira
 ):
-    """Agent error + prior unpushed commits ahead of target → push + MR + complete."""
+    """Agent error + HEAD unchanged: do not attribute prior tip as this job."""
     state = state_manager.create_state("EX-PRIOR", "s", "d")
     git, _runner = _mock_git_and_agent(
         processor,
@@ -602,10 +604,9 @@ async def test_execution_error_prior_unpushed_commits_still_delivers(
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
             await processor._start_execution_workflow(state)
     st = state_manager.get_state("EX-PRIOR")
-    assert st.status == TaskStatus.COMPLETED
-    assert (st.metadata or {}).get("delivery_status") == "delivered"
-    git.push.assert_called()
-    git.create_merge_request.assert_called()
+    assert st.status == TaskStatus.ERROR
+    git.push.assert_not_called()
+    git.create_merge_request.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -512,6 +512,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert not any("Work Completed" in (c.get("body") or "") for c in fake_jira.comments)
     assert not any("AuthService" in (c.get("body") or "") for c in fake_jira.comments)
     git.push.assert_called()
+    git.create_merge_request.assert_not_called()
 
 
 @pytest.mark.asyncio
