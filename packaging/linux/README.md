@@ -15,6 +15,20 @@ builds `virtual_developer-linux-x64-*` with:
 - `vendor/python-wheels` (manylinux)
 - prebuilt `web/dist`
 
+### WSL live probe (30+ HTTP requests)
+
+`opencode.integration.json` pins a real OpenCode Zen free model
+(`opencode/mimo-v2.5-free`). After the linux `yaver` zip and a Linux
+`opencode serve` are up:
+
+```bash
+YAVER_BASE=http://127.0.0.1:18081 \
+OPENCODE_BASE=http://127.0.0.1:14097 \
+python3 packaging/linux/wsl_integration_probe.py
+```
+
+The probe fails unless at least 30 distinct requests succeed.
+
 Extract the artifact so the install scripts sit next to `vendor/` and `src/`, then:
 
 ```bash

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -73,6 +74,16 @@ def test_linux_scripts_exist_and_parse():
             text=True,
         )
         assert parsed.returncode == 0, f"{name}: {parsed.stderr}"
+
+
+def test_wsl_integration_probe_has_thirty_named_requests():
+    text = (LINUX / "wsl_integration_probe.py").read_text(encoding="utf-8")
+    names = re.findall(r'p\.req\(\s*"([^"]+)"', text)
+    assert (LINUX / "opencode.integration.json").is_file()
+    cfg = (LINUX / "opencode.integration.json").read_text(encoding="utf-8")
+    assert "mimo-v2.5-free" in cfg
+    assert '"plugin": []' in cfg
+    assert len(names) >= 30, names
 
 
 def test_linux_dist_ci_and_offline_vendor_hooks():
