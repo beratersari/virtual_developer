@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [SemVer](https://semver.org/) from the repo root `VERSION` file.
 GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
+## [0.2.3] — 2026-09-06
+
+### Added
+
+- OpenCoderman **`028c79c`**: 30 skills outside C++ (TypeScript, Kotlin, Swift, PHP, Ruby, Dart, Scala, Elixir, PowerShell, Lua, R, React, Vue, Node, Next.js, Android, iOS, Django, Spring, Rails, PostgreSQL, MongoDB, Redis, AWS, HTML/CSS, ML, protobuf, WebSocket, OAuth/OIDC, Linux). C++ remains one group among many.
+
+[0.2.3]: https://github.com/beratersari/virtual_developer/releases/tag/v0.2.3
+
 ## [0.2.2] — 2026-09-06
 
 ### Added

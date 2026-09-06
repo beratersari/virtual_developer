@@ -1,7 +1,8 @@
-# Yaver 0.2.2
+# Yaver 0.2.3
 
-Records the exact OpenCoderman submodule commit (`opencoderman.pin`) and
-attaches `opencoderman-<sha>.zip` on the GitHub Release.
+Ships OpenCoderman **`028c79c`** with multi-domain skills (not C++-only).
+The exact submodule commit is in `opencoderman.pin` and
+`opencoderman-028c79c.zip` on this release.
 
 Changelog: see `CHANGELOG.md` in the source tree.
 
