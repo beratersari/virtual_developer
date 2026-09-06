@@ -158,7 +158,7 @@ def test_tag_workflows_share_release_notes():
     changelog = ROOT / "CHANGELOG.md"
     assert notes.is_file()
     assert changelog.is_file()
-    assert "yaver-windows-x64-0.2.0.zip" in notes.read_text(encoding="utf-8")
+    assert "yaver-windows-x64-" in notes.read_text(encoding="utf-8")
     assert ".env.example" in notes.read_text(encoding="utf-8")
     for rel in (
         ".github/workflows/executables.yml",

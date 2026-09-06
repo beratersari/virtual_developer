@@ -1,6 +1,9 @@
-# Yaver 0.2.0
+# Yaver 0.2.1
 
-First tagged release. Changelog: see `CHANGELOG.md` in the source tree.
+Patch over 0.2.0: the Windows exe no longer crashes when `.env` is present
+(console encoding). Double-click / no-args starts the daemon + dashboard.
+
+Changelog: see `CHANGELOG.md` in the source tree.
 
 ## What to download
 
@@ -8,8 +11,8 @@ First tagged release. Changelog: see `CHANGELOG.md` in the source tree.
 
 | File | Platform |
 |------|----------|
-| `yaver-windows-x64-0.2.0.zip` | Windows x64 |
-| `yaver-linux-x64-0.2.0.zip` or `.tar.gz` | Linux x64 |
+| `yaver-windows-x64-*.zip` | Windows x64 |
+| `yaver-linux-x64-*.zip` or `.tar.gz` | Linux x64 |
 
 Each archive is an **onedir** folder:
 
@@ -36,14 +39,14 @@ OpenCode and Codex are **not** inside these binaries. Install them from the full
 
 | File | Platform |
 |------|----------|
-| `virtual_developer-windows-x64-0.2.0.zip` | Windows |
-| `virtual_developer-linux-x64-0.2.0.zip` / `.tar.gz` | Linux |
+| `virtual_developer-windows-x64-*.zip` | Windows |
+| `virtual_developer-linux-x64-*.zip` / `.tar.gz` | Linux |
 
 Extract, run `install-dashboard` then `install-backends` (and `install-codex` if needed), edit `.env`, start with `start-backend` / `start.bat`.
 
 ### Source code
 
-GitHub attaches **Source code (zip)** and **Source code (tar.gz)** for tag `v0.2.0`.
+GitHub attaches **Source code (zip)** and **Source code (tar.gz)** for this tag.
 
 ## Highlights
 

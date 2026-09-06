@@ -6,6 +6,14 @@ from src.config import Settings, get_current_temp_dir, get_settings, set_current
 from src.orchestrator.prompt_kit import clear_prompt_kit_cache
 
 
+def test_dotenv_bootstrap_log_has_no_almost_equal():
+    from pathlib import Path
+
+    text = Path("src/config.py").read_text(encoding="utf-8")
+    assert "applied≈" not in text
+    assert "applied~" in text
+
+
 def test_is_configured_and_validate():
     s = Settings(jira_host="", jira_api_token="")
     assert s.is_configured() is False

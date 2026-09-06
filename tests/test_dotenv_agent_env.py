@@ -21,6 +21,7 @@ def test_bootstrap_dotenv_loads_unknown_keys_into_environ(tmp_path, monkeypatch)
 
     n = bootstrap_dotenv_into_environ(env_file, override=False)
     assert n >= 2
+    # Log text must stay ASCII-safe: ≈ on Windows cp1252 aborted the frozen exe.
     assert os.environ.get("MVCC_HOME") == "/opt/mvcc"
     assert os.environ.get("AWS_REGION") == "eu-west-1"
 

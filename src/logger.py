@@ -166,8 +166,7 @@ class Logger:
         )
 
         stream = sys.stderr if level.value >= LogLevel.WARNING.value else sys.stdout
-        print(formatted, file=stream)
-        stream.flush()
+        _write_stream(stream, formatted)
 
         # Feed dashboard issue/job log buffer (plain text, no ANSI)
         try:
@@ -207,6 +206,47 @@ class Logger:
     def exception(self, message: str, exc: BaseException) -> None:
         """Log an error with full traceback (message, exception)."""
         self._log(LogLevel.ERROR, message, exc)
+
+
+def configure_stdio() -> None:
+    """Force UTF-8 stdio so frozen Windows consoles do not crash on logs."""
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if callable(reconf):
+            try:
+                reconf(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _write_stream(stream, text: str) -> None:
+    """Print one log line. Never raise — Windows cp1252 cannot encode ≈/—."""
+    try:
+        print(text, file=stream)
+        stream.flush()
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    payload = (text + "\n").encode("utf-8", errors="replace")
+    buf = getattr(stream, "buffer", None)
+    if buf is not None:
+        try:
+            buf.write(payload)
+            buf.flush()
+            return
+        except Exception:
+            pass
+    try:
+        enc = getattr(stream, "encoding", None) or "utf-8"
+        print(text.encode(enc, errors="replace").decode(enc, errors="replace"), file=stream)
+        stream.flush()
+    except Exception:
+        pass
+
+
+configure_stdio()
 
 
 _DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024

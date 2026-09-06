@@ -78,7 +78,7 @@ def bootstrap_dotenv_into_environ(
             os.environ[key] = str(value)
             applied += 1
         if applied:
-            logger.debug(f"Loaded dotenv keys from {path} (applied≈{applied})")
+            logger.debug(f"Loaded dotenv keys from {path} (applied~{applied})")
     return applied
 
 

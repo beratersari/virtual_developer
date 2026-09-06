@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [SemVer](https://semver.org/) from the repo root `VERSION` file.
 GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
+## [0.2.1] — 2026-09-06
+
+### Fixed
+
+- Frozen `yaver.exe` crashed on startup as soon as a `.env` was present: a debug log used `≈`, which Windows cp1252 cannot encode. The process died before the ops dashboard bound :8080. Logger now never raises on console encoding, and a no-argument / double-click launch starts the daemon.
+
+[0.2.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.2.1
+
 ## [0.2.0] — 2026-09-06
 
 First tagged product release. Builds from `develop` (`v0.2.0`).

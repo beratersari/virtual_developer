@@ -33,11 +33,18 @@ def validate_config():
         sys.exit(1)
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__)
-def cli():
+@click.pass_context
+def cli(ctx: click.Context):
     """Yaver — unattended Jira aide."""
-    pass
+    if ctx.invoked_subcommand is not None:
+        return
+    # Frozen exe: double-click / no args starts the dashboard daemon.
+    if getattr(sys, "frozen", False):
+        ctx.invoke(start)
+        return
+    click.echo(ctx.get_help())
 
 
 @cli.command()

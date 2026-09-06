@@ -7,8 +7,17 @@ import sys
 from pathlib import Path
 
 # Windows consoles otherwise mojibake Turkish / git subjects in this process.
+# PYTHONUTF8 alone does not reconfigure the bootloader's already-open stdio
+# (cp1252), so a later log with ≈ or — would crash before the dashboard starts.
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
+for _stream in (sys.stdout, sys.stderr):
+    _reconf = getattr(_stream, "reconfigure", None)
+    if callable(_reconf):
+        try:
+            _reconf(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 if getattr(sys, "frozen", False):
     install = Path(sys.executable).resolve().parent
