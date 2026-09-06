@@ -75,6 +75,13 @@ def _static_dir() -> Optional[Path]:
         raw = (os.environ.get(env_key) or "").strip()
         if raw:
             candidates.append(Path(raw))
+    try:
+        from src.install_paths import bundled_web_dist, install_root
+
+        candidates.append(bundled_web_dist())
+        candidates.append(install_root() / "web" / "dist")
+    except Exception:
+        pass
     # src/dashboard/api.py → parents[2] = package / repo root
     candidates.append(Path(__file__).resolve().parents[2] / "web" / "dist")
     candidates.append(Path.cwd() / "web" / "dist")

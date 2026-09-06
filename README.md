@@ -61,12 +61,21 @@ Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated,
 
 ## Requirements
 
-- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels)  
+- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels), **or** the standalone `yaver` / `yaver.exe` from CI (see below)  
 - **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) — stock **build** / **plan** agents (no oh-my-openagent)  
 - **Git**  
 - **glab** (GitLab CLI) when push/MR is enabled  
 - Jira access (board browse, comment, optional transitions)  
 - GitLab PAT with clone/push/MR rights when using remote workspaces  
+
+### Standalone executables (no host Python)
+
+CI workflow **Standalone Executables** (`.github/workflows/executables.yml`) freezes the daemon + CLI with PyInstaller:
+
+- Windows x64 → `yaver.exe` (onedir folder + zip)
+- Linux x64 → `yaver` (onedir folder + zip / tar.gz)
+
+Config: [`packaging/pyinstaller/`](packaging/pyinstaller/README.md) (`versions.env`, `yaver.spec`). Extract the artifact, copy `.env.example` → `.env`, run `yaver start`. OpenCode / Codex are **not** inside the binary — install those separately. This does **not** replace the full offline zips (wheels + OpenCode vendor).  
 
 ---
 

@@ -25,7 +25,7 @@ Yaver is a Python daemon that:
 ### Language & layout
 
 - Python 3.12+, type hints on public APIs where practical.
-- Package root: `src/`. Entry points: `cli.py`, `src/daemon.py`.
+- Package root: `src/`. Entry points: `cli.py`, `src/daemon.py` (frozen: `yaver` / `yaver.exe` via `packaging/pyinstaller/`).
 - Prefer small, focused modules; avoid shared mutable singletons across concurrent issues (`JobProcessor.git_manager` / `agent_runner` must not be overwritten mid-flight for parallel jobs when you touch concurrency).
 - Do not log secrets (Jira tokens, GitLab PATs). Never commit `.env`.
 
@@ -749,6 +749,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `packaging/install_opencode.py` | Yaver wrapper around `opencoderman/install.py` (CLI sources + rg/glab extras) |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
+| `packaging/pyinstaller/README.md` | Standalone `yaver` / `yaver.exe` (PyInstaller; CI `executables.yml`) |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `opencoderman/agents/derman-plan.md` | derman-plan — unattended planner (not stock `plan`) |
@@ -760,3 +761,21 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |
+| `packaging/pyinstaller/` | Frozen `yaver` / `yaver.exe` spec, versions, build + CI |
+
+---
+
+## 11. Standalone executables (PyInstaller)
+
+Additive track. **Does not replace** the Windows/Linux offline zips.
+
+| Item | Rule |
+|------|------|
+| Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
+| Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example` |
+| Not bundled | OpenCode, Codex, Git, glab — still installed separately |
+| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
+| Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
+
+Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists.
