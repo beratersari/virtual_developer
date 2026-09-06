@@ -752,6 +752,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
 | `packaging/pyinstaller/README.md` | Standalone `yaver` / `yaver.exe` (PyInstaller; CI `executables.yml`) |
+| `packaging/opencoderman_pin.py` | Resolve/write OpenCoderman submodule SHA for each release |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `opencoderman/agents/derman-plan.md` | derman-plan — unattended planner (not stock `plan`) |
@@ -779,5 +780,6 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 | Not bundled | OpenCode, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
+| OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |
 
 Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists.

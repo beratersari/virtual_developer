@@ -100,6 +100,7 @@ def test_workflow_builds_both_platforms():
     assert "pyinstaller==" in text
     assert "softprops/action-gh-release" in text
     assert "packaging/RELEASE_NOTES.md" in text
+    assert "opencoderman_pin.py" in text
     assert "windows-dist.yml" in text or "does not replace" in text.lower() or "Additive" in text
     assert "Upload zip archive" in text
     assert "Upload tar.gz archive (Linux)" in text
@@ -119,6 +120,9 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (payload / "START_HERE.txt").write_text("start", encoding="utf-8")
     (payload / "VERSION").write_text("0.2.0\n", encoding="utf-8")
     (payload / "versions.env").write_text("PYINSTALLER_MODE=onedir\n", encoding="utf-8")
+    (payload / "opencoderman.pin").write_text(
+        "OPENCODERMAN_COMMIT=deadbeef\n", encoding="utf-8"
+    )
     assert ap.assert_payload(payload, platform="windows") == []
 
 

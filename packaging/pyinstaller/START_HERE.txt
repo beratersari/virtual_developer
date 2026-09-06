@@ -26,4 +26,7 @@ Config is the .env file next to this binary. Secrets are never baked
 into the executable. Durable data still goes to YAVER_DATA_DIR
 (C:\vd\yaver on Windows, /vd/yaver or ~/vd/yaver on Linux).
 
+opencoderman.pin records the exact OpenCoderman submodule commit this
+build was frozen against (also attached on the GitHub Release).
+
 Git and glab must be on PATH for clone / push / merge requests.

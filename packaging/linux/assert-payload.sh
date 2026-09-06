@@ -23,6 +23,7 @@ for rel in \
   vendor/opencode-home.zip \
   vendor/bin/opencode \
   opencoderman/install.py \
+  opencoderman.pin \
   opencoderman/agents/gitlab-reviewer.md \
   opencoderman/vendor/bin/linux/opencode \
   packaging/install_opencode.py \

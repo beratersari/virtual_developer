@@ -12,6 +12,7 @@ REQUIRED_FILES = (
     "START_HERE.txt",
     "VERSION",
     "versions.env",
+    "opencoderman.pin",
 )
 
 REQUIRED_BUNDLED = (

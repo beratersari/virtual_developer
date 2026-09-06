@@ -1,7 +1,7 @@
-# Yaver 0.2.1
+# Yaver 0.2.2
 
-Patch over 0.2.0: the Windows exe no longer crashes when `.env` is present
-(console encoding). Double-click / no-args starts the daemon + dashboard.
+Records the exact OpenCoderman submodule commit (`opencoderman.pin`) and
+attaches `opencoderman-<sha>.zip` on the GitHub Release.
 
 Changelog: see `CHANGELOG.md` in the source tree.
 
@@ -43,6 +43,13 @@ OpenCode and Codex are **not** inside these binaries. Install them from the full
 | `virtual_developer-linux-x64-*.zip` / `.tar.gz` | Linux |
 
 Extract, run `install-dashboard` then `install-backends` (and `install-codex` if needed), edit `.env`, start with `start-backend` / `start.bat`.
+
+### OpenCoderman snapshot
+
+Each release also attaches `opencoderman-<sha>.zip` — the **exact**
+submodule tree this tag was built with (commit is in `opencoderman.pin`
+inside the exe zip and the offline installers). Later submodule bumps
+do not change that file.
 
 ### Source code
 

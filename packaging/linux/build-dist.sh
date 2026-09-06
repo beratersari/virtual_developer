@@ -112,6 +112,11 @@ if [[ ! -f "$PAYLOAD/opencoderman/install.py" ]]; then
 fi
 rm -rf "$PAYLOAD/opencoderman/.git"
 find "$PAYLOAD/opencoderman" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+python3 "$ROOT/packaging/opencoderman_pin.py" \
+  --repo-root "$ROOT" \
+  --write-pin "$PAYLOAD/opencoderman.pin"
+cp -f "$PAYLOAD/opencoderman.pin" "$PAYLOAD/opencoderman/opencoderman.pin"
+echo "  + opencoderman.pin"
 
 echo
 echo "Step 1b: Building ops dashboard frontend (web/)..."

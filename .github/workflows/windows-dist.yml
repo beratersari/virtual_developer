@@ -78,6 +78,19 @@ jobs:
         with:
           python-version: ${{ steps.versions.outputs.PYTHON_VERSION }}
 
+      - name: Snapshot OpenCoderman pin
+        id: ocm
+        shell: bash
+        run: |
+          mkdir -p dist
+          python packaging/opencoderman_pin.py \
+            --repo-root "${{ github.workspace }}" \
+            --write-pin dist/opencoderman.pin \
+            --zip dist \
+            --compose-notes packaging/RELEASE_NOTES.md \
+            --out-notes dist/RELEASE_NOTES.md \
+            --github-output
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -109,6 +122,7 @@ jobs:
             "packaging/install_opencode.py",
             "packaging/windows/Install-Backends.ps1",
             "opencoderman/install.py",
+            "opencoderman.pin",
             "opencoderman/agents/gitlab-reviewer.md",
             "opencoderman/vendor/bin/windows/opencode.exe",
             "start.bat",
@@ -230,8 +244,10 @@ jobs:
         with:
           name: Yaver ${{ steps.meta.outputs.base_version }}
           tag_name: ${{ github.ref_name }}
-          files: dist/${{ steps.meta.outputs.dist_name }}.zip
-          body_path: packaging/RELEASE_NOTES.md
+          files: |
+            dist/${{ steps.meta.outputs.dist_name }}.zip
+            dist/opencoderman-*.zip
+          body_path: dist/RELEASE_NOTES.md
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

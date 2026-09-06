@@ -315,6 +315,14 @@ Get-ChildItem -Path $stagedOcm -Recurse -Directory -Filter "__pycache__" -ErrorA
 if (-not (Test-Path -LiteralPath (Join-Path $stagedOcm "install.py"))) {
     throw "opencoderman/install.py missing from payload — init the submodule"
 }
+$pinScript = Join-Path $root "packaging\opencoderman_pin.py"
+if (-not (Test-Path -LiteralPath $pinScript)) {
+    throw "packaging/opencoderman_pin.py missing"
+}
+& python $pinScript --repo-root $root --write-pin (Join-Path $payload "opencoderman.pin")
+if ($LASTEXITCODE -ne 0) { throw "opencoderman_pin.py failed (exit $LASTEXITCODE)" }
+Copy-Item -LiteralPath (Join-Path $payload "opencoderman.pin") -Destination (Join-Path $stagedOcm "opencoderman.pin") -Force
+Write-Host "  + opencoderman.pin"
 
 # Root launchers (backend / frontend / both)
 foreach ($launcher in @(
@@ -832,6 +840,7 @@ JIRA Virtual Developer — Windows offline package
 
 Supported Python (this build): $($supportedPy -join ', ')
 OpenCode pack: opencoderman/ (install.py + agents + skills)
+OpenCoderman pin: opencoderman.pin (exact submodule commit for this build)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 

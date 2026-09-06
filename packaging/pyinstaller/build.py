@@ -143,6 +143,20 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copy2(HERE / "START_HERE.txt", bundled / "START_HERE.txt")
     shutil.copy2(ROOT / "VERSION", bundled / "VERSION")
     shutil.copy2(HERE / "versions.env", bundled / "versions.env")
+    pin_script = ROOT / "packaging" / "opencoderman_pin.py"
+    if pin_script.is_file():
+        subprocess.run(
+            [
+                sys.executable,
+                str(pin_script),
+                "--repo-root",
+                str(ROOT),
+                "--write-pin",
+                str(bundled / "opencoderman.pin"),
+            ],
+            check=True,
+            cwd=str(ROOT),
+        )
 
     version = _product_version()
     version_safe = version.replace("+", ".")

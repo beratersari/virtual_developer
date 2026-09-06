@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [SemVer](https://semver.org/) from the repo root `VERSION` file.
 GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
+## [0.2.2] — 2026-09-06
+
+### Added
+
+- Every release records the exact OpenCoderman submodule commit in `opencoderman.pin` (exe zip + offline installers) and attaches `opencoderman-<sha>.zip` so a later submodule bump cannot rewrite what that tag shipped.
+
+[0.2.2]: https://github.com/beratersari/virtual_developer/releases/tag/v0.2.2
+
 ## [0.2.1] — 2026-09-06
 
 ### Fixed

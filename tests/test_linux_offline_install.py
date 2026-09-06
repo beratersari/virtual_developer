@@ -117,6 +117,7 @@ def test_assert_payload_script_accepts_minimal_tree(tmp_path):
         "vendor/opencode-home.zip",
         "vendor/bin/opencode",
         "opencoderman/install.py",
+        "opencoderman.pin",
         "opencoderman/agents/gitlab-reviewer.md",
         "opencoderman/vendor/bin/linux/opencode",
         "packaging/install_opencode.py",

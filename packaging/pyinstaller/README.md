@@ -62,7 +62,7 @@ Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Li
 **Do**
 
 - Keep `PYINSTALLER_MODE=onedir`.
-- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`.
+- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`.
 - Resolve `.env` from the folder next to the exe (`install_root`), not `_MEIPASS`.
 - Re-run **Standalone Executables** after changing `yaver.spec` or `versions.env`.
 
