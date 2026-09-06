@@ -7,6 +7,7 @@ the full Windows/Linux offline zip, or your own OpenCode/Codex install).
 
 1. Copy .env.example to .env
 2. Edit .env (at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID)
+   versions.env is the freeze pin (Python / Node / PyInstaller) — not secrets
 3. Start:
 
    Windows:  yaver.exe start

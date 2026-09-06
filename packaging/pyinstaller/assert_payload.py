@@ -11,6 +11,7 @@ REQUIRED_FILES = (
     ".env.example",
     "START_HERE.txt",
     "VERSION",
+    "versions.env",
 )
 
 REQUIRED_BUNDLED = (

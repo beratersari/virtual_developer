@@ -99,6 +99,7 @@ def test_workflow_builds_both_platforms():
     assert "npm run build" in text
     assert "pyinstaller==" in text
     assert "softprops/action-gh-release" in text
+    assert "packaging/RELEASE_NOTES.md" in text
     assert "windows-dist.yml" in text or "does not replace" in text.lower() or "Additive" in text
     assert "Upload zip archive" in text
     assert "Upload tar.gz archive (Linux)" in text
@@ -117,6 +118,7 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (payload / ".env.example").write_text("JIRA_HOST=\n", encoding="utf-8")
     (payload / "START_HERE.txt").write_text("start", encoding="utf-8")
     (payload / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+    (payload / "versions.env").write_text("PYINSTALLER_MODE=onedir\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
 
 
@@ -149,6 +151,23 @@ def test_build_script_requires_spa_and_onedir():
     assert "--out-dir" in text
     assert 'f"{dest_base.name}.zip"' in text
     assert "dest_base.with_suffix" not in text
+
+
+def test_tag_workflows_share_release_notes():
+    notes = ROOT / "packaging" / "RELEASE_NOTES.md"
+    changelog = ROOT / "CHANGELOG.md"
+    assert notes.is_file()
+    assert changelog.is_file()
+    assert "yaver-windows-x64-0.2.0.zip" in notes.read_text(encoding="utf-8")
+    assert ".env.example" in notes.read_text(encoding="utf-8")
+    for rel in (
+        ".github/workflows/executables.yml",
+        ".github/workflows/windows-dist.yml",
+        ".github/workflows/linux-dist.yml",
+    ):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "softprops/action-gh-release" in text, rel
+        assert "packaging/RELEASE_NOTES.md" in text, rel
 
 
 def test_start_here_does_not_claim_opencode_is_bundled():

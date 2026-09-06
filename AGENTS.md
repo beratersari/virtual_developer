@@ -742,6 +742,8 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | File | Purpose |
 |------|---------|
 | `README.md` | User-facing setup, architecture, plan_ready / never auto-start |
+| `CHANGELOG.md` | User-facing release notes (Keep a Changelog) |
+| `packaging/RELEASE_NOTES.md` | GitHub Release body used by tag CI |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |

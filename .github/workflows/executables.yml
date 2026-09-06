@@ -206,21 +206,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: Virtual Developer ${{ steps.meta.outputs.version }}
+          name: Yaver ${{ steps.meta.outputs.base_version }}
+          tag_name: ${{ github.ref_name }}
           files: |
             dist/${{ steps.meta.outputs.dist_name }}.zip
             dist/${{ steps.meta.outputs.dist_name }}.tar.gz
-          generate_release_notes: true
+          body_path: packaging/RELEASE_NOTES.md
           fail_on_unmatched_files: false
-          body: |
-            Standalone executable `${{ steps.meta.outputs.dist_name }}`.
-
-            1. Extract the zip / tar
-            2. Copy `.env.example` → `.env` and set Jira credentials
-            3. Run `yaver start` (Windows: `yaver.exe start`)
-            4. Open http://127.0.0.1:8080
-
-            OpenCode and Codex are **not** bundled. Use the full offline
-            zip (`install-backends`) or install those CLIs yourself.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

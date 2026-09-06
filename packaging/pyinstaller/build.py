@@ -142,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     shutil.copy2(ROOT / ".env.example", bundled / ".env.example")
     shutil.copy2(HERE / "START_HERE.txt", bundled / "START_HERE.txt")
     shutil.copy2(ROOT / "VERSION", bundled / "VERSION")
+    shutil.copy2(HERE / "versions.env", bundled / "versions.env")
 
     version = _product_version()
     version_safe = version.replace("+", ".")
