@@ -8,8 +8,15 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.config import settings
 from src.dashboard.snapshot import poll_snapshot_store
 from src.jira.client import JiraClient
-from src.issue_git_spec import parse_issue_mode
-from src.jira.triggers import jira_body_to_text, poller_triggers_on
+from src.jira.plan_labels import (
+    HANDOFF_EXECUTE,
+    HANDOFF_REFACTOR,
+    PLAN_EXECUTE_LABEL,
+    PLAN_REFACTOR_LABEL,
+    infer_plan_handoff,
+    labels_from_fields,
+)
+from src.jira.triggers import poller_triggers_on
 from src.logger import logger
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -43,8 +50,9 @@ class JiraPoller:
         # Last observed Jira status name (lowercased) per issue — used to detect
         # real transitions into "To Do" rather than re-queueing every poll.
         self._last_jira_status: Dict[str, str] = {}
-        # Latch: emit plan_ready start once until status leaves PLAN_READY
+        # Latch: emit plan_execute / plan_refactor once until the label leaves
         self._plan_start_emitted: Set[str] = set()
+        self._plan_refactor_emitted: Set[str] = set()
         self._running = False
         self._handler: Optional[Callable[[dict], None]] = None
 
@@ -209,7 +217,7 @@ class JiraPoller:
 
         new_issues = []
         todo_issues = []
-        plan_build_issues: List[dict] = []
+        plan_handoff_issues: List[dict] = []
         checked_count = 0
         assigned_to_bot_count = 0
         snapshot_rows: List[Dict[str, Any]] = []
@@ -270,8 +278,8 @@ class JiraPoller:
                 # Exceptions (not rework):
                 #   * in-flight pending/planning/executing — never restart
                 #     from poll noise (PENDING is the accept/ack window)
-                #   * plan_ready — waits until {params} Mode is build
-                #     (Mode: plan never starts implementation).
+                #   * plan_ready — waits for plan_execute / plan_refactor
+                #     labels (Mode: build on the same ticket does not implement).
                 in_flight = local_st in {
                     TaskStatus.PENDING,
                     TaskStatus.PLANNING,
@@ -300,31 +308,52 @@ class JiraPoller:
                     )
                 todo_issues.append(issue)
 
-                if waiting_plan and issue_key not in self._plan_start_emitted:
-                    enriched = self._enrich_issue_for_work(issue)
-                    if self._issue_mode_is_build(enriched):
-                        plan_build_issues.append(enriched)
-                        logger.info(
-                            f"Plan-ready Mode: build for {issue_key}; "
-                            f"starting implementation"
-                        )
+            local_st = local.status if local else None
+            in_flight = local_st in {
+                TaskStatus.PENDING,
+                TaskStatus.PLANNING,
+                TaskStatus.EXECUTING,
+            }
+            handoff = infer_plan_handoff(fields)
+            if (
+                handoff
+                and local
+                and local.status == TaskStatus.PLAN_READY
+                and not in_flight
+            ):
+                latch = (
+                    self._plan_start_emitted
+                    if handoff == HANDOFF_EXECUTE
+                    else self._plan_refactor_emitted
+                )
+                if issue_key not in latch:
+                    tagged = dict(issue)
+                    tagged["_plan_handoff"] = handoff
+                    plan_handoff_issues.append(tagged)
+                    logger.info(
+                        f"Plan handoff {handoff} for {issue_key} "
+                        f"(label {PLAN_EXECUTE_LABEL if handoff == HANDOFF_EXECUTE else PLAN_REFACTOR_LABEL})"
+                    )
 
-            if local and local.status != TaskStatus.PLAN_READY:
+            label_set = labels_from_fields(fields)
+            if PLAN_EXECUTE_LABEL not in label_set:
                 self._plan_start_emitted.discard(issue_key)
+            if PLAN_REFACTOR_LABEL not in label_set:
+                self._plan_refactor_emitted.discard(issue_key)
 
         reprocess_issues = self.check_status_changes(todo_issues)
 
         # Deduplicate: prefer create over update when both would fire
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
-        plan_build_issues = [
+        plan_handoff_issues = [
             i
-            for i in plan_build_issues
+            for i in plan_handoff_issues
             if i["key"] not in new_keys
             and i["key"] not in {x["key"] for x in reprocess_issues}
         ]
         will_keys = new_keys | {i["key"] for i in reprocess_issues} | {
-            i["key"] for i in plan_build_issues
+            i["key"] for i in plan_handoff_issues
         }
 
         for row in snapshot_rows:
@@ -336,7 +365,7 @@ class JiraPoller:
                 f"{assigned_to_bot_count} assigned to bot, "
                 f"{len(new_issues)} new to process, "
                 f"{len(reprocess_issues)} to reprocess, "
-                f"{len(plan_build_issues)} plan_ready builds"
+                f"{len(plan_handoff_issues)} plan handoffs"
             )
 
         poll_snapshot_store.end_poll(
@@ -344,7 +373,7 @@ class JiraPoller:
             issues=snapshot_rows,
             interval_seconds=self.interval,
         )
-        return new_issues + reprocess_issues + plan_build_issues
+        return new_issues + reprocess_issues + plan_handoff_issues
 
     @staticmethod
     def issue_text_fingerprint(issue: dict, *, light: Optional[bool] = None) -> str:
@@ -580,21 +609,12 @@ class JiraPoller:
             logger.warning(f"Could not enrich {issue_key} from Jira: {e}")
         return issue
 
-    @staticmethod
-    def _issue_mode_is_build(issue: dict) -> bool:
-        """True when ``{params}`` Mode is build (plan never implements)."""
-        fields = (issue or {}).get("fields") or {}
-        desc = fields.get("description")
-        if not isinstance(desc, str):
-            desc = jira_body_to_text(desc)
-        return parse_issue_mode(fields.get("summary") or "", desc or "") == "build"
-
     def dispatch_as_update(self, issue_key: str) -> bool:
         """True when this key must use the issue_updated handler.
 
         After a daemon restart ``_seen_issues`` is empty, but disk state and
-        plan-start latches still mean this is not a create. plan_ready build
-        after a To Do return uses the update path.
+        plan-start latches still mean this is not a create. plan_execute /
+        plan_refactor on an existing ticket uses the update path.
         """
         key = (issue_key or "").strip()
         if not key:
@@ -679,13 +699,19 @@ class JiraPoller:
             logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
 
         if self._handler:
+            handoff = issue.pop("_plan_handoff", None)
             event = {
                 "webhookEvent": "jira:issue_updated" if is_update else "jira:issue_created",
                 "issue": issue,
                 "timestamp": int(time.time() * 1000),
             }
+            if handoff:
+                event["plan_handoff"] = handoff
             self._handler(event)
-            if is_update:
+            # Latch execute only. plan_refactor must be re-tried every poll
+            # until a comment tagging the PAT user exists (operator often
+            # adds the label first, then comments).
+            if is_update and handoff == HANDOFF_EXECUTE:
                 self._plan_start_emitted.add(issue_key)
         else:
             logger.error(

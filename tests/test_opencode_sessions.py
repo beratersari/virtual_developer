@@ -880,6 +880,34 @@ def test_assistant_asked_question_is_not_a_crash():
             "Pick one:\nA) Redis\nB) Memcached\nC) In-process cache",
             True,
         ),
+        (
+            "Pick one:\n1. Redis\n2. Memcached\n3. In-process cache",
+            True,
+        ),
+        (
+            "Plan written successfully to `C:\\vd\\yaver\\plans\\KAN-7.md`\n\n"
+            "Summary of the plan:\n"
+            "1. **Install a C++ compiler** — g++/cl/clang++ are all absent "
+            "on this Windows host. Use winget install LLVM.LLVM or MSYS2/MinGW.\n"
+            "2. **Modify main.cpp** — add #include <cassert> and "
+            "assert(12 + 12 == 24); before the existing std::cout line.\n"
+            "3. **Compile** with g++ -o main main.cpp — exit 0 means success.\n"
+            "4. **Run** with ./main — should print 24, exit 0.\n"
+            "5. **Commit** as [KAN-7] test: add assert verifying 12+12 equals 24.",
+            False,
+        ),
+        (
+            "Plan written to .yaver-plans\\KAN-482.md.\n\n"
+            "Summary\nTicket — add a unit test.\n\n"
+            "Plan steps for derman-build:\n"
+            "Modify random_sum.cpp\n"
+            "Compile with MSVC cl.exe\n"
+            "Run .\\random_sum.exe\n"
+            "Commit as [KAN-482] feat: add unit test\n\n"
+            "PLAN_DONE\nfile: .yaver-plans/KAN-482.md\n"
+            "implement: no\nquestions: none\n",
+            False,
+        ),
         ("Please confirm the target branch before I continue.", True),
         ("Implemented the parser and committed.", False),
         ("Fixed the bug. Tests pass.", False),
@@ -893,6 +921,36 @@ def test_assistant_asked_question_free_form(text, expected):
     from src.opencode_sessions import assistant_asked_question
 
     assert assistant_asked_question(text) is expected
+
+
+def test_numbered_plan_summary_is_not_a_clarifying_question():
+    """KAN-7: finished plan steps looked like A/B/C and triggered implement."""
+    from src.opencode_sessions import assess_session_completeness
+
+    plan = (
+        "Plan written successfully to `C:\\vd\\t\\test_project\\.yaver-plans\\KAN-7.md`.\n\n"
+        "**Summary of the plan:**\n\n"
+        "1. **Install a C++ compiler** — `g++`/`cl`/`clang++` are all absent "
+        "on this Windows host. Use `winget install LLVM.LLVM` or MSYS2/MinGW.\n"
+        "2. **Modify `main.cpp`** — add `#include <cassert>` and "
+        "`assert(12 + 12 == 24);` before the existing `std::cout` line.\n"
+        "3. **Compile** with `g++ -o main main.cpp` — exit 0 means success.\n"
+        "4. **Run** with `./main` — should print `24`, exit 0.\n"
+        "5. **Commit** as `[KAN-7] test: add assert verifying 12+12 equals 24`."
+    )
+    result = assess_session_completeness(
+        "ses_plan_summary",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": plan}],
+            }
+        ],
+        todos=[{"status": "completed"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
 
 
 def test_free_form_clarifying_question_is_incomplete_not_success():

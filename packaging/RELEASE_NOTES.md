@@ -82,4 +82,4 @@ JIRA_API_TOKEN=your-api-token-here
 JIRA_BOARD_ID=1
 ```
 
-Durable data: `YAVER_DATA_DIR` (`C:\vd\yaver` / `/vd/yaver`). Temp clones: `TEMP_DIR_BASE` (`C:\vd\t` / `/vd/t`).
+Durable data: `YAVER_DATA_DIR` (`C:\vd\yaver` / `/vd/yaver`). Temp clones: `TEMP_DIR_BASE` (`C:\vd\t` / `/vd/t`). Plans: `{YAVER_DATA_DIR}/plans/`.

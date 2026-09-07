@@ -200,6 +200,7 @@ async def test_planning_reporter_exceptions_still_plan_ready(
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PL-REP").status == TaskStatus.PLAN_READY
+    processor.reporter.append_plan_to_description.assert_not_called()
 
 
 @pytest.mark.asyncio

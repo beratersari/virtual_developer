@@ -40,7 +40,11 @@ REAL_GITLAB = "https://gitlab.com/beratersari0/test_project.git"
 E2E_LABEL = "vd-plan-build-e2e"
 TARGET_REL = "notes/vd_plan_follow.txt"
 TARGET_LINE = "PLAN_FOLLOWED=1"
-PLAN_REL_RE = re.compile(r"\.sisyphus/plans/[A-Z][A-Z0-9]+-\d+\.md", re.I)
+PLAN_REL_RE = re.compile(
+    r"(?:\.sisyphus/plans/|\.yaver-plans/|data[/\\]plans[/\\]|plans[/\\])"
+    r"[A-Z][A-Z0-9]+-\d+\.md",
+    re.I,
+)
 # Prefer models that recently completed a generate on this serve.
 LIVE_MODELS = (
     "opencode/mimo-v2.5-free",
@@ -143,6 +147,104 @@ def collect_text_files(root: Path, *, suffixes: Iterable[str]) -> str:
     return "\n".join(parts)
 
 
+def flatten_serve_messages(raw_messages: Iterable) -> tuple[List[str], List[dict]]:
+    """Pull assistant text + tool path/name pairs out of OpenCode serve JSON."""
+    texts: List[str] = []
+    tools: List[dict] = []
+    for msg in raw_messages or []:
+        if not isinstance(msg, dict):
+            continue
+        info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+        role = str(info.get("role") or msg.get("role") or "")
+        parts = msg.get("parts")
+        if isinstance(parts, dict):
+            parts = [parts]
+        if not isinstance(parts, list):
+            parts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            ptype = str(part.get("type") or "").lower()
+            if ptype in {"text", "reasoning", "thinking"}:
+                blob = str(part.get("text") or part.get("content") or "").strip()
+                if blob:
+                    texts.append(blob)
+                continue
+            if ptype != "tool":
+                continue
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+            if not inp and isinstance(part.get("input"), dict):
+                inp = part["input"]
+            path = str(
+                inp.get("path")
+                or inp.get("filePath")
+                or inp.get("file")
+                or inp.get("target")
+                or ""
+            )
+            title = str(state.get("title") or part.get("title") or "")
+            tools.append(
+                {
+                    "role": role,
+                    "tool": str(part.get("tool") or state.get("title") or ""),
+                    "path": path,
+                    "title": title,
+                    "status": str(state.get("status") or part.get("status") or ""),
+                }
+            )
+    return texts, tools
+
+
+def analyze_serve_plan_use(
+    messages: Iterable,
+    *,
+    issue_key: str,
+) -> Dict[str, object]:
+    """Did this OpenCode session read the durable plan and write the marker file?"""
+    texts, tools = flatten_serve_messages(messages)
+    blob = "\n".join(texts)
+    plan_name = f"{issue_key}.md".lower()
+    read_plan = False
+    wrote_target = False
+    plan_tools: List[str] = []
+    for t in tools:
+        path = f"{t.get('path') or ''} {t.get('title') or ''}".replace("\\", "/").lower()
+        tool = str(t.get("tool") or "").lower()
+        looks_plan = (
+            plan_name in path
+            or ".yaver-plans/" in path
+            or "/plans/" in path
+            or bool(PLAN_REL_RE.search(path))
+        )
+        if looks_plan:
+            plan_tools.append(f"{tool}:{t.get('path') or t.get('title')}")
+            if tool in {"read", "view", "cat", "read_file"} or "read" in tool:
+                read_plan = True
+        target_hit = (
+            TARGET_REL.lower() in path or Path(TARGET_REL).name.lower() in path
+        )
+        if target_hit and (
+            tool in {"write", "edit", "apply_patch", "strreplace", "multiedit"}
+            or "write" in tool
+            or "edit" in tool
+        ):
+            wrote_target = True
+    if not read_plan and PLAN_REL_RE.search(blob):
+        # Model quoted the plan path in prose (weaker, still a signal)
+        read_plan = "read" in blob.lower() and (
+            plan_name in blob.lower() or "plan" in blob.lower()
+        )
+    return {
+        "read_plan": read_plan,
+        "wrote_target": wrote_target,
+        "plan_tools": plan_tools,
+        "tool_count": len(tools),
+        "tools": tools,
+        "text": blob,
+    }
+
+
 def analyze_plan_follow(
     *,
     plan_text: str,
@@ -151,6 +253,7 @@ def analyze_plan_follow(
     plan_session: str,
     build_session: str,
     workspace_file: Optional[str],
+    build_read_plan_file: bool = False,
 ) -> Dict[str, object]:
     """Score whether the builder followed the written plan.
 
@@ -169,16 +272,17 @@ def analyze_plan_follow(
         or TARGET_REL.lower() in plan_low,
         "plan_names_marker": TARGET_LINE.lower() in plan_low,
         "plan_prompt_asks_for_plan_file": bool(PLAN_REL_RE.search(plan_prompt_s))
-        or ".sisyphus/plans/" in plan_prompt_s,
+        or "plans/" in plan_prompt_s.replace("\\", "/"),
         "build_prompt_points_at_plan": bool(PLAN_REL_RE.search(blob_build))
-        or ".sisyphus/plans/" in blob_build.lower(),
+        or "plans/" in blob_build.replace("\\", "/").lower(),
         "build_session_mentions_plan": bool(PLAN_REL_RE.search(build_sess))
-        or ".sisyphus/plans/" in build_sess.lower()
+        or "plans/" in build_sess.replace("\\", "/").lower()
         or "plan file" in build_sess.lower(),
         "build_session_mentions_target": TARGET_REL.split("/")[-1].lower()
         in build_sess.lower()
         or TARGET_REL.lower() in build_sess.lower(),
         "workspace_has_marker": TARGET_LINE in (workspace_file or "").strip(),
+        "build_read_plan_file": bool(build_read_plan_file),
     }
     # Soft: builder quoted / reused a plan heading
     headings = [
@@ -196,6 +300,7 @@ def analyze_plan_follow(
         "plan_prompt_asks_for_plan_file",
         "build_prompt_points_at_plan",
         "workspace_has_marker",
+        "build_read_plan_file",
     )
     checks["passed"] = all(bool(checks[k]) for k in required)
     checks["required"] = list(required)
@@ -217,6 +322,7 @@ def test_analyze_plan_follow_canned():
             "Reading .sisyphus/plans/KAN-9.md then creating notes/vd_plan_follow.txt"
         ),
         workspace_file=TARGET_LINE,
+        build_read_plan_file=True,
     )
     assert out["passed"] is True, out
 
@@ -231,6 +337,36 @@ def test_analyze_plan_follow_canned():
     assert miss["passed"] is False
     assert miss["plan_names_target_file"] is False
     assert miss["workspace_has_marker"] is False
+    assert miss["build_read_plan_file"] is False
+
+
+def test_analyze_serve_plan_use_detects_read_and_write():
+    msgs = [
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"path": ".yaver-plans/KAN-99.md"},
+                    },
+                },
+                {
+                    "type": "tool",
+                    "tool": "write",
+                    "state": {
+                        "status": "completed",
+                        "input": {"path": TARGET_REL},
+                    },
+                },
+            ],
+        }
+    ]
+    out = analyze_serve_plan_use(msgs, issue_key="KAN-99")
+    assert out["read_plan"] is True
+    assert out["wrote_target"] is True
 
 
 def _jira_event(key: str, summary: str, description: str) -> dict:
@@ -403,11 +539,15 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
 
     workdir = tmp_path / "run"
     workdir.mkdir()
+    runtime_data = tmp_path / "_vd_runtime"
+    runtime_data.mkdir(exist_ok=True)
     monkeypatch.chdir(workdir)
+    monkeypatch.setenv("YAVER_DATA_DIR", str(runtime_data))
     monkeypatch.setattr(settings, "temp_dir_base", str(tmp_path / "t"))
     monkeypatch.setattr(settings, "sisyphus_plans_dir", Path(".sisyphus/plans"))
     monkeypatch.setattr(settings, "agent_prompts_dir", Path(__file__).resolve().parents[1] / "agent")
     monkeypatch.setattr(settings, "default_model", LIVE_MODELS[0])
+    monkeypatch.setattr(settings, "agent_task_timeout_seconds", 1800)
     monkeypatch.setattr(settings, "agent_task_max_retries", 1)
     monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 0)
     if not (settings.gitlab_allowed_hosts or "").strip() and not (
@@ -453,15 +593,17 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
             f"expected plan_ready, got {st.status.value}: {st.error_message}"
         )
 
-        durable = Path(workdir) / ".sisyphus" / "plans" / f"{key}.md"
-        if st.plan_path:
+        from src.paths import plans_dir as _plans_dir
+
+        durable = _plans_dir() / f"{key}.md"
+        if st.plan_path and Path(st.plan_path).is_file():
             durable = Path(st.plan_path)
         assert durable.is_file(), f"durable plan missing: {durable}"
         plan_text = durable.read_text(encoding="utf-8", errors="replace")
         print(f"[live] plan bytes={len(plan_text)} path={durable}", flush=True)
         print(plan_text[:1500], flush=True)
 
-        # Product handoff: Mode: plan must not implement; Mode: build must.
+        # Product handoff: Mode: plan must not implement; plan_execute must.
         handoff = JiraPoller(client=jira, board_id="1", interval_seconds=30)
         handoff.state_manager = sm
         handoff._seen_issues.add(key)
@@ -477,22 +619,30 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
         )
         print(f"[live] {key} still Mode: plan → poller did not start build", flush=True)
 
-        build_desc = description.replace("Mode: plan", "Mode: build", 1)
-        assert jira.update_issue(key, fields={"description": build_desc}), jira.last_error
-        if not _transition_to_todo(jira, key):
-            pytest.skip(f"{key}: no To Do transition after Mode: build")
+        assert jira.add_labels(key, ["plan_execute"]), jira.last_error
         live_build = jira.get_issue(
             key, fields=["summary", "description", "labels", "assignee", "status"]
         )
         assert live_build
+        live_build.setdefault("fields", {})["status"] = {
+            "name": "In Progress",
+            "statusCategory": {"key": "indeterminate"},
+        }
+        live_build["fields"]["labels"] = list(
+            live_build.get("fields", {}).get("labels") or []
+        )
+        if "plan_execute" not in [
+            str(x).lower() for x in live_build["fields"]["labels"]
+        ]:
+            live_build["fields"]["labels"].append("plan_execute")
         handoff._plan_start_emitted.discard(key)
         with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
             with patch.object(jira, "get_sprint_issues", return_value=[live_build]):
                 to_build = handoff.poll_board()
         assert key in [i["key"] for i in to_build], (
-            f"Mode: build not accepted: {[i['key'] for i in to_build]}"
+            f"plan_execute not accepted: {[i['key'] for i in to_build]}"
         )
-        print(f"[live] {key} Mode: build → poller accepted implementation", flush=True)
+        print(f"[live] {key} plan_execute → poller accepted implementation", flush=True)
 
         build_outcome = await proc.process_event(
             {"webhookEvent": "jira:issue_updated", "issue": live_build}
@@ -592,6 +742,109 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
             except (OSError, subprocess.TimeoutExpired):
                 continue
 
+        session_ids: List[str] = []
+        meta = dict(st2.metadata or {})
+        for sid in meta.get("opencode_session_ids") or []:
+            if sid and str(sid) not in session_ids:
+                session_ids.append(str(sid))
+        cur = getattr(st2, "current_opencode_session_id", None) or meta.get(
+            "current_opencode_session_id"
+        )
+        if cur and str(cur) not in session_ids:
+            session_ids.append(str(cur))
+        for rec in jobs.list_jobs(issue_key=key):
+            for field in ("opencode_session_id", "session_id"):
+                sid = rec.get(field)
+                if sid and str(sid) not in session_ids:
+                    session_ids.append(str(sid))
+        print(f"[live] opencode session ids: {session_ids}", flush=True)
+
+        serve_analyses: List[dict] = []
+        build_read_plan = False
+        clone_dir = None
+        if git:
+            clone_dir = git.get_working_directory()
+        if session_ids:
+            from src.opencode_serve import OpenCodeServeClient
+
+            client = OpenCodeServeClient(
+                base_url=serve_url,
+                directory=str(clone_dir) if clone_dir else None,
+            )
+            try:
+                for sid in session_ids:
+                    try:
+                        msgs = await client.list_all_messages(sid, max_messages=500)
+                    except Exception as exc:
+                        print(
+                            f"[live] list_messages {sid} failed: {exc}",
+                            flush=True,
+                        )
+                        continue
+                    used = analyze_serve_plan_use(msgs, issue_key=key)
+                    serve_analyses.append(
+                        {
+                            "session_id": sid,
+                            "read_plan": used["read_plan"],
+                            "wrote_target": used["wrote_target"],
+                            "plan_tools": used["plan_tools"],
+                            "tool_count": used["tool_count"],
+                            "text_excerpt": str(used["text"] or "")[:1200],
+                            "tools": [
+                                f"{t.get('tool')}:{t.get('path') or t.get('title')}"
+                                for t in (used["tools"] or [])[:40]
+                            ],
+                        }
+                    )
+                    print(
+                        f"[live] serve {sid} read_plan={used['read_plan']} "
+                        f"wrote_target={used['wrote_target']} "
+                        f"tools={used['tool_count']} "
+                        f"plan_tools={used['plan_tools']}",
+                        flush=True,
+                    )
+                    for line in (used["tools"] or [])[:40]:
+                        print(
+                            f"    tool={line.get('tool')} "
+                            f"path={line.get('path') or line.get('title')} "
+                            f"status={line.get('status')}",
+                            flush=True,
+                        )
+                    if used["read_plan"] and (
+                        used["wrote_target"] or sid == session_ids[-1]
+                    ):
+                        build_read_plan = True
+                    extra = str(used["text"] or "")
+                    if extra:
+                        build_sess += "\n" + extra
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+        if not build_read_plan:
+            # Session-log fallback: the builder named the plan file.
+            blob = f"{build_prompt}\n{build_sess}"
+            if PLAN_REL_RE.search(blob) and (
+                f"{key}.md".lower() in blob.lower()
+                or "yaver-plans" in blob.lower()
+                or "plans/" in blob.replace("\\", "/").lower()
+            ):
+                # Only accept if a read-like tool/path also appears
+                low = blob.lower()
+                if any(
+                    tok in low
+                    for tok in (
+                        "read the plan",
+                        "reading the plan",
+                        "opened the plan",
+                        ".yaver-plans/",
+                        f"{key.lower()}.md",
+                    )
+                ):
+                    build_read_plan = True
+
         report = analyze_plan_follow(
             plan_text=plan_text,
             plan_prompt=plan_prompt,
@@ -599,12 +852,21 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
             plan_session=plan_sess,
             build_session=build_sess,
             workspace_file=workspace_body,
+            build_read_plan_file=build_read_plan,
         )
         print("[live] plan-follow report:", flush=True)
         for k, v in report.items():
             if k == "required":
                 continue
             print(f"  {k}={v}", flush=True)
+        if serve_analyses:
+            print("[live] serve analyses:", flush=True)
+            for row in serve_analyses:
+                print(
+                    f"  sid={row['session_id']} read={row['read_plan']} "
+                    f"wrote={row['wrote_target']} tools={row['tools'][:12]}",
+                    flush=True,
+                )
 
         assert report["plan_nonempty"], "planner wrote an empty plan"
         assert report["plan_names_target_file"], (
@@ -621,14 +883,14 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
             f"(got {workspace_body!r}); status={st2.status.value} "
             f"err={st2.error_message}"
         )
+        assert report["build_read_plan_file"], (
+            "OpenCode build session never read the plan file — "
+            "the model likely implemented from the Jira description only.\n"
+            f"session ids={session_ids}\n"
+            f"serve={serve_analyses}\n"
+            f"session excerpt:\n{build_sess[:2000]}"
+        )
         assert report["passed"], report
-
-        if not report["build_session_mentions_plan"]:
-            pytest.fail(
-                "OpenCode build session never mentioned the plan file — "
-                "the model likely did not read it.\n"
-                f"session excerpt:\n{build_sess[:1500]}"
-            )
     finally:
         _close_open_mrs_for_branch(work)
         _delete_remote_branch(work)

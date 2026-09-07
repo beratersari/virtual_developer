@@ -98,7 +98,7 @@ def test_fail_issue_still_errors_in_flight(processor, state_manager, fake_jira):
 
 
 # ---------------------------------------------------------------------------
-# plan_ready: Mode: plan never builds; Mode: build on To Do does
+# plan_ready: Mode: build does not implement; plan_execute + In Progress does
 # ---------------------------------------------------------------------------
 
 
@@ -109,7 +109,7 @@ async def test_plan_ready_mode_plan_does_not_start(processor, state_manager):
     state_manager.update_state("PR-M1", status=TaskStatus.PLAN_READY)
     started = {"ok": False}
 
-    async def fake_exec(st):
+    async def fake_exec(st, **kwargs):
         started["ok"] = True
 
     event = {
@@ -131,7 +131,7 @@ async def test_plan_ready_mode_plan_does_not_start(processor, state_manager):
 
 
 @pytest.mark.asyncio
-async def test_plan_ready_mode_build_starts(processor, state_manager):
+async def test_plan_ready_mode_build_does_not_start(processor, state_manager):
     desc = (
         "{params}\nRepository: https://g.example/r.git\n"
         "Source branch: feature/x\nTarget branch: develop\n"
@@ -141,7 +141,7 @@ async def test_plan_ready_mode_build_starts(processor, state_manager):
     state_manager.update_state("PR-M2", status=TaskStatus.PLAN_READY)
     started = {"ok": False}
 
-    async def fake_exec(st):
+    async def fake_exec(st, **kwargs):
         started["ok"] = True
 
     event = {
@@ -151,6 +151,40 @@ async def test_plan_ready_mode_build_starts(processor, state_manager):
             "fields": {
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
                 "labels": [],
+                "summary": "s",
+                "description": desc,
+            },
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        await processor._handle_issue_updated(event)
+    assert started["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_ready_plan_execute_starts(processor, state_manager, tmp_path):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-M3", "s", desc)
+    plan = tmp_path / "PR-M3.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-M3", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
+    started = {"ok": False}
+
+    async def fake_exec(st, **kwargs):
+        started["ok"] = True
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "PR-M3",
+            "fields": {
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
                 "summary": "s",
                 "description": desc,
             },

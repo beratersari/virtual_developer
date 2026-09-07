@@ -353,7 +353,7 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
-    # Durable locations (YAVER_DATA_DIR / TEMP_DIR_BASE on Windows and Linux)
+    # Durable locations (YAVER_DATA_DIR / TEMP_DIR_BASE)
     data_dir: str = ""
     temp_dir_base: str = ""
 

@@ -11,7 +11,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Removed
 
 - `TRIGGER_LABELS` is gone from Settings, `.env` / `.env.example`, and the dashboard API. Poller intake is To Do + bot assignee (`TRIGGER_ASSIGNEE_NAMES`) only.
-- `ai-start-work` / `ai-execute` / `ai-plan-ready` are no longer used. After `plan_ready`, set `Mode: build` (same ticket or a new issue) to implement. `Mode: plan` never starts a build.
+- `ai-start-work` / `ai-execute` / `ai-plan-ready` are no longer used.
+- Same-ticket `Mode: build` no longer starts implementation after a plan.
+
+### Changed
+
+- Plan files are stored at `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not inside the git clone), so the build agent cannot commit them.
+- After a plan the bot sets label `plan_ready`. Rename it to `plan_execute` while the ticket is **In Progress** to implement (`implement the plan {ISSUE_KEY}.md` on the **build** session). Mode in `{params}` can stay `plan`.
+- To revise a plan: remove `plan_ready`, add `plan_refactor`, and comment tagging the bot (PAT `/myself` identity). The **plan** session is resumed; the bot republishes the plan and restores `plan_ready`.
+- Plan and build keep separate OpenCode session maps per repo + source + target.
+- Direct `Mode: build` issues implement the durable plan when it exists (this ticket, or the plan-session ticket for the same repo + source + target). Jira text is context only. Without a plan file they still implement the Jira description.
 
 ## [0.2.4] — 2026-09-07
 

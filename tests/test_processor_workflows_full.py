@@ -190,11 +190,11 @@ async def test_bot_commands(processor, state_manager, tmp_path, fake_jira):
     state_manager.update_state("BC-1", status=TaskStatus.PLAN_READY, plan_path="p.md")
     with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as m:
         await processor._handle_bot_command("BC-1", "/start-work")
-        m.assert_awaited()
+        m.assert_not_awaited()
 
-    # force not plan ready so a second /start-work does not run real execution
     state_manager.update_state("BC-1", status=TaskStatus.PENDING)
     await processor._handle_bot_command("BC-1", "/start-work")
+    assert any("plan_execute" in c["body"] for c in fake_jira.comments)
 
     await processor._handle_bot_command("BC-1", "/status")
     await processor._handle_bot_command("NOPE", "/status")
@@ -209,17 +209,6 @@ async def test_bot_commands(processor, state_manager, tmp_path, fake_jira):
     with patch.object(processor, "_handle_direct_request", new_callable=AsyncMock) as d:
         await processor._handle_bot_command("BC-1", "please explain")
         d.assert_awaited()
-
-    # start-work crash (must leave CANCELLED first — CAS refuses terminal clobber)
-    state_manager.create_state("BC-2", "s", "d")
-    state_manager.update_state("BC-2", status=TaskStatus.PLAN_READY, plan_path="p.md")
-    with patch.object(
-        processor,
-        "_start_execution_workflow",
-        side_effect=RuntimeError("exec fail"),
-    ):
-        await processor._handle_bot_command("BC-2", "/start-work")
-    assert state_manager.get_state("BC-2").status == TaskStatus.ERROR
 
 
 @pytest.mark.asyncio

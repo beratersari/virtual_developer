@@ -139,7 +139,7 @@ def _seed_opencode_session(
 async def test_plan_start_after_restart_must_start_execution(
     state_manager, fake_jira, reporter, tmp_path, monkeypatch
 ):
-    """Cold poller + In Progress → To Do must start build."""
+    """Cold poller + In Progress + plan_execute must start build."""
     from src.jira.poller import JiraPoller
     from src.processor import JobProcessor
 
@@ -149,18 +149,25 @@ async def test_plan_start_after_restart_must_start_execution(
     desc = (
         "{params}\nRepository: https://g.example/r.git\n"
         "Source branch: feature/x\nTarget branch: develop\n"
-        "Mode: build\n{params}"
+        "Mode: plan\n{params}"
     )
     state_manager.create_state(key, "plan me", desc)
-    state_manager.update_state(key, status=TaskStatus.PLAN_READY)
+    plan = tmp_path / f"{key}.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        key, status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
 
     issue = {
         "key": key,
         "fields": {
             "summary": "plan me",
             "description": desc,
-            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": [],
+            "status": {
+                "name": "In Progress",
+                "statusCategory": {"key": "indeterminate"},
+            },
+            "labels": ["plan_execute"],
             "assignee": {"displayName": "DevBot"},
         },
     }
@@ -262,33 +269,27 @@ async def test_live_jira_plan_start_after_restart():
     tmp = _P(tempfile.mkdtemp(prefix="vd-verify-"))
     state_manager = JiraStateManager(state_dir=tmp / "state")
     state_manager.create_state(key, summary, description)
-    state_manager.update_state(key, status=TaskStatus.PLAN_READY)
+    plan_file = tmp / f"{key}.md"
+    plan_file.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        key, status=TaskStatus.PLAN_READY, plan_path=str(plan_file)
+    )
 
-    # Use the live payload; keep status To Do-like for the start-label path.
+    # Inject plan_execute + In Progress onto the live payload (handoff path).
     issue = {
         "key": key,
         "id": live.get("id"),
         "fields": {
             "summary": fields.get("summary") or summary,
             "description": fields.get("description") or description,
-            "status": fields.get("status")
-            or {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": fields.get("labels") or [],
+            "status": {
+                "name": "In Progress",
+                "statusCategory": {"key": "indeterminate"},
+            },
+            "labels": list(fields.get("labels") or []) + ["plan_execute"],
             "assignee": fields.get("assignee"),
         },
     }
-    status_name = str((issue["fields"]["status"] or {}).get("name") or "")
-    if status_name and status_name.lower() not in {
-        "to do",
-        "todo",
-        "open",
-        "backlog",
-        "selected for development",
-    }:
-        issue["fields"]["status"] = {
-            "name": "To Do",
-            "statusCategory": {"key": "new"},
-        }
 
     poller = JiraPoller(client=client, interval_seconds=1, board_id="1")
     poller.state_manager = state_manager

@@ -782,6 +782,70 @@ _FAREWELL_CLOSER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LETTER_CHOICE_RE = re.compile(r"^[\[(]?[a-dA-D][\].):\-]\s+\S")
+_NUMBER_CHOICE_RE = re.compile(r"^[\[(]?[1-4][\].):\-]\s+\S")
+# Numbered plan/todo steps are not questions unless the operator is asked to pick.
+_NUMBERED_CHOICE_ASK_TOKENS = (
+    "which ",
+    "pick ",
+    "choose ",
+    "prefer",
+    "option",
+    "should i",
+    "shall i",
+    "do you",
+    "your choice",
+    "select one",
+    "select an",
+)
+
+
+def _looks_like_multiple_choice(text: str) -> bool:
+    """True for a trailing A/B/C (or asked 1/2/3) pick-one block.
+
+    Numbered implementation/plan steps (``1. Install…`` / ``2. Modify…``)
+    are not operator questions. Letter choices stay a question. Numeric
+    lists only count when the nearby text asks the operator to pick.
+    """
+    tail_lines = [ln.strip() for ln in (text or "")[-600:].splitlines() if ln.strip()]
+    if not tail_lines:
+        return False
+    window = tail_lines[-6:]
+    lettered = 0
+    numbered = 0
+    for ln in window:
+        if _LETTER_CHOICE_RE.match(ln):
+            lettered += 1
+        elif _NUMBER_CHOICE_RE.match(ln):
+            numbered += 1
+    if lettered >= 2:
+        return True
+    if numbered >= 2:
+        blob = " ".join(window).lower()
+        return any(tok in blob for tok in _NUMBERED_CHOICE_ASK_TOKENS)
+    return False
+
+
+_PLAN_DONE_RE = re.compile(
+    r"(?:"
+    r"^plan written\b"
+    r"|^\s*plan_done\b"
+    r"|questions:\s*none\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _looks_like_finished_plan(text: str) -> bool:
+    """True when the last turn is a plan-file recap, not an operator question."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _PLAN_DONE_RE.search(t):
+        return True
+    head = t[:80].lower()
+    return head.startswith("plan written") or head.startswith("## plan complete")
+
 
 def assistant_asked_question(text: str) -> bool:
     """True when the last assistant turn is waiting on a human operator.
@@ -795,6 +859,8 @@ def assistant_asked_question(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _looks_like_finished_plan(t):
+        return False
     if _FAREWELL_CLOSER_RE.search(t) and not re.search(
         r"\b(?:shall i|should i|which |what should|please confirm|"
         r"before i (?:proceed|continue))\b",
@@ -805,15 +871,8 @@ def assistant_asked_question(text: str) -> bool:
         t = _FAREWELL_CLOSER_RE.sub("", t)
     if _ASSISTANT_QUESTION_RE.search(t):
         return True
-    # Trailing multiple-choice block (A/B/C or 1/2/3).
-    tail_lines = [ln.strip() for ln in t[-600:].splitlines() if ln.strip()]
-    if tail_lines:
-        choiceish = 0
-        for ln in tail_lines[-6:]:
-            if re.match(r"^[\[(]?[a-dA-D1-4][\].):\-]\s+\S", ln):
-                choiceish += 1
-        if choiceish >= 2:
-            return True
+    if _looks_like_multiple_choice(t):
+        return True
     q = _last_question_sentence(t[-800:])
     if not q:
         return False

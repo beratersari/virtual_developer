@@ -1171,26 +1171,60 @@ class JobProcessor:
                     branch = source
         return repo, branch, target
 
+    def _session_kind_for_issue(self, issue_key: str) -> str:
+        """``plan`` or ``build`` map for this issue's current workflow."""
+        from src.state.session_bind_store import normalize_session_kind
+
+        st = self.state_manager.get_state(issue_key)
+        meta = dict((st.metadata if st else None) or {})
+        kind = normalize_session_kind(str(meta.get("workflow_type") or ""))
+        if kind:
+            return kind
+        if st is not None:
+            if st.status == TaskStatus.PLANNING:
+                return "plan"
+            if st.status == TaskStatus.EXECUTING:
+                return "build"
+        return ""
+
     def _resume_session_candidates(
         self, issue_key: str, git: Any = None
     ) -> tuple[List[str], List[str], Optional[str]]:
         """Session ids to try for this issue, plus forgotten ids and bind wd.
 
-        Same Jira issue re-queued from the schedule tab must resume even when
-        the repo/work/target bind key differs from the first upsert.
+        Plan and build keep separate maps for the same repo+source+target so
+        a derman-plan chat is never reused to implement. Same Jira issue
+        re-queued from the schedule tab must resume even when the
+        repo/work/target bind key differs from the first upsert.
         """
         import src.state.session_bind_store as session_binds
 
         repo, branch, target = self._session_bind_key(issue_key, git)
         recs: List[Dict[str, Any]] = []
         store = session_binds.session_bind_store
-        if repo and branch and target:
-            hit = store.get(repo, branch, target, issue_key=issue_key)
+        kind = self._session_kind_for_issue(issue_key)
+        other_kind_sids: set[str] = set()
+        if repo and branch and target and kind:
+            hit = store.get(repo, branch, target, kind=kind)
             if hit:
                 recs.append(hit)
-        by_issue = store.find_by_issue_key(issue_key)
-        if by_issue and by_issue not in recs:
-            recs.append(by_issue)
+            other = "build" if kind == "plan" else "plan"
+            other_rec = store.get(repo, branch, target, kind=other)
+            other_sid = str((other_rec or {}).get("session_id") or "").strip()
+            if other_sid:
+                other_kind_sids.add(other_sid)
+        if kind != "plan":
+            if repo and branch and target:
+                hit = store.get(repo, branch, target, issue_key=issue_key)
+                if hit and str(hit.get("kind") or "") != "plan":
+                    recs.append(hit)
+            by_issue = store.find_by_issue_key(issue_key)
+            if (
+                by_issue
+                and by_issue not in recs
+                and str(by_issue.get("kind") or "") != "plan"
+            ):
+                recs.append(by_issue)
         forgotten: List[str] = []
         bind_wd: Optional[str] = None
         sids: List[str] = []
@@ -1199,6 +1233,8 @@ class JobProcessor:
             from src.backends.base import is_session_or_thread_id
 
             sid = str(raw or "").strip()
+            if sid in other_kind_sids:
+                return
             if is_session_or_thread_id(sid) and sid not in sids:
                 sids.append(sid)
 
@@ -1214,17 +1250,19 @@ class JobProcessor:
                     bind_wd = wd0.strip()
         if repo and branch and target:
             for fx in store.forgotten_ids_for(
-                repo, branch, target, issue_key=issue_key
+                repo, branch, target, issue_key=issue_key, kind=kind
             ):
                 if fx not in forgotten:
                     forgotten.append(fx)
-        st = self.state_manager.get_state(issue_key)
-        if st is not None:
-            _add_sid(st.current_opencode_session_id)
-            meta = dict(st.metadata or {})
-            _add_sid(meta.get("last_opencode_session_id"))
-            for sid in reversed(list(meta.get("opencode_session_ids") or [])):
-                _add_sid(sid)
+        # Plan chats must not pick up a leftover build ses_* from state.
+        if kind != "plan":
+            st = self.state_manager.get_state(issue_key)
+            if st is not None:
+                _add_sid(st.current_opencode_session_id)
+                meta = dict(st.metadata or {})
+                _add_sid(meta.get("last_opencode_session_id"))
+                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                    _add_sid(sid)
         return sids, forgotten, bind_wd
 
     def _attach_bound_opencode_session(
@@ -1377,6 +1415,7 @@ class JobProcessor:
             return
         import src.state.session_bind_store as session_binds
 
+        kind = self._session_kind_for_issue(issue_key)
         session_binds.session_bind_store.forget_for(
             repo,
             branch,
@@ -1384,6 +1423,7 @@ class JobProcessor:
             session_id=sid,
             reason="abandoned",
             issue_key=issue_key,
+            kind=kind,
         )
 
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
@@ -1416,6 +1456,7 @@ class JobProcessor:
                 wd = str(got) if got else None
             except Exception:
                 wd = None
+        kind = self._session_kind_for_issue(issue_key)
         session_binds.session_bind_store.upsert(
             repository_url=repo,
             branch=branch,
@@ -1424,6 +1465,7 @@ class JobProcessor:
             issue_key=issue_key,
             job_id=job_id,
             working_directory=wd,
+            kind=kind,
         )
         self._record_job_working_directory(issue_key, wd)
 
@@ -1776,6 +1818,8 @@ class JobProcessor:
         """
         archive = self._archive_run_identifiers(state.issue_key)
         archive["requeue_eligible"] = False
+        if workflow_type:
+            archive["workflow_type"] = workflow_type
         # Reject terminal statuses: cancel/fail can land between accept and begin
         # without holding the issue lock.
         # Always re-read live settings (dashboard may have changed timeout)
@@ -2170,8 +2214,8 @@ class JobProcessor:
     ) -> dict:
         """Start execution for a plan_ready issue (explicit label / internal path).
 
-        Plans wait at ``plan_ready`` until ``Mode: build`` is set (same
-        ticket or a new issue). Dashboard HTTP Start is disabled (410).
+        Plans wait at ``plan_ready`` until label ``plan_execute`` is set on an
+        In Progress ticket. Dashboard HTTP Start is disabled (410).
 
         Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
@@ -2227,6 +2271,195 @@ class JobProcessor:
                         "error": str(e),
                         "issue_key": issue_key,
                     }
+
+    def _jira_for_labels(self) -> Any:
+        return self.jira_client or getattr(self.reporter, "client", None)
+
+    def _apply_plan_labels(
+        self,
+        issue_key: str,
+        *,
+        add: Optional[List[str]] = None,
+        remove: Optional[List[str]] = None,
+        replace: Optional[tuple[str, str]] = None,
+    ) -> None:
+        client = self._jira_for_labels()
+        if client is None:
+            return
+        try:
+            if replace and hasattr(client, "replace_label"):
+                client.replace_label(issue_key, replace[0], replace[1])
+            if remove and hasattr(client, "remove_labels"):
+                client.remove_labels(issue_key, list(remove))
+            if add and hasattr(client, "add_labels"):
+                client.add_labels(issue_key, list(add))
+        except Exception as e:
+            logger.warning(f"{issue_key}: plan label update failed: {e}")
+
+    def _infer_plan_handoff(self, event: Dict[str, Any]) -> Optional[str]:
+        from src.jira.plan_labels import (
+            HANDOFF_EXECUTE,
+            HANDOFF_REFACTOR,
+            handoff_from_changelog,
+            infer_plan_handoff,
+        )
+
+        raw = str(event.get("plan_handoff") or "").strip().lower()
+        if raw in {HANDOFF_EXECUTE, HANDOFF_REFACTOR}:
+            return raw
+        via_cl = handoff_from_changelog(event.get("changelog"))
+        if via_cl:
+            return via_cl
+        issue = event.get("issue") or {}
+        return infer_plan_handoff(issue.get("fields") or {})
+
+    def _latest_plan_refactor_comment(self, issue_key: str) -> Optional[str]:
+        from src.config import get_settings
+        from src.jira.plan_labels import latest_comment_tagging_pat_user
+
+        client = self._jira_for_labels()
+        if client is None or not hasattr(client, "get_comments"):
+            return None
+        try:
+            comments = client.get_comments(issue_key) or []
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not fetch comments: {e}")
+            return None
+        myself = None
+        if hasattr(client, "get_myself"):
+            try:
+                myself = client.get_myself()
+            except Exception:
+                myself = None
+        live = get_settings()
+        return latest_comment_tagging_pat_user(
+            comments,
+            myself=myself,
+            mention_tokens=getattr(live, "trigger_mentions_list", None) or [],
+            extra_needles=getattr(live, "trigger_assignee_names_list", None) or [],
+        )
+
+    async def _maybe_handle_plan_handoff(
+        self, event: Dict[str, Any], state: Optional[JiraAgentState]
+    ) -> Optional[tuple[bool, Optional[str]]]:
+        """Label-driven plan refactor / execute. None = not a handoff event."""
+        from src.jira.plan_labels import (
+            HANDOFF_EXECUTE,
+            HANDOFF_REFACTOR,
+            PLAN_EXECUTE_LABEL,
+            PLAN_EXECUTED_LABEL,
+            PLAN_READY_LABEL,
+            PLAN_REFACTOR_LABEL,
+        )
+
+        handoff = self._infer_plan_handoff(event)
+        if not handoff:
+            return None
+        issue_key = (event.get("issue") or {}).get("key") or (
+            state.issue_key if state else ""
+        )
+        if not state:
+            return False, "plan handoff without local state"
+        if state.status in self.IN_FLIGHT_STATUSES:
+            return False, f"already in progress ({state.status.value})"
+        if self._is_live_processing(issue_key):
+            return False, "already live in processing cache"
+
+        issue = event.get("issue") or {}
+        fields = issue.get("fields") or {}
+        summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
+        description = _issue_text(fields.get("description", "") or "") or (
+            state.description or ""
+        )
+        if summary:
+            state.issue_summary = summary
+        if description:
+            state.description = description
+
+        if handoff == HANDOFF_EXECUTE:
+            from src.jira.plan_labels import is_in_progress_status
+
+            if not is_in_progress_status(fields):
+                return False, "plan_execute; ticket is not In Progress"
+            has_plan = self._durable_plan_path(issue_key).exists()
+            raw_path = (state.plan_path or "").strip()
+            if raw_path and not has_plan:
+                try:
+                    has_plan = Path(raw_path).is_file()
+                except OSError:
+                    has_plan = False
+            if not has_plan:
+                logger.info(f"{issue_key} plan_execute but no plan file on disk")
+                return False, "plan_execute without a plan"
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": WorkflowType.EXECUTION.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            self._apply_plan_labels(
+                issue_key,
+                replace=(PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL),
+                remove=[PLAN_READY_LABEL],
+            )
+            logger.info(
+                f"{issue_key} plan_execute + In Progress; beginning execution"
+            )
+            try:
+                await self._start_execution_workflow(state, from_plan_execute=True)
+                return True, None
+            except Exception as e:
+                logger.exception(
+                    f"Plan execute failed for {issue_key}: {e}", e
+                )
+                self._fail_issue(
+                    issue_key,
+                    f"Failed to start plan execution: {e}",
+                    suggestion=(
+                        "Check logs. Keep the ticket In Progress and set "
+                        "label plan_execute (or open a new Mode: build issue)."
+                    ),
+                )
+                self._release_context(issue_key, success=False)
+                return True, None
+
+        if handoff == HANDOFF_REFACTOR:
+            comment = self._latest_plan_refactor_comment(issue_key)
+            if not comment:
+                logger.info(
+                    f"{issue_key} plan_refactor: no comment tagging the PAT user yet"
+                )
+                return False, "plan_refactor; waiting for a comment that tags the bot"
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": WorkflowType.PLANNING.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            logger.info(f"{issue_key} plan_refactor; revising plan on plan session")
+            try:
+                await self._start_planning_workflow(
+                    state, refactor_comment=comment
+                )
+                return True, None
+            except Exception as e:
+                logger.exception(
+                    f"Plan refactor failed for {issue_key}: {e}", e
+                )
+                self._fail_issue(
+                    issue_key,
+                    f"Failed to refactor the plan: {e}",
+                    suggestion=(
+                        "Check logs. Re-add plan_refactor and comment "
+                        "tagging the bot to retry."
+                    ),
+                )
+                self._release_context(issue_key, success=False)
+                return True, None
+
+        return None
 
     def _kill_children_for_issue(self, issue_key: str) -> None:
         """Force-kill every subprocess for one issue (agent, git, workspace tools)."""
@@ -2763,47 +2996,16 @@ class JobProcessor:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
             return False, f"already in progress ({existing.status.value})"
         # PLAN_READY: never re-plan or build from a create event.
-        # Implementation starts only when Mode is build (same ticket or a
-        # new Mode: build issue). Mode: plan stays waiting.
+        # Same-ticket implement / refactor is label-driven (plan_execute /
+        # plan_refactor). A new Mode: build issue still starts below.
         if existing and existing.status == TaskStatus.PLAN_READY:
-            if scheduled_job and parse_issue_mode(summary, description) == "build":
-                if summary:
-                    existing.issue_summary = summary
-                if description:
-                    existing.description = description
-                self.state_manager.update_state(
-                    issue_key,
-                    issue_summary=existing.issue_summary,
-                    description=existing.description,
-                    metadata={"workflow_type": WorkflowType.EXECUTION.value},
-                )
-                state = self.state_manager.get_state(issue_key) or existing
-                logger.info(
-                    f"Issue {issue_key} plan_ready + scheduled_job + Mode: build; "
-                    f"beginning execution (schedule_id={event.get('schedule_id')})"
-                )
-                self._mark_jira_in_progress(issue_key)
-                try:
-                    await self._start_execution_workflow(state)
-                    return True, None
-                except Exception as e:
-                    logger.exception(
-                        f"Scheduled plan start failed for {issue_key}: {e}", e
-                    )
-                    self._fail_issue(
-                        issue_key,
-                        f"Failed to start scheduled plan execution: {e}",
-                        suggestion=(
-                            "Check logs. Set Mode: build in {{params}} and "
-                            "put the ticket on To Do, or open a new build issue."
-                        ),
-                    )
-                    self._release_context(issue_key, success=False)
-                    return True, None
+            handoff = await self._maybe_handle_plan_handoff(event, existing)
+            if handoff is not None:
+                return handoff
             logger.info(
-                f"Issue {issue_key} has plan ready; waiting for Mode: build"
+                f"Issue {issue_key} has plan ready; waiting for plan_execute"
             )
-            return False, "plan_ready; waiting for Mode: build"
+            return False, "plan_ready; waiting for plan_execute"
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
@@ -2968,57 +3170,20 @@ class JobProcessor:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
             return await self._handle_issue_created(event)
 
-        # plan_ready → execute only when {params} Mode is build.
-        # Mode: plan never implements, even if the ticket is To Do again.
+        # plan_ready → execute/refactor only via plan_execute / plan_refactor.
+        # Mode: build on this ticket does not implement.
         if state.status == TaskStatus.PLAN_READY:
             if self._is_live_processing(issue_key):
                 logger.info(f"{issue_key} plan_ready but already live; skip start")
                 return False, "plan_ready but already live"
-
-            summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
-            description = _issue_text(fields.get("description", "") or "")
-            if not description:
-                description = state.description or ""
-
-            if summary:
-                state.issue_summary = summary
-            if description:
-                state.description = description
-
-            wants_build = parse_issue_mode(summary, description) == "build"
-            if is_todo and wants_build:
-                self.state_manager.update_state(
-                    issue_key,
-                    issue_summary=state.issue_summary,
-                    description=state.description,
-                    metadata={"workflow_type": WorkflowType.EXECUTION.value},
-                )
-                state = self.state_manager.get_state(issue_key) or state
-                logger.info(
-                    f"{issue_key} plan_ready + Mode: build; beginning execution"
-                )
-                try:
-                    await self._start_execution_workflow(state)
-                    return True, None
-                except Exception as e:
-                    logger.exception(
-                        f"Plan start for Mode: build failed for {issue_key}: {e}", e
-                    )
-                    self._fail_issue(
-                        issue_key,
-                        f"Failed to start plan execution: {e}",
-                        suggestion=(
-                            "Check logs. Keep Mode: build in {{params}} and "
-                            "To Do, or open a new Mode: build issue."
-                        ),
-                    )
-                    self._release_context(issue_key, success=False)
-                    return True, None
+            handoff = await self._maybe_handle_plan_handoff(event, state)
+            if handoff is not None:
+                return handoff
             logger.info(
-                f"{issue_key} plan_ready; Mode is not build "
-                f"(jira status '{status_name}') — not implementing"
+                f"{issue_key} plan_ready; waiting for plan_execute "
+                f"(jira status '{status_name}')"
             )
-            return False, "plan_ready; Mode is not build"
+            return False, "plan_ready; waiting for plan_execute"
 
         return False, f"no action for status {state.status.value}"
 
@@ -3027,9 +3192,10 @@ class JobProcessor:
     ) -> tuple[bool, Optional[str]]:
         """Assignment-to-bot or mention — explicit start, not poller To Do noise.
 
-        In-flight is never restarted. plan_ready starts execution (mention /
-        assign is the operator start signal). Terminal work is reset and run
-        again even if the board is still In Progress.
+        In-flight is never restarted. plan_ready starts execution only on
+        ``plan_execute`` (In Progress). Mentions with ``plan_refactor`` revise
+        the plan. Terminal work is reset and run again even if the board is
+        still In Progress.
         """
         issue = event.get("issue") or {}
         issue_key = issue.get("key") or ""
@@ -3044,42 +3210,13 @@ class JobProcessor:
             return False, f"already in progress ({state.status.value})"
 
         if state and state.status == TaskStatus.PLAN_READY:
-            fields = issue.get("fields") or {}
-            summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
-            description = _issue_text(fields.get("description", "") or "")
-            if not description:
-                description = state.description or ""
-            if parse_issue_mode(summary, description) != "build":
-                logger.info(
-                    f"{issue_key}: webhook plan_ready ignored (Mode is not build)"
-                )
-                return False, "plan_ready; Mode is not build"
-            if summary:
-                state.issue_summary = summary
-            if description:
-                state.description = description
-            self.state_manager.update_state(
-                issue_key,
-                issue_summary=state.issue_summary,
-                description=state.description,
-                metadata={"workflow_type": WorkflowType.EXECUTION.value},
+            handoff = await self._maybe_handle_plan_handoff(event, state)
+            if handoff is not None:
+                return handoff
+            logger.info(
+                f"{issue_key}: webhook plan_ready ignored (need plan_execute)"
             )
-            state = self.state_manager.get_state(issue_key) or state
-            self._mark_jira_in_progress(issue_key)
-            try:
-                await self._start_execution_workflow(state)
-                return True, None
-            except Exception as e:
-                logger.exception(
-                    f"Webhook plan start failed for {issue_key}: {e}", e
-                )
-                self._fail_issue(
-                    issue_key,
-                    f"Failed to start plan execution: {e}",
-                    suggestion="Check logs, then mention or re-assign the bot.",
-                )
-                self._release_context(issue_key, success=False)
-                return True, None
+            return False, "plan_ready; waiting for plan_execute"
 
         if state and state.status in self.TERMINAL_STATUSES:
             logger.info(
@@ -3120,32 +3257,14 @@ class JobProcessor:
         cmd_lower = command.lower().strip()
         
         if cmd_lower.startswith("/start-work"):
-            # Start execution of existing plan only when Mode is build
-            desc = (state.description if state else "") or ""
-            summary = (state.issue_summary if state else "") or ""
-            if (
-                state
-                and state.status == TaskStatus.PLAN_READY
-                and parse_issue_mode(summary, desc) == "build"
-            ):
-                try:
-                    await self._start_execution_workflow(state)
-                except Exception as e:
-                    logger.exception(f"Execution workflow crashed for {issue_key}: {e}", e)
-                    self._fail_issue(
-                        issue_key,
-                        f"Execution workflow failed: {e}",
-                        suggestion="Check logs, then try /start-work again.",
-                    )
-                    self._release_context(issue_key, success=False)
-            else:
-                self.reporter.post_comment_response(
-                    issue_key,
-                    "No plan is ready for execution yet.\n\n"
-                    "* If planning is still running, wait for the *Plan Ready* comment.\n"
-                    "* If planning failed, move the issue back to To Do to re-queue.\n"
-                    "* Then set Mode: build in {params} and put the ticket on To Do.",
-                )
+            self.reporter.post_comment_response(
+                issue_key,
+                "Dashboard / comment Start is disabled.\n\n"
+                "* To implement a plan: set label `plan_execute` while the "
+                "ticket is *In Progress*.\n"
+                "* To revise a plan: remove `plan_ready`, add `plan_refactor`, "
+                "and comment tagging the bot.",
+            )
         
         elif cmd_lower.startswith("/status"):
             # Report current status
@@ -4195,8 +4314,8 @@ class JobProcessor:
             self._record_job_working_directory(
                 state.issue_key, git.get_working_directory()
             )
-            in_workspace = self._materialize_plan_into_workspace(state.issue_key)
-            plan_path_for_agent = str(in_workspace) if in_workspace else None
+            durable = self._durable_plan_path(state.issue_key)
+            plan_path_for_agent = str(durable) if durable.exists() else None
             raw_wb = getattr(git, "work_branch", None)
             work_branch = (
                 raw_wb.strip()
@@ -4471,18 +4590,35 @@ class JobProcessor:
         finally:
             self._release_context(state.issue_key, success=success)
 
-    async def _start_planning_workflow(self, state: JiraAgentState):
-        logger.info(f"Starting planning workflow for {state.issue_key}")
+    async def _start_planning_workflow(
+        self, state: JiraAgentState, *, refactor_comment: Optional[str] = None
+    ):
+        refactoring = bool((refactor_comment or "").strip())
+        logger.info(
+            f"Starting planning workflow for {state.issue_key}"
+            + (" (refactor)" if refactoring else "")
+        )
         workflow_start_time = datetime.now()
+
+        plan_abs = str(self._ensure_durable_plan_dir(state.issue_key))
+        if refactoring:
+            prompt = PromptBuilder.build_plan_refactor_prompt(
+                state.issue_key,
+                refactor_comment or "",
+                plan_path=plan_abs,
+            )
+        else:
+            prompt = PromptBuilder.build_plan_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_abs,
+            )
 
         # Claim in-flight BEFORE slow git clone so poll cannot double-start
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
-            prompt=PromptBuilder.build_plan_prompt(
-                issue_key=state.issue_key,
-                summary=state.issue_summary or "",
-                description=state.description or "",
-            ),
+            prompt=prompt,
             agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
@@ -4515,6 +4651,20 @@ class JobProcessor:
             )
             self._release_context(state.issue_key, success=False)
             return
+        plan_for_agent = self._plan_path_for_agent(state.issue_key)
+        if refactoring:
+            task.prompt = PromptBuilder.build_plan_refactor_prompt(
+                state.issue_key,
+                refactor_comment or "",
+                plan_path=plan_for_agent,
+            )
+        else:
+            task.prompt = PromptBuilder.build_plan_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_for_agent,
+            )
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
         self._attach_bound_opencode_session(state.issue_key, task, git)
@@ -4610,7 +4760,7 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result — plan mode: no GitLab push; durable plan + Jira description
+        # Check result — plan mode: no GitLab push; durable plan + Jira comment
         if result["returncode"] == 0:
             if self._is_aborted(state.issue_key):
                 logger.info(
@@ -4638,7 +4788,7 @@ class JobProcessor:
                     "Planning agent exited 0 but no plan file with content was found.",
                     suggestion=(
                         "The planner must write a non-empty plan to "
-                        f"`.sisyphus/plans/{state.issue_key}.md` (or `.omo/plans/`) "
+                        f"`{self._durable_plan_path(state.issue_key)}` "
                         "without waiting for chat approval. Check session logs, then "
                         "re-queue from To Do."
                     ),
@@ -4646,21 +4796,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
-            # Normalize into preferred sisyphus path in the workspace when we only
-            # found an .omo draft/plan so durable + build paths stay consistent
-            git = self._git_for(state.issue_key)
-            working = git.get_working_directory() if git else None
-            if working and plan_path:
-                preferred = Path(working) / settings.sisyphus_plans_dir / f"{state.issue_key}.md"
-                try:
-                    if plan_path.resolve() != preferred.resolve():
-                        preferred.parent.mkdir(parents=True, exist_ok=True)
-                        preferred.write_text(plan_content, encoding="utf-8")
-                        plan_path = preferred
-                except Exception as e:
-                    logger.warning(f"Could not normalize plan to {preferred}: {e}")
-
-            # B3: durable copy before releasing temp clone
+            # Durable host copy (never the clone — build must not commit the plan)
             durable = self._persist_plan(state.issue_key, plan_content)
             if durable is None:
                 self._fail_issue(
@@ -4701,22 +4837,25 @@ class JobProcessor:
             ready_state = self.state_manager.get_state(state.issue_key)
             if ready_state:
                 try:
-                    self.reporter.append_plan_to_description(ready_state, plan_content)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not append plan to description for {state.issue_key}: {e}"
-                    )
-                try:
                     self.reporter.post_plan_summary(ready_state, plan_content)
                 except Exception as e:
                     logger.warning(
-                        f"Could not post plan summary for {state.issue_key}: {e}"
+                        f"Could not post plan comment for {state.issue_key}: {e}"
                     )
+            from src.jira.plan_labels import PLAN_READY_LABEL, PLAN_REFACTOR_LABEL
 
-            # Wait for the operator to move the ticket back to To Do.
+            self._apply_plan_labels(
+                state.issue_key,
+                add=[PLAN_READY_LABEL],
+                remove=[PLAN_REFACTOR_LABEL],
+            )
 
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue
+            if refactoring:
+                from src.jira.plan_labels import PLAN_REFACTOR_LABEL
+
+                self._apply_plan_labels(state.issue_key, add=[PLAN_REFACTOR_LABEL])
             self.state_manager.update_state(
                 state.issue_key,
                 execution_duration_seconds=duration,
@@ -4728,17 +4867,17 @@ class JobProcessor:
             )
             self._release_context(state.issue_key, success=False)
 
-    async def _start_execution_workflow(self, state: JiraAgentState):
-        logger.info(f"Starting execution (build) workflow for {state.issue_key}")
+    async def _start_execution_workflow(
+        self, state: JiraAgentState, *, from_plan_execute: bool = False
+    ):
+        logger.info(
+            f"Starting execution (build) workflow for {state.issue_key}"
+            + (" (plan_execute)" if from_plan_execute else "")
+        )
         workflow_start_time = datetime.now()
 
         # Resolve durable plan path before clone so we can materialize into workspace
-        durable_plan = self._durable_plan_path(state.issue_key)
-        plan_for_prompt = (
-            str(durable_plan)
-            if durable_plan and durable_plan.exists()
-            else (state.plan_path or "")
-        )
+        plan_for_prompt = self._resolve_plan_for_build(state.issue_key) or ""
 
         # Create task first (rebuild prompt after clone with work_branch)
         task = AgentTask(
@@ -4783,28 +4922,35 @@ class JobProcessor:
             )
             self._release_context(state.issue_key, success=False)
             return
-        # Materialize durable plan into the fresh clone for Atlas
-        in_workspace = self._materialize_plan_into_workspace(state.issue_key)
+        # Plan stays under {YAVER_DATA_DIR}/plans — never copy it into the clone.
+        # Mode: build (not plan_execute) still uses the plan when one exists
+        # for this ticket or the same repo + source + target.
         plan_path_for_agent = (
-            str(in_workspace) if in_workspace else plan_for_prompt
+            self._resolve_plan_for_build(state.issue_key, git) or plan_for_prompt
         )
-        if in_workspace:
+        durable_now = self._durable_plan_path(state.issue_key)
+        if plan_path_for_agent:
             self.state_manager.update_state(
                 state.issue_key,
-                plan_path=str(in_workspace),
+                plan_path=plan_path_for_agent,
             )
         # Rebuild prompt after workspace prep so work_branch (may differ from
         # issue key) and commit policy use the real checked-out source.
-        # Always include Jira title + description (build path).
         raw_wb = getattr(git, "work_branch", None)
         work_branch = raw_wb.strip() if isinstance(raw_wb, str) and raw_wb.strip() else None
-        task.prompt = PromptBuilder.build_build_prompt(
-            issue_key=state.issue_key,
-            summary=state.issue_summary or "",
-            description=state.description or "",
-            plan_path=plan_path_for_agent or None,
-            work_branch=work_branch,
-        )
+        if from_plan_execute:
+            task.prompt = PromptBuilder.build_plan_execute_prompt(
+                plan_path_for_agent or str(durable_now),
+                issue_key=state.issue_key,
+            )
+        else:
+            task.prompt = PromptBuilder.build_build_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_path_for_agent or None,
+                work_branch=work_branch,
+            )
         if work_branch:
             try:
                 self.state_manager.update_state(
@@ -5373,8 +5519,129 @@ class JobProcessor:
         return "none"
 
     def _durable_plan_path(self, issue_key: str) -> Path:
-        """Host-side plan path that survives temp-clone cleanup."""
-        return settings.full_plans_dir / f"{issue_key}.md"
+        """Host-side plan path under ``{YAVER_DATA_DIR}/plans``."""
+        from src.paths import plans_dir
+
+        return plans_dir() / f"{issue_key}.md"
+
+    def _resolve_plan_for_build(
+        self, issue_key: str, git: Any = None
+    ) -> Optional[str]:
+        """Plan file a ``Mode: build`` job should implement.
+
+        Prefer this ticket's durable plan. If missing (new build ticket
+        after a plan on another key), use the plan-session bind for the
+        same repo + source + target.
+        """
+        own = self._durable_plan_path(issue_key)
+        if own.exists():
+            return str(own)
+        st = self.state_manager.get_state(issue_key)
+        raw = ((st.plan_path if st else None) or "").strip()
+        if raw:
+            try:
+                existing = Path(raw)
+                if existing.is_file():
+                    return str(existing)
+            except OSError:
+                pass
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        meta = dict((st.metadata if st else None) or {})
+        candidates: list[tuple[str, str, str]] = []
+        if repo and branch and target:
+            candidates.append((repo, branch, target))
+        src = str(meta.get("source_branch") or "").strip()
+        tgt = target or str(meta.get("target_branch") or "").strip()
+        remote = repo or str(meta.get("repository_url") or "").strip()
+        if remote and src and tgt:
+            candidates.append((remote, src, tgt))
+        from src.state.session_bind_store import session_bind_store
+
+        seen: set[tuple[str, str, str]] = set()
+        for remote_u, work, tgt_b in candidates:
+            key = (remote_u, work, tgt_b)
+            if key in seen:
+                continue
+            seen.add(key)
+            rec = session_bind_store.get(remote_u, work, tgt_b, kind="plan")
+            other = str((rec or {}).get("issue_key") or "").strip()
+            if not other or other.upper() == issue_key.upper():
+                continue
+            sibling = self._durable_plan_path(other)
+            if sibling.exists():
+                logger.info(
+                    f"{issue_key}: Mode: build using plan from {other} "
+                    f"({sibling})"
+                )
+                return str(sibling)
+        return None
+
+    def _ensure_durable_plan_dir(self, issue_key: str) -> Path:
+        """Create ``{YAVER_DATA_DIR}/plans`` and return the issue plan path."""
+        dest = self._durable_plan_path(issue_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not create plans dir {dest.parent}: {e}")
+        return dest
+
+    def _link_plans_into_workspace(self, issue_key: str) -> Optional[Path]:
+        """Expose ``{YAVER_DATA_DIR}/plans`` as ``{clone}/.yaver-plans`` for OpenCode.
+
+        The planner is only allowed to write plan globs. A directory link lets
+        it write a workspace-relative path while the bytes land in the data
+        dir (not committed — we add ``.git/info/exclude``).
+        """
+        import os
+        import subprocess
+
+        dest_root = self._ensure_durable_plan_dir(issue_key).parent
+        git = self._git_for(issue_key)
+        working = git.get_working_directory() if git else None
+        if not working:
+            return None
+        link = Path(working) / ".yaver-plans"
+        try:
+            if link.exists() or link.is_symlink():
+                if link.is_dir():
+                    return link / f"{issue_key}.md"
+                return None
+            try:
+                os.symlink(dest_root, link, target_is_directory=True)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                completed = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(dest_root)],
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode != 0:
+                    logger.warning(
+                        f"{issue_key}: could not link plans dir into clone: "
+                        f"{(completed.stderr or completed.stdout or '').strip()}"
+                    )
+                    return None
+            exclude = Path(working) / ".git" / "info" / "exclude"
+            if exclude.parent.is_dir():
+                extra = ".yaver-plans/\n.sisyphus/\n"
+                try:
+                    current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+                    if ".yaver-plans/" not in current:
+                        exclude.write_text(current + extra, encoding="utf-8")
+                except OSError:
+                    pass
+            return link / f"{issue_key}.md"
+        except OSError as e:
+            logger.warning(f"{issue_key}: plan dir link failed: {e}")
+            return None
+
+    def _plan_path_for_agent(self, issue_key: str) -> str:
+        """Path the planner should write: linked workspace path, else absolute."""
+        linked = self._link_plans_into_workspace(issue_key)
+        if linked is not None:
+            return str(Path(".yaver-plans") / f"{issue_key}.md")
+        return str(self._ensure_durable_plan_dir(issue_key))
 
     def _persist_plan(self, issue_key: str, content: str) -> Optional[Path]:
         """Write plan to durable plans dir. Returns path or None on failure."""
@@ -5390,6 +5657,36 @@ class JobProcessor:
         except Exception as e:
             logger.error(f"Failed to persist plan for {issue_key}: {e}")
             return None
+
+    def _materialize_plan_at_clone_root(self, issue_key: str) -> Optional[Path]:
+        """Copy the durable plan to ``{clone}/{ISSUE_KEY}.md`` for plan_execute."""
+        durable = self._durable_plan_path(issue_key)
+        if not durable.exists():
+            existing = self._resolve_plan_path(issue_key, require_exists=True)
+            if existing and existing.exists():
+                try:
+                    content = existing.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    return None
+                self._persist_plan(issue_key, content)
+                durable = self._durable_plan_path(issue_key)
+            else:
+                return None
+        git = self._git_for(issue_key)
+        working = git.get_working_directory() if git else None
+        if not working:
+            return durable if durable.exists() else None
+        try:
+            content = durable.read_text(encoding="utf-8", errors="replace")
+            dest = Path(working) / f"{issue_key}.md"
+            dest.write_text(content, encoding="utf-8")
+            logger.info(f"Copied plan to clone root: {dest}")
+            return dest
+        except Exception as e:
+            logger.warning(
+                f"Could not copy plan to clone root for {issue_key}: {e}"
+            )
+            return durable if durable.exists() else None
 
     def _materialize_plan_into_workspace(self, issue_key: str) -> Optional[Path]:
         """Copy durable plan into the issue temp clone for Atlas. Returns in-workspace path."""

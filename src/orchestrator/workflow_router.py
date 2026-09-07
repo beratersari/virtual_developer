@@ -102,8 +102,8 @@ class WorkflowRouter:
         """Whether a *new* issue can start work immediately when routed.
 
         Fresh ``Mode: build`` issues run execution. Planning always stops at
-        ``plan_ready``. Implementation needs ``Mode: build`` (same ticket or a
-        new issue).
+        ``plan_ready``. Same-ticket implement uses label ``plan_execute``;
+        a new ``Mode: build`` issue is still a direct build.
         """
         return workflow_type == WorkflowType.EXECUTION
 

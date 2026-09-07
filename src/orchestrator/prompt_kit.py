@@ -37,7 +37,13 @@ def substitute_placeholders(
         out = out.replace("{PLAN_PATH}", (plan_path or "").strip() or "(none)")
     if "{PLAN_PATH}" in out:
         key = (issue_key or "ISSUE").strip() or "ISSUE"
-        out = out.replace("{PLAN_PATH}", f".sisyphus/plans/{key}.md")
+        try:
+            from src.paths import plans_dir
+
+            fallback = str(plans_dir() / f"{key}.md")
+        except Exception:
+            fallback = f"{key}.md"
+        out = out.replace("{PLAN_PATH}", fallback)
     return out
 
 

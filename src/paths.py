@@ -7,6 +7,8 @@ folder (zip reinstall on Windows, or a git pull on Linux):
 * WSL:     ``/mnt/c/vd/yaver`` and ``/mnt/c/vd/t``
 * Linux:   ``/vd/yaver`` and ``/vd/t`` (or ``~/vd/…`` if ``/vd`` is not writable)
 
+Plans are ``{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md`` (not inside the clone).
+
 ``C:\\vd\\…`` in ``.env`` is remapped on Linux. Override with
 ``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
 Legacy ``.jira-agent/`` next to the repo is only a migrate/read fallback.
@@ -164,11 +166,21 @@ def resolve_temp_dir_base(raw: Path | str | None = None) -> Path:
 
 
 def agent_data_dir() -> Path:
-    """Root for sessions, jobs, state, binds — not the install folder."""
+    """Root for sessions, jobs, state, binds, plans — not the install folder."""
     override = _env_path("YAVER_DATA_DIR", "VD_DATA_DIR")
     if override is not None:
         return override
     return default_data_dir()
+
+
+def plans_dir() -> Path:
+    """Durable plan files: ``{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md``."""
+    return agent_data_dir() / "plans"
+
+
+def logs_dir() -> Path:
+    """Daemon logs: ``{YAVER_DATA_DIR}/logs``."""
+    return agent_data_dir() / "logs"
 
 
 def legacy_agent_data_dir() -> Path:
@@ -210,6 +222,8 @@ def ensure_agent_data_dir(*, migrate: bool = False) -> Path:
     dest = agent_data_dir()
     try:
         dest.mkdir(parents=True, exist_ok=True)
+        (dest / "plans").mkdir(parents=True, exist_ok=True)
+        (dest / "logs").mkdir(parents=True, exist_ok=True)
     except OSError:
         return dest
     if migrate:

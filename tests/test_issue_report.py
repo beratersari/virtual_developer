@@ -165,6 +165,39 @@ def test_job_report_includes_prompts_retries_and_logs(tmp_path, monkeypatch):
     assert "no working_directory on job" not in git_txt
 
 
+def test_report_reads_base_logs_and_plan_file(tmp_path, monkeypatch):
+    """Logs and plans live under YAVER_DATA_DIR, not the clone."""
+    from src.paths import logs_dir, plans_dir
+
+    root = tmp_path / "yaver"
+    monkeypatch.setenv("YAVER_DATA_DIR", str(root))
+    (logs_dir()).mkdir(parents=True)
+    (logs_dir() / "extra.log").write_text("daemon extra line\n", encoding="utf-8")
+    (plans_dir()).mkdir(parents=True)
+    (plans_dir() / "KAN-9.md").write_text("# plan body\n", encoding="utf-8")
+
+    jobs_dir = tmp_path / "jobs"
+    store = JobStore(jobs_dir=jobs_dir)
+    job = store.create_job(issue_key="KAN-9", summary="plan job", workflow_type="planning")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-9", "plan job", "d")
+    sm.update_state("KAN-9", plan_path=str(plans_dir() / "KAN-9.md"))
+
+    payload, _ = build_issue_report_zip(
+        IssueReportRequest(kind="job", job_id=job["job_id"], note="need plan"),
+        store=store,
+        state_manager=sm,
+    )
+    names = _zip_names(payload)
+    runtime = json.loads(_zip_text(payload, "runtime.json"))
+    assert runtime["paths"]["plans_dir"].replace("\\", "/").endswith("/yaver/plans")
+    assert runtime["paths"]["logs_dir"].replace("\\", "/").endswith("/yaver/logs")
+    assert "system/logs/extra.log" in names
+    assert "daemon extra line" in _zip_text(payload, "system/logs/extra.log")
+    assert "job/plan.md" in names
+    assert "# plan body" in _zip_text(payload, "job/plan.md")
+
+
 def test_job_report_missing_job(tmp_path):
     store = JobStore(jobs_dir=tmp_path / "jobs")
     try:

@@ -918,14 +918,15 @@ def create_dashboard_app(
     async def task_start(issue_key: str) -> dict:
         """Deprecated: dashboard Start is disabled.
 
-        After a plan, set Mode: build in {params} (or open a new build issue).
+        After a plan, set label plan_execute while In Progress
+        (or open a new Mode: build issue).
         """
         raise HTTPException(
             status_code=410,
             detail=(
                 "Starting work from the dashboard is disabled. "
-                "After a plan, set Mode: build in {params} and put the "
-                "ticket on To Do, or open a new Mode: build issue."
+                "After a plan, rename label plan_ready → plan_execute "
+                "while the ticket is In Progress, or open a new Mode: build issue."
             ),
         )
 

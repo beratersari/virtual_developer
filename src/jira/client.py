@@ -1,27 +1,147 @@
 """JIRA API client wrapper."""
 
 from typing import Any, Dict, Iterable, List, Optional, Union
+import re
 
 import httpx
 
 from src.config import settings
 from src.logger import logger
 
+_WIKI_CODE_OPEN = re.compile(r"^\{code(?::([A-Za-z0-9_+-]+))?\}$")
+_WIKI_HEADING = re.compile(r"^h([1-6])\.\s+(.*)$")
+_WIKI_BULLET = re.compile(r"^\*\s+(\S.*)$")
+_WIKI_INLINE = re.compile(
+    r"\{noformat\}(.+?)\{noformat\}"
+    r"|\*([^*\n]+)\*"
+    r"|_([^_\n]+)_"
+)
+
+
+def _adf_text(text: str, *mark_types: str) -> Dict[str, Any]:
+    node: Dict[str, Any] = {"type": "text", "text": text}
+    if mark_types:
+        node["marks"] = [{"type": m} for m in mark_types]
+    return node
+
+
+def _inline_wiki_to_adf(text: str) -> List[Dict[str, Any]]:
+    """Wiki ``*bold*``, ``_italic_``, ``{noformat}code{noformat}`` → ADF text."""
+    nodes: List[Dict[str, Any]] = []
+    pos = 0
+    for match in _WIKI_INLINE.finditer(text or ""):
+        if match.start() > pos:
+            chunk = text[pos : match.start()]
+            if chunk:
+                nodes.append(_adf_text(chunk))
+        if match.group(1) is not None:
+            nodes.append(_adf_text(match.group(1), "code"))
+        elif match.group(2) is not None:
+            nodes.append(_adf_text(match.group(2), "strong"))
+        else:
+            nodes.append(_adf_text(match.group(3), "em"))
+        pos = match.end()
+    if pos < len(text or ""):
+        tail = text[pos:]
+        if tail:
+            nodes.append(_adf_text(tail))
+    if not nodes:
+        nodes = [_adf_text(" ")]
+    return nodes
+
+
+def _wiki_to_adf_nodes(text: str) -> List[Dict[str, Any]]:
+    """Convert the wiki we emit (h3, bullets, {code:markdown}) to ADF blocks."""
+    nodes: List[Dict[str, Any]] = []
+    lines = (text or "").split("\n")
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        opened = _WIKI_CODE_OPEN.match(stripped)
+        if opened:
+            lang = opened.group(1) or ""
+            buf: List[str] = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "{code}":
+                buf.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            block: Dict[str, Any] = {
+                "type": "codeBlock",
+                "content": [{"type": "text", "text": "\n".join(buf) or " "}],
+            }
+            if lang:
+                block["attrs"] = {"language": lang}
+            nodes.append(block)
+            continue
+        if stripped == "{noformat}":
+            buf = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "{noformat}":
+                buf.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            nodes.append(
+                {
+                    "type": "codeBlock",
+                    "content": [{"type": "text", "text": "\n".join(buf) or " "}],
+                }
+            )
+            continue
+        heading = _WIKI_HEADING.match(raw)
+        if heading:
+            nodes.append(
+                {
+                    "type": "heading",
+                    "attrs": {"level": int(heading.group(1))},
+                    "content": _inline_wiki_to_adf(heading.group(2)),
+                }
+            )
+            i += 1
+            continue
+        if re.match(r"^-{3,}\s*$", stripped):
+            nodes.append({"type": "rule"})
+            i += 1
+            continue
+        bullet = _WIKI_BULLET.match(raw)
+        if bullet:
+            items: List[Dict[str, Any]] = []
+            while i < len(lines):
+                item = _WIKI_BULLET.match(lines[i])
+                if not item:
+                    break
+                items.append(
+                    {
+                        "type": "listItem",
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": _inline_wiki_to_adf(item.group(1)),
+                            }
+                        ],
+                    }
+                )
+                i += 1
+            nodes.append({"type": "bulletList", "content": items})
+            continue
+        if not stripped:
+            i += 1
+            continue
+        nodes.append(
+            {"type": "paragraph", "content": _inline_wiki_to_adf(raw)}
+        )
+        i += 1
+    if not nodes:
+        nodes = [{"type": "paragraph", "content": [_adf_text(" ")]}]
+    return nodes
+
 
 def _comment_body_to_adf(body: str) -> Dict[str, Any]:
-    """ADF doc for Cloud 400 fallback. Text nodes cannot contain raw newlines."""
-    text = body or ""
-    paragraphs: List[Dict[str, Any]] = []
-    for line in text.split("\n"):
-        content: List[Dict[str, Any]] = []
-        if line:
-            content.append({"type": "text", "text": line})
-        else:
-            content.append({"type": "hardBreak"})
-        paragraphs.append({"type": "paragraph", "content": content})
-    if not paragraphs:
-        paragraphs = [{"type": "paragraph", "content": [{"type": "text", "text": " "}]}]
-    return {"version": 1, "type": "doc", "content": paragraphs}
+    """ADF doc for Cloud comments. Wiki headings/code/lists become real blocks."""
+    return {"version": 1, "type": "doc", "content": _wiki_to_adf_nodes(body or "")}
 
 
 def _jira_fields_query(fields: Union[str, Iterable[str], None]) -> Optional[str]:
@@ -579,20 +699,27 @@ class JiraClient:
         return False
     
     def add_comment(self, issue_key: str, body: str) -> Optional[Dict[str, Any]]:
-        """Add a comment to an issue."""
+        """Add a comment to an issue.
+
+        Cloud stores comments as ADF. A wiki string often returns 201 but
+        renders as unformatted text. Post ADF first on Cloud; Server/DC
+        still sends a wiki string and falls back to ADF on 400.
+        """
         try:
             logger.info(f"Adding comment to {issue_key}")
+            wiki = {"body": body}
+            adf = {"body": _comment_body_to_adf(body)}
+            first, second = (adf, wiki) if self.is_cloud else (wiki, adf)
             response = self.client.post(
                 f"/issue/{issue_key}/comment",
-                json={"body": body},
+                json=first,
             )
             logger.debug(f"Comment status: {response.status_code}")
             if response.status_code == 400:
-                alt_body = {"body": _comment_body_to_adf(body)}
                 logger.warning(f"Trying alternate comment format for {issue_key}")
                 response = self.client.post(
                     f"/issue/{issue_key}/comment",
-                    json=alt_body,
+                    json=second,
                 )
                 logger.debug(f"Alternate comment status: {response.status_code}")
             response.raise_for_status()
@@ -689,6 +816,50 @@ class JiraClient:
         existing = [str(x) for x in raw] if isinstance(raw, list) else []
         merged = list(dict.fromkeys([*existing, *labels]))
         return self.update_issue(issue_key, labels=merged)
+
+    def remove_labels(self, issue_key: str, labels: List[str]) -> bool:
+        """Drop labels without wiping unrelated ones (on-prem safe)."""
+        drop = {str(x).strip().lower() for x in (labels or []) if str(x).strip()}
+        if not drop:
+            return True
+        issue = self.get_issue(issue_key, fields=["labels"])
+        if not issue or not isinstance(issue, dict):
+            logger.error(f"Cannot remove labels on {issue_key}: get_issue failed")
+            return False
+        fields = issue.get("fields") or {}
+        if "labels" not in fields:
+            logger.error(
+                f"Cannot remove labels on {issue_key}: labels field missing from get_issue"
+            )
+            return False
+        raw = fields.get("labels") or []
+        existing = [str(x) for x in raw] if isinstance(raw, list) else []
+        kept = [x for x in existing if str(x).strip().lower() not in drop]
+        return self.update_issue(issue_key, labels=kept)
+
+    def replace_label(self, issue_key: str, old: str, new: str) -> bool:
+        """Rename one label (add ``new``, drop ``old``) without wiping others."""
+        add = (new or "").strip()
+        drop = (old or "").strip()
+        if not add and not drop:
+            return True
+        issue = self.get_issue(issue_key, fields=["labels"])
+        if not issue or not isinstance(issue, dict):
+            logger.error(f"Cannot replace label on {issue_key}: get_issue failed")
+            return False
+        fields = issue.get("fields") or {}
+        if "labels" not in fields:
+            logger.error(
+                f"Cannot replace label on {issue_key}: labels field missing from get_issue"
+            )
+            return False
+        raw = fields.get("labels") or []
+        existing = [str(x) for x in raw] if isinstance(raw, list) else []
+        drop_l = drop.lower()
+        kept = [x for x in existing if str(x).strip().lower() != drop_l]
+        if add and add.lower() not in {str(x).strip().lower() for x in kept}:
+            kept.append(add)
+        return self.update_issue(issue_key, labels=kept)
     
     def transition_issue(
         self,

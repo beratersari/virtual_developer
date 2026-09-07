@@ -42,12 +42,13 @@ class JiraAgentDaemon:
         # run_coroutine_threadsafe on a closed/stale loop reference.
         self._main_loop = asyncio.get_running_loop()
 
-        from src.paths import agent_data_dir, ensure_agent_data_dir
+        from src.paths import agent_data_dir, ensure_agent_data_dir, plans_dir
 
         logger.info("Starting Yaver daemon")
         logger.info(f"project_root={settings.project_root}")
         logger.info(f"data_dir={agent_data_dir()}")
         logger.info(f"temp_dir_base={settings.temp_dir_base}")
+        logger.info(f"plans_dir={plans_dir()}")
         ensure_agent_data_dir(migrate=True)
         try:
             Path(settings.temp_dir_base).mkdir(parents=True, exist_ok=True)

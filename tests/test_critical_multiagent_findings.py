@@ -281,7 +281,7 @@ def test_p1_plan_ready_mode_plan_does_not_start(poller, state_manager, monkeypat
     assert "PS-1" not in [i["key"] for i in r1]
 
 
-def test_p1_plan_ready_mode_build_emits_once(poller, state_manager, monkeypatch):
+def test_p1_plan_ready_mode_build_does_not_emit(poller, state_manager, monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
@@ -308,13 +308,7 @@ def test_p1_plan_ready_mode_build_emits_once(poller, state_manager, monkeypatch)
     poller.client.get_issue = MagicMock(return_value=issue)
 
     r1 = poller.poll_board()
-    assert "PS-2" in [i["key"] for i in r1]
-
-    poller._plan_start_emitted.add("PS-2")
-    r2 = poller.poll_board()
-    assert "PS-2" not in [i["key"] for i in r2], (
-        "plan_ready Mode: build must not fire on every poll"
-    )
+    assert "PS-2" not in [i["key"] for i in r1]
 
 
 def test_p1b_completed_still_todo_poller_does_not_reemit(poller, state_manager):
@@ -483,7 +477,7 @@ def test_p4_plan_start_unassigned_does_not_dispatch(
     assert "START-1" not in [i["key"] for i in result]
 
 
-def test_p4_plan_start_mode_build_with_assignee_dispatches(
+def test_p4_plan_start_plan_execute_dispatches(
     poller, state_manager, monkeypatch
 ):
     from src.config import settings
@@ -493,7 +487,7 @@ def test_p4_plan_start_mode_build_with_assignee_dispatches(
     desc = (
         "{params}\nRepository: https://g.example/r.git\n"
         "Source branch: feature/x\nTarget branch: develop\n"
-        "Mode: build\n{params}"
+        "Mode: plan\n{params}"
     )
     state_manager.create_state("START-2", "s", desc)
     state_manager.update_state("START-2", status=TaskStatus.PLAN_READY)
@@ -501,12 +495,16 @@ def test_p4_plan_start_mode_build_with_assignee_dispatches(
 
     issue = {
         "key": "START-2",
-        "fields": _todo_fields(
-            labels=[],
-            summary="s",
-            description=desc,
-            assignee={"displayName": "DevBot"},
-        ),
+        "fields": {
+            "summary": "s",
+            "description": desc,
+            "status": {
+                "name": "In Progress",
+                "statusCategory": {"key": "indeterminate"},
+            },
+            "labels": ["plan_execute"],
+            "assignee": {"displayName": "DevBot"},
+        },
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
