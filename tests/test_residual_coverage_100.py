@@ -41,6 +41,7 @@ def _git_agent(processor, key, tmp_path, **kw):
     git.ensure_on_work_branch.return_value = True
     git.commits_ahead_of_target.return_value = 1
     git.push.return_value = kw.get("push_ok", True)
+    git.head_is_on_remote.return_value = False
     git.get_last_commit_subject.return_value = kw.get("subject", "feat: x")
     git.get_last_commit_message.return_value = "body"
     _sha_calls = {"n": 0}
@@ -132,7 +133,7 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch.object(processor, "_resolve_plan_path", return_value=bad):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
@@ -169,7 +170,7 @@ async def test_planning_plan_read_error_and_cas_race(processor, state_manager, t
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", side_effect=persist_then_cancel):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 0
                 s.full_plans_dir = plans
@@ -192,19 +193,21 @@ async def test_planning_reporter_exceptions_still_plan_ready(
     processor.reporter.post_plan_summary = MagicMock(side_effect=RuntimeError("b"))
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 0
             s.full_plans_dir = plans
             s.sisyphus_plans_dir = Path(".sisyphus/plans")
             await processor._start_planning_workflow(state)
     assert state_manager.get_state("PL-REP").status == TaskStatus.PLAN_READY
+    processor.reporter.append_plan_to_description.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_push_reporter_exceptions(processor, state_manager, tmp_path):
     state = state_manager.create_state("MR-X", "s", "d")
     git, _ = _git_agent(processor, "MR-X", tmp_path, push_ok=False)
+    git.head_is_on_remote.return_value = False
     processor.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))
     assert await processor._push_and_create_mr(state) is False
 
@@ -251,7 +254,7 @@ async def test_plan_ready_label_skips_when_live(processor, state_manager):
                 key="LAB-1",
                 event_type="jira:issue_updated",
                 status="In Progress",
-                labels=["ai-start-work"],
+                labels=[],
             )
         )
         m.assert_not_called()
@@ -327,7 +330,7 @@ def test_poller_plan_ready_label_log(state_manager):
         "key": "PR-L",
         "fields": {
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["ai-start-work"],
+            "labels": [],
             "assignee": None,
             "summary": "s",
             "description": "d",
@@ -389,7 +392,6 @@ def test_poller_parallel_dispatch(tmp_path, state_manager):
     with patch("src.jira.poller.settings") as s:
         s.poll_dispatch_workers = 4
         s.trigger_on_assignment = False
-        s.trigger_labels_list = ["ai-assist"]
         # one cycle then stop
         def stop_after(*a, **k):
             poller._running = False
@@ -560,31 +562,18 @@ def test_agent_runner_kill_edges():
     assert out in (None, False, True)
 
 
-def test_prompt_kit_missing_sections(tmp_path):
+def test_prompt_placeholders_only():
     from src.orchestrator.prompt_kit import (
-        get_section,
-        load_prompt_sections,
-        parse_prompt_kit,
+        clear_prompt_kit_cache,
         substitute_issue_key,
+        substitute_placeholders,
     )
 
-    kit = tmp_path / "kit.md"
-    kit.write_text(
-        "## §role.planning\n---\nPlan stuff\n---\n## §role.execution\nDo stuff\n",
-        encoding="utf-8",
-    )
-    secs = parse_prompt_kit(kit.read_text(encoding="utf-8"))
-    assert "role.planning" in secs
-    loaded = load_prompt_sections(kit_path=kit, refresh=True)
-    assert "role.planning" in loaded
     assert substitute_issue_key("", "K-1") == ""
     assert "K-1" in substitute_issue_key("branch feature/{ISSUE_KEY}", "K-1")
-    body = get_section("role.planning", kit_path=kit)
-    assert body
-    # OSError reading kit
-    missing = tmp_path / "nope.md"
-    loaded2 = load_prompt_sections(kit_path=missing, refresh=True)
-    assert isinstance(loaded2, dict)
+    out = substitute_placeholders("{ISSUE_KEY} {PLAN_PATH}", issue_key="K-1")
+    assert "K-1" in out and "plans/K-1" in out
+    clear_prompt_kit_cache()
 
 
 def test_opencode_sessions_edges(tmp_path):

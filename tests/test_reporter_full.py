@@ -79,6 +79,11 @@ def test_post_plan_summary(state):
     cid = r.post_plan_summary(state, plan)
     assert cid is not None
     assert client.updated  # labels update
+    body = client.comments[-1]["body"]
+    assert "line 0" in body
+    assert "line 29" in body
+    assert "this comment" in body.lower()
+    assert "appended to this issue's description" not in body.lower()
 
 
 def test_post_plan_summary_empty_lines(state):
@@ -138,6 +143,52 @@ def test_post_error_with_suggestion(state):
     assert "Suggestion" in client.comments[-1]["body"]
 
 
+def test_post_incomplete_compaction_is_not_generic_error(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] compact-then-stop",
+        suggestion="raise compact continue budget",
+        category="incomplete",
+    )
+    body = client.comments[-1]["body"]
+    assert "Incomplete session (context compaction)" in body
+    assert "not* a crash" in body or "not a crash" in body.lower()
+    assert "AI Agent — Error" not in body
+
+
+def test_post_unfinished_work_is_not_compaction(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] after unattended nudge still incomplete: open todos: 4 pending, 1 in_progress",
+        suggestion="not a compaction crash",
+        category="unfinished",
+    )
+    body = client.comments[-1]["body"]
+    assert "unfinished work" in body.lower()
+    assert "context compaction" not in body.lower()
+    assert "AI Agent — Error" not in body
+
+
+def test_post_compact_loop_is_not_question_or_timeout(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    r.post_error(
+        state,
+        "[INCOMPLETE] auto-compact loop (8 consecutive compact-only cycles)",
+        suggestion="split the ticket",
+        category="compact_loop",
+    )
+    body = client.comments[-1]["body"]
+    assert "auto-compact loop" in body.lower()
+    assert "Continue was not sent" in body or "continue was not sent" in body.lower()
+    assert "Clarifying question" not in body
+    assert "AI Agent — Error" not in body
+
+
 def test_post_error_not_timed_out_not_exhausted(state):
     state.timed_out = False
     state.retry_count = 0
@@ -150,18 +201,85 @@ def test_post_error_not_timed_out_not_exhausted(state):
     assert "Retries exhausted" not in body
 
 
+def test_post_completion_prefers_cleaned_agent_answer(state):
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    raw = "\n".join(
+        [
+            "[serve] session resumed: ses_xyz",
+            "[serve] turn=initial sending message…",
+            "Değişkenler a = 4, b = 2 olarak güncellendi.",
+            "[serve] assessment complete=True premature=False reasons=[]",
+        ]
+    )
+    cid = r.post_completion(state, "All tasks completed successfully.", agent_answer=raw)
+    assert cid is not None
+    body = client.comments[-1]["body"]
+    assert "Work Completed" in body
+    assert "a = 4, b = 2" in body
+    assert "[serve]" not in body
+    assert "ses_xyz" not in body
+
+
 def test_post_comment_response():
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     assert r.post_comment_response("R-1", "hello") is not None
+    body = client.comments[-1]["body"]
+    assert "hello" in body
+    assert "AI Agent — Response" in body
 
 
+def test_post_comment_response_formats_codex_jsonl_keeps_opencode():
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    jsonl = "\n".join(
+        [
+            "[codex] cwd=/tmp model=gpt",
+            '{"type":"item.completed","item":{"type":"agent_message","text":"I will look next."}}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"## Login\\n\\nUses JWT."}}',
+        ]
+    )
+    r.post_comment_response("R-1", jsonl)
+    body = client.comments[-1]["body"]
+    assert "## Login" in body
+    assert "Uses JWT." in body
+    assert "I will look next." not in body
+    assert '{"type"' not in body
+    assert "[codex] cwd" not in body
+
+    opencode = (
+        "[serve] session created: ses_1\n"
+        "Login uses JWT in `src/auth.cpp`.\n"
+        '{"type":"error","message":"not a stream"}'
+    )
+    r.post_comment_response("R-1", opencode)
+    oc = client.comments[-1]["body"]
+    assert "Login uses JWT in `src/auth.cpp`." in oc
+    assert "[serve] session created: ses_1" not in oc
+    assert '{"type":"error","message":"not a stream"}' in oc
 
 
 def test_post_oracle_response():
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     assert r.post_oracle_response("R-1", "q?", "a!") is not None
+    body = client.comments[-1]["body"]
+    assert "a!" in body
+
+
+def test_post_oracle_response_formats_codex_jsonl():
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    jsonl = (
+        "[codex] cwd=/tmp\n"
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Use Postgres."}}'
+    )
+    r.post_oracle_response("R-1", "which db?", jsonl)
+    body = client.comments[-1]["body"]
+    assert "Use Postgres." in body
+    assert '{"type"' not in body
+    assert "[codex]" not in body
 
 
 def test_update_issue_status_and_attach():

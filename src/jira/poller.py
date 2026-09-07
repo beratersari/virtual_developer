@@ -8,6 +8,15 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.config import settings
 from src.dashboard.snapshot import poll_snapshot_store
 from src.jira.client import JiraClient
+from src.jira.plan_labels import (
+    HANDOFF_EXECUTE,
+    HANDOFF_REFACTOR,
+    PLAN_EXECUTE_LABEL,
+    PLAN_REFACTOR_LABEL,
+    infer_plan_handoff,
+    labels_from_fields,
+)
+from src.jira.triggers import poller_triggers_on
 from src.logger import logger
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -21,11 +30,13 @@ class JiraPoller:
         client: Optional[JiraClient] = None,
         interval_seconds: Optional[int] = None,
         board_id: Optional[str] = None,
+        state_manager: Optional[JiraStateManager] = None,
     ):
         self.client = client or JiraClient()
         self.interval = interval_seconds or settings.poll_interval_seconds
         self.board_id = board_id or settings.jira_board_id
-        self.state_manager = JiraStateManager()
+        # Prefer shared manager from daemon/processor (same process lock + dir)
+        self.state_manager = state_manager or JiraStateManager()
 
         logger.info(
             f"Initializing JiraPoller - interval: {self.interval}s, "
@@ -35,11 +46,13 @@ class JiraPoller:
         if not self.board_id:
             logger.warning("JIRA_BOARD_ID not configured, board polling disabled")
 
-        self._last_check: Optional[datetime] = None
         self._seen_issues: Set[str] = set()
         # Last observed Jira status name (lowercased) per issue — used to detect
         # real transitions into "To Do" rather than re-queueing every poll.
         self._last_jira_status: Dict[str, str] = {}
+        # Latch: emit plan_execute / plan_refactor once until the label leaves
+        self._plan_start_emitted: Set[str] = set()
+        self._plan_refactor_emitted: Set[str] = set()
         self._running = False
         self._handler: Optional[Callable[[dict], None]] = None
 
@@ -49,25 +62,13 @@ class JiraPoller:
 
         Fragments come from ``TRIGGER_ASSIGNEE_NAMES`` (see settings
         ``trigger_assignee_names_list``). Match is case-insensitive substring
-        against displayName, name, and key.
+        against displayName, name, key, and accountId (Cloud).
         """
-        if not assignee:
-            return False
-        candidates = [
-            (assignee.get("displayName") or "").lower(),
-            (assignee.get("name") or "").lower(),
-            (assignee.get("key") or "").lower(),
-        ]
-        needles = settings.trigger_assignee_names_list
-        if not needles:
-            return False
-        for name in candidates:
-            if not name:
-                continue
-            for needle in needles:
-                if needle and needle in name:
-                    return True
-        return False
+        from src.jira.triggers import assignee_looks_like_bot
+
+        return assignee_looks_like_bot(
+            assignee, needles=settings.trigger_assignee_names_list
+        )
 
     def _is_assigned_to_jira_ai_bot(self, issue_key: str, fields: Optional[dict] = None) -> bool:
         # Prefer assignee already present on the board payload (avoids N+1 GET)
@@ -96,6 +97,8 @@ class JiraPoller:
             "open",
             "backlog",
             "new",
+            "selected for development",
+            "ready for development",
             "yapılacaklar",  # Turkish
             "yapilacaklar",
         }
@@ -137,7 +140,11 @@ class JiraPoller:
         ]
 
         logger.debug(f"Polling board {self.board_id}")
+        if hasattr(self.client, "last_error"):
+            self.client.last_error = None
         sprint = self.client.get_active_sprint(self.board_id)
+        lookup = getattr(self.client, "sprint_lookup", None)
+        sprint_err = getattr(self.client, "last_error", None)
         if sprint:
             sprint_id = sprint["id"]
             sprint_name = sprint.get("name", "unknown")
@@ -148,6 +155,35 @@ class JiraPoller:
                 max_results=100,
             )
             source = f"sprint {sprint_name}"
+        elif lookup == "error" or (
+            sprint_err and lookup not in ("kanban", "empty", "ok")
+        ):
+            # Scrum lookup failed — do not widen to the whole board/backlog.
+            logger.error(
+                f"Sprint lookup failed for board {self.board_id}"
+                + (f" ({sprint_err})" if sprint_err else "")
+                + "; skipping intake this cycle"
+            )
+            poll_snapshot_store.end_poll(
+                source=f"board {self.board_id}",
+                issues=[],
+                interval_seconds=self.interval,
+                error=sprint_err or "sprint lookup failed",
+            )
+            return []
+        elif lookup == "empty":
+            # Active-sprint list is empty on a board that supports sprints.
+            logger.info(
+                f"No active sprint on board {self.board_id}; "
+                f"not loading the whole board"
+            )
+            poll_snapshot_store.end_poll(
+                source=f"sprint (none active) board {self.board_id}",
+                issues=[],
+                interval_seconds=self.interval,
+                error=None,
+            )
+            return []
         else:
             logger.info(
                 f"No active sprint on board {self.board_id}; "
@@ -161,27 +197,30 @@ class JiraPoller:
             source = f"board {self.board_id}"
 
         if not issues:
-            logger.debug(f"No issues found from {source}")
+            fetch_error = getattr(self.client, "last_error", None)
+            logger.debug(
+                f"No issues found from {source}"
+                + (f" ({fetch_error})" if fetch_error else "")
+            )
             poll_snapshot_store.end_poll(
                 source=source,
                 issues=[],
                 interval_seconds=self.interval,
+                error=fetch_error,
             )
-            self._last_check = datetime.now()
             return []
 
         logger.debug(f"Found {len(issues)} issues from {source}")
-
-        trigger_labels = set(settings.trigger_labels_list)
-        logger.debug(f"Trigger labels: {trigger_labels}")
+        # Previous cycle's board statuses (leave→return). Tests can seed
+        # ``_last_jira_status``; ``start()`` also snapshots this.
+        self._status_before_poll = dict(self._last_jira_status)
 
         new_issues = []
         todo_issues = []
-        plan_start_issues = []  # plan_ready + ai-start-work label (poller-only start)
+        plan_handoff_issues: List[dict] = []
         checked_count = 0
         assigned_to_bot_count = 0
         snapshot_rows: List[Dict[str, Any]] = []
-        _START_LABELS = frozenset({"ai-start-work", "ai-execute"})
 
         for issue in issues:
             issue_key = issue["key"]
@@ -189,7 +228,6 @@ class JiraPoller:
             status_name = (fields.get("status") or {}).get("name", "")
             status = status_name.lower()
             labels = list(fields.get("labels") or [])
-            label_set = set(labels)
             assignee_data = fields.get("assignee")
             assignee_display = None
             if assignee_data:
@@ -202,16 +240,12 @@ class JiraPoller:
             # Track Jira status for all issues so we can detect real To Do re-entry
             self._last_jira_status[issue_key] = status
 
-            matched_labels = sorted(trigger_labels & label_set)
-            has_label = bool(matched_labels)
             is_assigned_to_bot = self._is_assigned_to_jira_ai_bot(issue_key, fields)
             if is_assigned_to_bot:
                 assigned_to_bot_count += 1
             is_todo = self._is_todo_status(fields)
             seen = issue_key in self._seen_issues
-            should_process = has_label or (
-                is_assigned_to_bot and bool(settings.trigger_on_assignment)
-            )
+            should_process = poller_triggers_on(assigned_to_bot=is_assigned_to_bot)
             # will_process decided after reprocess pass; provisional for new
             provisional_new = should_process and is_todo and not seen
 
@@ -223,9 +257,7 @@ class JiraPoller:
                     "jira_status": status_name,
                     "labels": labels,
                     "assignee": assignee_display,
-                    "matched_label": has_label,
                     "matched_assignee": is_assigned_to_bot,
-                    "matched_labels": matched_labels,
                     "is_todo": is_todo,
                     "will_process": provisional_new,  # updated after reprocess
                     "local_status": local.status.value if local else None,
@@ -235,57 +267,94 @@ class JiraPoller:
             checked_count += 1
 
             if should_process and is_todo:
-                if not seen:
-                    # Cold start: do NOT re-fire terminal/in-flight/plan_ready work
-                    # as "new" — only true first sightings (no local state) or
-                    # PENDING-like states. Terminal rework requires a real To Do
-                    # transition via check_status_changes.
-                    local_st = local.status if local else None
-                    skip_as_new = local_st in {
-                        TaskStatus.COMPLETED,
-                        TaskStatus.ERROR,
-                        TaskStatus.CANCELLED,
-                        TaskStatus.PLANNING,
-                        TaskStatus.EXECUTING,
-                        TaskStatus.PLAN_READY,
-                    }
-                    if skip_as_new:
-                        self._seen_issues.add(issue_key)
-                        logger.debug(
-                            f"Skip cold-start requeue for {issue_key} "
-                            f"(local status={local_st.value if local_st else None})"
+                local_st = local.status if local else None
+                # INTENTIONAL: Jira **To Do** + trigger is the rework signal.
+                # completed / error / cancelled on To Do are re-queued (reset +
+                # run again). Do not "fix" that by skipping terminal stay-on-To-Do.
+                # After accept the bot moves the board to In Progress so the
+                # next poll does not start another job; if the ticket is put
+                # back on To Do (or never left), that is another rework.
+                #
+                # Exceptions (not rework):
+                #   * in-flight pending/planning/executing — never restart
+                #     from poll noise (PENDING is the accept/ack window)
+                #   * plan_ready — waits for plan_execute / plan_refactor
+                #     labels (Mode: build on the same ticket does not implement).
+                in_flight = local_st in {
+                    TaskStatus.PENDING,
+                    TaskStatus.PLANNING,
+                    TaskStatus.EXECUTING,
+                }
+                waiting_plan = local_st == TaskStatus.PLAN_READY
+                if in_flight or waiting_plan:
+                    logger.debug(
+                        f"Skip poller intake for {issue_key} "
+                        f"(local status={local_st.value if local_st else None})"
+                    )
+                elif self._issue_has_pending_schedule(issue_key):
+                    logger.info(
+                        f"Skip poller intake for {issue_key}: pending schedule"
+                    )
+                else:
+                    new_issues.append(issue)
+                    logger.info(
+                        f"{'Re-queue' if seen or local_st else 'New issue to process'}: "
+                        f"{issue_key}"
+                        + (
+                            f" (local status={local_st.value})"
+                            if local_st
+                            else ""
                         )
-                    else:
-                        new_issues.append(issue)
-                        logger.info(f"New issue to process: {issue_key}")
+                    )
                 todo_issues.append(issue)
 
-                # plan_ready is not terminal — start via label without comment poll
-                if (
-                    local
-                    and local.status == TaskStatus.PLAN_READY
-                    and (_START_LABELS & {str(x).strip().lower() for x in labels})
-                ):
-                    plan_start_issues.append(issue)
+            local_st = local.status if local else None
+            in_flight = local_st in {
+                TaskStatus.PENDING,
+                TaskStatus.PLANNING,
+                TaskStatus.EXECUTING,
+            }
+            handoff = infer_plan_handoff(fields)
+            if (
+                handoff
+                and local
+                and local.status == TaskStatus.PLAN_READY
+                and not in_flight
+            ):
+                latch = (
+                    self._plan_start_emitted
+                    if handoff == HANDOFF_EXECUTE
+                    else self._plan_refactor_emitted
+                )
+                if issue_key not in latch:
+                    tagged = dict(issue)
+                    tagged["_plan_handoff"] = handoff
+                    plan_handoff_issues.append(tagged)
                     logger.info(
-                        f"Plan-ready start signal for {issue_key} "
-                        f"(label ai-start-work / ai-execute)"
+                        f"Plan handoff {handoff} for {issue_key} "
+                        f"(label {PLAN_EXECUTE_LABEL if handoff == HANDOFF_EXECUTE else PLAN_REFACTOR_LABEL})"
                     )
+
+            label_set = labels_from_fields(fields)
+            if PLAN_EXECUTE_LABEL not in label_set:
+                self._plan_start_emitted.discard(issue_key)
+            if PLAN_REFACTOR_LABEL not in label_set:
+                self._plan_refactor_emitted.discard(issue_key)
 
         reprocess_issues = self.check_status_changes(todo_issues)
 
         # Deduplicate: prefer create over update when both would fire
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
-        plan_start_issues = [
+        plan_handoff_issues = [
             i
-            for i in plan_start_issues
-            if i["key"] not in new_keys and i["key"] not in {x["key"] for x in reprocess_issues}
+            for i in plan_handoff_issues
+            if i["key"] not in new_keys
+            and i["key"] not in {x["key"] for x in reprocess_issues}
         ]
-        reprocess_keys = {i["key"] for i in reprocess_issues} | {
-            i["key"] for i in plan_start_issues
+        will_keys = new_keys | {i["key"] for i in reprocess_issues} | {
+            i["key"] for i in plan_handoff_issues
         }
-        will_keys = new_keys | reprocess_keys
 
         for row in snapshot_rows:
             row["will_process"] = row["key"] in will_keys
@@ -296,7 +365,7 @@ class JiraPoller:
                 f"{assigned_to_bot_count} assigned to bot, "
                 f"{len(new_issues)} new to process, "
                 f"{len(reprocess_issues)} to reprocess, "
-                f"{len(plan_start_issues)} plan_ready starts"
+                f"{len(plan_handoff_issues)} plan handoffs"
             )
 
         poll_snapshot_store.end_poll(
@@ -304,26 +373,58 @@ class JiraPoller:
             issues=snapshot_rows,
             interval_seconds=self.interval,
         )
-        self._last_check = datetime.now()
-        # plan_start goes as is_update so processor uses issue_updated path
-        return new_issues + reprocess_issues + plan_start_issues
+        return new_issues + reprocess_issues + plan_handoff_issues
 
     @staticmethod
-    def issue_text_fingerprint(issue: dict) -> str:
-        """Stable hash of summary+description for reprocess-on-edit detection."""
+    def issue_text_fingerprint(issue: dict, *, light: Optional[bool] = None) -> str:
+        """Stable hash for reprocess-on-edit detection.
+
+        Full fingerprint: ``summary + "\\n" + description``.
+        Light fingerprint (board scan omits description): ``summary + "\\n"``.
+
+        When ``light`` is None, light mode is chosen automatically if the
+        ``description`` key is absent from fields (poll_board payload shape).
+        """
         fields = issue.get("fields") or {}
         summary = fields.get("summary") or ""
-        desc = fields.get("description") or ""
-        if not isinstance(desc, str):
-            desc = str(desc)
-        raw = f"{summary}\n{desc}".encode("utf-8", errors="replace")
+        if light is None:
+            light = "description" not in fields
+        if light:
+            raw = f"{summary}\n".encode("utf-8", errors="replace")
+        else:
+            desc = fields.get("description") or ""
+            if not isinstance(desc, str):
+                desc = str(desc)
+            raw = f"{summary}\n{desc}".encode("utf-8", errors="replace")
         return hashlib.sha256(raw).hexdigest()[:20]
 
-    def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
-        """Re-queue terminal issues that should run again.
+    @staticmethod
+    def text_fingerprints_from_state(
+        summary: Optional[str], description: Optional[str]
+    ) -> Dict[str, str]:
+        """Full + light fingerprints for fail-path metadata (poller-compatible)."""
+        s = summary or ""
+        d = description or ""
+        if not isinstance(d, str):
+            d = str(d)
+        full = hashlib.sha256(f"{s}\n{d}".encode("utf-8", errors="replace")).hexdigest()[
+            :20
+        ]
+        light = hashlib.sha256(f"{s}\n".encode("utf-8", errors="replace")).hexdigest()[
+            :20
+        ]
+        return {
+            "last_intake_fingerprint": full,
+            "last_intake_fingerprint_light": light,
+        }
 
-        Never re-queue in-flight work (PLANNING/EXECUTING) just because
-        Jira still says To Do — that caused infinite re-execution loops.
+    def check_status_changes(self, todo_issues: List[dict]) -> List[dict]:
+        """Secondary reopen path (leave→return / ERROR text edit).
+
+        Primary rework is ``poll_board`` new_issues: **To Do + trigger** after
+        completed/error/cancelled is intentional re-queue. This helper covers
+        cases that did not go through that list (e.g. pending-schedule skip
+        then a later status change). Never restart in-flight work.
 
         Reprocess when:
         * user moves ticket back to To Do (leave → return), or
@@ -354,7 +455,7 @@ class JiraPoller:
                 )
                 continue
 
-            if state.status not in terminal:
+            if self._issue_has_pending_schedule(issue_key):
                 continue
 
             prev_before = getattr(self, "_status_before_poll", {}).get(issue_key)
@@ -366,11 +467,18 @@ class JiraPoller:
             # while Jira stayed on To Do after cancel/fail.
             synthetic = frozenset({"__cancelled__", "__terminal_local__"})
 
-            # Real board leave non-To-Do → return to To Do
+            if state.status not in terminal:
+                continue
+            # Require an actual status *name* change: category-"new" columns
+            # (e.g. "Selected for Development") are To Do-like for eligibility
+            # but are not in the hard-coded English name set. Without prev!=curr
+            # they re-fired every poll for terminal work.
             entered_todo_from_elsewhere = (
                 prev_before is not None
                 and prev_before not in synthetic
+                and prev_before != curr_name
                 and not self._is_todo_status_name(prev_before)
+                and self._is_todo_status(fields)
             )
             # Cancel/error: only when Jira status *string* changed into To Do
             # (user actually moved the ticket). Synthetic markers alone do NOT count.
@@ -379,6 +487,7 @@ class JiraPoller:
                 and prev_before is not None
                 and prev_before not in synthetic
                 and prev_before != curr_name
+                and not self._is_todo_status_name(prev_before)
                 and self._is_todo_status(fields)
             )
             # After process_issue moved tracker to "in progress", returning to To Do
@@ -389,17 +498,17 @@ class JiraPoller:
             )
             # User fixed description (Mode/{params}) while staying on To Do after ERROR.
             # CANCELLED while still To Do must NOT auto-retry (operator cancelled).
-            # When fingerprint is missing (legacy), treat as "needs one retry attempt".
+            # Board scan omits description — use light fingerprint there so a full
+            # stored hash never false-matches "text changed" every poll.
             text_changed_retry = False
             if (
                 requeue_eligible
                 and state.status == TaskStatus.ERROR
                 and self._is_todo_status(fields)
             ):
-                fp = self.issue_text_fingerprint(issue)
-                last_fp = meta.get("last_intake_fingerprint")
-                if last_fp is None or last_fp != fp:
-                    text_changed_retry = True
+                text_changed_retry = self._error_text_changed_for_reprocess(
+                    issue, meta
+                )
 
             if not (
                 entered_todo_from_elsewhere
@@ -428,6 +537,54 @@ class JiraPoller:
 
         return reprocess_issues
 
+    def _error_text_changed_for_reprocess(
+        self, issue: dict, meta: dict
+    ) -> bool:
+        """True when ERROR requeue should fire due to summary/description edit.
+
+        Light board payloads (no ``description`` key) compare only the summary
+        fingerprint so missing description never looks like a user edit.
+        When description is present (enriched), use the full fingerprint.
+        """
+        fields = issue.get("fields") or {}
+        board_is_light = "description" not in fields
+
+        if board_is_light:
+            light_fp = self.issue_text_fingerprint(issue, light=True)
+            last_light = meta.get("last_intake_fingerprint_light")
+            if last_light is not None:
+                return last_light != light_fp
+            # Legacy rows with only full fingerprint: do not false-positive.
+            # Missing fingerprint: do not re-fire every poll (orphan recovery
+            # must write fingerprints; operator edit or leave→return still works).
+            return False
+
+        fp = self.issue_text_fingerprint(issue, light=False)
+        last_fp = meta.get("last_intake_fingerprint")
+        if last_fp is None:
+            return True
+        return last_fp != fp
+
+    def _issue_has_pending_schedule(self, issue_key: str) -> bool:
+        """True when a non-terminal schedule is waiting/dispatching for this key."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return False
+        ss = getattr(self, "schedule_store", None)
+        if ss is None:
+            try:
+                from src.state.schedule_store import schedule_store as ss
+            except Exception:
+                return False
+        try:
+            for status in ("scheduled", "dispatching"):
+                for rec in ss.list_schedules(status=status, limit=500):
+                    if (rec.get("issue_key") or "").strip().upper() == key:
+                        return True
+        except Exception:
+            return False
+        return False
+
     def _enrich_issue_for_work(self, issue: dict) -> dict:
         """Fetch full issue (incl. description) only for keys we will process."""
         issue_key = issue.get("key") or ""
@@ -452,6 +609,71 @@ class JiraPoller:
             logger.warning(f"Could not enrich {issue_key} from Jira: {e}")
         return issue
 
+    def dispatch_as_update(self, issue_key: str) -> bool:
+        """True when this key must use the issue_updated handler.
+
+        After a daemon restart ``_seen_issues`` is empty, but disk state and
+        plan-start latches still mean this is not a create. plan_execute /
+        plan_refactor on an existing ticket uses the update path.
+        """
+        key = (issue_key or "").strip()
+        if not key:
+            return False
+        if key in self._seen_issues or key in getattr(self, "_plan_start_emitted", ()):
+            return True
+        sm = getattr(self, "state_manager", None)
+        if sm is not None:
+            try:
+                if sm.get_state(key) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _fail_unhandled_accept(
+        self, issue_key: str, summary: str, *, reason: str = ""
+    ) -> None:
+        """Board was moved In Progress but no worker will run — tell Jira."""
+        proc = getattr(self, "_processor", None)
+        if proc is not None and hasattr(proc, "record_dropped_accept"):
+            try:
+                proc.record_dropped_accept(
+                    issue_key,
+                    summary,
+                    reason=reason
+                    or (
+                        "No poller handler was bound after accept. "
+                        "Re-save settings / restart the daemon."
+                    ),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"{issue_key}: processor dropped-accept failed: {e}"
+                )
+        extra = f" {reason.strip()}" if (reason or "").strip() else ""
+        msg = (
+            "Issue was accepted (moved toward In Progress) but no worker "
+            f"was bound.{extra} Re-save settings / restart the daemon, then "
+            "move the ticket back to To Do to retry."
+        )
+        try:
+            self.client.add_comment(issue_key, f"AI Agent — ERROR\n\n{msg}")
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not post unhandled-accept comment: {e}")
+        try:
+            st = self.state_manager.get_state(issue_key)
+            if st is None:
+                self.state_manager.create_state(issue_key, summary or issue_key, "")
+            self.state_manager.update_state(
+                issue_key,
+                status=TaskStatus.ERROR,
+                error_message=msg,
+                metadata={"requeue_eligible": True},
+            )
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not record unhandled-accept ERROR: {e}")
+
     def process_issue(self, issue: dict, is_update: bool = False) -> None:
         issue = self._enrich_issue_for_work(issue)
         issue_key = issue["key"]
@@ -469,13 +691,34 @@ class JiraPoller:
             # status *change* (prev is still "to do") and reprocess is skipped.
             self._last_jira_status[issue_key] = "in progress"
 
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            assign_to_pat_user(self.client, issue_key, issue=issue)
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
+
         if self._handler:
+            handoff = issue.pop("_plan_handoff", None)
             event = {
                 "webhookEvent": "jira:issue_updated" if is_update else "jira:issue_created",
                 "issue": issue,
                 "timestamp": int(time.time() * 1000),
             }
+            if handoff:
+                event["plan_handoff"] = handoff
             self._handler(event)
+            # Latch execute only. plan_refactor must be re-tried every poll
+            # until a comment tagging the PAT user exists (operator often
+            # adds the label first, then comments).
+            if is_update and handoff == HANDOFF_EXECUTE:
+                self._plan_start_emitted.add(issue_key)
+        else:
+            logger.error(
+                f"{issue_key}: no poller handler bound after accept; "
+                f"recording ERROR so the ticket is not silently stuck"
+            )
+            self._fail_unhandled_accept(issue_key, summary)
 
     def start(self, handler: Callable[[dict], None]):
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -496,6 +739,32 @@ class JiraPoller:
                 if settings.jira_board_id:
                     self.board_id = settings.jira_board_id
 
+                from src.jira.webhook import INTAKE_WEBHOOK, normalize_intake_mode
+
+                intake = normalize_intake_mode(
+                    getattr(settings, "jira_intake_mode", None)
+                )
+                if intake == INTAKE_WEBHOOK:
+                    # Poller idle — webhook endpoint is the sole Jira intake.
+                    # Still publish a snapshot so the Board page is not stale.
+                    poll_snapshot_store.begin_poll(
+                        board_id=self.board_id,
+                        interval_seconds=self.interval,
+                    )
+                    poll_snapshot_store.end_poll(
+                        source="webhook",
+                        issues=[],
+                        interval_seconds=self.interval,
+                    )
+                    logger.debug(
+                        "Jira intake mode=webhook; skipping board poll this cycle"
+                    )
+                    for _ in range(self.interval):
+                        if not self._running:
+                            break
+                        time.sleep(1)
+                    continue
+
                 poll_snapshot_store.begin_poll(
                     board_id=self.board_id,
                     interval_seconds=self.interval,
@@ -514,8 +783,7 @@ class JiraPoller:
                     # (agent work itself is capped by max_concurrent_jobs)
                     def _one(issue: dict) -> str:
                         key = issue["key"]
-                        is_update = key in self._seen_issues
-                        self.process_issue(issue, is_update)
+                        self.process_issue(issue, self.dispatch_as_update(key))
                         return key
 
                     if len(issues) == 1 or workers == 1:

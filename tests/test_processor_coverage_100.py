@@ -260,6 +260,124 @@ def test_fail_issue_exception_swallowed(processor, state_manager):
     processor._fail_issue("FE-2", "x")
 
 
+def test_fail_from_agent_result_incomplete_is_not_crash(processor, state_manager, fake_jira):
+    """Compact/incomplete agent result must not use the generic Error heading."""
+    state_manager.create_state("FE-C", "compact", "d")
+    processor._fail_from_agent_result(
+        "FE-C",
+        {
+            "returncode": 2,
+            "stderr": "[INCOMPLETE] compact-then-stop",
+            "incomplete": True,
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Incomplete session (context compaction)" in b for b in bodies)
+    assert not any(
+        "h3. AI Agent — Error" in b and "compact-then-stop" in b for b in bodies
+    )
+
+
+def test_fail_from_agent_result_clarifying_question_heading(
+    processor, state_manager, fake_jira
+):
+    """Model asking questions must not look like a compaction budget error."""
+    state_manager.create_state("FE-Q", "question", "d")
+    processor._fail_from_agent_result(
+        "FE-Q",
+        {
+            "returncode": 2,
+            "stderr": "[INCOMPLETE] assistant asked a clarifying question",
+            "incomplete": True,
+            "assistant_asked_question": True,
+            "incomplete_reasons": ["assistant asked a clarifying question"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Clarifying question" in b for b in bodies)
+    assert any("unattended" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+
+
+def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
+    processor, state_manager, fake_jira
+):
+    """Open todos after the unattended nudge must not look like compact budget."""
+    state_manager.create_state("FE-T", "todos", "d")
+    processor._fail_from_agent_result(
+        "FE-T",
+        {
+            "returncode": 2,
+            "stderr": (
+                "[INCOMPLETE] after unattended nudge still incomplete: "
+                "open todos: 4 pending, 1 in_progress"
+            ),
+            "incomplete": True,
+            "incomplete_reasons": ["open todos: 4 pending, 1 in_progress"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("unfinished work" in b.lower() for b in bodies)
+    assert not any("context compaction" in b.lower() for b in bodies)
+    assert not any("OPENCODE_SERVE_MAX_COMPACT_CONTINUES" in b for b in bodies)
+
+
+def test_fail_from_agent_result_thread_lock_heading(
+    processor, state_manager, fake_jira
+):
+    """Codex writer lock must not look like OpenCode incomplete/compaction."""
+    state_manager.create_state("KAN-12371", "django", "d")
+    processor._fail_from_agent_result(
+        "KAN-12371",
+        {
+            "returncode": 1,
+            "stderr": (
+                "Error: thread/resume failed: thread "
+                "01a03397-15ff-7941-a5e7-17e23b3d7b82 already has an "
+                "active writer (code -32600)"
+            ),
+            "incomplete": False,
+            "thread_locked": True,
+            "incomplete_reasons": ["codex thread locked"],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("Codex thread locked" in b for b in bodies)
+    assert not any("Incomplete session" in b for b in bodies)
+
+
+def test_fail_from_agent_result_compact_loop_heading(
+    processor, state_manager, fake_jira
+):
+    """Tight auto-compact loop must not look like a timeout or question."""
+    state_manager.create_state("FE-L", "loop", "d")
+    processor._fail_from_agent_result(
+        "FE-L",
+        {
+            "returncode": 2,
+            "stderr": (
+                "[INCOMPLETE] auto-compact loop: OpenCode kept compacting "
+                "with no new work. auto-compact loop (8 consecutive "
+                "compact-only cycles)"
+            ),
+            "incomplete": True,
+            "incomplete_reasons": [
+                "auto-compact loop (8 consecutive compact-only cycles)"
+            ],
+        },
+        fallback="agent failed",
+    )
+    bodies = [c["body"] for c in fake_jira.comments]
+    assert any("auto-compact loop" in b.lower() for b in bodies)
+    assert any("will not help" in b.lower() or "will not break" in b.lower() for b in bodies)
+    assert not any("Clarifying question" in b for b in bodies)
+    assert not any("raise that timeout" in b.lower() for b in bodies)
+
+
 def test_release_context_cleanup_exception(processor):
     git = MagicMock()
     git.cleanup.side_effect = RuntimeError("rm fail")
@@ -314,6 +432,24 @@ def test_link_and_apply_session_paths(processor, state_manager, tmp_path):
     processor._apply_agent_result_session("LK-1", result)
     loaded = processor.job_store.get_job(job["job_id"])
     assert loaded is not None
+
+    # Abandoned cold-retry id must not be rebound when the final attempt
+    # produced no session id.
+    processor._apply_agent_result_session(
+        "LK-1",
+        {
+            "opencode_session_id": None,
+            "session_file": str(sess),
+            "retry_info": {
+                "last_opencode_session_id": "ses_old",
+                "abandoned_session_id": "ses_old",
+            },
+        },
+    )
+    st = state_manager.get_state("LK-1")
+    assert st is not None
+    # current stays ses_new from the previous successful apply
+    assert st.current_opencode_session_id == "ses_new"
 
     # no session id
     processor._record_opencode_session("LK-1", None)
@@ -555,7 +691,9 @@ async def test_handle_created_route_err_and_live(processor, state_manager):
 
 
 @pytest.mark.asyncio
-async def test_handle_updated_reprocess_and_label_fail(processor, state_manager):
+async def test_handle_updated_reprocess_and_label_fail(
+    processor, state_manager, tmp_path
+):
     # terminal without requeue_eligible
     state_manager.create_state("UP-1", "s", "d")
     state_manager.update_state("UP-1", status=TaskStatus.ERROR, metadata={})
@@ -592,23 +730,36 @@ async def test_handle_updated_reprocess_and_label_fail(processor, state_manager)
         )
         m.assert_awaited()
 
-    # plan_ready + label + live skip
+    # plan_ready + live skip
+    plan = tmp_path / "UP-L.md"
+    plan.write_text("# plan\n", encoding="utf-8")
     state_manager.create_state("UP-L", "s", "d")
-    state_manager.update_state("UP-L", status=TaskStatus.PLAN_READY)
+    state_manager.update_state(
+        "UP-L", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
     processor._contexts["UP-L"] = {"git": None, "runner": None}
     event = {
         "webhookEvent": "jira:issue_updated",
         "issue": {
             "key": "UP-L",
             "fields": {
-                "status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
-                "labels": ["ai-start-work"],
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
+                "summary": "s",
+                "description": (
+                    "{params}\nRepository: https://g.example/r.git\n"
+                    "Source branch: feature/x\nTarget branch: develop\n"
+                    "Mode: plan\n{params}"
+                ),
             },
         },
     }
     await processor._handle_issue_updated(event)
 
-    # plan_ready + label + execution fails
+    # plan_ready + To Do + execution fails
     del processor._contexts["UP-L"]
     with patch.object(
         processor,
@@ -643,16 +794,16 @@ async def test_bot_commands_status_cancel_start(processor, state_manager, fake_j
         error_message="prev err",
         metadata={"workflow_type": "planning", "merge_request_url": "http://mr/x"},
     )
-    with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock):
+    with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as m:
         await processor._handle_bot_command("BOT-1", "/start-work")
+        m.assert_not_awaited()
 
     await processor._handle_bot_command("BOT-1", "/status")
     await processor._handle_bot_command("NOSTATE", "/status")
 
-    # start-work when not plan_ready
     state_manager.update_state("BOT-1", status=TaskStatus.PENDING)
     await processor._handle_bot_command("BOT-1", "/start-work")
-    assert any("No plan is ready" in c["body"] for c in fake_jira.comments)
+    assert any("plan_execute" in c["body"] for c in fake_jira.comments)
 
     # cancel with runner
     state_manager.update_state(
@@ -718,7 +869,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=IssueGitConfigError("bad template"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
     assert state_manager.get_state("GW-1").status == TaskStatus.ERROR
 
     state = state_manager.create_state("GW-2", "s", "d")
@@ -727,7 +878,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitCloneError("clone fail"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-3", "s", "d")
     with patch.object(
@@ -735,7 +886,7 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitTargetBranchError("no target"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-4", "s", "d")
     with patch.object(
@@ -743,13 +894,13 @@ def test_prepare_git_workspace_exception_types(processor, state_manager, fake_ji
         "_init_git_manager",
         side_effect=GitSourceBranchError("no source"),
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
     state = state_manager.create_state("GW-5", "s", "d")
     with patch.object(
         processor, "_init_git_manager", side_effect=RuntimeError("weird")
     ):
-        assert processor._prepare_git_workspace(state) is None
+        assert processor._prepare_git_workspace_blocking(state) is None
 
 
 # ---------------------------------------------------------------------------
@@ -775,8 +926,8 @@ def test_assert_build_delivery_failures(processor, tmp_path):
 
     git.ensure_on_work_branch.return_value = True
     git.commits_ahead_of_target.return_value = 0
-    git.get_last_commit_sha.return_value = "aaa111"
-    git.delivery_baseline_sha = None
+    git.get_last_commit_sha.return_value = "bbb222"
+    git.delivery_baseline_sha = "aaa111"
     err = processor._assert_build_delivery("BD-1")
     assert "No commits" in err
 
@@ -789,10 +940,14 @@ def test_assert_build_delivery_failures(processor, tmp_path):
     git.delivery_baseline_sha = "aaa111"  # new commits since start
     assert processor._assert_build_delivery("BD-1") is None
 
-    # Re-queue on existing source: ahead of target but HEAD unchanged → fail
+    # Re-queue on existing source: ahead of target, HEAD unchanged → still deliver
     git.delivery_baseline_sha = "bbb222"
     git.get_last_commit_sha.return_value = "bbb222"
     git.commits_ahead_of_target.return_value = 5
+    assert processor._assert_build_delivery("BD-1") is None
+
+    # HEAD unchanged and nothing ahead of target → soft no-op
+    git.commits_ahead_of_target.return_value = 0
     err = processor._assert_build_delivery("BD-1")
     assert err is not None
     assert "No new commits" in err
@@ -864,6 +1019,23 @@ def test_persist_and_materialize_plan(processor, tmp_path):
             assert processor._persist_plan("P-3", "content") is None
 
 
+def test_format_push_fail_error_includes_git_reason():
+    auth = (
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled"
+    )
+    msg = JobProcessor._format_push_fail_error(auth, existing_mr=False)
+    assert msg.startswith("Agent finished but git push failed")
+    assert "could not read Username" in msg
+    assert "write credentials" in msg
+    mr = JobProcessor._format_push_fail_error("remote: denied", existing_mr=True)
+    assert "existing MR" in mr
+    assert "remote: denied" in mr
+    assert JobProcessor._format_push_fail_error("", existing_mr=False).endswith(
+        "work was not delivered to remote."
+    )
+
+
 @pytest.mark.asyncio
 async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, fake_jira):
     state = state_manager.create_state("PU-1", "s", "d")
@@ -876,6 +1048,7 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git = MagicMock()
     git.work_branch = "feature/PU-1"
     git.target_branch = "develop"
+    git.commits_ahead_of_target.return_value = 1
     git.ensure_on_work_branch.return_value = False
     processor._contexts["PU-1"] = {"git": git, "runner": None}
     assert await processor._push_and_create_mr(state) is False
@@ -890,16 +1063,63 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.work_branch = "release/1.0"
     assert await processor._push_and_create_mr(state) is False
 
+    # Existing MR (GitLab note intake): push the MR source even if protected
+    git.work_branch = "develop"
+    git.target_branch = "main"
+    git.get_current_branch.return_value = "develop"
+    git.push.return_value = True
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_sha.return_value = "abc123"
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+
+    # release/* on an existing MR must also push
+    git.work_branch = "release/1.0"
+    git.get_current_branch.return_value = "release/1.0"
+    git.push.reset_mock()
+    assert (
+        await processor._push_and_create_mr(
+            state, existing_mr_url="https://gitlab.example.com/g/r/-/merge_requests/9"
+        )
+        is True
+    )
+    git.push.assert_called()
+
     # empty branch name
     git.work_branch = ""
     git.get_current_branch.return_value = ""
     assert await processor._push_and_create_mr(state) is False
 
-    # push fail
+    # push fail and not on remote
     git.work_branch = "feature/PU-1"
     git.get_current_branch.return_value = "feature/PU-1"
     git.push.return_value = False
+    git.head_is_on_remote.return_value = False
+    git.get_last_commit_sha.return_value = "sha_new"
+    git.last_push_error = (
+        "fatal: could not read Username for 'https://gitlab.com': "
+        "terminal prompts disabled"
+    )
     assert await processor._push_and_create_mr(state) is False
+    noted = (state_manager.get_state("PU-1").metadata or {}).get("delivery_note") or ""
+    assert "could not read Username" in noted
+
+    # Agent already pushed: push fails but origin has HEAD → still open MR
+    git.push.return_value = False
+    git.head_is_on_remote.return_value = True
+    git.get_last_commit_subject.return_value = "feat: agent pushed"
+    git.get_last_commit_message.return_value = "body"
+    git.get_last_commit_sha.return_value = "sha_agent"
+    git.create_merge_request.return_value = "http://mr/agent"
+    assert await processor._push_and_create_mr(state) is True
+    git.create_merge_request.assert_called()
+    git.head_is_on_remote.return_value = False
 
     # push ok, MR ok
     git.push.return_value = True
@@ -914,10 +1134,49 @@ async def test_push_protected_and_ensure_on_work_fail(processor, state_manager, 
     git.get_last_commit_message.return_value = None
     assert await processor._push_and_create_mr(state) is True
 
+    # HEAD == job-start baseline (prior unpushed commit) still records delivery
+    git.ensure_on_work_branch.return_value = True
+    git.work_branch = "feature/PU-1"
+    git.get_current_branch.return_value = "feature/PU-1"
+    git.push.return_value = True
+    git.delivery_baseline_sha = "6958c0ce96f1"
+    git.get_last_commit_sha.return_value = "6958c0ce96f1"
+    git.get_last_commit_subject.return_value = "[kan] test: lead service unit tests"
+    git.get_last_commit_message.return_value = "[kan] test: lead service unit tests"
+    git.create_merge_request.return_value = "http://mr/prior"
+    processor.reporter.post_progress_update = MagicMock()
+    assert await processor._push_and_create_mr(state) is True
+    git.create_merge_request.assert_called()
+    recorded = (state_manager.get_state("PU-1").metadata or {}).get("merge_request_url")
+    assert recorded == "http://mr/prior"
+
     # reporter raises on progress — still returns
     processor.reporter.post_progress_update = MagicMock(side_effect=RuntimeError("x"))
     git.ensure_on_work_branch.return_value = False
     assert await processor._push_and_create_mr(state) is False
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_skips_when_not_ahead_of_target(
+    processor, state_manager, fake_jira
+):
+    """KAN-218 / job_7435790adfb0: 0-ahead branch may push, must not open an MR."""
+    state = state_manager.create_state("KAN-218", "s", "d")
+    git = MagicMock()
+    git.work_branch = "feature/KAN-218"
+    git.target_branch = "main"
+    git.ensure_on_work_branch.return_value = True
+    git.get_current_branch.return_value = "feature/KAN-218"
+    git.commits_ahead_of_target.return_value = 0
+    git.push.return_value = True
+    git.create_merge_request.return_value = "https://gitlab.example.com/mr/34"
+    processor._contexts["KAN-218"] = {"git": git, "runner": None}
+    assert await processor._push_and_create_mr(state) is True
+    git.push.assert_called()
+    git.create_merge_request.assert_not_called()
+    assert (state_manager.get_state("KAN-218").metadata or {}).get(
+        "merge_request_url"
+    ) in (None, "")
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +1197,7 @@ async def test_planning_missing_plan_and_durable_fail(
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -956,7 +1215,7 @@ async def test_planning_missing_plan_and_durable_fail(
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", return_value=None):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
@@ -992,7 +1251,7 @@ async def test_planning_aborted_and_cas_race(
     runner.run_agent_with_retry = AsyncMock(side_effect=abort_result)
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1031,7 +1290,7 @@ async def test_planning_aborted_and_cas_race(
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_persist_plan", side_effect=persist_and_cancel):
             with patch("src.processor.settings") as s:
-                s.planning_agent = "prometheus"
+                s.default_agent = "prometheus"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
@@ -1063,7 +1322,7 @@ async def test_execution_delivery_and_push_failures(
 
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1079,16 +1338,33 @@ async def test_execution_delivery_and_push_failures(
     git2.commits_ahead_of_target.return_value = 2
     with patch.object(processor, "_init_git_manager", return_value=git2):
         with patch.object(processor, "_push_and_create_mr", new_callable=AsyncMock) as p:
-            p.return_value = False
+
+            async def _fail_push(*_a, **_k):
+                state_manager.update_state(
+                    "EXD-2",
+                    metadata={
+                        "delivery_status": "push_failed",
+                        "delivery_note": (
+                            "fatal: could not read Username for "
+                            "'https://gitlab.com': terminal prompts disabled"
+                        ),
+                    },
+                )
+                return False
+
+            p.side_effect = _fail_push
             with patch("src.processor.settings") as s:
-                s.orchestrator_agent = "atlas"
+                s.default_agent = "atlas"
                 s.agent_task_timeout_seconds = 10
                 s.agent_task_max_retries = 1
                 s.full_plans_dir = plans
                 s.sisyphus_plans_dir = Path(".sisyphus/plans")
                 s.default_branch = "main"
                 await processor._start_execution_workflow(state2)
-    assert state_manager.get_state("EXD-2").status == TaskStatus.ERROR
+    exd2 = state_manager.get_state("EXD-2")
+    assert exd2.status == TaskStatus.ERROR
+    assert "could not read Username" in (exd2.error_message or "")
+    assert "write credentials" in (exd2.error_message or "")
 
     # aborted during execution
     state3 = state_manager.create_state("EXD-3", "s", "d")
@@ -1109,7 +1385,7 @@ async def test_execution_delivery_and_push_failures(
     runner3.run_agent_with_retry = AsyncMock(side_effect=aborting)
     with patch.object(processor, "_init_git_manager", return_value=git3):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans
@@ -1308,9 +1584,7 @@ def test_job_processor_init_real_client_branch(monkeypatch, tmp_path):
     with patch("src.processor.settings") as s:
         s.is_configured.return_value = True
         s.jira_host = "https://jira.real.example.com"
-        s.default_agent = "a"
-        s.planning_agent = "p"
-        s.orchestrator_agent = "o"
+        s.default_agent = "atlas"
         with patch("src.processor.create_jira_client", return_value=MagicMock()) as cj:
             proc = JobProcessor()
             cj.assert_called()
@@ -1365,9 +1639,11 @@ async def test_execution_prepare_git_none_returns(
 ):
     monkeypatch.chdir(tmp_path)
     state = state_manager.create_state("EXN-1", "s", "d")
-    with patch.object(processor, "_prepare_git_workspace", return_value=None):
+    with patch.object(
+        processor, "_prepare_git_workspace", new_callable=AsyncMock, return_value=None
+    ):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = tmp_path / "plans"
@@ -1413,7 +1689,7 @@ async def test_planning_success_with_retry_info_no_auto_start(
     runner.run_agent_with_retry = with_hooks
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.planning_agent = "prometheus"
+            s.default_agent = "prometheus"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 2
             s.full_plans_dir = plans
@@ -1460,7 +1736,7 @@ async def test_execution_success_full_path(
     runner.run_agent_with_retry = with_hooks
     with patch.object(processor, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 10
             s.agent_task_max_retries = 1
             s.full_plans_dir = plans

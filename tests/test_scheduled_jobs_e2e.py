@@ -23,6 +23,7 @@ from src.scheduler.service import (
     dispatch_due_schedules,
     preview_existing_issue,
     schedule_existing_issue,
+    wait_inflight_dispatches,
 )
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
@@ -198,7 +199,7 @@ def test_e2e_preview_jira_unavailable():
     assert "KAN-404" in out["error"]
 
 
-def test_e2e_preview_missing_mode_hard_fail():
+def test_e2e_preview_missing_mode_defaults_to_build():
     client = MagicMock()
     client.get_issue.return_value = _issue_payload(
         "KAN-NOMODE",
@@ -211,8 +212,9 @@ def test_e2e_preview_missing_mode_hard_fail():
         ),
     )
     out = preview_existing_issue("KAN-NOMODE", jira_client=client)
-    assert out["ok"] is False
-    assert out.get("template_valid") is False
+    assert out["ok"] is True
+    assert out.get("template_valid") is True
+    assert out.get("mode") == "build"
 
 
 def test_e2e_schedule_existing_soft_fail_transition_and_labels(tmp_path):
@@ -265,7 +267,9 @@ def test_e2e_cancel_dispatched_refused(tmp_path):
         issue_key="KAN-C",
         issue_description="x",
     )
+    assert store.claim_due(rec["schedule_id"]) is not None
     store.update(rec["schedule_id"], status="dispatched")
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
     out = cancel_scheduled_job(rec["schedule_id"], store=store)
     assert out["ok"] is False
     assert "Cannot cancel" in out["error"]
@@ -303,19 +307,123 @@ async def test_e2e_dispatch_uses_local_snapshot_when_jira_get_fails(tmp_path):
     client.get_issue.side_effect = RuntimeError("Jira offline at dispatch")
 
     processor = MagicMock()
-    processor.process_event = AsyncMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
 
     result = await dispatch_due_schedules(
         processor=processor,
         store=store,
         jira_client=client,
     )
-    assert result["started"] == 1
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     processor.process_event.assert_awaited_once()
     event = processor.process_event.await_args.args[0]
     assert event["issue"]["key"] == "KAN-LOCAL"
     assert "local only" in (event["issue"]["fields"]["description"] or "")
     assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
+    tmp_path, monkeypatch
+):
+    """CRITICAL #6: schedule fire on plan_ready must start work, not false-dispatch."""
+    monkeypatch.chdir(tmp_path)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-PR", "plan done", _valid_params(mode="build"))
+    sm.update_state("KAN-PR", status=TaskStatus.PLAN_READY)
+
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="later",
+        description="",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-PR",
+        issue_description=build_issue_description(
+            description="x",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+        ),
+        source="existing",
+    )
+
+    from src.processor import JobProcessor
+
+    with patch("src.processor.create_jira_client"):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+    proc._start_execution_workflow = AsyncMock()
+    proc._start_planning_workflow = AsyncMock()
+    proc._mark_jira_in_progress = MagicMock()
+
+    result = await dispatch_due_schedules(
+        processor=proc, store=store, jira_client=None
+    )
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+    proc._start_execution_workflow.assert_awaited_once()
+    proc._start_planning_workflow.assert_not_awaited()
+    # Workflow begin would set EXECUTING; we mocked it, so still plan_ready
+    # unless _begin_workflow_run ran — mock means status may stay plan_ready,
+    # but the execution entrypoint was invoked (the real success signal).
+    assert proc._start_execution_workflow.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_e2e_dispatch_in_flight_is_not_false_success(tmp_path, monkeypatch):
+    """In-flight issue: schedule must not report dispatched without starting."""
+    monkeypatch.chdir(tmp_path)
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-LIVE", "busy", _valid_params())
+    sm.update_state("KAN-LIVE", status=TaskStatus.EXECUTING)
+
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="busy",
+        description="",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-LIVE",
+        issue_description=_valid_params(),
+        source="existing",
+    )
+
+    from src.processor import JobProcessor
+
+    with patch("src.processor.create_jira_client"):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = MagicMock()
+    proc._start_execution_workflow = AsyncMock()
+    proc._start_planning_workflow = AsyncMock()
+
+    result = await dispatch_due_schedules(
+        processor=proc, store=store, jira_client=None
+    )
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "error"
+    assert "in progress" in (refreshed.get("error_message") or "").lower()
+    proc._start_execution_workflow.assert_not_awaited()
+    assert sm.get_state("KAN-LIVE").status == TaskStatus.EXECUTING
 
 
 @pytest.mark.asyncio
@@ -341,8 +449,8 @@ async def test_e2e_dispatch_process_event_crash_marks_schedule_error(tmp_path):
         store=store,
         jira_client=None,
     )
-    assert result["failed"] == 1
-    assert result["started"] == 0
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "error"
     assert "workflow exploded" in (refreshed.get("error_message") or "")
@@ -383,7 +491,7 @@ async def test_e2e_dispatch_skips_future_and_cancelled(tmp_path):
         processor=processor, store=store, jira_client=None
     )
     assert result["due"] == 0
-    assert result["started"] == 0
+    assert result["launched"] == 0
     processor.process_event.assert_not_called()
 
 
@@ -471,7 +579,8 @@ async def test_e2e_full_pipeline_comments_fail_local_state_still_updates(
         store=store,
         jira_client=jira,
     )
-    assert result["started"] == 1, result
+    assert result["launched"] == 1, result
+    await wait_inflight_dispatches()
     assert store.get(sid)["status"] == "dispatched"
 
     # 4) Local state exists and is completed despite Jira comment failures
@@ -530,12 +639,13 @@ def test_e2e_api_matrix_hard_and_soft(tmp_path, monkeypatch):
         def _preview(issue_key):
             return preview_existing_issue(issue_key, jira_client=client)
 
-        def _from_issue(issue_key, scheduled_at, store=None):
+        def _from_issue(issue_key, scheduled_at, store=None, **kw):
             return schedule_existing_issue(
                 issue_key,
                 scheduled_at=scheduled_at,
                 jira_client=client,
                 store=store or store,
+                **kw,
             )
 
         m.setattr("src.dashboard.api.create_scheduled_job", _create)
@@ -607,7 +717,7 @@ def test_e2e_description_adf_and_plain_helpers():
     }
     assert "hello ADF" in _description_to_text(adf)
     msg = _plain_template_error(
-        "*Virtual Developer* could not start: no ``{params}`` block found.\n\n"
+        "*Yaver* could not start: no ``{params}`` block found.\n\n"
         "{code}\nhelp\n{code}"
     )
     assert "could not start" in msg.lower() or "params" in msg.lower()

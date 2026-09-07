@@ -1,0 +1,565 @@
+"""Persist OpenCode session ids keyed by repository + work branch + target.
+
+A later issue (or re-run) with the same remote, work/Source branch, **and**
+Target can resume the same OpenCode serve session. A different Target is a
+different MR base — new clone folder + new session so the model is not mixed
+with work aimed at another branch. Dashboard Reset drops the bind.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+
+from src.logger import logger
+
+
+def _default_binds_dir() -> Path:
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("opencode-binds")
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def normalize_repo_key(url: str) -> str:
+    """Identity key for a git remote (host/path, no scheme/.git/userinfo)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    raw = raw.strip("<>").strip("`").strip().rstrip("/")
+    if raw.lower().endswith(".git"):
+        raw = raw[:-4]
+    if raw.startswith("git@"):
+        # git@host:group/repo
+        rest = raw[4:]
+        if ":" in rest:
+            host, path = rest.split(":", 1)
+            return f"{host.lower()}/{path.strip('/').lower()}"
+        return rest.lower()
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        host = (parsed.hostname or parsed.netloc.split("@")[-1]).lower()
+        path = (parsed.path or "").strip("/").lower()
+        if path.endswith(".git"):
+            path = path[:-4]
+        return f"{host}/{path}".rstrip("/")
+    return raw.lower().replace("\\", "/")
+
+
+def normalize_branch(name: str) -> str:
+    branch = (name or "").strip().strip("`")
+    if branch.startswith("refs/heads/"):
+        branch = branch[len("refs/heads/") :]
+    return branch
+
+
+SESSION_KIND_PLAN = "plan"
+SESSION_KIND_BUILD = "build"
+_SESSION_KINDS = frozenset({SESSION_KIND_PLAN, SESSION_KIND_BUILD})
+
+
+def normalize_session_kind(kind: str = "") -> str:
+    """``plan`` / ``build`` session map, or empty for the legacy bind."""
+    raw = (kind or "").strip().lower()
+    if raw in {"planning", "derman-plan"}:
+        return SESSION_KIND_PLAN
+    if raw in {"execution", "executing", "derman-build"}:
+        return SESSION_KIND_BUILD
+    return raw if raw in _SESSION_KINDS else ""
+
+
+def bind_id_for(
+    repository_url: str,
+    branch: str,
+    target_branch: str = "",
+    issue_key: str = "",
+    kind: str = "",
+) -> str:
+    repo_key = normalize_repo_key(repository_url)
+    br = normalize_branch(branch)
+    tgt = normalize_branch(target_branch)
+    issue = (issue_key or "").strip().upper()
+    kind_n = normalize_session_kind(kind)
+    # Kind-specific maps are (repo, source/work, target, kind) — no issue
+    # in the key so plan refactor / later builds resume the same chat.
+    if kind_n:
+        material = f"{repo_key}\0{br}\0{tgt}\0{kind_n}"
+    else:
+        material = f"{repo_key}\0{br}\0{tgt}\0{issue}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"osb_{digest}"
+
+
+class SessionBindStore:
+    """One JSON file per (repo, work branch, target) → OpenCode session id."""
+
+    def __init__(self, binds_dir: Optional[Path] = None) -> None:
+        self.binds_dir = binds_dir or _default_binds_dir()
+        self.binds_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+
+    def _path(self, bind_id: str) -> Path:
+        safe = (bind_id or "").replace("/", "_").replace("\\", "_")
+        return self.binds_dir / f"{safe}.json"
+
+    def _write(self, rec: Dict[str, Any]) -> None:
+        path = self._path(rec["bind_id"])
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, indent=2, ensure_ascii=False)
+        tmp.replace(path)
+
+    def get(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str = "",
+        issue_key: str = "",
+        kind: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not normalize_repo_key(repository_url) or not normalize_branch(branch):
+            return None
+        if not normalize_branch(target_branch):
+            return None
+        kind_n = normalize_session_kind(kind)
+        if kind_n:
+            # Plan and build maps are separate. A miss must not fall back
+            # to the other kind (derman-plan cannot implement).
+            return self.get_by_id(
+                bind_id_for(
+                    repository_url,
+                    branch,
+                    target_branch,
+                    issue_key="",
+                    kind=kind_n,
+                )
+            )
+        bid = bind_id_for(
+            repository_url, branch, target_branch, issue_key=issue_key
+        )
+        hit = self.get_by_id(bid)
+        if hit:
+            # Exact key, including a forgotten row (empty session_id) so
+            # attach can read forgotten_session_ids and refuse that ses_*.
+            return hit
+        if (issue_key or "").strip():
+            legacy = self.get_by_id(
+                bind_id_for(repository_url, branch, target_branch, issue_key="")
+            )
+            if legacy and str(legacy.get("session_id") or "").strip():
+                return legacy
+        # Newest live bind for this repo+work+target (any issue). Forgotten
+        # rows have an empty session_id and are skipped by list_binds.
+        return self._find_live_for(repository_url, branch, target_branch)
+
+    def _find_live_for(
+        self, repository_url: str, branch: str, target_branch: str
+    ) -> Optional[Dict[str, Any]]:
+        repo = normalize_repo_key(repository_url)
+        br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
+        if not repo or not br or not tgt:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        for rec in self.list_binds(limit=500):
+            rec_repo = rec.get("repository_key") or normalize_repo_key(
+                str(rec.get("repository_url") or "")
+            )
+            if rec_repo != repo:
+                continue
+            if normalize_branch(str(rec.get("branch") or "")) != br:
+                continue
+            if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
+                continue
+            if best is None or (rec.get("updated_at") or "") >= (
+                best.get("updated_at") or ""
+            ):
+                best = rec
+        return best
+
+    def get_by_id(self, bind_id: str) -> Optional[Dict[str, Any]]:
+        path = self._path((bind_id or "").strip())
+        if not path.is_file():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                rec = json.load(f)
+            return rec if isinstance(rec, dict) else None
+        except Exception as e:
+            logger.debug(f"Could not read session bind {bind_id}: {e}")
+            return None
+
+    def upsert(
+        self,
+        *,
+        repository_url: str,
+        branch: str,
+        session_id: str,
+        issue_key: str = "",
+        job_id: Optional[str] = None,
+        working_directory: Optional[str] = None,
+        target_branch: str = "",
+        kind: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(repository_url, str) or not isinstance(branch, str):
+            return None
+        if not isinstance(session_id, str):
+            return None
+        if not isinstance(target_branch, str):
+            return None
+        repo = repository_url.strip()
+        br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
+        sid = session_id.strip()
+        kind_n = normalize_session_kind(kind)
+        if not normalize_repo_key(repo) or not br or not tgt or not sid:
+            return None
+        bid = bind_id_for(
+            repo, br, tgt, issue_key="" if kind_n else issue_key, kind=kind_n
+        )
+        now = _now_iso()
+        wd = (working_directory or "").strip() or None
+        if wd:
+            try:
+                wd = str(Path(wd).resolve())
+            except OSError:
+                wd = str(wd)
+        with self._lock:
+            prev = self.get_by_id(bid) or {}
+            forgotten = [
+                str(x).strip()
+                for x in (prev.get("forgotten_session_ids") or [])
+                if str(x).strip()
+            ]
+            if sid in forgotten:
+                logger.info(
+                    f"OpenCode session bind {bid}: refusing forgotten session {sid}"
+                )
+                return prev or None
+            rec: Dict[str, Any] = {
+                "bind_id": bid,
+                "repository_url": repo,
+                "repository_key": normalize_repo_key(repo),
+                "branch": br,
+                "target_branch": tgt,
+                "session_id": sid,
+                "kind": kind_n or prev.get("kind") or "",
+                "issue_key": (issue_key or "").strip().upper(),
+                "job_id": job_id or prev.get("job_id"),
+                "working_directory": wd or prev.get("working_directory"),
+                "forgotten_session_ids": forgotten[-50:],
+                "created_at": prev.get("created_at") or now,
+                "updated_at": now,
+            }
+            if prev.get("reset_at"):
+                rec["reset_at"] = prev.get("reset_at")
+            self._write(rec)
+        kind_note = f" kind={kind_n}" if kind_n else ""
+        logger.info(
+            f"Session bind {bid}: {normalize_repo_key(repo)}"
+            f"@{br}→{tgt}{kind_note} → {sid}"
+        )
+        return rec
+
+    def delete(self, bind_id: str) -> bool:
+        bid = (bind_id or "").strip()
+        if not bid:
+            return False
+        path = self._path(bid)
+        with self._lock:
+            if not path.is_file():
+                return False
+            try:
+                path.unlink()
+            except OSError as e:
+                logger.warning(f"Could not delete session bind {bid}: {e}")
+                return False
+        logger.info(f"OpenCode session bind reset: {bid}")
+        return True
+
+    def forget_session(
+        self,
+        bind_id: str,
+        *,
+        session_id: str = "",
+        reason: str = "reset",
+    ) -> Optional[Dict[str, Any]]:
+        """Drop the resume pointer but remember the id so discovery cannot rebind it.
+
+        Dashboard Reset and empty-timeout abandon use this instead of unlink so
+        ``find_sessions_for_directory`` cannot restore the same ``ses_*``.
+        """
+        bid = (bind_id or "").strip()
+        if not bid:
+            return None
+        with self._lock:
+            rec = self.get_by_id(bid)
+            if not rec:
+                return None
+            now = _now_iso()
+            forgotten = [
+                str(x).strip()
+                for x in (rec.get("forgotten_session_ids") or [])
+                if str(x).strip()
+            ]
+            sid = (session_id or rec.get("session_id") or "").strip()
+            if sid and sid not in forgotten:
+                forgotten.append(sid)
+            rec["session_id"] = ""
+            rec["forgotten_session_ids"] = forgotten[-50:]
+            rec["reset_at"] = now
+            rec["forget_reason"] = reason
+            rec["updated_at"] = now
+            self._write(rec)
+        logger.info(
+            f"OpenCode session bind forgotten {bid}: {sid or '(none)'} ({reason})"
+        )
+        return rec
+
+    def delete_for(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str = "",
+        issue_key: str = "",
+        kind: str = "",
+    ) -> bool:
+        if not normalize_branch(target_branch):
+            return False
+        kind_n = normalize_session_kind(kind)
+        ok = self.delete(
+            bind_id_for(
+                repository_url,
+                branch,
+                target_branch,
+                issue_key="" if kind_n else issue_key,
+                kind=kind_n,
+            )
+        )
+        if kind_n:
+            return ok
+        # Leftover pre-issue-key file must not keep a live pointer.
+        if (issue_key or "").strip():
+            ok = (
+                self.delete(bind_id_for(repository_url, branch, target_branch))
+                or ok
+            )
+        return ok
+
+    def forget_for(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str,
+        *,
+        session_id: str = "",
+        reason: str = "abandoned",
+        issue_key: str = "",
+        kind: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not normalize_branch(target_branch):
+            return None
+        kind_n = normalize_session_kind(kind)
+        rec = self.forget_session(
+            bind_id_for(
+                repository_url,
+                branch,
+                target_branch,
+                issue_key="" if kind_n else issue_key,
+                kind=kind_n,
+            ),
+            session_id=session_id,
+            reason=reason,
+        )
+        if kind_n:
+            return rec
+        # Production upserts include issue_key. Also tombstone the legacy
+        # "" bind so get() fallback cannot restore the abandoned ses_*.
+        if (issue_key or "").strip():
+            leftover = self.forget_session(
+                bind_id_for(repository_url, branch, target_branch),
+                session_id=session_id,
+                reason=reason,
+            )
+            rec = rec or leftover
+        return rec
+
+    def forgotten_ids_for(
+        self,
+        repository_url: str,
+        branch: str,
+        target_branch: str,
+        issue_key: str = "",
+        kind: str = "",
+    ) -> List[str]:
+        """Forgotten ses_* for this repo+work+target (any issue, including empty)."""
+        out: List[str] = []
+        seen: set[str] = set()
+
+        def _add(rec: Optional[Dict[str, Any]]) -> None:
+            if not rec:
+                return
+            for x in rec.get("forgotten_session_ids") or []:
+                fx = str(x or "").strip()
+                if fx and fx not in seen:
+                    seen.add(fx)
+                    out.append(fx)
+
+        repo = normalize_repo_key(repository_url)
+        br = normalize_branch(branch)
+        tgt = normalize_branch(target_branch)
+        if not repo or not br or not tgt:
+            return out
+        kind_n = normalize_session_kind(kind)
+        if kind_n:
+            _add(
+                self.get_by_id(
+                    bind_id_for(
+                        repository_url,
+                        branch,
+                        target_branch,
+                        issue_key="",
+                        kind=kind_n,
+                    )
+                )
+            )
+        _add(
+            self.get_by_id(
+                bind_id_for(
+                    repository_url, branch, target_branch, issue_key=issue_key
+                )
+            )
+        )
+        _add(self.get_by_id(bind_id_for(repository_url, branch, target_branch)))
+        if not self.binds_dir.is_dir():
+            return out
+        with self._lock:
+            for path in self.binds_dir.glob("osb_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                rec_repo = rec.get("repository_key") or normalize_repo_key(
+                    str(rec.get("repository_url") or "")
+                )
+                if rec_repo != repo:
+                    continue
+                if normalize_branch(str(rec.get("branch") or "")) != br:
+                    continue
+                if normalize_branch(str(rec.get("target_branch") or "")) != tgt:
+                    continue
+                _add(rec)
+        return out
+
+    def find_by_issue_key(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """Newest bind that still points at a session for this Jira issue."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return None
+        best: Optional[Dict[str, Any]] = None
+        for rec in self.list_binds(limit=500):
+            if (rec.get("issue_key") or "").strip().upper() != key:
+                continue
+            if not str(rec.get("session_id") or "").strip():
+                continue
+            if best is None or (rec.get("updated_at") or "") >= (
+                best.get("updated_at") or ""
+            ):
+                best = rec
+        return best
+
+    def list_binds(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        if not self.binds_dir.is_dir():
+            return items
+        with self._lock:
+            for path in self.binds_dir.glob("osb_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if isinstance(rec, dict) and rec.get("session_id"):
+                    items.append(rec)
+        items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        return items[: max(1, int(limit))]
+
+    def relocate_working_directory(self, old_dir: Any, new_dir: Any) -> int:
+        """Point binds at *new_dir* after a clone folder was renamed in place."""
+        try:
+            old_r = Path(old_dir).resolve()
+            new_s = str(Path(new_dir).resolve())
+        except (OSError, TypeError):
+            return 0
+        if not new_s:
+            return 0
+        try:
+            if old_r == Path(new_s).resolve():
+                return 0
+        except OSError:
+            pass
+        updated = 0
+        with self._lock:
+            if not self.binds_dir.is_dir():
+                return 0
+            now = _now_iso()
+            for path in self.binds_dir.glob("osb_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                raw = rec.get("working_directory")
+                if not raw or not isinstance(raw, str):
+                    continue
+                try:
+                    if Path(raw).resolve() != old_r:
+                        continue
+                except OSError:
+                    continue
+                rec["working_directory"] = new_s
+                rec["updated_at"] = now
+                self._write(rec)
+                updated += 1
+        if updated:
+            logger.info(
+                f"Relocated {updated} session bind working_directory "
+                f"{old_r} → {new_s}"
+            )
+        return updated
+
+    def working_directories(self) -> List[Path]:
+        """Clone paths still referenced by a session bind (protect from purge)."""
+        out: List[Path] = []
+        seen: set[str] = set()
+        for rec in self.list_binds(limit=500):
+            raw = rec.get("working_directory")
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                resolved = Path(raw).resolve()
+            except OSError:
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(resolved)
+        return out
+
+
+session_bind_store = SessionBindStore()

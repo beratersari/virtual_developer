@@ -41,11 +41,9 @@ def test_logger_instance_methods():
         lg.exception("div", e)
 
 
-def test_module_level_wrappers():
-    logger_mod.debug("d")
-    logger_mod.info("i")
-    logger_mod.warning("w")
-    logger_mod.error("e")
+def test_module_level_wrappers_removed():
+    for name in ("debug", "info", "warning", "error", "critical", "exception"):
+        assert not hasattr(logger_mod, name)
 
 
 def test_format_has_no_emoji_and_stable_columns():
@@ -67,6 +65,54 @@ def test_format_has_no_emoji_and_stable_columns():
     assert "hello world" in text
     # timestamp shape YYYY-MM-DD
     assert text[:4].isdigit()
+
+
+def test_write_stream_survives_cp1252_console(monkeypatch):
+    """Frozen Windows stdio is cp1252 — ≈ must not abort the process."""
+    from src.logger import _write_stream
+
+    class _Cp1252:
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.writes = []
+
+        def write(self, s):
+            s.encode("cp1252")
+            self.writes.append(s)
+
+        def flush(self):
+            pass
+
+    broken = _Cp1252()
+    _write_stream(broken, "applied≈48 dash—ok")
+    # Primary print may fail; replacement path must not raise.
+    class _Buf:
+        def __init__(self):
+            self.data = b""
+
+        def write(self, b):
+            self.data += b
+
+        def flush(self):
+            pass
+
+    class _WithBuf(_Cp1252):
+        def __init__(self):
+            super().__init__()
+            self.buffer = _Buf()
+
+    stream = _WithBuf()
+    _write_stream(stream, "applied≈48")
+    assert b"applied" in stream.buffer.data
+
+
+def test_logger_debug_almost_equal_does_not_raise(capsys):
+    lg = Logger()
+    lg.set_color_output(False)
+    lg.debug("Loaded dotenv keys (applied≈3)")
+    out = capsys.readouterr().out
+    assert "applied" in out
 
 
 def test_info_line_includes_caller_file_and_line(capsys):

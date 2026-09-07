@@ -52,24 +52,29 @@ def test_assert_remote_host_allowed_blocks_attacker(monkeypatch):
     assert "attacker.example" in str(ei.value).lower() or "refused" in str(ei.value).lower()
 
 
-def test_assert_remote_host_requires_allowlist_when_pat_set(monkeypatch):
+def test_assert_remote_host_uses_legacy_pat_without_allowlist(monkeypatch):
     from src.config import settings as real_settings
 
     monkeypatch.setattr(real_settings, "gitlab_pat", "pat")
+    monkeypatch.setattr(real_settings, "gitlab_host_pats", "")
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "")
     with patch.object(GitManager, "_setup_temp_working_dir"):
         gm = GitManager(issue_key="SEC-2")
-    with pytest.raises(GitCloneError) as ei:
-        gm._assert_remote_host_allowed("https://gitlab.company.com/g/r.git")
-    assert "GITLAB_ALLOWED_HOSTS" in str(ei.value)
+    gm._assert_remote_host_allowed("https://gitlab.company.com/g/r.git")
+    assert gm._pat_for_remote("https://gitlab.company.com/g/r.git") == "pat"
 
 
-def test_clone_argv_never_embeds_pat(tmp_path, monkeypatch):
+def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
+    """Clone uses oauth2:PAT@ URL when settings PAT exists; never clears helpers."""
     from src.config import settings as real_settings
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(real_settings, "gitlab_pat", "super-secret-pat-xyz")
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map(
+            {"gitlab.example.com": "super-secret-pat-xyz"}
+        )
     monkeypatch.setattr(real_settings, "temp_dir_base", Path(".temp"))
 
     with patch.object(GitManager, "_setup_temp_working_dir"):
@@ -81,21 +86,134 @@ def test_clone_argv_never_embeds_pat(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["env"] = kwargs.get("env")
+        captured["cmd"] = list(cmd)
+        captured["env"] = kwargs.get("env") or {}
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("src.git_manager.subprocess.run", side_effect=fake_run):
-        with patch.object(gm, "_sync_remote_branches"):
-            with patch.object(gm, "_scrub_remote_credentials"):
-                gm._clone_into_temp()
+        with patch.object(gm, "_update_submodules"):
+            with patch.object(gm, "_materialize_job_remote_refs"):
+                with patch.object(gm, "_scrub_remote_credentials") as scrub:
+                    gm._clone_into_temp()
+                    scrub.assert_called()
 
-    joined = " ".join(str(c) for c in captured["cmd"])
-    assert "super-secret-pat-xyz" not in joined
-    assert "oauth2:" not in joined
-    env = captured["env"] or {}
-    assert env.get("VD_GIT_PASSWORD") == "super-secret-pat-xyz"
+    cmd = captured["cmd"]
+    assert cmd[0] == "git"
+    assert "clone" in cmd
+    i = cmd.index("clone")
+    assert cmd[i : i + 2] == ["clone", "--no-single-branch"]
+    clone_url = cmd[i + 2]
+    # PAT must not appear in argv (insteadOf + askpass in env)
+    assert "oauth2:super-secret-pat-xyz@" not in clone_url
+    env = captured.get("env") or {}
+    assert clone_url == "https://gitlab.example.com/group/repo.git"
+    rewrite = [
+        env.get(k)
+        for k in env
+        if str(k).startswith("GIT_CONFIG_KEY_")
+        and "insteadOf" in str(env.get(k) or "")
+    ]
+    assert any("oauth2:super-secret-pat-xyz@" in str(v) for v in rewrite), env
+    assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    assert env.get("GCM_INTERACTIVE") == "never"
     assert env.get("GIT_ASKPASS")
+    assert env.get("VD_GIT_PASSWORD") == "super-secret-pat-xyz"
+    assert "credential.helper=" in cmd
+
+
+def test_push_applies_settings_pat_to_origin_without_clearing_helpers(
+    tmp_path, monkeypatch
+):
+    """Push with settings PAT sets origin URL temporarily; helper GUI disabled."""
+    from src.config import settings as real_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(real_settings, "gitlab_pat", "settings-pat-from-dashboard")
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map(
+            {"gitlab.example.com": "settings-pat-from-dashboard"}
+        )
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-PUSH")
+    gm.remote_enabled = True
+    gm.remote_url = "https://gitlab.example.com/group/repo.git"
+    gm.temp_dir = tmp_path / "repo"
+    gm.temp_dir.mkdir()
+    gm.work_branch = "feature/SEC-PUSH"
+    gm._assert_remote_host_allowed = MagicMock()
+
+    captured = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("src.git_manager.subprocess.run", side_effect=fake_run):
+        with patch.object(gm, "_with_auth_remote"):
+            ok = gm.push("feature/SEC-PUSH")
+
+    assert ok is True
+    # set-url with oauth2:PAT before push
+    set_urls = [c for c in captured if c[:3] == ["git", "remote", "set-url"]]
+    assert any("oauth2:settings-pat-from-dashboard@" in " ".join(c) for c in set_urls)
+    # Unattended: empty helper on argv so Windows GCM cannot pop a dialog
+    push_cmds = [c for c in captured if "push" in c]
+    assert push_cmds
+    assert any("credential.helper=" in c for c in push_cmds)
+
+
+def test_push_without_settings_pat_refuses_windows_credentials(
+    tmp_path, monkeypatch
+):
+    """No settings PAT → push fails. Windows Credential Manager is not used."""
+    from src.config import settings as real_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(real_settings, "gitlab_pat", "")
+    monkeypatch.setattr(real_settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map({})
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-NOPAT")
+    gm.remote_enabled = True
+    gm.remote_url = "https://gitlab.example.com/group/repo.git"
+    gm.temp_dir = tmp_path / "repo"
+    gm.temp_dir.mkdir()
+    gm.work_branch = "feature/x"
+    gm._assert_remote_host_allowed = MagicMock()
+
+    captured = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("src.git_manager.subprocess.run", side_effect=fake_run):
+        with patch.object(gm, "_with_auth_remote"):
+            with patch.object(gm, "_scrub_remote_credentials"):
+                ok = gm.push("feature/x")
+
+    assert ok is False
+    assert "Windows" in (gm.last_push_error or "")
+    assert not any("push" in c for c in captured)
+
+
+def test_https_url_with_settings_pat_builds_oauth2_url(tmp_path, monkeypatch):
+    from src.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "gitlab_pat", "glpat-abc")
+    if hasattr(real_settings, "set_gitlab_host_pat_map"):
+        real_settings.set_gitlab_host_pat_map({"gitlab.example.com": "glpat-abc"})
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(issue_key="SEC-URL")
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    out = gm._https_url_with_settings_pat()
+    assert out == "https://oauth2:glpat-abc@gitlab.example.com/g/r.git"
 
 
 def test_build_clone_url_does_not_embed_pat():
@@ -239,12 +357,18 @@ async def test_start_plan_execution_from_api(processor, state_manager, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_plan_ready_label_starts_execution(processor, state_manager):
+async def test_plan_ready_label_starts_execution(
+    processor, state_manager, tmp_path
+):
     state = state_manager.create_state("PR-2", "s", "d")
-    state_manager.update_state("PR-2", status=TaskStatus.PLAN_READY)
+    plan = tmp_path / "PR-2.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-2", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
     started = {"ok": False}
 
-    async def fake_exec(st):
+    async def fake_exec(st, **kwargs):
         started["ok"] = True
 
     event = {
@@ -252,9 +376,17 @@ async def test_plan_ready_label_starts_execution(processor, state_manager):
         "issue": {
             "key": "PR-2",
             "fields": {
-                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["ai-assist", "ai-start-work"],
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
                 "summary": "s",
+                "description": (
+                    "{params}\nRepository: https://g.example/r.git\n"
+                    "Source branch: feature/x\nTarget branch: develop\n"
+                    "Mode: plan\n{params}"
+                ),
             },
         },
     }

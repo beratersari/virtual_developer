@@ -4,6 +4,7 @@ import asyncio
 import platform
 import signal
 import sys
+from pathlib import Path
 from typing import Optional
 
 import uvicorn
@@ -13,7 +14,6 @@ from src.dashboard.api import create_dashboard_app
 from src.jira.poller import JiraPoller
 from src.logger import logger
 from src.processor import JobProcessor
-from src.state.manager import JiraStateManager
 
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
@@ -24,23 +24,46 @@ class JiraAgentDaemon:
 
     def __init__(self):
         self.processor = JobProcessor()
-        self.state_manager = JiraStateManager()
+        # One process-wide state manager (processor owns it; dashboard + poller share)
+        self.state_manager = self.processor.state_manager
         self._running = False
         self._stopping = False
         self._poller: Optional[JiraPoller] = None
         self._dashboard_server: Optional[uvicorn.Server] = None
+        # Main asyncio loop used by poller thread → process_event handoff
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def start(self):
         """Start the daemon."""
         # Validate configuration
         settings.validate_or_raise()
 
-        logger.info("Starting JIRA Virtual Developer daemon")
+        # Capture the running loop once so poller workers never call
+        # run_coroutine_threadsafe on a closed/stale loop reference.
+        self._main_loop = asyncio.get_running_loop()
+
+        from src.paths import agent_data_dir, ensure_agent_data_dir, plans_dir
+
+        logger.info("Starting Yaver daemon")
         logger.info(f"project_root={settings.project_root}")
+        logger.info(f"data_dir={agent_data_dir()}")
+        logger.info(f"temp_dir_base={settings.temp_dir_base}")
+        logger.info(f"plans_dir={plans_dir()}")
+        ensure_agent_data_dir(migrate=True)
+        try:
+            Path(settings.temp_dir_base).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not create TEMP_DIR_BASE {settings.temp_dir_base}: {e}")
         logger.info(f"jira_host={settings.jira_host}")
         logger.info(f"poll_interval_seconds={settings.poll_interval_seconds}")
+        intake = (
+            settings.jira_intake_mode_normalized
+            if hasattr(settings, "jira_intake_mode_normalized")
+            else (settings.jira_intake_mode or "poll")
+        )
+        logger.info(f"jira_intake_mode={intake}")
 
-        # Disk PLANNING/EXECUTING after crash is not a live job — finalise first
+        # Disk PENDING/PLANNING/EXECUTING after crash is not a live job — finalise first
         try:
             n = self.processor.recover_orphaned_in_flight()
             if n:
@@ -48,15 +71,34 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.exception(f"Startup orphan recovery failed: {e}", e)
 
-        # Age-based temp clone sweep (default: delete dirs older than 24h)
+        # Schedules left in "dispatching" after crash never become due again
         try:
-            from src.git_manager import purge_stale_temp_dirs
+            from src.scheduler.service import recover_stuck_schedules
 
-            purged = purge_stale_temp_dirs()
-            if purged:
-                logger.info(f"Startup temp purge removed {purged} stale clone(s)")
+            n = recover_stuck_schedules(max_age_seconds=0.0)
+            if n:
+                logger.info(
+                    f"Startup recovery re-opened {n} stuck schedule(s) "
+                    f"(dispatching → scheduled)"
+                )
         except Exception as e:
-            logger.exception(f"Startup temp purge failed: {e}", e)
+            logger.exception(f"Startup schedule recovery failed: {e}", e)
+
+        try:
+            n = self.processor.queue_store.recover_stuck_running()
+            if n:
+                logger.info(f"Startup recovery re-queued {n} orphaned queue item(s)")
+        except Exception as e:
+            logger.exception(f"Startup queue recovery failed: {e}", e)
+
+        # Crash recovery leaves durable rows in ``queued``. Start them now —
+        # otherwise poller sees "already queued" and never dispatches.
+        try:
+            started = await self.processor.dispatch_queue()
+            if started:
+                logger.info(f"Startup queue dispatch started {started} item(s)")
+        except Exception as e:
+            logger.exception(f"Startup queue dispatch failed: {e}", e)
 
         self._running = True
         self._stopping = False
@@ -110,7 +152,7 @@ class JiraAgentDaemon:
                 )
             tasks.append(asyncio.create_task(self._start_dashboard()))
 
-        # Board/sprint poller is the sole issue intake path
+        # Board/sprint poller (idle when jira_intake_mode=webhook)
         logger.info("Starting JIRA poller...")
         poller_task = asyncio.create_task(self._start_poller())
         tasks.append(poller_task)
@@ -124,11 +166,6 @@ class JiraAgentDaemon:
         logger.info("Starting schedule dispatcher...")
         schedule_task = asyncio.create_task(self._run_schedule_dispatcher())
         tasks.append(schedule_task)
-
-        # Periodic purge of temp clones older than temp_cleanup_max_age_days
-        logger.info("Starting temp cleanup sweeper...")
-        cleanup_task = asyncio.create_task(self._run_temp_cleanup_sweeper())
-        tasks.append(cleanup_task)
 
         logger.info("Daemon started. Press Ctrl+C to stop.")
 
@@ -177,6 +214,7 @@ class JiraAgentDaemon:
             state_manager=self.state_manager,
         )
         self._dashboard_app = app
+        app.state.loop = self._main_loop or asyncio.get_running_loop()
         config = uvicorn.Config(
             app,
             host=settings.dashboard_host,
@@ -189,9 +227,13 @@ class JiraAgentDaemon:
 
     async def _start_poller(self):
         """Start the JIRA poller."""
-        self._poller = JiraPoller(board_id=settings.jira_board_id)
+        self._poller = JiraPoller(
+            board_id=settings.jira_board_id,
+            state_manager=self.state_manager,
+        )
         # Link live poller for dashboard settings + cancel re-queue status markers
         self.processor._poller = self._poller
+        self._poller._processor = self.processor
         try:
             n = self.processor.seed_poller_requeue_markers()
             if n:
@@ -202,23 +244,99 @@ class JiraAgentDaemon:
         if app is not None:
             app.state.poller = self._poller
 
-        # Run poller in executor since it's blocking
-        loop = asyncio.get_event_loop()
+        # Prefer the loop captured at start(); fall back to running loop here
+        loop = self._main_loop or asyncio.get_running_loop()
+        self._main_loop = loop
 
         # Create async-safe handler that works from a different thread
         def async_handler(event):
             if not self._running or self._stopping:
+                self._record_dropped_accept(
+                    event, "Daemon is stopping or not running."
+                )
                 return
-            asyncio.run_coroutine_threadsafe(
-                self.processor.process_event(event),
-                loop,
-            )
+            issue_key = (event.get("issue") or {}).get("key") or "unknown"
+            main = self._main_loop
+            if main is None:
+                logger.error(
+                    f"Cannot schedule process_event for {issue_key}: "
+                    f"no asyncio loop captured (restart daemon)"
+                )
+                self._record_dropped_accept(
+                    event, "No asyncio loop was captured."
+                )
+                return
+            try:
+                if main.is_closed():
+                    logger.error(
+                        f"Cannot schedule process_event for {issue_key}: "
+                        f"asyncio event loop is closed "
+                        f"(issue may sit In Progress without a job — restart daemon)"
+                    )
+                    self._record_dropped_accept(
+                        event, "The asyncio event loop is closed."
+                    )
+                    return
+            except Exception:
+                pass
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.processor.enqueue_jira_event(event),
+                    main,
+                )
+            except RuntimeError as e:
+                logger.error(
+                    f"Failed to schedule process_event for {issue_key}: {e} "
+                    f"(issue may sit In Progress without a job — restart daemon)"
+                )
+                self._record_dropped_accept(event, str(e))
+                return
+
+            def _on_done(f: "asyncio.Future") -> None:
+                try:
+                    result = f.result()
+                except Exception as exc:
+                    logger.exception(
+                        f"process_event failed for {issue_key}: {exc}",
+                        exc,
+                    )
+                    self._record_dropped_accept(event, str(exc))
+                    return
+                if isinstance(result, dict) and result.get("ok") is False:
+                    self._record_dropped_accept(
+                        event,
+                        str(result.get("reason") or "enqueue rejected"),
+                    )
+
+            try:
+                fut.add_done_callback(_on_done)
+            except Exception:
+                pass
 
         await loop.run_in_executor(
             None,
             self._poller.start,
             async_handler,
         )
+
+    def _record_dropped_accept(self, event: dict, reason: str) -> None:
+        """Jira already left To Do; persist ERROR + comment so it is not silent."""
+        issue = (event or {}).get("issue") or {}
+        key = (issue.get("key") or "").strip()
+        if not key or key.lower() == "unknown":
+            return
+        fields = issue.get("fields") or {}
+        summary = fields.get("summary") or key
+        proc = getattr(self, "processor", None)
+        if proc is None or not hasattr(proc, "record_dropped_accept"):
+            logger.error(
+                f"{key}: accepted but no worker and no processor to record ERROR"
+            )
+            return
+        try:
+            proc.record_dropped_accept(key, str(summary or key), reason=reason)
+        except Exception as e:
+            logger.warning(f"{key}: dropped-accept notify failed: {e}")
 
     def _abort_stuck_issue(self, state, message: str) -> None:
         """Fail issue, notify Jira, kill agent children, and release live context."""
@@ -232,7 +350,7 @@ class JiraAgentDaemon:
             issue_key,
             message,
             suggestion=(
-                "Check session logs under .jira-agent/sessions/, then "
+                "Check session logs under YAVER_DATA_DIR/sessions/, then "
                 "move the issue back to TO DO to re-queue."
             ),
         )
@@ -253,29 +371,11 @@ class JiraAgentDaemon:
                 if result.get("claimed"):
                     logger.info(
                         f"Schedule dispatch: due={result.get('due')} "
-                        f"started={result.get('started')} failed={result.get('failed')}"
+                        f"claimed={result.get('claimed')} "
+                        f"launched={result.get('launched')}"
                     )
             except Exception as e:
                 logger.exception(f"Schedule dispatcher tick failed: {e}", e)
-            await asyncio.sleep(interval)
-
-    async def _run_temp_cleanup_sweeper(self):
-        """Delete temp clone directories older than configured max age (default 24h)."""
-        from src.git_manager import purge_stale_temp_dirs
-
-        # Hourly is enough; startup already runs one sweep
-        interval = 3600
-        while self._running:
-            try:
-                policy = (settings.temp_cleanup_policy or "age").strip().lower()
-                # Always allow age purge when policy is age; also run when always
-                # is set so long-lived dirs still get collected
-                if policy in {"age", "always"}:
-                    n = purge_stale_temp_dirs()
-                    if n:
-                        logger.info(f"Periodic temp purge removed {n} stale clone(s)")
-            except Exception as e:
-                logger.exception(f"Temp cleanup sweeper failed: {e}", e)
             await asyncio.sleep(interval)
 
     async def _monitor_active_issues(self):
@@ -303,15 +403,41 @@ class JiraAgentDaemon:
                     if state.status not in in_flight:
                         continue
 
-                    timeout = state.timeout_seconds or settings.agent_task_timeout_seconds
+                    from src.config import live_agent_timeout_seconds
+
+                    timeout = live_agent_timeout_seconds()
                     # Treat falsy 0 as a real zero retries; only None falls back to settings
                     retries = (
                         state.max_retries
                         if state.max_retries is not None
                         else settings.agent_task_max_retries
                     )
-                    # Allow full retry budget plus 50% headroom for backoff/overhead
-                    limit_seconds = timeout * (retries + 1) * 1.5
+                    meta = state.metadata or {}
+                    extra = 0
+                    try:
+                        extra = max(
+                            int(meta.get("max_incomplete_retries") or 0),
+                            int(meta.get("max_compact_continues") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        extra = 0
+                    # Allow full retry + compact-continue budget plus 50% headroom
+                    from src.config import compute_stuck_limit_seconds
+
+                    limit_seconds = compute_stuck_limit_seconds(
+                        timeout, retries, extra_attempts=extra
+                    )
+                    # Clone phase (live context, no agent task id yet) uses git budget
+                    live = False
+                    try:
+                        live = self.processor._is_live_processing(state.issue_key)
+                    except Exception:
+                        live = False
+                    if live and not getattr(state, "current_task_id", None):
+                        clone_budget = int(
+                            getattr(settings, "git_clone_timeout_seconds", 1800) or 1800
+                        )
+                        limit_seconds = max(limit_seconds, clone_budget + 60)
 
                     # Missing started_at must not leave jobs stuck forever.
                     if not state.started_at:

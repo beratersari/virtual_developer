@@ -1,11 +1,9 @@
-"""Agent runner that interfaces with Oh My OpenAgent via CLI."""
+"""Agent runner that drives Oh My OpenAgent over ``opencode serve``."""
 
 import asyncio
-import json
 import os
 import platform
-import shlex
-import subprocess
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,30 +17,40 @@ from src.logger import logger
 # Check if running on Windows
 IS_WINDOWS = platform.system() == "Windows"
 
-# oh-my-openagent registers agents under display names, not short keys.
-# Map config/short names so --agent resolves without "not found" fallback.
+# OpenCoderman derman-build / derman-plan are the Yaver defaults. Stock
+# OpenCode build/plan stay available. Old names map to the OpenCoderman pair.
 OPENCODE_AGENT_ALIASES: Dict[str, str] = {
-    "sisyphus": "Sisyphus - ultraworker",
-    "prometheus": "Prometheus - Plan Builder",
-    "atlas": "Atlas - Plan Executor",
+    "derman-build": "derman-build",
+    "derman-plan": "derman-plan",
+    "forge": "derman-build",
+    "blueprint": "derman-plan",
+    "implement": "derman-build",
+    "planner": "derman-plan",
+    "build": "build",
+    "plan": "plan",
+    "atlas": "derman-build",
+    "sisyphus": "derman-build",
+    "sisyphus-junior": "derman-build",
+    "hephaestus": "derman-build",
+    "prometheus": "derman-plan",
+    "metis": "derman-plan",
+    "momus": "derman-plan",
     "oracle": "oracle",
     "explore": "explore",
     "librarian": "librarian",
-    "metis": "Metis - Plan Consultant",
-    "momus": "Momus - Plan Critic",
-    "sisyphus-junior": "Sisyphus-Junior",
-    "hephaestus": "Hephaestus",
-    "multimodal-looker": "multimodal-looker",
 }
 
 
 def _default_sessions_dir() -> Path:
-    """Session logs root. Tests patch this so nothing lands in the real repo tree."""
-    return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+    """Session logs root (``YAVER_DATA_DIR/sessions``). Tests patch this."""
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("sessions").resolve()
 
 
 def resolve_opencode_agent_name(agent: str) -> str:
-    """Map short agent keys to OpenCode agent IDs registered by oh-my-openagent."""
+    """Map short / legacy names to OpenCode agent ids (derman-build, derman-plan, …)."""
     if not agent:
         return agent
     key = agent.strip()
@@ -55,115 +63,225 @@ def resolve_opencode_agent_name(agent: str) -> str:
     # Title-case single tokens often still fail; try lower map again
     return OPENCODE_AGENT_ALIASES.get(key.lower().replace("_", "-"), key)
 
-# B10: allowlist child env (not denylist). Host Jira/GitLab push creds stay out.
-# Model provider keys OpenCode needs are explicitly allowed.
-_AGENT_ENV_ALLOW_EXACT = frozenset(
-    {
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "LANGUAGE",
-        "TZ",
-        "TERM",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
-        "PWD",
-        "USERPROFILE",
-        "HOMEDRIVE",
-        "HOMEPATH",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "SYSTEMROOT",
-        "WINDIR",
-        "COMSPEC",
-        "PATHEXT",
-        "NUMBER_OF_PROCESSORS",
-        "PROCESSOR_ARCHITECTURE",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        # OpenCode / Bun / Node runtime
-        "OPENCODE_DISABLE_MODELS_FETCH",
-        "OPENCODE_CONFIG",
-        "OPENCODE_CONFIG_DIR",
-        "OPENCODE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "BUN_INSTALL",
-        "NODE_ENV",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "npm_config_cache",
-        # Model providers the agent needs to call LLMs (not Jira/GitLab)
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "OPENROUTER_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "XAI_API_KEY",
-        "GROQ_API_KEY",
-        "MISTRAL_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "TOGETHER_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_ENDPOINT",
-        "OLLAMA_HOST",
-        "OLLAMA_API_KEY",
-    }
-)
-_AGENT_ENV_ALLOW_PREFIXES = (
-    "LC_",
-    "OPENCODE_",
-    "BUN_",
-    "npm_config_",
-)
+# ---------------------------------------------------------------------------
+# Agent child env: inherit the full process environment (no allow/deny filter)
+# plus current Windows User/Machine vars (System Properties / WSL host).
+# (working_directory is accepted for call-site compatibility; unused.)
+# ---------------------------------------------------------------------------
 
 
-def _agent_subprocess_env() -> Dict[str, str]:
-    """Minimal env for agent children: allowlist + no host git credentials.
+def _maybe_wsl_windows_path(path: str) -> str:
+    """Translate ``C:\\Windows\\...`` to ``/mnt/c/Windows/...`` when on WSL."""
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        return raw
+    if raw.startswith("/"):
+        return raw
+    if len(raw) >= 3 and raw[1] == ":" and raw[0].isalpha():
+        drive = raw[0].lower()
+        rest = raw[2:].replace("\\", "/").lstrip("/")
+        return f"/mnt/{drive}/{rest}"
+    return raw
 
-    Never pass Jira/GitLab tokens, SSH agent, or credential helpers.
-    Push/auth remains host-side via GitManager askpass only.
+
+def _parse_cmd_set_output(text: str) -> Dict[str, str]:
+    """Parse ``cmd.exe /c set`` lines (``KEY=value``; value may contain ``=``)."""
+    out: Dict[str, str] = {}
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def _windows_registry_environ() -> Dict[str, str]:
+    """User + Machine environment from the Windows registry."""
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except ImportError:
+        return {}
+    merged: Dict[str, str] = {}
+    hives = (
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+    )
+    for hive, path in hives:
+        try:
+            key = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        try:
+            index = 0
+            while True:
+                try:
+                    name, value, typ = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                index += 1
+                if not name:
+                    continue
+                raw = value if isinstance(value, str) else str(value)
+                if typ == getattr(winreg, "REG_EXPAND_SZ", 2):
+                    raw = os.path.expandvars(raw)
+                merged[str(name)] = raw
+        finally:
+            winreg.CloseKey(key)
+    return merged
+
+
+def _resolve_windows_cmd() -> Optional[str]:
+    import shutil
+
+    candidates = [
+        os.environ.get("COMSPEC"),
+        "/mnt/c/Windows/System32/cmd.exe",
+        "/mnt/c/WINDOWS/system32/cmd.exe",
+        shutil.which("cmd.exe"),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        path = Path(_maybe_wsl_windows_path(str(cand)))
+        try:
+            if path.is_file():
+                return str(path)
+        except OSError:
+            continue
+    return None
+
+
+def _windows_environ_via_cmd() -> Dict[str, str]:
+    """Fresh Windows env as seen by ``cmd.exe`` (WSL / System Properties)."""
+    import subprocess
+
+    cmd = _resolve_windows_cmd()
+    if not cmd:
+        return {}
+    try:
+        proc = subprocess.run(
+            [cmd, "/d", "/c", "set"],
+            capture_output=True,
+            timeout=12,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    raw = proc.stdout or b""
+    text = ""
+    for enc in ("utf-8", "cp1254", "cp857", "latin-1"):
+        try:
+            text = raw.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        if "=" in text:
+            break
+    return _parse_cmd_set_output(text)
+
+
+def read_host_system_environ() -> Dict[str, str]:
+    """Current PC User/Machine env — not only what this process inherited.
+
+    Native Windows reads the registry. On WSL, ``cmd.exe /c set`` is used so
+    keys set in System Properties (e.g. ``CODEX_API_KEY``) reach Codex jobs.
     """
-    env: Dict[str, str] = {}
-    for key, value in os.environ.items():
-        if value is None:
+    if os.name == "nt":
+        return _windows_registry_environ()
+    # Avoid spawning cmd.exe during the unit suite (slow on /mnt/c).
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("VD_TEST_HOST_ENV"):
+        return {}
+    return _windows_environ_via_cmd()
+
+
+def _merge_host_system_environ(env: Dict[str, str], host: Dict[str, str]) -> None:
+    """Fill missing/empty keys from the PC environment. Never wipe a set value."""
+    for key, value in (host or {}).items():
+        if not key or value is None:
             continue
-        if key in _AGENT_ENV_ALLOW_EXACT:
-            env[key] = value
+        host_val = str(value)
+        if not host_val.strip():
             continue
-        if any(key.startswith(p) for p in _AGENT_ENV_ALLOW_PREFIXES):
-            env[key] = value
-    # Harden git so the agent cannot push with host credentials
+        current = env.get(key)
+        if current is None or not str(current).strip():
+            env[key] = host_val
+
+
+def _agent_subprocess_env(
+    working_directory: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Pass every process env var plus current PC User/Machine vars.
+
+    No name-based allow/deny list. ``.env`` bootstrap and host env
+    (toolchain, ``CODEX_API_KEY``, ``OPENAI_API_KEY``, tokens, custom build
+    vars) are inherited as-is. Empty process values are filled from the
+    Windows User/Machine environment so System Properties keys work.
+    """
+    env: Dict[str, str] = {
+        key: value for key, value in os.environ.items() if value is not None
+    }
+    _merge_host_system_environ(env, read_host_system_environ())
+
+    # Harden git so the agent cannot push with Windows / host credentials.
+    # GIT_CONFIG_* empty helper is not enough on Git-for-Windows (system
+    # credential.helper=manager still runs and uses Credential Manager).
+    # Do NOT rewrite HOME/USERPROFILE — OpenCode loads plugins from
+    # ~/.opencode, ~/.config/opencode, ~/.cache/opencode.
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
-    env.pop("SSH_AUTH_SOCK", None)
-    env.pop("SSH_AGENT_PID", None)
-    env.pop("GIT_ASKPASS", None)
-    env.pop("GIT_SSH_COMMAND", None)
-    env.pop("VD_GIT_PASSWORD", None)
-    env.pop("GITLAB_PAT", None)
-    env.pop("GITLAB_TOKEN", None)
-    env.pop("JIRA_API_TOKEN", None)
-    env.pop("JIRA_PASSWORD", None)
+    env["GCM_MODAL_PROMPT"] = "false"
+    env["GCM_GUI_PROMPT"] = "false"
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_0"] = ""
+    real_git = shutil.which("git")
+    wrap_dir = _ensure_unattended_git_wrapper()
+    if wrap_dir is not None and real_git:
+        env["VD_REAL_GIT"] = real_git
+        env["PATH"] = str(wrap_dir) + os.pathsep + (env.get("PATH") or "")
     return env
+
+
+def _unattended_git_wrapper_dir() -> Path:
+    from src.paths import agent_subdir
+
+    return agent_subdir("bin", "git-wrap").resolve()
+
+
+def _ensure_unattended_git_wrapper() -> Optional[Path]:
+    """``git`` shim that forces ``-c credential.helper=`` on every agent git.
+
+    Git-for-Windows ignores ``GIT_CONFIG_* credential.helper=`` and still
+    calls GCM, which silently uses the operator's Windows credentials.
+    """
+    wrap = _unattended_git_wrapper_dir()
+    try:
+        wrap.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            path = wrap / "git.cmd"
+            content = (
+                "@echo off\r\n"
+                "if \"%VD_REAL_GIT%\"==\"\" exit /b 1\r\n"
+                "\"%VD_REAL_GIT%\" -c credential.helper= %*\r\n"
+            )
+        else:
+            path = wrap / "git"
+            content = (
+                "#!/bin/sh\n"
+                "if [ -z \"$VD_REAL_GIT\" ]; then exit 1; fi\n"
+                "exec \"$VD_REAL_GIT\" -c credential.helper= \"$@\"\n"
+            )
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            path.write_text(content, encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(path.stat().st_mode | 0o111)
+        return wrap
+    except OSError as e:
+        logger.warning(f"Could not write unattended git wrapper: {e}")
+        return None
 
 
 @dataclass
@@ -177,18 +295,29 @@ class AgentTask:
     description: str
     prompt: str
     agent: str
-    category: Optional[str] = None
     issue_key: Optional[str] = None
     session_id: Optional[str] = None
     task_id: str = field(default_factory=lambda: f"task_{uuid.uuid4().hex[:8]}")
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
     task_type: Optional[str] = None
+    abandoned_session_id: Optional[str] = None
+    forgotten_session_ids: List[str] = field(default_factory=list)
+    original_prompt: Optional[str] = None
+    # Incomplete-session resume must not abort a leftover busy turn.
+    abort_busy_session: bool = True
+    # Worker: opencode | codex (empty = settings.agent_backend).
+    backend: Optional[str] = None
+    # Ops dashboard filter — logger prefixes ``[job_id=…]`` from log_context.
+    job_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         from src.issue_git_spec import strip_params_block
 
-        object.__setattr__(self, "prompt", strip_params_block(self.prompt or ""))
+        cleaned = strip_params_block(self.prompt or "")
+        object.__setattr__(self, "prompt", cleaned)
+        if not (self.original_prompt or "").strip():
+            object.__setattr__(self, "original_prompt", cleaned)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -196,7 +325,6 @@ class AgentTask:
             "task_id": self.task_id,
             "description": self.description,
             "agent": self.agent,
-            "category": self.category,
             "prompt": self.prompt,
             "skills": self.skills,
             "session_id": self.session_id,
@@ -204,7 +332,7 @@ class AgentTask:
 
 
 class AgentRunner:
-    """Runs agents using Oh My OpenAgent CLI."""
+    """Runs agents via OpenCode HTTP serve (same session, auto-compact)."""
 
     def __init__(self, working_directory: Optional[Path] = None):
         self.working_directory = working_directory
@@ -214,7 +342,19 @@ class AgentRunner:
         # Maps task_id -> last session log path (run_agent naming may include issue_key)
         self._session_files: Dict[str, Path] = {}
         logger.debug(f"AgentRunner initialized with working_directory={working_directory}")
-    
+
+    @staticmethod
+    def _bind_log_context(task: AgentTask) -> None:
+        """Tag subsequent logs with issue + job so the dashboard can filter."""
+        from src.log_context import get_job_id, set_issue_key, set_job_id
+
+        if task.issue_key:
+            set_issue_key(task.issue_key)
+        jid = (getattr(task, "job_id", None) or get_job_id() or "").strip()
+        if jid:
+            task.job_id = jid
+            set_job_id(jid)
+
     async def run_agent(
         self,
         task: AgentTask,
@@ -222,6 +362,7 @@ class AgentRunner:
         on_complete: Optional[callable] = None,
         on_progress: Optional[callable] = None,
         on_session_file: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         attempt_number: int = 0,
     ) -> Dict[str, Any]:
@@ -233,19 +374,39 @@ class AgentRunner:
             on_complete: Callback when complete (result)
             on_progress: Callback for progress updates (percentage, message)
             on_session_file: Callback (session_path, prompt_path) when log/prompt files are created
+            on_session_id: Callback (ses_*) as soon as the OpenCode session is known
             timeout_seconds: Override timeout from settings (None uses config default)
             attempt_number: The retry attempt number (0 = first attempt)
         """
-        logger.info(f"Starting agent task: task_id={task.task_id}, agent={task.agent}, attempt={attempt_number}")
-        
-        # Use configured timeout if not overridden (allow explicit 0)
-        effective_timeout = (
-            settings.agent_task_timeout_seconds
-            if timeout_seconds is None
-            else timeout_seconds
+        self._bind_log_context(task)
+        logger.info(
+            f"Starting agent task: task_id={task.task_id} "
+            f"backend={task.backend or 'opencode'} agent={task.agent} "
+            f"attempt={attempt_number}"
         )
+        
+        # Use configured timeout if not overridden (allow explicit 0).
+        # Re-read live settings so a dashboard save of 7200 is not ignored
+        # because the job began under the 1800 default.
+        from src.config import live_agent_timeout_seconds
+
+        live_timeout = live_agent_timeout_seconds()
+        if timeout_seconds is None:
+            effective_timeout = live_timeout
+        else:
+            try:
+                passed = int(timeout_seconds)
+            except (TypeError, ValueError):
+                passed = live_timeout
+            # Operator raised the dashboard budget above the 1800 default —
+            # honor it even if this job froze 1800 at start. Do not override
+            # explicit short test timeouts while live is still 1800.
+            if live_timeout > 1800:
+                effective_timeout = max(passed, live_timeout)
+            else:
+                effective_timeout = passed
         start_time = asyncio.get_event_loop().time()
-        logger.debug(f"Effective timeout: {effective_timeout}s")
+        logger.info(f"OpenCode/agent timeout: {effective_timeout}s")
 
         # Create session file for this task with naming convention: JIRAID_DATETIME_RETRYCOUNT
         session_file = self._get_session_file(
@@ -282,171 +443,556 @@ class AgentRunner:
             except Exception as e:
                 logger.debug(f"on_session_file callback failed: {e}")
 
-        # Build the command as a list (cross-platform)
-        cmd_list = self._build_command(task, session_file)
-        logger.debug(f"Command built with {len(cmd_list)} parts: {' '.join(cmd_list[:3])}...")
-        
-        # Open session file for writing output
-        with open(session_file, 'w', encoding='utf-8') as session_fh:
-            # Run the process using exec (no shell) for cross-platform compatibility
-            # On Windows, we need to use shell=False and handle the command differently
-            child_env = _agent_subprocess_env()
-            if IS_WINDOWS:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd_list,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.working_directory,
-                    env=child_env,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
+        published_sid = {"id": None, "last_db": 0.0}
+
+        def _publish_session(sid: Optional[str]) -> None:
+            sid = (sid or "").strip()
+            if not sid or sid == published_sid["id"]:
+                return
+            # OpenCode uses ses_*; Codex uses thread UUIDs.
+            if not (
+                sid.startswith("ses_")
+                or sid.startswith("thread_")
+                or (sid.count("-") >= 4 and len(sid) >= 16)
+            ):
+                return
+            forgotten = {
+                str(x).strip()
+                for x in (getattr(task, "forgotten_session_ids", None) or [])
+                if str(x).strip()
+            }
+            abandoned = (getattr(task, "abandoned_session_id", None) or "").strip()
+            if abandoned:
+                forgotten.add(abandoned)
+            if sid in forgotten:
+                logger.warning(
+                    f"Not publishing forgotten/abandoned session {sid} "
+                    f"for task_id={task.task_id}"
                 )
-            else:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd_list,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=self.working_directory,
-                    env=child_env,
-                    start_new_session=True,  # own process group for killpg on cancel/timeout
-                )
-
-            # Register so /cancel and stuck-watchdog can terminate foreground agents
-            self._running_tasks[task.task_id] = process
-            
-            stdout_lines = []
-            stderr_lines = []
-            last_progress = 0
-            
-            # Read output streams with progress tracking and timeout check
-            async def read_stream(stream, lines, callback_name, file_handle):
-                nonlocal last_progress
-                while True:
-                    # Check timeout
-                    elapsed = asyncio.get_event_loop().time() - start_time
-                    if elapsed > effective_timeout:
-                        raise asyncio.TimeoutError(
-                            f"Task exceeded timeout of {effective_timeout} seconds"
-                        )
-
-                    try:
-                        line = await asyncio.wait_for(
-                            stream.readline(),
-                            timeout=1.0  # 1 second check interval
-                        )
-                    except asyncio.TimeoutError:
-                        # No data available, check timeout and continue
-                        continue
-
-                    if not line:
-                        break
-                    decoded = line.decode('utf-8', errors='replace').rstrip()
-                    lines.append(decoded)
-
-                    # Write to session file
-                    file_handle.write(decoded + '\n')
-                    file_handle.flush()
-
-                    # Parse progress from output
-                    progress = self._parse_progress(decoded)
-                    if progress and progress != last_progress:
-                        last_progress = progress
-                        if on_progress:
-                            on_progress(progress, decoded[:100])
-
-                    if on_output:
-                        on_output(callback_name, decoded)
-
+                return
+            published_sid["id"] = sid
             try:
-                logger.info(
-                    f"Waiting for agent/opencode process to complete, "
-                    f"timeout={effective_timeout}s"
+                Path(str(session_file) + ".session_id").write_text(
+                    sid + "\n", encoding="utf-8"
                 )
-                # Wall-clock budget covers BOTH stream reads and process.wait().
-                # Previously wait() ran unguarded after stdout/stderr EOF, so a
-                # hung OpenCode child that closed pipes never timed out.
-                async def _drain_and_wait() -> int:
-                    await asyncio.gather(
-                        read_stream(
-                            process.stdout, stdout_lines, "stdout", session_fh
-                        ),
-                        read_stream(
-                            process.stderr, stderr_lines, "stderr", session_fh
-                        ),
-                    )
-                    remaining = effective_timeout - (
-                        asyncio.get_event_loop().time() - start_time
-                    )
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError(
-                            f"Task exceeded timeout of {effective_timeout} seconds"
-                        )
-                    return await asyncio.wait_for(
-                        process.wait(), timeout=remaining
-                    )
+            except Exception:
+                pass
+            if on_session_id is not None:
+                try:
+                    on_session_id(sid)
+                except Exception:
+                    pass
 
-                returncode = await asyncio.wait_for(
-                    _drain_and_wait(),
-                    timeout=max(0.01, float(effective_timeout)),
-                )
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.info(
-                    f"Agent process completed: returncode={returncode}, "
-                    f"elapsed={elapsed:.2f}s, stdout_lines={len(stdout_lines)}, "
-                    f"stderr_lines={len(stderr_lines)}"
-                )
-            except asyncio.TimeoutError:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.error(
-                    f"Agent/opencode task timed out after {elapsed:.2f}s "
-                    f"(limit={effective_timeout}s)"
-                )
-                await self._kill_process_tree_escalating(process, task.task_id)
-                logger.info(f"Killed timed out process: task_id={task.task_id}")
-                # Extract session ID from output collected so far
-                all_output_lines = stdout_lines + stderr_lines
-                session_id = self._resolve_session_id(
-                    task, all_output_lines, session_file=session_file
-                )
-                logger.debug(f"Extracted session ID from partial output: {session_id}")
-                return {
-                    "task_id": task.task_id,
-                    "returncode": -1,
-                    "stdout": "\n".join(stdout_lines),
-                    "stderr": f"\n[TIMEOUT] Task exceeded {effective_timeout} seconds",
-                    "session_file": str(session_file),
-                    "opencode_session_id": session_id,
-                    "progress": last_progress,
-                    "timed_out": True,
-                }
-            finally:
-                self._running_tasks.pop(task.task_id, None)
-        
-        # Extract session ID from output / OpenCode DB
-        all_output_lines = stdout_lines + stderr_lines
-        session_id = self._resolve_session_id(
-            task, all_output_lines, session_file=session_file
+        if getattr(task, "session_id", None):
+            _publish_session(str(task.session_id))
+
+        from src.backends import get_agent_backend, resolve_backend_name
+        from src.backends.base import BACKEND_OPENCODE, AgentRunRequest
+
+        backend_name = resolve_backend_name(
+            task_backend=getattr(task, "backend", None)
         )
-        logger.debug(f"Extracted session ID: {session_id}")
+        if backend_name == BACKEND_OPENCODE:
+            return await self._run_agent_via_serve(
+                task,
+                session_file=session_file,
+                on_output=on_output,
+                on_complete=on_complete,
+                on_progress=on_progress,
+                on_session_id=_publish_session,
+                timeout_seconds=effective_timeout,
+                start_time=start_time,
+            )
 
-        elapsed = asyncio.get_event_loop().time() - start_time
-        result = {
-            "task_id": task.task_id,
-            "returncode": returncode,
-            "stdout": "\n".join(stdout_lines),
-            "stderr": "\n".join(stderr_lines),
-            "session_file": str(session_file),
-            "opencode_session_id": session_id,
-            "progress": 100 if returncode == 0 else last_progress,
+        backend = get_agent_backend(backend_name)
+        handle: Dict[str, Any] = {
+            "mode": backend.name,
+            "backend": backend.name,
+            "cancel": False,
+            "session_id": task.session_id,
         }
-        
-        if returncode == 0:
-            logger.info(f"Agent task completed successfully: task_id={task.task_id}, duration={elapsed:.2f}s, progress=100%")
-        else:
-            logger.warning(f"Agent task failed: task_id={task.task_id}, returncode={returncode}, duration={elapsed:.2f}s")
+        self._running_tasks[task.task_id] = handle
+        log_lines: List[str] = []
 
+        def _on_out(stream: str, line: str) -> None:
+            try:
+                with open(session_file, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+            except OSError:
+                pass
+            if on_output:
+                on_output(stream, line)
+            if on_progress:
+                pct = self._parse_progress(line)
+                if pct is not None:
+                    try:
+                        on_progress(pct, line[:200])
+                    except Exception:
+                        pass
+
+        try:
+            result_obj = await backend.run(
+                AgentRunRequest(
+                    prompt=task.prompt or "",
+                    title=(
+                        f"{task.issue_key}: {task.description}"
+                        if task.issue_key
+                        else (task.description or task.task_id)
+                    )[:120],
+                    model=(task.model or settings.default_model or ""),
+                    agent=task.agent or "",
+                    session_id=task.session_id,
+                    issue_key=task.issue_key,
+                    job_id=task.job_id,
+                    working_directory=self.working_directory,
+                    timeout_seconds=float(effective_timeout),
+                    abort_busy_session=bool(
+                        getattr(task, "abort_busy_session", True)
+                    ),
+                    handle=handle,
+                    on_output=_on_out,
+                    on_session=_publish_session,
+                    should_abort=lambda: bool(handle.get("cancel")),
+                    log_lines=log_lines,
+                )
+            )
+        finally:
+            self._running_tasks.pop(task.task_id, None)
+
+        if result_obj.session_id:
+            _publish_session(str(result_obj.session_id))
+            task.session_id = result_obj.session_id
+        try:
+            body = result_obj.stdout or ""
+            if result_obj.stderr:
+                body = body + ("\n" if body else "") + result_obj.stderr
+            if body.strip():
+                session_file.write_text(body, encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not write session log: {e}")
+
+        result = result_obj.to_agent_result(
+            task.task_id, session_file=str(session_file)
+        )
+        if on_complete:
+            try:
+                on_complete(result)
+            except Exception:
+                pass
+        return result
+
+
+    @staticmethod
+    def _session_log_is_empty(session_file: Optional[str]) -> bool:
+        if not session_file:
+            return True
+        try:
+            p = Path(session_file)
+            return (not p.is_file()) or p.stat().st_size < 40
+        except OSError:
+            return True
+
+    @staticmethod
+    def _task_is_codex(
+        task: AgentTask, session_id: Optional[str] = None
+    ) -> bool:
+        """True for Codex jobs (backend flag or Codex thread UUID)."""
+        from src.backends.base import BACKEND_CODEX, normalize_backend_name
+
+        name = normalize_backend_name(getattr(task, "backend", None))
+        if name == BACKEND_CODEX:
+            return True
+        sid = (session_id or getattr(task, "session_id", None) or "").strip()
+        if not sid or sid.startswith("ses_"):
+            return False
+        return sid.count("-") >= 4 and len(sid) >= 16
+
+    @staticmethod
+    def _result_thread_locked(result: Optional[Dict[str, Any]]) -> bool:
+        data = result if isinstance(result, dict) else {}
+        if data.get("thread_locked") or data.get("leftover_writer"):
+            return True
+        blob = " ".join(
+            [str(data.get("stderr") or "")]
+            + [str(data.get("stdout") or "")]
+            + [str(r) for r in (data.get("incomplete_reasons") or [])]
+        ).lower()
+        if (
+            "active writer" in blob
+            or "thread-store conflict" in blob
+            or "codex thread locked" in blob
+        ):
+            return True
+        from src.backends.codex import is_codex_stream_overflow_error
+
+        return is_codex_stream_overflow_error(blob)
+
+    @staticmethod
+    def _result_unknown_agent(result: Optional[Dict[str, Any]]) -> bool:
+        """True when serve rejected the agent id (retry cannot fix that)."""
+        data = result if isinstance(result, dict) else {}
+        blob = " ".join(
+            [str(data.get("stderr") or "")]
+            + [str(data.get("stdout") or "")]
+            + [str(r) for r in (data.get("incomplete_reasons") or [])]
+        ).lower()
+        return "unknown agent" in blob or "is not registered" in blob
+
+    def _resume_codex_after_lock(
+        self,
+        task: AgentTask,
+        session_id: Optional[str],
+        *,
+        lock_hits: int,
+        leftover_writer: bool = False,
+    ) -> None:
+        """Retry the same Codex thread once, then start a new thread.
+
+        Codex refuses ``exec resume`` while another writer holds the store.
+        Flooding the same id with OpenCode finish-todos prompts does not
+        release the lock and burns the incomplete retry budget.
+
+        A leftover writer is the original ``codex exec`` still running.
+        Keep that thread: wait, then continue it. Do not start a second
+        writer on the same clone (KAN-12375).
+        """
+        from src.backends.codex import (
+            DEFAULT_CODEX_COLD_CONTINUE_PROMPT,
+            DEFAULT_CODEX_RESUME_PROMPT,
+        )
+
+        sid = (session_id or "").strip()
+        if leftover_writer and sid:
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            logger.warning(
+                f"Retry after leftover writer: keep Codex thread {sid} "
+                "(live exec still writing; wait, then continue this thread)"
+            )
+            return
+        if sid and lock_hits < 2:
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            logger.warning(
+                f"Retry after thread_locked: resume Codex thread {sid} "
+                f"(lock hit {lock_hits})"
+            )
+            return
+        if sid:
+            task.abandoned_session_id = sid
+            forgotten = list(getattr(task, "forgotten_session_ids", None) or [])
+            if sid not in forgotten:
+                forgotten.append(sid)
+            task.forgotten_session_ids = forgotten
+        task.session_id = None
+        task.prompt = DEFAULT_CODEX_COLD_CONTINUE_PROMPT
+        logger.warning(
+            f"Retry after thread_locked: Codex thread {sid or '-'} still "
+            "has an active writer — starting a new thread from current files"
+        )
+
+    def _resume_opencode_session_for_retry(
+        self,
+        task: AgentTask,
+        session_id: Optional[str],
+        *,
+        why: str,
+        session_file: Optional[str] = None,
+        timed_out: bool = False,
+        stdout: Optional[str] = None,
+    ) -> None:
+        """Point the next serve attempt at an existing OpenCode session.
+
+        Serve reuse uses ``task.session_id``.
+        A cold retry would discard compacted history — but an empty timeout
+        usually means the session pointed at another clone directory and
+        hung; retrying Continue on that id stays stuck.
+        """
+        sid = (session_id or "").strip()
+        if self._task_is_codex(task, sid):
+            from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
+
+            if not sid:
+                logger.warning(
+                    f"Retry after {why} has no Codex thread id; starting cold"
+                )
+                return
+            task.session_id = sid
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            task.abort_busy_session = False
+            logger.warning(
+                f"Retry after {why}: resume Codex thread {sid}"
+            )
+            return
+        empty_log = self._session_log_is_empty(session_file)
+        no_stdout = not (stdout or "").strip()
+        if timed_out and empty_log and no_stdout and not sid:
+            logger.warning(
+                f"Retry after {why}: empty session log and no session id; "
+                "starting cold"
+            )
+            return
+        if sid and self.working_directory:
+            try:
+                from src.opencode_sessions import (
+                    lookup_session_directory,
+                    session_matches_workdir,
+                )
+
+                stored_dir, ok = lookup_session_directory(sid)
+                if not ok:
+                    # Same job / same clone: keep the session. The row may not
+                    # be flushed yet; a transient DB error must not drop Continue.
+                    logger.warning(
+                        f"Retry after {why}: OpenCode DB unreadable; "
+                        f"keeping session {sid} on current clone"
+                    )
+                elif stored_dir and not session_matches_workdir(
+                    sid, self.working_directory
+                ):
+                    logger.warning(
+                        f"Retry after {why}: session {sid} is not for "
+                        f"{self.working_directory}; starting cold (do not "
+                        "re-send BUILD/PLAN on another clone's session)"
+                    )
+                    task.abandoned_session_id = sid
+                    task.session_id = None
+                    return
+            except Exception as e:
+                logger.debug(f"session dir check failed: {e}")
+        if not sid:
+            logger.warning(
+                f"Retry after {why} has no session id; starting cold"
+            )
+            return
+        task.session_id = sid
+        if why == "incomplete_session":
+            from src.opencode_serve import DEFAULT_FINISH_TODOS_PROMPT
+
+            # Short finish-todos nudge — not the original BUILD/PLAN kit and
+            # not a fake operator "Continue" during compact.
+            task.prompt = DEFAULT_FINISH_TODOS_PROMPT
+            task.abort_busy_session = False
+            logger.warning(
+                f"Retry after {why}: resume session {sid} with finish-todos prompt"
+            )
+            return
+        from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
+
+        prev = (task.prompt or "").lstrip()
+        if not prev.lower().startswith("continue"):
+            task.prompt = DEFAULT_CONTINUE_PROMPT
+        logger.warning(
+            f"Retry after {why}: resume session {sid}"
+        )
+
+    async def _run_agent_via_serve(
+        self,
+        task: AgentTask,
+        *,
+        session_file: Path,
+        on_output: Optional[callable] = None,
+        on_complete: Optional[callable] = None,
+        on_progress: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
+        timeout_seconds: int = 1800,
+        start_time: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Drive OpenCode over HTTP serve and wait out auto-compact.
+
+        Requires a running ``opencode serve`` at ``settings.opencode_serve_url``.
+        Compaction is never resumed by posting a user Continue prompt.
+        """
+        from src.opencode_serve import OpenCodeServeClient, ServeOrchestrator
+
+        base = (
+            getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
+        )
+        work_dir = str(self.working_directory) if self.working_directory else None
+        agent_name = resolve_opencode_agent_name(task.agent)
+        model = task.model or settings.default_model
+        title = (
+            f"{task.issue_key}: {task.description}"
+            if task.issue_key
+            else (task.description or task.task_id)
+        )[:120]
+
+        log_lines: List[str] = []
+        try:
+            session_file.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        client = OpenCodeServeClient(
+            base,
+            timeout_seconds=float(timeout_seconds),
+            directory=work_dir,
+        )
+        # Cancel handle: serve path stores client + session (not a subprocess).
+        serve_handle: Dict[str, Any] = {
+            "mode": "serve",
+            "client": client,
+            "session_id": task.session_id,
+            "cancel": False,
+        }
+        self._running_tasks[task.task_id] = serve_handle
+
+        def _on_out(stream: str, line: str) -> None:
+            try:
+                with open(session_file, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                    fh.flush()
+            except OSError:
+                pass
+            if on_output:
+                on_output(stream, line)
+
+        def _remember_session(sid: str) -> None:
+            """Publish ses_* immediately so cancel/retry/continue share it."""
+            if not sid:
+                return
+            serve_handle["session_id"] = sid
+            task.session_id = sid
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    sid + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+            if on_session_id is not None:
+                try:
+                    on_session_id(sid)
+                except Exception:
+                    pass
+
+        orch = ServeOrchestrator(
+            client=client,
+            # Cover the rest of the job: auto-compact then auto-resume can
+            # take as long as the original turn. Never inject Continue.
+            compact_wait_seconds=float(timeout_seconds) or 180.0,
+            compact_poll_seconds=2.0,
+        )
+        turn = None
+        try:
+            # One user turn + one compact wait. max_compact_continues no longer
+            # POSTs Continue; do not multiply the outer wait by 256.
+            outer_timeout = float(timeout_seconds) + float(
+                orch.compact_wait_seconds or 0
+            )
+            turn = await asyncio.wait_for(
+                orch.run(
+                    prompt=task.prompt or "",
+                    title=title,
+                    agent=agent_name,
+                    model=model,
+                    session_id=task.session_id,
+                    abort_busy_session=bool(
+                        getattr(task, "abort_busy_session", True)
+                    ),
+                    on_output=_on_out,
+                    on_session=_remember_session,
+                    should_abort=lambda: bool(serve_handle.get("cancel")),
+                    log_lines=log_lines,
+                ),
+                timeout=outer_timeout,
+            )
+            if turn.session_id:
+                _remember_session(turn.session_id)
+        except asyncio.TimeoutError:
+            try:
+                sid = serve_handle.get("session_id")
+                if sid:
+                    await client.abort(sid)
+            except Exception:
+                pass
+            result = {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "\n".join(log_lines),
+                "stderr": f"[serve] timed out after {timeout_seconds}s",
+                "session_file": str(session_file),
+                "opencode_session_id": serve_handle.get("session_id"),
+                "progress": 0,
+                "mode": "serve",
+                "timed_out": True,
+            }
+            if on_complete:
+                on_complete(result)
+            return result
+        finally:
+            self._running_tasks.pop(task.task_id, None)
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+
+        if turn is None:
+            result = {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "\n".join(log_lines),
+                "stderr": "[serve] no result",
+                "session_file": str(session_file),
+                "opencode_session_id": None,
+                "progress": 0,
+                "mode": "serve",
+            }
+            if on_complete:
+                on_complete(result)
+            return result
+
+        try:
+            body = turn.stdout or ""
+            if turn.stderr:
+                body = body + ("\n" if body else "") + turn.stderr
+            session_file.write_text(body, encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Could not write serve session log: {e}")
+
+        if turn.session_id:
+            try:
+                Path(str(session_file) + ".session_id").write_text(
+                    turn.session_id + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+        if on_progress and turn.returncode == 0:
+            try:
+                on_progress(100, "serve complete")
+            except Exception:
+                pass
+
+        result = turn.to_agent_result(task.task_id, session_file=str(session_file))
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if turn.returncode == 0:
+            logger.info(
+                f"[opencode] exit ok: task_id={task.task_id} "
+                f"session={turn.session_id} duration={elapsed:.2f}s"
+            )
+        else:
+            from src.backends.codex import format_failure_report
+
+            logger.error(
+                format_failure_report(
+                    backend="opencode",
+                    returncode=turn.returncode,
+                    stderr=turn.stderr or "",
+                    stdout=turn.stdout or "",
+                    timed_out=bool(turn.timed_out),
+                    incomplete=bool(turn.incomplete),
+                    incomplete_reasons=list(turn.incomplete_reasons or []),
+                    session_id=str(turn.session_id or ""),
+                    duration_s=elapsed,
+                    extra={
+                        "task_id": task.task_id,
+                        "compact_events": turn.compact_events,
+                        "continue_count": turn.continue_count,
+                    },
+                )
+            )
         if on_complete:
             on_complete(result)
-
         return result
     
     def _parse_progress(self, line: str) -> Optional[int]:
@@ -467,10 +1013,9 @@ class AgentRunner:
         if match:
             return _clamp(int(match.group(1)))
 
-        # Pattern 2: Progress bar blocks
-        # Count filled vs empty blocks
+        # Pattern 2: Progress bar blocks (do not count prose spaces as empty cells)
         filled_blocks = line.count('█') + line.count('▓') + line.count('■')
-        empty_blocks = line.count('░') + line.count('▒') + line.count(' ')
+        empty_blocks = line.count('░') + line.count('▒')
         total_blocks = filled_blocks + empty_blocks
         if total_blocks >= 5 and filled_blocks > 0:
             return _clamp(int((filled_blocks / total_blocks) * 100))
@@ -492,127 +1037,30 @@ class AgentRunner:
         """
         import re
 
+        created = [
+            r'session created:\s*(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
+            r'session resumed:\s*(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)',
+        ]
         labeled = [
-            r'Session[:\s]+(ses_[a-zA-Z0-9_-]+)',
-            r'Session\s*ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
-            r'"sessionID"\s*:\s*"(ses_[a-zA-Z0-9_-]+)"',
+            r'Session:\s*(ses_[a-zA-Z0-9_-]+)',
+            r'Session\s+ID[:\s]+(ses_[a-zA-Z0-9_-]+)',
         ]
         bare = r'(ses_[a-zA-Z0-9]{6,}[a-zA-Z0-9_-]*)'
 
+        last_created: Optional[str] = None
         last_labeled: Optional[str] = None
         last_bare: Optional[str] = None
         for line in lines:
+            for pattern in created:
+                for match in re.finditer(pattern, line, re.IGNORECASE):
+                    last_created = match.group(1)
             for pattern in labeled:
                 for match in re.finditer(pattern, line, re.IGNORECASE):
                     last_labeled = match.group(1)
             for match in re.finditer(bare, line, re.IGNORECASE):
                 last_bare = match.group(1)
-        return last_labeled or last_bare
-    
-    def _build_command(self, task: AgentTask, session_file: Path) -> List[str]:
-        """Build the opencode CLI command as a list (cross-platform).
-        
-        Command format: bunx oh-my-opencode run [options] <message>
-        The message must be the last argument.
-        
-        Returns:
-            List of command arguments for use with subprocess (no shell needed)
-        """
-        agent_name = resolve_opencode_agent_name(task.agent)
-        logger.debug(
-            f"Building command for task: agent={task.agent} -> {agent_name}, "
-            f"model={task.model or settings.default_model}, session_id={task.session_id}"
-        )
-        
-        # Build base command
-        cmd_parts = self.opencode_cli.split() + ["run"]
+        return last_created or last_labeled or last_bare
 
-        # Force OpenCode into the issue temp clone (otherwise it walks up to the
-        # host git root and edits/commits the wrong repository).
-        if self.working_directory:
-            cmd_parts.extend(["--dir", str(self.working_directory)])
-        
-        # Add agent option (resolved OpenCode / oh-my-openagent ID)
-        cmd_parts.extend(["--agent", agent_name])
-        
-        # Use task-specific model if provided, otherwise use configured default
-        effective_model = task.model or settings.default_model
-        if effective_model:
-            cmd_parts.extend(["--model", effective_model])
-        
-        # Add session continuation if specified
-        if task.session_id:
-            # Current OpenCode CLI uses --session, not --session-id
-            cmd_parts.extend(["--session", task.session_id])
-
-        # Title helps map sessions back to Jira issues in the OpenCode DB
-        if task.issue_key:
-            title = f"{task.issue_key}: {(task.description or '')[:80]}"
-            cmd_parts.extend(["--title", title])
-        
-        # Final gate: never pass {params} git blocks to the agent CLI
-        from src.issue_git_spec import strip_params_block
-
-        cmd_parts.append(strip_params_block(task.prompt or ""))
-        
-        return cmd_parts
-
-    def _resolve_session_id(
-        self,
-        task: AgentTask,
-        output_lines: List[str],
-        *,
-        session_file: Optional[Path] = None,
-    ) -> Optional[str]:
-        """Parse CLI output, then fall back to OpenCode SQLite by issue/dir."""
-        session_id = self._parse_session_id(output_lines)
-        if not session_id and task.issue_key:
-            try:
-                from src.opencode_sessions import resolve_session_id
-
-                session_id = resolve_session_id(
-                    task.issue_key,
-                    working_directory=self.working_directory,
-                )
-            except Exception as e:
-                logger.debug(f"Session DB lookup failed: {e}")
-        if session_id and session_file is not None:
-            try:
-                Path(str(session_file) + ".session_id").write_text(
-                    session_id + "\n", encoding="utf-8"
-                )
-            except Exception:
-                pass
-        return session_id
-    
-    def _build_shell_command(self, task: AgentTask, session_file: Path) -> str:
-        """Build shell command with redirection (fallback for compatibility).
-        
-        Note: This method is kept for backwards compatibility but _build_command
-        is preferred for cross-platform support.
-        """
-        cmd_list = self._build_command(task, session_file)
-        
-        if IS_WINDOWS:
-            # Windows shell escaping
-            escaped_parts = []
-            for part in cmd_list:
-                if ' ' in part or '"' in part:
-                    # Escape quotes and wrap in quotes
-                    escaped = part.replace('"', '"""')
-                    escaped_parts.append(f'"{escaped}"')
-                else:
-                    escaped_parts.append(part)
-            cmd_str = ' '.join(escaped_parts)
-            # Windows redirection
-            session_file_str = str(session_file).replace('"', '"""')
-            return f'{cmd_str} > "{session_file_str}" 2>&1'
-        else:
-            # Unix shell escaping using shlex
-            cmd_str = ' '.join(shlex.quote(part) for part in cmd_list)
-            session_file_str = shlex.quote(str(session_file))
-            return f'{cmd_str} > {session_file_str} 2>&1'
-    
     def _get_session_file(
         self,
         task_id: str,
@@ -631,10 +1079,11 @@ class AgentRunner:
         Returns:
             Path to the session log file
 
-        Naming convention:
-            - Normal task: PROJ-123_20240327_143052_0.log
-            - Code review: PROJ-123_review_20240327_143052_0.log
-            - Retry 1: PROJ-123_20240327_143052_1.log
+        Naming convention (attempt_number is 0-based; retries use _retryN):
+            - First attempt: PROJ-123_20240327_143052.log
+            - Code review:   PROJ-123_review_20240327_143052.log
+            - Retry 1:       PROJ-123_20240327_143052_retry1.log
+            - Retry 2:       PROJ-123_20240327_143052_retry2.log
         """
         # Ensure directory exists (tests patch _default_sessions_dir to isolate)
         sessions_dir = _default_sessions_dir()
@@ -654,14 +1103,22 @@ class AgentRunner:
         if issue_key:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_key = _safe_token(issue_key)
+            # attempt 0 = initial run; attempt N>=1 → suffix _retryN (dashboard labels)
+            retry_suffix = (
+                f"_retry{int(attempt_number)}" if int(attempt_number or 0) > 0 else ""
+            )
             if task_type:
                 filename = (
-                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}_{attempt_number}.log"
+                    f"{safe_key}_{_safe_token(task_type)}_{timestamp}{retry_suffix}.log"
                 )
             else:
-                filename = f"{safe_key}_{timestamp}_{attempt_number}.log"
+                filename = f"{safe_key}_{timestamp}{retry_suffix}.log"
         else:
-            filename = f"{_safe_token(task_id or 'task')}.log"
+            base = _safe_token(task_id or "task")
+            if int(attempt_number or 0) > 0:
+                filename = f"{base}_retry{int(attempt_number)}.log"
+            else:
+                filename = f"{base}.log"
 
         path = sessions_dir / filename
         try:
@@ -678,42 +1135,27 @@ class AgentRunner:
         task: AgentTask,
         on_output: Optional[callable] = None,
     ) -> str:
-        """Start a background agent and return task ID."""
-        # Similar to run_agent but non-blocking
-        # Returns immediately with task ID for polling
+        """Start a serve-backed agent in the background and return task ID."""
         logger.info(f"Starting background agent: task_id={task.task_id}, agent={task.agent}")
-        
-        session_file = self._get_session_file(task.task_id)
-        session_file.parent.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Background agent session file: {session_file}")
-        
-        cmd_list = self._build_command(task, session_file)
-        
-        child_env = _agent_subprocess_env()
-        if IS_WINDOWS:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.working_directory,
-                env=child_env,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0,
-            )
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *cmd_list,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.working_directory,
-                env=child_env,
-                start_new_session=True,
-            )
-        
-        # Store for later monitoring / cancel
-        self._running_tasks[task.task_id] = process
-        logger.info(f"Background agent started: task_id={task.task_id}, pid={process.pid}")
-        
+        self._running_tasks[task.task_id] = {
+            "mode": "serve",
+            "client": None,
+            "session_id": task.session_id,
+            "cancel": False,
+        }
+
+        async def _bg() -> None:
+            try:
+                await self.run_agent(task, on_output=on_output)
+            except Exception as e:
+                logger.warning(f"Background agent failed: task_id={task.task_id}: {e}")
+            finally:
+                self._running_tasks.pop(task.task_id, None)
+
+        asyncio.create_task(_bg())
+        logger.info(f"Background agent scheduled: task_id={task.task_id}")
         return task.task_id
+
     
     async def check_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Check status of a running background task."""
@@ -721,7 +1163,11 @@ class AgentRunner:
         if not process:
             logger.debug(f"Task not found in running tasks: {task_id}")
             return None
-        
+
+        # Serve-mode handle is a dict, not a subprocess
+        if isinstance(process, dict) and process.get("mode") == "serve":
+            return {"task_id": task_id, "status": "running", "mode": "serve"}
+
         # Check if process has completed
         if process.returncode is not None:
             del self._running_tasks[task_id]
@@ -765,6 +1211,21 @@ class AgentRunner:
             return
         try:
             if IS_WINDOWS:
+                pid = getattr(process, "pid", None)
+                if force and pid:
+                    try:
+                        import subprocess as _sp
+
+                        r = _sp.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=15,
+                            check=False,
+                        )
+                        if r.returncode == 0:
+                            return
+                    except Exception:
+                        pass
                 try:
                     if force:
                         process.kill()
@@ -799,65 +1260,56 @@ class AgentRunner:
         except ProcessLookupError:
             pass
 
-    async def _kill_process_tree_escalating(
-        self, process: Any, task_id: str, *, soft_wait: float = 10.0
-    ) -> None:
-        """SIGTERM, wait, then SIGKILL if the process is still alive."""
-        self._kill_process_tree(process, force=False)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=soft_wait)
-            return
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Process still alive after SIGTERM, escalating to SIGKILL: {task_id}"
-            )
-        self._kill_process_tree(process, force=True)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning(f"Process wait timed out after SIGKILL: {task_id}")
-
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task (foreground or background)."""
         process = self._running_tasks.get(task_id)
-        if process and process.returncode is None:
+        if not process:
+            logger.debug(f"Task not found or already completed: task_id={task_id}")
+            return False
+
+        # Backend handle (OpenCode serve or Codex subprocess)
+        if isinstance(process, dict) and process.get("mode") in {
+            "serve",
+            "opencode",
+            "codex",
+        }:
+            process["cancel"] = True
+            logger.info(
+                f"Cancelling {process.get('backend') or process.get('mode')} "
+                f"task: task_id={task_id}"
+            )
+            try:
+                from src.backends import get_agent_backend
+
+                get_agent_backend(
+                    process.get("backend") or process.get("mode")
+                ).cancel(process)
+            except Exception as e:
+                logger.debug(f"backend cancel failed: {e}")
+            return True
+
+        if process.returncode is None:
             logger.info(f"Cancelling running task: task_id={task_id}")
-            self._kill_process_tree(process, force=False)
-            # Escalate if still running (sync path — best effort)
-            if process.returncode is None:
-                try:
-                    import time
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                if process.returncode is None:
-                    self._kill_process_tree(process, force=True)
+            self._kill_process_tree(process, force=True)
             logger.info(f"Task cancel signal sent: task_id={task_id}")
             return True
         logger.debug(f"Task not found or already completed: task_id={task_id}")
         return False
 
     def cancel_all_tasks(self) -> int:
-        """Kill every live child process tracked by this runner. Returns count signalled.
-
-        SIGTERM then brief wait then SIGKILL (same escalation as cancel_task).
-        """
+        """Force-kill every live child process tracked by this runner."""
         killed = 0
         for task_id, process in list(self._running_tasks.items()):
             if process is None:
                 continue
+            if isinstance(process, dict):
+                if self.cancel_task(task_id):
+                    killed += 1
+                continue
             if getattr(process, "returncode", None) is not None:
                 continue
             logger.info(f"Cancelling task on shutdown: task_id={task_id}")
-            self._kill_process_tree(process, force=False)
-            if getattr(process, "returncode", None) is None:
-                try:
-                    import time
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                if getattr(process, "returncode", None) is None:
-                    self._kill_process_tree(process, force=True)
+            self._kill_process_tree(process, force=True)
             killed += 1
         return killed
 
@@ -869,8 +1321,10 @@ class AgentRunner:
         on_progress: Optional[callable] = None,
         on_retry: Optional[callable] = None,
         on_session_file: Optional[callable] = None,
+        on_session_id: Optional[callable] = None,
         timeout_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
+        max_incomplete_retries: Optional[int] = None,
         should_abort: Optional[callable] = None,
     ) -> Dict[str, Any]:
         """Run an agent task with automatic retry on failure.
@@ -888,6 +1342,10 @@ class AgentRunner:
             on_session_file: Callback when session/prompt files are created
             timeout_seconds: Override timeout from settings
             max_retries: Override max retries from settings
+            max_incomplete_retries: Compact/incomplete resume budget.
+                Independent of ``max_retries`` so compaction is not treated as
+                a generic error. ``None`` uses settings. When the caller
+                passes ``max_retries=0``, incomplete retries are also 0.
             should_abort: Optional zero-arg callable; when true, stop retrying
                 immediately (cancel / stuck watchdog). Result includes
                 ``aborted=True``.
@@ -895,17 +1353,36 @@ class AgentRunner:
         Returns:
             Dict with task result including retry information and all session files
         """
+        def _safe_int(val: Any, default: int = 0) -> int:
+            try:
+                if val is None or isinstance(val, bool):
+                    return int(default)
+                return int(val)
+            except (TypeError, ValueError):
+                return int(default)
+
         # Allow max_retries=0 to mean "no retries" (do not treat 0 as unset)
         effective_max_retries = (
             settings.agent_task_max_retries
             if max_retries is None
             else max_retries
         )
+        effective_max_retries = _safe_int(effective_max_retries, 0)
+        if max_incomplete_retries is not None:
+            incomplete_cap = _safe_int(max_incomplete_retries, 0)
+        elif max_retries == 0:
+            # Explicit "no retries" from caller (tests / one-shot)
+            incomplete_cap = 0
+        else:
+            incomplete_cap = _safe_int(
+                getattr(settings, "agent_task_max_incomplete_retries", 0), 0
+            )
         retry_delay = settings.agent_task_retry_delay_seconds
         backoff_multiplier = settings.agent_task_retry_backoff_multiplier
         retry_on_timeout = settings.agent_task_retry_on_timeout
         retry_on_error = settings.agent_task_retry_on_error
         
+        self._bind_log_context(task)
         logger.info(f"Starting agent with retry: task_id={task.task_id}, max_retries={effective_max_retries}")
 
         def _aborted() -> bool:
@@ -923,14 +1400,7 @@ class AgentRunner:
                 "session_file": all_session_files[-1] if all_session_files else None,
                 "opencode_session_id": last_session_id,
                 "aborted": True,
-                "retry_info": {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "aborted": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,
-                },
+                "retry_info": _retry_info(aborted=True),
             }
             if extra:
                 base.update(extra)
@@ -939,16 +1409,46 @@ class AgentRunner:
         last_result = None
         last_session_id = None
         attempt = 0
+        incomplete_used = 0
+        error_used = 0
+        timeout_used = 0
+        lock_used = 0
         all_session_files = []
 
-        while attempt <= effective_max_retries:
+        def _retry_info(**extra: Any) -> Dict[str, Any]:
+            info: Dict[str, Any] = {
+                "attempts": attempt + 1,
+                "max_retries": effective_max_retries,
+                "max_incomplete_retries": incomplete_cap,
+                "incomplete_retries_used": incomplete_used,
+                "lock_retries_used": lock_used,
+                "retried": attempt > 0,
+                "all_session_files": all_session_files,
+                "last_opencode_session_id": last_session_id,
+                "abandoned_session_id": getattr(
+                    task, "abandoned_session_id", None
+                ),
+            }
+            info.update(extra)
+            return info
+
+        # Error/timeout still use max_retries. Incomplete/compact uses its own
+        # cap so a 20-compact job is not killed after 3 generic retries.
+        max_total_attempts = (
+            1 + int(effective_max_retries) + int(incomplete_cap)
+        )
+
+        while attempt < max_total_attempts:
             if _aborted():
                 logger.info(
                     f"Abort before attempt {attempt + 1}: task_id={task.task_id}"
                 )
                 return _abort_result()
 
-            logger.info(f"Agent attempt {attempt + 1}/{effective_max_retries + 1}: task_id={task.task_id}")
+            logger.info(
+                f"Agent attempt {attempt + 1}/{max_total_attempts}: "
+                f"task_id={task.task_id}"
+            )
             
             # Run the task with attempt number (0 = first attempt, 1+ = retries)
             result = await self.run_agent(
@@ -957,6 +1457,7 @@ class AgentRunner:
                 on_complete=on_complete,
                 on_progress=on_progress,
                 on_session_file=on_session_file,
+                on_session_id=on_session_id,
                 timeout_seconds=timeout_seconds,
                 attempt_number=attempt,
             )
@@ -975,38 +1476,93 @@ class AgentRunner:
                 )
                 result = dict(result)
                 result["aborted"] = True
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "aborted": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,
-                }
+                result["retry_info"] = _retry_info(aborted=True)
                 return result
 
             # Check if successful
             if result.get("returncode") == 0:
                 logger.info(f"Agent succeeded on attempt {attempt + 1}: task_id={task.task_id}")
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
-                }
+                result["retry_info"] = _retry_info()
                 return result
 
             # Determine if we should retry
             should_retry = False
             retry_reason = ""
 
-            if result.get("timed_out"):
-                if retry_on_timeout and attempt < effective_max_retries:
+            if self._result_thread_locked(result):
+                if lock_used < effective_max_retries:
+                    should_retry = True
+                    retry_reason = "thread_locked"
+                    logger.warning(
+                        f"Codex thread locked on attempt {attempt + 1}: "
+                        f"task_id={task.task_id} "
+                        f"(lock retry {lock_used + 1}/{effective_max_retries})"
+                    )
+            elif result.get("timed_out"):
+                from src.opencode_sessions import compact_related_reasons
+
+                to_reasons = list(result.get("incomplete_reasons") or [])
+                compact_followup = (
+                    bool(result.get("had_compact"))
+                    or bool(result.get("assistant_asked_question"))
+                    or int(result.get("compact_events") or 0) > 0
+                    or compact_related_reasons(to_reasons)
+                    or any("compact" in str(r).lower() for r in to_reasons)
+                    or any("clarifying question" in str(r).lower() for r in to_reasons)
+                )
+                if compact_followup:
+                    logger.warning(
+                        f"Timeout after compact/question — not sending another "
+                        f"user prompt: task_id={task.task_id} reasons={to_reasons}"
+                    )
+                elif retry_on_timeout and timeout_used < effective_max_retries:
                     should_retry = True
                     retry_reason = "timeout"
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
-            elif retry_on_error and attempt < effective_max_retries:
+            elif result.get("incomplete"):
+                # Compact/incomplete was already waited out inside run_agent.
+                # Another prompt (Continue, Finish-todos, or the original BUILD)
+                # shows up as a user chat turn and races OpenCode auto-compact.
+                # Clarifying questions are also one-pass: serve already sent at
+                # most one unattended nudge; do not re-blast BUILD here.
+                from src.opencode_sessions import compact_related_reasons
+
+                reasons = list(result.get("incomplete_reasons") or [])
+                compact_followup = (
+                    bool(result.get("had_compact"))
+                    or bool(result.get("assistant_asked_question"))
+                    or int(result.get("compact_events") or 0) > 0
+                    or int(result.get("continue_count") or 0) > 0
+                    or compact_related_reasons(reasons)
+                    or any("compact" in str(r).lower() for r in reasons)
+                    or any("clarifying question" in str(r).lower() for r in reasons)
+                    or "unattended nudge" in str(result.get("stderr") or "").lower()
+                )
+                if compact_followup:
+                    logger.warning(
+                        f"Incomplete after compact/question — not sending another "
+                        f"user message: task_id={task.task_id} reasons={reasons}"
+                    )
+                else:
+                    incomplete_budget = (
+                        incomplete_cap
+                        if incomplete_cap > 0
+                        else effective_max_retries
+                    )
+                    if incomplete_used < incomplete_budget:
+                        should_retry = True
+                        retry_reason = "incomplete_session"
+                        logger.warning(
+                            f"Incomplete session on attempt {attempt + 1}: "
+                            f"task_id={task.task_id} "
+                            f"(resume {incomplete_used + 1}/{incomplete_budget})"
+                        )
+            elif self._result_unknown_agent(result):
+                logger.error(
+                    f"Unknown OpenCode agent — not retrying: "
+                    f"task_id={task.task_id} attempt={attempt + 1}"
+                )
+            elif retry_on_error and error_used < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
                 logger.warning(f"Agent failed with error on attempt {attempt + 1}, will retry: task_id={task.task_id}, returncode={result.get('returncode')}")
@@ -1014,6 +1570,37 @@ class AgentRunner:
                 logger.error(f"Agent failed and no more retries allowed: task_id={task.task_id}, attempt={attempt + 1}")
 
             if should_retry:
+                sid = result.get("opencode_session_id") or last_session_id
+                keep_live_writer = False
+                if retry_reason == "thread_locked":
+                    from src.backends.codex import is_codex_stream_overflow_error
+
+                    overflow_blob = " ".join(
+                        [
+                            str(result.get("stderr") or ""),
+                            str(result.get("stdout") or ""),
+                        ]
+                    )
+                    keep_live_writer = bool(
+                        result.get("leftover_writer")
+                        or result.get("stream_overflow")
+                        or is_codex_stream_overflow_error(overflow_blob)
+                    )
+                    self._resume_codex_after_lock(
+                        task,
+                        sid,
+                        lock_hits=lock_used + 1,
+                        leftover_writer=keep_live_writer,
+                    )
+                else:
+                    self._resume_opencode_session_for_retry(
+                        task,
+                        sid,
+                        why=retry_reason,
+                        session_file=result.get("session_file"),
+                        timed_out=bool(result.get("timed_out")),
+                        stdout=result.get("stdout"),
+                    )
                 if _aborted():
                     logger.info(
                         f"Abort before scheduling retry: task_id={task.task_id}"
@@ -1026,10 +1613,33 @@ class AgentRunner:
                         }
                     )
 
+                if retry_reason == "incomplete_session":
+                    incomplete_used += 1
+                elif retry_reason == "timeout":
+                    timeout_used += 1
+                elif retry_reason == "thread_locked":
+                    lock_used += 1
+                else:
+                    error_used += 1
                 attempt += 1
 
-                # Calculate delay with exponential backoff
-                delay = retry_delay * (backoff_multiplier ** (attempt - 1))
+                # Lock conflicts fail in seconds; do not apply the
+                # incomplete-session exponential (5 * 2^n → hours).
+                # A leftover writer is still doing work — wait longer
+                # before touching the same thread.
+                if retry_reason == "thread_locked":
+                    if keep_live_writer:
+                        delay = min(
+                            30.0,
+                            max(10.0, float(retry_delay or 5) * 2),
+                        )
+                    else:
+                        delay = min(
+                            float(retry_delay or 5) * (2 ** max(0, lock_used - 1)),
+                            15.0,
+                        )
+                else:
+                    delay = retry_delay * (backoff_multiplier ** (attempt - 1))
 
                 # Extract error details from the failed attempt
                 error_message = result.get("stderr", "") if result.get("returncode") != 0 else None
@@ -1058,7 +1668,7 @@ class AgentRunner:
 
                 # Log retry attempt
                 logger.warning(
-                    f"{retry_reason.capitalize()} on attempt {attempt}/{effective_max_retries} "
+                    f"{retry_reason} on attempt {attempt}/{max_total_attempts} "
                     f"for {task.task_id}, retrying in {delay:.1f}s..."
                 )
 
@@ -1074,28 +1684,40 @@ class AgentRunner:
             else:
                 # No more retries - include session ID from last attempt
                 logger.info(f"All retry attempts exhausted: task_id={task.task_id}, total_attempts={attempt + 1}")
-                result["retry_info"] = {
-                    "attempts": attempt + 1,
-                    "max_retries": effective_max_retries,
-                    "retried": attempt > 0,
-                    "final_failure": True,
-                    "all_session_files": all_session_files,
-                    "last_opencode_session_id": last_session_id,  # opencode session ID from last attempt
-                }
+                from src.backends.codex import format_failure_report
+
+                logger.error(
+                    format_failure_report(
+                        backend=str(task.backend or result.get("backend") or "agent"),
+                        returncode=result.get("returncode"),
+                        stderr=str(result.get("stderr") or ""),
+                        stdout=str(result.get("stdout") or ""),
+                        timed_out=bool(result.get("timed_out")),
+                        incomplete=bool(result.get("incomplete")),
+                        incomplete_reasons=list(
+                            result.get("incomplete_reasons") or []
+                        ),
+                        session_id=str(
+                            result.get("opencode_session_id")
+                            or result.get("session_id")
+                            or ""
+                        ),
+                        extra={
+                            "task_id": task.task_id,
+                            "retry_reason": retry_reason,
+                            "total_attempts": attempt + 1,
+                            "session_file": result.get("session_file"),
+                        },
+                    )
+                )
+                result["retry_info"] = _retry_info(final_failure=True)
                 return result
 
         # Should not reach here with normal control flow (loop always returns).
         # Defensive fallback kept for safety; last_result branch is effectively dead.
         logger.error(f"Unexpected fallback reached in run_agent_with_retry: task_id={task.task_id}")
         if last_result:  # pragma: no cover
-            last_result["retry_info"] = {
-                "attempts": attempt + 1,
-                "max_retries": effective_max_retries,
-                "retried": True,
-                "final_failure": True,
-                "all_session_files": all_session_files,
-                "last_opencode_session_id": last_session_id,
-            }
+            last_result["retry_info"] = _retry_info(retried=True, final_failure=True)
             logger.warning(f"Returning last result due to unexpected state: task_id={task.task_id}")
             return last_result
 
@@ -1107,12 +1729,5 @@ class AgentRunner:
             "stderr": "Max retries exceeded",
             "session_file": all_session_files[-1] if all_session_files else None,
             "opencode_session_id": last_session_id,
-            "retry_info": {
-                "attempts": attempt + 1,
-                "max_retries": effective_max_retries,
-                "retried": True,
-                "final_failure": True,
-                "all_session_files": all_session_files,
-                "last_opencode_session_id": last_session_id,
-            },
+            "retry_info": _retry_info(retried=True, final_failure=True),
         }

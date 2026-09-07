@@ -87,26 +87,22 @@ async def test_agent_inner_timeout_raise(tmp_path, monkeypatch):
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 1
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
-            # patch time to advance past timeout on second call
-            times = [0.0, 0.0, 100.0, 100.0, 100.0, 100.0]
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "[TIMEOUT]",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "timed_out": True,
+                "progress": 0,
+            }
 
-            class FakeLoop:
-                def time(self):
-                    if times:
-                        return times.pop(0)
-                    return 100.0
-
-            with patch("asyncio.get_event_loop", return_value=FakeLoop()):
-                task = AgentTask(description="d", prompt="p", agent="a", issue_key="TO-1")
-                try:
-                    result = await runner.run_agent(task, timeout_seconds=1)
-                    assert result.get("timed_out") or result.get("returncode") is not None
-                except Exception:
-                    pass
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
+            task = AgentTask(description="d", prompt="p", agent="a", issue_key="TO-1")
+            result = await runner.run_agent(task, timeout_seconds=1)
+            assert result.get("timed_out") or result.get("returncode") is not None
 
 
 @pytest.mark.asyncio
@@ -128,6 +124,7 @@ async def test_agent_retry_fallback_unreachable_via_patch(tmp_path, monkeypatch)
     with patch.object(runner, "run_agent", side_effect=empty_run):
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.agent_task_max_retries = -1  # attempt <= -1 is False immediately if attempt=0? 0 <= -1 is False
+            s.agent_task_max_incomplete_retries = 0
             s.agent_task_retry_delay_seconds = 0.01
             s.agent_task_retry_backoff_multiplier = 1.0
             s.agent_task_retry_on_timeout = True
@@ -151,6 +148,7 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     p.reporter = reporter
 
     git = MagicMock()
+    git.work_branch = "feature/x"
     git.ensure_feature_branch.return_value = "feature/x"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/x"
@@ -183,7 +181,7 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     state_manager.update_state("OO-1", plan_path="p.md")
     with patch.object(p, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"
@@ -193,7 +191,6 @@ async def test_planning_and_direct_on_output_pass(state_manager, reporter, fake_
     with patch.object(p, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 1
             s.default_branch = "main"

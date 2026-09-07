@@ -2,15 +2,42 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from src.brand import PRODUCT_NAME
+
+
+class TempFolderDeleteRequest(BaseModel):
+    """Body for POST /api/storage/delete — one temp clone folder."""
+
+    name: str = Field(..., min_length=1, max_length=255)
+    area: str = Field(default="temp", description="temp clones only")
+
+    @field_validator("name")
+    @classmethod
+    def _name_ok(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("name is required")
+        if "/" in text or "\\" in text or text in {".", ".."}:
+            raise ValueError("name must be a single folder or file name")
+        return text
+
+    @field_validator("area")
+    @classmethod
+    def _area_ok(cls, v: str) -> str:
+        text = (v or "temp").strip().lower() or "temp"
+        if text != "temp":
+            raise ValueError("area must be temp")
+        return text
 
 
 class MetaResponse(BaseModel):
     version: str
     server_time: str
-    app_name: str = "JIRA Virtual Developer"
+    app_name: str = PRODUCT_NAME
 
 
 class BulkJobDeleteRequest(BaseModel):
@@ -20,19 +47,66 @@ class BulkJobDeleteRequest(BaseModel):
     delete_artifacts: bool = True
 
 
+class IssueReportRequest(BaseModel):
+    """Body for POST /api/reports — download a diagnostic zip."""
+
+    kind: str = Field(default="general", description="general | job")
+    note: str = Field(..., min_length=1, max_length=8000)
+    job_id: Optional[str] = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind_ok(cls, v: str) -> str:
+        got = (v or "").strip().lower()
+        if got not in ("general", "job"):
+            raise ValueError("kind must be 'general' or 'job'")
+        return got
+
+    @field_validator("note")
+    @classmethod
+    def _note_ok(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("note is required")
+        return text
+
+    @field_validator("job_id")
+    @classmethod
+    def _job_id_ok(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        jid = v.strip()
+        return jid or None
+
+    @model_validator(mode="after")
+    def _job_requires_id(self) -> "IssueReportRequest":
+        if self.kind == "job" and not self.job_id:
+            raise ValueError("job_id is required when kind is 'job'")
+        return self
+
+
 class ScheduleCreateRequest(BaseModel):
     """Body for POST /api/schedules."""
 
     title: str
     description: str = ""
     repository_url: str
-    source_branch: str
+    # Required when source_branch_mode is "custom"; ignored for "issue_key"
+    source_branch: str = ""
     target_branch: str
     mode: str  # plan | build
     scheduled_at: str
     project_key: Optional[str] = None
     # Jira issue type name (Task, Story, ExtBug, Görev, …). Resolved per project.
     issue_type: str = "Task"
+    # custom = use source_branch; issue_key = feature/{NEW_JIRA_KEY} after create
+    source_branch_mode: str = "custom"
+    # Start process_event immediately (does not wait for scheduled_at)
+    dispatch_now: bool = False
+    # Optional OpenCode model id for this job only (empty = settings default)
+    model: str = Field(default="", max_length=200)
+    # Optional worker: opencode | codex (empty = settings.agent_backend)
+    backend: str = Field(default="", max_length=40)
 
 
 class ScheduleExistingRequest(BaseModel):
@@ -40,6 +114,17 @@ class ScheduleExistingRequest(BaseModel):
 
     issue_key: str
     scheduled_at: str
+    dispatch_now: bool = False
+    model: str = Field(default="", max_length=200)
+    backend: str = Field(default="", max_length=40)
+    # Operator-edited Jira description (prompt + {params}). Empty = live ticket.
+    description: str = Field(default="", max_length=100_000)
+    # Picker overrides when the live ticket has no valid {params} block.
+    repository_url: str = ""
+    source_branch: str = ""
+    target_branch: str = ""
+    mode: str = ""
+    source_branch_mode: str = ""
 
 
 class ScheduleItem(BaseModel):
@@ -50,6 +135,8 @@ class ScheduleItem(BaseModel):
     source_branch: str = ""
     target_branch: str = ""
     mode: str = ""
+    model: str = ""
+    backend: str = ""
     issue_type: str = "Task"
     scheduled_at: str = ""
     status: str = "scheduled"
@@ -67,7 +154,6 @@ class TaskItem(BaseModel):
     issue_key: str
     summary: str
     status: str
-    progress_percentage: int = 0
     workflow_type: Optional[str] = None
     jira_assignee: Optional[str] = None
     error_message: Optional[str] = None
@@ -87,17 +173,19 @@ class TasksResponse(BaseModel):
     server_time: str
 
 
-class GitDeliveryItem(BaseModel):
-    """One push / commit / MR delivery from a job run (task may have many)."""
+class JobRetryAttempt(BaseModel):
+    """One failed attempt that triggered a retry, nested under a parent job."""
 
-    job_id: Optional[str] = None
-    feature_branch: Optional[str] = None
-    merge_request_url: Optional[str] = None
-    commit_sha: Optional[str] = None
-    commit_subject: Optional[str] = None
-    commit_url: Optional[str] = None
-    created_at: Optional[str] = None
-    status: Optional[str] = None
+    attempt_number: int = 0
+    label: str = ""  # e.g. "retry1" — matches session file _retryN suffix
+    reason: str = ""  # "error" | "timeout"
+    delay_seconds: float = 0.0
+    failed_session_log_path: Optional[str] = None
+    error_message: Optional[str] = None
+    return_code: Optional[int] = None
+    opencode_session_id: Optional[str] = None
+    task_id: Optional[str] = None
+    timestamp: Optional[str] = None
 
 
 class JobItem(BaseModel):
@@ -109,14 +197,22 @@ class JobItem(BaseModel):
     description: str = ""
     workflow_type: str = "execution"
     agent: str = ""
+    # Worker model id used for this run (settings default_model at start)
+    model: Optional[str] = None
+    # opencode | codex (empty = infer from session / {params})
+    backend: str = ""
     status: str = "running"
     task_id: Optional[str] = None
     task_ids: List[str] = Field(default_factory=list)
     opencode_session_id: Optional[str] = None
     opencode_session_ids: List[str] = Field(default_factory=list)
     session_log_path: Optional[str] = None
+    # All OpenCode logs for this job (initial + _retryN), ordered oldest→newest
+    session_log_paths: List[str] = Field(default_factory=list)
     prompt_path: Optional[str] = None
-    progress_percentage: int = 0
+    prompt_paths: List[str] = Field(default_factory=list)
+    # Failed attempts that scheduled retries (nested; not separate dashboard jobs)
+    retry_attempts: List[JobRetryAttempt] = Field(default_factory=list)
     error_message: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -131,6 +227,12 @@ class JobItem(BaseModel):
     # delivered | no_new_commits | etc. (soft completion when no new commits)
     delivery_status: Optional[str] = None
     delivery_note: Optional[str] = None
+    # Temp clone used for this run (job record or session bind)
+    working_directory: Optional[str] = None
+    # jira (default) | gitlab — same job/chat UI, different intake
+    source: str = "jira"
+    gitlab_project: Optional[str] = None
+    gitlab_mr_iid: Optional[int] = None
 
 
 class JobsResponse(BaseModel):
@@ -148,12 +250,10 @@ class PolledIssueItem(BaseModel):
     jira_status: str = ""
     labels: List[str] = Field(default_factory=list)
     assignee: Optional[str] = None
-    matched_label: bool = False
     matched_assignee: bool = False
     is_todo: bool = False
     will_process: bool = False
     local_status: Optional[str] = None
-    matched_labels: List[str] = Field(default_factory=list)
 
 
 class PollStatusResponse(BaseModel):
@@ -184,14 +284,32 @@ class ModelOption(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """OpenCode model inventory — sole source for the Settings model list."""
+    """Worker model inventory — OpenCode CLI/config or Codex ~/.codex."""
 
     default_model: str = ""
     models: List[ModelOption] = Field(default_factory=list)
+    backend: str = "opencode"
     opencode_config_model: Optional[str] = None
     opencode_config_path: Optional[str] = None
     error: Optional[str] = None
     server_time: str = ""
+
+
+class OpencodeSessionBind(BaseModel):
+    """One persisted OpenCode session keyed by repository + work + target + kind."""
+
+    bind_id: str
+    repository_url: str = ""
+    repository_key: str = ""
+    branch: str = ""
+    target_branch: str = ""
+    session_id: str = ""
+    kind: str = ""
+    issue_key: str = ""
+    job_id: Optional[str] = None
+    working_directory: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 class SettingsView(BaseModel):
@@ -201,19 +319,20 @@ class SettingsView(BaseModel):
     jira_board_id: str = ""
     jira_projects: str = ""
     poll_interval_seconds: int = 30
-    trigger_labels: str = ""
     trigger_on_assignment: bool = True
     max_concurrent_jobs: int = 3
     # Single wall-clock budget for agent runner + OpenCode process (same value)
     agent_task_timeout_seconds: int = 1800
+    agent_task_max_retries: int = 3
+    agent_task_max_incomplete_retries: int = 256
     default_branch: str = "(from Jira issue)"
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
     # Presence flags only — never return token/PAT values
     jira_token_configured: bool = False
     gitlab_pat_configured: bool = False
+    # Optional Cloud Basic email (not a secret). Empty → Bearer PAT.
     jira_email_configured: bool = False
-    # Cloud Basic auth username (email); not secret but useful for ops
     jira_email: str = ""
     # Legacy flat list of hosts (derived from credential map)
     gitlab_allowed_hosts: str = ""
@@ -221,6 +340,44 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
+    # Unattended worker: opencode | codex
+    agent_backend: str = "opencode"
+    gitlab_webhook_enabled: bool = False
+    gitlab_bot_mentions: str = ""
+    gitlab_webhook_secret_configured: bool = False
+    gitlab_webhook_path: str = "/webhooks/gitlab"
+    # poll (board poller, default) | webhook (POST /webhooks/jira)
+    jira_intake_mode: str = "poll"
+    jira_webhook_secret_configured: bool = False
+    jira_webhook_path: str = "/webhooks/jira"
+    trigger_mentions: str = ""
+    trigger_assignee_names: str = ""
+    # Saved remotes for the schedule New-issue picker (not secrets)
+    project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+    # Durable locations (YAVER_DATA_DIR / TEMP_DIR_BASE)
+    data_dir: str = ""
+    temp_dir_base: str = ""
+
+
+class ProjectRepositoryItem(BaseModel):
+    """One bookmarked git remote for the New-issue form."""
+
+    label: str = Field(default="", max_length=80)
+    url: str = Field(..., min_length=3, max_length=500)
+    target_branch: str = Field(default="", max_length=255)
+    source_branch: str = Field(default="", max_length=255)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _git_url(cls, value: Any) -> str:
+        from src.issue_git_spec import _looks_like_git_url, _normalize_repo_url
+
+        url = _normalize_repo_url(str(value or ""))
+        if not _looks_like_git_url(url):
+            raise ValueError(
+                "Must be an http(s), ssh, or git@ repository URL (e.g. https://gitlab.com/g/r.git)"
+            )
+        return url
 
 
 class GitlabHostCredentialView(BaseModel):
@@ -235,11 +392,17 @@ class GitlabHostCredentialUpdate(BaseModel):
 
     * ``pat`` omit/empty → keep existing PAT for that host (if any)
     * ``pat`` non-empty → set/replace PAT for host
+    * ``previous_host`` + empty pat → copy stored PAT from the old hostname
     * Hosts omitted from the list on full replace are removed
     """
 
     host: str = Field(..., min_length=1, max_length=253)
     pat: Optional[str] = Field(default=None, max_length=4000)
+    previous_host: Optional[str] = Field(
+        default=None,
+        max_length=253,
+        description="If the operator renamed this host and pat is empty, copy the stored PAT from previous_host",
+    )
 
 
 class GitlabConnectionTestRequest(BaseModel):
@@ -255,10 +418,15 @@ class JiraConnectionTestRequest(BaseModel):
     """Body for POST /api/settings/jira/test.
 
     Omitted/empty token uses the stored runtime token. Never echoed back.
+    Optional ``email`` enables Cloud Basic auth for the probe.
     """
 
     host: Optional[str] = Field(default=None, max_length=500)
-    email: Optional[str] = Field(default=None, max_length=320)
+    email: Optional[str] = Field(
+        default=None,
+        max_length=320,
+        description="Optional Cloud email for Basic auth; omit for Bearer",
+    )
     api_token: Optional[str] = Field(default=None, max_length=4000)
     max_projects: int = Field(default=25, ge=1, le=50)
 
@@ -272,7 +440,11 @@ class SettingsUpdate(BaseModel):
     """
 
     jira_host: Optional[str] = Field(default=None, max_length=500)
-    jira_email: Optional[str] = Field(default=None, max_length=320)
+    jira_email: Optional[str] = Field(
+        default=None,
+        max_length=320,
+        description="Ignored on save. Cloud keeps existing JIRA_EMAIL; on-prem stays Bearer.",
+    )
     jira_api_token: Optional[str] = Field(
         default=None,
         max_length=4000,
@@ -291,27 +463,143 @@ class SettingsUpdate(BaseModel):
         max_length=2000,
         description="Legacy comma-separated hosts for single GITLAB_PAT",
     )
-    jira_board_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    jira_board_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Jira Agile board id (digits only, e.g. 1)",
+    )
+
+    @field_validator("jira_board_id", mode="before")
+    @classmethod
+    def _jira_board_id_digits(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        # Strip accidental markdown wrapping: `1` or ``1``
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+            text = text[1:-1].strip()
+        if not text.isdigit():
+            raise ValueError(
+                "Jira board ID must be a number (Agile board id from the board URL, e.g. 1)"
+            )
+        return text
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
-    trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
-    # Agent and OpenCode share this one timeout (orchestrator kills the CLI at limit)
+    # Agent and OpenCode share this one timeout (orchestrator aborts the serve turn)
     agent_task_timeout_seconds: Optional[int] = Field(
         default=None,
         ge=30,
         le=86400,
         description="Wall-clock seconds per OpenCode/agent attempt (30s–24h)",
     )
+    agent_task_max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=64,
+        description="Retries after timeout or hard error (0 = no retry)",
+    )
+    agent_task_max_incomplete_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=256,
+        description=(
+            "Serve retries after compact-then-stop / incomplete session "
+            "(independent of error retries)"
+        ),
+    )
     default_model: Optional[str] = Field(default=None, max_length=200)
+    agent_backend: Optional[str] = Field(
+        default=None,
+        max_length=40,
+        description="Unattended worker: opencode | codex",
+    )
+    project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
+        default=None,
+        max_length=40,
+        description="Full replace of saved git remotes for the New-issue form",
+    )
+    jira_intake_mode: Optional[str] = Field(
+        default=None,
+        max_length=20,
+        description="Jira intake: poll (board poller) or webhook (POST /webhooks/jira)",
+    )
+    jira_webhook_secret: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only Jira webhook token (omit to keep current)",
+    )
+    trigger_mentions: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Comma-separated @mentions that start a job from a Jira comment",
+    )
+    trigger_assignee_names: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Comma-separated name fragments for assign-to-bot trigger",
+    )
+
+    @field_validator("jira_intake_mode", mode="before")
+    @classmethod
+    def _jira_intake_mode_known(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        from src.jira.webhook import INTAKE_POLL, INTAKE_WEBHOOK, normalize_intake_mode
+
+        mode = normalize_intake_mode(text)
+        if mode not in {INTAKE_POLL, INTAKE_WEBHOOK}:
+            raise ValueError("jira_intake_mode must be 'poll' or 'webhook'")
+        return mode
+
+    @field_validator("agent_backend", mode="before")
+    @classmethod
+    def _agent_backend_known(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        from src.backends.base import normalize_backend_name
+
+        name = normalize_backend_name(text)
+        if not name:
+            raise ValueError("agent_backend must be 'opencode' or 'codex'")
+        return name
 
 
-class DashboardEnvelope(BaseModel):
-    """Full snapshot pushed over WebSocket."""
+class QueueItem(BaseModel):
+    """One waiting or running intake message (Jira issue or GitLab MR comment)."""
 
-    type: str = "dashboard"
-    meta: MetaResponse
-    tasks: TasksResponse
-    jobs: Optional[JobsResponse] = None
-    poll: PollStatusResponse
-    settings: SettingsView
+    queue_id: str
+    status: str = "queued"
+    source: str = "jira"
+    issue_key: str = ""
+    summary: str = ""
+    message: str = ""
+    repository_url: str = ""
+    source_branch: str = ""
+    work_branch: str = ""
+    target_branch: str = ""
+    lock_key: str = ""
+    job_id: Optional[str] = None
+    merge_request_url: str = ""
+    gitlab_note_id: str = ""
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class QueueResponse(BaseModel):
+    items: List[QueueItem] = Field(default_factory=list)
+    queued_count: int = 0
+    running_count: int = 0
+    total: int = 0
+    server_time: str = ""

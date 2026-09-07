@@ -2,12 +2,52 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 from src.config import settings
 from src.logger import logger
+
+
+def _normalize_jira_host(raw: str) -> str:
+    host = (raw or "").strip().rstrip("/")
+    if not host:
+        return ""
+    if "://" not in host:
+        host = f"https://{host}"
+    try:
+        parsed = urlparse(host)
+        return (parsed.hostname or "").lower()
+    except Exception:
+        return host.lower().split("/")[0].split(":")[0]
+
+
+def _probe_error_text(status: int, raw: str = "") -> str:
+    """Operator-facing probe error — never echo remote body (SSRF oracle)."""
+    return f"Jira returned HTTP {status}"
+
+
+def _is_blocked_probe_host(host_url: str) -> bool:
+    """True for cloud-metadata / link-local probe targets."""
+    try:
+        parsed = urlparse(
+            host_url if "://" in host_url else f"https://{host_url}"
+        )
+        name = (parsed.hostname or "").lower()
+    except Exception:
+        name = (host_url or "").lower()
+    if not name:
+        return False
+    if name in {"metadata.google.internal", "metadata"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return ip.is_link_local or str(ip) == "169.254.169.254"
 
 
 def probe_jira_connection(
@@ -19,16 +59,40 @@ def probe_jira_connection(
 ) -> Dict[str, Any]:
     """Verify Jira credentials via ``/myself`` and list projects.
 
+    Auth:
+      * email + token → HTTP Basic (Cloud API token / dev)
+      * token only → Bearer (PAT / prod)
+
     Omitted fields fall back to runtime ``settings``. Never returns the token.
     """
     h = (host if host is not None else settings.jira_host or "").strip().rstrip("/")
-    em = (email if email is not None else getattr(settings, "jira_email", "") or "").strip()
+    em = (
+        email if email is not None else getattr(settings, "jira_email", "") or ""
+    ).strip()
     tok = (api_token if api_token is not None else "").strip()
+    provided_token = bool(tok)
     if not tok:
         tok = (settings.jira_api_token or "").strip()
 
     if not h:
         return {"ok": False, "error": "Jira host is required", "host": ""}
+    if _is_blocked_probe_host(h):
+        return {
+            "ok": False,
+            "host": h,
+            "error": "Refusing to probe this host (link-local / metadata).",
+        }
+    configured = _normalize_jira_host(settings.jira_host or "")
+    requested = _normalize_jira_host(h)
+    if tok and not provided_token and requested != configured:
+        return {
+            "ok": False,
+            "host": h,
+            "error": (
+                "Refusing to send the stored Jira token to a different host. "
+                "Paste a token for this host, or test the configured Jira host."
+            ),
+        }
     if not tok:
         return {
             "ok": False,
@@ -40,23 +104,20 @@ def probe_jira_connection(
         }
 
     is_cloud = "atlassian.net" in h.lower()
-    use_basic = bool(tok and em)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     auth = None
-    auth_mode = "bearer"
-    if use_basic:
+    if em:
         auth = (em, tok)
         auth_mode = "basic"
     else:
         headers["Authorization"] = f"Bearer {tok}"
-        if is_cloud:
-            # Still attempt Bearer so the error is explicit if email missing
-            auth_mode = "bearer (cloud host — email recommended)"
+        auth_mode = "bearer"
 
     base = f"{h}/rest/api/2"
     timeout = httpx.Timeout(25.0, connect=10.0)
 
     try:
+        # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(
             base_url=base,
             auth=auth,
@@ -69,8 +130,9 @@ def probe_jira_connection(
                 hint = ""
                 if is_cloud and not em:
                     hint = (
-                        " Cloud hosts usually need email + API token (Basic auth). "
-                        "Set Jira email and retry."
+                        " For Jira Cloud API tokens, set Jira email "
+                        "(HTTP Basic email+token). Leave email empty only for "
+                        "Bearer PAT (on-prem / prod)."
                     )
                 return {
                     "ok": False,
@@ -79,7 +141,7 @@ def probe_jira_connection(
                     "http_status": me.status_code,
                     "error": (
                         f"Auth failed (HTTP {me.status_code}). "
-                        f"Token invalid or missing scopes.{hint}"
+                        f"Token invalid, revoked, or missing scopes.{hint}"
                     ),
                 }
             if me.status_code != 200:
@@ -88,10 +150,7 @@ def probe_jira_connection(
                     "host": h,
                     "auth_mode": auth_mode,
                     "http_status": me.status_code,
-                    "error": (
-                        f"/myself returned HTTP {me.status_code}: "
-                        f"{(me.text or '')[:300]}"
-                    ),
+                    "error": _probe_error_text(me.status_code),
                 }
             user = me.json() if me.content else {}
             display = ""

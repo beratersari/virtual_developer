@@ -27,6 +27,7 @@ venv/
 ENV/
 env/
 .venv/
+.venv-win/
 
 # IDE
 .vscode/
@@ -77,6 +78,7 @@ htmlcov/
 
 # Packaging build output (local only)
 packaging/windows/_downloads/
+vendor/
 
 # Frontend
 node_modules/

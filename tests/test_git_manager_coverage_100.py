@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -28,6 +29,12 @@ def gm(tmp_path, monkeypatch):
     from src.config import settings as real_settings
 
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    monkeypatch.setattr(real_settings, "gitlab_pat", "test-pat")
+    monkeypatch.setattr(
+        real_settings,
+        "gitlab_host_pats",
+        '{"gitlab.example.com":"test-pat"}',
+    )
     with patch.object(GitManager, "_setup_temp_working_dir"):
         g = GitManager(issue_key="COV-1")
     g.temp_dir = tmp_path / "repo"
@@ -58,48 +65,87 @@ def test_git_source_branch_error_attrs():
 def test_clone_timeout_raises_git_clone_error(gm):
     with patch(
         "src.git_manager.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=30),
+        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=60),
     ):
         with patch("src.git_manager.settings") as s:
             s.gitlab_pat = ""
             s.gitlab_allowed_hosts_list = []
-            s.git_clone_timeout_seconds = 30
+            s.gitlab_pat_for_host = lambda h: ""
+            s.gitlab_host_pat_map = lambda: {}
+            s.all_gitlab_pats = lambda: []
+            s.git_clone_timeout_seconds = 60
             with pytest.raises(GitCloneError) as ei:
                 gm._clone_into_temp()
     assert "timed out" in ei.value.user_message.lower()
-    assert "30" in ei.value.user_message
+    assert "60" in ei.value.user_message
+
+
+def test_submodule_timeout_raises_git_clone_error(gm, tmp_path):
+    (gm.temp_dir / ".gitmodules").write_text('[submodule "a"]\n', encoding="utf-8")
+    with patch(
+        "src.git_manager.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="git", timeout=90),
+    ):
+        with patch.object(gm, "_apply_settings_pat_to_origin", return_value=False):
+            with patch("src.git_manager.settings") as s:
+                s.git_update_submodules = True
+                s.git_submodule_timeout_seconds = 90
+                s.gitlab_pat = ""
+                s.gitlab_pat_for_host = lambda h: ""
+                with pytest.raises(GitCloneError) as ei:
+                    gm._update_submodules(reason="after clone")
+    assert "submodule" in ei.value.user_message.lower()
+    assert "90" in ei.value.user_message
 
 
 def test_assert_remote_host_allowed_branches(gm, monkeypatch):
     from src.config import settings
 
+    # Isolate from real .env host→PAT maps so this test is deterministic
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_pat", "secret-pat")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+
     # urlparse("https://") → no hostname
-    with patch.object(
-        type(settings),
-        "gitlab_allowed_hosts_list",
-        property(lambda self: ["gitlab.example.com"]),
-    ):
-        with pytest.raises(GitCloneError, match="no host"):
-            gm._assert_remote_host_allowed("https://")
+    with pytest.raises(GitCloneError, match="no host"):
+        gm._assert_remote_host_allowed("https://")
 
-    with patch.object(type(settings), "gitlab_allowed_hosts_list", property(lambda self: [])):
-        with pytest.raises(GitCloneError, match="GITLAB_ALLOWED_HOSTS"):
-            gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")
+    # Lone GITLAB_PAT (no host map) authenticates any job remote
+    gm._assert_remote_host_allowed("https://gitlab.example.com/g/r.git")
 
-    with patch.object(
-        type(settings),
-        "gitlab_allowed_hosts_list",
-        property(lambda self: ["allowed.example.com"]),
-    ):
-        with pytest.raises(GitCloneError, match="refused to send credentials"):
-            gm._assert_remote_host_allowed("https://evil.example.com/g/r.git")
+    monkeypatch.setattr(
+        settings, "gitlab_host_pats", '{"allowed.example.com":"secret-pat"}'
+    )
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    with pytest.raises(GitCloneError, match="refused to send credentials"):
+        gm._assert_remote_host_allowed("https://evil.example.com/g/r.git")
 
 
 def test_host_from_url_edges():
     assert GitManager._host_from_url("") == ""
     assert GitManager._host_from_url("gitlab.example.com/group/repo") == "gitlab.example.com"
     assert GitManager._host_from_url("https://GitLab.Example.COM/a/b") == "gitlab.example.com"
+    assert GitManager._host_from_url("https://gitlab.example.com:443/a/b.git") == (
+        "gitlab.example.com"
+    )
+    assert GitManager._host_from_url("git@gitlab.example.com:group/repo.git") == (
+        "gitlab.example.com"
+    )
+
+
+def test_normalize_remote_url_strips_ssh_and_userinfo():
+    assert GitManager.normalize_remote_url(
+        "git@gitlab.example.com:group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "https://git@gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "https://gitlab.example.com:443/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
+    assert GitManager.normalize_remote_url(
+        "ssh://git@gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo.git"
 
 
 # --- Setup / temp dir ---
@@ -167,7 +213,11 @@ def test_ensure_askpass_script_unix(tmp_path, monkeypatch):
     # rewrite when content differs
     path.write_text("stale", encoding="utf-8")
     path2 = GitManager._ensure_askpass_script()
-    assert "VD_GIT_PASSWORD" in path2.read_text(encoding="utf-8")
+    text = path2.read_text(encoding="utf-8")
+    assert "VD_GIT_PASSWORD" in text
+    assert "yaver.exe" not in text.lower()
+    py = path2.with_name("vd-git-askpass.py")
+    assert "VD_GIT_PASSWORD" in py.read_text(encoding="utf-8")
 
 
 def test_ensure_askpass_script_windows(tmp_path, monkeypatch):
@@ -176,12 +226,23 @@ def test_ensure_askpass_script_windows(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     with patch("src.git_manager.os.name", "nt"):
-        with patch.object(pathlib, "WindowsPath", pathlib.PosixPath):
+        ctx = (
+            patch.object(pathlib, "WindowsPath", pathlib.PosixPath)
+            if os.name != "nt"
+            else patch.object(pathlib, "WindowsPath", pathlib.WindowsPath)
+        )
+        with ctx:
             path = GitManager._ensure_askpass_script()
             assert path.name == "vd-git-askpass.cmd"
             text = path.read_text(encoding="utf-8")
             assert "VD_GIT_PASSWORD" in text
             assert "oauth2" in text
+            assert "yaver.exe" not in text.lower()
+            assert "sys.executable" not in text
+            py = path.with_name("vd-git-askpass.py")
+            py_text = py.read_text(encoding="utf-8")
+            assert "VD_GIT_PASSWORD" in py_text
+            assert "oauth2" in py_text
 
 
 def test_ensure_askpass_chmod_oserror(tmp_path, monkeypatch):
@@ -336,6 +397,22 @@ def test_prepare_work_branch_creates_from_target_when_missing(gm):
                     existing.assert_not_called()
 
 
+def test_prepare_work_branch_local_only_does_not_use_origin(gm):
+    """Local leftover from a previous run is not origin/{work} (KAN-24)."""
+    with patch.object(gm, "_remote_head_exists", return_value=False):
+        with patch.object(gm, "_branch_exists", return_value=True):
+            with patch.object(
+                gm, "_checkout_local_work_branch", return_value="feature/KAN-23"
+            ) as local:
+                with patch.object(gm, "_checkout_existing_remote_branch") as existing:
+                    with patch.object(gm, "_checkout_work_branch_from_target") as create:
+                        out = gm._prepare_work_branch("feature/KAN-23", "develop")
+                        assert out == "feature/KAN-23"
+                        local.assert_called_once_with("feature/KAN-23")
+                        existing.assert_not_called()
+                        create.assert_not_called()
+
+
 def test_ensure_feature_branch_prepares_not_always_from_target(gm):
     gm.source_branch = "feature/legacy"
     gm.target_branch = "develop"
@@ -441,22 +518,22 @@ def test_format_commit_strips_leading_key(gm):
     assert msg.count("[COV-1]") == 1
 
 
-def test_sync_remote_branches_creates_tracking(gm):
-    def run_git(args, check=True, auth=False):
-        if args[:2] == ["fetch", "--all"]:
-            return _cp()
-        if args[:2] == ["branch", "-r"]:
-            return _cp("  origin/main\n  origin/HEAD -> origin/main\n  origin/feat\n")
-        if args[0] == "rev-parse":
-            return _cp(returncode=1)
-        if args[0] == "branch" and "--track" in args:
-            return _cp()
-        if args[:2] == ["remote", "set-url"]:
-            return _cp()
+def test_materialize_job_remote_refs_fetches_target_only(gm):
+    gm.source_branch = ""
+    gm.target_branch = "main"
+    gm.remote_url = "https://gitlab.example.com/g/r.git"
+    calls: list = []
+
+    def run_git(args, check=True, auth=False, timeout=None):
+        calls.append(list(args))
         return _cp()
 
     with patch.object(gm, "_run_git", side_effect=run_git):
-        gm._sync_remote_branches()
+        gm._materialize_job_remote_refs()
+
+    assert ["fetch", "origin", "main"] in calls
+    assert not any("--track" in c for c in calls)
+    assert not any(c[:2] == ["branch", "-r"] for c in calls)
 
 
 # --- GitLab host / glab env / API MR ---
@@ -666,14 +743,12 @@ def test_get_mr_url_exception(gm):
         assert gm.get_mr_url() is None
 
 
-def test_cleanup_rmtree_fails(gm, tmp_path):
-    d = tmp_path / "killme"
+def test_cleanup_keeps_dir_without_rmtree(gm, tmp_path):
+    d = tmp_path / "keepme"
     d.mkdir()
     gm.temp_dir = d
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "always"
-        with patch("src.git_manager.shutil.rmtree", side_effect=OSError("busy")):
-            assert gm.cleanup() is False
+    assert gm.cleanup() is True
+    assert d.exists()
 
 
 def test_delete_local_branch_switch_paths(gm):

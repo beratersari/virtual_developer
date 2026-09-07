@@ -66,7 +66,8 @@ def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     assert "Plan Ready" in body
     assert "No plan content" in body or "not found" in body.lower()
     assert "Mode: build" in body
-    assert "To Do" in body
+    assert "this comment" in body.lower()
+    assert "appended to this issue's description" not in body.lower()
 
 
 def test_plan_summary_whitespace_only(reporter, client):

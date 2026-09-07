@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,7 +16,9 @@ from src.scheduler.service import (
     cancel_scheduled_job,
     create_scheduled_job,
     dispatch_due_schedules,
+    inflight_dispatch_ids,
     parse_schedule_at,
+    wait_inflight_dispatches,
 )
 from src.state.manager import JiraStateManager
 from src.state.schedule_store import SCHEDULE_LABEL, ScheduleStore
@@ -35,6 +38,19 @@ def test_build_issue_description_includes_params():
     assert "Source branch: feature/x" in text
     assert "Target branch: develop" in text
     assert "Mode: build" in text
+    assert "Model:" not in text
+
+
+def test_build_issue_description_includes_optional_model():
+    text = build_issue_description(
+        description="Do the thing",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="feature/x",
+        target_branch="develop",
+        mode="build",
+        model="opencode/hy3-free",
+    )
+    assert "Model: opencode/hy3-free" in text
 
 
 def test_parse_schedule_at_variants():
@@ -80,6 +96,50 @@ def test_schedule_store_claim_and_due(tmp_path):
     assert store.claim_due(a["schedule_id"]) is None
 
 
+def test_list_due_zulu_future_is_not_due_against_local_now(tmp_path):
+    """UTC Z must not be compared by labeling naive local now as UTC."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future_utc = datetime.now().astimezone() + timedelta(hours=2)
+    scheduled_at = (
+        future_utc.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+    rec = store.create(
+        title="zulu-future",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=scheduled_at,
+        issue_key="KAN-Z1",
+        issue_description="x",
+    )
+    assert store.list_due() == []
+    later = datetime.now() + timedelta(hours=3)
+    due = store.list_due(now=later)
+    assert len(due) == 1
+    assert due[0]["schedule_id"] == rec["schedule_id"]
+
+
+def test_list_due_naive_local_still_uses_wall_clock(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future_local = (datetime.now() + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    store.create(
+        title="naive-future",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future_local,
+        issue_key="KAN-N1",
+        issue_description="x",
+    )
+    assert store.list_due() == []
+
+
 def test_create_scheduled_job_hard_fails_without_issue(tmp_path):
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     client = MagicMock()
@@ -98,9 +158,135 @@ def test_create_scheduled_job_hard_fails_without_issue(tmp_path):
     )
     assert out["ok"] is False
     assert "Failed to create Jira issue" in out["error"]
-    assert "Schedule was not saved" in out["error"]
+
+
+def test_work_branch_for_issue_key():
+    from src.scheduler.service import work_branch_for_issue_key
+
+    assert work_branch_for_issue_key("KAN-42") == "feature/KAN-42"
+    assert work_branch_for_issue_key("PROJ/1") == "feature/PROJ-1"
+
+
+def test_create_scheduled_job_custom_source_branch(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-9"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Custom branch job",
+        description="body",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["source_branch"] == "develop"
+    assert out["schedule"]["source_branch"] == "develop"
+    # Description on create already has develop
+    desc = client.create_issue.call_args.kwargs.get("description") or ""
+    assert "Source branch: develop" in desc
+    client.update_issue.assert_not_called()
+
+
+def test_create_scheduled_job_persists_model(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-91"}
+    client.transition_to_in_progress.return_value = True
+    out = create_scheduled_job(
+        title="Model job",
+        description="body",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="main",
+        mode="build",
+        model="opencode/mimo-v2.5-free",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["schedule"]["model"] == "opencode/mimo-v2.5-free"
+    desc = client.create_issue.call_args.kwargs.get("description") or ""
+    assert "Model: opencode/mimo-v2.5-free" in desc
+
+
+def test_create_scheduled_job_source_from_issue_key(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-99"}
+    client.transition_to_in_progress.return_value = True
+    client.update_issue.return_value = True
+    out = create_scheduled_job(
+        title="Issue-key branch job",
+        description="Implement feature",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="",  # ignored for issue_key mode
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(
+            timespec="seconds"
+        ),
+        project_key="KAN",
+        source_branch_mode="issue_key",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["issue_key"] == "KAN-99"
+    assert out["source_branch"] == "feature/KAN-99"
+    assert out["schedule"]["source_branch"] == "feature/KAN-99"
+    assert "feature/KAN-99" in (out["schedule"].get("issue_description") or "")
+    # After create, description rewritten with real key
+    client.update_issue.assert_called_once()
+    upd_fields = client.update_issue.call_args.kwargs.get("fields") or {}
+    if not upd_fields and client.update_issue.call_args.args:
+        # positional (issue_key, fields=...)
+        pass
+    # kwargs form: update_issue(issue_key, fields={...})
+    call_kw = client.update_issue.call_args
+    fields = call_kw.kwargs.get("fields")
+    if fields is None and len(call_kw.args) >= 2:
+        fields = call_kw.args[1]
+    assert fields is not None
+    assert "Source branch: feature/KAN-99" in fields.get("description", "")
+
+
+def test_create_scheduled_job_issue_key_mode_requires_no_custom_source(tmp_path):
+    """custom mode without source_branch fails; issue_key mode does not need it."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "X-1"}
+    client.update_issue.return_value = True
+    missing = create_scheduled_job(
+        title="T",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="",
+        target_branch="develop",
+        mode="plan",
+        scheduled_at=datetime.now().isoformat(timespec="seconds"),
+        project_key="X",
+        source_branch_mode="custom",
+        jira_client=client,
+        store=store,
+    )
+    assert missing["ok"] is False
+    assert "source_branch" in missing["error"]
     assert store.list_schedules() == []
-    client.transition_to_in_progress.assert_not_called()
+    client.create_issue.assert_not_called()
 
 
 def test_create_scheduled_job_soft_transition_and_saves(tmp_path):
@@ -152,14 +338,18 @@ async def test_dispatch_due_schedules(tmp_path):
         ),
     )
     processor = MagicMock()
-    processor.process_event = AsyncMock()
+    # Structured outcome (real JobProcessor shape)
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
 
     result = await dispatch_due_schedules(
         processor=processor,
         store=store,
         jira_client=None,
     )
-    assert result["started"] == 1
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
     processor.process_event.assert_awaited_once()
     event = processor.process_event.await_args.args[0]
     assert event["webhookEvent"] == "jira:issue_created"
@@ -168,6 +358,239 @@ async def test_dispatch_due_schedules(tmp_path):
 
     refreshed = store.get(rec["schedule_id"])
     assert refreshed["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_marks_error_when_process_event_noops(tmp_path):
+    """Do not mark dispatched when processor reports no work started."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(seconds=30)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Skip",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-NOOP",
+        issue_description=build_issue_description(
+            description="d",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+        ),
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={
+            "ok": True,
+            "work_started": False,
+            "skipped": "already in progress (executing)",
+        }
+    )
+
+    result = await dispatch_due_schedules(
+        processor=processor,
+        store=store,
+        jira_client=None,
+    )
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "error"
+    assert "already in progress" in (refreshed.get("error_message") or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_block_other_due_schedules(tmp_path):
+    """One long process_event must not delay claiming other already-due jobs."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    earlier = (datetime.now() - timedelta(minutes=2)).isoformat(timespec="seconds")
+    later = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec_a = store.create(
+        title="slow",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=earlier,
+        issue_key="KAN-SLOW",
+        issue_description="a",
+    )
+    rec_b = store.create(
+        title="fast",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=later,
+        issue_key="KAN-FAST",
+        issue_description="b",
+    )
+
+    release_slow = asyncio.Event()
+    started: list[str] = []
+
+    async def process_event(event):
+        key = event["issue"]["key"]
+        started.append(key)
+        if key == "KAN-SLOW":
+            await release_slow.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    result = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert result["launched"] == 2
+    # Let both tasks reach process_event (slow waits on the event).
+    for _ in range(50):
+        if len(started) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert started == ["KAN-SLOW", "KAN-FAST"] or set(started) == {
+        "KAN-SLOW",
+        "KAN-FAST",
+    }
+    assert rec_a["schedule_id"] in inflight_dispatch_ids()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatching"
+    # Fast job must be allowed to finish while slow is still running.
+    for _ in range(50):
+        if store.get(rec_b["schedule_id"])["status"] == "dispatched":
+            break
+        await asyncio.sleep(0.01)
+    assert store.get(rec_b["schedule_id"])["status"] == "dispatched"
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatching"
+
+    release_slow.set()
+    await wait_inflight_dispatches()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_next_dispatch_tick_while_previous_still_running(tmp_path):
+    """Daemon 15s tick must pick up newly due jobs while another is dispatching."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    future = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    rec_a = store.create(
+        title="first",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-A",
+        issue_description="a",
+    )
+    rec_c = store.create(
+        title="later",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-C",
+        issue_description="c",
+    )
+
+    release_a = asyncio.Event()
+    seen: list[str] = []
+
+    async def process_event(event):
+        key = event["issue"]["key"]
+        seen.append(key)
+        if key == "KAN-A":
+            await release_a.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    r1 = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert r1["launched"] == 1
+    for _ in range(50):
+        if "KAN-A" in seen:
+            break
+        await asyncio.sleep(0.01)
+    assert "KAN-A" in seen
+
+    store.update(
+        rec_c["schedule_id"],
+        scheduled_at=(datetime.now() - timedelta(seconds=1)).isoformat(
+            timespec="seconds"
+        ),
+    )
+    r2 = await dispatch_due_schedules(
+        processor=processor, store=store, jira_client=None
+    )
+    assert r2["launched"] == 1
+    for _ in range(50):
+        if "KAN-C" in seen:
+            break
+        await asyncio.sleep(0.01)
+    assert "KAN-C" in seen
+    assert rec_a["schedule_id"] in inflight_dispatch_ids()
+
+    release_a.set()
+    await wait_inflight_dispatches()
+    assert store.get(rec_a["schedule_id"])["status"] == "dispatched"
+    assert store.get(rec_c["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_recover_skips_inflight_dispatching_rows(tmp_path):
+    """Age recovery must not reset a schedule whose worker is still running."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(minutes=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="live",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-LIVE-REC",
+        issue_description="x",
+    )
+    gate = asyncio.Event()
+
+    async def process_event(event):
+        await gate.wait()
+        return {"ok": True, "work_started": True, "skipped": None}
+
+    processor = MagicMock()
+    processor.process_event = process_event
+
+    await dispatch_due_schedules(processor=processor, store=store, jira_client=None)
+    sid = rec["schedule_id"]
+    assert sid in inflight_dispatch_ids()
+    assert store.get(sid)["status"] == "dispatching"
+
+    from src.scheduler.service import recover_stuck_schedules
+
+    n = recover_stuck_schedules(
+        store=store,
+        max_age_seconds=0.0,
+        exclude_ids=inflight_dispatch_ids(),
+    )
+    assert n == 0
+    assert store.get(sid)["status"] == "dispatching"
+
+    gate.set()
+    await wait_inflight_dispatches()
+    assert store.get(sid)["status"] == "dispatched"
 
 
 def test_cancel_scheduled_job(tmp_path):
@@ -183,6 +606,56 @@ def test_cancel_scheduled_job(tmp_path):
         issue_key="KAN-3",
         issue_description="x",
     )
+    out = cancel_scheduled_job(rec["schedule_id"], store=store)
+    assert out["ok"] is True
+    assert store.get(rec["schedule_id"])["status"] == "cancelled"
+
+
+def test_recover_stuck_dispatching_reopens_for_list_due(tmp_path):
+    """Crash after claim left status=dispatching — must not stay black-holed."""
+    from datetime import datetime
+
+    from src.scheduler.service import recover_stuck_schedules
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="stuck",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="plan",
+        scheduled_at="2000-01-01T00:00:00",
+        issue_key="KAN-STUCK",
+        issue_description="x",
+    )
+    claimed = store.claim_due(rec["schedule_id"])
+    assert claimed["status"] == "dispatching"
+    assert store.list_due(now=datetime(2026, 1, 1)) == []
+
+    n = recover_stuck_schedules(store=store, max_age_seconds=0.0)
+    assert n == 1
+    refreshed = store.get(rec["schedule_id"])
+    assert refreshed["status"] == "scheduled"
+    due = store.list_due(now=datetime(2026, 1, 1))
+    assert len(due) == 1
+    assert due[0]["schedule_id"] == rec["schedule_id"]
+
+
+def test_cancel_dispatching_schedule_allowed(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="c",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2026-12-01T00:00:00",
+        issue_key="KAN-DISP",
+        issue_description="x",
+    )
+    store.claim_due(rec["schedule_id"])
     out = cancel_scheduled_job(rec["schedule_id"], store=store)
     assert out["ok"] is True
     assert store.get(rec["schedule_id"])["status"] == "cancelled"
@@ -234,6 +707,12 @@ def test_preview_existing_issue_invalid_template():
 
     out = preview_existing_issue("KAN-21", jira_client=client)
     assert out["ok"] is False
+    assert out.get("description") == "just text"
+    assert out.get("template_valid") is False
+    assert out.get("issue_type") == "Task"
+    assert out.get("title") == "No params"
+    assert out.get("prompt") == "just text"
+    assert out.get("repository_url") == ""
     assert "params" in out["error"].lower() or "template" in out["error"].lower() or "could not" in out["error"].lower()
 
 
@@ -293,6 +772,9 @@ def test_create_with_custom_issue_type(tmp_path):
     client = MagicMock()
     client.create_issue.return_value = {"key": "KAN-77"}
     client.transition_to_in_progress.return_value = True
+    client.get_myself.return_value = {"name": "devbot", "key": "devbot"}
+    client.assign_issue.return_value = True
+    client.is_cloud = False
 
     out = create_scheduled_job(
         title="Bugfix",
@@ -310,6 +792,7 @@ def test_create_with_custom_issue_type(tmp_path):
     assert out["ok"] is True
     assert out["schedule"]["issue_type"] == "ExtBug"
     assert client.create_issue.call_args.kwargs["issue_type"] == "ExtBug"
+    client.assign_issue.assert_called_once_with("KAN-77", "devbot")
 
 
 def test_api_schedules(tmp_path, monkeypatch):
@@ -417,13 +900,14 @@ def test_api_schedules(tmp_path, monkeypatch):
         )
         m.setattr(
             "src.dashboard.api.schedule_existing_issue",
-            lambda issue_key, scheduled_at, store=None: __import__(
+            lambda issue_key, scheduled_at, store=None, **kw: __import__(
                 "src.scheduler.service", fromlist=["schedule_existing_issue"]
             ).schedule_existing_issue(
                 issue_key,
                 scheduled_at=scheduled_at,
                 jira_client=client_mock,
                 store=store,
+                **kw,
             ),
         )
         r_prev = tc.get("/api/schedules/preview", params={"issue_key": "KAN-88"})
@@ -436,3 +920,282 @@ def test_api_schedules(tmp_path, monkeypatch):
         )
         assert r_ex.status_code == 200, r_ex.text
         assert r_ex.json()["schedule"]["source"] == "existing"
+
+
+def test_claim_for_dispatch_ignores_due_time_and_retries_error(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future = (datetime.now() + timedelta(hours=5)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="later",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-NOW",
+        issue_description="x",
+    )
+    assert store.list_due() == []
+    claimed = store.claim_for_dispatch(rec["schedule_id"])
+    assert claimed is not None
+    assert claimed["status"] == "dispatching"
+    assert store.claim_for_dispatch(rec["schedule_id"]) is None
+
+    err = store.create(
+        title="failed",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-ERR",
+        issue_description="x",
+    )
+    store.update(err["schedule_id"], status="error", error_message="boom")
+    retried = store.claim_for_dispatch(err["schedule_id"])
+    assert retried["status"] == "dispatching"
+    assert retried.get("error_message") is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_schedule_now_fires_future_job(tmp_path):
+    from src.scheduler.service import dispatch_schedule_now
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    future = (datetime.now() + timedelta(hours=4)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="soon",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-INSTANT",
+        issue_description="x",
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    out = dispatch_schedule_now(
+        rec["schedule_id"], processor=processor, store=store, jira_client=None
+    )
+    assert out["ok"] is True
+    assert out["schedule"]["status"] == "dispatching"
+    await wait_inflight_dispatches()
+    processor.process_event.assert_awaited_once()
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["key"] == "KAN-INSTANT"
+    assert event["scheduled_job"] is True
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+def test_dispatch_schedule_now_refuses_cancelled(tmp_path):
+    from src.scheduler.service import dispatch_schedule_now
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="no",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2026-12-01T00:00:00",
+        issue_key="KAN-NO",
+        issue_description="x",
+    )
+    cancel_scheduled_job(rec["schedule_id"], store=store)
+    out = dispatch_schedule_now(
+        rec["schedule_id"],
+        processor=MagicMock(),
+        store=store,
+    )
+    assert out["ok"] is False
+    assert "cancelled" in (out.get("error") or "")
+
+
+def test_api_dispatch_now(tmp_path, monkeypatch):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    future = (datetime.now() + timedelta(hours=6)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="api-now",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=future,
+        issue_key="KAN-API-NOW",
+        issue_description="x",
+    )
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    monkeypatch.setattr("src.dashboard.api.schedule_store", store)
+    app = create_dashboard_app(processor=processor, state_manager=sm)
+    tc = TestClient(app)
+    r = tc.post(f"/api/schedules/{rec['schedule_id']}/dispatch")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert r.json()["schedule"]["status"] == "dispatching"
+    r_bad = tc.post(f"/api/schedules/{rec['schedule_id']}/dispatch")
+    assert r_bad.status_code == 409
+    r_miss = tc.post("/api/schedules/sched_missing/dispatch")
+    assert r_miss.status_code == 404
+
+
+def test_api_from_issue_run_now_stamps_scheduled_at_now(tmp_path, monkeypatch):
+    """Run now must not keep the form default (now + 5 minutes)."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    picker = (datetime.now() + timedelta(minutes=5)).isoformat(timespec="seconds")
+
+    def _schedule(issue_key, scheduled_at, store=None, **_kw):
+        rec = (store or ScheduleStore(schedules_dir=tmp_path / "schedules")).create(
+            title="run-now",
+            description="",
+            repository_url="https://example.com/r.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+            scheduled_at=scheduled_at,
+            issue_key=issue_key,
+            issue_description="x",
+        )
+        return {"ok": True, "schedule": rec, "issue_key": issue_key}
+
+    processor = MagicMock()
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+    monkeypatch.setattr("src.dashboard.api.schedule_store", store)
+    monkeypatch.setattr("src.dashboard.api.schedule_existing_issue", _schedule)
+    app = create_dashboard_app(processor=processor, state_manager=sm)
+    tc = TestClient(app)
+    before = datetime.now()
+    r = tc.post(
+        "/api/schedules/from-issue",
+        json={
+            "issue_key": "KAN-RUNNOW",
+            "scheduled_at": picker,
+            "dispatch_now": True,
+        },
+    )
+    after = datetime.now()
+    assert r.status_code == 200, r.text
+    got = parse_schedule_at(r.json()["schedule"]["scheduled_at"])
+    if got.tzinfo is not None:
+        got = got.replace(tzinfo=None)
+    assert got >= before.replace(microsecond=0) - timedelta(seconds=2)
+    assert got <= after + timedelta(seconds=2)
+    assert abs((got - parse_schedule_at(picker)).total_seconds()) >= 60
+    assert r.json()["dispatched"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tick_does_not_close_processor_jira_client(tmp_path):
+    """Workers fetch Jira after the tick returns — do not close that client."""
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(seconds=30)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Live fetch",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-CLIENT",
+        issue_description="snapshot desc",
+    )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.closed = False
+            self.got: list[str] = []
+
+        def get_issue(self, key: str):
+            assert not self.closed, "Jira client was closed before get_issue"
+            self.got.append(key)
+            return {
+                "key": key,
+                "fields": {"summary": "from jira", "description": "live desc"},
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    client = _Client()
+    processor = MagicMock()
+    processor.jira_client = client
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+
+    result = await dispatch_due_schedules(processor=processor, store=store)
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+    assert client.closed is False
+    assert client.got == ["KAN-CLIENT"]
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["fields"]["summary"] == "from jira"
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_skipped_dispatched_schedule_refires_on_next_tick(tmp_path):
+    """Dispatched + stale-reap skip must become due again and start work."""
+    from src.state.queue_store import WorkQueueStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    past = (datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds")
+    rec = store.create(
+        title="Was skipped",
+        description="d",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=past,
+        issue_key="KAN-SKIPPED",
+        issue_description="d",
+    )
+    store.update(rec["schedule_id"], status="dispatching")
+    store.update(rec["schedule_id"], status="dispatched")
+
+    qs = WorkQueueStore(queue_dir=tmp_path / "queue")
+    qrow = qs.enqueue(
+        source="jira",
+        issue_key="KAN-SKIPPED",
+        summary="Was skipped",
+        payload={"schedule_id": rec["schedule_id"]},
+    )
+    claimed = qs.claim_next(max_running=4)
+    assert claimed["queue_id"] == qrow["queue_id"]
+    qs.finish(
+        qrow["queue_id"],
+        status="skipped",
+        error_message="Reaped stale running queue row (issue not live)",
+    )
+
+    processor = MagicMock()
+    processor.queue_store = qs
+    processor.list_live_processing_keys = MagicMock(return_value=[])
+    processor.process_event = AsyncMock(
+        return_value={"ok": True, "work_started": True, "skipped": None}
+    )
+
+    result = await dispatch_due_schedules(processor=processor, store=store)
+    assert result["launched"] == 1
+    await wait_inflight_dispatches()
+    processor.process_event.assert_awaited_once()
+    event = processor.process_event.await_args.args[0]
+    assert event["issue"]["key"] == "KAN-SKIPPED"
+    assert event["scheduled_job"] is True
+    assert store.get(rec["schedule_id"])["status"] == "dispatched"

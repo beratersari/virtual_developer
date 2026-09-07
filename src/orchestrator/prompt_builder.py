@@ -1,37 +1,298 @@
-"""Build prompts for different agent types from the unified prompt kit."""
+"""Build short per-job user prompts: job facts + Jira title/description.
+
+Stable unattended rules live on the OpenCoderman ``derman-plan`` /
+``derman-build`` agents. These files only pass issue key, branch, plan
+path, and Jira text.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
 
 from src.config import settings
 from src.issue_git_spec import strip_params_block
-from src.orchestrator.prompt_kit import get_section, substitute_issue_key
+from src.logger import logger
+from src.orchestrator.prompt_kit import substitute_placeholders
 
 
 class PromptBuilder:
-    """Builds prompts from ``agent/AGENT_PROMPT.md`` sections + Jira body.
+    """Short user stubs for **derman-plan** and **derman-build**.
 
-    Paths:
+    Each run is:
 
-    * **planning** — ``§role.planning`` + summary/description (no git policy)
-    * **direct** — ``§role.direct`` + ``§policy.commit`` + summary/description
-    * **execution** — ``§role.execution`` + ``§policy.commit`` + plan path
-    * **oracle** — ``§role.oracle`` + question (no git policy)
-
-    Jira ``{params}`` git blocks are stripped from prompt text (still used by
-    GitManager for clone/push).
+    1. Job facts from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
+       (placeholders ``{ISSUE_KEY}``, ``{WORK_BRANCH}``, ``{PLAN_PATH}``)
+    2. Jira title (summary)
+    3. Jira description
     """
 
     @staticmethod
-    def _kit_path():
-        return settings.prompt_kit_file
+    def _agent_dir() -> Path:
+        """Directory containing PLAN_PROMPT.md / BUILD_PROMPT.md."""
+        candidates: list[Path] = []
+        custom = getattr(settings, "agent_prompts_dir", None)
+        if custom:
+            p = Path(custom)
+            candidates.append(p if p.is_absolute() else Path.cwd() / p)
+        candidates.append(Path.cwd() / "agent")
+        try:
+            from src.install_paths import bundled_agent_dir, install_root
+
+            candidates.append(install_root() / "agent")
+            candidates.append(bundled_agent_dir())
+        except Exception:
+            pass
+        seen: set[str] = set()
+        for path in candidates:
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if path.is_dir():
+                return path
+        return candidates[0] if candidates else Path.cwd() / "agent"
 
     @staticmethod
-    def role_section(role: str) -> str:
-        """Load a role section: planning | execution | direct | oracle."""
-        section_id = role if role.startswith("role.") else f"role.{role}"
-        return get_section(section_id, kit_path=PromptBuilder._kit_path())
+    def plan_prompt_path() -> Path:
+        custom = getattr(settings, "plan_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "PLAN_PROMPT.md"
+
+    @staticmethod
+    def build_prompt_path() -> Path:
+        custom = getattr(settings, "build_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "BUILD_PROMPT.md"
+
+    @staticmethod
+    def _join_blocks(*parts: str) -> str:
+        return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
+
+    @staticmethod
+    def _jira_title_and_description(
+        issue_key: str,
+        summary: str = "",
+        description: str = "",
+    ) -> str:
+        """Jira title + description only (params stripped)."""
+        title = strip_params_block(summary or "").strip()
+        body = strip_params_block(description or "").strip()
+        parts = [f"## Jira issue: {issue_key}"]
+        if title:
+            parts.append(f"## Jira title\n\n{title}")
+        if body:
+            parts.append(f"## Jira description\n\n{body}")
+        if not title and not body:
+            parts.append("(no summary or description provided)")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def _read_prompt_file_cached(path_str: str, mtime_ns: int) -> str:
+        del mtime_ns  # cache key only
+        return Path(path_str).read_text(encoding="utf-8")
+
+    @staticmethod
+    def clear_prompt_file_cache() -> None:
+        """Drop file cache (tests / hot-reload after edit)."""
+        PromptBuilder._read_prompt_file_cached.cache_clear()
+
+    @staticmethod
+    def _load_mode_prompt(
+        path: Path,
+        *,
+        issue_key: str,
+        work_branch: Optional[str] = None,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Load one mode file and substitute placeholders."""
+        text = ""
+        if path.is_file():
+            try:
+                stat = path.stat()
+                text = PromptBuilder._read_prompt_file_cached(
+                    str(path.resolve()), stat.st_mtime_ns
+                )
+            except OSError as e:
+                logger.warning(f"Could not read prompt file {path}: {e}")
+        if not text.strip():
+            logger.warning(f"Prompt file missing or empty: {path}; using minimal stub")
+            text = (
+                f"# Mode prompt missing\n\n"
+                f"Work on issue {{ISSUE_KEY}}. Plan path: {{PLAN_PATH}}. "
+                f"Work branch: {{WORK_BRANCH}}.\n"
+            )
+
+        out = substitute_placeholders(
+            text,
+            issue_key=issue_key,
+            work_branch=work_branch,
+            plan_path=plan_path,
+        )
+        return out.strip()
+
+    @staticmethod
+    def build_plan_prompt(
+        issue_key: str,
+        summary: str,
+        description: str,
+        *,
+        acceptance_criteria: Optional[str] = None,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Plan mode: ``PLAN_PROMPT.md`` + Jira title + description."""
+        from src.paths import plans_dir
+
+        plan_abs = (plan_path or "").strip() or str(
+            plans_dir() / f"{issue_key}.md"
+        )
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key=issue_key,
+            plan_path=plan_abs,
+        )
+        jira = PromptBuilder._jira_title_and_description(
+            issue_key, summary, description
+        )
+        if acceptance_criteria and str(acceptance_criteria).strip():
+            jira += (
+                f"\n\n### Acceptance criteria\n"
+                f"{str(acceptance_criteria).strip()}"
+            )
+        return PromptBuilder._join_blocks(system, jira)
+
+    @staticmethod
+    def build_build_prompt(
+        issue_key: str,
+        summary: str,
+        description: str,
+        *,
+        plan_path: Optional[str] = None,
+        work_branch: Optional[str] = None,
+    ) -> str:
+        """Build mode: implement the plan when it exists, else Jira text.
+
+        ``Mode: build`` is not ``plan_execute``. When a durable plan file
+        is present (this ticket or a sibling plan for the same repo /
+        branches), that file is the spec. Jira is context only.
+        """
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=work_branch,
+            plan_path=plan,
+        )
+        jira = PromptBuilder._jira_title_and_description(
+            issue_key, summary, description
+        )
+        plan_exists = False
+        try:
+            plan_exists = bool(plan) and Path(plan).is_file()
+        except OSError:
+            plan_exists = False
+        if plan_exists:
+            lead = PromptBuilder.build_plan_execute_prompt(
+                plan, issue_key=issue_key
+            )
+            context = (
+                "## Jira context (do not replace the plan)\n\n"
+                "Implement the plan above. Title and description are "
+                "background only unless the plan is missing a detail.\n\n"
+                + jira
+            )
+            return PromptBuilder._join_blocks(lead, system, context)
+        return PromptBuilder._join_blocks(system, jira)
+
+    @staticmethod
+    def build_plan_execute_prompt(
+        plan_path: str,
+        *,
+        issue_key: str = "",
+    ) -> str:
+        """Same-ticket plan→build: continue the *build* session.
+
+        The plan may live under the host data ``plans/`` dir (absolute
+        path). Naming only that path made the model treat the data dir
+        as the project. Name the plan as ``{ISSUE_KEY}.md`` and say the
+        clone cwd is the only workdir.
+        """
+        path = (plan_path or "").strip() or "plan.md"
+        key = (issue_key or "").strip()
+        name = f"{key}.md" if key else Path(path).name
+        return (
+            f"implement the plan {name}\n\n"
+            f"Read the plan at this absolute path (Yaver data dir — "
+            f"not the product repository):\n"
+            f"{path}\n\n"
+            f"Do all implementation in the current working directory "
+            f"(the git clone already checked out). Do not treat the "
+            f"plan file's parent directory as the project. Do not copy "
+            f"or commit the plan file.\n"
+        )
+
+    @staticmethod
+    def build_plan_refactor_prompt(
+        issue_key: str,
+        comment: str,
+        *,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Revise the existing plan from a Jira comment (same plan session)."""
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key=issue_key,
+            plan_path=plan,
+        )
+        body = (comment or "").strip() or "(empty comment)"
+        extra = (
+            f"## Plan refactor\n\n"
+            f"Revise the existing plan at `{plan}`. Overwrite that file. "
+            f"Do not implement product code.\n\n"
+            f"## Operator comment\n\n{body}"
+        )
+        return PromptBuilder._join_blocks(system, extra)
+
+    @staticmethod
+    def build_oracle_consult_prompt(
+        question: str,
+        context_files: Optional[list] = None,
+        *,
+        issue_key: str = "",
+        summary: str = "",
+    ) -> str:
+        """Consult uses the plan-mode prompt + question as description."""
+        desc = (question or "").strip()
+        if context_files:
+            desc = (
+                desc
+                + "\n\n### Context files\n"
+                + "\n".join(f"- {f}" for f in context_files)
+            ).strip()
+        key = issue_key or "CONSULT"
+        title = (summary or "").strip() or "Oracle consultation"
+        q = desc or "(no question provided)"
+        return (
+            f"## Oracle consultation: {key}\n\n"
+            f"Answer the operator's question. Do **not** write a plan file, "
+            f"do not modify product code, and do not invent a Mode/params template.\n\n"
+            f"## Jira title\n\n{title}\n\n"
+            f"## Question\n\n{q}\n"
+        )
 
     @staticmethod
     def commit_message_block(
@@ -39,188 +300,85 @@ class PromptBuilder:
         *,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Git policy from ``§policy.commit``.
-
-        Commit subjects always use the Jira ``issue_key``. ``work_branch`` is
-        the prepared MR source (may differ from the issue key).
-        """
-        body = get_section(
-            "policy.commit",
-            kit_path=PromptBuilder._kit_path(),
+        """Git policy text from build prompt (for tests / commit policy helpers)."""
+        body = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
             issue_key=issue_key,
-            work_branch=work_branch,
+            work_branch=work_branch or f"feature/{issue_key}",
         )
-        return f"## Git policy\n\n{body}"
+        marker = "## Git policy"
+        if marker in body:
+            return marker + body.split(marker, 1)[1]
+        return (
+            f"## Git policy\n\n"
+            f"Match this repo's AGENTS.md and git log. "
+            f"If no pattern exists, commit as `[{issue_key}] <type>: <short description>`."
+        )
 
     @staticmethod
-    def _join_blocks(*parts: str) -> str:
-        return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
-
-    @staticmethod
-    def _jira_body(
-        issue_key: str,
-        summary: str = "",
-        description: str = "",
+    def build_gitlab_comment_prompt(
         *,
-        extra_heading: str = "### Description",
-    ) -> str:
-        summary = strip_params_block(summary or "")
-        description = strip_params_block(description or "")
-        parts = [f"## Jira issue: {issue_key}"]
-        if summary:
-            parts.append(f"**Summary:** {summary}")
-        if description:
-            parts.append(f"{extra_heading}\n{description}")
-        elif not summary:
-            parts.append("(no summary or description provided)")
-        return "\n\n".join(parts)
-
-    @staticmethod
-    def build_prometheus_prompt(
         issue_key: str,
-        summary: str,
-        description: str,
-        acceptance_criteria: Optional[str] = None,
-    ) -> str:
-        """Planning (Prometheus): kit §role.planning + Jira body. No git policy."""
-        jira = PromptBuilder._jira_body(issue_key, summary, description)
-        if acceptance_criteria and str(acceptance_criteria).strip():
-            jira += f"\n\n### Acceptance criteria\n{acceptance_criteria.strip()}"
-
-        plan_rel = f".sisyphus/plans/{issue_key}.md"
-        plan_instr = (
-            f"## Required plan file (mandatory)\n\n"
-            f"This is an **unattended** Jira agent run — **do not wait** for human "
-            f"approval, \"okay\", or chat confirmation.\n\n"
-            f"Before you finish, write the **full** plan (markdown with task checkboxes) to:\n\n"
-            f"`{plan_rel}`\n\n"
-            f"Also acceptable: `.omo/plans/{issue_key}.md` "
-            f"(drafts under `.omo/drafts/` alone are **not** enough).\n\n"
-            f"Exit with success only after that file exists and is non-empty."
-        )
-
-        return PromptBuilder._join_blocks(
-            "# Task planning request",
-            f"## Role\n\n{PromptBuilder.role_section('planning')}",
-            plan_instr,
-            jira,
-        )
-
-    @staticmethod
-    def build_atlas_prompt(
-        issue_key: str,
-        plan_path: str,
-        previous_learnings: Optional[List[str]] = None,
-        *,
+        mr_title: str,
+        mr_url: str,
+        source_branch: str,
+        target_branch: str,
+        author: str,
+        comment: str,
         work_branch: Optional[str] = None,
+        plan_path: Optional[str] = None,
     ) -> str:
-        """Execution (Atlas): kit §role.execution + git policy + plan path."""
-        body = (
-            f"## Jira issue: {issue_key}\n\n"
-            f"Execute the plan at:\n`{plan_path or '(no plan path)'}`\n"
-        )
-        if work_branch:
-            body += (
-                f"\n### Prepared git work branch\n"
-                f"`{work_branch}` (already checked out — stay on it; "
-                f"commit subjects use `[{issue_key}]`, not the branch name)\n"
-            )
-        if previous_learnings:
-            body += "\n### Previous learnings\n"
-            for learning in previous_learnings:
-                body += f"- {learning}\n"
+        """Build-mode prompt for a GitLab MR @mention.
 
-        return PromptBuilder._join_blocks(
-            "# Task execution request",
-            f"## Role\n\n{PromptBuilder.role_section('execution')}",
-            PromptBuilder.commit_message_block(
-                issue_key, work_branch=work_branch
-            ),
-            body,
-        )
-
-    @staticmethod
-    def build_sisyphus_prompt(
-        issue_key: str,
-        task_description: str,
-        context: Optional[Dict[str, Any]] = None,
-        *,
-        summary: str = "",
-        work_branch: Optional[str] = None,
-    ) -> str:
-        """Direct execution (Sisyphus): kit §role.direct + git policy + Jira body.
-
-        ``task_description`` is the Jira description (or free-form request text).
-        Optional ``summary`` is the issue summary.
+        Same ``BUILD_PROMPT.md`` as Jira execution: the agent may edit, build,
+        test, and commit. The orchestrator pushes onto the **existing** MR
+        source branch and posts the reply as a note.
         """
-        jira = PromptBuilder._jira_body(
-            issue_key,
-            summary,
-            task_description,
-            extra_heading="### Task",
-        )
-        if work_branch:
-            jira += (
-                f"\n\n### Prepared git work branch\n"
-                f"`{work_branch}` (already checked out — stay on it; "
-                f"commit subjects use `[{issue_key}]`, not the branch name)"
-            )
-        if context:
-            ctx_bits: List[str] = []
-            if context.get("files"):
-                ctx_bits.append(
-                    "**Relevant files:**\n"
-                    + "\n".join(f"- {f}" for f in context["files"])
-                )
-            if context.get("patterns"):
-                ctx_bits.append(
-                    "**Code patterns:**\n"
-                    + "\n".join(f"- {p}" for p in context["patterns"])
-                )
-            extra = {
-                k: v for k, v in context.items() if k not in ("files", "patterns")
-            }
-            if extra:
-                ctx_bits.append(
-                    "**Other context:**\n"
-                    + "\n".join(f"- {k}: {v}" for k, v in extra.items())
-                )
-            if ctx_bits:
-                jira += "\n\n### Context\n" + "\n\n".join(ctx_bits)
+        from src.issue_git_spec import strip_params_block
 
-        return PromptBuilder._join_blocks(
-            "# Direct task execution",
-            f"## Role\n\n{PromptBuilder.role_section('direct')}",
-            PromptBuilder.commit_message_block(
-                issue_key, work_branch=work_branch
+        comment_body = strip_params_block(comment or "").strip()
+        title = strip_params_block(mr_title or "").strip()
+        who = (author or "").strip() or "someone"
+        branch = (work_branch or source_branch or "").strip()
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=branch or source_branch,
+            plan_path=plan,
+        )
+        parts = [
+            system,
+            f"## GitLab merge request: {issue_key}",
+            (
+                "This run is a **build** follow-up on an existing GitLab merge "
+                "request (not a new Jira ticket). The repository is already "
+                f"checked out on `{source_branch}` (MR into `{target_branch}`). "
+                "Resume any existing OpenCode session for this repo + branch + "
+                "target. Treat the MR comment below as the request."
             ),
-            jira,
+            f"## MR title\n\n{title or '(no title)'}",
+        ]
+        if mr_url:
+            parts.append(f"## MR URL\n\n{mr_url}")
+        parts.append(
+            f"## Branches\n\n* Source (checked out): `{source_branch}`\n"
+            f"* Target: `{target_branch}`\n"
+            f"* Work branch: `{branch or source_branch}`"
         )
-
-    @staticmethod
-    def build_oracle_consult_prompt(
-        question: str,
-        context_files: Optional[List[str]] = None,
-        *,
-        issue_key: str = "",
-        summary: str = "",
-    ) -> str:
-        """Oracle: kit §role.oracle + question. No git policy."""
-        parts: List[str] = []
-        if issue_key:
-            parts.append(PromptBuilder._jira_body(issue_key, summary, question, extra_heading="### Question"))
-        else:
-            parts.append(f"## Question\n{(question or '').strip() or '(empty)'}")
-        if context_files:
-            parts.append(
-                "## Context files\n" + "\n".join(f"- {f}" for f in context_files)
-            )
-
-        return PromptBuilder._join_blocks(
-            "# Architecture consultation",
-            f"## Role\n\n{PromptBuilder.role_section('oracle')}",
-            *parts,
+        parts.append(f"## Comment from {who}\n\n{comment_body or '(empty comment)'}")
+        parts.append(
+            "## GitLab delivery\n\n"
+            "Implement the comment when it asks for code changes, or when a "
+            "code change is the correct answer. Stay on the prepared work "
+            "branch. Commit if you change files. Do **not** push and do **not** "
+            "open a new merge request — the orchestrator will push onto this "
+            "existing MR. Write a clear final answer for the reviewer; it will "
+            "be posted back on the MR as a note."
         )
+        return PromptBuilder._join_blocks(*parts)
 
 
-__all__ = ["PromptBuilder", "substitute_issue_key"]
+__all__ = ["PromptBuilder"]

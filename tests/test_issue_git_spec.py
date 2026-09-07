@@ -29,6 +29,72 @@ Acceptance: do the thing
     assert spec.source_branch == "develop"
     assert spec.target_branch == "main"
     assert spec.mode == "plan"
+    assert spec.model is None
+
+
+def test_parse_optional_model():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: build
+Model: opencode/hy3-free
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/hy3-free"
+
+
+def test_upsert_params_model_inserts_and_replaces():
+    from src.issue_git_spec import upsert_params_model
+
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: build
+{params}
+"""
+    one = upsert_params_model(desc, "opencode/mimo-v2.5-free")
+    spec, err = parse_issue_git_spec("", one)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/mimo-v2.5-free"
+    two = upsert_params_model(one, "opencode/hy3-free")
+    spec2, err2 = parse_issue_git_spec("", two)
+    assert err2 is None
+    assert spec2 is not None
+    assert spec2.model == "opencode/hy3-free"
+    assert two.lower().count("model:") == 1
+
+
+def test_upsert_params_model_replaces_wiki_bold_line():
+    from src.issue_git_spec import upsert_params_backend, upsert_params_model
+
+    desc = (
+        "{params}\n"
+        "Repository: https://gitlab.example.com/group/repo.git\n"
+        "Source branch: develop\n"
+        "Target branch: main\n"
+        "Mode: build\n"
+        "*Model:* old-model\n"
+        "*Backend:* opencode\n"
+        "{params}\n"
+    )
+    out = upsert_params_model(desc, "opencode/hy3-free")
+    spec, err = parse_issue_git_spec("", out)
+    assert err is None
+    assert spec is not None
+    assert spec.model == "opencode/hy3-free"
+    out2 = upsert_params_backend(out, "codex")
+    spec2, err2 = parse_issue_git_spec("", out2)
+    assert err2 is None
+    assert spec2 is not None
+    assert spec2.backend == "codex"
 
 
 def test_params_required():
@@ -98,6 +164,44 @@ Mode: execute
     assert spec.mode == "build"
 
 
+def test_jira_issue_key_brackets_in_branch_parse():
+    """Cloud visual editor wraps keys: feature/[KAN-7] must stay a git ref."""
+    spec, err = parse_issue_git_spec(
+        "KANe",
+        (
+            "{params}\n"
+            "Repository: https://gitlab.com/beratersari0/test_project.git\n"
+            "Source branch: feature/[KAN-7]\n"
+            "Target branch: main\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+    )
+    assert err is None, err
+    assert spec is not None
+    assert spec.source_branch == "feature/KAN-7"
+    assert spec.target_branch == "main"
+
+
+def test_jira_issue_key_wiki_link_in_branch_parse():
+    """[KAN-7|browse-url] must become KAN-7, not a URL glued onto the branch."""
+    spec, err = parse_issue_git_spec(
+        "KANe",
+        (
+            "{params}\n"
+            "Repository: https://gitlab.com/beratersari0/test_project.git\n"
+            "Source branch: feature/[KAN-7|https://beratersari0.atlassian.net/browse/KAN-7]\n"
+            "Target branch: develop\n"
+            "Mode: build\n"
+            "{params}\n"
+        ),
+    )
+    assert err is None, err
+    assert spec is not None
+    assert spec.source_branch == "feature/KAN-7"
+    assert spec.target_branch == "develop"
+
+
 def test_jira_wiki_inside_params():
     """Jira wiki links and same-line fields inside {params}."""
     desc = (
@@ -139,7 +243,7 @@ def test_missing_fields_inside_params():
     assert "Source branch" in err
 
 
-def test_mode_required():
+def test_mode_defaults_to_build():
     desc = """
 {params}
 Repository: https://gitlab.example.com/group/repo.git
@@ -148,10 +252,24 @@ Target branch: main
 {params}
 """
     spec, err = parse_issue_git_spec("feat", desc)
+    assert err is None
+    assert spec is not None
+    assert spec.mode == "build"
+
+
+def test_invalid_mode_rejected():
+    desc = """
+{params}
+Repository: https://gitlab.example.com/group/repo.git
+Source branch: develop
+Target branch: main
+Mode: banana
+{params}
+"""
+    spec, err = parse_issue_git_spec("feat", desc)
     assert spec is None
     assert err is not None
     assert "Mode" in err
-    assert "{params}" in err or "description" in err.lower()
 
 
 def test_parse_issue_mode_helper():
@@ -161,6 +279,14 @@ def test_parse_issue_mode_helper():
             "",
             "{params}\nRepository: https://g.com/a/b.git\n"
             "Source branch: develop\nMode: BUILD\n{params}",
+        )
+        == "build"
+    )
+    assert (
+        parse_issue_mode(
+            "",
+            "{params}\nRepository: https://g.com/a/b.git\n"
+            "Source branch: develop\n{params}",
         )
         == "build"
     )

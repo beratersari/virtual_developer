@@ -75,7 +75,7 @@ class PollSnapshotStore:
     ) -> None:
         now = datetime.now()
         next_at = now + timedelta(seconds=max(1, interval_seconds))
-        matched = sum(1 for i in issues if i.get("matched_label") or i.get("matched_assignee"))
+        matched = sum(1 for i in issues if i.get("matched_assignee"))
         will = sum(1 for i in issues if i.get("will_process"))
         with self._lock:
             self._data.update(
@@ -96,6 +96,12 @@ class PollSnapshotStore:
     def set_idle(self) -> None:
         with self._lock:
             self._data["phase"] = "idle"
+        self._notify()
+
+    def set_board_id(self, board_id: Optional[str]) -> None:
+        """Update displayed board id immediately (settings save; next poll will confirm)."""
+        with self._lock:
+            self._data["board_id"] = board_id
         self._notify()
 
     def snapshot(self) -> Dict[str, Any]:

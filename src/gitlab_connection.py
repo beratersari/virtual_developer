@@ -12,6 +12,7 @@ from src.logger import logger
 
 
 def _normalize_host(raw: str) -> str:
+    """Hostname plus port when the operator set a non-default port."""
     host = (raw or "").strip().lower()
     if not host:
         return ""
@@ -19,7 +20,12 @@ def _normalize_host(raw: str) -> str:
         host = f"https://{host}"
     try:
         parsed = urlparse(host)
-        return (parsed.hostname or "").lower()
+        name = (parsed.hostname or "").lower()
+        if not name:
+            return ""
+        if parsed.port:
+            return f"{name}:{parsed.port}"
+        return name
     except Exception:
         return (raw or "").strip().lower().split("/")[0]
 
@@ -42,10 +48,30 @@ def probe_gitlab_connection(
         return {"ok": False, "error": "host is required", "host": ""}
 
     token = (pat or "").strip()
+    provided_pat = bool(token)
     if not token and hasattr(settings, "gitlab_pat_for_host"):
         token = (settings.gitlab_pat_for_host(h) or "").strip()
     if not token:
-        token = (settings.gitlab_pat or "").strip()
+        allowed = []
+        if hasattr(settings, "gitlab_allowed_hosts_list"):
+            allowed = [x.lower() for x in settings.gitlab_allowed_hosts_list]
+        mapped = {}
+        if hasattr(settings, "gitlab_host_pat_map"):
+            try:
+                mapped = settings.gitlab_host_pat_map() or {}
+            except Exception:
+                mapped = {}
+        if h in mapped or h in allowed:
+            token = (settings.gitlab_pat or "").strip()
+        elif not provided_pat:
+            return {
+                "ok": False,
+                "host": h,
+                "error": (
+                    "No PAT stored for this host. Paste a PAT or add the host "
+                    "in Settings before testing."
+                ),
+            }
     if not token:
         return {
             "ok": False,
@@ -58,10 +84,10 @@ def probe_gitlab_connection(
 
     base = f"https://{h}/api/v4"
     headers = {"PRIVATE-TOKEN": token, "Accept": "application/json"}
-    # On-prem often uses custom CAs; match product's pragmatic TLS stance for GitLab
     timeout = httpx.Timeout(20.0, connect=10.0)
 
     try:
+        # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(timeout=timeout, verify=False, headers=headers) as client:
             user_resp = client.get(f"{base}/user")
             if user_resp.status_code == 401:

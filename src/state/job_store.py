@@ -10,12 +10,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.config import settings
 from src.logger import logger
 
 
 def _default_jobs_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "jobs"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("jobs")
 
 
 def extract_task_description_from_prompt(text: str) -> str:
@@ -75,18 +77,9 @@ def description_from_prompt_path(prompt_path: Optional[str]) -> str:
             except ValueError:
                 return False
 
-        allowed = (
-            _under(Path.cwd() / ".jira-agent")
-            or _under(_default_jobs_dir())
-            or ".jira-agent" in path.parts
-            or (
-                path.parent.name == "sessions"
-                and (
-                    path.name.endswith(".prompt.txt")
-                    or path.suffix == ".log"
-                )
-            )
-        )
+        from src.paths import under_agent_data
+
+        allowed = under_agent_data(path) or _under(_default_jobs_dir())
         if not allowed:
             logger.debug(f"Refusing prompt path outside agent dirs: {path}")
             return ""
@@ -123,14 +116,25 @@ class JobStore:
         agent: str = "",
         task_id: Optional[str] = None,
         status: str = "running",
+        source: str = "jira",
+        merge_request_url: Optional[str] = None,
+        gitlab_project: Optional[str] = None,
+        gitlab_mr_iid: Optional[int] = None,
+        model: Optional[str] = None,
+        backend: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a job snapshot for one agent run.
 
         ``summary`` and ``description`` are frozen at start time so later Jira
         edits / reprocess do not rewrite history for this job.
+        ``model`` is the worker model id used for this run.
+        ``backend`` is ``opencode`` or ``codex`` (empty = infer later).
         """
+        src = (source or "jira").strip().lower() or "jira"
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat(timespec="seconds")
+        model_id = (model or "").strip() or None
+        backend_id = (backend or "").strip() or None
         job: Dict[str, Any] = {
             "job_id": job_id,
             "issue_key": issue_key,
@@ -138,21 +142,36 @@ class JobStore:
             "description": description or "",
             "workflow_type": workflow_type or "direct",
             "agent": agent or "",
+            "model": model_id,
+            "backend": backend_id,
             "status": status,
+            "source": src,
+            "gitlab_project": gitlab_project or None,
+            "gitlab_mr_iid": gitlab_mr_iid,
             "task_id": task_id,
             "task_ids": [task_id] if task_id else [],
             "opencode_session_id": None,
             "opencode_session_ids": [],
             "session_log_path": None,
+            # All OpenCode session logs for this job (initial + _retryN), ordered
+            "session_log_paths": [],
             "prompt_path": None,
+            "prompt_paths": [],
+            # Failed-attempt bookkeeping nested under this job (not separate jobs)
+            "retry_attempts": [],
             "progress_percentage": 0,
             "error_message": None,
             "started_at": now,
             "completed_at": None,
             "updated_at": now,
         }
+        if merge_request_url:
+            job["merge_request_url"] = merge_request_url
         self._write(job)
-        logger.info(f"Job created: {job_id} issue={issue_key} workflow={workflow_type}")
+        logger.info(
+            f"Job created: {job_id} issue={issue_key} workflow={workflow_type} "
+            f"source={src}"
+        )
         return job
 
     def update_job(self, job_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
@@ -176,6 +195,32 @@ class JobStore:
                         tids.append(value)
                     job["task_ids"] = tids
                     job["task_id"] = value
+                elif key == "session_log_path" and value:
+                    paths = list(job.get("session_log_paths") or [])
+                    if value not in paths:
+                        paths.append(value)
+                    job["session_log_paths"] = paths
+                    job["session_log_path"] = value  # latest
+                elif key == "prompt_path" and value:
+                    paths = list(job.get("prompt_paths") or [])
+                    if value not in paths:
+                        paths.append(value)
+                    job["prompt_paths"] = paths
+                    job["prompt_path"] = value  # latest
+                elif key == "retry_attempt" and isinstance(value, dict):
+                    # Append one failed-attempt record under this job
+                    history = list(job.get("retry_attempts") or [])
+                    history.append(value)
+                    job["retry_attempts"] = history
+                elif key == "session_log_paths" and isinstance(value, list):
+                    # Merge unique paths preserving order
+                    existing = list(job.get("session_log_paths") or [])
+                    for p in value:
+                        if p and p not in existing:
+                            existing.append(p)
+                    job["session_log_paths"] = existing
+                    if existing:
+                        job["session_log_path"] = existing[-1]
                 else:
                     job[key] = value
             job["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -237,7 +282,15 @@ class JobStore:
                 jobs.append(job)
             except Exception as e:
                 logger.error(f"Error loading {path}: {e}")
-        jobs.sort(key=lambda j: j.get("started_at") or j.get("updated_at") or "", reverse=True)
+        jobs.sort(
+            key=lambda j: (
+                j.get("started_at")
+                or j.get("created_at")
+                or j.get("updated_at")
+                or ""
+            ),
+            reverse=True,
+        )
         off = max(0, int(offset or 0))
         lim = max(1, int(limit or 1))
         return jobs[off : off + lim]

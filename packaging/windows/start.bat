@@ -16,6 +16,7 @@ echo ========================================
 echo.
 echo   Backend  : http://127.0.0.1:8080/   ^(API + SPA^)
 echo   Frontend : http://127.0.0.1:5173/   ^(SPA + proxy — use this if you want :5173^)
+echo   Serve    : http://127.0.0.1:4096/   ^(OpenCode — started with backend if needed^)
 echo.
 
 set "BE=%SCRIPT_DIR%\start-backend.bat"
@@ -24,12 +25,12 @@ if not exist "%BE%" set "BE=%SCRIPT_DIR%\packaging\windows\start-backend.bat"
 if not exist "%FE%" set "FE=%SCRIPT_DIR%\packaging\windows\start-frontend.bat"
 
 if not exist "%BE%" (
-    echo [ERROR] start-backend.bat not found. Run install.bat or re-download the package.
+    echo [ERROR] start-backend.bat not found. Run install-dashboard.bat or re-download the package.
     call :maybe_pause
     exit /b 1
 )
 if not exist "%FE%" (
-    echo [ERROR] start-frontend.bat not found. Run install.bat or re-download the package.
+    echo [ERROR] start-frontend.bat not found. Run install-dashboard.bat or re-download the package.
     call :maybe_pause
     exit /b 1
 )
@@ -65,7 +66,7 @@ echo Prefer UI:  http://127.0.0.1:5173/
 echo Also UI:    http://127.0.0.1:8080/
 echo API:        http://127.0.0.1:8080/api/meta
 echo.
-echo Console windows: VD-Backend and VD-Frontend
+echo Console windows: VD-OpenCode-Serve, VD-Backend, VD-Frontend
 echo.
 call :maybe_pause
 exit /b 0

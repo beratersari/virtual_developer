@@ -79,15 +79,24 @@ def test_recover_multiple_orphans(processor, state_manager):
     assert state_manager.get_state("M-2").status == TaskStatus.ERROR
 
 
-def test_recover_skips_plan_ready_pending_completed(processor, state_manager):
+def test_recover_orphaned_pending_marks_error(processor, state_manager, fake_jira):
+    """Crash in the accept/ack window leaves PENDING with no child process."""
+    state_manager.create_state("ORPH-PEND", "s", "d")
+    assert state_manager.get_state("ORPH-PEND").status == TaskStatus.PENDING
+    assert processor.recover_orphaned_in_flight() == 1
+    st = state_manager.get_state("ORPH-PEND")
+    assert st.status == TaskStatus.ERROR
+    assert st.error_message
+    assert fake_jira.comments
+
+
+def test_recover_skips_plan_ready_and_completed(processor, state_manager):
     state_manager.create_state("OK-1", "s", "d")
     state_manager.update_state("OK-1", status=TaskStatus.PLAN_READY)
-    state_manager.create_state("OK-2", "s", "d")  # PENDING
     state_manager.create_state("OK-3", "s", "d")
     state_manager.update_state("OK-3", status=TaskStatus.COMPLETED, completed_at=datetime.now())
     assert processor.recover_orphaned_in_flight() == 0
     assert state_manager.get_state("OK-1").status == TaskStatus.PLAN_READY
-    assert state_manager.get_state("OK-2").status == TaskStatus.PENDING
     assert state_manager.get_state("OK-3").status == TaskStatus.COMPLETED
 
 
@@ -407,18 +416,20 @@ async def test_poller_handler_ignored_while_stopping():
     daemon = JiraAgentDaemon()
     daemon.processor = MagicMock()
     daemon.processor.process_event = AsyncMock()
+    daemon.processor.seed_poller_requeue_markers = MagicMock(return_value=0)
     daemon._running = False
     daemon._stopping = True
+    daemon._main_loop = None
 
     with patch("src.daemon.JiraPoller") as Poller:
         poller = MagicMock()
         Poller.return_value = poller
         with patch("src.daemon.settings") as s:
             s.jira_board_id = "1"
-            with patch("asyncio.get_event_loop") as gel:
-                loop = MagicMock()
-                loop.run_in_executor = AsyncMock(return_value=None)
-                gel.return_value = loop
+            loop = MagicMock()
+            loop.run_in_executor = AsyncMock(return_value=None)
+            loop.is_closed = MagicMock(return_value=False)
+            with patch("asyncio.get_running_loop", return_value=loop):
                 await daemon._start_poller()
                 handler = loop.run_in_executor.call_args[0][2]
                 handler({"webhookEvent": "jira:issue_created", "issue": {"key": "X"}})

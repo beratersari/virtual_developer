@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """CLI for JIRA Virtual Developer."""
 
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -34,11 +33,18 @@ def validate_config():
         sys.exit(1)
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__)
-def cli():
-    """JIRA Virtual Developer - AI Agent Integration for JIRA."""
-    pass
+@click.pass_context
+def cli(ctx: click.Context):
+    """Yaver — unattended Jira aide."""
+    if ctx.invoked_subcommand is not None:
+        return
+    # Frozen exe: double-click / no args starts the dashboard daemon.
+    if getattr(sys, "frozen", False):
+        ctx.invoke(start)
+        return
+    click.echo(ctx.get_help())
 
 
 @cli.command()
@@ -55,14 +61,14 @@ def start():
 
 @cli.command()
 @click.argument("issue_key")
-@click.option("--agent", "-a", default=None, help="Override agent (sisyphus, prometheus, atlas)")
+@click.option("--agent", "-a", default=None, help="Override agent (build, plan, oracle)")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running")
 def process(issue_key: str, agent: Optional[str], dry_run: bool):
     """Process a specific JIRA issue manually.
     
     Examples:
         python cli.py process SIM-1008
-        python cli.py process SIM-1008 --agent sisyphus
+        python cli.py process SIM-1008 --agent build
         python cli.py process SIM-1008 --dry-run
     """
     validate_config()
@@ -259,9 +265,11 @@ def config():
     
     table.add_row("JIRA Host", settings.jira_host)
     table.add_row("Projects", ", ".join(settings.jira_projects_list))
-    table.add_row("Default Agent", settings.default_agent)
-    table.add_row("Planning Agent", settings.planning_agent)
-    table.add_row("Orchestrator Agent", settings.orchestrator_agent)
+    table.add_row("Implement agent", settings.default_agent)
+    table.add_row(
+        "Planner agent",
+        getattr(settings, "default_plan_agent", "derman-plan"),
+    )
     table.add_row("Max Concurrent Jobs", str(settings.max_concurrent_jobs))
     table.add_row("Poll Interval (s)", str(settings.poll_interval_seconds))
     table.add_row("Board ID", settings.jira_board_id or "(not set)")
@@ -444,12 +452,38 @@ def schedule_cancel(schedule_id: str):
 @cli.command()
 def init():
     """Initialize the project structure."""
+    from src.paths import (
+        agent_data_dir,
+        agent_subdir,
+        default_temp_dir,
+        ensure_agent_data_dir,
+        plans_dir,
+        resolve_temp_dir_base,
+    )
+    from src.config import upsert_dotenv_keys
+
+    ensure_agent_data_dir(migrate=True)
     dirs = [
         settings.state_dir,
-        settings.project_root / ".jira-agent" / "sessions",
-        settings.full_plans_dir,
+        agent_subdir("sessions"),
+        resolve_temp_dir_base(
+            settings.temp_dir_base
+            if Path(settings.temp_dir_base).is_absolute()
+            else default_temp_dir()
+        ),
+        plans_dir(),
         Path("logs"),
     ]
+    upsert_dotenv_keys(
+        {
+            "YAVER_DATA_DIR": str(agent_data_dir()),
+            "TEMP_DIR_BASE": str(
+                settings.temp_dir_base
+                if Path(settings.temp_dir_base).is_absolute()
+                else default_temp_dir()
+            ),
+        }
+    )
     
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
@@ -474,9 +508,13 @@ def init():
 @click.option("--project", "-p", default="sample_project", help="Project directory to work on")
 @click.option("--title", "-t", required=True, help="Issue title/summary")
 @click.option("--description", "-d", required=True, help="Issue description")
-@click.option("--agent", "-a", default="sisyphus", help="Agent to use (sisyphus, prometheus, atlas, oracle)")
-@click.option("--category", "-c", help="Category for task (quick, deep, visual-engineering, etc.)")
-@click.option("--plan-only", is_flag=True, help="Only create a plan (Prometheus), don't execute")
+@click.option(
+    "--agent",
+    "-a",
+    default=None,
+    help="OpenCode agent (default: derman-build / derman-plan by mode; use oracle for consult)",
+)
+@click.option("--plan-only", is_flag=True, help="Only create a plan (Mode: plan path), don't execute")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running agent")
 @click.option("--model", "-m", default=None, help="Override DEFAULT_MODEL for this run")
 @click.option("--timeout", default=None, type=int, help="Agent timeout seconds (default from settings)")
@@ -484,8 +522,7 @@ def test_issue(
     project: str,
     title: str,
     description: str,
-    agent: str,
-    category: Optional[str],
+    agent: Optional[str],
     plan_only: bool,
     dry_run: bool,
     model: Optional[str],
@@ -504,12 +541,6 @@ def test_issue(
             --title "Add logging" \\
             --description "Add logging to all calculator methods" \\
             --plan-only
-        
-        # Use specific category
-        python cli.py test-issue \\
-            --title "Update UI" \\
-            --description "Make it look better" \\
-            --category visual-engineering
     """
     import asyncio
     from datetime import datetime
@@ -517,7 +548,9 @@ def test_issue(
     from src.orchestrator.prompt_builder import PromptBuilder
     from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
     from src.state.manager import JiraStateManager
-    from src.state.models import JiraAgentState, TaskStatus
+    from src.state.models import TaskStatus
+
+    explicit_agent = (agent or "").strip()
     
     # Generate a fake issue key
     issue_key = f"TEST-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -526,9 +559,6 @@ def test_issue(
     console.print(f"Project: {project}")
     console.print(f"Title: {title}")
     console.print(f"Description: {description}")
-    console.print(f"Agent: {agent}")
-    if category:
-        console.print(f"Category: {category}")
     console.print()
     
     if dry_run:
@@ -546,7 +576,14 @@ def test_issue(
     
     # Determine workflow
     workflow = WorkflowRouter.route_issue(issue_key, title, description)
-    console.print(f"Detected workflow: [green]{workflow.value}[/green]\n")
+    if explicit_agent:
+        agent = explicit_agent
+    elif plan_only:
+        agent = WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING)
+    else:
+        agent = WorkflowRouter.get_agent_for_workflow(workflow)
+    console.print(f"Detected workflow: [green]{workflow.value}[/green]")
+    console.print(f"Agent: [green]{agent}[/green]\n")
     
     async def run_agent():
         project_path = Path(project).resolve()
@@ -561,7 +598,7 @@ def test_issue(
             state.status = TaskStatus.PLANNING
             state_manager.set_state(state)
             
-            prompt = PromptBuilder.build_prometheus_prompt(
+            prompt = PromptBuilder.build_plan_prompt(
                 issue_key=issue_key,
                 summary=title,
                 description=description,
@@ -569,15 +606,17 @@ def test_issue(
             task = AgentTask(
                 description=f"Plan: {title}",
                 prompt=prompt,
-                agent="prometheus",
+                agent=agent if agent != "oracle" else settings.default_agent,
                 issue_key=issue_key,
                 model=model,
             )
         elif agent == "oracle":
-            # Oracle consultation
+            # Oracle consultation → plan-shaped prompt (system + title + body)
             console.print("[blue]Starting Oracle consultation...[/blue]")
-            prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=description,
+            prompt = PromptBuilder.build_plan_prompt(
+                issue_key=issue_key,
+                summary=title or "",
+                description=description or "",
             )
             task = AgentTask(
                 description=f"Consult: {title}",
@@ -587,20 +626,20 @@ def test_issue(
                 model=model,
             )
         else:
-            # Direct execution
+            # Build / direct execution → build path
             console.print("[blue]Starting direct execution...[/blue]")
             state.status = TaskStatus.EXECUTING
             state_manager.set_state(state)
             
-            prompt = PromptBuilder.build_sisyphus_prompt(
+            prompt = PromptBuilder.build_build_prompt(
                 issue_key=issue_key,
-                task_description=description,
+                summary=title or "",
+                description=description or "",
             )
             task = AgentTask(
                 description=f"Execute: {title}",
                 prompt=prompt,
                 agent=agent,
-                category=category or settings.execution_category,
                 issue_key=issue_key,
                 model=model,
             )

@@ -25,7 +25,6 @@ class WorkflowRouter:
         "design pattern",
         "best practice",
         "how to",
-        "approach",
     ]
 
     # Words that signal real implementation work (must not route to oracle-only)
@@ -78,8 +77,9 @@ class WorkflowRouter:
         if has_oracle_phrase and not has_implementation:
             return WorkflowType.ORACLE_CONSULT
 
-        # Mode missing: prefer planning so git prepare posts the full format help
-        # (processor also fails early via route_issue_with_reason when Mode required)
+        # No {params} Mode (and no params default): prefer planning so git
+        # prepare posts the format help. A {params} block without Mode is
+        # already ``build`` via parse_issue_mode.
         return WorkflowType.PLANNING
 
     @classmethod
@@ -102,20 +102,24 @@ class WorkflowRouter:
         """Whether a *new* issue can start work immediately when routed.
 
         Fresh ``Mode: build`` issues run execution. Planning always stops at
-        ``plan_ready`` and **never** auto-starts build (intentional). Resume
-        from plan_ready requires an explicit start label or a new build issue.
+        ``plan_ready``. Same-ticket implement uses label ``plan_execute``;
+        a new ``Mode: build`` issue is still a direct build.
         """
         return workflow_type == WorkflowType.EXECUTION
 
     @classmethod
     def get_agent_for_workflow(cls, workflow_type: WorkflowType) -> str:
-        """Get default agent for workflow type."""
-        mapping = {
-            WorkflowType.PLANNING: settings.planning_agent,
-            WorkflowType.EXECUTION: settings.orchestrator_agent,
-            WorkflowType.ORACLE_CONSULT: "oracle",
-        }
-        return mapping.get(workflow_type, settings.default_agent)
+        """OpenCode agent for this workflow (oracle consult is fixed)."""
+        if workflow_type == WorkflowType.ORACLE_CONSULT:
+            return "oracle"
+        if workflow_type == WorkflowType.PLANNING:
+            plan = getattr(settings, "default_plan_agent", None)
+            if isinstance(plan, str) and plan.strip():
+                return plan.strip()
+        agent = getattr(settings, "default_agent", None)
+        if isinstance(agent, str) and agent.strip():
+            return agent.strip()
+        return "derman-build"
 
     @classmethod
     def extract_mention_command(cls, comment_text: str) -> Optional[str]:

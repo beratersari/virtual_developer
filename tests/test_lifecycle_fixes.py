@@ -98,22 +98,18 @@ def test_fail_issue_still_errors_in_flight(processor, state_manager, fake_jira):
 
 
 # ---------------------------------------------------------------------------
-# plan_ready: Mode:build alone does not start; start label does
+# plan_ready: Mode: build does not implement; plan_execute + In Progress does
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manager):
-    state_manager.create_state(
-        "PR-M1",
-        "s",
-        "{params}\nRepository: https://g.example/r.git\n"
-        "Source branch: feature/x\nTarget branch: develop\nMode: build\n{params}",
-    )
+async def test_plan_ready_mode_plan_does_not_start(processor, state_manager):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-M1", "s", desc)
     state_manager.update_state("PR-M1", status=TaskStatus.PLAN_READY)
     started = {"ok": False}
 
-    async def fake_exec(st):
+    async def fake_exec(st, **kwargs):
         started["ok"] = True
 
     event = {
@@ -122,13 +118,9 @@ async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manag
             "key": "PR-M1",
             "fields": {
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["ai-assist"],
+                "labels": [],
                 "summary": "s",
-                "description": (
-                    "{params}\nRepository: https://g.example/r.git\n"
-                    "Source branch: feature/x\nTarget branch: develop\n"
-                    "Mode: build\n{params}"
-                ),
+                "description": desc,
             },
         },
     }
@@ -136,6 +128,71 @@ async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manag
         await processor._handle_issue_updated(event)
     assert started["ok"] is False
     assert state_manager.get_state("PR-M1").status == TaskStatus.PLAN_READY
+
+
+@pytest.mark.asyncio
+async def test_plan_ready_mode_build_does_not_start(processor, state_manager):
+    desc = (
+        "{params}\nRepository: https://g.example/r.git\n"
+        "Source branch: feature/x\nTarget branch: develop\n"
+        "Mode: build\n{params}"
+    )
+    state_manager.create_state("PR-M2", "s", desc)
+    state_manager.update_state("PR-M2", status=TaskStatus.PLAN_READY)
+    started = {"ok": False}
+
+    async def fake_exec(st, **kwargs):
+        started["ok"] = True
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "PR-M2",
+            "fields": {
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "labels": [],
+                "summary": "s",
+                "description": desc,
+            },
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        await processor._handle_issue_updated(event)
+    assert started["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_ready_plan_execute_starts(processor, state_manager, tmp_path):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-M3", "s", desc)
+    plan = tmp_path / "PR-M3.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-M3", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
+    started = {"ok": False}
+
+    async def fake_exec(st, **kwargs):
+        started["ok"] = True
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "PR-M3",
+            "fields": {
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
+                "summary": "s",
+                "description": desc,
+            },
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        await processor._handle_issue_updated(event)
+    assert started["ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +232,115 @@ def test_purge_stale_temp_dirs_removes_old_only(tmp_path):
     assert new.exists()
 
 
-def test_cleanup_age_keeps_fresh_dir(tmp_path):
+def test_daemon_does_not_auto_purge_temp_clones():
+    """No automatic clone deletion (start, hourly, or job-end policy)."""
+    import inspect
+    from pathlib import Path
+
+    from src import daemon as daemon_mod
+    from src.config import Settings
+
+    source = inspect.getsource(daemon_mod.JiraAgentDaemon)
+    assert "_run_temp_cleanup_sweeper" not in source
+    assert "purge_stale_temp_dirs" not in source
+    assert not hasattr(daemon_mod.JiraAgentDaemon, "_run_temp_cleanup_sweeper")
+    assert "temp_cleanup_policy" not in Settings.model_fields
+    assert "temp_cleanup_max_age_days" not in Settings.model_fields
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    text = example.read_text(encoding="utf-8")
+    assert "TEMP_CLEANUP_POLICY" not in text
+    assert "TEMP_CLEANUP_MAX_AGE_DAYS" not in text
+
+
+def test_cleanup_keeps_temp_dir(tmp_path):
     d = tmp_path / "fresh"
     d.mkdir()
     gm = GitManager.__new__(GitManager)
+    gm.issue_key = "CL-AGE"
     gm.temp_dir = d
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "age"
-        s.temp_cleanup_max_age_days = 1.0
-        assert gm.cleanup(success=True) is True
-        assert d.exists()
+    assert gm.cleanup(success=True) is True
+    assert d.exists()
+
+
+# ---------------------------------------------------------------------------
+# Cancel / abort during post-agent push (critical finding #6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_skips_when_aborted(processor, state_manager):
+    """Cancel/watchdog before delivery must not push or open MR."""
+    state_manager.create_state("AB-1", "s", "d")
+    state_manager.update_state("AB-1", status=TaskStatus.CANCELLED)
+    git = MagicMock()
+    processor._contexts = {"AB-1": {"git": git, "runner": MagicMock()}}
+
+    ok = await processor._push_and_create_mr(state_manager.get_state("AB-1"))
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_push_and_create_mr_cancel_during_push_skips_notify(
+    processor, state_manager, fake_jira
+):
+    """Cancel mid-push must not treat GitCancelledError as a push-fail comment."""
+    from src.git_manager import GitCancelledError
+
+    state_manager.create_state("AB-2", "s", "d")
+    state_manager.update_state("AB-2", status=TaskStatus.EXECUTING)
+    git = MagicMock()
+    git.work_branch = "feature/AB-2"
+    git.target_branch = "develop"
+    git.get_current_branch.return_value = "feature/AB-2"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
+    git.push.side_effect = GitCancelledError(
+        "git cancelled: git remote set-url origin https://oauth2:***@h/r.git"
+    )
+    processor._contexts = {"AB-2": {"git": git, "runner": MagicMock()}}
+
+    ok = await processor._push_and_create_mr(state_manager.get_state("AB-2"))
+    assert ok is False
+    git.push.assert_called_once()
+    git.create_merge_request.assert_not_called()
+    bodies = [c.get("body", "") for c in getattr(fake_jira, "comments", [])]
+    assert not any("push failed" in b.lower() for b in bodies)
+
+
+@pytest.mark.asyncio
+async def test_push_skips_mr_when_aborted_after_push(processor, state_manager):
+    """If cancel lands after git.push, do not open MR or stamp delivery."""
+    state_manager.create_state("AB-2", "s", "d")
+    state_manager.update_state("AB-2", status=TaskStatus.EXECUTING)
+    git = MagicMock()
+    git.ensure_on_work_branch = MagicMock(return_value=True)
+    git.work_branch = "feature/AB-2"
+    git.target_branch = "develop"
+    git.commits_ahead_of_target = MagicMock(return_value=1)
+    git.push = MagicMock(return_value=True)
+    git.get_last_commit_subject = MagicMock(return_value="feat: x")
+    git.get_last_commit_message = MagicMock(return_value="feat: x")
+    git.get_last_commit_sha = MagicMock(return_value="abc123deadbeef")
+    git.create_merge_request = MagicMock(return_value="https://mr/1")
+    git.build_commit_url = MagicMock(return_value=None)
+
+    processor._contexts = {"AB-2": {"git": git, "runner": MagicMock()}}
+    state = state_manager.get_state("AB-2")
+    call_count = {"n": 0}
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        call_count["n"] += 1
+        out = fn(*args, **kwargs)
+        # ensure_on_work_branch (1) then push (2) — abort after push
+        if call_count["n"] == 2:
+            state_manager.update_state("AB-2", status=TaskStatus.CANCELLED)
+        return out
+
+    with patch("src.processor.asyncio.to_thread", side_effect=fake_to_thread):
+        ok = await processor._push_and_create_mr(state)
+
+    assert ok is False
+    git.create_merge_request.assert_not_called()
+    st = state_manager.get_state("AB-2")
+    assert st.status == TaskStatus.CANCELLED
+    assert (st.metadata or {}).get("delivery_status") != "delivered"

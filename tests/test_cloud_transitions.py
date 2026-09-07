@@ -25,8 +25,7 @@ def _client_with_transitions(host: str, transitions: list) -> JiraClient:
         with patch("src.jira.client.settings") as s:
             s.jira_host = host
             s.jira_api_token = "t"
-            s.jira_email = "u@e.com" if "atlassian.net" in host else ""
-            c = JiraClient(host=host, api_token="t", email=s.jira_email)
+            c = JiraClient(host=host, api_token="t")
     c.get_transitions = MagicMock(return_value=transitions)
     c.do_transition = MagicMock(return_value=True)
     return c

@@ -22,24 +22,44 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
 ## User flow
 
 1. Download `virtual_developer-windows-x64-*.zip` (Actions artifact or GitHub Release).
-2. Extract once (you should see `install.bat` and `start.bat` at the top level).
+   The zip already includes the prebuilt ops dashboard SPA (`web\dist`).
+2. Extract once (you should see `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, and `start.bat` at the top level).
 3. Install a supported Python 3.x x64 (see `vendor\SUPPORTED_PYTHON.txt`).
-4. Run **`install.bat`**:
-   - Creates `.venv` and installs Python deps from **`vendor\python-wheels`** (offline)
-   - Extracts OpenCode into **`%USERPROFILE%\.opencode`**
-   - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+4. Install (run dashboard + backends for a full offline box):
+   - **`install-dashboard.bat`** — **Python + ops dashboard** (no agent workers):
+     - Creates `.venv` + deps from **`vendor\python-wheels`**, start scripts, `.env`, `cli.py init`
+     - Ensures **`web\dist`** (prebuilt ops dashboard SPA) is present
+   - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
+     - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
+     - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
+   - **`install-backends.bat`** — **OpenCode** via the **opencoderman** submodule (plus Codex when run with no args):
+     - Calls `packaging/install_opencode.py` → `opencoderman/install.py`
+     - OpenCode to **`%USERPROFILE%\.opencode`** (CLI + agents + skills; stock `plugin: []`)
+     - CLI from `opencoderman/vendor/bin/windows/`, `vendor/bin/opencode.exe`, or `vendor/opencode-home.zip`
+     - Optional: `install-backends.bat opencode` (OpenCode only)
+     - Needs Python (project `.venv` or `python` / `py` on PATH)
+   - **`install-codex.bat`** — **Codex CLI only**:
+     - Extracts **`vendor\codex-package-x86_64-pc-windows-msvc.tar.gz`** with **`tar.exe`**
+       (that file is put in the CI zip; no network at install time)
+     - Codex to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**
+     - Dummy **`%USERPROFILE%\.codex\config.toml`** if that file is not already there
+     - Does not touch OpenCode or Python
+   - **`install-opencode-online.bat`** — **OpenCode only, online** (needs network + Python):
+     - Vendors the CLI with `opencoderman/packaging/build_artifact.py --in-place` (version from the submodule)
+     - Then the same `install.py` as the offline path
+     - **Offline workers still use `install-backends.bat`** (CI zip / vendored CLI)
 5. Edit **`.env`** (Jira / GitLab).
 6. Start (pick one):
-   - **`start-backend.bat`** — daemon on **http://0.0.0.0:8080/** (API + SPA)
+   - **`start-backend.bat`** — ensures OpenCode serve on **:4096**, then daemon on **http://0.0.0.0:8080/** (API + SPA)
    - **`start-frontend.bat`** — separate UI on **http://0.0.0.0:5173/** (proxies `/api` + `/ws` to backend; **no Node/Vite**)
    - **`start.bat`** — both (backend first, then frontend)
-7. Optional OpenCode TUI: **`start-opencode.bat`** (never from your user home folder).
+7. Optional OpenCode TUI: **`start-opencode.bat`** (after `install-backends.bat` or `install-opencode-online.bat`; never from your user home folder).
 
 ### Frontend + backend model (offline)
 
 | Launcher | Port | Role |
 |----------|------|------|
-| **start-backend.bat** | **8080** | Daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
+| **start-backend.bat** | **8080** (+ **4096** serve) | Ensures OpenCode serve, then daemon: poller, jobs, REST, WebSocket, and SPA from `web\dist` |
 | **start-frontend.bat** | **5173** | SPA only + reverse proxy to backend (so you can use :5173 without Node) |
 | **start.bat** | both | Calls backend, then frontend |
 
@@ -57,42 +77,49 @@ Do **not** ship `web\node_modules` in the zip. Only `web\dist`.
 
 **CI note:** full `e2e-smoke.ps1` is not run on every push (too slow). Build asserts payload layout.
 
-OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, config, plugin).
-Config is mirrored to **`%USERPROFILE%\.config\opencode\`** for OpenCode global discovery.
+OpenCode is installed **only** under **`%USERPROFILE%\.opencode`** (binary, stock config, opencoderman agents/skills).
+`opencoderman/install.py` backs up a leftover **`%USERPROFILE%\.config\opencode\`** and does not write it back.
 
 Do **not** expect a second install at `C:\vd\opencode` (that was a short-lived workaround).
-Advanced override: set `VD_OPENCODE_ROOT` before running `install.bat`.
+Advanced override: set `VD_OPENCODE_ROOT` before running `install-backends.bat`.
 
 ## Design notes (Windows pain points)
 
 | Problem | Fix |
 |---------|-----|
-| Path too long / slow extract of `node_modules` | Outer zip only has **`vendor/opencode-home.zip`** (one file). `install.bat` extracts it with long-path-aware tools into `%USERPROFILE%\.opencode` |
+| Path too long / slow extract of `node_modules` | Outer zip keeps **`vendor/opencode-home.zip`** as a CLI fallback only. Install goes through **opencoderman** (CLI + agents/skills), not a full home unzip. |
 | Python version lock-in | Offline wheels downloaded for **3.10, 3.11, 3.12, 3.13** (`PYTHON_WHEEL_VERSIONS`); runtime requires **≥ 3.10** |
 | `opencode.json` became `[OK] config ...` | **cmd.exe** treats unescaped `>` in `echo ... -> file` as redirect — installer never uses bare `->` in echo lines |
 | Multiple `opencode` on PATH | Installer adds only `%USERPROFILE%\.opencode\bin` and drops legacy `C:\vd\opencode\bin` from user PATH |
-| Dirty re-install | `install.bat` wipes prior `%USERPROFILE%\.opencode`, legacy `C:\vd\opencode`, and bad `.config\opencode\opencode.json` before extract |
+| Dirty re-install | `opencoderman/install.py` **renames** prior `%USERPROFILE%\.opencode` to a timestamped backup and unhooks other OpenCode dirs from PATH |
 | Black/blank TUI / default agents | OpenCode Bun-installs plugins into `~/.cache/opencode`; installer **full-copies** the complete `oh-my-opencode` tree (agents + skill `.md`), pins version, seeds `node_modules` + `packages` + `.config` |
 
 ## Files
 
 | Path | Role |
 |------|------|
-| `versions.env` | Pinned OpenCode / oh-my-opencode / glab / Python wheel set / Node |
+| `versions.env` | Pinned OpenCode / Codex / oh-my-opencode / glab / Python wheel set / Node |
 | `package.json` | Template for `%USERPROFILE%\.opencode\package.json` |
-| `opencode.json` | Registers `oh-my-opencode` plugin |
+| `opencode.json` | Stock OpenCode config (`plugin: []`, built-in build/plan) |
 | `oh-my-opencode.json` | Default plugin config stub |
+| `Install-Backends.ps1` | Offline OpenCode and/or Codex (called by root `install-backends.bat` / `install-codex.bat`) |
+| `../install_opencode.py` | Yaver wrapper around `opencoderman/install.py` |
+| `Install-OpencodeOnline.ps1` | Online OpenCode via opencoderman (`build_artifact.py --in-place` + install.py) |
+| `npm-online.npmrc` | Editable npm `registry=` for online install only |
+| `online-sources.env` | Optional `OPENCODE_ZIP_URL` / `NPM_REGISTRY` mirrors |
 | `build-dist.ps1` | Fetches pinned artifacts, **builds `web/` SPA**, packs the zip |
 | `start.bat` | User launcher: kill old processes → start daemon + dashboard |
 | `Stop-VdProcesses.ps1` | Helper used by `start.bat` to free ports / kill old daemons |
 | `e2e-smoke.ps1` | CI: deep-path install + assert SPA + launchers + OpenCode |
 | `../../.github/workflows/windows-dist.yml` | Runs the packager on `windows-latest` |
 
+Payload still ships **`vendor/node/`** (Node win-x64) for other tooling. Online OpenCode no longer needs it — it uses the opencoderman vendor script + Python.
+
 ## Bumping versions
 
 1. Edit `versions.env` (and the version inside `package.json` if you change oh-my-opencode).
 2. Push to `develop` / `main`, or run the **Windows Distribution** workflow manually.
-3. Download the new artifact and smoke-test `install.bat` on a clean Windows machine.
+3. Download the new artifact and smoke-test `install-dashboard.bat` + `install-backends.bat` + `install-codex.bat` on a clean Windows machine.
 
 ## Local pack (Windows)
 

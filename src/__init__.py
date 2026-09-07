@@ -1,11 +1,14 @@
-"""JIRA Virtual Developer - Python integration for Oh My OpenAgent."""
+"""Yaver — unattended Jira aide (OpenCode / Oh My OpenAgent)."""
 
 from pathlib import Path
 
 
 def _read_version() -> str:
     """Read SemVer product version from the repo/root VERSION file."""
+    from src.install_paths import bundled_version_file
+
     candidates = [
+        bundled_version_file(),
         Path(__file__).resolve().parent.parent / "VERSION",
         Path.cwd() / "VERSION",
     ]

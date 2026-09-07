@@ -1,12 +1,14 @@
 """Job processor for handling JIRA events."""
 
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
 from src.git_manager import (
+    GitCancelledError,
     GitCloneError,
     GitManager,
     GitSourceBranchError,
@@ -14,18 +16,50 @@ from src.git_manager import (
 )
 from src.issue_git_spec import (
     IssueGitConfigError,
+    parse_issue_git_spec,
     parse_issue_mode,
     require_issue_git_spec,
 )
-from src.jira.client import JiraClient, create_jira_client
+from src.jira.client import create_jira_client
 from src.logger import logger
 from src.orchestrator.agent_runner import AgentRunner, AgentTask
 from src.orchestrator.prompt_builder import PromptBuilder
 from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.reporter.jira_reporter import JiraReporter
 from src.state.job_store import JobStore, job_store
+from src.state.queue_store import WorkQueueStore, work_queue_store, workspace_lock_key
 from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
+
+
+def _plain_int(val: Any, default: int = 0) -> int:
+    """Coerce settings/mocks to int (MagicMock is not JSON-serializable)."""
+    try:
+        if val is None or isinstance(val, bool):
+            return int(default)
+        return int(val)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _issue_text(value: Any) -> str:
+    """Plain text from a Jira summary/description (wiki string or Cloud ADF)."""
+    from src.jira.triggers import jira_body_to_text
+
+    return jira_body_to_text(value)
+
+
+def _live_agent_timeout_seconds(state: Optional[JiraAgentState] = None) -> int:
+    """Dashboard/runtime timeout, not a value frozen at job begin.
+
+    Saving 7200 after a job started at 1800 must still reach OpenCode.
+    """
+    from src.config import live_agent_timeout_seconds
+
+    timeout = live_agent_timeout_seconds()
+    if state is not None:
+        state.timeout_seconds = timeout
+    return timeout
 
 
 class _JobSlotLimiter:
@@ -105,10 +139,26 @@ class JobProcessor:
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._job_semaphore: Optional[asyncio.Semaphore] = None
         self.job_store: JobStore = job_store
+        self.queue_store: WorkQueueStore = work_queue_store
+        self._queue_dispatch_lock: Optional[asyncio.Lock] = None
+        self._queue_dispatch_again = False
         # issue_key -> active job_id for this process
         self._active_jobs: Dict[str, str] = {}
         # Per-issue locks prevent double-start races under concurrent events
         self._issue_locks: Dict[str, asyncio.Lock] = {}
+        # Serialize concurrent jobs that share (repo, source_branch).
+        # Claim runs inside asyncio.to_thread git init — use threading.Lock,
+        # not asyncio.Lock (worker threads cannot share the event-loop lock).
+        self._source_branch_holders_lock = threading.Lock()
+        self._source_branch_holders: Dict[str, str] = {}
+        # lock_key -> issue_key for in-flight schedule/git work (queue claim)
+        self._workspace_lock_holders: Dict[str, str] = {}
+        # Issue keys whose session bind must not be overwritten (uncertain lookup)
+        self._freeze_session_binds: set[str] = set()
+        # GitLab note ids already accepted (webhook retries)
+        self._gitlab_seen_notes: set[str] = set()
+        # Jira webhook event ids (comment:… / assignee:… / created:…)
+        self._jira_seen_events: set[str] = set()
         
         logger.info("Initializing JobProcessor")
         
@@ -120,11 +170,20 @@ class JobProcessor:
             logger.info("Using real JIRA client")
         
         self.jira_client = create_jira_client(simulated=use_simulated)
-        logger.debug(f"JobProcessor initialized - default_agent: {settings.default_agent}, "
-                     f"planning_agent: {settings.planning_agent}, orchestrator_agent: {settings.orchestrator_agent}")
+        logger.debug(
+            f"JobProcessor initialized - derman-build={settings.default_agent} "
+            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')}"
+        )
     
     # Statuses where an agent is actively running — never restart these from updates
     IN_FLIGHT_STATUSES = {
+        TaskStatus.PLANNING,
+        TaskStatus.EXECUTING,
+    }
+    # Cold-start leftovers with no child process. PENDING is the accept/ack
+    # window while the daemon is alive; after a crash it is orphaned too.
+    ORPHAN_RECOVER_STATUSES = {
+        TaskStatus.PENDING,
         TaskStatus.PLANNING,
         TaskStatus.EXECUTING,
     }
@@ -160,6 +219,25 @@ class JobProcessor:
             return WorkflowType.EXECUTION
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
+    def _is_gitlab_triggered(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """True when this run was started by a GitLab MR comment.
+
+        Synthetic ``GL-…`` keys are always GitLab. A real Jira key in the MR
+        title (``feat(KAN-12): …``) is still a GitLab trigger — answers go
+        to the MR, not the Jira ticket.
+        """
+        from src.gitlab.keys import is_gitlab_issue_key
+
+        if is_gitlab_issue_key(issue_key):
+            return True
+        st = state or self.state_manager.get_state(issue_key)
+        meta = (getattr(st, "metadata", None) if st is not None else None) or {}
+        if str(meta.get("source") or "").strip().lower() == "gitlab":
+            return True
+        return str(meta.get("workflow_type") or "").strip().lower() == "gitlab_mr"
+
     def _mark_jira_in_progress(self, issue_key: str) -> bool:
         """Move the Jira issue to an In Progress-like status when work starts.
 
@@ -170,6 +248,9 @@ class JobProcessor:
         Returns True only when Jira accepted an In Progress transition (so the
         poller tracker may honestly record ``in progress``).
         """
+        if self._is_gitlab_triggered(issue_key):
+            return False
+        moved = False
         try:
             client = self.jira_client
             if client is None:
@@ -181,15 +262,29 @@ class JobProcessor:
                     poller = getattr(self, "_poller", None)
                     if poller is not None and hasattr(poller, "_last_jira_status"):
                         poller._last_jira_status[issue_key] = "in progress"
-                    return True
-                logger.warning(
-                    f"{issue_key}: could not transition to In Progress "
-                    f"(no matching transition or already in progress)"
-                )
-                return False
-            return False
+                    moved = True
+                else:
+                    logger.warning(
+                        f"{issue_key}: could not transition to In Progress "
+                        f"(no matching transition or already in progress)"
+                    )
+            self._assign_jira_to_pat_user(issue_key)
+            return moved
         except Exception as e:
             logger.warning(f"{issue_key}: In Progress transition failed: {e}")
+            self._assign_jira_to_pat_user(issue_key)
+            return False
+
+    def _assign_jira_to_pat_user(self, issue_key: str) -> bool:
+        """Set the Jira assignee to the PAT user. Never used for GitLab jobs."""
+        if self._is_gitlab_triggered(issue_key):
+            return False
+        try:
+            from src.jira.client import assign_to_pat_user
+
+            return bool(assign_to_pat_user(self.jira_client, issue_key))
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign failed: {e}")
             return False
 
     def _poller_tracks_in_progress(self, issue_key: str) -> bool:
@@ -243,6 +338,7 @@ class JobProcessor:
         error_message: str,
         *,
         suggestion: Optional[str] = None,
+        category: str = "error",
     ) -> None:
         """Mark issue ERROR, finish job record, allow re-queue, notify Jira.
 
@@ -257,11 +353,16 @@ class JobProcessor:
         that would make ``force_after_in_progress`` re-fire every poll while
         the ticket never left To Do.
         """
-        error_text = (error_message or "Unknown error")[:2000]
+        error_text = (error_message or "Unknown error")[:8000]
+        logger.error(
+            f"{issue_key} failed ({category}) exit_message:\n{error_text}"
+            + (f"\nSuggestion: {suggestion}" if suggestion else "")
+        )
         try:
+            gitlab_job = self._is_gitlab_triggered(issue_key)
             # Leave To Do when work fails (missing Mode / {params}, agent crash).
             # Poller + workflow also try this; fail path is the last guarantee.
-            moved_ip = self._mark_jira_in_progress(issue_key)
+            moved_ip = False if gitlab_job else self._mark_jira_in_progress(issue_key)
             # process_issue may already have transitioned + set tracker before
             # the workflow failed; keep that real IP marker for leave→return.
             already_tracked_ip = self._poller_tracks_in_progress(issue_key)
@@ -271,15 +372,17 @@ class JobProcessor:
             meta_patch = self._archive_run_identifiers(issue_key)
             meta_patch["requeue_eligible"] = True
             # Fingerprint current text so poller only reprocesses when user edits
-            # the description (e.g. adds Mode) while staying on To Do.
+            # summary/description while staying on To Do. Store full + light
+            # (summary-only) so light board scans do not false-match every poll.
             st0 = self.state_manager.get_state(issue_key)
             if st0 is not None:
-                raw = f"{st0.issue_summary or ''}\n{st0.description or ''}"
-                import hashlib
+                from src.jira.poller import JiraPoller
 
-                meta_patch["last_intake_fingerprint"] = hashlib.sha256(
-                    raw.encode("utf-8", errors="replace")
-                ).hexdigest()[:20]
+                meta_patch.update(
+                    JiraPoller.text_fingerprints_from_state(
+                        st0.issue_summary, st0.description
+                    )
+                )
             # CAS: never clobber success or operator cancel
             updated = self.state_manager.update_state_if(
                 issue_key,
@@ -294,11 +397,12 @@ class JobProcessor:
                 cur = self.state_manager.get_state(issue_key)
                 if cur is None:
                     # No local state file — still surface the error on Jira
-                    self.reporter.post_comment_response(
-                        issue_key,
-                        f"An error occurred while processing this issue:\n\n"
-                        f"{{code}}\n{error_text}\n{{code}}",
-                    )
+                    if not gitlab_job:
+                        self.reporter.post_comment_response(
+                            issue_key,
+                            f"An error occurred while processing this issue:\n\n"
+                            f"{{code}}\n{error_text}\n{{code}}",
+                        )
                     return
                 logger.info(
                     f"_fail_issue CAS skip for {issue_key}: "
@@ -311,9 +415,19 @@ class JobProcessor:
             )
             # Only force tracker In Progress when the board actually left To Do
             # (or process_issue already recorded a successful transition).
-            if moved_ip or already_tracked_ip:
+            if (not gitlab_job) and (moved_ip or already_tracked_ip):
                 self._nudge_poller_after_terminal(issue_key, marker="in progress")
             state = updated
+            if gitlab_job:
+                self._post_gitlab_mr_reply(
+                    state,
+                    (
+                        "*Yaver* hit an error on this MR comment:\n\n"
+                        f"```\n{error_text}\n```\n"
+                        + (f"\n{suggestion}" if suggestion else "")
+                    ),
+                )
+                return
             # Default suggestion for config errors if caller did not pass one
             effective_suggestion = suggestion
             if not effective_suggestion:
@@ -330,12 +444,242 @@ class JobProcessor:
                         "away and back to *To Do*, to re-queue."
                     )
             comment_id = self.reporter.post_error(
-                state, error_text, suggestion=effective_suggestion
+                state,
+                error_text,
+                suggestion=effective_suggestion,
+                category=category,
             )
             if not comment_id:
                 logger.error(f"Jira post_error returned no comment for {issue_key}")
         except Exception as e:
             logger.exception(f"Failed to report error for {issue_key}: {e}", e)
+
+    def record_dropped_accept(
+        self,
+        issue_key: str,
+        summary: str = "",
+        *,
+        reason: str = "",
+    ) -> None:
+        """Jira was moved In Progress but no worker started — ERROR + comment.
+
+        Used when the poller accepted the ticket and the daemon handler then
+        dropped the event (stopping, closed loop, enqueue crash). Safe to call
+        from the poller thread. Missing/unknown keys are ignored.
+        """
+        key = (issue_key or "").strip()
+        if not key or key.lower() == "unknown":
+            return
+        extra = f" {reason.strip()}" if (reason or "").strip() else ""
+        msg = (
+            "Issue was accepted (moved toward In Progress) but no worker "
+            f"was bound.{extra} Restart the daemon if it was stopping, "
+            "then move the ticket back to To Do to retry."
+        )
+        try:
+            st = self.state_manager.get_state(key)
+            if st is None:
+                self.state_manager.create_state(key, summary or key, "")
+            self.state_manager.update_state(
+                key,
+                status=TaskStatus.ERROR,
+                error_message=msg[:2000],
+                metadata={"requeue_eligible": True},
+            )
+        except Exception as e:
+            logger.warning(f"{key}: could not record dropped-accept ERROR: {e}")
+        try:
+            self._ensure_job_for_failure(key)
+        except Exception:
+            pass
+        posted = False
+        try:
+            if self.jira_client is not None and hasattr(
+                self.jira_client, "add_comment"
+            ):
+                self.jira_client.add_comment(key, f"AI Agent — ERROR\n\n{msg}")
+                posted = True
+        except Exception as e:
+            logger.warning(f"{key}: dropped-accept Jira comment failed: {e}")
+        if not posted:
+            try:
+                self.reporter.post_comment_response(
+                    key, f"AI Agent — ERROR\n\n{msg}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"{key}: dropped-accept reporter comment failed: {e}"
+                )
+
+    def _fail_from_agent_result(
+        self,
+        issue_key: str,
+        result: Optional[Dict[str, Any]],
+        *,
+        fallback: str,
+        suggestion: Optional[str] = None,
+    ) -> None:
+        """Fail a job from an agent result; compaction is not a crash."""
+        data = result if isinstance(result, dict) else {}
+        incomplete = bool(data.get("incomplete"))
+        stderr = (data.get("stderr") or "").strip() or fallback
+        reasons = list(data.get("incomplete_reasons") or [])
+        backend = (data.get("backend") or data.get("mode") or "").strip() or "agent"
+        from src.backends.codex import format_failure_report
+
+        report = format_failure_report(
+            backend=backend,
+            returncode=data.get("returncode"),
+            stderr=stderr,
+            stdout=str(data.get("stdout") or ""),
+            timed_out=bool(data.get("timed_out")),
+            incomplete=incomplete,
+            incomplete_reasons=reasons,
+            session_id=str(
+                data.get("session_id") or data.get("opencode_session_id") or ""
+            ),
+            extra={
+                k: data.get(k)
+                for k in (
+                    "task_id",
+                    "progress",
+                    "thread_locked",
+                    "assistant_asked_question",
+                    "compact_events",
+                    "continue_count",
+                    "session_file",
+                )
+            },
+        )
+        logger.error(f"{issue_key} {report}")
+        asked = bool(data.get("assistant_asked_question")) or any(
+            "clarifying question" in str(r).lower() for r in reasons
+        ) or "clarifying question" in stderr.lower()
+        blob = " ".join([stderr] + [str(r) for r in reasons]).lower()
+        from src.opencode_sessions import (
+            compact_related_reasons,
+            reasons_are_open_todos_only,
+        )
+
+        compactish = compact_related_reasons(reasons) or (
+            "compact" in blob and "clarifying question" not in blob
+        )
+        loopish = (
+            "compact loop" in blob
+            or "auto-compact loop" in blob
+            or "compact-only cycles" in blob
+        )
+        locked = bool(data.get("thread_locked")) or (
+            "active writer" in blob
+            or "thread-store conflict" in blob
+            or "codex thread locked" in blob
+        )
+        unknown_agent = (
+            "unknown agent" in blob or "is not registered" in blob
+        )
+        if unknown_agent:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode serve does not have this agent (derman-build / "
+                    "derman-plan). Install OpenCoderman agents into ~/.opencode "
+                    "and restart `opencode serve`, then re-queue from To Do."
+                ),
+                category="unknown_agent",
+            )
+            return
+        if locked:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "Codex refused to resume the thread because another "
+                    "writer still holds it (often a leftover `codex exec` "
+                    "after timeout). Kill leftover Codex processes for this "
+                    "job, then move the issue back to To Do to re-queue. "
+                    "The next run starts a new thread from the current files."
+                ),
+                category="thread_lock",
+            )
+            return
+        if incomplete and asked and not loopish:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "This daemon is unattended (one-pass): the model stopped "
+                    "to ask a clarifying question and there is no human reply "
+                    "path. Put the missing decisions into the issue "
+                    "description (Mode, {params}, constraints), then move the "
+                    "issue back to To Do to re-queue."
+                ),
+                category="question",
+            )
+            return
+        if incomplete and loopish:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode entered an auto-compact loop (repeated "
+                    "'Session auto-compacted' with no new work). Raising "
+                    "AGENT_TASK_TIMEOUT_SECONDS will not help, and a Continue "
+                    "prompt would grow context and race the compact loop. "
+                    "Split the ticket or shrink scope, then move it back to "
+                    "To Do to re-queue."
+                ),
+                category="compact_loop",
+            )
+            return
+        if incomplete and compactish:
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "OpenCode stopped after context compaction (not a crash). "
+                    "The same session can be resumed. Compact wait is unbounded "
+                    "except by AGENT_TASK_TIMEOUT_SECONDS; raise that timeout "
+                    "if the job is still compacting when the wall-clock budget "
+                    "ends, then re-queue from To Do."
+                ),
+                category="incomplete",
+            )
+            return
+        if incomplete:
+            todos_only = reasons_are_open_todos_only(reasons) or (
+                "open todos" in blob and "compact" not in blob
+            )
+            self._fail_issue(
+                issue_key,
+                stderr,
+                suggestion=suggestion
+                or (
+                    "After one unattended nudge the session still had "
+                    "unfinished work"
+                    + (" (open todos)" if todos_only else "")
+                    + ". This is not a compaction crash. Put remaining "
+                    "decisions in the issue description if the model asked "
+                    "something, then move the issue back to To Do to re-queue."
+                ),
+                category="unfinished",
+            )
+            return
+        self._fail_issue(
+            issue_key,
+            stderr,
+            suggestion=suggestion
+            or (
+                "Check agent/session logs, then move the issue back to To Do "
+                "to retry."
+            ),
+            category="error",
+        )
 
     def _archive_run_identifiers(
         self,
@@ -403,6 +747,7 @@ class JobProcessor:
         meta_patch["current_job_id"] = None
         self.state_manager.update_state(
             issue_key,
+            force=True,  # intentional reopen: terminal → PENDING for reprocess
             status=TaskStatus.PENDING,
             progress_percentage=0,
             error_message=None,
@@ -411,13 +756,6 @@ class JobProcessor:
             timed_out=False,
             completed_at=None,
             metadata=meta_patch,
-        )
-
-    def _clear_requeue_flag(self, issue_key: str) -> None:
-        """Clear poller re-queue eligibility when work actually starts."""
-        self.state_manager.update_state(
-            issue_key,
-            metadata={"requeue_eligible": False},
         )
 
     def _runner_for(self, issue_key: str) -> Optional[AgentRunner]:
@@ -510,12 +848,32 @@ class JobProcessor:
                 issue_key, session_id, session_file=session_file
             )
         jid = self._active_jobs.get(issue_key)
-        if jid and (new_task_id or session_id or session_file):
-            patch: Dict[str, Any] = {}
+        if jid and (new_task_id or session_id or session_file or reason):
+            # Nest this failure under the active job (never as a separate/legacy job).
+            # attempt_number is 1-based for the upcoming retry; label matches session
+            # file suffix _retryN from AgentRunner.
+            retry_label = f"retry{int(attempt_number)}"
+            patch: Dict[str, Any] = {
+                "retry_attempt": {
+                    "attempt_number": int(attempt_number),
+                    "label": retry_label,
+                    "reason": reason or "",
+                    "delay_seconds": float(delay_seconds or 0),
+                    "failed_session_log_path": session_file,
+                    "error_message": (error_message or "")[:2000]
+                    if error_message
+                    else None,
+                    "return_code": return_code,
+                    "opencode_session_id": session_id,
+                    "task_id": new_task_id,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                },
+            }
             if new_task_id:
                 patch["task_id"] = new_task_id
             if session_id:
                 patch["opencode_session_id"] = session_id
+            # Keep failed attempt path on the job's path list (append, not replace)
             if session_file:
                 patch["session_log_path"] = session_file
             try:
@@ -538,10 +896,113 @@ class JobProcessor:
                 git.cleanup(success=success)
             except Exception as e:
                 logger.warning(f"Cleanup failed for {issue_key}: {e}")
+        self._release_source_branch(issue_key)
+        self._freeze_session_binds.discard(issue_key)
+        self._kick_queue()
+        # Drop leftover legacy mirrors so oracle/comment cannot adopt a dead clone
+        if self.agent_runner is not None and ctx and ctx.get("runner") is self.agent_runner:
+            self.agent_runner = None
+        if self.git_manager is not None and git is self.git_manager:
+            self.git_manager = None
+
+    def _source_lock_key(self, repository_url: str, source_branch: str) -> str:
+        from src.state.session_bind_store import normalize_branch, normalize_repo_key
+
+        repo = normalize_repo_key(repository_url)
+        branch = normalize_branch(source_branch).lower()
+        return f"{repo}::{branch}"
+
+    def _claim_source_branch(self, issue_key: str, repository_url: str, source_branch: str) -> bool:
+        """Refuse a second concurrent job on the same (repo, source) pair.
+
+        Atomic under concurrent ``asyncio.to_thread`` git init (threading.Lock).
+        """
+        key = self._source_lock_key(repository_url, source_branch)
+        if not key.strip(":"):
+            return True
+        with self._source_branch_holders_lock:
+            holder = self._source_branch_holders.get(key)
+            if holder and holder != issue_key:
+                logger.warning(
+                    f"{issue_key}: source branch {source_branch} already in use by {holder}"
+                )
+                return False
+            self._source_branch_holders[key] = issue_key
+            return True
+
+    def _release_source_branch(self, issue_key: str) -> None:
+        with self._source_branch_holders_lock:
+            dead = [k for k, v in self._source_branch_holders.items() if v == issue_key]
+            for k in dead:
+                self._source_branch_holders.pop(k, None)
+        self.drop_workspace_lock(issue_key)
+
+    def note_workspace_lock(
+        self,
+        issue_key: str,
+        *,
+        repository_url: str = "",
+        work_branch: str = "",
+        target_branch: str = "",
+        lock_key: str = "",
+    ) -> str:
+        """Remember a live clone lock so the queue will not admit a collision."""
+        from src.state.queue_store import workspace_lock_key
+
+        key = (issue_key or "").strip()
+        lk = (lock_key or "").strip() or workspace_lock_key(
+            repository_url, work_branch, target_branch
+        )
+        if not key or not lk:
+            return ""
+        self._workspace_lock_holders[lk] = key
+        return lk
+
+    def drop_workspace_lock(self, issue_key: str) -> None:
+        dead = [
+            k
+            for k, v in self._workspace_lock_holders.items()
+            if v == (issue_key or "").strip()
+        ]
+        for k in dead:
+            self._workspace_lock_holders.pop(k, None)
+
+    def live_workspace_lock_keys(self) -> set:
+        return {k for k in self._workspace_lock_holders if k}
+
+    def _finish_after_git_missing(self, issue_key: str) -> None:
+        """Close live job + context when git prep returns None after begin."""
+        st = self.state_manager.get_state(issue_key)
+        if st and st.status in self.IN_FLIGHT_STATUSES:
+            self._fail_issue(
+                issue_key,
+                "Git workspace was not prepared; aborting this run.",
+                suggestion="Check clone/template errors, then move back to To Do.",
+            )
+        elif not st or st.status not in self.TERMINAL_STATUSES:
+            self._finish_job_record(
+                issue_key,
+                status="error",
+                error_message="Git workspace was not prepared",
+            )
+        self._release_context(issue_key, success=False)
 
     def _is_live_processing(self, issue_key: str) -> bool:
         """True when this process holds an in-memory processing slot for the issue."""
         return issue_key in self._contexts
+
+    def _issue_is_in_flight(self, issue_key: str) -> bool:
+        """True when this issue is already running (cache or local planning/executing)."""
+        key = (issue_key or "").strip()
+        if not key:
+            return False
+        if self._is_live_processing(key):
+            return True
+        try:
+            st = self.state_manager.get_state(key)
+        except Exception:
+            return False
+        return bool(st and st.status in self.IN_FLIGHT_STATUSES)
 
     def list_live_processing_keys(self) -> list[str]:
         """Issue keys currently held in the in-memory processing cache."""
@@ -674,7 +1135,457 @@ class JobProcessor:
                 "opencode_sessions": entries,
             },
         )
-        logger.info(f"{issue_key} OpenCode session: {session_id}")
+        logger.info(f"{issue_key} session: {session_id}")
+
+    def _session_bind_key(
+        self, issue_key: str, git: Any = None
+    ) -> tuple[str, str, str]:
+        """(repository_url, work_branch, target_branch) for session + clone bind."""
+        gm = git if git is not None else self._git_for(issue_key)
+        st = self.state_manager.get_state(issue_key)
+        meta = dict((st.metadata if st else None) or {})
+
+        def _s(val: Any) -> str:
+            return val.strip() if isinstance(val, str) else ""
+
+        repo = ""
+        branch = ""
+        target = ""
+        if gm is not None:
+            repo = _s(getattr(gm, "remote_url", None))
+            branch = _s(getattr(gm, "work_branch", None))
+            target = _s(getattr(gm, "target_branch", None))
+        repo = repo or _s(meta.get("repository_url"))
+        target = target or _s(meta.get("target_branch"))
+        if not branch:
+            # Prefer the resolved work branch. Params Source=develop/main is
+            # not the bind key (those jobs isolate as feature/{KEY}).
+            feature = _s(meta.get("feature_branch"))
+            source = _s(meta.get("source_branch"))
+            if feature:
+                branch = feature
+            elif source:
+                from src.git_manager import GitManager
+
+                if source != target and not GitManager._is_primary_base(source):
+                    branch = source
+        return repo, branch, target
+
+    def _session_kind_for_issue(self, issue_key: str) -> str:
+        """``plan`` or ``build`` map for this issue's current workflow."""
+        from src.state.session_bind_store import normalize_session_kind
+
+        st = self.state_manager.get_state(issue_key)
+        meta = dict((st.metadata if st else None) or {})
+        kind = normalize_session_kind(str(meta.get("workflow_type") or ""))
+        if kind:
+            return kind
+        if st is not None:
+            if st.status == TaskStatus.PLANNING:
+                return "plan"
+            if st.status == TaskStatus.EXECUTING:
+                return "build"
+        return ""
+
+    def _resume_session_candidates(
+        self, issue_key: str, git: Any = None
+    ) -> tuple[List[str], List[str], Optional[str]]:
+        """Session ids to try for this issue, plus forgotten ids and bind wd.
+
+        Plan and build keep separate maps for the same repo+source+target so
+        a derman-plan chat is never reused to implement. Same Jira issue
+        re-queued from the schedule tab must resume even when the
+        repo/work/target bind key differs from the first upsert.
+        """
+        import src.state.session_bind_store as session_binds
+
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        recs: List[Dict[str, Any]] = []
+        store = session_binds.session_bind_store
+        kind = self._session_kind_for_issue(issue_key)
+        other_kind_sids: set[str] = set()
+        if repo and branch and target and kind:
+            hit = store.get(repo, branch, target, kind=kind)
+            if hit:
+                recs.append(hit)
+            other = "build" if kind == "plan" else "plan"
+            other_rec = store.get(repo, branch, target, kind=other)
+            other_sid = str((other_rec or {}).get("session_id") or "").strip()
+            if other_sid:
+                other_kind_sids.add(other_sid)
+        if kind != "plan":
+            if repo and branch and target:
+                hit = store.get(repo, branch, target, issue_key=issue_key)
+                if hit and str(hit.get("kind") or "") != "plan":
+                    recs.append(hit)
+            by_issue = store.find_by_issue_key(issue_key)
+            if (
+                by_issue
+                and by_issue not in recs
+                and str(by_issue.get("kind") or "") != "plan"
+            ):
+                recs.append(by_issue)
+        forgotten: List[str] = []
+        bind_wd: Optional[str] = None
+        sids: List[str] = []
+
+        def _add_sid(raw: Any) -> None:
+            from src.backends.base import is_session_or_thread_id
+
+            sid = str(raw or "").strip()
+            if sid in other_kind_sids:
+                return
+            if is_session_or_thread_id(sid) and sid not in sids:
+                sids.append(sid)
+
+        for rec in recs:
+            for x in rec.get("forgotten_session_ids") or []:
+                fx = str(x or "").strip()
+                if fx and fx not in forgotten:
+                    forgotten.append(fx)
+            _add_sid(rec.get("session_id"))
+            if not bind_wd:
+                wd0 = rec.get("working_directory")
+                if isinstance(wd0, str) and wd0.strip():
+                    bind_wd = wd0.strip()
+        if repo and branch and target:
+            for fx in store.forgotten_ids_for(
+                repo, branch, target, issue_key=issue_key, kind=kind
+            ):
+                if fx not in forgotten:
+                    forgotten.append(fx)
+        # Plan chats must not pick up a leftover build ses_* from state.
+        if kind != "plan":
+            st = self.state_manager.get_state(issue_key)
+            if st is not None:
+                _add_sid(st.current_opencode_session_id)
+                meta = dict(st.metadata or {})
+                _add_sid(meta.get("last_opencode_session_id"))
+                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                    _add_sid(sid)
+        return sids, forgotten, bind_wd
+
+    def _attach_bound_opencode_session(
+        self, issue_key: str, task: AgentTask, git: Any = None
+    ) -> Optional[str]:
+        """Reuse the OpenCode session or Codex thread for this issue / bind.
+
+        If the bind map already has a live ``ses_*`` or Codex thread UUID for
+        (repo, work, target), continue that session. Cancel, a missing SQLite
+        row, a locked DB, or a new clone path must not start a cold session.
+        Dashboard Reset is the only forget. Relocate OpenCode
+        ``session.directory`` onto the live clone so serve resume stays aligned.
+        Codex resume uses ``exec resume`` and a short continue prompt — not
+        another full BUILD/PLAN kit.
+        """
+        if getattr(task, "session_id", None):
+            return task.session_id
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        sids, forgotten, bind_wd = self._resume_session_candidates(issue_key, git)
+        if forgotten:
+            task.forgotten_session_ids = list(
+                dict.fromkeys(
+                    list(getattr(task, "forgotten_session_ids", None) or [])
+                    + forgotten
+                )
+            )
+            task.abandoned_session_id = (
+                getattr(task, "abandoned_session_id", None) or forgotten[-1]
+            )
+        wd = None
+        if git is not None and hasattr(git, "get_working_directory"):
+            try:
+                wd = git.get_working_directory()
+            except Exception:
+                wd = None
+        if wd is None:
+            runner = self._runner_for(issue_key)
+            wd = getattr(runner, "working_directory", None) if runner else None
+
+        from src.opencode_sessions import (
+            lookup_session_directory,
+            paths_equivalent,
+            relocate_session_directories,
+        )
+
+        from src.backends.base import (
+            BACKEND_CODEX,
+            BACKEND_OPENCODE,
+            is_codex_thread_id,
+            is_opencode_session_id,
+            normalize_backend_name,
+        )
+
+        backend = normalize_backend_name(getattr(task, "backend", None))
+
+        chosen: Optional[str] = None
+        for sid in sids:
+            if sid in forgotten:
+                continue
+            # Production always sets task.backend. Never give OpenCode a
+            # Codex UUID (serve requires ses_*). Unset backend = legacy pick.
+            if backend == BACKEND_CODEX and not is_codex_thread_id(sid):
+                continue
+            if backend == BACKEND_OPENCODE and not is_opencode_session_id(sid):
+                continue
+            chosen = sid
+            break
+        if not chosen:
+            return None
+
+        is_opencode = is_opencode_session_id(chosen)
+        if is_opencode:
+            stored_dir: Optional[str] = None
+            try:
+                stored_dir, ok = lookup_session_directory(chosen)
+            except Exception as e:
+                logger.debug(f"{issue_key}: session dir check failed: {e}")
+                ok = False
+                stored_dir = None
+            relocate_from = None
+            if ok and stored_dir and wd and not paths_equivalent(stored_dir, wd):
+                relocate_from = stored_dir
+            elif bind_wd and wd and not paths_equivalent(bind_wd, wd):
+                relocate_from = bind_wd
+            if relocate_from:
+                try:
+                    n = relocate_session_directories(relocate_from, wd)
+                    logger.info(
+                        f"{issue_key}: relocating session {chosen} "
+                        f"{relocate_from} → {wd} (updated={n}) to resume"
+                    )
+                except Exception as e:
+                    logger.debug(f"{issue_key}: session relocate failed: {e}")
+                try:
+                    import src.state.session_bind_store as session_binds
+
+                    session_binds.session_bind_store.relocate_working_directory(
+                        relocate_from, wd
+                    )
+                except Exception:
+                    pass
+            elif not ok:
+                logger.warning(
+                    f"{issue_key}: OpenCode DB unreadable; still resuming {chosen} "
+                    f"(bind key {repo}@{branch}→{target} is live)"
+                )
+            elif stored_dir is None:
+                logger.info(
+                    f"{issue_key}: session {chosen} not in OpenCode DB; "
+                    f"resuming because bind key exists"
+                )
+
+        task.session_id = chosen
+        if not is_opencode:
+            from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
+
+            task.prompt = DEFAULT_CODEX_RESUME_PROMPT
+            self._inherit_codex_thread_artifacts(issue_key, chosen)
+        try:
+            self.state_manager.update_state(
+                issue_key, current_opencode_session_id=chosen
+            )
+        except Exception:
+            pass
+        self._link_job_opencode_session(issue_key, chosen)
+        logger.info(
+            f"{issue_key}: resuming session {chosen} for "
+            f"{repo}@{branch}→{target}"
+        )
+        return chosen
+
+    def _should_bind_opencode_session(self, issue_key: str) -> bool:
+        """Oracle/sandbox must not overwrite the plan/build session bind."""
+        ctx = self._contexts.get(issue_key) or {}
+        if ctx.get("git") is None and issue_key in self._contexts:
+            return False
+        st = self.state_manager.get_state(issue_key)
+        wf = str(((st.metadata if st else None) or {}).get("workflow_type") or "")
+        if wf.lower() == "oracle":
+            return False
+        return True
+
+    def _forget_bound_session(self, issue_key: str, session_id: Optional[str]) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        git = self._git_for(issue_key)
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        if not repo or not branch or not target:
+            return
+        import src.state.session_bind_store as session_binds
+
+        kind = self._session_kind_for_issue(issue_key)
+        session_binds.session_bind_store.forget_for(
+            repo,
+            branch,
+            target,
+            session_id=sid,
+            reason="abandoned",
+            issue_key=issue_key,
+            kind=kind,
+        )
+
+    def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        if not self._should_bind_opencode_session(issue_key):
+            logger.info(
+                f"{issue_key}: skipping session bind upsert (oracle/sandbox)"
+            )
+            return
+        if issue_key in self._freeze_session_binds:
+            logger.info(
+                f"{issue_key}: skipping session bind upsert "
+                f"(OpenCode DB lookup was uncertain)"
+            )
+            return
+        git = self._git_for(issue_key)
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        if not repo or not branch or not target:
+            return
+        import src.state.session_bind_store as session_binds
+
+        raw_jid = self._active_jobs.get(issue_key)
+        job_id = raw_jid if isinstance(raw_jid, str) else None
+        wd = None
+        if git is not None and hasattr(git, "get_working_directory"):
+            try:
+                got = git.get_working_directory()
+                wd = str(got) if got else None
+            except Exception:
+                wd = None
+        kind = self._session_kind_for_issue(issue_key)
+        session_binds.session_bind_store.upsert(
+            repository_url=repo,
+            branch=branch,
+            target_branch=target,
+            session_id=sid,
+            issue_key=issue_key,
+            job_id=job_id,
+            working_directory=wd,
+            kind=kind,
+        )
+        self._record_job_working_directory(issue_key, wd)
+
+    def _record_job_working_directory(
+        self, issue_key: str, working_dir: Any
+    ) -> None:
+        """Persist the temp clone path on the active job record."""
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id or not working_dir:
+            return
+        try:
+            path = str(Path(str(working_dir)).resolve())
+        except OSError:
+            path = str(working_dir).strip()
+        if not path:
+            return
+        try:
+            self.job_store.update_job(job_id, working_directory=path)
+        except Exception:
+            pass
+
+    def _model_for_issue(self, state: Any) -> str:
+        """Per-issue Model: from {params}, else settings default."""
+        if state is None:
+            return (getattr(settings, "default_model", "") or "").strip()
+        try:
+            from src.issue_git_spec import parse_issue_git_spec
+
+            spec, _err = parse_issue_git_spec(
+                getattr(state, "issue_summary", "") or "",
+                getattr(state, "description", "") or "",
+            )
+        except Exception:
+            spec = None
+        mid = (getattr(spec, "model", None) or "").strip() if spec else ""
+        if mid:
+            return mid
+        return (getattr(settings, "default_model", "") or "").strip()
+
+    def _backend_for_issue(self, state: Any) -> str:
+        """Per-issue Backend: from {params}, else settings.agent_backend."""
+        from src.backends.base import BACKEND_OPENCODE, normalize_backend_name
+
+        if state is not None:
+            try:
+                from src.issue_git_spec import parse_issue_git_spec
+
+                spec, _err = parse_issue_git_spec(
+                    getattr(state, "issue_summary", "") or "",
+                    getattr(state, "description", "") or "",
+                )
+            except Exception:
+                spec = None
+            bid = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            if bid:
+                return bid
+        return (
+            normalize_backend_name(getattr(settings, "agent_backend", None))
+            or BACKEND_OPENCODE
+        )
+
+    def _apply_job_opencode_context_limit(
+        self, working_dir: Any, *, model: str = ""
+    ) -> None:
+        """Cap the job workspace model window so long runs auto-compact."""
+        if not working_dir:
+            return
+        try:
+            limit = int(getattr(settings, "opencode_context_limit", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if limit <= 0:
+            return
+        model = (model or getattr(settings, "default_model", "") or "").strip()
+        if not model:
+            return
+        try:
+            from src.opencode_models import write_workspace_context_limit
+
+            path = write_workspace_context_limit(
+                Path(str(working_dir)),
+                model=model,
+                context_limit=limit,
+            )
+        except Exception as e:
+            logger.debug(f"workspace OpenCode context cap skipped: {e}")
+            return
+        if path is not None:
+            logger.info(
+                f"OpenCode workspace context cap {limit} for {model} → {path}"
+            )
+
+    def _clear_stale_omo_continuations(self, working_dir: Any) -> None:
+        """Remove leftover oh-my-openagent run-continuation JSON.
+
+        Those files are empty idle checkpoints from earlier sessions. After
+        compact, Atlas treats them as the job and loops
+        "inspect prior session files to recover {issue}".
+        """
+        if not working_dir:
+            return
+        folder = Path(str(working_dir)) / ".omo" / "run-continuation"
+        if not folder.is_dir():
+            return
+        removed = 0
+        try:
+            for path in folder.glob("*.json"):
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.debug(f"stale .omo continuation cleanup skipped: {e}")
+            return
+        if removed:
+            logger.info(
+                f"Removed {removed} stale .omo/run-continuation checkpoint(s) "
+                f"under {folder}"
+            )
 
     def _link_job_session_paths(
         self,
@@ -687,10 +1598,25 @@ class JobProcessor:
         if not job_id:
             return
         patch: Dict[str, Any] = {}
+        existing = self.job_store.get_job(job_id) or {}
         if session_path:
             patch["session_log_path"] = session_path
+            logs = [
+                str(p)
+                for p in (existing.get("session_log_paths") or [])
+                if p
+            ]
+            if session_path not in logs:
+                logs.append(session_path)
+            patch["session_log_paths"] = logs
         if prompt_path:
             patch["prompt_path"] = prompt_path
+            prompts = [
+                str(p) for p in (existing.get("prompt_paths") or []) if p
+            ]
+            if prompt_path not in prompts:
+                prompts.append(prompt_path)
+            patch["prompt_paths"] = prompts
         if not patch:
             return
         try:
@@ -698,30 +1624,152 @@ class JobProcessor:
         except Exception:
             pass
 
+    def _inherit_codex_thread_artifacts(self, issue_key: str, thread_id: str) -> None:
+        """Copy prior job logs/prompts for this Codex thread onto the live job.
+
+        Each ``codex exec`` writes a new JSONL file. Chat and Prompt tabs only
+        read paths stored on the current job, so a resume without this copy
+        looks like a cold start.
+        """
+        job_id = self._active_jobs.get(issue_key)
+        tid = (thread_id or "").strip()
+        if not job_id or not tid:
+            return
+        logs: List[str] = []
+        prompts: List[str] = []
+        # list_jobs is newest-first; walk oldest job first so chat reads in time order
+        for rec in reversed(self.job_store.list_jobs(issue_key=issue_key, limit=200)):
+            if rec.get("job_id") == job_id:
+                continue
+            sid = str(rec.get("opencode_session_id") or "").strip()
+            ids = [str(x).strip() for x in (rec.get("opencode_session_ids") or []) if x]
+            if sid != tid and tid not in ids:
+                continue
+            for p in rec.get("session_log_paths") or []:
+                if p and str(p) not in logs:
+                    logs.append(str(p))
+            lp = rec.get("session_log_path")
+            if lp and str(lp) not in logs:
+                logs.append(str(lp))
+            for p in rec.get("prompt_paths") or []:
+                if p and str(p) not in prompts:
+                    prompts.append(str(p))
+            pp = rec.get("prompt_path")
+            if pp and str(pp) not in prompts:
+                prompts.append(str(pp))
+        if not logs and not prompts:
+            return
+        current = self.job_store.get_job(job_id) or {}
+        merged_logs = list(logs)
+        for p in current.get("session_log_paths") or []:
+            if p and str(p) not in merged_logs:
+                merged_logs.append(str(p))
+        lp = current.get("session_log_path")
+        if lp and str(lp) not in merged_logs:
+            merged_logs.append(str(lp))
+        merged_prompts = list(prompts)
+        for p in current.get("prompt_paths") or []:
+            if p and str(p) not in merged_prompts:
+                merged_prompts.append(str(p))
+        pp = current.get("prompt_path")
+        if pp and str(pp) not in merged_prompts:
+            merged_prompts.append(str(pp))
+        patch: Dict[str, Any] = {"opencode_session_id": tid}
+        if merged_logs:
+            patch["session_log_paths"] = merged_logs
+            patch["session_log_path"] = merged_logs[-1]
+        if merged_prompts:
+            patch["prompt_paths"] = merged_prompts
+            if not current.get("prompt_path"):
+                patch["prompt_path"] = merged_prompts[-1]
+        try:
+            self.job_store.update_job(job_id, **patch)
+        except Exception as e:
+            logger.debug(f"{issue_key}: inherit Codex artifacts failed: {e}")
+
+    def _link_job_opencode_session(self, issue_key: str, session_id: Optional[str]) -> None:
+        """Publish ses_* / Codex thread id onto the live job as soon as known."""
+        from src.backends.base import is_session_or_thread_id
+
+        sid = (session_id or "").strip()
+        if not sid or not is_session_or_thread_id(sid):
+            return
+        try:
+            self._record_opencode_session(issue_key, sid)
+        except Exception:
+            pass
+        try:
+            self._upsert_session_bind(issue_key, sid)
+        except Exception:
+            pass
+        job_id = self._active_jobs.get(issue_key)
+        if not job_id:
+            return
+        try:
+            self.job_store.update_job(job_id, opencode_session_id=sid)
+        except Exception:
+            pass
+
     def _apply_agent_result_session(self, issue_key: str, result: Dict[str, Any]) -> None:
         """Pull session id from agent result (and retry_info) into state."""
         sid = result.get("opencode_session_id")
-        if not sid and result.get("retry_info"):
-            sid = result["retry_info"].get("last_opencode_session_id")
+        retry = result.get("retry_info") or {}
+        abandoned = retry.get("abandoned_session_id") if retry else None
+        if abandoned:
+            self._forget_bound_session(issue_key, str(abandoned))
+        if not sid and retry:
+            last = retry.get("last_opencode_session_id")
+            # Empty-timeout / wrong-dir cold retries must not rebind the
+            # session they just abandoned when the final attempt has no id.
+            if last and last != abandoned:
+                sid = last
+        if sid and abandoned and sid == abandoned:
+            sid = None
         self._record_opencode_session(
             issue_key,
             sid,
             session_file=result.get("session_file"),
         )
+        if sid:
+            self._upsert_session_bind(issue_key, sid)
         job_id = self._active_jobs.get(issue_key)
         if job_id:
             patch: Dict[str, Any] = {}
             if sid:
                 patch["opencode_session_id"] = sid
+            # Fold every attempt's session log under this job (initial + _retryN)
+            all_files = []
+            if result.get("retry_info"):
+                all_files = list(
+                    result["retry_info"].get("all_session_files") or []
+                )
+            if result.get("session_file") and result["session_file"] not in all_files:
+                all_files.append(result["session_file"])
+            existing = self.job_store.get_job(job_id) or {}
+            if all_files:
+                merged_logs: List[str] = []
+                for p in list(existing.get("session_log_paths") or []) + all_files:
+                    sp = str(p or "").strip()
+                    if sp and sp not in merged_logs:
+                        merged_logs.append(sp)
+                patch["session_log_paths"] = merged_logs
+                patch["session_log_path"] = merged_logs[-1]
             if result.get("session_file"):
-                patch["session_log_path"] = result.get("session_file")
                 try:
                     p = Path(str(result["session_file"]))
                     prompt = p.parent / f"{p.stem}.prompt.txt"
                     if prompt.is_file():
                         patch["prompt_path"] = str(prompt)
+                        merged_prompts: List[str] = []
+                        for item in list(existing.get("prompt_paths") or []) + [
+                            str(prompt)
+                        ]:
+                            sp = str(item or "").strip()
+                            if sp and sp not in merged_prompts:
+                                merged_prompts.append(sp)
+                        if merged_prompts:
+                            patch["prompt_paths"] = merged_prompts
                         # Backfill description from frozen prompt if missing
-                        existing = self.job_store.get_job(job_id) or {}
                         if not (existing.get("description") or "").strip():
                             from src.state.job_store import description_from_prompt_path
 
@@ -733,6 +1781,20 @@ class JobProcessor:
             if patch:
                 self.job_store.update_job(job_id, **patch)
 
+    def _live_timeout_seconds(self, state: Optional[JiraAgentState] = None) -> int:
+        """Live dashboard timeout, persisted onto ``state`` when it changes."""
+        timeout = _live_agent_timeout_seconds(state)
+        if state is not None and state.issue_key:
+            try:
+                cur = self.state_manager.get_state(state.issue_key)
+                if cur is not None and cur.timeout_seconds != timeout:
+                    self.state_manager.update_state(
+                        state.issue_key, timeout_seconds=timeout
+                    )
+            except Exception:
+                pass
+        return timeout
+
     def _begin_workflow_run(
         self,
         state: JiraAgentState,
@@ -743,34 +1805,81 @@ class JobProcessor:
         agent: str,
         job_status: str,
         started_at: Optional[datetime] = None,
-    ) -> str:
+    ) -> Optional[str]:
         """Archive previous run ids, claim in-flight fields, create a new job.
 
         Call this instead of writing ``current_task_id`` then starting a job
         separately — archive must run **before** the previous task id is
         overwritten.
+
+        Uses CAS so a concurrent cancel/fail/complete (which does **not** take
+        the issue lock) cannot be overwritten by a late begin. Returns the new
+        job_id, or ``None`` when the claim was rejected (caller must abort).
         """
         archive = self._archive_run_identifiers(state.issue_key)
         archive["requeue_eligible"] = False
-        self.state_manager.update_state(
+        if workflow_type:
+            archive["workflow_type"] = workflow_type
+        # Reject terminal statuses: cancel/fail can land between accept and begin
+        # without holding the issue lock.
+        # Always re-read live settings (dashboard may have changed timeout)
+        from src.config import get_settings, live_agent_timeout_seconds
+
+        live = get_settings()
+        timeout_s = live_agent_timeout_seconds()
+        max_retries = _plain_int(getattr(live, "agent_task_max_retries", None), 0)
+        max_incomplete = _plain_int(
+            getattr(live, "agent_task_max_incomplete_retries", None), 0
+        )
+        archive["max_incomplete_retries"] = max_incomplete
+        claimed = self.state_manager.update_state_if(
             state.issue_key,
+            reject_statuses=self.TERMINAL_STATUSES,
             status=status,
             started_at=started_at or datetime.now(),
             current_task_id=task.task_id,
             current_opencode_session_id=None,
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            timeout_seconds=timeout_s,
+            max_retries=max_retries,
             metadata=archive,
+        )
+        if claimed is None:
+            logger.info(
+                f"_begin_workflow_run refused for {state.issue_key}: "
+                f"status is terminal (cancel/fail/complete won the race)"
+            )
+            return None
+        from src.config import compute_stuck_limit_seconds
+
+        stuck_s = compute_stuck_limit_seconds(
+            timeout_s,
+            max_retries,
+            extra_attempts=max_incomplete,
+        )
+        logger.info(
+            f"{state.issue_key} job budget: timeout={timeout_s}s "
+            f"max_retries={max_retries} incomplete={max_incomplete} "
+            f"(stuck limit ≈ {int(stuck_s)}s)"
         )
         state.current_task_id = task.task_id
         state.current_opencode_session_id = None
-        return self._start_job_record(
+        state.status = claimed.status
+        state.timeout_seconds = timeout_s
+        state.max_retries = max_retries
+        model_id = (getattr(task, "model", None) or "").strip() or (
+            getattr(live, "default_model", None) or settings.default_model or ""
+        ).strip()
+        job_id = self._start_job_record(
             state,
             workflow_type=workflow_type,
             agent=agent,
             task_id=task.task_id,
             status=job_status,
+            model=model_id or None,
         )
+        if job_id:
+            task.job_id = job_id
+        return job_id
 
     def _start_job_record(
         self,
@@ -780,11 +1889,16 @@ class JobProcessor:
         agent: str,
         task_id: Optional[str] = None,
         status: str = "running",
-    ) -> str:
+        model: Optional[str] = None,
+    ) -> Optional[str]:
         """Create a **new** job history row for this run; returns job_id.
 
         Never reuses or overwrites a previous job file. Each run gets a unique
         ``job_*`` record with its own task_id / session_id fields.
+
+        If the issue is already terminal (cancel/fail won the race after CAS
+        begin), either refuse to create a live row or immediately finish it so
+        the Jobs UI never shows a permanent running/planning ghost.
         """
         # If a previous run left an active job pointer, finish it first
         if self._active_jobs.get(state.issue_key):
@@ -794,6 +1908,66 @@ class JobProcessor:
                 error_message="Superseded by new job start",
             )
 
+        # Cancel/fail can land between CAS claim and job create without the
+        # issue lock — re-read disk and refuse a live row for terminal issues.
+        live_now = self.state_manager.get_state(state.issue_key)
+        if live_now and live_now.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"_start_job_record refused for {state.issue_key}: "
+                f"already terminal ({live_now.status.value})"
+            )
+            # Still create a history row marked terminal so operators see the
+            # aborted attempt, then leave no live job pointer.
+            term = live_now.status.value
+            tmeta = dict((live_now.metadata or {}) if live_now else {})
+            model_id = (model or "").strip() or (
+                settings.default_model or ""
+            ).strip() or None
+            job = self.job_store.create_job(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                workflow_type=workflow_type,
+                agent=agent,
+                task_id=task_id,
+                status=term,
+                source=str(tmeta.get("source") or "jira"),
+                merge_request_url=tmeta.get("merge_request_url") or None,
+                gitlab_project=tmeta.get("gitlab_project") or None,
+                gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
+                model=model_id,
+                backend=self._backend_for_issue(state),
+            )
+            job_id = job["job_id"]
+            self._active_jobs[state.issue_key] = job_id
+            self._finish_job_record(
+                state.issue_key,
+                status=term,
+                error_message=(
+                    live_now.error_message
+                    or f"Not started — issue already {term}"
+                ),
+            )
+            # Keep job_ids history without treating this as a live current job
+            st = self.state_manager.get_state(state.issue_key)
+            meta = dict((st.metadata if st else None) or {})
+            job_ids = list(meta.get("job_ids") or [])
+            if job_id not in job_ids:
+                job_ids.append(job_id)
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={
+                    "job_ids": job_ids[-200:],
+                    # Clear live pointer if finish left it
+                    "current_job_id": meta.get("current_job_id"),
+                },
+            )
+            return job_id
+
+        meta0 = dict((state.metadata or {}) if state else {})
+        model_id = (model or "").strip() or (
+            settings.default_model or ""
+        ).strip() or None
         job = self.job_store.create_job(
             issue_key=state.issue_key,
             summary=state.issue_summary or "",
@@ -803,6 +1977,12 @@ class JobProcessor:
             agent=agent,
             task_id=task_id,
             status=status,
+            source=str(meta0.get("source") or "jira"),
+            merge_request_url=meta0.get("merge_request_url") or None,
+            gitlab_project=meta0.get("gitlab_project") or None,
+            gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
+            model=model_id,
+            backend=self._backend_for_issue(state),
         )
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id
@@ -814,7 +1994,33 @@ class JobProcessor:
         except Exception:
             pass
 
+        # Re-check after create: cancel may have won during create_job
         st = self.state_manager.get_state(state.issue_key)
+        if st and st.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"_start_job_record finishing immediately for {state.issue_key}: "
+                f"became terminal ({st.status.value}) during job create"
+            )
+            self._finish_job_record(
+                state.issue_key,
+                status=st.status.value,
+                error_message=st.error_message
+                or f"Aborted — issue became {st.status.value}",
+            )
+            meta = dict(st.metadata or {})
+            job_ids = list(meta.get("job_ids") or [])
+            if job_id not in job_ids:
+                job_ids.append(job_id)
+            task_ids = list(meta.get("task_ids") or [])
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+            patch: Dict[str, Any] = {"job_ids": job_ids[-200:]}
+            if task_id:
+                patch["task_ids"] = task_ids[-100:]
+                patch["last_task_id"] = task_id
+            self.state_manager.update_state(state.issue_key, metadata=patch)
+            return job_id
+
         meta = dict((st.metadata if st else None) or {})
         job_ids = list(meta.get("job_ids") or [])
         if job_id not in job_ids:
@@ -822,7 +2028,7 @@ class JobProcessor:
         task_ids = list(meta.get("task_ids") or [])
         if task_id and task_id not in task_ids:
             task_ids.append(task_id)
-        patch: Dict[str, Any] = {
+        patch = {
             "job_ids": job_ids[-200:],
             "current_job_id": job_id,
         }
@@ -863,10 +2069,12 @@ class JobProcessor:
             # Still allow progress/session fill-in if missing — never overwrite ids
             fill: Dict[str, Any] = {}
             st = self.state_manager.get_state(issue_key)
+            current_jid = str((st.metadata or {}).get("current_job_id") or "").strip() if st else ""
             if (
                 st
                 and st.current_opencode_session_id
                 and not existing.get("opencode_session_id")
+                and (not current_jid or current_jid == job_id)
             ):
                 fill["opencode_session_id"] = st.current_opencode_session_id
             if st and st.current_task_id and not existing.get("task_id"):
@@ -885,9 +2093,10 @@ class JobProcessor:
             fields["progress_percentage"] = progress_percentage
         st = self.state_manager.get_state(issue_key)
         # Prefer ids already on the job (supersede must not stamp the new run's ids)
+        current_jid = str((st.metadata or {}).get("current_job_id") or "").strip() if st else ""
         if st and st.current_opencode_session_id and not (
             existing and existing.get("opencode_session_id")
-        ):
+        ) and (not current_jid or current_jid == job_id):
             fields["opencode_session_id"] = st.current_opencode_session_id
         if st and st.current_task_id and not (existing and existing.get("task_id")):
             fields["task_id"] = st.current_task_id
@@ -924,9 +2133,11 @@ class JobProcessor:
                 "status": state.status.value,
             }
 
-        # Kill first — never block behind process_event's long-held issue lock
+        # Kill first — never block behind process_event's long-held issue lock.
+        # Stage does not matter: clone, checkout, serve/Codex, push, MR.
         killed = False
         try:
+            await self._abort_serve_sessions_for_issue(issue_key)
             runner = self._runner_for(issue_key)
             if runner and state.current_task_id:
                 killed = bool(runner.cancel_task(state.current_task_id))
@@ -935,14 +2146,32 @@ class JobProcessor:
                 if n:
                     killed = True
             self._kill_children_for_issue(issue_key)
+            if self._kill_git_for_issue(issue_key):
+                killed = True
         except Exception as e:
             logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
+        live_job_id = self._active_jobs.get(issue_key)
         cancelled = self._cancel_issue_state(
             issue_key,
             message=reason,
             status=TaskStatus.CANCELLED,
         )
+        # Drop leftover queued/running rows so a later schedule of this issue
+        # is not blocked forever by a stale ``running`` claim.
+        try:
+            nq = self.queue_store.finish_open_for_issue(
+                issue_key,
+                status="cancelled",
+                error_message=reason,
+                job_id=live_job_id,
+            )
+            if nq:
+                logger.info(
+                    f"Job cancelled via API: {issue_key} closed {nq} queue row(s)"
+                )
+        except Exception as e:
+            logger.warning(f"cancel_job queue finish failed for {issue_key}: {e}")
         try:
             self._release_context(issue_key, success=False)
         except Exception as e:
@@ -967,7 +2196,11 @@ class JobProcessor:
                 "process_signalled": killed,
             }
 
-        logger.info(f"Job cancelled via API: {issue_key} killed={killed}")
+        jid = (refreshed.metadata or {}).get("current_job_id") if refreshed else None
+        logger.info(
+            f"Job cancelled via API: {issue_key} killed={killed} "
+            f"job_id={jid or '-'}"
+        )
         return {
             "ok": True,
             "issue_key": issue_key,
@@ -981,9 +2214,8 @@ class JobProcessor:
     ) -> dict:
         """Start execution for a plan_ready issue (explicit label / internal path).
 
-        Plans never auto-start. Operators either add ``ai-start-work`` /
-        ``ai-execute`` (poller) or open a separate issue with ``Mode: build``.
-        Dashboard HTTP Start is disabled (410).
+        Plans wait at ``plan_ready`` until label ``plan_execute`` is set on an
+        In Progress ticket. Dashboard HTTP Start is disabled (410).
 
         Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
@@ -1040,19 +2272,423 @@ class JobProcessor:
                         "issue_key": issue_key,
                     }
 
-    def _kill_children_for_issue(self, issue_key: str) -> None:
-        """Best-effort kill of agent subprocesses for one issue."""
-        state = self.state_manager.get_state(issue_key)
-        runner = self._runner_for(issue_key)
-        if not runner:
+    def _jira_for_labels(self) -> Any:
+        return self.jira_client or getattr(self.reporter, "client", None)
+
+    def _apply_plan_labels(
+        self,
+        issue_key: str,
+        *,
+        add: Optional[List[str]] = None,
+        remove: Optional[List[str]] = None,
+        replace: Optional[tuple[str, str]] = None,
+    ) -> None:
+        client = self._jira_for_labels()
+        if client is None:
             return
         try:
-            if state and state.current_task_id:
-                runner.cancel_task(state.current_task_id)
-            if hasattr(runner, "cancel_all_tasks"):
-                runner.cancel_all_tasks()
+            if replace and hasattr(client, "replace_label"):
+                client.replace_label(issue_key, replace[0], replace[1])
+            if remove and hasattr(client, "remove_labels"):
+                client.remove_labels(issue_key, list(remove))
+            if add and hasattr(client, "add_labels"):
+                client.add_labels(issue_key, list(add))
         except Exception as e:
-            logger.warning(f"Could not kill agent processes for {issue_key}: {e}")
+            logger.warning(f"{issue_key}: plan label update failed: {e}")
+
+    def _infer_plan_handoff(self, event: Dict[str, Any]) -> Optional[str]:
+        from src.jira.plan_labels import (
+            HANDOFF_EXECUTE,
+            HANDOFF_REFACTOR,
+            handoff_from_changelog,
+            infer_plan_handoff,
+        )
+
+        raw = str(event.get("plan_handoff") or "").strip().lower()
+        if raw in {HANDOFF_EXECUTE, HANDOFF_REFACTOR}:
+            return raw
+        via_cl = handoff_from_changelog(event.get("changelog"))
+        if via_cl:
+            return via_cl
+        issue = event.get("issue") or {}
+        return infer_plan_handoff(issue.get("fields") or {})
+
+    def _latest_plan_refactor_comment(self, issue_key: str) -> Optional[str]:
+        from src.config import get_settings
+        from src.jira.plan_labels import latest_comment_tagging_pat_user
+
+        client = self._jira_for_labels()
+        if client is None or not hasattr(client, "get_comments"):
+            return None
+        try:
+            comments = client.get_comments(issue_key) or []
+        except Exception as e:
+            logger.warning(f"{issue_key}: could not fetch comments: {e}")
+            return None
+        myself = None
+        if hasattr(client, "get_myself"):
+            try:
+                myself = client.get_myself()
+            except Exception:
+                myself = None
+        live = get_settings()
+        return latest_comment_tagging_pat_user(
+            comments,
+            myself=myself,
+            mention_tokens=getattr(live, "trigger_mentions_list", None) or [],
+            extra_needles=getattr(live, "trigger_assignee_names_list", None) or [],
+        )
+
+    async def _maybe_handle_plan_handoff(
+        self, event: Dict[str, Any], state: Optional[JiraAgentState]
+    ) -> Optional[tuple[bool, Optional[str]]]:
+        """Label-driven plan refactor / execute. None = not a handoff event."""
+        from src.jira.plan_labels import (
+            HANDOFF_EXECUTE,
+            HANDOFF_REFACTOR,
+            PLAN_EXECUTE_LABEL,
+            PLAN_EXECUTED_LABEL,
+            PLAN_READY_LABEL,
+            PLAN_REFACTOR_LABEL,
+        )
+
+        handoff = self._infer_plan_handoff(event)
+        if not handoff:
+            return None
+        issue_key = (event.get("issue") or {}).get("key") or (
+            state.issue_key if state else ""
+        )
+        if not state:
+            return False, "plan handoff without local state"
+        if state.status in self.IN_FLIGHT_STATUSES:
+            return False, f"already in progress ({state.status.value})"
+        if self._is_live_processing(issue_key):
+            return False, "already live in processing cache"
+
+        issue = event.get("issue") or {}
+        fields = issue.get("fields") or {}
+        summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
+        description = _issue_text(fields.get("description", "") or "") or (
+            state.description or ""
+        )
+        if summary:
+            state.issue_summary = summary
+        if description:
+            state.description = description
+
+        if handoff == HANDOFF_EXECUTE:
+            from src.jira.plan_labels import is_in_progress_status
+
+            if not is_in_progress_status(fields):
+                return False, "plan_execute; ticket is not In Progress"
+            has_plan = self._durable_plan_path(issue_key).exists()
+            raw_path = (state.plan_path or "").strip()
+            if raw_path and not has_plan:
+                try:
+                    has_plan = Path(raw_path).is_file()
+                except OSError:
+                    has_plan = False
+            if not has_plan:
+                logger.info(f"{issue_key} plan_execute but no plan file on disk")
+                return False, "plan_execute without a plan"
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": WorkflowType.EXECUTION.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            self._apply_plan_labels(
+                issue_key,
+                replace=(PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL),
+                remove=[PLAN_READY_LABEL],
+            )
+            logger.info(
+                f"{issue_key} plan_execute + In Progress; beginning execution"
+            )
+            try:
+                await self._start_execution_workflow(state, from_plan_execute=True)
+                return True, None
+            except Exception as e:
+                logger.exception(
+                    f"Plan execute failed for {issue_key}: {e}", e
+                )
+                self._fail_issue(
+                    issue_key,
+                    f"Failed to start plan execution: {e}",
+                    suggestion=(
+                        "Check logs. Keep the ticket In Progress and set "
+                        "label plan_execute (or open a new Mode: build issue)."
+                    ),
+                )
+                self._release_context(issue_key, success=False)
+                return True, None
+
+        if handoff == HANDOFF_REFACTOR:
+            comment = self._latest_plan_refactor_comment(issue_key)
+            if not comment:
+                logger.info(
+                    f"{issue_key} plan_refactor: no comment tagging the PAT user yet"
+                )
+                return False, "plan_refactor; waiting for a comment that tags the bot"
+            self.state_manager.update_state(
+                issue_key,
+                issue_summary=state.issue_summary,
+                description=state.description,
+                metadata={"workflow_type": WorkflowType.PLANNING.value},
+            )
+            state = self.state_manager.get_state(issue_key) or state
+            logger.info(f"{issue_key} plan_refactor; revising plan on plan session")
+            try:
+                await self._start_planning_workflow(
+                    state, refactor_comment=comment
+                )
+                return True, None
+            except Exception as e:
+                logger.exception(
+                    f"Plan refactor failed for {issue_key}: {e}", e
+                )
+                self._fail_issue(
+                    issue_key,
+                    f"Failed to refactor the plan: {e}",
+                    suggestion=(
+                        "Check logs. Re-add plan_refactor and comment "
+                        "tagging the bot to retry."
+                    ),
+                )
+                self._release_context(issue_key, success=False)
+                return True, None
+
+        return None
+
+    def _kill_children_for_issue(self, issue_key: str) -> None:
+        """Force-kill every subprocess for one issue (agent, git, workspace tools)."""
+        state = self.state_manager.get_state(issue_key)
+        runner = self._runner_for(issue_key)
+        extra_pids = self._tracked_pids_for_issue(issue_key, runner)
+        if runner:
+            try:
+                if state and state.current_task_id:
+                    runner.cancel_task(state.current_task_id)
+                if hasattr(runner, "cancel_all_tasks"):
+                    runner.cancel_all_tasks()
+            except Exception as e:
+                logger.warning(f"Could not kill agent processes for {issue_key}: {e}")
+        self._kill_git_for_issue(issue_key)
+        self._kill_workspace_for_issue(issue_key, extra_root_pids=extra_pids)
+
+    async def _abort_serve_sessions_for_issue(self, issue_key: str) -> None:
+        """POST /session/{id}/abort for every known ses_* on this issue.
+
+        OpenCode tools keep running until the session is aborted (or we
+        reclaim the clone). Session id may live on the runner handle, state,
+        or a ``.session_id`` sidecar — do not require current_task_id.
+        """
+        sids: set[str] = set()
+        client = None
+        state = self.state_manager.get_state(issue_key)
+        if state:
+            for raw in (
+                state.current_opencode_session_id,
+                (state.metadata or {}).get("last_opencode_session_id"),
+            ):
+                sid = str(raw or "").strip()
+                if sid.startswith("ses_"):
+                    sids.add(sid)
+            for raw in (state.metadata or {}).get("opencode_session_ids") or []:
+                sid = str(raw or "").strip()
+                if sid.startswith("ses_"):
+                    sids.add(sid)
+        runner = self._runner_for(issue_key)
+        tasks = getattr(runner, "_running_tasks", None) or {}
+        for handle in list(tasks.values()):
+            if not isinstance(handle, dict):
+                continue
+            sid = str(handle.get("session_id") or "").strip()
+            if sid.startswith("ses_"):
+                sids.add(sid)
+            if handle.get("client") is not None:
+                client = handle.get("client")
+        if not sids:
+            return
+        owned = False
+        if client is None:
+            try:
+                from src.opencode_serve import OpenCodeServeClient
+
+                base = (
+                    getattr(settings, "opencode_serve_url", None)
+                    or "http://127.0.0.1:4096"
+                )
+                client = OpenCodeServeClient(base, timeout_seconds=15.0)
+                owned = True
+            except Exception as e:
+                logger.debug(f"{issue_key}: serve abort client skipped: {e}")
+                return
+        try:
+            for sid in sids:
+                try:
+                    await client.abort(sid)
+                    logger.info(f"{issue_key}: aborted OpenCode session {sid}")
+                except Exception as e:
+                    logger.debug(f"{issue_key}: abort {sid} failed: {e}")
+        finally:
+            if owned:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+
+    def _tracked_pids_for_issue(self, issue_key: str, runner: Any = None) -> list:
+        """PIDs we already know about (git Popen, Codex proc)."""
+        pids: list = []
+        git = self._git_for(issue_key) or GitManager.live_for(issue_key)
+        if git is not None:
+            for proc in list(getattr(git, "_live_procs", None) or []):
+                pid = getattr(proc, "pid", None)
+                if pid:
+                    pids.append(int(pid))
+        runner = runner or self._runner_for(issue_key)
+        tasks = getattr(runner, "_running_tasks", None) or {}
+        for handle in list(tasks.values()):
+            if isinstance(handle, dict):
+                proc = handle.get("proc")
+            else:
+                proc = handle
+            pid = getattr(proc, "pid", None)
+            if pid:
+                pids.append(int(pid))
+        return pids
+
+    def _workspace_path_for_issue(self, issue_key: str) -> Optional[Path]:
+        paths = self._workspace_paths_for_issue(issue_key)
+        return paths[0] if paths else None
+
+    def _workspace_paths_for_issue(self, issue_key: str) -> List[Path]:
+        """Every clone/sandbox path we know for this issue (any stage)."""
+        found: List[Path] = []
+        seen: set[str] = set()
+
+        def _add(raw: Any) -> None:
+            if raw is None:
+                return
+            try:
+                path = Path(str(raw)).resolve()
+            except OSError:
+                path = Path(str(raw))
+            key = str(path)
+            if not key or key in seen:
+                return
+            seen.add(key)
+            found.append(path)
+
+        git = self._git_for(issue_key) or GitManager.live_for(issue_key)
+        if git is not None:
+            getter = getattr(git, "get_working_directory", None)
+            wd = None
+            if callable(getter):
+                try:
+                    wd = getter()
+                except Exception:
+                    wd = None
+            _add(wd or getattr(git, "temp_dir", None))
+        runner = self._runner_for(issue_key)
+        if runner is not None:
+            _add(getattr(runner, "working_directory", None))
+        job_id = self._active_jobs.get(issue_key)
+        job_ids = [job_id] if job_id else []
+        state = self.state_manager.get_state(issue_key)
+        meta = (state.metadata or {}) if state else {}
+        for extra_id in meta.get("job_ids") or []:
+            if extra_id and extra_id not in job_ids:
+                job_ids.append(extra_id)
+        if meta.get("current_job_id") and meta["current_job_id"] not in job_ids:
+            job_ids.append(meta["current_job_id"])
+        for jid in job_ids:
+            if not jid:
+                continue
+            try:
+                job = self.job_store.get_job(jid)
+            except Exception:
+                job = None
+            if isinstance(job, dict):
+                _add(job.get("working_directory"))
+        try:
+            from src.state.session_bind_store import session_bind_store
+
+            rec = session_bind_store.find_by_issue_key(issue_key)
+        except Exception:
+            rec = None
+        if isinstance(rec, dict):
+            _add(rec.get("working_directory"))
+        return found
+
+    def _kill_workspace_for_issue(
+        self, issue_key: str, *, extra_root_pids: Optional[list] = None
+    ) -> int:
+        """Force-kill leftover bash/npm/git still running in the job clone."""
+        paths = self._workspace_paths_for_issue(issue_key)
+        extra = list(extra_root_pids or [])
+        if not paths and not extra:
+            return 0
+        try:
+            from src.process_kill import reclaim_workspace
+
+            n = 0
+            if not paths:
+                # Still have tracked PIDs (clone dest not recorded yet).
+                n += int(reclaim_workspace(None, extra_root_pids=extra, force=True) or 0)
+            for wd in paths or []:
+                n += int(
+                    reclaim_workspace(wd, extra_root_pids=extra, force=True) or 0
+                )
+            if n:
+                logger.info(
+                    f"{issue_key}: force-killed {n} leftover workspace process(es)"
+                )
+            return int(n or 0)
+        except Exception as e:
+            logger.warning(f"Could not kill workspace processes for {issue_key}: {e}")
+            return 0
+
+    def _kill_git_for_issue(self, issue_key: str) -> int:
+        """Force-kill git/glab children; delete an in-progress clone.
+
+        Returns the number of git processes signalled. Safe when no GitManager
+        is registered yet (clone may still be in ``GitManager.__init__``).
+        """
+        git = self._git_for(issue_key)
+        if git is None:
+            git = GitManager.live_for(issue_key)
+        if git is None:
+            return 0
+        killed = 0
+        cancel = getattr(git, "cancel_processes", None)
+        if callable(cancel):
+            try:
+                n = cancel(force=True)
+                if isinstance(n, int):
+                    killed = max(0, n)
+                elif n:
+                    killed = 1
+            except Exception as e:
+                logger.warning(f"Could not kill git processes for {issue_key}: {e}")
+        # Incomplete clone is not in ``_contexts`` yet — delete it now so a
+        # killed ``git clone`` cannot keep writing, and so age-policy cleanup
+        # does not keep a half-downloaded tree.
+        if isinstance(git, GitManager):
+            try:
+                if issue_key not in self._contexts and git.should_discard_on_cancel():
+                    git.discard_workspace()
+                else:
+                    # Reused complete clone: leftover git / index.lock must
+                    # still die so the next prompt can checkout.
+                    reclaim = getattr(git, "reclaim_workspace", None)
+                    if callable(reclaim):
+                        reclaim()
+            except Exception as e:
+                logger.warning(f"Could not discard/reclaim clone for {issue_key}: {e}")
+        return killed
 
     def _cancel_issue_state(
         self,
@@ -1078,6 +2714,16 @@ class JobProcessor:
             # Allow poller to re-queue when the user returns the issue to To Do
             if status in (TaskStatus.CANCELLED, TaskStatus.ERROR):
                 meta_patch["requeue_eligible"] = True
+                if status == TaskStatus.ERROR:
+                    st0 = self.state_manager.get_state(issue_key)
+                    if st0 is not None:
+                        from src.jira.poller import JiraPoller
+
+                        meta_patch.update(
+                            JiraPoller.text_fingerprints_from_state(
+                                st0.issue_summary, st0.description
+                            )
+                        )
 
             update_kwargs: Dict[str, Any] = {
                 "status": status,
@@ -1146,15 +2792,15 @@ class JobProcessor:
             return False
 
     def recover_orphaned_in_flight(self) -> int:
-        """On cold start: disk PLANNING/EXECUTING cannot be live — finalise them.
+        """On cold start: disk PENDING/PLANNING/EXECUTING cannot be live.
 
         In-memory cache is empty after a process restart, so any leftover
-        in-flight status is orphaned (no child process). Mark ERROR so poller
-        can re-queue from To Do, and Jira users are not left with a silent hang.
+        accept-window or in-flight status is orphaned (no child process).
+        Mark ERROR so poller can re-queue from To Do.
         """
         recovered = 0
         for state in self.state_manager.get_active_issues():
-            if state.status not in self.IN_FLIGHT_STATUSES:
+            if state.status not in self.ORPHAN_RECOVER_STATUSES:
                 continue
             logger.warning(
                 f"Orphaned in-flight state for {state.issue_key} "
@@ -1222,15 +2868,44 @@ class JobProcessor:
         logger.info(f"Shutdown processing complete: {finalised} issue(s) finalised")
         return finalised
 
-    async def process_event(self, event: Dict[str, Any]):
+    @staticmethod
+    def _unpack_handler_result(result: Any) -> tuple[bool, Optional[str]]:
+        """Normalize handler returns for schedule outcome bookkeeping.
+
+        Real handlers return ``(work_started, skip_reason)``. Unit tests often
+        patch handlers with bare ``AsyncMock`` (MagicMock return) — treat those
+        as ``work_started=True`` so process_event paths keep working.
+        """
+        if isinstance(result, tuple) and len(result) >= 2:
+            skipped = result[1]
+            return bool(result[0]), (str(skipped) if skipped else None)
+        if isinstance(result, tuple) and len(result) == 1:
+            return bool(result[0]), None
+        if isinstance(result, bool):
+            return result, None
+        if result is None:
+            return False, "handler returned no result"
+        # MagicMock / unexpected objects from tests
+        return True, None
+
+    async def process_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Process a JIRA poll (or CLI) event.
 
         Events use a ``webhookEvent`` key for historical compatibility with
         the poller envelope (``jira:issue_created`` / ``jira:issue_updated``).
-        HTTP webhooks are not supported.
+        HTTP Jira webhooks set ``webhook_intake=True`` (assignment / mention).
+
+        Returns a small outcome dict so schedule dispatch can tell a real start
+        from a deliberate no-op (e.g. plan_ready without an explicit start).
         """
         event_type = event.get("webhookEvent", "")
         issue_key = event.get("issue", {}).get("key", "unknown")
+        outcome: Dict[str, Any] = {
+            "ok": True,
+            "issue_key": issue_key,
+            "work_started": False,
+            "skipped": None,
+        }
 
         from src.log_context import clear_log_context, set_issue_key, set_job_id
 
@@ -1255,17 +2930,32 @@ class JobProcessor:
                     # Accept both on-prem/cloud comment event names
                     if event_type == "jira:issue_created":
                         logger.info(f"Handling issue created event for {issue_key}")
-                        await self._handle_issue_created(event)
+                        started, skip_reason = self._unpack_handler_result(
+                            await self._handle_issue_created(event)
+                        )
+                        outcome["work_started"] = started
+                        outcome["skipped"] = skip_reason
                     elif event_type == "jira:issue_updated":
                         logger.info(f"Handling issue updated event for {issue_key}")
-                        await self._handle_issue_updated(event)
+                        started, skip_reason = self._unpack_handler_result(
+                            await self._handle_issue_updated(event)
+                        )
+                        outcome["work_started"] = started
+                        outcome["skipped"] = skip_reason
                     elif event_type in ("comment_created", "jira:issue_commented"):
                         logger.info(f"Handling comment created event for {issue_key}")
                         await self._handle_comment_created(event)
+                        # Comments may start work; report conservatively via status.
+                        st = self.state_manager.get_state(issue_key)
+                        if st and st.status in self.IN_FLIGHT_STATUSES:
+                            outcome["work_started"] = True
                     else:
                         logger.debug(f"Unknown event type: {event_type}, ignoring")
+                        outcome["skipped"] = f"unknown event type: {event_type}"
         except Exception as e:
             logger.exception(f"Unhandled error processing event for {issue_key}: {e}", e)
+            outcome["ok"] = False
+            outcome["skipped"] = str(e)
             if issue_key and issue_key != "unknown":
                 self._fail_issue(
                     issue_key,
@@ -1275,17 +2965,23 @@ class JobProcessor:
                 self._release_context(issue_key, success=False)
         finally:
             clear_log_context()
+        return outcome
     
-    async def _handle_issue_created(self, event: Dict[str, Any]):
+    async def _handle_issue_created(
+        self, event: Dict[str, Any]
+    ) -> tuple[bool, Optional[str]]:
+        """Handle create-style events.
+
+        Returns ``(work_started, skip_reason)``. ``skip_reason`` is set when no
+        workflow was started (caller may mark a schedule as failed).
+        """
         issue = event.get("issue", {})
         issue_key = issue.get("key", "unknown")
         fields = issue.get("fields", {})
+        scheduled_job = bool(event.get("scheduled_job"))
         
-        summary = fields.get("summary", "")
-        description = fields.get("description", "") or ""
-        if not isinstance(description, str):
-            # On-prem is usually plain text; tolerate accidental non-string payloads
-            description = str(description)
+        summary = _issue_text(fields.get("summary", ""))
+        description = _issue_text(fields.get("description", "") or "")
         
         logger.info(f"Handling issue created for {issue_key}: {summary[:80]}")
         logger.debug(f"Issue description length: {len(description)} chars")
@@ -1293,21 +2989,23 @@ class JobProcessor:
         # Live in-memory cache wins over disk — never double-start a held job
         if self._is_live_processing(issue_key):
             logger.info(f"Issue {issue_key} already live in processing cache, skipping")
-            return
+            return False, "already live in processing cache"
 
         existing = self.state_manager.get_state(issue_key)
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
-            return
-        # PLAN_READY: do not re-plan from a create event.
-        # Plans never auto-start (intentional). Explicit start only via
-        # ai-start-work / ai-execute labels on issue_updated, or a new Mode: build issue.
+            return False, f"already in progress ({existing.status.value})"
+        # PLAN_READY: never re-plan or build from a create event.
+        # Same-ticket implement / refactor is label-driven (plan_execute /
+        # plan_refactor). A new Mode: build issue still starts below.
         if existing and existing.status == TaskStatus.PLAN_READY:
+            handoff = await self._maybe_handle_plan_handoff(event, existing)
+            if handoff is not None:
+                return handoff
             logger.info(
-                f"Issue {issue_key} has plan ready; no auto-start "
-                f"(add label ai-start-work / ai-execute, or open Mode: build issue)"
+                f"Issue {issue_key} has plan ready; waiting for plan_execute"
             )
-            return
+            return False, "plan_ready; waiting for plan_execute"
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
@@ -1349,7 +3047,11 @@ class JobProcessor:
                 issue_key=issue_key,
                 issue_summary=summary,
                 description=description,
-                triggered_by="poller",
+                triggered_by=(
+                    "scheduled"
+                    if scheduled_job
+                    else ("webhook" if event.get("webhook_intake") else "poller")
+                ),
                 jira_assignee=assignee,
             )
             self.state_manager.update_state(
@@ -1380,6 +3082,7 @@ class JobProcessor:
                 await self._start_execution_workflow(state)
             elif workflow_type == WorkflowType.ORACLE_CONSULT:
                 await self._start_oracle_consultation(state)
+            return True, None
         except Exception as e:
             logger.exception(f"Workflow {workflow_type.value} crashed for {issue_key}: {e}", e)
             self._fail_issue(
@@ -1388,44 +3091,57 @@ class JobProcessor:
                 suggestion="Check agent/session logs, then move the issue back to TO DO to retry.",
             )
             self._release_context(issue_key, success=False)
+            # Entry was attempted; schedule should not look like a silent success skip.
+            return True, None
     
-    async def _handle_issue_updated(self, event: Dict[str, Any]):
+    async def _handle_issue_updated(
+        self, event: Dict[str, Any]
+    ) -> tuple[bool, Optional[str]]:
+        """Handle update-style events. Returns ``(work_started, skip_reason)``."""
         issue = event.get("issue") or {}
         issue_key = issue.get("key")
         if not issue_key:
             logger.warning("issue_updated event missing issue key, ignoring")
-            return
+            return False, "missing issue key"
         fields = issue.get("fields", {})
         status_data = fields.get("status", {})
         status_name = status_data.get("name", "")
         
         if self._is_live_processing(issue_key):
             logger.info(f"{issue_key} is live in processing cache; ignoring update event")
-            return
+            return False, "already live in processing cache"
 
         state = self.state_manager.get_state(issue_key)
 
         logger.debug(f"Issue {issue_key} - Event status: '{status_name}', State status: {state.status.value if state else 'NO_STATE'}")
 
         if not state:
-            await self._handle_issue_created(event)
-            return
+            return await self._handle_issue_created(event)
 
         # Never interrupt or restart in-flight agent work from poll noise
         if state.status in self.IN_FLIGHT_STATUSES:
             logger.info(
                 f"{issue_key} is in-flight ({state.status.value}); ignoring update event"
             )
-            return
+            return False, f"already in progress ({state.status.value})"
 
         # Locale-safe To Do (English "To Do", Turkish "Yapılacaklar", statusCategory=new)
         from src.jira.poller import JiraPoller
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        # Terminal → reprocess only when Jira is To Do.
-        # ERROR/CANCELLED require requeue_eligible (set by cancel/fail).
-        # COMPLETED may reprocess when poller already detected a real reopen.
+        webhook_intake = bool(event.get("webhook_intake"))
+
+        # Explicit webhook assignment / mention: start or re-run regardless of
+        # the Jira column. In-flight is still never restarted.
+        if webhook_intake:
+            return await self._handle_webhook_intake(event, state)
+
+        # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
+        # (poller already required a trigger) resets and runs again.
+        # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
+        # Do NOT auto-reprocess while the board is still In Progress (that
+        # caused infinite "no new commits" loops). plan_ready is not rework.
         if state.status in self.TERMINAL_STATUSES:
             if is_todo:
                 meta = state.metadata or {}
@@ -1435,91 +3151,82 @@ class JobProcessor:
                             f"{issue_key} is {state.status.value} without "
                             f"requeue_eligible; ignoring update event"
                         )
-                        return
+                        return False, f"{state.status.value} without requeue_eligible"
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
                     f"(Jira status '{status_name}' is To Do, requeue_eligible="
                     f"{bool(meta.get('requeue_eligible'))})"
                 )
                 self._reset_for_reprocess(issue_key)
-                await self._handle_issue_created(event)
-            else:
-                logger.debug(
-                    f"{issue_key} is {state.status.value}; Jira status "
-                    f"'{status_name}' is not To Do — not reprocessing"
-                )
-            return
+                return await self._handle_issue_created(event)
+            logger.debug(
+                f"{issue_key} is {state.status.value}; Jira status "
+                f"'{status_name}' is not To Do — not reprocessing"
+            )
+            return False, f"terminal {state.status.value}; Jira not To Do"
 
         # Non-terminal waiting: re-kick PENDING if still To Do
         if is_todo and state.status == TaskStatus.PENDING:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
-            await self._handle_issue_created(event)
-            return
+            return await self._handle_issue_created(event)
 
-        # plan_ready → execute only on explicit start labels (ai-start-work /
-        # ai-execute). Mode: build alone does NOT auto-start (intentional product
-        # choice — no plan→build autostart). Open a new Mode: build issue to
-        # implement, or add a start label on this ticket while it is To Do.
+        # plan_ready → execute/refactor only via plan_execute / plan_refactor.
+        # Mode: build on this ticket does not implement.
         if state.status == TaskStatus.PLAN_READY:
             if self._is_live_processing(issue_key):
                 logger.info(f"{issue_key} plan_ready but already live; skip start")
-                return
-
-            labels = list(fields.get("labels") or [])
-            label_set = {str(x).strip().lower() for x in labels}
-            has_start_label = (
-                "ai-start-work" in label_set or "ai-execute" in label_set
+                return False, "plan_ready but already live"
+            handoff = await self._maybe_handle_plan_handoff(event, state)
+            if handoff is not None:
+                return handoff
+            logger.info(
+                f"{issue_key} plan_ready; waiting for plan_execute "
+                f"(jira status '{status_name}')"
             )
+            return False, "plan_ready; waiting for plan_execute"
 
-            summary = fields.get("summary", "") or state.issue_summary or ""
-            description = fields.get("description", "") or ""
-            if not isinstance(description, str):
-                description = str(description)
-            if not description:
-                description = state.description or ""
+        return False, f"no action for status {state.status.value}"
 
-            if summary:
-                state.issue_summary = summary
-            if description:
-                state.description = description
+    async def _handle_webhook_intake(
+        self, event: Dict[str, Any], state: Optional[JiraAgentState]
+    ) -> tuple[bool, Optional[str]]:
+        """Assignment-to-bot or mention — explicit start, not poller To Do noise.
 
-            if is_todo and has_start_label:
-                self.state_manager.update_state(
-                    issue_key,
-                    issue_summary=state.issue_summary,
-                    description=state.description,
-                    metadata={"workflow_type": WorkflowType.EXECUTION.value},
-                )
-                state = self.state_manager.get_state(issue_key) or state
-                logger.info(
-                    f"{issue_key} plan_ready + To Do + start label; "
-                    f"beginning execution"
-                )
-                try:
-                    await self._start_execution_workflow(state)
-                except Exception as e:
-                    logger.exception(
-                        f"Plan start from label failed for {issue_key}: {e}", e
-                    )
-                    self._fail_issue(
-                        issue_key,
-                        f"Failed to start plan execution: {e}",
-                        suggestion=(
-                            "Check logs. To run build: open a new issue with "
-                            "Mode: build, or re-queue with label ai-start-work."
-                        ),
-                    )
-                    self._release_context(issue_key, success=False)
-            elif is_todo and not has_start_label:
-                logger.info(
-                    f"{issue_key} plan_ready and To Do; no auto-start "
-                    f"(add ai-start-work / ai-execute, or open Mode: build issue)"
-                )
-            else:
-                logger.debug(
-                    f"{issue_key} plan_ready; waiting for explicit start "
-                    f"(jira status '{status_name}')"
-                )
+        In-flight is never restarted. plan_ready starts execution only on
+        ``plan_execute`` (In Progress). Mentions with ``plan_refactor`` revise
+        the plan. Terminal work is reset and run again even if the board is
+        still In Progress.
+        """
+        issue = event.get("issue") or {}
+        issue_key = issue.get("key") or ""
+        trigger = str(event.get("webhook_trigger") or "webhook")
+        logger.info(
+            f"{issue_key}: webhook intake ({trigger}) "
+            f"local={state.status.value if state else 'none'}"
+        )
+        if self._is_live_processing(issue_key):
+            return False, "already live in processing cache"
+        if state and state.status in self.IN_FLIGHT_STATUSES:
+            return False, f"already in progress ({state.status.value})"
+
+        if state and state.status == TaskStatus.PLAN_READY:
+            handoff = await self._maybe_handle_plan_handoff(event, state)
+            if handoff is not None:
+                return handoff
+            logger.info(
+                f"{issue_key}: webhook plan_ready ignored (need plan_execute)"
+            )
+            return False, "plan_ready; waiting for plan_execute"
+
+        if state and state.status in self.TERMINAL_STATUSES:
+            logger.info(
+                f"Reprocessing {issue_key} from {state.status.value} "
+                f"(webhook {trigger})"
+            )
+            self._reset_for_reprocess(issue_key)
+            return await self._handle_issue_created(event)
+
+        return await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -1550,25 +3257,14 @@ class JobProcessor:
         cmd_lower = command.lower().strip()
         
         if cmd_lower.startswith("/start-work"):
-            # Start execution of existing plan
-            if state and state.status == TaskStatus.PLAN_READY:
-                try:
-                    await self._start_execution_workflow(state)
-                except Exception as e:
-                    logger.exception(f"Execution workflow crashed for {issue_key}: {e}", e)
-                    self._fail_issue(
-                        issue_key,
-                        f"Execution workflow failed: {e}",
-                        suggestion="Check logs, then try /start-work again.",
-                    )
-            else:
-                self.reporter.post_comment_response(
-                    issue_key,
-                    "No plan is ready for execution yet.\n\n"
-                    "* If planning is still running, wait for the *Plan Ready* comment.\n"
-                    "* If planning failed, move the issue back to To Do to re-queue.\n"
-                    "* Then reply with `/start-work` when status is `plan_ready`.",
-                )
+            self.reporter.post_comment_response(
+                issue_key,
+                "Dashboard / comment Start is disabled.\n\n"
+                "* To implement a plan: set label `plan_execute` while the "
+                "ticket is *In Progress*.\n"
+                "* To revise a plan: remove `plan_ready`, add `plan_refactor`, "
+                "and comment tagging the bot.",
+            )
         
         elif cmd_lower.startswith("/status"):
             # Report current status
@@ -1643,13 +3339,13 @@ class JobProcessor:
             fields = issue.get("fields") or {}
             live_summary = fields.get("summary")
             live_desc = fields.get("description")
-            if live_summary is not None and str(live_summary).strip():
-                summary = str(live_summary)
+            if live_summary is not None:
+                text = _issue_text(live_summary)
+                if text.strip():
+                    summary = text
             if live_desc is not None:
-                if not isinstance(live_desc, str):
-                    live_desc = str(live_desc)
                 # Allow empty description only when API returned a value
-                description = live_desc
+                description = _issue_text(live_desc)
             if st and (summary != (st.issue_summary or "") or description != (st.description or "")):
                 logger.info(
                     f"{issue_key}: refreshed summary/description from live Jira "
@@ -1668,27 +3364,56 @@ class JobProcessor:
         self,
         issue_key: str,
         state: Optional[JiraAgentState] = None,
-    ) -> GitManager:
+        *,
+        repository_url: Optional[str] = None,
+        source_branch: Optional[str] = None,
+        target_branch: Optional[str] = None,
+        keep_source_work_branch: bool = False,
+    ) -> Optional[GitManager]:
         """Clone from the issue template (Repository + Source + Target).
 
         Always re-reads summary/description from Jira when possible so
         ``{params}`` matches the current ticket, not a stale state snapshot.
 
+        When ``repository_url`` + source + target are passed (GitLab MR webhook),
+        Jira ``{params}`` are skipped.
+
+        Returns ``None`` when the issue was cancelled/errored during clone
+        (workspace discarded; no live context registered).
+
         Raises IssueGitConfigError / GitCloneError / GitSourceBranchError /
         GitTargetBranchError with user-facing messages suitable for Jira comments.
         """
         logger.info(f"Initializing git manager for {issue_key}")
+        if self._is_aborted(issue_key):
+            logger.info(f"{issue_key}: aborted before git init; skipping clone")
+            return None
         st = state or self.state_manager.get_state(issue_key)
-        summary, description = self._refresh_issue_text_from_jira(issue_key, st)
-        # Re-load state after refresh (update may have persisted)
-        st = self.state_manager.get_state(issue_key) or st
-        spec = require_issue_git_spec(summary=summary, description=description)
+        repo = (repository_url or "").strip()
+        src_b = (source_branch or "").strip()
+        tgt_b = (target_branch or "").strip()
+        if repo and src_b and tgt_b:
+            from types import SimpleNamespace
+
+            spec = SimpleNamespace(
+                repository_url=repo,
+                source_branch=src_b,
+                target_branch=tgt_b,
+            )
+        else:
+            summary, description = self._refresh_issue_text_from_jira(issue_key, st)
+            # Re-load state after refresh (update may have persisted)
+            st = self.state_manager.get_state(issue_key) or st
+            if self._is_aborted(issue_key):
+                logger.info(f"{issue_key}: aborted after Jira refresh; skipping clone")
+                return None
+            spec = require_issue_git_spec(summary=summary, description=description)
         logger.info(
             f"{issue_key} git from issue: repo={spec.repository_url} "
             f"source_branch={spec.source_branch} target_branch={spec.target_branch} "
             f"(MR plan: work branch from target, then MR source → target)"
         )
-        if st:
+        if st and not self._is_aborted(issue_key):
             self.state_manager.update_state(
                 issue_key,
                 metadata={
@@ -1698,12 +3423,67 @@ class JobProcessor:
                 },
             )
 
-        git = GitManager(
-            issue_key=issue_key,
-            remote_url=spec.repository_url,
-            source_branch=spec.source_branch,
-            target_branch=spec.target_branch,
-        )
+        # Only serialize custom shared Source branches. Primary bases
+        # (develop/main/…) use isolated feature/{KEY} work branches.
+        src = (spec.source_branch or "").strip()
+        tgt = (spec.target_branch or "").strip()
+        if src and src != tgt and not GitManager._is_primary_base(src):
+            if not self._claim_source_branch(
+                issue_key, spec.repository_url, spec.source_branch
+            ):
+                raise GitSourceBranchError(
+                    f"{issue_key}: another job is already using source branch "
+                    f"`{spec.source_branch}` on this repository. Wait for it to "
+                    f"finish or use a distinct Source branch."
+                )
+
+        try:
+            git = GitManager(
+                issue_key=issue_key,
+                remote_url=spec.repository_url,
+                source_branch=spec.source_branch,
+                target_branch=spec.target_branch,
+                keep_source_work_branch=keep_source_work_branch,
+            )
+        except GitCancelledError:
+            logger.info(f"{issue_key}: clone aborted because the job was cancelled")
+            self._release_source_branch(issue_key)
+            return None
+        try:
+            work = git.work_branch or git.resolve_work_branch_name(
+                issue_key,
+                spec.source_branch,
+                spec.target_branch,
+                keep_source=keep_source_work_branch,
+            )
+            self.note_workspace_lock(
+                issue_key,
+                repository_url=spec.repository_url,
+                work_branch=work,
+                target_branch=spec.target_branch,
+            )
+        except Exception:
+            pass
+        # Cancel may have won while clone ran (no runner registered yet).
+        # Do not re-arm live context after terminal status.
+        if self._is_aborted(issue_key):
+            logger.info(
+                f"{issue_key}: aborted during/after clone; discarding workspace"
+            )
+            try:
+                if isinstance(git, GitManager):
+                    git.cancel_processes(force=True)
+                    if git.should_discard_on_cancel():
+                        git.discard_workspace()
+                    else:
+                        git.cleanup(success=False)
+                else:
+                    git.cleanup(success=False)
+            except Exception as e:
+                logger.warning(f"{issue_key}: cleanup after abort failed: {e}")
+            self._release_source_branch(issue_key)
+            return None
+
         working_dir = git.get_working_directory()
         logger.debug(f"Working directory: {working_dir}")
         runner = AgentRunner(working_directory=working_dir)
@@ -1715,18 +3495,57 @@ class JobProcessor:
         self.agent_runner = runner
         return git
 
-    def _prepare_git_workspace(self, state: JiraAgentState) -> Optional[GitManager]:
-        """Init git + work branch from target, or fail the issue with a Jira message.
+    def _prepare_git_workspace_blocking(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Sync clone + work-branch setup (may take minutes on large repos).
 
-        Returns GitManager on success, None after calling ``_fail_issue``.
+        Must not run on the asyncio event loop — use
+        :meth:`_prepare_git_workspace` which offloads via ``asyncio.to_thread``.
+
+        Returns ``None`` on hard failure (``_fail_issue`` already called) **or**
+        when the issue was cancelled/errored mid-setup (no fail — already terminal).
         """
         try:
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted before git workspace prep"
+                )
+                return None
             git = self._init_git_manager(state.issue_key, state)
+            if git is None:
+                # Cancel/fail during clone — do not overwrite terminal with ERROR
+                logger.info(
+                    f"{state.issue_key}: git init returned None (aborted); "
+                    f"skipping agent start"
+                )
+                return None
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted after git init; releasing context"
+                )
+                self._release_context(state.issue_key, success=False)
+                return None
             branch_name = git.ensure_feature_branch(state.issue_key)
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"{state.issue_key}: aborted after branch setup; releasing context"
+                )
+                self._release_context(state.issue_key, success=False)
+                return None
             logger.info(
                 f"Work branch ready: {branch_name} "
                 f"(based on target={git.target_branch}; MR {branch_name} → {git.target_branch})"
             )
+            try:
+                wd = git.get_working_directory()
+            except Exception:
+                wd = None
+            self._record_job_working_directory(state.issue_key, wd)
+            self._apply_job_opencode_context_limit(
+                wd, model=self._model_for_issue(state)
+            )
+            self._clear_stale_omo_continuations(wd)
             return git
         except IssueGitConfigError as e:
             logger.warning(
@@ -1743,6 +3562,11 @@ class JobProcessor:
                 ),
             )
             self._release_context(state.issue_key, success=False)
+            return None
+        except GitCancelledError:
+            logger.info(
+                f"{state.issue_key}: git aborted because the job was cancelled"
+            )
             return None
         except GitCloneError as e:
             logger.error(f"{state.issue_key} clone failed: {e}")
@@ -1778,43 +3602,1072 @@ class JobProcessor:
             logger.exception(f"{state.issue_key} git workspace setup failed: {e}", e)
             self._fail_issue(
                 state.issue_key,
-                f"*Virtual Developer* could not prepare the git workspace.\n\n`{e}`",
+                f"*Yaver* could not prepare the git workspace.\n\n`{e}`",
                 suggestion="Check logs, then move the issue back to To Do.",
             )
             self._release_context(state.issue_key, success=False)
             return None
 
-    async def _start_planning_workflow(self, state: JiraAgentState):
-        logger.info(f"Starting planning workflow for {state.issue_key}")
+    async def _prepare_git_workspace(
+        self, state: JiraAgentState
+    ) -> Optional[GitManager]:
+        """Init git + work branch without blocking the asyncio event loop.
+
+        Large clones previously froze the ops dashboard (same process/loop as
+        uvicorn). Offload clone/checkout to a worker thread.
+        """
+        return await asyncio.to_thread(self._prepare_git_workspace_blocking, state)
+
+    def _kick_queue(self) -> None:
+        """Schedule a queue dispatch on the running loop (safe from sync code)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.create_task(self.dispatch_queue())
+        except Exception:
+            pass
+
+    async def enqueue_gitlab_note(self, event: Any) -> Dict[str, Any]:
+        """Persist a GitLab MR comment and try to start it (or leave it queued)."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        if not isinstance(event, GitlabMrNoteEvent):
+            return {"ok": False, "reason": "invalid event"}
+        existing = self.queue_store.find_note(event.note_id)
+        if existing:
+            return {
+                "ok": True,
+                "queued": existing.get("status") == "queued",
+                "duplicate": True,
+                "queue_id": existing.get("queue_id"),
+                "issue_key": existing.get("issue_key"),
+                "status": existing.get("status"),
+            }
+        # GitLab checks out the MR source as-is (keep_source=True), including
+        # main/develop. The queue lock must use that same folder identity.
+        work = GitManager.resolve_work_branch_name(
+            event.issue_key,
+            event.source_branch,
+            event.target_branch,
+            keep_source=True,
+        )
+        lock = workspace_lock_key(
+            event.repository_url, work, event.target_branch
+        )
+        rec = self.queue_store.enqueue(
+            source="gitlab",
+            issue_key=event.issue_key,
+            summary=event.mr_title or f"MR !{event.mr_iid}",
+            message=event.prompt or event.note_body,
+            repository_url=event.repository_url,
+            source_branch=event.source_branch,
+            work_branch=work,
+            target_branch=event.target_branch,
+            lock_key=lock,
+            gitlab_note_id=event.note_id,
+            merge_request_url=event.mr_url,
+            payload=event.to_dict(),
+        )
+        await self.dispatch_queue()
+        live = self.queue_store.get(rec["queue_id"]) or rec
+        return {
+            "ok": True,
+            "queued": live.get("status") == "queued",
+            "started": live.get("status") == "running",
+            "queue_id": live.get("queue_id"),
+            "issue_key": live.get("issue_key"),
+            "status": live.get("status"),
+        }
+
+    async def enqueue_jira_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist a Jira intake event and try to start it (or leave it queued)."""
+        issue = event.get("issue") or {}
+        key = (issue.get("key") or "").strip()
+        fields = issue.get("fields") or {}
+        summary = _issue_text(fields.get("summary") or "")
+        desc = _issue_text(fields.get("description") or "")
+        if not key:
+            return {"ok": False, "reason": "missing issue key"}
+        event_id = str(event.get("jira_event_id") or "").strip()
+        if event_id:
+            if event_id in self._jira_seen_events:
+                logger.info(f"{key}: duplicate Jira webhook event {event_id}; skip")
+                return {
+                    "ok": True,
+                    "queued": False,
+                    "started": False,
+                    "duplicate": True,
+                    "issue_key": key,
+                    "status": "skipped",
+                    "reason": "duplicate webhook event",
+                }
+            existing_ev = self.queue_store.find_jira_event(event_id)
+            if existing_ev:
+                logger.info(
+                    f"{key}: Jira event {event_id} already queued as "
+                    f"{existing_ev.get('queue_id')}"
+                )
+                return {
+                    "ok": True,
+                    "queued": existing_ev.get("status") == "queued",
+                    "started": existing_ev.get("status") == "running",
+                    "duplicate": True,
+                    "queue_id": existing_ev.get("queue_id"),
+                    "issue_key": key,
+                    "status": existing_ev.get("status"),
+                }
+            self._jira_seen_events.add(event_id)
+        # Collapse into any open row. A second dispatch while the issue is
+        # already running must not create another ``queued`` row — that
+        # shows the same ticket in both In flight and Queue, and would
+        # start a duplicate run when the live job finishes.
+        existing = self.queue_store.find_open_jira(key)
+        if existing and (existing.get("status") or "") == "queued":
+            logger.info(
+                f"{key}: already queued as {existing.get('queue_id')}; "
+                f"dispatching existing row (not creating a duplicate)"
+            )
+            await self.dispatch_queue()
+            live = self.queue_store.get(existing.get("queue_id") or "") or existing
+            return {
+                "ok": True,
+                "queued": live.get("status") == "queued",
+                "started": live.get("status") == "running",
+                "duplicate": True,
+                "queue_id": live.get("queue_id"),
+                "issue_key": key,
+                "status": live.get("status"),
+            }
+        if existing and (existing.get("status") or "") == "running":
+            logger.info(
+                f"{key}: already running as {existing.get('queue_id')}; "
+                f"not queueing a duplicate"
+            )
+            return {
+                "ok": True,
+                "queued": False,
+                "started": True,
+                "duplicate": True,
+                "queue_id": existing.get("queue_id"),
+                "issue_key": key,
+                "status": "running",
+                "reason": "already in-flight",
+            }
+        if self._issue_is_in_flight(key):
+            logger.info(f"{key}: already in-flight; not queueing a duplicate")
+            return {
+                "ok": True,
+                "queued": False,
+                "started": True,
+                "duplicate": True,
+                "issue_key": key,
+                "status": "running",
+                "reason": "already in-flight",
+            }
+        spec, _err = parse_issue_git_spec(summary, desc)
+        repo = (spec.repository_url if spec else "") or ""
+        src = (spec.source_branch if spec else "") or ""
+        tgt = (spec.target_branch if spec else "") or ""
+        work = GitManager.resolve_work_branch_name(key, src, tgt) if (src or tgt) else ""
+        lock = workspace_lock_key(repo, work, tgt)
+        rec = self.queue_store.enqueue(
+            source="jira",
+            issue_key=key,
+            summary=summary,
+            message=desc,
+            repository_url=repo,
+            source_branch=src,
+            work_branch=work,
+            target_branch=tgt,
+            lock_key=lock,
+            job_id=self._active_jobs.get(key),
+            jira_event_id=event_id,
+            payload=event,
+        )
+        logger.info(
+            f"{key}: scheduled/enqueued queue_id={rec.get('queue_id')} "
+            f"schedule_id={event.get('schedule_id') or '-'} "
+            f"job_id={rec.get('job_id') or self._active_jobs.get(key) or '-'} "
+            f"lock={lock or '-'}"
+        )
+        await self.dispatch_queue()
+        live = self.queue_store.get(rec["queue_id"]) or rec
+        return {
+            "ok": True,
+            "queued": live.get("status") == "queued",
+            "started": live.get("status") == "running",
+            "queue_id": live.get("queue_id"),
+            "issue_key": key,
+            "status": live.get("status"),
+        }
+
+    def _reap_stale_queue_running(self) -> int:
+        """Finish ``running`` queue rows whose issue is no longer live.
+
+        After dashboard Stop the worker may still be winding down, but the
+        issue is CANCELLED and ``_contexts`` is empty. A leftover running
+        row then blocks ``claim_next`` for that issue (and can fill
+        ``max_running``). Reap those orphans before claiming.
+        """
+        n = 0
+        live = {
+            (k or "").strip().upper()
+            for k in self.list_live_processing_keys()
+            if k
+        }
+        for rec in list(self.queue_store.list_items(status="running", limit=500)):
+            ik = (rec.get("issue_key") or "").strip()
+            if not ik or ik.upper() in live:
+                continue
+            st = self.state_manager.get_state(ik)
+            if st and st.status in self.IN_FLIGHT_STATUSES:
+                continue
+            # First-run / scheduled claim: process_event has not created
+            # local state yet. A second dispatch (``_release_context``
+            # kicks the queue while the finishing item also dispatches)
+            # must not treat this as a leftover after Stop.
+            if not st:
+                continue
+            # A brand-new claim after Stop still sees local CANCELLED until
+            # process_event resets it. Only reap rows that started *before*
+            # the terminal write (the leftover claim from the stopped job).
+            if st and st.completed_at and rec.get("started_at"):
+                done_at = st.completed_at
+                if hasattr(done_at, "isoformat"):
+                    done_at = done_at.isoformat(timespec="milliseconds")
+                if str(rec.get("started_at") or "") >= str(done_at):
+                    continue
+            qid = rec.get("queue_id") or ""
+            if not qid:
+                continue
+            term = "skipped"
+            if st and st.status == TaskStatus.CANCELLED:
+                term = "cancelled"
+            elif st and st.status == TaskStatus.ERROR:
+                term = "error"
+            elif st and st.status == TaskStatus.COMPLETED:
+                term = "completed"
+            self.queue_store.finish(
+                qid,
+                status=term,
+                error_message="Reaped stale running queue row (issue not live)",
+                job_id=(st.metadata or {}).get("current_job_id") if st else None,
+            )
+            n += 1
+            logger.info(
+                f"Queue reap {qid} issue={ik} status={term} "
+                f"(not live; local={st.status.value if st else 'none'})"
+            )
+        return n
+
+    def _skip_queued_while_in_flight(self) -> int:
+        """Finish leftover ``queued`` rows whose issue is already running.
+
+        Poller/schedule re-enqueue used to leave a waiting row next to the
+        live job. That row appeared on the Queue tab and would start again
+        when the in-flight run finished.
+        """
+        n = 0
+        for rec in list(self.queue_store.list_items(status="queued", limit=500)):
+            ik = (rec.get("issue_key") or "").strip()
+            if not ik or not self._issue_is_in_flight(ik):
+                continue
+            qid = rec.get("queue_id") or ""
+            if not qid:
+                continue
+            self.queue_store.finish(
+                qid,
+                status="skipped",
+                error_message="issue already in-flight",
+            )
+            n += 1
+            logger.info(
+                f"Queue skip {qid} issue={ik} (already in-flight; not shown as waiting)"
+            )
+        return n
+
+    async def dispatch_queue(self) -> int:
+        """Claim and start every currently runnable queue item."""
+        started = 0
+        if self._queue_dispatch_lock is None:
+            self._queue_dispatch_lock = asyncio.Lock()
+        if self._queue_dispatch_lock.locked():
+            self._queue_dispatch_again = True
+            return 0
+        async with self._queue_dispatch_lock:
+            reaped = self._reap_stale_queue_running()
+            if reaped:
+                logger.info(f"Queue dispatch reaped {reaped} stale running row(s)")
+            skipped_live = self._skip_queued_while_in_flight()
+            if skipped_live:
+                logger.info(
+                    f"Queue dispatch skipped {skipped_live} queued row(s) "
+                    f"already in-flight"
+                )
+            while True:
+                self._queue_dispatch_again = False
+                max_jobs = max(1, int(settings.max_concurrent_jobs or 1))
+                blocked = set(self.list_live_processing_keys())
+                item = self.queue_store.claim_next(
+                    blocked_issue_keys=blocked,
+                    blocked_locks=self.live_workspace_lock_keys(),
+                    max_running=max_jobs,
+                )
+                if item is None:
+                    if self._queue_dispatch_again:
+                        continue
+                    break
+                asyncio.create_task(self._run_queue_item(item))
+                started += 1
+        return started
+
+    async def _run_queue_item(self, rec: Dict[str, Any]) -> None:
+        qid = rec.get("queue_id") or ""
+        source = (rec.get("source") or "jira").strip().lower()
+        job_id = None
+        try:
+            live_row = self.queue_store.get(qid) if qid else None
+            if not live_row or live_row.get("status") not in {"queued", "running"}:
+                logger.info(
+                    f"Queue item {qid} no longer open "
+                    f"(status={live_row.get('status') if live_row else 'missing'}); skip"
+                )
+                return
+            if source == "gitlab":
+                from src.gitlab.webhook import GitlabMrNoteEvent
+
+                event = GitlabMrNoteEvent.from_dict(rec.get("payload") or {})
+                if self._job_semaphore is None:
+                    limit = max(1, int(settings.max_concurrent_jobs or 1))
+                    self._job_semaphore = _JobSlotLimiter(limit)
+                async with self._job_semaphore:
+                    ran = await self._run_gitlab_mr_comment(event)
+                if not ran:
+                    self.queue_store.requeue(
+                        qid, reason="workspace or issue still in-flight"
+                    )
+                    return
+            else:
+                outcome = await self.process_event(rec.get("payload") or {})
+                if not outcome.get("work_started"):
+                    self.queue_store.finish(
+                        qid,
+                        status="skipped",
+                        error_message=str(
+                            outcome.get("skipped") or "process_event did not start work"
+                        )[:2000],
+                    )
+                    return
+            st = self.state_manager.get_state(rec.get("issue_key") or "")
+            if st:
+                job_id = (st.metadata or {}).get("current_job_id") or (
+                    (st.metadata or {}).get("job_ids") or [None]
+                )[-1]
+            job_id = self._active_jobs.get(rec.get("issue_key") or "") or job_id
+            status = "completed"
+            if st and st.status == TaskStatus.ERROR:
+                status = "error"
+            elif st and st.status == TaskStatus.CANCELLED:
+                status = "cancelled"
+            self.queue_store.finish(
+                qid,
+                status=status,
+                error_message=(st.error_message if st else None),
+                job_id=job_id if isinstance(job_id, str) else None,
+            )
+        except Exception as e:
+            logger.exception(f"Queue item {qid} failed: {e}", e)
+            self.queue_store.finish(qid, status="error", error_message=str(e))
+        finally:
+            await self.dispatch_queue()
+
+    def _post_gitlab_mr_reply(self, state: JiraAgentState, body: str) -> bool:
+        """Post *body* on the GitLab MR stored in issue metadata (CE + EE)."""
+        meta = dict(state.metadata or {})
+        host = (meta.get("gitlab_host") or "").strip()
+        project = meta.get("gitlab_project_id") or meta.get("gitlab_project")
+        iid = meta.get("gitlab_mr_iid")
+        if not host or not project or not iid:
+            logger.error(
+                f"{state.issue_key}: cannot post GitLab note "
+                f"(host={host!r} project={project!r} iid={iid!r})"
+            )
+            return False
+        from src.gitlab.client import GitlabClient
+
+        client = GitlabClient(host=host)
+        posted = client.post_mr_note(
+            project=project,
+            mr_iid=int(iid),
+            body=body,
+            discussion_id=str(meta.get("gitlab_discussion_id") or ""),
+        )
+        return posted is not None
+
+    async def handle_gitlab_mr_lifecycle(self, event: Any) -> Dict[str, Any]:
+        """Persist MR state and delete the temp clone when the MR is merged or closed.
+
+        Does not take the long-held issue lock — delete must not wait on a job.
+        """
+        from src.gitlab.webhook import GitlabMrLifecycleEvent
+
+        if not isinstance(event, GitlabMrLifecycleEvent):
+            logger.warning("handle_gitlab_mr_lifecycle: invalid event")
+            return {"ok": False, "reason": "invalid event", "deleted": []}
+        state_name = (event.state or "").strip().lower()
+        if event.is_merged:
+            state_name = "merged"
+        elif event.is_closed:
+            state_name = "closed"
+        elif (event.action or "").lower() in {"reopen", "open", "opened"}:
+            state_name = "opened"
+        elif not state_name:
+            state_name = (event.action or "").strip().lower() or "unknown"
+
+        self._record_merge_request_state(
+            issue_key=event.issue_key,
+            mr_url=event.mr_url,
+            project_path=event.project_path,
+            mr_iid=event.mr_iid,
+            state=state_name,
+        )
+        if not event.should_delete_clone:
+            return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
+
+        from src.dashboard.temp_storage import delete_clones_for_merge_request
+
+        deleted = delete_clones_for_merge_request(
+            mr_url=event.mr_url,
+            project_path=event.project_path,
+            mr_iid=event.mr_iid,
+            issue_key=event.issue_key,
+            source_branch=event.source_branch,
+        )
+        logger.info(
+            f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
+            f"{state_name} — deleted clones {deleted or '(none)'}"
+        )
+        return {
+            "ok": True,
+            "reason": state_name,
+            "deleted": deleted,
+        }
+
+    def _record_merge_request_state(
+        self,
+        *,
+        issue_key: str,
+        mr_url: str,
+        project_path: str,
+        mr_iid: int,
+        state: str,
+    ) -> None:
+        """Write merge_request_state onto matching jobs and issue metadata."""
+        url = (mr_url or "").strip().rstrip("/")
+        key = (issue_key or "").strip().upper()
+        path = (project_path or "").strip()
+        try:
+            n = self.job_store.count_jobs()
+            for job in self.job_store.list_jobs(limit=max(int(n or 0), 1)):
+                job_url = str(job.get("merge_request_url") or "").strip().rstrip("/")
+                same_url = bool(url and job_url.lower() == url.lower())
+                same_iid = (
+                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
+                    and int(mr_iid or 0) > 0
+                    and (
+                        not path
+                        or str(job.get("gitlab_project") or "").strip().lower()
+                        == path.lower()
+                    )
+                )
+                same_issue = bool(key) and str(job.get("issue_key") or "").upper() == key
+                if not (same_url or same_iid or (same_issue and url)):
+                    continue
+                patch: Dict[str, Any] = {"merge_request_state": state}
+                if url:
+                    patch["merge_request_url"] = url
+                if path:
+                    patch["gitlab_project"] = path
+                if mr_iid:
+                    patch["gitlab_mr_iid"] = int(mr_iid)
+                self.job_store.update_job(str(job.get("job_id") or ""), **patch)
+        except Exception as e:
+            logger.warning(f"Could not persist MR state on jobs: {e}")
+        if key:
+            try:
+                meta: Dict[str, Any] = {"merge_request_state": state}
+                if url:
+                    meta["merge_request_url"] = url
+                self.state_manager.update_state(key, metadata=meta)
+            except Exception as e:
+                logger.warning(f"Could not persist MR state on {key}: {e}")
+
+    async def handle_gitlab_mr_comment(self, event: Any) -> None:
+        """Clone the MR source branch, run a build, push if needed, reply on the MR."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        if not isinstance(event, GitlabMrNoteEvent):
+            logger.warning("handle_gitlab_mr_comment: invalid event")
+            return
+        issue_key = event.issue_key
+        from src.log_context import set_issue_key
+
+        set_issue_key(issue_key)
+        if self._job_semaphore is None:
+            limit = max(1, int(settings.max_concurrent_jobs or 1))
+            self._job_semaphore = _JobSlotLimiter(limit)
+
+        async with self._job_semaphore:
+            async with self._get_issue_lock(issue_key):
+                await self._run_gitlab_mr_comment(event)
+
+    async def _run_gitlab_mr_comment(self, event: Any) -> bool:
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        assert isinstance(event, GitlabMrNoteEvent)
+        issue_key = event.issue_key
+        note_id = (event.note_id or "").strip()
+        if note_id and note_id in self._gitlab_seen_notes:
+            logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
+            return True
+
+        if self._is_live_processing(issue_key):
+            logger.info(f"{issue_key}: already in-flight; deferring GitLab note")
+            return False
+
+        st = self.state_manager.get_state(issue_key)
+        summary = event.mr_title or f"MR !{event.mr_iid}"
+        description = event.prompt
+        meta = {
+            "source": "gitlab",
+            "gitlab_host": event.host,
+            "gitlab_project": event.project_path,
+            "gitlab_project_id": event.project_id or None,
+            "gitlab_mr_iid": event.mr_iid,
+            "merge_request_url": event.mr_url,
+            "gitlab_discussion_id": event.discussion_id,
+            "repository_url": event.repository_url,
+            "source_branch": event.source_branch,
+            "target_branch": event.target_branch,
+            "feature_branch": event.source_branch,
+            "workflow_type": "gitlab_mr",
+            "requeue_eligible": False,
+        }
+        if st is None:
+            st = self.state_manager.create_state(
+                issue_key, summary, description
+            )
+            self.state_manager.update_state(issue_key, metadata=meta)
+        else:
+            if st.status in self.IN_FLIGHT_STATUSES:
+                logger.info(
+                    f"{issue_key}: local status {st.status.value}; "
+                    f"deferring GitLab note"
+                )
+                return False
+            self.state_manager.update_state(
+                issue_key,
+                force=True,
+                status=TaskStatus.PENDING,
+                issue_summary=summary,
+                description=description,
+                error_message=None,
+                progress_percentage=0,
+                completed_at=None,
+                current_task_id=None,
+                current_opencode_session_id=None,
+                metadata=meta,
+            )
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return False
+        # Mark seen only after accept — a defer must not poison retries.
+        if note_id:
+            self._gitlab_seen_notes.add(note_id)
+            if len(self._gitlab_seen_notes) > 500:
+                self._gitlab_seen_notes = set(list(self._gitlab_seen_notes)[-250:])
+        await self._start_gitlab_mr_workflow(st, event)
+        return True
+
+    def _gitlab_mr_reply_body(
+        self,
+        stdout: str,
+        *,
+        pushed: bool,
+        branch: str = "",
+        commit_sha: str = "",
+        commit_url: str = "",
+        delivery_note: str = "",
+    ) -> str:
+        """Format the Virtual Developer note posted back on the MR."""
+        from src.backends.codex import format_agent_answer_for_comment
+
+        # Codex stdout is the exec JSONL stream — post the assistant markdown.
+        answer = format_agent_answer_for_comment(stdout, limit=8000)
+        parts = ["*Yaver*", "", answer]
+        if pushed:
+            extra = ["", "---", ""]
+            br = (branch or "").strip()
+            extra.append(
+                f"Pushed new commits to the existing MR source branch"
+                + (f" `{br}`." if br else ".")
+            )
+            sha = (commit_sha or "").strip()
+            url = (commit_url or "").strip()
+            if url:
+                extra.append(f"Commit: {url}")
+            elif sha:
+                extra.append(f"Commit: `{sha[:12]}`")
+            parts.extend(extra)
+        elif delivery_note:
+            parts.extend(["", "---", "", delivery_note.strip()])
+        return "\n".join(parts)
+
+    async def _start_gitlab_mr_workflow(
+        self, state: JiraAgentState, event: Any
+    ) -> None:
+        """Build on the MR source branch, push if the agent committed, reply on the MR."""
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        assert isinstance(event, GitlabMrNoteEvent)
+        logger.info(
+            f"Starting GitLab MR build workflow for {state.issue_key} "
+            f"(MR !{event.mr_iid})"
+        )
+        success: Optional[bool] = False
+        try:
+            task = AgentTask(
+                description=f"GitLab MR build: {state.issue_key}",
+                prompt=PromptBuilder.build_gitlab_comment_prompt(
+                    issue_key=state.issue_key,
+                    mr_title=event.mr_title,
+                    mr_url=event.mr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    work_branch=event.source_branch,
+                ),
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                issue_key=state.issue_key,
+                model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
+            )
+            job_id = self._begin_workflow_run(
+                state,
+                status=TaskStatus.EXECUTING,
+                task=task,
+                workflow_type="gitlab_mr",
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                job_status="executing",
+            )
+            if job_id is None:
+                logger.info(
+                    f"GitLab MR job not started for {state.issue_key}: "
+                    f"begin claim rejected"
+                )
+                return
+
+            try:
+                git = await asyncio.to_thread(
+                    self._init_git_manager,
+                    state.issue_key,
+                    state,
+                    repository_url=event.repository_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    keep_source_work_branch=True,
+                )
+            except (IssueGitConfigError, GitCloneError, GitSourceBranchError, GitTargetBranchError) as e:
+                msg = getattr(e, "user_message", None) or str(e)
+                self._fail_issue(
+                    state.issue_key,
+                    msg,
+                    suggestion="Check repository URL, PAT, and that the MR source/target exist.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            if git is None:
+                self._finish_after_git_missing(state.issue_key)
+                return
+            if self._is_aborted(state.issue_key):
+                self._release_context(state.issue_key, success=False)
+                return
+            try:
+                await asyncio.to_thread(
+                    git.ensure_feature_branch, state.issue_key
+                )
+            except Exception as e:
+                logger.exception(
+                    f"{state.issue_key} GitLab branch setup failed: {e}", e
+                )
+                self._fail_issue(
+                    state.issue_key,
+                    f"*Yaver* could not check out `{event.source_branch}`.\n\n`{e}`",
+                    suggestion="Check that the MR source branch exists and the PAT can clone.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            self._record_job_working_directory(
+                state.issue_key, git.get_working_directory()
+            )
+            durable = self._durable_plan_path(state.issue_key)
+            plan_path_for_agent = str(durable) if durable.exists() else None
+            raw_wb = getattr(git, "work_branch", None)
+            work_branch = (
+                raw_wb.strip()
+                if isinstance(raw_wb, str) and raw_wb.strip()
+                else event.source_branch
+            )
+            task.prompt = PromptBuilder.build_gitlab_comment_prompt(
+                issue_key=state.issue_key,
+                mr_title=event.mr_title,
+                mr_url=event.mr_url,
+                source_branch=event.source_branch,
+                target_branch=event.target_branch,
+                author=event.author_username or event.author_name,
+                comment=event.prompt,
+                work_branch=work_branch,
+                plan_path=plan_path_for_agent,
+            )
+            if work_branch:
+                try:
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={"feature_branch": work_branch},
+                    )
+                except Exception:
+                    pass
+            self._snapshot_delivery_baseline(state.issue_key, git)
+            runner = self._runner_for(state.issue_key)
+            if runner is None:
+                self._fail_issue(
+                    state.issue_key,
+                    "Agent runner was not initialized for this GitLab job.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            self._attach_bound_opencode_session(state.issue_key, task, git)
+
+            result = await runner.run_agent_with_retry(
+                task,
+                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                    state.issue_key, sp, pp
+                ),
+                on_session_id=lambda sid: self._link_job_opencode_session(
+                    state.issue_key, sid
+                ),
+                timeout_seconds=self._live_timeout_seconds(state),
+                max_retries=(
+                    state.max_retries
+                    if state.max_retries is not None
+                    else settings.agent_task_max_retries
+                ),
+                max_incomplete_retries=_plain_int(
+                    getattr(settings, "agent_task_max_incomplete_retries", 0),
+                    0,
+                ),
+                should_abort=lambda: self._is_aborted(state.issue_key),
+            )
+            self._apply_agent_result_session(state.issue_key, result)
+
+            if self._is_aborted(state.issue_key) or result.get("aborted"):
+                logger.info(
+                    f"GitLab MR job aborted for {state.issue_key}; "
+                    f"skipping MR reply"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            if result.get("returncode") == 0:
+                answer = (result.get("stdout") or "").strip() or "(no output)"
+                pushed = False
+                delivery_note = ""
+                delivery_err = self._assert_build_delivery(state.issue_key)
+                hard_delivery_err = bool(
+                    delivery_err
+                    and not self._is_noop_delivery_message(delivery_err)
+                )
+                if hard_delivery_err:
+                    self._fail_issue(
+                        state.issue_key,
+                        delivery_err,
+                        suggestion=(
+                            "Ensure the agent commits on the MR source "
+                            "branch, then comment again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if self._is_aborted(state.issue_key):
+                    logger.info(
+                        f"GitLab MR job aborted for {state.issue_key} "
+                        f"before push; skipping delivery"
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                # Always try push onto the existing MR source. Do not open
+                # a *new* MR when this run has nothing ahead of target.
+                has_unique = not (
+                    delivery_err and self._is_noop_delivery_message(delivery_err)
+                )
+                push_ok = await self._push_and_create_mr(
+                    state,
+                    existing_mr_url=event.mr_url or None,
+                    open_mr=has_unique,
+                )
+                if self._is_aborted(state.issue_key):
+                    logger.info(
+                        f"GitLab MR job aborted for {state.issue_key} "
+                        f"during/after push; not marking completed"
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if not has_unique:
+                    logger.info(
+                        f"{state.issue_key}: GitLab MR build finished "
+                        f"with no unique commits to deliver — still "
+                        f"posting MR reply"
+                    )
+                    delivery_note = (
+                        "No unique commits to deliver on this run; "
+                        "existing MR was not re-attributed."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "no_new_commits",
+                            "delivery_note": (delivery_err or delivery_note)[:2000],
+                        },
+                    )
+                elif not push_ok:
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check GitLab remote/credentials, then comment "
+                            "on the MR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                else:
+                    pushed = True
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": None,
+                        },
+                    )
+
+                live = self.state_manager.get_state(state.issue_key) or state
+                meta = dict(live.metadata or {})
+                posted = self._post_gitlab_mr_reply(
+                    live,
+                    self._gitlab_mr_reply_body(
+                        answer,
+                        pushed=pushed,
+                        branch=str(meta.get("feature_branch") or work_branch or ""),
+                        commit_sha=str(meta.get("last_commit_sha") or ""),
+                        commit_url=str(meta.get("last_commit_url") or ""),
+                        delivery_note=delivery_note,
+                    ),
+                )
+                if not posted:
+                    logger.error(
+                        f"{state.issue_key}: agent succeeded but MR note failed"
+                    )
+                updated = self.state_manager.update_state_if(
+                    state.issue_key,
+                    expected_statuses={TaskStatus.EXECUTING},
+                    reject_statuses=self.ABORTED_STATUSES,
+                    status=TaskStatus.COMPLETED,
+                    completed_at=datetime.now(),
+                    progress_percentage=100,
+                    current_task_id=None,
+                )
+                if updated is None:
+                    success = False
+                else:
+                    self._finish_job_record(
+                        state.issue_key,
+                        status="completed",
+                        progress_percentage=100,
+                    )
+                    success = True
+            else:
+                outcome = await self._deliver_if_new_commits(
+                    state,
+                    existing_mr_url=event.mr_url or None,
+                    require_new_sha=True,
+                )
+                if outcome == "aborted":
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if outcome == "delivered":
+                    live = self.state_manager.get_state(state.issue_key) or state
+                    meta = dict(live.metadata or {})
+                    note = (
+                        "Agent session reported an error or incomplete stop, "
+                        "but the work branch has commits to deliver. "
+                        "Orchestrator pushed onto the existing MR."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": note,
+                        },
+                    )
+                    answer = (result.get("stdout") or "").strip() or note
+                    self._post_gitlab_mr_reply(
+                        live,
+                        self._gitlab_mr_reply_body(
+                            answer,
+                            pushed=True,
+                            branch=str(
+                                meta.get("feature_branch") or work_branch or ""
+                            ),
+                            commit_sha=str(meta.get("last_commit_sha") or ""),
+                            commit_url=str(meta.get("last_commit_url") or ""),
+                            delivery_note=note,
+                        ),
+                    )
+                    updated = self.state_manager.update_state_if(
+                        state.issue_key,
+                        expected_statuses={TaskStatus.EXECUTING},
+                        reject_statuses=self.ABORTED_STATUSES,
+                        status=TaskStatus.COMPLETED,
+                        completed_at=datetime.now(),
+                        progress_percentage=100,
+                        current_task_id=None,
+                    )
+                    if updated is None:
+                        success = False
+                    else:
+                        self._finish_job_record(
+                            state.issue_key,
+                            status="completed",
+                            progress_percentage=100,
+                        )
+                        success = True
+                    return
+                if outcome == "push_failed":
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check GitLab remote/credentials, then comment "
+                            "on the MR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                self._fail_from_agent_result(
+                    state.issue_key,
+                    result,
+                    fallback="GitLab MR comment job failed",
+                    suggestion="Check the job session log on the ops dashboard.",
+                )
+        except Exception as e:
+            logger.exception(
+                f"GitLab MR workflow crashed for {state.issue_key}: {e}", e
+            )
+            self._fail_issue(
+                state.issue_key,
+                f"GitLab MR comment job failed: {e}",
+            )
+        finally:
+            self._release_context(state.issue_key, success=success)
+
+    async def _start_planning_workflow(
+        self, state: JiraAgentState, *, refactor_comment: Optional[str] = None
+    ):
+        refactoring = bool((refactor_comment or "").strip())
+        logger.info(
+            f"Starting planning workflow for {state.issue_key}"
+            + (" (refactor)" if refactoring else "")
+        )
         workflow_start_time = datetime.now()
+
+        plan_abs = str(self._ensure_durable_plan_dir(state.issue_key))
+        if refactoring:
+            prompt = PromptBuilder.build_plan_refactor_prompt(
+                state.issue_key,
+                refactor_comment or "",
+                plan_path=plan_abs,
+            )
+        else:
+            prompt = PromptBuilder.build_plan_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_abs,
+            )
 
         # Claim in-flight BEFORE slow git clone so poll cannot double-start
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
-            prompt=PromptBuilder.build_prometheus_prompt(
-                issue_key=state.issue_key,
-                summary=state.issue_summary,
-                description=state.description,
-            ),
-            agent=settings.planning_agent,
+            prompt=prompt,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
             issue_key=state.issue_key,
+            model=self._model_for_issue(state),
+            backend=self._backend_for_issue(state),
         )
-        self._begin_workflow_run(
+        job_id = self._begin_workflow_run(
             state,
             status=TaskStatus.PLANNING,
             task=task,
             workflow_type="planning",
-            agent=settings.planning_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
             job_status="planning",
             started_at=workflow_start_time,
         )
+        if job_id is None:
+            logger.info(
+                f"Planning not started for {state.issue_key}: begin claim rejected"
+            )
+            return
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
+            self._finish_after_git_missing(state.issue_key)
             return
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Planning aborted after clone for {state.issue_key}; "
+                f"not starting agent"
+            )
+            self._release_context(state.issue_key, success=False)
+            return
+        plan_for_agent = self._plan_path_for_agent(state.issue_key)
+        if refactoring:
+            task.prompt = PromptBuilder.build_plan_refactor_prompt(
+                state.issue_key,
+                refactor_comment or "",
+                plan_path=plan_for_agent,
+            )
+        else:
+            task.prompt = PromptBuilder.build_plan_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_for_agent,
+            )
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
+        self._attach_bound_opencode_session(state.issue_key, task, git)
 
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
@@ -1860,6 +4713,15 @@ class JobProcessor:
                 progress_percentage=state.progress_percentage,
             )
 
+        from src.config import get_settings as _get_settings
+
+        _live = _get_settings()
+        _timeout = self._live_timeout_seconds(state)
+        _retries = (
+            state.max_retries
+            if state.max_retries is not None
+            else _live.agent_task_max_retries
+        )
         result = await runner.run_agent_with_retry(
             task,
             on_output=on_output,
@@ -1868,8 +4730,14 @@ class JobProcessor:
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
             ),
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            on_session_id=lambda sid: self._link_job_opencode_session(
+                state.issue_key, sid
+            ),
+            timeout_seconds=_timeout,
+            max_retries=_retries,
+            max_incomplete_retries=_plain_int(
+                getattr(_live, "agent_task_max_incomplete_retries", 0), 0
+            ),
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
@@ -1892,7 +4760,7 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result — plan mode: no GitLab push; durable plan + Jira description
+        # Check result — plan mode: no GitLab push; durable plan + Jira comment
         if result["returncode"] == 0:
             if self._is_aborted(state.issue_key):
                 logger.info(
@@ -1920,7 +4788,7 @@ class JobProcessor:
                     "Planning agent exited 0 but no plan file with content was found.",
                     suggestion=(
                         "The planner must write a non-empty plan to "
-                        f"`.sisyphus/plans/{state.issue_key}.md` (or `.omo/plans/`) "
+                        f"`{self._durable_plan_path(state.issue_key)}` "
                         "without waiting for chat approval. Check session logs, then "
                         "re-queue from To Do."
                     ),
@@ -1928,21 +4796,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
-            # Normalize into preferred sisyphus path in the workspace when we only
-            # found an .omo draft/plan so durable + build paths stay consistent
-            git = self._git_for(state.issue_key)
-            working = git.get_working_directory() if git else None
-            if working and plan_path:
-                preferred = Path(working) / settings.sisyphus_plans_dir / f"{state.issue_key}.md"
-                try:
-                    if plan_path.resolve() != preferred.resolve():
-                        preferred.parent.mkdir(parents=True, exist_ok=True)
-                        preferred.write_text(plan_content, encoding="utf-8")
-                        plan_path = preferred
-                except Exception as e:
-                    logger.warning(f"Could not normalize plan to {preferred}: {e}")
-
-            # B3: durable copy before releasing temp clone
+            # Durable host copy (never the clone — build must not commit the plan)
             durable = self._persist_plan(state.issue_key, plan_content)
             if durable is None:
                 self._fail_issue(
@@ -1983,90 +4837,120 @@ class JobProcessor:
             ready_state = self.state_manager.get_state(state.issue_key)
             if ready_state:
                 try:
-                    self.reporter.append_plan_to_description(ready_state, plan_content)
-                except Exception as e:
-                    logger.warning(
-                        f"Could not append plan to description for {state.issue_key}: {e}"
-                    )
-                try:
                     self.reporter.post_plan_summary(ready_state, plan_content)
                 except Exception as e:
                     logger.warning(
-                        f"Could not post plan summary for {state.issue_key}: {e}"
+                        f"Could not post plan comment for {state.issue_key}: {e}"
                     )
+            from src.jira.plan_labels import PLAN_READY_LABEL, PLAN_REFACTOR_LABEL
 
-            # Do not auto-start build (intentional). Explicit start labels or a
-            # new Mode: build issue only. Dashboard Start is disabled.
+            self._apply_plan_labels(
+                state.issue_key,
+                add=[PLAN_READY_LABEL],
+                remove=[PLAN_REFACTOR_LABEL],
+            )
 
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue
+            if refactoring:
+                from src.jira.plan_labels import PLAN_REFACTOR_LABEL
+
+                self._apply_plan_labels(state.issue_key, add=[PLAN_REFACTOR_LABEL])
             self.state_manager.update_state(
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
-            self._fail_issue(
+            self._fail_from_agent_result(
                 state.issue_key,
-                result.get("stderr") or "Planning agent failed",
-                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
+                result,
+                fallback="Planning agent failed",
             )
             self._release_context(state.issue_key, success=False)
 
-    async def _start_execution_workflow(self, state: JiraAgentState):
-        logger.info(f"Starting execution (build) workflow for {state.issue_key}")
+    async def _start_execution_workflow(
+        self, state: JiraAgentState, *, from_plan_execute: bool = False
+    ):
+        logger.info(
+            f"Starting execution (build) workflow for {state.issue_key}"
+            + (" (plan_execute)" if from_plan_execute else "")
+        )
         workflow_start_time = datetime.now()
 
         # Resolve durable plan path before clone so we can materialize into workspace
-        durable_plan = self._durable_plan_path(state.issue_key)
-        plan_for_prompt = (
-            str(durable_plan)
-            if durable_plan and durable_plan.exists()
-            else (state.plan_path or "")
-        )
+        plan_for_prompt = self._resolve_plan_for_build(state.issue_key) or ""
 
-        # Create task first
+        # Create task first (rebuild prompt after clone with work_branch)
         task = AgentTask(
             description=f"Execute: {state.issue_key}",
-            prompt=PromptBuilder.build_atlas_prompt(
+            prompt=PromptBuilder.build_build_prompt(
                 issue_key=state.issue_key,
-                plan_path=plan_for_prompt,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_for_prompt or None,
             ),
-            agent=settings.orchestrator_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
             issue_key=state.issue_key,
+            model=self._model_for_issue(state),
+            backend=self._backend_for_issue(state),
         )
 
         # Claim in-flight before git clone (archives prior task/session/job ids)
-        self._begin_workflow_run(
+        job_id = self._begin_workflow_run(
             state,
             status=TaskStatus.EXECUTING,
             task=task,
             workflow_type="execution",
-            agent=settings.orchestrator_agent,
+            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
             job_status="executing",
             started_at=workflow_start_time,
         )
+        if job_id is None:
+            logger.info(
+                f"Execution not started for {state.issue_key}: begin claim rejected"
+            )
+            return
         self._mark_jira_in_progress(state.issue_key)
 
-        git = self._prepare_git_workspace(state)
+        git = await self._prepare_git_workspace(state)
         if git is None:
+            self._finish_after_git_missing(state.issue_key)
             return
-        # Materialize durable plan into the fresh clone for Atlas
-        in_workspace = self._materialize_plan_into_workspace(state.issue_key)
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Execution aborted after clone for {state.issue_key}; "
+                f"not starting agent"
+            )
+            self._release_context(state.issue_key, success=False)
+            return
+        # Plan stays under {YAVER_DATA_DIR}/plans — never copy it into the clone.
+        # Mode: build (not plan_execute) still uses the plan when one exists
+        # for this ticket or the same repo + source + target.
         plan_path_for_agent = (
-            str(in_workspace) if in_workspace else plan_for_prompt
+            self._resolve_plan_for_build(state.issue_key, git) or plan_for_prompt
         )
-        if in_workspace:
+        durable_now = self._durable_plan_path(state.issue_key)
+        if plan_path_for_agent:
             self.state_manager.update_state(
                 state.issue_key,
-                plan_path=str(in_workspace),
+                plan_path=plan_path_for_agent,
             )
         # Rebuild prompt after workspace prep so work_branch (may differ from
         # issue key) and commit policy use the real checked-out source.
-        work_branch = (getattr(git, "work_branch", None) or "").strip() or None
-        task.prompt = PromptBuilder.build_atlas_prompt(
-            issue_key=state.issue_key,
-            plan_path=plan_path_for_agent,
-            work_branch=work_branch,
-        )
+        raw_wb = getattr(git, "work_branch", None)
+        work_branch = raw_wb.strip() if isinstance(raw_wb, str) and raw_wb.strip() else None
+        if from_plan_execute:
+            task.prompt = PromptBuilder.build_plan_execute_prompt(
+                plan_path_for_agent or str(durable_now),
+                issue_key=state.issue_key,
+            )
+        else:
+            task.prompt = PromptBuilder.build_build_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                plan_path=plan_path_for_agent or None,
+                work_branch=work_branch,
+            )
         if work_branch:
             try:
                 self.state_manager.update_state(
@@ -2080,6 +4964,7 @@ class JobProcessor:
         self._snapshot_delivery_baseline(state.issue_key, git)
         runner = self._runner_for(state.issue_key)
         assert runner is not None, "AgentRunner not initialized"
+        self._attach_bound_opencode_session(state.issue_key, task, git)
 
         # Run agent with progress tracking and retry logic
         def on_progress(percentage: int, message: str):
@@ -2124,6 +5009,15 @@ class JobProcessor:
                 progress_percentage=state.progress_percentage,
             )
 
+        from src.config import get_settings as _get_settings
+
+        _live = _get_settings()
+        _timeout = self._live_timeout_seconds(state)
+        _retries = (
+            state.max_retries
+            if state.max_retries is not None
+            else _live.agent_task_max_retries
+        )
         result = await runner.run_agent_with_retry(
             task,
             on_output=on_output,
@@ -2132,8 +5026,14 @@ class JobProcessor:
             on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                 state.issue_key, sp, pp
             ),
-            timeout_seconds=settings.agent_task_timeout_seconds,
-            max_retries=settings.agent_task_max_retries,
+            on_session_id=lambda sid: self._link_job_opencode_session(
+                state.issue_key, sid
+            ),
+            timeout_seconds=_timeout,
+            max_retries=_retries,
+            max_incomplete_retries=_plain_int(
+                getattr(_live, "agent_task_max_incomplete_retries", 0), 0
+            ),
             should_abort=lambda: self._is_aborted(state.issue_key),
         )
         self._apply_agent_result_session(state.issue_key, result)
@@ -2155,53 +5055,16 @@ class JobProcessor:
         completed_at = datetime.now()
         duration = (completed_at - workflow_start_time).total_seconds()
 
-        # Check result — B4: exit 0 alone is not enough for a *new* delivery
+        # Check result — B4: exit 0 alone is not enough when there is no
+        # work branch / nothing ahead of target. Prior unpushed commits
+        # (HEAD unchanged this job) still must be pushed + MR opened.
         if result["returncode"] == 0:
             delivery_err = self._assert_build_delivery(state.issue_key)
-            if delivery_err:
-                # Soft success: agent OK but no new commits this run (e.g. re-queue
-                # on an already-delivered branch). Complete with note, do not ERROR
-                # and do not attribute prior MR/commits to this job.
-                if self._is_noop_delivery_message(delivery_err):
-                    logger.info(
-                        f"{state.issue_key}: completing without new delivery — "
-                        f"{delivery_err[:160]}"
-                    )
-                    self.state_manager.update_state(
-                        state.issue_key,
-                        execution_duration_seconds=duration,
-                        metadata={
-                            "delivery_status": "no_new_commits",
-                            "delivery_note": delivery_err[:2000],
-                        },
-                    )
-                    jid = self._active_jobs.get(state.issue_key)
-                    if jid:
-                        try:
-                            self.job_store.update_job(
-                                jid,
-                                delivery_status="no_new_commits",
-                                delivery_note=delivery_err[:2000],
-                                # Explicitly clear any stale MR/commit attribution
-                                merge_request_url=None,
-                                commit_sha=None,
-                                commit_subject=None,
-                                commit_url=None,
-                            )
-                        except Exception:
-                            pass
-                    await self._complete_work(
-                        self.state_manager.get_state(state.issue_key),
-                        execution_summary=(
-                            "Agent finished successfully with **no new git delivery** "
-                            "for this run.\n\n"
-                            f"{delivery_err}\n\n"
-                            "Prior branch commits / an existing merge request were "
-                            "*not* re-attributed to this job."
-                        ),
-                    )
-                    return
-
+            hard_delivery_err = bool(
+                delivery_err
+                and not self._is_noop_delivery_message(delivery_err)
+            )
+            if hard_delivery_err:
                 self._fail_issue(
                     state.issue_key,
                     delivery_err,
@@ -2213,11 +5076,75 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
 
-            push_ok = await self._push_and_create_mr(state)
+            # Cancel/watchdog after agent success: never start delivery
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"Execution aborted for {state.issue_key} before push; "
+                    "skipping delivery"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            # Always try push. Open an MR only when the work branch is
+            # ahead of the target (a 0-ahead feature/{KEY} must not get
+            # an empty MR).
+            has_unique = not (
+                delivery_err and self._is_noop_delivery_message(delivery_err)
+            )
+            push_ok = await self._push_and_create_mr(state, open_mr=has_unique)
+            # Abort wins over delivery bookkeeping even if push already ran
+            if self._is_aborted(state.issue_key):
+                logger.info(
+                    f"Execution aborted for {state.issue_key} during/after push; "
+                    "not marking delivered or completed"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            if not has_unique:
+                note = (delivery_err or "Nothing ahead of the target branch.")[:2000]
+                logger.info(
+                    f"{state.issue_key}: completing without MR — {note[:160]}"
+                )
+                self.state_manager.update_state(
+                    state.issue_key,
+                    execution_duration_seconds=duration,
+                    metadata={
+                        "delivery_status": "no_new_commits",
+                        "delivery_note": note,
+                    },
+                )
+                jid = self._active_jobs.get(state.issue_key)
+                if jid:
+                    try:
+                        self.job_store.update_job(
+                            jid,
+                            delivery_status="no_new_commits",
+                            delivery_note=note,
+                            merge_request_url=None,
+                            commit_sha=None,
+                            commit_subject=None,
+                            commit_url=None,
+                        )
+                    except Exception:
+                        pass
+                await self._complete_work(
+                    self.state_manager.get_state(state.issue_key),
+                    execution_summary=(
+                        "Agent finished successfully with **no unique git "
+                        "delivery** for this run (nothing ahead of the "
+                        "target; branch was pushed without opening an MR).\n\n"
+                        f"{note}"
+                    ),
+                    agent_answer=str(result.get("stdout") or ""),
+                )
+                return
             if not push_ok:
                 self._fail_issue(
                     state.issue_key,
-                    "Agent finished but git push failed; work was not delivered to remote.",
+                    self._format_push_fail_error(
+                        self._push_failure_reason(state.issue_key),
+                        existing_mr=False,
+                    ),
                     suggestion="Check GitLab remote/credentials, then re-queue from To Do.",
                 )
                 self._release_context(state.issue_key, success=False)
@@ -2235,21 +5162,68 @@ class JobProcessor:
             await self._complete_work(
                 self.state_manager.get_state(state.issue_key),
                 execution_summary="All tasks completed successfully.",
+                agent_answer=str(result.get("stdout") or ""),
             )
         else:
             self.state_manager.update_state(
                 state.issue_key,
                 execution_duration_seconds=duration,
             )
-            self._fail_issue(
+            outcome = await self._deliver_if_new_commits(
+                state, require_new_sha=True
+            )
+            if outcome == "aborted":
+                self._release_context(state.issue_key, success=False)
+                return
+            if outcome == "delivered":
+                note = (
+                    "Agent session reported an error or incomplete stop, "
+                    "but the work branch has commits to deliver. Orchestrator "
+                    "pushed the branch and opened (or reused) the merge request."
+                )
+                agent_err = (result.get("stderr") or "").strip()
+                self.state_manager.update_state(
+                    state.issue_key,
+                    metadata={
+                        "delivery_status": "delivered",
+                        "delivery_note": note,
+                    },
+                )
+                await self._complete_work(
+                    self.state_manager.get_state(state.issue_key),
+                    execution_summary=(
+                        note
+                        + (f"\n\nAgent: {agent_err[:1500]}" if agent_err else "")
+                    ),
+                    agent_answer=str(result.get("stdout") or ""),
+                )
+                return
+            if outcome == "push_failed":
+                self._fail_issue(
+                    state.issue_key,
+                    self._format_push_fail_error(
+                        self._push_failure_reason(state.issue_key),
+                        existing_mr=False,
+                    ),
+                    suggestion=(
+                        "Check GitLab remote/credentials, then re-queue from To Do."
+                    ),
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            self._fail_from_agent_result(
                 state.issue_key,
-                result.get("stderr") or "Execution agent failed",
-                suggestion="Check agent/session logs, then move the issue back to To Do to retry.",
+                result,
+                fallback="Execution agent failed",
             )
             self._release_context(state.issue_key, success=False)
 
     async def _complete_work(
-        self, state: JiraAgentState, execution_summary: str = ""
+        self,
+        state: JiraAgentState,
+        execution_summary: str = "",
+        *,
+        agent_answer: str = "",
     ) -> None:
         """Mark work completed and notify Jira (no automated code-review phase)."""
         if state is None:
@@ -2268,6 +5242,7 @@ class JobProcessor:
             status=TaskStatus.COMPLETED,
             completed_at=completed_at,
             progress_percentage=100,
+            metadata={"requeue_eligible": True},
         )
         if updated is None:
             logger.info(
@@ -2282,16 +5257,24 @@ class JobProcessor:
         )
         logger.info(f"State updated to COMPLETED for {state.issue_key}")
 
-        summary = (execution_summary or "").strip() or (
-            "All tasks completed successfully."
-        )
-        try:
-            self.reporter.post_completion(
-                self.state_manager.get_state(state.issue_key),
-                summary=summary,
+        live = self.state_manager.get_state(state.issue_key) or state
+        if self._is_gitlab_triggered(state.issue_key, live):
+            logger.info(
+                f"{state.issue_key}: GitLab-triggered run — "
+                "skipping Jira completion comment"
             )
-        except Exception as e:
-            logger.error(f"Failed to post completion for {state.issue_key}: {e}")
+        else:
+            summary = (execution_summary or "").strip() or (
+                "All tasks completed successfully."
+            )
+            try:
+                self.reporter.post_completion(
+                    live,
+                    summary=summary,
+                    agent_answer=agent_answer,
+                )
+            except Exception as e:
+                logger.error(f"Failed to post completion for {state.issue_key}: {e}")
 
         self._release_context(state.issue_key, success=True)
         logger.info(f"Work completed for {state.issue_key}")
@@ -2331,7 +5314,7 @@ class JobProcessor:
         if sha:
             logger.info(
                 f"{issue_key} delivery baseline HEAD={sha[:12]} "
-                f"(job will only count newer commits)"
+                f"(job-start snapshot; unpushed prior commits are still delivered)"
             )
         else:
             logger.warning(f"{issue_key} could not snapshot delivery baseline SHA")
@@ -2373,16 +5356,17 @@ class JobProcessor:
         )
 
     def _assert_build_delivery(self, issue_key: str) -> Optional[str]:
-        """Require *new* commits on the work branch for this job before push/complete.
+        """Require deliverable commits on the work branch before treating as delivered.
 
         Returns a message if delivery is not ready, or None when valid.
 
-        ``commits_ahead_of_target`` alone is not enough: a re-queue on an
-        existing source branch may already be ahead from a *previous* job.
-        We require HEAD to differ from the job-start baseline snapshot.
+        HEAD matching the job-start baseline is OK when the branch is already
+        ahead of the target (prior job committed and never pushed). Only
+        “nothing ahead of target” is a no-op. Missing baseline still fails
+        closed so we do not invent a snapshot.
 
         Callers treat the “no new commits this job” message as a *soft*
-        completion (status completed + note), not an ERROR.
+        completion after a push attempt, not an ERROR.
         """
         git = self._git_for(issue_key)
         if not git:
@@ -2412,7 +5396,25 @@ class JobProcessor:
             )
 
         baseline = self._resolve_delivery_baseline(issue_key, git)
+        if not baseline:
+            return (
+                "Could not snapshot HEAD at job start (delivery baseline missing). "
+                "Refusing to attribute existing commits on this branch to this job. "
+                "Re-queue after the workspace can record a baseline."
+            )
+
+        ahead = 0
+        if hasattr(git, "commits_ahead_of_target"):
+            try:
+                ahead = int(git.commits_ahead_of_target(work))
+            except Exception:
+                ahead = 0
+
         if baseline and head == baseline:
+            if ahead >= 1:
+                # Prior run committed (or branch already ahead) and this job
+                # did not add a SHA — still deliver: push + open/reuse MR.
+                return None
             short = head[:12]
             return (
                 f"No new commits on `{work}` for this job "
@@ -2422,12 +5424,6 @@ class JobProcessor:
                 "attributed to this job."
             )
 
-        ahead = 0
-        if hasattr(git, "commits_ahead_of_target"):
-            try:
-                ahead = int(git.commits_ahead_of_target(work))
-            except Exception:
-                ahead = 0
         if ahead < 1:
             return (
                 f"No commits on `{work}` ahead of the target branch. "
@@ -2435,9 +5431,217 @@ class JobProcessor:
             )
         return None
 
+    def _head_moved_this_job(self, issue_key: str) -> bool:
+        """True when HEAD is a different SHA than the job-start baseline."""
+        git = self._git_for(issue_key)
+        if git is None:
+            return False
+        try:
+            raw = git.get_last_commit_sha() if hasattr(git, "get_last_commit_sha") else None
+            head = str(raw).strip() if raw is not None else ""
+        except Exception:
+            head = ""
+        baseline = self._resolve_delivery_baseline(issue_key, git) or ""
+        return bool(head and baseline and head != baseline)
+
+    @staticmethod
+    def _commits_ahead_of_target(git: Any, branch: str) -> int:
+        """Commits on ``branch`` not in the target; 0 if unknown."""
+        if git is None or not hasattr(git, "commits_ahead_of_target"):
+            return 0
+        try:
+            raw = git.commits_ahead_of_target(branch)
+            return max(0, int(raw))
+        except (TypeError, ValueError, Exception):
+            return 0
+
+    async def _deliver_if_new_commits(
+        self,
+        state: JiraAgentState,
+        *,
+        existing_mr_url: Optional[str] = None,
+        require_new_sha: bool = False,
+    ) -> str:
+        """Always try to push and open/reuse an MR after an agent result.
+
+        Returns ``delivered``, ``none``, ``push_failed``, or ``aborted``.
+        Push + MR are attempted even when HEAD did not move this job
+        (prior unpushed commits, or already on remote). ``delivered`` when
+        the branch is ahead of the target and the remote tip is ready.
+        Already-on-remote is not a push error.
+
+        ``require_new_sha=True`` (agent *failed*): do not treat older
+        commits already on this work branch as this job's delivery. An
+        unknown-agent / no-work failure must stay ERROR.
+
+        Never open an MR when the work branch is not ahead of the target
+        (empty ``feature/{KEY}`` cut from main must not get a 0-commit MR).
+        Push is still attempted so the remote branch exists.
+        """
+        if self._is_aborted(state.issue_key):
+            return "aborted"
+        if require_new_sha and not self._head_moved_this_job(state.issue_key):
+            # Prior unique commits on this branch are not this job's delivery.
+            # A 0-ahead cut from the target may still be pushed (no MR).
+            has_prior = self._assert_build_delivery(state.issue_key) is None
+            if has_prior:
+                logger.info(
+                    f"{state.issue_key}: agent failed and HEAD did not move "
+                    "this job — not delivering prior branch commits"
+                )
+                return "none"
+            logger.info(
+                f"{state.issue_key}: agent failed, HEAD unchanged, branch "
+                "not ahead of target — push only, no MR"
+            )
+            await self._push_and_create_mr(
+                state,
+                existing_mr_url=existing_mr_url,
+                open_mr=False,
+                notify_on_fail=False,
+            )
+            return "none"
+        has_work = self._assert_build_delivery(state.issue_key) is None
+        logger.info(
+            f"{state.issue_key}: attempting push after agent result "
+            f"(has_work={has_work})"
+        )
+        push_ok = await self._push_and_create_mr(
+            state,
+            existing_mr_url=existing_mr_url,
+            open_mr=has_work,
+            notify_on_fail=has_work,
+        )
+        if self._is_aborted(state.issue_key):
+            return "aborted"
+        if has_work:
+            return "delivered" if push_ok else "push_failed"
+        return "none"
+
     def _durable_plan_path(self, issue_key: str) -> Path:
-        """Host-side plan path that survives temp-clone cleanup."""
-        return settings.full_plans_dir / f"{issue_key}.md"
+        """Host-side plan path under ``{YAVER_DATA_DIR}/plans``."""
+        from src.paths import plans_dir
+
+        return plans_dir() / f"{issue_key}.md"
+
+    def _resolve_plan_for_build(
+        self, issue_key: str, git: Any = None
+    ) -> Optional[str]:
+        """Plan file a ``Mode: build`` job should implement.
+
+        Prefer this ticket's durable plan. If missing (new build ticket
+        after a plan on another key), use the plan-session bind for the
+        same repo + source + target.
+        """
+        own = self._durable_plan_path(issue_key)
+        if own.exists():
+            return str(own)
+        st = self.state_manager.get_state(issue_key)
+        raw = ((st.plan_path if st else None) or "").strip()
+        if raw:
+            try:
+                existing = Path(raw)
+                if existing.is_file():
+                    return str(existing)
+            except OSError:
+                pass
+        repo, branch, target = self._session_bind_key(issue_key, git)
+        meta = dict((st.metadata if st else None) or {})
+        candidates: list[tuple[str, str, str]] = []
+        if repo and branch and target:
+            candidates.append((repo, branch, target))
+        src = str(meta.get("source_branch") or "").strip()
+        tgt = target or str(meta.get("target_branch") or "").strip()
+        remote = repo or str(meta.get("repository_url") or "").strip()
+        if remote and src and tgt:
+            candidates.append((remote, src, tgt))
+        from src.state.session_bind_store import session_bind_store
+
+        seen: set[tuple[str, str, str]] = set()
+        for remote_u, work, tgt_b in candidates:
+            key = (remote_u, work, tgt_b)
+            if key in seen:
+                continue
+            seen.add(key)
+            rec = session_bind_store.get(remote_u, work, tgt_b, kind="plan")
+            other = str((rec or {}).get("issue_key") or "").strip()
+            if not other or other.upper() == issue_key.upper():
+                continue
+            sibling = self._durable_plan_path(other)
+            if sibling.exists():
+                logger.info(
+                    f"{issue_key}: Mode: build using plan from {other} "
+                    f"({sibling})"
+                )
+                return str(sibling)
+        return None
+
+    def _ensure_durable_plan_dir(self, issue_key: str) -> Path:
+        """Create ``{YAVER_DATA_DIR}/plans`` and return the issue plan path."""
+        dest = self._durable_plan_path(issue_key)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not create plans dir {dest.parent}: {e}")
+        return dest
+
+    def _link_plans_into_workspace(self, issue_key: str) -> Optional[Path]:
+        """Expose ``{YAVER_DATA_DIR}/plans`` as ``{clone}/.yaver-plans`` for OpenCode.
+
+        The planner is only allowed to write plan globs. A directory link lets
+        it write a workspace-relative path while the bytes land in the data
+        dir (not committed — we add ``.git/info/exclude``).
+        """
+        import os
+        import subprocess
+
+        dest_root = self._ensure_durable_plan_dir(issue_key).parent
+        git = self._git_for(issue_key)
+        working = git.get_working_directory() if git else None
+        if not working:
+            return None
+        link = Path(working) / ".yaver-plans"
+        try:
+            if link.exists() or link.is_symlink():
+                if link.is_dir():
+                    return link / f"{issue_key}.md"
+                return None
+            try:
+                os.symlink(dest_root, link, target_is_directory=True)
+            except OSError:
+                if os.name != "nt":
+                    raise
+                completed = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(dest_root)],
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode != 0:
+                    logger.warning(
+                        f"{issue_key}: could not link plans dir into clone: "
+                        f"{(completed.stderr or completed.stdout or '').strip()}"
+                    )
+                    return None
+            exclude = Path(working) / ".git" / "info" / "exclude"
+            if exclude.parent.is_dir():
+                extra = ".yaver-plans/\n.sisyphus/\n"
+                try:
+                    current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+                    if ".yaver-plans/" not in current:
+                        exclude.write_text(current + extra, encoding="utf-8")
+                except OSError:
+                    pass
+            return link / f"{issue_key}.md"
+        except OSError as e:
+            logger.warning(f"{issue_key}: plan dir link failed: {e}")
+            return None
+
+    def _plan_path_for_agent(self, issue_key: str) -> str:
+        """Path the planner should write: linked workspace path, else absolute."""
+        linked = self._link_plans_into_workspace(issue_key)
+        if linked is not None:
+            return str(Path(".yaver-plans") / f"{issue_key}.md")
+        return str(self._ensure_durable_plan_dir(issue_key))
 
     def _persist_plan(self, issue_key: str, content: str) -> Optional[Path]:
         """Write plan to durable plans dir. Returns path or None on failure."""
@@ -2453,6 +5657,36 @@ class JobProcessor:
         except Exception as e:
             logger.error(f"Failed to persist plan for {issue_key}: {e}")
             return None
+
+    def _materialize_plan_at_clone_root(self, issue_key: str) -> Optional[Path]:
+        """Copy the durable plan to ``{clone}/{ISSUE_KEY}.md`` for plan_execute."""
+        durable = self._durable_plan_path(issue_key)
+        if not durable.exists():
+            existing = self._resolve_plan_path(issue_key, require_exists=True)
+            if existing and existing.exists():
+                try:
+                    content = existing.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    return None
+                self._persist_plan(issue_key, content)
+                durable = self._durable_plan_path(issue_key)
+            else:
+                return None
+        git = self._git_for(issue_key)
+        working = git.get_working_directory() if git else None
+        if not working:
+            return durable if durable.exists() else None
+        try:
+            content = durable.read_text(encoding="utf-8", errors="replace")
+            dest = Path(working) / f"{issue_key}.md"
+            dest.write_text(content, encoding="utf-8")
+            logger.info(f"Copied plan to clone root: {dest}")
+            return dest
+        except Exception as e:
+            logger.warning(
+                f"Could not copy plan to clone root for {issue_key}: {e}"
+            )
+            return durable if durable.exists() else None
 
     def _materialize_plan_into_workspace(self, issue_key: str) -> Optional[Path]:
         """Copy durable plan into the issue temp clone for Atlas. Returns in-workspace path."""
@@ -2485,83 +5719,261 @@ class JobProcessor:
             logger.warning(f"Could not materialize plan into workspace for {issue_key}: {e}")
             return durable if durable.exists() else None
 
-    async def _push_and_create_mr(self, state: JiraAgentState) -> bool:
+    def _record_delivery_failure(self, issue_key: str, reason: str) -> str:
+        """Persist a push/delivery failure reason on issue metadata."""
+        note = (reason or "").strip()[:2000]
+        if not note:
+            return ""
+        try:
+            self.state_manager.update_state(
+                issue_key,
+                metadata={"delivery_status": "push_failed", "delivery_note": note},
+            )
+        except Exception:
+            pass
+        return note
+
+    def _push_failure_reason(self, issue_key: str) -> str:
+        """Best-effort git push reason after ``_push_and_create_mr`` returned False."""
+        git = self._git_for(issue_key)
+        extra = getattr(git, "last_push_error", None) if git else None
+        if isinstance(extra, str) and extra.strip():
+            return extra.strip()
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return ""
+        meta = st.metadata or {}
+        note = meta.get("delivery_note")
+        return note.strip() if isinstance(note, str) else ""
+
+    @staticmethod
+    def _format_push_fail_error(reason: str, *, existing_mr: bool) -> str:
+        """Dashboard / Jira error: generic delivery line plus git reason."""
+        if existing_mr:
+            head = (
+                "Agent finished but git push failed; "
+                "work was not delivered to the existing MR."
+            )
+        else:
+            head = (
+                "Agent finished but git push failed; "
+                "work was not delivered to remote."
+            )
+        body = (reason or "").strip()
+        if not body:
+            return head
+        low = body.lower()
+        if (
+            "could not read username" in low
+            or "authentication failed" in low
+            or "http basic: access denied" in low
+            or "terminal prompts disabled" in low
+        ) and "gitlab pat" not in low:
+            body = (
+                f"{body}\n\n"
+                "GitLab rejected the push because no write credentials were "
+                "available. Add a host PAT in Settings (write_repository + api), "
+                "then re-queue."
+            )
+        return f"{head}\n\n{body}"
+
+    async def _push_and_create_mr(
+        self,
+        state: JiraAgentState,
+        *,
+        existing_mr_url: Optional[str] = None,
+        open_mr: bool = True,
+        notify_on_fail: bool = True,
+    ) -> bool:
         """Push prepared work_branch and open MR.
 
-        Returns True if the branch was pushed (MR is best-effort after push).
-        Returns False on missing git manager, protected branch, or push failure.
-        Always pushes ``git.work_branch`` (not drifted HEAD) — B5.
+        Delivery contract (build jobs; see AGENTS.md §2 OpenCode serve):
+        - Agent **committed only** → orchestrator pushes and opens MR.
+        - Agent **already pushed** → still open MR (push may no-op / already
+          on remote); do not skip MR creation.
+        - Always prefer ``git.work_branch`` (not drifted HEAD) — B5.
+
+        Returns True when the branch is on the remote and delivery was
+        recorded (MR is best-effort after a successful remote tip).
+        Returns False on missing git manager, protected branch (unless
+        ``existing_mr_url`` — GitLab note jobs push the MR source as-is),
+        or when neither push nor remote-tip verification succeeds.
+
+        Checks cancel/watchdog abort before expensive git work and before
+        recording delivery so cancel after agent success does not stamp
+        ``delivery_status=delivered`` or open an MR after terminal cancel.
+
+        When ``existing_mr_url`` is set (GitLab MR comment jobs), push onto
+        that branch and reuse the URL — do not open a second MR, and do not
+        post Jira progress (the caller replies on the MR).
+
+        ``open_mr=False`` stops after push (or already-on-remote).
+
+        ``notify_on_fail=False`` skips Jira push-failure comments.
+
+        A new merge request is opened only when the work branch is ahead
+        of the target. Push still runs when the branch is not ahead so
+        the remote feature branch exists; a 0-ahead cut must not get an MR.
         """
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Skipping push/MR for aborted {state.issue_key}"
+            )
+            return False
+
         git = self._git_for(state.issue_key)
         if not git:
             logger.warning(f"No git manager for {state.issue_key}")
-            try:
-                self.reporter.post_progress_update(
-                    state,
-                    "No git workspace available; cannot push or open a merge request.",
-                )
-            except Exception:
-                pass
+            msg = "No git workspace available; cannot push or open a merge request."
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
 
         logger.info(f"Starting push and MR creation for {state.issue_key}")
 
-        # B5: force work_branch, never drift HEAD
-        if not git.ensure_on_work_branch():
+        # B5: force work_branch, never drift HEAD (off event loop — git I/O)
+        on_work = await asyncio.to_thread(git.ensure_on_work_branch)
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Abort after work-branch checkout for {state.issue_key}; "
+                "skipping push"
+            )
+            return False
+        if not on_work:
             msg = (
                 f"Refusing to push: could not checkout prepared work branch "
                 f"`{getattr(git, 'work_branch', None)}`."
             )
             logger.error(msg)
-            try:
-                self.reporter.post_progress_update(state, msg)
-            except Exception:
-                pass
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
 
-        branch_name = (getattr(git, "work_branch", None) or "").strip() or git.get_current_branch()
+        branch_name = (getattr(git, "work_branch", None) or "").strip()
+        if not branch_name:
+            branch_name = await asyncio.to_thread(git.get_current_branch)
 
-        # Refuse to push protected bases / MR target / release/*
+        # Refuse to push protected bases / MR target / release/* unless this
+        # is an existing-MR update (GitLab note intake keeps the MR source,
+        # including develop→main and release/*).
         target = (getattr(git, "target_branch", None) or "").strip().lower()
         protected = {"main", "master", "develop", "trunk", "dev"}
         if target:
             protected.add(target)
         bl = (branch_name or "").lower()
-        if not branch_name or bl in protected or bl.startswith("release/"):
+        updating_existing_mr = bool((existing_mr_url or "").strip())
+        if not branch_name or (
+            not updating_existing_mr
+            and (bl in protected or bl.startswith("release/"))
+        ):
             msg = (
                 f"Refusing to push protected branch '{branch_name}'. "
                 f"Agent must work on a feature/work branch "
                 f"(MR source → target `{getattr(git, 'target_branch', '')}`)."
             )
             logger.error(msg)
-            try:
-                self.reporter.post_progress_update(state, msg)
-            except Exception:
-                pass
+            if notify_on_fail:
+                self._record_delivery_failure(state.issue_key, msg)
+                try:
+                    self.reporter.post_progress_update(state, msg)
+                except Exception:
+                    pass
             return False
+
+        ahead = self._commits_ahead_of_target(git, branch_name)
+        if ahead < 1 and open_mr and not updating_existing_mr:
+            logger.info(
+                f"{state.issue_key}: `{branch_name}` is not ahead of target "
+                f"`{getattr(git, 'target_branch', '') or '?'}` "
+                f"(ahead={ahead}) — will push but skip opening an MR"
+            )
+            open_mr = False
 
         # Always record branch for completion messages (even if push fails later)
-        self.state_manager.update_state(
-            state.issue_key,
-            metadata={"feature_branch": branch_name},
-        )
+        if not self._is_aborted(state.issue_key):
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={"feature_branch": branch_name},
+            )
 
-        push_success = git.push(branch_name)
-        if not push_success:
-            logger.warning(f"Push failed or remote not configured for {state.issue_key}")
-            try:
-                self.reporter.post_progress_update(
-                    state,
-                    (
-                        f"Git push failed for branch `{branch_name or 'unknown'}`. "
-                        "Local work may still exist in the agent temp workspace; "
-                        "no merge request was created. Check GitLab credentials "
-                        "(GITLAB_PAT) and remote access, then re-queue from To Do."
-                    ),
-                )
-            except Exception:
-                pass
+        if self._is_aborted(state.issue_key):
+            logger.info(
+                f"Abort before push for {state.issue_key}; skipping remote delivery"
+            )
             return False
+
+        try:
+            push_success = await asyncio.to_thread(git.push, branch_name)
+        except GitCancelledError:
+            logger.info(
+                f"Abort during push for {state.issue_key}; skipping remote delivery"
+            )
+            return False
+        if self._is_aborted(state.issue_key):
+            # Push may have already completed; do not open MR or stamp delivery.
+            logger.warning(
+                f"{state.issue_key}: abort after push attempt — "
+                "not creating MR or recording delivery"
+            )
+            return False
+        if not push_success:
+            # Last chance: agent may have pushed; remote tip matches HEAD.
+            already_remote = False
+            if hasattr(git, "head_is_on_remote"):
+                try:
+                    already_remote = await asyncio.to_thread(
+                        git.head_is_on_remote, branch_name
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"{state.issue_key}: head_is_on_remote failed: {e}"
+                    )
+                    already_remote = False
+            if already_remote:
+                logger.info(
+                    f"{state.issue_key}: push failed but `{branch_name}` HEAD "
+                    "is already on origin (agent push); continuing to open MR"
+                )
+                push_success = True
+            else:
+                raw = getattr(git, "last_push_error", None)
+                reason = raw.strip() if isinstance(raw, str) and raw.strip() else (
+                    "git push failed (see daemon log)"
+                )
+                logger.warning(
+                    f"Push failed or remote not configured for {state.issue_key}: "
+                    f"{reason[:200]}"
+                )
+                if notify_on_fail:
+                    self._record_delivery_failure(state.issue_key, reason)
+                    try:
+                        detail = reason
+                        comment = (
+                            f"Git push failed for branch `{branch_name or 'unknown'}`.\n\n"
+                            f"{detail}\n\n"
+                            "Local work may still exist in the agent temp workspace; "
+                            "no merge request was created. Check GitLab credentials "
+                            "(GITLAB_PAT) and remote access, then re-queue from To Do."
+                        )
+                        self.reporter.post_progress_update(state, comment)
+                    except Exception:
+                        pass
+                return False
+
+        if not open_mr:
+            logger.info(
+                f"{state.issue_key}: push ok (or already on remote); "
+                "skipping MR (open_mr=False)"
+            )
+            return True
 
         commit_subject = git.get_last_commit_subject()
         commit_body = git.get_last_commit_message()
@@ -2593,22 +6005,34 @@ class JobProcessor:
             .strip()
             or None
         )
-        mr_url = git.create_merge_request(
-            title=mr_title,
-            body=mr_body,
-            target_branch=target_branch,
-        )
-
-        # Only attribute MR/commit to *this* job when HEAD moved past baseline
-        baseline = self._resolve_delivery_baseline(state.issue_key, git)
-        if baseline and commit_sha and commit_sha == baseline:
+        if self._is_aborted(state.issue_key):
             logger.warning(
-                f"{state.issue_key}: refusing to record git delivery — "
-                f"commit {commit_sha[:12]} is the job-start baseline (no new work)"
+                f"{state.issue_key}: abort before MR — not recording delivery"
+            )
+            return False
+        reuse_mr = (existing_mr_url or "").strip() or None
+        if reuse_mr:
+            mr_url = reuse_mr
+            logger.info(
+                f"{state.issue_key}: reusing existing MR {mr_url} "
+                f"(not opening a new one)"
+            )
+        else:
+            mr_url = await asyncio.to_thread(
+                git.create_merge_request,
+                title=mr_title,
+                body=mr_body,
+                target_branch=target_branch,
+            )
+        if self._is_aborted(state.issue_key):
+            logger.warning(
+                f"{state.issue_key}: abort after MR attempt — not recording delivery"
             )
             return False
 
-        # Persist delivery on this job + issue metadata history (multi-run safe)
+        # Persist delivery on this job + issue metadata history (multi-run safe).
+        # Record even when HEAD matches the job-start baseline: a prior run
+        # may have committed and never pushed; this job still delivers.
         self._record_git_delivery(
             state,
             feature_branch=branch_name,
@@ -2618,14 +6042,18 @@ class JobProcessor:
             commit_url=commit_url,
         )
 
-        if mr_url:
+        if reuse_mr:
+            logger.info(
+                f"{state.issue_key}: pushed `{branch_name}` onto existing MR {mr_url}"
+            )
+        elif mr_url:
             logger.info(f"Merge request created: {mr_url}")
             try:
                 self.reporter.post_progress_update(
                     state,
                     (
-                        f"Branch `{branch_name}` pushed and merge request opened:\n"
-                        f"{mr_url}"
+                        f"Branch `{branch_name}` is on the remote and merge request "
+                        f"opened:\n{mr_url}"
                     ),
                 )
             except Exception:
@@ -2641,7 +6069,7 @@ class JobProcessor:
                 self.reporter.post_progress_update(
                     state,
                     (
-                        f"Branch `{branch_name}` was pushed to the remote, but a merge "
+                        f"Branch `{branch_name}` is on the remote, but a merge "
                         f"request could not be created (target branch may be "
                         f"`{target_branch}`, or `glab` may be missing/misconfigured). "
                         "Open an MR manually in GitLab if needed."
@@ -2650,7 +6078,7 @@ class JobProcessor:
                 )
             except Exception:
                 pass
-        # Push succeeded; MR is best-effort
+        # Remote tip ready; MR is best-effort (create or already-exists URL)
         return True
 
     def _record_git_delivery(
@@ -2683,14 +6111,16 @@ class JobProcessor:
 
         if job_id:
             try:
-                self.job_store.update_job(
-                    job_id,
-                    feature_branch=feature_branch or None,
-                    merge_request_url=merge_request_url or None,
-                    commit_sha=commit_sha or None,
-                    commit_subject=commit_subject or None,
-                    commit_url=commit_url or None,
-                )
+                patch: Dict[str, Any] = {
+                    "feature_branch": feature_branch or None,
+                    "merge_request_url": merge_request_url or None,
+                    "commit_sha": commit_sha or None,
+                    "commit_subject": commit_subject or None,
+                    "commit_url": commit_url or None,
+                }
+                if merge_request_url:
+                    patch["merge_request_state"] = "opened"
+                self.job_store.update_job(job_id, **patch)
             except Exception as e:
                 logger.warning(
                     f"Could not persist git delivery on job {job_id}: {e}"
@@ -2716,6 +6146,7 @@ class JobProcessor:
         }
         if merge_request_url:
             meta_patch["merge_request_url"] = merge_request_url
+            meta_patch.setdefault("merge_request_state", "opened")
         if commit_sha:
             meta_patch["last_commit_sha"] = commit_sha
         if commit_url:
@@ -2737,7 +6168,7 @@ class JobProcessor:
 
         When ``require_exists`` is True, never return a missing path (B2).
         Preference order: durable host → ``.sisyphus/plans`` → ``.omo/plans``
-        → non-empty ``.omo/drafts`` (Prometheus ULW draft fallback).
+        → ``.omo/drafts/{issue_key}.md``. Never adopt another issue's markdown.
         """
         candidates: list[Path] = []
         # Prefer durable host path (survives temp cleanup)
@@ -2758,28 +6189,6 @@ class JobProcessor:
                 except Exception:
                     continue
         if require_exists:
-            # Last resort: any non-empty markdown under workspace plans/omo
-            if working:
-                base = Path(working)
-                for sub in (
-                    base / ".sisyphus" / "plans",
-                    base / ".omo" / "plans",
-                    base / ".omo" / "drafts",
-                ):
-                    if not sub.is_dir():
-                        continue
-                    try:
-                        for path in sorted(sub.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
-                            try:
-                                if path.read_text(encoding="utf-8", errors="replace").strip():
-                                    logger.info(
-                                        f"Resolved plan for {issue_key} via scan: {path}"
-                                    )
-                                    return path
-                            except Exception:
-                                continue
-                    except Exception:
-                        continue
             return None
         # Prefer durable / sisyphus path even if missing (executor materializes later)
         if working:
@@ -2791,7 +6200,7 @@ class JobProcessor:
 
         Always binds to the given issue_key (never reuses another issue's runner).
         Prefers a full git workspace when possible; falls back to an empty
-        sandbox under ``.temp/`` — never the daemon project_root.
+        sandbox under ``TEMP_DIR_BASE`` — never the daemon project_root.
         """
         existing = self._contexts.get(issue_key)
         if existing and existing.get("runner") is not None:
@@ -2799,11 +6208,14 @@ class JobProcessor:
             self.git_manager = existing.get("git")
             return existing["runner"]
 
-        # Adopt a test/pre-set runner only when no other issue contexts exist
-        # (avoids cross-issue reuse under concurrency).
+        # Adopt a test/pre-set runner only when it is unbound (no leftover
+        # working_directory from a released issue clone).
+        wd = getattr(self.agent_runner, "working_directory", None)
+        wd_is_real_path = isinstance(wd, (str, Path)) and bool(str(wd).strip())
         if (
             self.agent_runner is not None
             and not self._contexts
+            and not wd_is_real_path
         ):
             self._contexts[issue_key] = {
                 "git": self.git_manager,
@@ -2812,38 +6224,45 @@ class JobProcessor:
             return self.agent_runner
 
         try:
-            self._init_git_manager(issue_key)
+            git = self._init_git_manager(issue_key)
+            if git is not None:
+                runner = self._runner_for(issue_key)
+                if runner is not None:
+                    return runner
+            # Aborted during clone (None) or context not registered — sandbox below
         except Exception as e:
             logger.warning(
                 f"Git workspace init failed for {issue_key}, "
                 f"using isolated sandbox (not project_root): {e}"
             )
-            safe = "".join(
-                c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
-            )[:80]
-            sandbox = (
-                Path.cwd()
-                / settings.temp_dir_base
-                / f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            sandbox.mkdir(parents=True, exist_ok=True)
-            runner = AgentRunner(working_directory=sandbox)
-            self._contexts[issue_key] = {"git": None, "runner": runner}
-            self.agent_runner = runner
-        assert self.agent_runner is not None
-        return self.agent_runner
+        safe = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in (issue_key or "unknown")
+        )[:80]
+        from src.paths import resolve_temp_dir_base
+
+        sandbox = resolve_temp_dir_base(settings.temp_dir_base) / (
+            f"sandbox_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        sandbox.mkdir(parents=True, exist_ok=True)
+        runner = AgentRunner(working_directory=sandbox)
+        self._contexts[issue_key] = {"git": None, "runner": runner}
+        self.agent_runner = runner
+        return runner
 
     async def _start_oracle_consultation(self, state: JiraAgentState):
         """Start Oracle consultation."""
         logger.info(f"Starting Oracle consultation for {state.issue_key}")
         success: Optional[bool] = False
         try:
-            runner = self._ensure_agent_runner(state.issue_key)
+            # Clone/init must not block the daemon event loop (cancel/watchdog).
+            runner = await asyncio.to_thread(
+                self._ensure_agent_runner, state.issue_key
+            )
 
-            prompt = PromptBuilder.build_oracle_consult_prompt(
-                question=state.description or state.issue_summary or "",
+            prompt = PromptBuilder.build_plan_prompt(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
+                description=state.description or state.issue_summary or "",
             )
 
             task = AgentTask(
@@ -2851,9 +6270,11 @@ class JobProcessor:
                 prompt=prompt,
                 agent="oracle",
                 issue_key=state.issue_key,
+                model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
             )
 
-            self._begin_workflow_run(
+            job_id = self._begin_workflow_run(
                 state,
                 status=TaskStatus.EXECUTING,
                 task=task,
@@ -2861,12 +6282,25 @@ class JobProcessor:
                 agent="oracle",
                 job_status="executing",
             )
+            if job_id is None:
+                logger.info(
+                    f"Oracle not started for {state.issue_key}: begin claim rejected"
+                )
+                return
             self._mark_jira_in_progress(state.issue_key)
+
+            if self._is_aborted(state.issue_key):
+                logger.info(f"Oracle aborted before agent for {state.issue_key}")
+                self._release_context(state.issue_key, success=False)
+                return
 
             result = await runner.run_agent(
                 task,
                 on_session_file=lambda sp, pp=None: self._link_job_session_paths(
                     state.issue_key, sp, pp
+                ),
+                on_session_id=lambda sid: self._link_job_opencode_session(
+                    state.issue_key, sid
                 ),
             )
             self._apply_agent_result_session(state.issue_key, result)
@@ -2876,10 +6310,12 @@ class JobProcessor:
                 return
 
             if result["returncode"] == 0:
+                from src.backends.codex import format_agent_answer_for_comment
+
                 self.reporter.post_oracle_response(
                     state.issue_key,
                     question=state.description,
-                    answer=result["stdout"],
+                    answer=format_agent_answer_for_comment(result.get("stdout") or ""),
                 )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
@@ -2931,33 +6367,38 @@ class JobProcessor:
             else:
                 created_context = issue_key in self._contexts
 
-            # Free-form @mention: execution kit (direct workflow removed)
+            # Free-form @mention: same build path (system + title + description)
             summary = (state.issue_summary if state else "") or ""
             git = self._git_for(issue_key)
             work_branch = (
                 (getattr(git, "work_branch", None) or "").strip() if git else ""
             ) or None
-            prompt = PromptBuilder.build_atlas_prompt(
+            desc = (request or "").strip() or (state.description if state else "") or ""
+            prompt = PromptBuilder.build_build_prompt(
                 issue_key=issue_key,
-                plan_path="",
-                previous_learnings=[
-                    f"Free-form request: {request}",
-                    f"Summary: {summary}",
-                ],
+                summary=summary,
+                description=desc,
                 work_branch=work_branch,
             )
 
             task = AgentTask(
                 description=f"Comment request: {issue_key}",
                 prompt=prompt,
-                agent=settings.orchestrator_agent,
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=issue_key,
+                model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
             )
 
             result = await runner.run_agent(task)
 
             if result["returncode"] == 0:
-                self.reporter.post_comment_response(issue_key, result["stdout"])
+                from src.backends.codex import format_agent_answer_for_comment
+
+                self.reporter.post_comment_response(
+                    issue_key,
+                    format_agent_answer_for_comment(result.get("stdout") or ""),
+                )
             else:
                 err = result.get("stderr") or "Agent failed for free-form request"
                 self.reporter.post_comment_response(

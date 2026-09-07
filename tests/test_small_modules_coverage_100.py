@@ -22,16 +22,15 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, TaskStatus
 
 
-def test_config_empty_trigger_labels_and_gitlab_hosts():
+def test_config_empty_gitlab_hosts_and_projects():
     s = Settings(
         jira_host="https://j.example",
         jira_api_token="t",
-        trigger_labels="",
         gitlab_allowed_hosts=" gitlab.com , , example.com ",
         jira_projects="",
     )
-    assert s.trigger_labels_list == ["ai-assist", "bot"]
-    assert s.gitlab_allowed_hosts_list == ["gitlab.com", "example.com"]
+    # Hosts without a PAT are not allowed; list comes from the PAT map.
+    assert s.gitlab_allowed_hosts_list == []
     assert s.jira_projects_list == ["PROJ"]
 
 
@@ -58,7 +57,8 @@ def test_update_state_if_reject_and_unknown_field(tmp_path):
         )
         is None
     )
-    sm.update_state("U-1", status=TaskStatus.EXECUTING)
+    # Intentional re-open from terminal requires force=True
+    sm.update_state("U-1", force=True, status=TaskStatus.EXECUTING)
     out = sm.update_state_if(
         "U-1",
         expected_statuses={TaskStatus.EXECUTING},
@@ -91,6 +91,30 @@ def test_issue_log_ring_filter_and_overflow():
     lines = ring.for_issue("KAN-1")
     assert lines
     assert all("KAN-1" in (x.get("message") or "") for x in lines)
+
+
+def test_issue_log_ring_for_issue_no_prefix_bleed():
+    """KAN-1 must not surface KAN-10 (or other longer keys) system log lines."""
+    ring = IssueLogRing(maxlen=50, persist=False)
+    ring.append("started", issue_key="KAN-1")
+    ring.append("other ticket work", issue_key="KAN-10")
+    ring.append("untagged free text about KAN-1 only")
+    ring.append("untagged free text about KAN-10 only")
+    ring.append("still KAN-1 via tag", issue_key="KAN-1")
+
+    for_k1 = ring.for_issue("KAN-1")
+    msgs = [x.get("message") or "" for x in for_k1]
+    assert "started" in msgs
+    assert "still KAN-1 via tag" in msgs
+    assert "untagged free text about KAN-1 only" in msgs
+    assert "other ticket work" not in msgs
+    assert "untagged free text about KAN-10 only" not in msgs
+
+    for_k10 = ring.for_issue("KAN-10")
+    msgs10 = [x.get("message") or "" for x in for_k10]
+    assert "other ticket work" in msgs10
+    assert "untagged free text about KAN-10 only" in msgs10
+    assert "started" not in msgs10
 
 
 def test_issue_log_ring_for_job():
@@ -154,7 +178,7 @@ def test_poll_snapshot_listener_and_idle():
     store.begin_poll(board_id="1", interval_seconds=30)
     store.end_poll(
         source="board",
-        issues=[{"key": "K-1", "will_process": True, "matched_label": True}],
+        issues=[{"key": "K-1", "will_process": True, "matched_assignee": True}],
         interval_seconds=30,
         error=None,
     )
@@ -179,7 +203,8 @@ def test_workflow_router_mode_and_reason_edges():
     assert WorkflowRouter.route_issue("X", "s", build) == WorkflowType.EXECUTION
     wt, err = WorkflowRouter.route_issue_with_reason("X", "fix bug", "implement feature")
     assert wt == WorkflowType.PLANNING
-    assert err and "Mode" in err
+    # Mode / git template validation is deferred to workspace prep (err always None)
+    assert err is None
     wt2, err2 = WorkflowRouter.route_issue_with_reason(
         "X", "how to design", "should we use pattern"
     )
@@ -188,9 +213,9 @@ def test_workflow_router_mode_and_reason_edges():
 
 
 def test_prompt_builder_empty_jira_body():
-    p = PromptBuilder.build_prometheus_prompt("K-1", "", "")
+    p = PromptBuilder.build_plan_prompt("K-1", "", "")
     assert "K-1" in p
-    p2 = PromptBuilder.build_sisyphus_prompt("K-1", "", summary="")
+    p2 = PromptBuilder.build_build_prompt("K-1", "", "")
     assert "K-1" in p2
 
 
@@ -218,7 +243,7 @@ def test_issue_git_spec_expand_links_and_strip():
     assert "{params}" not in cleaned
 
 
-def test_agent_env_allowlist_strips_secrets():
+def test_agent_env_passes_all_process_vars():
     from src.orchestrator.agent_runner import _agent_subprocess_env
     import os
 
@@ -232,18 +257,22 @@ def test_agent_env_allowlist_strips_secrets():
             "OPENAI_API_KEY": "ok",
             "SSH_AUTH_SOCK": "/tmp/ssh",
             "VD_GIT_PASSWORD": "pat",
-            "RANDOM_SECRET": "nope",
+            "NPM_TOKEN": "build-me",
+            "CMAKE_GENERATOR": "Ninja",
+            "MVCC_HOME": "/opt/mvcc",
         },
         clear=False,
     ):
         env = _agent_subprocess_env()
     assert env.get("PATH")
     assert env.get("OPENAI_API_KEY") == "ok"
-    assert "GITLAB_PAT" not in env
-    assert "JIRA_API_TOKEN" not in env
-    assert "SSH_AUTH_SOCK" not in env
-    assert "VD_GIT_PASSWORD" not in env
-    assert "RANDOM_SECRET" not in env
+    assert env.get("CMAKE_GENERATOR") == "Ninja"
+    assert env.get("MVCC_HOME") == "/opt/mvcc"
+    assert env.get("NPM_TOKEN") == "build-me"
+    assert env.get("GITLAB_PAT") == "secret"
+    assert env.get("JIRA_API_TOKEN") == "secret"
+    assert env.get("SSH_AUTH_SOCK") == "/tmp/ssh"
+    assert env.get("VD_GIT_PASSWORD") == "pat"
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
 
 
@@ -289,8 +318,8 @@ def test_reporter_append_plan_to_description(reporter, fake_jira):
         plan_path="/tmp/p.md",
     )
     assert reporter.append_plan_to_description(st, "") is False
-    assert reporter.append_plan_to_description(st, "# plan\nstep") is True
-    fake_jira.append_to_description.assert_called()
+    assert reporter.append_plan_to_description(st, "# plan\nstep") is False
+    fake_jira.append_to_description.assert_not_called()
 
 
 def test_src_read_version_fallbacks(tmp_path, monkeypatch):

@@ -12,7 +12,12 @@ from src.dashboard.api import create_dashboard_app
 from unittest.mock import MagicMock
 
 from src.dashboard.schemas import SettingsUpdate
-from src.dashboard.service import apply_settings_update, build_settings_view, read_app_version
+from src.dashboard.service import (
+    apply_settings_update,
+    build_live_envelope,
+    build_settings_view,
+    read_app_version,
+)
 from src.dashboard.snapshot import PollSnapshotStore
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -21,6 +26,19 @@ from src.state.models import TaskStatus
 @pytest.fixture
 def store():
     return PollSnapshotStore()
+
+
+def test_live_envelope_skips_tasks_and_jobs(tmp_path):
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    proc = MagicMock()
+    proc.list_live_processing_keys.return_value = ["KAN-1"]
+    env = build_live_envelope(state_manager=sm, processor=proc)
+    assert env["type"] == "live"
+    assert env["live_issue_keys"] == ["KAN-1"]
+    assert "tasks" not in env
+    assert "jobs" not in env
+    assert "queued_count" in env["queue"]
+    assert "poll" in env and "meta" in env
 
 
 def test_snapshot_countdown(store):
@@ -34,11 +52,9 @@ def test_snapshot_countdown(store):
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
                 "assignee": "Jira AI Bot",
-                "matched_label": True,
                 "matched_assignee": True,
                 "is_todo": True,
                 "will_process": True,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
@@ -57,6 +73,7 @@ def test_settings_view_hides_secrets(monkeypatch):
     monkeypatch.setattr(settings, "jira_api_token", "super-secret")
     monkeypatch.setattr(settings, "gitlab_pat", "pat-secret")
     monkeypatch.setattr(settings, "jira_host", "https://jira.example.com")
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "gitlab.com")
     view = build_settings_view()
     dumped = view.model_dump()
@@ -74,9 +91,22 @@ def test_settings_view_hides_secrets(monkeypatch):
     assert "models" not in dumped
 
 
-def test_apply_settings_update_runtime(monkeypatch):
+def test_settings_update_rejects_non_numeric_board_id():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_board_id="`")
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_board_id="board-1")
+    # Accidental markdown/quotes around a real id
+    assert SettingsUpdate(jira_board_id="`1`").jira_board_id == "1"
+    assert SettingsUpdate(jira_board_id=" 42 ").jira_board_id == "42"
+
+
+def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "default_model", "old/m")
@@ -108,9 +138,52 @@ def test_settings_view_includes_agent_timeout(monkeypatch):
     assert "agent_task_timeout_seconds" in view.model_dump()
 
 
-def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
+def test_upsert_dotenv_keys_preserves_other_lines(tmp_path):
+    from src.config import upsert_dotenv_keys
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "# keep comment\nJIRA_HOST=https://old\nOTHER=keep-me\n",
+        encoding="utf-8",
+    )
+    n = upsert_dotenv_keys(
+        {"JIRA_HOST": "https://new.example.com", "JIRA_API_TOKEN": "tok"},
+        path=path,
+    )
+    assert n == 2
+    text = path.read_text(encoding="utf-8")
+    assert "# keep comment" in text
+    assert "OTHER=keep-me" in text
+    assert "JIRA_HOST=https://new.example.com" in text
+    assert "JIRA_API_TOKEN=tok" in text
+
+
+def test_apply_settings_retry_counts(tmp_path, monkeypatch):
     from src.config import settings
 
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "agent_task_max_retries", 3)
+    monkeypatch.setattr(settings, "agent_task_max_incomplete_retries", 256)
+    view = apply_settings_update(
+        SettingsUpdate(
+            agent_task_max_retries=5,
+            agent_task_max_incomplete_retries=64,
+        )
+    )
+    assert settings.agent_task_max_retries == 5
+    assert settings.agent_task_max_incomplete_retries == 64
+    assert view.agent_task_max_retries == 5
+    assert view.agent_task_max_incomplete_retries == 64
+
+
+def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://old.example.com\nJIRA_API_TOKEN=old-token\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(settings, "jira_host", "https://old.example.com")
     monkeypatch.setattr(settings, "jira_email", "old@ex.com")
     monkeypatch.setattr(settings, "jira_api_token", "old-token")
@@ -130,11 +203,14 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
         )
     )
     assert settings.jira_host == "https://new.example.com"
-    assert settings.jira_email == "new@ex.com"
+    # Settings save always clears JIRA_EMAIL (Bearer from then on)
+    assert settings.jira_email == ""
     assert settings.jira_api_token == "new-secret-token"
+    assert view.jira_email == ""
+    assert view.jira_email_configured is False
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == "pat-onprem"
-    assert settings.gitlab_pat_for_host("api.gitlab.com") == "pat-cloud"
+    assert settings.gitlab_pat_for_host("api.gitlab.com") == ""
     assert view.jira_token_configured is True
     assert view.gitlab_pat_configured is True
     assert {c.host for c in view.gitlab_credentials} == {
@@ -159,6 +235,86 @@ def test_apply_settings_connection_and_write_only_secrets(monkeypatch):
     assert settings.jira_api_token == "new-secret-token"
     assert settings.gitlab_pat_for_host("gitlab.com") == "pat-cloud"
     assert settings.gitlab_pat_for_host("gitlab.example.com") == ""
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "JIRA_API_TOKEN=new-secret-token" in env_text
+    assert "JIRA_HOST=https://new.example.com" in env_text
+    assert "JIRA_EMAIL=new@ex.com" not in env_text
+    assert "JIRA_EMAIL=" in env_text
+    assert "GITLAB_HOST_PATS=" in env_text
+    assert "pat-cloud" in env_text
+
+
+def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(
+    tmp_path, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+    if hasattr(settings, "set_gitlab_host_pat_map"):
+        settings.set_gitlab_host_pat_map({"gitlab.com": "keep-me-secret"})
+
+    apply_settings_update(
+        SettingsUpdate(
+            gitlab_credentials=[
+                {
+                    "host": "gitlab.company.com",
+                    "pat": "",
+                    "previous_host": "gitlab.com",
+                }
+            ]
+        )
+    )
+    assert settings.gitlab_pat_for_host("gitlab.company.com") == "keep-me-secret"
+    assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
+def test_apply_settings_gitlab_rename_1to1_without_previous_host(
+    tmp_path, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+    if hasattr(settings, "set_gitlab_host_pat_map"):
+        settings.set_gitlab_host_pat_map({"gitlab.com": "keep-me-secret"})
+
+    apply_settings_update(
+        SettingsUpdate(
+            gitlab_credentials=[{"host": "gitlab.company.com", "pat": ""}]
+        )
+    )
+    # Inferred 1:1 rename is refused — PAT stays off the new host
+    assert settings.gitlab_pat_for_host("gitlab.company.com") == ""
+    assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
+def test_settings_save_without_gitlab_rows_keeps_legacy_pat(tmp_path, monkeypatch):
+    """UI always sends gitlab_credentials; empty list must not wipe GITLAB_PAT."""
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "JIRA_HOST=https://jira.example.com\nGITLAB_PAT=LEGACY-SECRET-PAT\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "LEGACY-SECRET-PAT")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+
+    apply_settings_update(
+        SettingsUpdate(
+            poll_interval_seconds=45,
+            gitlab_credentials=[],
+        )
+    )
+    assert settings.gitlab_pat == "LEGACY-SECRET-PAT"
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LEGACY-SECRET-PAT" in env
 
 
 def test_refresh_runtime_jira_clients(monkeypatch):
@@ -208,12 +364,10 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
                 "summary": "summary",
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
-                "assignee": None,
-                "matched_label": True,
-                "matched_assignee": False,
+                "assignee": "Jira AI Bot",
+                "matched_assignee": True,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
@@ -232,7 +386,7 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
             p = client.get("/api/poll")
             assert p.status_code == 200
             poll = p.json()
-            assert poll["issues"][0]["matched_label"] is True
+            assert poll["issues"][0]["matched_assignee"] is True
             assert "seconds_until_next_poll" in poll
 
             d = client.get("/api/dashboard")
@@ -256,16 +410,14 @@ def test_task_detail_without_local_state(tmp_path):
                 "summary": "from poll",
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
-                "matched_label": True,
                 "matched_assignee": False,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
     )
-    with patch("src.dashboard.service.poll_snapshot_store", store):
+    with patch("src.dashboard.snapshot.poll_snapshot_store", store):
         with patch(
             "src.dashboard.service._fetch_live_jira_fields",
             return_value={},
@@ -323,15 +475,78 @@ def test_git_deliveries_aggregate_from_jobs_and_meta(tmp_path, monkeypatch):
         meta=sm.get_state("GIT-1").metadata or {},
         store=jobs,
     )
-    assert len(deliveries) >= 2
+    assert len(deliveries) == 2
     mrs = {d["merge_request_url"] for d in deliveries if d.get("merge_request_url")}
     assert "https://gitlab.example.com/g/r/-/merge_requests/1" in mrs
     assert "https://gitlab.example.com/g/r/-/merge_requests/2" in mrs
+    # Top-level issue MR must merge into the matching job row, not a third card.
+    by_mr = {d["merge_request_url"]: d for d in deliveries}
+    assert by_mr["https://gitlab.example.com/g/r/-/merge_requests/2"]["job_id"] == j2["job_id"]
 
     listed = build_jobs(issue_key="GIT-1", page=1, page_size=10, store=jobs, state_manager=sm)
     by_id = {j.job_id: j for j in listed.jobs}
     assert by_id[j1["job_id"]].merge_request_url.endswith("/merge_requests/1")
     assert by_id[j2["job_id"]].commit_sha.startswith("bbbb")
+
+
+def test_git_deliveries_dedupe_same_mr_from_job_history_and_legacy():
+    """Same MR stored on the job, git_deliveries list, and top-level meta → one row."""
+    from src.dashboard.service import _collect_git_deliveries
+
+    mr = "https://gitlab.com/org/repo/-/merge_requests/18"
+    branch = "feature/KAN-1905"
+    job_id = "job_b17057e81181"
+    deliveries = _collect_git_deliveries(
+        issue_key="KAN-1905",
+        meta={
+            "feature_branch": branch,
+            "merge_request_url": mr,
+            "current_job_id": None,
+            "git_deliveries": [
+                {
+                    "job_id": job_id,
+                    "feature_branch": branch,
+                    "merge_request_url": mr,
+                    "created_at": "2026-08-01T12:00:00",
+                }
+            ],
+        },
+        jobs=[
+            {
+                "job_id": job_id,
+                "status": "completed",
+                "feature_branch": branch,
+                "merge_request_url": mr,
+                "completed_at": "2026-08-01T12:05:00",
+            }
+        ],
+    )
+    assert len(deliveries) == 1
+    assert deliveries[0]["job_id"] == job_id
+    assert deliveries[0]["status"] == "completed"
+    assert deliveries[0]["merge_request_url"] == mr
+    assert deliveries[0]["feature_branch"] == branch
+
+
+def test_build_jobs_sorts_by_created_date_not_issue_key(tmp_path):
+    from src.dashboard.service import build_jobs, job_created_stamp
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    old = jobs.create_job(issue_key="KAN-1", summary="old same issue")
+    newer_other = jobs.create_job(issue_key="KAN-9", summary="newer other issue")
+    mid = jobs.create_job(issue_key="KAN-1", summary="mid same issue")
+    jobs.update_job(old["job_id"], started_at="2026-08-01T10:00:00")
+    jobs.update_job(newer_other["job_id"], started_at="2026-08-20T12:00:00")
+    jobs.update_job(mid["job_id"], started_at="2026-08-10T09:00:00")
+
+    listed = build_jobs(page=1, page_size=10, store=jobs, state_manager=sm)
+    ids = [j.job_id for j in listed.jobs]
+    assert ids[0] == newer_other["job_id"]
+    assert ids[1] == mid["job_id"]
+    assert ids[2] == old["job_id"]
+    assert job_created_stamp(listed.jobs[0]) >= job_created_stamp(listed.jobs[1])
 
 
 def test_build_jobs_pagination(tmp_path):
@@ -361,8 +576,138 @@ def test_build_jobs_pagination(tmp_path):
     assert len(ids) == 7
 
 
+def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
+    from src.dashboard.service import build_jobs
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    login = jobs.create_job(
+        issue_key="KAN-12",
+        summary="Add login page",
+        description="Use session cookies and rotate the refresh token.",
+    )
+    jobs.create_job(
+        issue_key="KAN-99",
+        summary="Unrelated billing",
+        description="Invoice export only.",
+    )
+    by_key = build_jobs(issue_key="kan-12", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert {j.job_id for j in by_key.jobs} == {login["job_id"]}
+    by_title = build_jobs(issue_key="login", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert {j.job_id for j in by_title.jobs} == {login["job_id"]}
+    by_desc = build_jobs(
+        issue_key="refresh token", page=1, page_size=20, store=jobs, state_manager=sm
+    )
+    assert {j.job_id for j in by_desc.jobs} == {login["job_id"]}
+    by_word = build_jobs(issue_key="KAN", page=1, page_size=20, store=jobs, state_manager=sm)
+    assert len(by_word.jobs) == 2
+    jobs.create_job(
+        issue_key="KAN-50",
+        summary="Params only",
+        description=(
+            "Operator text here.\n\n"
+            "{params}\nRepository: https://gitlab.com/a/b.git\n"
+            "Source branch: develop\nTarget branch: develop\nMode: build\n{params}"
+        ),
+    )
+    by_params = build_jobs(
+        issue_key="gitlab.com", page=1, page_size=20, store=jobs, state_manager=sm
+    )
+    assert by_params.jobs == []
+
+
+def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):
+    from src.dashboard.service import build_one_job
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import SessionBindStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    stored = jobs.create_job(
+        issue_key="WD-1",
+        summary="s",
+        description="d",
+        status="completed",
+    )
+    jobs.update_job(
+        stored["job_id"],
+        working_directory=str(tmp_path / "clone-a"),
+    )
+    item = build_one_job(stored["job_id"], store=jobs, state_manager=sm)
+    assert item is not None
+    assert item.working_directory == str(tmp_path / "clone-a")
+
+    stored2 = jobs.create_job(
+        issue_key="WD-2",
+        summary="s2",
+        description="d2",
+        status="completed",
+    )
+    jobs.update_job(stored2["job_id"], opencode_session_id="ses_wd2")
+    binds = SessionBindStore(binds_dir=tmp_path / "binds")
+    binds.upsert(
+        repository_url="https://gitlab.com/g/r.git",
+        branch="feature/WD-2",
+        target_branch="develop",
+        session_id="ses_wd2",
+        issue_key="WD-2",
+        job_id=stored2["job_id"],
+        working_directory=str(tmp_path / "clone-b"),
+    )
+    monkeypatch.setattr("src.state.session_bind_store.session_bind_store", binds)
+    item2 = build_one_job(stored2["job_id"], store=jobs, state_manager=sm)
+    assert item2 is not None
+    assert item2.working_directory == str((tmp_path / "clone-b").resolve())
+
+
+def test_build_one_job_does_not_inherit_later_run_session(tmp_path):
+    """Job detail is run-scoped: an older job must not show the later ses_*."""
+    from src.dashboard.service import build_one_job
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("SES-1", "s", "d")
+    old = jobs.create_job(issue_key="SES-1", summary="clone fail", status="error")
+    current = jobs.create_job(issue_key="SES-1", summary="later run", status="executing")
+    jobs.update_job(current["job_id"], opencode_session_id="ses_later")
+    sm.update_state(
+        "SES-1",
+        current_opencode_session_id="ses_later",
+        metadata={
+            "current_job_id": current["job_id"],
+            "last_opencode_session_id": "ses_later",
+        },
+    )
+    old_item = build_one_job(old["job_id"], store=jobs, state_manager=sm)
+    assert old_item is not None
+    assert not (old_item.opencode_session_id or "").strip()
+
+    # After finish, current_job_id is cleared — still do not backfill old rows
+    sm.update_state("SES-1", metadata={"current_job_id": "", "last_opencode_session_id": "ses_later"})
+    old_after = build_one_job(old["job_id"], store=jobs, state_manager=sm)
+    assert old_after is not None
+    assert not (old_after.opencode_session_id or "").strip()
+
+    live = build_one_job(current["job_id"], store=jobs, state_manager=sm)
+    assert live is not None
+    assert live.opencode_session_id == "ses_later"
+
+    # In-flight job with no session on disk may inherit the issue session
+    bare = jobs.create_job(issue_key="SES-1", summary="live clone", status="executing")
+    sm.update_state(
+        "SES-1",
+        current_opencode_session_id="ses_now",
+        metadata={"current_job_id": bare["job_id"]},
+    )
+    bare_item = build_one_job(bare["job_id"], store=jobs, state_manager=sm)
+    assert bare_item is not None
+    assert bare_item.opencode_session_id == "ses_now"
+
+
 def test_poll_api_hides_unmatched_board_issues(tmp_path):
-    """Poll DTO lists only bot-eligible issues (label or assignee match)."""
+    """Poll DTO lists only bot-assignee issues (or will_process this cycle)."""
     from src.dashboard.service import build_poll_status
 
     sm = JiraStateManager(state_dir=tmp_path / "state")
@@ -372,15 +717,13 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
         issues=[
             {
                 "key": "MATCH-1",
-                "summary": "has trigger",
+                "summary": "assigned this cycle",
                 "jira_status": "To Do",
-                "labels": ["ai-assist"],
-                "assignee": None,
-                "matched_label": True,
-                "matched_assignee": False,
+                "labels": [],
+                "assignee": "Jira AI Bot",
+                "matched_assignee": True,
                 "is_todo": True,
                 "will_process": True,
-                "matched_labels": ["ai-assist"],
             },
             {
                 "key": "NOISE-9",
@@ -388,11 +731,9 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
                 "jira_status": "To Do",
                 "labels": ["other"],
                 "assignee": "Alice",
-                "matched_label": False,
                 "matched_assignee": False,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": [],
             },
             {
                 "key": "BOT-2",
@@ -400,11 +741,9 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
                 "jira_status": "In Progress",
                 "labels": [],
                 "assignee": "Jira AI Bot",
-                "matched_label": False,
                 "matched_assignee": True,
                 "is_todo": False,
                 "will_process": False,
-                "matched_labels": [],
             },
         ],
         interval_seconds=30,
@@ -488,8 +827,23 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
     )
     issue_log_ring.append("Working on DET-1 something")
     sessions = isolate_jira_agent_artifacts["sessions_dir"]
-    (sessions / "DET-1_20260101_120000_0.log").write_text("opencode output line\n")
-    (sessions / "DET-1_20260101_120000_0.prompt.txt").write_text("full prompt body")
+    log_path = sessions / "DET-1_20260101_120000.log"
+    log_path.write_text("opencode output line\n")
+    (sessions / "DET-1_20260101_120000.prompt.txt").write_text("full prompt body")
+
+    store = isolate_jira_agent_artifacts["job_store"]
+    det_job = store.create_job(
+        issue_key="DET-1",
+        summary="summary here",
+        description="do the thing",
+        status="executing",
+        task_id="task-abc",
+    )
+    store.update_job(
+        det_job["job_id"],
+        session_log_path=str(log_path.resolve()),
+        prompt_path=str((sessions / "DET-1_20260101_120000.prompt.txt").resolve()),
+    )
 
     # Live Jira returns updated description/status (not frozen local state)
     fake_jira.get_issue = MagicMock(
@@ -509,74 +863,84 @@ def test_task_detail_and_cancel(tmp_path, monkeypatch, fake_jira, isolate_jira_a
     proc.state_manager = sm
     proc.reporter = MagicMock()
     proc.jira_client = fake_jira
+    proc.job_store = store
     runner = MagicMock()
     runner.cancel_task = MagicMock(return_value=True)
     runner.cancel_all_tasks = MagicMock(return_value=1)
     proc._contexts["DET-1"] = {"git": MagicMock(), "runner": runner}
+    proc._active_jobs["DET-1"] = det_job["job_id"]
 
-    app = create_dashboard_app(processor=proc, state_manager=sm)
-    client = TestClient(app)
+    with patch("src.dashboard.api.job_store", store):
+        with patch("src.dashboard.service.default_job_store", store):
+            app = create_dashboard_app(processor=proc, state_manager=sm)
+            client = TestClient(app)
 
-    r = client.get("/api/tasks/DET-1")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["issue_key"] == "DET-1"
-    assert body["can_cancel"] is True
-    assert body["live"] is True
-    assert body["description"] == "description updated in jira"
-    assert body["summary"] == "summary from jira live"
-    assert body["jira_status"] == "In Progress"
-    assert body["jira_live"] is True
-    assert "agent" in body["prompts"]
-    assert "assembled_prompt" not in body["prompts"]
-    assert "system_rules" not in body["prompts"]
-    assert any("opencode output" in (s.get("content") or "") for s in body["session_logs"])
-    assert any("DET-1" in (line.get("message") or "") for line in body["system_logs"])
+            r = client.get("/api/tasks/DET-1?live=true&artifacts=true")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["issue_key"] == "DET-1"
+            assert body["can_cancel"] is True
+            assert body["live"] is True
+            assert body["description"] == "description updated in jira"
+            assert body["summary"] == "summary from jira live"
+            assert body["jira_status"] == "In Progress"
+            assert body["jira_live"] is True
+            assert "agent" in body["prompts"]
+            assert "assembled_prompt" not in body["prompts"]
+            assert "system_rules" not in body["prompts"]
+            assert any(
+                "opencode output" in (s.get("content") or "")
+                for s in body["session_logs"]
+            )
+            assert any(
+                "DET-1" in (line.get("message") or "") for line in body["system_logs"]
+            )
 
-    c = client.post("/api/tasks/DET-1/cancel")
-    assert c.status_code == 200
-    assert c.json()["ok"] is True
-    st = sm.get_state("DET-1")
-    assert st.status == TaskStatus.CANCELLED
-    assert st.current_task_id is None
-    # Preserved for dashboard display
-    assert (st.metadata or {}).get("last_task_id") == "task-abc"
-    assert "DET-1" not in proc._contexts
+            c = client.post("/api/tasks/DET-1/cancel")
+            assert c.status_code == 200
+            assert c.json()["ok"] is True
+            st = sm.get_state("DET-1")
+            assert st.status == TaskStatus.CANCELLED
+            assert st.current_task_id is None
+            # Preserved for dashboard display
+            assert (st.metadata or {}).get("last_task_id") == "task-abc"
+            assert "DET-1" not in proc._contexts
 
-    detail_after = client.get("/api/tasks/DET-1").json()
-    assert detail_after["current_task_id"] == "task-abc"
-    # Jobs embedded on detail (legacy session-derived when no JobStore rows)
-    assert "jobs" in detail_after
-    assert any(j["issue_key"] == "DET-1" for j in detail_after["jobs"])
+            detail_after = client.get("/api/tasks/DET-1").json()
+            assert detail_after["current_task_id"] == "task-abc"
+            # Real JobStore job only — never legacy_* from session files
+            assert "jobs" in detail_after
+            assert any(j["issue_key"] == "DET-1" for j in detail_after["jobs"])
+            assert any(j["job_id"] == det_job["job_id"] for j in detail_after["jobs"])
+            assert not any(
+                j["job_id"].startswith("legacy_") for j in detail_after["jobs"]
+            )
 
-    # Terminal cannot cancel again
-    c2 = client.post("/api/tasks/DET-1/cancel")
-    assert c2.status_code == 400
+            # Terminal cannot cancel again
+            c2 = client.post("/api/tasks/DET-1/cancel")
+            assert c2.status_code == 400
 
-
-def test_api_jobs_filter_and_legacy_sessions(
+def test_api_jobs_filter_no_legacy_sessions(
     tmp_path, monkeypatch, isolate_jira_agent_artifacts
 ):
-    """Jobs list supports issue_key filter; session logs become legacy jobs."""
-    from src.state.job_store import JobStore
-
+    """Jobs list filters by issue_key; session files never become legacy jobs."""
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("JOB-1", "first issue", "desc live latest")
     sm.create_state("JOB-2", "second", "d")
 
     sessions = isolate_jira_agent_artifacts["sessions_dir"]
-    (sessions / "JOB-1_20260101_100000_0.log").write_text("run a\n")
-    (sessions / "JOB-1_20260101_100000_0.log.session_id").write_text("ses_aaa")
-    (sessions / "JOB-1_20260101_100000_0.prompt.txt").write_text(
+    (sessions / "JOB-1_20260101_100000.log").write_text("run a\n")
+    (sessions / "JOB-1_20260101_100000.log.session_id").write_text("ses_aaa")
+    (sessions / "JOB-1_20260101_100000.prompt.txt").write_text(
         "# Direct\n\n## Task\ndesc from first prompt\n\n# X\n",
         encoding="utf-8",
     )
-    (sessions / "JOB-1_20260102_110000_0.log").write_text("run b\n")
-    (sessions / "JOB-1_20260102_110000_0.prompt.txt").write_text(
+    (sessions / "JOB-1_20260102_110000.log").write_text("run b\n")
+    (sessions / "JOB-1_20260102_110000.prompt.txt").write_text(
         "# Direct\n\n## Task\ndesc from second prompt\n\n# X\n",
         encoding="utf-8",
     )
-    (sessions / "JOB-2_20260101_120000_0.log").write_text("other\n")
+    (sessions / "JOB-2_20260101_120000.log").write_text("other\n")
 
     store = isolate_jira_agent_artifacts["job_store"]
     stored = store.create_job(
@@ -589,9 +953,16 @@ def test_api_jobs_filter_and_legacy_sessions(
     )
     store.update_job(
         stored["job_id"],
-        session_log_path=str((sessions / "JOB-1_20260102_110000_0.log").resolve()),
-        prompt_path=str((sessions / "JOB-1_20260102_110000_0.prompt.txt").resolve()),
+        session_log_path=str((sessions / "JOB-1_20260102_110000.log").resolve()),
+        prompt_path=str((sessions / "JOB-1_20260102_110000.prompt.txt").resolve()),
         opencode_session_id="ses_bbb",
+    )
+    # Second real job for JOB-2 (not a legacy session row)
+    stored2 = store.create_job(
+        issue_key="JOB-2",
+        summary="second",
+        description="d",
+        status="completed",
     )
 
     monkeypatch.chdir(tmp_path)
@@ -605,31 +976,27 @@ def test_api_jobs_filter_and_legacy_sessions(
             keys = {j["issue_key"] for j in all_jobs["jobs"]}
             assert "JOB-1" in keys
             assert "JOB-2" in keys
+            assert not any(
+                j["job_id"].startswith("legacy_") for j in all_jobs["jobs"]
+            )
 
             filtered = client.get("/api/jobs", params={"issue_key": "job-1"}).json()
             assert filtered["issue_key_filter"] == "job-1" or filtered["issue_key_filter"] == "JOB-1"
             assert filtered["total"] >= 1
             assert all(j["issue_key"] == "JOB-1" for j in filtered["jobs"])
-            # Stored job + legacy for the other session
             job_ids = {j["job_id"] for j in filtered["jobs"]}
             assert stored["job_id"] in job_ids
-            assert any(jid.startswith("legacy_") for jid in job_ids)
+            assert not any(jid.startswith("legacy_") for jid in job_ids)
 
-            detail = client.get("/api/tasks/JOB-1").json()
+            detail = client.get("/api/tasks/JOB-1?live=true").json()
             assert len(detail["jobs"]) >= 1
             assert all(j["issue_key"] == "JOB-1" for j in detail["jobs"])
-            # Live issue description must not overwrite per-job snapshots
             assert detail["description"] == "desc live latest"
             by_id = {j["job_id"]: j for j in detail["jobs"]}
             assert by_id[stored["job_id"]]["description"] == "desc frozen on job store"
-            legacy = [j for j in detail["jobs"] if j["job_id"].startswith("legacy_")]
-            assert legacy, "expected legacy job from first session"
-            assert any(
-                j["description"] == "desc from first prompt" for j in legacy
-            ), [j["description"] for j in legacy]
-            # Distinct job descriptions must not all equal live issue text
-            descs = {j["description"] for j in detail["jobs"] if j.get("description")}
-            assert len(descs) >= 2, descs
+            assert not any(j["job_id"].startswith("legacy_") for j in detail["jobs"])
+            # Second store job only for JOB-2
+            assert stored2["job_id"] not in by_id
 
 
 def test_task_detail_without_state_is_stub_not_404(tmp_path):
@@ -662,7 +1029,7 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
         "fields": {
             "summary": "fix",
             "labels": ["ai-assist"],
-            "assignee": {"displayName": "Alice"},
+            "assignee": {"displayName": "DevBot"},
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
         },
     }
@@ -673,9 +1040,12 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
 
     p = JiraPoller(client=fake_jira, board_id="1", interval_seconds=10)
     p.state_manager = state_manager
-    out = p.poll_board()
+    with patch("src.jira.poller.settings") as s:
+        s.trigger_assignee_names_list = ["devbot"]
+        s.trigger_on_assignment = True
+        out = p.poll_board()
     assert len(out) == 1
     snap = store.snapshot()
     assert snap["issues"]
-    assert snap["issues"][0]["matched_label"] is True
+    assert snap["issues"][0]["matched_assignee"] is True
     assert snap["issues"][0]["will_process"] is True

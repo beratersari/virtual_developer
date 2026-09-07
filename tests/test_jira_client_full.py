@@ -110,10 +110,13 @@ def test_board_and_sprint(client):
 
     http.get.return_value = _resp(200, {"values": [{"id": 9, "name": "S1"}]})
     assert c.get_active_sprint("1")["id"] == 9
+    assert c.sprint_lookup == "ok"
     http.get.return_value = _resp(200, {"values": []})
     assert c.get_active_sprint("1") is None
+    assert c.sprint_lookup == "empty"
     http.get.return_value = _resp(500)
     assert c.get_active_sprint("1") is None
+    assert c.sprint_lookup == "error"
 
 
 def test_get_sprint_issues_pagination(client):
@@ -153,6 +156,24 @@ def test_transition_to_in_progress(client):
 
     http.get.return_value = _resp(200, {"transitions": [{"id": "1", "name": "Done"}]})
     assert c.transition_to_in_progress("P-1") is False
+
+
+def test_add_comment_cloud_posts_adf_first():
+    with patch("src.jira.client.httpx.Client") as mock_cls:
+        mock_http = MagicMock()
+        mock_cls.return_value = mock_http
+        with patch("src.jira.client.settings") as s:
+            s.jira_host = "https://ex.atlassian.net"
+            s.jira_api_token = "token"
+            s.jira_email = "a@b.com"
+            c = JiraClient()
+            c.client = mock_http
+    mock_http.post.return_value = _resp(201, {"id": "c1"})
+    assert c.add_comment("P-1", "h3. Title\n\n{code:markdown}\n# p\n{code}")["id"] == "c1"
+    sent = mock_http.post.call_args.kwargs["json"]["body"]
+    assert isinstance(sent, dict)
+    assert sent["type"] == "doc"
+    assert any(n.get("type") == "codeBlock" for n in sent["content"])
 
 
 def test_add_comment_plain_and_adf_fallback(client):
@@ -259,8 +280,8 @@ def test_add_labels_merges_existing(client):
     assert labels == ["ai-assist", "bot", "ai-plan-ready"]
 
 
-def test_client_auth_bearer_only():
-    """On-prem: Bearer when email empty; Cloud: Basic when email set."""
+def test_client_auth_bearer_or_basic():
+    """Bearer when email empty; Basic when email + token (Cloud/dev)."""
     with patch("src.jira.client.httpx.Client") as mock_cls:
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.onprem.example.com/"
@@ -271,7 +292,7 @@ def test_client_auth_bearer_only():
             assert kwargs["headers"]["Authorization"] == "Bearer tok"
             assert kwargs.get("auth") is None
 
-            # Cloud Basic email:token
+            # Cloud / dev Basic email:token
             s.jira_host = "https://x.atlassian.net"
             s.jira_email = "user@example.com"
             s.jira_api_token = "cloudtok"
@@ -280,9 +301,15 @@ def test_client_auth_bearer_only():
             assert kwargs_cloud.get("auth") == ("user@example.com", "cloudtok")
             assert "Authorization" not in kwargs_cloud.get("headers", {})
 
+            # Cloud host without email → still Bearer (prod-style)
+            s.jira_email = ""
+            s.jira_api_token = "pat"
+            JiraClient()
+            kwargs_pat = mock_cls.call_args.kwargs
+            assert kwargs_pat["headers"]["Authorization"] == "Bearer pat"
+
             # No token → no Authorization header
             s.jira_api_token = ""
-            s.jira_email = ""
             JiraClient(host="https://h", api_token="")
             kwargs2 = mock_cls.call_args.kwargs
             assert "Authorization" not in kwargs2.get("headers", {})

@@ -4,7 +4,7 @@
   Build the Windows offline distribution zip for JIRA Virtual Developer.
 
 .DESCRIPTION
-  Fetches pinned OpenCode, glab, oh-my-opencode, and Python wheels (3.10+) from
+  Fetches pinned OpenCode, Codex, glab, oh-my-opencode, and Python wheels (3.10+) from
   the web, stages the app, packs OpenCode home into a SINGLE archive (avoids
   Windows MAX_PATH / slow node_modules extract for end users), and writes a zip.
 
@@ -201,10 +201,27 @@ if (-not (Test-Path -LiteralPath $versionsFile)) {
     throw "versions.env not found: $versionsFile"
 }
 $ver = Read-Versions $versionsFile
+$ocmVersions = Join-Path $root "opencoderman\packaging\versions.env"
+if (Test-Path -LiteralPath $ocmVersions) {
+    $ov = Read-Versions $ocmVersions
+    foreach ($k in @("OPENCODE_VERSION", "OPENCODE_WINDOWS_ASSET", "OPENCODE_LINUX_ASSET", "OPENCODE_REPO")) {
+        if ($ov.ContainsKey($k) -and $ov[$k]) { $ver[$k] = $ov[$k] }
+    }
+    Write-Host "OpenCode pins from opencoderman/packaging/versions.env"
+} else {
+    Write-Host "[WARNING] opencoderman/packaging/versions.env missing; using packaging/windows/versions.env"
+}
 
 $OPENCODE_VERSION = $ver["OPENCODE_VERSION"]
 $OH_MY_OPENCODE_VERSION = $ver["OH_MY_OPENCODE_VERSION"]
 $GLAB_VERSION = $ver["GLAB_VERSION"]
+$CODEX_VERSION = $ver["CODEX_VERSION"]
+$CODEX_WINDOWS_ASSET = if ($ver["CODEX_WINDOWS_ASSET"]) {
+    $ver["CODEX_WINDOWS_ASSET"]
+} else {
+    "codex-package-x86_64-pc-windows-msvc.tar.gz"
+}
+$NODE_FULL_VERSION = if ($ver["NODE_FULL_VERSION"]) { $ver["NODE_FULL_VERSION"] } else { "20.19.0" }
 $PYTHON_MIN_VERSION = if ($ver["PYTHON_MIN_VERSION"]) { $ver["PYTHON_MIN_VERSION"] } else { "3.10" }
 $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
     @($ver["PYTHON_WHEEL_VERSIONS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -215,6 +232,8 @@ $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
 if (-not $OPENCODE_VERSION) { throw "OPENCODE_VERSION missing in versions.env" }
 if (-not $OH_MY_OPENCODE_VERSION) { throw "OH_MY_OPENCODE_VERSION missing in versions.env" }
 if (-not $GLAB_VERSION) { throw "GLAB_VERSION missing in versions.env" }
+if (-not $CODEX_VERSION) { throw "CODEX_VERSION missing in versions.env" }
+if (-not $NODE_FULL_VERSION) { throw "NODE_FULL_VERSION missing in versions.env" }
 
 if (-not $OutDir) {
     $OutDir = Join-Path $root "dist"
@@ -236,6 +255,7 @@ Write-Host "Payload   : $payload"
 Write-Host "OpenCode  : $OPENCODE_VERSION"
 Write-Host "oh-my-oc  : $OH_MY_OPENCODE_VERSION"
 Write-Host "glab      : $GLAB_VERSION"
+Write-Host "Codex     : $CODEX_VERSION"
 Write-Host "Wheels for: $($wheelVersionList -join ', ') (min runtime $PYTHON_MIN_VERSION)"
 Write-Host ""
 
@@ -248,7 +268,11 @@ $copyItems = @(
     "cli.py",
     "requirements.txt",
     ".env.example",
-    "install.bat",
+    "install-dashboard.bat",
+    "install-dashboard-system-python.bat",
+    "install-opencode-online.bat",
+    "install-backends.bat",
+    "install-codex.bat",
     "VERSION",
     "README.md",
     "AGENTS.md",
@@ -258,12 +282,16 @@ $copyItems = @(
     "src",
     "agent",
     "sample_project",
-    "packaging"
+    "packaging",
+    "opencoderman"
 )
 
 foreach ($item in $copyItems) {
     $src = Join-Path $root $item
     if (-not (Test-Path -LiteralPath $src)) {
+        if ($item -eq ".env.example") {
+            throw "Required payload file missing: $item"
+        }
         Write-Host "  skip missing: $item"
         continue
     }
@@ -278,8 +306,31 @@ foreach ($item in $copyItems) {
     Write-Host "  + $item"
 }
 
+$stagedOcm = Join-Path $payload "opencoderman"
+if (Test-Path -LiteralPath (Join-Path $stagedOcm ".git")) {
+    Remove-Item -LiteralPath (Join-Path $stagedOcm ".git") -Recurse -Force
+}
+Get-ChildItem -Path $stagedOcm -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+if (-not (Test-Path -LiteralPath (Join-Path $stagedOcm "install.py"))) {
+    throw "opencoderman/install.py missing from payload — init the submodule"
+}
+$pinScript = Join-Path $root "packaging\opencoderman_pin.py"
+if (-not (Test-Path -LiteralPath $pinScript)) {
+    throw "packaging/opencoderman_pin.py missing"
+}
+& python $pinScript --repo-root $root --write-pin (Join-Path $payload "opencoderman.pin")
+if ($LASTEXITCODE -ne 0) { throw "opencoderman_pin.py failed (exit $LASTEXITCODE)" }
+Copy-Item -LiteralPath (Join-Path $payload "opencoderman.pin") -Destination (Join-Path $stagedOcm "opencoderman.pin") -Force
+Write-Host "  + opencoderman.pin"
+
 # Root launchers (backend / frontend / both)
-foreach ($launcher in @("start.bat", "start-backend.bat", "start-frontend.bat")) {
+foreach ($launcher in @(
+        "start.bat",
+        "start-backend.bat",
+        "start-frontend.bat",
+        "start-opencode-serve.bat"
+    )) {
     $srcLauncher = Join-Path $root "packaging\windows\$launcher"
     if (-not (Test-Path -LiteralPath $srcLauncher)) {
         throw "packaging\windows\$launcher missing"
@@ -287,7 +338,7 @@ foreach ($launcher in @("start.bat", "start-backend.bat", "start-frontend.bat"))
     Copy-Item -LiteralPath $srcLauncher -Destination (Join-Path $payload $launcher) -Force
     Write-Host "  + $launcher"
 }
-foreach ($helper in @("Wait-Http.ps1", "Stop-VdProcesses.ps1", "serve_frontend.py")) {
+foreach ($helper in @("Wait-Http.ps1", "Stop-VdProcesses.ps1", "Ensure-OpencodeServe.ps1", "serve_frontend.py")) {
     $hp = Join-Path $root "packaging\windows\$helper"
     if (-not (Test-Path -LiteralPath $hp)) {
         throw "packaging\windows\$helper missing"
@@ -355,8 +406,17 @@ $payloadWebDist = Join-Path $payloadWeb "dist"
 if (Test-Path -LiteralPath $payloadWebDist) {
     Remove-Item -LiteralPath $payloadWebDist -Recurse -Force
 }
-Copy-Item -LiteralPath $webDist -Destination $payloadWebDist -Recurse -Force
+Ensure-Dir $payloadWebDist
+# Copy *contents* so we never nest web/dist/dist on PowerShell
+Copy-Item -Path (Join-Path $webDist "*") -Destination $payloadWebDist -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $webDir "package.json") -Destination (Join-Path $payloadWeb "package.json") -Force
+$builtJs = @(Get-ChildItem -LiteralPath (Join-Path $webDist "assets") -Filter "index-*.js" -File)
+$builtCss = @(Get-ChildItem -LiteralPath (Join-Path $webDist "assets") -Filter "index-*.css" -File)
+if ($builtJs.Count -lt 1 -or $builtCss.Count -lt 1) {
+    throw "npm run build did not produce hashed index JS/CSS under web/dist/assets"
+}
+Write-Host "  SPA JS : $($builtJs[0].Name)"
+Write-Host "  SPA CSS: $($builtCss[0].Name)"
 # Marker so install/start can prove SPA was packaged
 $spaMarker = @"
 virtual_developer ops dashboard SPA (production build)
@@ -386,9 +446,14 @@ OpenCode=$OPENCODE_VERSION
 oh-my-opencode=$OH_MY_OPENCODE_VERSION
 oh-my-openagent=$OH_MY_OPENCODE_VERSION
 glab=$GLAB_VERSION
+Codex=$CODEX_VERSION
+CodexAsset=$CODEX_WINDOWS_ASSET
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=$($wheelVersionList -join ',')
-OpenCodeHome=vendor/opencode-home.zip (single archive — extract via install.bat)
+OpenCodeHome=vendor/opencode-home.zip (CLI fallback; install via opencoderman/install.py)
+OpenCoderman=opencoderman/ (agents, skills, install.py, vendored CLI)
+PortableNode=vendor/node (optional; online OpenCode uses opencoderman + Python)
+NodeFull=$NODE_FULL_VERSION
 "@
 Set-Content -Path (Join-Path $payload "DIST_VERSION.txt") -Value $marker -Encoding UTF8
 Set-Content -Path (Join-Path $payload "VERSION") -Value $productVersion -Encoding UTF8
@@ -456,6 +521,48 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
+# 3b) Fetch Codex Windows package (pinned rust-vX.Y.Z tar.gz)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 3b: Fetching Codex CLI v$CODEX_VERSION..."
+
+$codexPkg = Join-Path $dl $CODEX_WINDOWS_ASSET
+$codexUrl = "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_WINDOWS_ASSET"
+Write-Host "  Asset: $CODEX_WINDOWS_ASSET (AMD64 / 64-bit Windows, extract with tar)"
+Download-File $codexUrl $codexPkg
+
+$codexExtract = Join-Path $dl "codex-extract"
+if (Test-Path -LiteralPath $codexExtract) {
+    Remove-Item -LiteralPath $codexExtract -Recurse -Force
+}
+Ensure-Dir $codexExtract
+# Same tar extract the installer uses (not Expand-Archive).
+Push-Location $codexExtract
+try {
+    & tar --force-local -xf $codexPkg
+    if ($LASTEXITCODE -ne 0) {
+        & tar -xf $codexPkg
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar extract failed for $codexPkg"
+    }
+} finally {
+    Pop-Location
+}
+
+$codexExe = Get-ChildItem -Path $codexExtract -Filter "codex*.exe" -Recurse -File |
+    Select-Object -First 1
+if (-not $codexExe) {
+    throw "codex.exe not found inside $codexPkg"
+}
+& $assertPe -Path $codexExe.FullName -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) {
+    throw "codex.exe is not AMD64"
+}
+$codexSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexExe.FullName).Hash
+Write-Host ("  Codex SHA256: {0} ({1:N1} MB)" -f $codexSha, ($codexExe.Length / 1MB))
+
+# ---------------------------------------------------------------------------
 # 4) Build OpenCode home in a SHORT temp path, then pack as ONE zip
 #    (Users never extract thousands of node_modules files from the outer zip.)
 # ---------------------------------------------------------------------------
@@ -480,6 +587,16 @@ $vendorBin = Join-Path $vendor "bin"
 Ensure-Dir $vendorBin
 Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $vendorBin "opencode.exe") -Force
 Copy-Item -LiteralPath $glabExe.FullName -Destination (Join-Path $vendorBin "glab.exe") -Force
+$ocmWinBin = Join-Path $payload "opencoderman\vendor\bin\windows"
+Ensure-Dir $ocmWinBin
+Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $ocmWinBin "opencode.exe") -Force
+Write-Host "  + opencoderman/vendor/bin/windows/opencode.exe"
+# Codex is shipped as the official tar.gz only. Installers extract with tar.
+Copy-Item -LiteralPath $codexPkg -Destination (Join-Path $vendor $CODEX_WINDOWS_ASSET) -Force
+$dummyCodexCfg = Join-Path $root "packaging\windows\codex-config.toml"
+if (Test-Path -LiteralPath $dummyCodexCfg) {
+    Copy-Item -LiteralPath $dummyCodexCfg -Destination (Join-Path $vendor "codex-config.toml") -Force
+}
 & $assertPe -Path (Join-Path $vendorBin "opencode.exe")
 if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
 
@@ -489,8 +606,14 @@ if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
     "OPENCODE_ASSET=$OPENCODE_ASSET"
     "OPENCODE_SHA256=$ocSha"
     "OPENCODE_BYTES=$((Get-Item -LiteralPath $opencodeExe.FullName).Length)"
+    "CODEX_VERSION=$CODEX_VERSION"
+    "CODEX_ASSET=$CODEX_WINDOWS_ASSET"
+    "CODEX_SHA256=$codexSha"
+    "CODEX_BYTES=$((Get-Item -LiteralPath $codexExe.FullName).Length)"
     "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
     "BACKUP=vendor\bin\opencode.exe"
+    "CODEX_INSTALL=%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe"
+    "CODEX_PACKAGE=vendor\$CODEX_WINDOWS_ASSET"
 ) | Set-Content -Path (Join-Path $ocBin "ARCH.txt") -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $ocBin "ARCH.txt") -Destination (Join-Path $vendorBin "ARCH.txt") -Force
 
@@ -499,88 +622,26 @@ $pkgBody = @"
 {
   "name": "virtual-developer-opencode-home",
   "private": true,
-  "description": "OpenCode user home dependencies for JIRA Virtual Developer",
-  "dependencies": {
-    "oh-my-openagent": "$OH_MY_OPENCODE_VERSION",
-    "oh-my-opencode": "$OH_MY_OPENCODE_VERSION"
-  }
+  "description": "OpenCode user home for Yaver (stock build/plan agents, no oh-my plugin)"
 }
 "@
 Set-Content -Path $pkgPath -Value $pkgBody -Encoding UTF8
 
-# Use NEW package id oh-my-openagent (legacy oh-my-opencode triggers auto-migration + Bun re-fetch hang).
-# autoupdate=false avoids network hangs on offline machines.
+# Stock OpenCode agents only. Empty plugin list avoids Bun fetching oh-my-openagent.
 $ocCfgBody = @"
 {
   "`$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
-  "plugin": ["oh-my-openagent@$OH_MY_OPENCODE_VERSION"]
+  "plugin": []
 }
 "@
 Set-Content -Path (Join-Path $ocHome "opencode.json") -Value $ocCfgBody -Encoding UTF8
-# Also ship template under packaging\ in the payload (install.bat fallback)
 $pkgWindows = Join-Path $payload "packaging\windows"
 if (Test-Path -LiteralPath $pkgWindows) {
     Set-Content -Path (Join-Path $pkgWindows "opencode.json") -Value $ocCfgBody -Encoding UTF8
 }
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-opencode.json") -Force
-# New basename used by oh-my-openagent docs
-Copy-Item -LiteralPath (Join-Path $root "packaging\windows\oh-my-opencode.json") -Destination (Join-Path $ocHome "oh-my-openagent.json") -Force
 
-Write-Host "  Installing oh-my-openagent@$OH_MY_OPENCODE_VERSION + oh-my-opencode@$OH_MY_OPENCODE_VERSION (npm, hoisted)..."
-Push-Location $ocHome
-try {
-    # Hoisted tree is shallower (fewer nested node_modules) — critical for Windows MAX_PATH
-    # Install BOTH names: config uses openagent; some tools still resolve legacy opencode name.
-    npm install --omit=dev --no-fund --no-audit --install-strategy=hoisted `
-        "oh-my-openagent@$OH_MY_OPENCODE_VERSION" `
-        "oh-my-opencode@$OH_MY_OPENCODE_VERSION"
-    if ($LASTEXITCODE -ne 0) {
-        throw "npm install oh-my-openagent/opencode @$OH_MY_OPENCODE_VERSION failed (exit $LASTEXITCODE)"
-    }
-} finally {
-    Pop-Location
-}
-
-# Ensure both package folders exist (npm may dedupe one away)
-$omoRoot = Join-Path $ocHome "node_modules\oh-my-opencode"
-$omaRoot = Join-Path $ocHome "node_modules\oh-my-openagent"
-if (-not (Test-Path -LiteralPath $omaRoot) -and (Test-Path -LiteralPath $omoRoot)) {
-    Write-Host "  Duplicating oh-my-opencode -> oh-my-openagent (npm dedupe)"
-    Copy-Item -LiteralPath $omoRoot -Destination $omaRoot -Recurse -Force
-}
-if (-not (Test-Path -LiteralPath $omoRoot) -and (Test-Path -LiteralPath $omaRoot)) {
-    Write-Host "  Duplicating oh-my-openagent -> oh-my-opencode (npm dedupe)"
-    Copy-Item -LiteralPath $omaRoot -Destination $omoRoot -Recurse -Force
-}
-if (-not (Test-Path -LiteralPath $omaRoot)) {
-    throw "oh-my-openagent missing after npm install"
-}
-if (-not (Test-Path -LiteralPath $omoRoot)) {
-    throw "oh-my-opencode missing after npm install"
-}
-
-Optimize-NodeModules (Join-Path $ocHome "node_modules")
-
-# Prove the offline plugin tree is complete (agents + skill markdown + size)
-foreach ($label in @("oh-my-openagent", "oh-my-opencode")) {
-    $pRoot = Join-Path $ocHome "node_modules\$label"
-    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\index.js"))) {
-        throw "$label missing dist\index.js after install/prune"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $pRoot "dist\agents"))) {
-        throw "$label missing dist\agents after install/prune"
-    }
-    $pFiles = @(Get-ChildItem -LiteralPath $pRoot -Recurse -File -ErrorAction SilentlyContinue)
-    $pMd = @(Get-ChildItem -LiteralPath $pRoot -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-    Write-Host "  $label tree: $($pFiles.Count) files, $($pMd.Count) markdown (skills/docs)"
-    if ($pFiles.Count -lt 500) {
-        throw "$label tree too small ($($pFiles.Count) files) — incomplete offline plugin"
-    }
-    if ($pMd.Count -lt 10) {
-        throw "$label has almost no .md files ($($pMd.Count)) — skills were pruned"
-    }
-}
+Write-Host "  Stock OpenCode config (plugin=[], default build agent). No oh-my-openagent."
 
 # Bundle ripgrep so first TUI run does not hang downloading from GitHub
 # OpenCode looks for: %USERPROFILE%\.cache\opencode\bin\rg.exe
@@ -596,7 +657,7 @@ $rgExe = Get-ChildItem -Path $rgExtract -Recurse -Filter "rg.exe" | Select-Objec
 if (-not $rgExe) { throw "rg.exe not found in ripgrep archive" }
 # Into OpenCode home bin (also on PATH after install)
 Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $ocBin "rg.exe") -Force
-# Into vendor for install.bat seed of ~/.cache/opencode/bin
+# Into vendor for install-backends.bat seed of ~/.cache/opencode/bin
 Copy-Item -LiteralPath $rgExe.FullName -Destination (Join-Path $vendorBin "rg.exe") -Force
 Write-Host ("  ripgrep: {0:N1} MB" -f ($rgExe.Length / 1MB))
 
@@ -625,6 +686,10 @@ try {
     & $assertPe -Path $verifyExe.FullName
     if ($LASTEXITCODE -ne 0) { throw "Packed opencode.exe failed AMD64/size check" }
     Write-Host ("  Verified packed opencode.exe ({0:N1} MB)" -f ($verifyExe.Length / 1MB))
+    $packedCodex = Get-ChildItem -Path $verifyDir -Recurse -Filter "codex.exe" -ErrorAction SilentlyContinue
+    if ($packedCodex) {
+        throw "opencode-home.zip must not contain codex.exe (Codex installs to %LOCALAPPDATA%\Programs\OpenAI\Codex)"
+    }
 } finally {
     Remove-Item -LiteralPath $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -632,7 +697,73 @@ try {
 # Do not ship expanded tree (prevents outer-zip path-length bombs)
 Remove-Item -LiteralPath $ocBuildRoot -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host "  vendor\opencode-home.zip ready (install.bat extracts to %USERPROFILE%\.opencode)"
+Write-Host "  vendor\opencode-home.zip ready (CLI fallback for packaging/install_opencode.py)"
+
+# ---------------------------------------------------------------------------
+# 4b) Portable Node win-x64 (node.exe + npm) for install-opencode-online.bat
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 4b: Staging portable Node v$NODE_FULL_VERSION (vendor\node)..."
+
+$nodeZipName = "node-v$NODE_FULL_VERSION-win-x64.zip"
+$nodeZip = Join-Path $dl $nodeZipName
+$nodeUrl = "https://nodejs.org/dist/v$NODE_FULL_VERSION/$nodeZipName"
+Download-File $nodeUrl $nodeZip
+
+$nodeExtract = Join-Path $dl "node-extract"
+if (Test-Path -LiteralPath $nodeExtract) {
+    Remove-Item -LiteralPath $nodeExtract -Recurse -Force
+}
+Expand-ZipSafe $nodeZip $nodeExtract
+
+# Official zip has a single top folder node-v*-win-x64\
+$nodeInner = Get-ChildItem -Path $nodeExtract -Directory | Select-Object -First 1
+if (-not $nodeInner) {
+    throw "Unexpected Node zip layout (no top-level directory)"
+}
+$nodeExeSrc = Join-Path $nodeInner.FullName "node.exe"
+$npmCmdSrc = Join-Path $nodeInner.FullName "npm.cmd"
+if (-not (Test-Path -LiteralPath $nodeExeSrc)) {
+    throw "node.exe missing in Node zip: $nodeExeSrc"
+}
+if (-not (Test-Path -LiteralPath $npmCmdSrc)) {
+    throw "npm.cmd missing in Node zip: $npmCmdSrc"
+}
+
+$vendorNode = Join-Path $vendor "node"
+if (Test-Path -LiteralPath $vendorNode) {
+    Remove-Item -LiteralPath $vendorNode -Recurse -Force
+}
+Ensure-Dir $vendorNode
+# Flatten into vendor\node so install-opencode-online finds vendor\node\node.exe
+$rcNode = Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+    $nodeInner.FullName, $vendorNode, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/nc", "/ns", "/np", "/R:1", "/W:1"
+) -Wait -PassThru -NoNewWindow
+if ($rcNode.ExitCode -ge 8) {
+    throw "robocopy Node tree failed (exit $($rcNode.ExitCode))"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $vendorNode "node.exe"))) {
+    throw "vendor\node\node.exe missing after stage"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $vendorNode "npm.cmd"))) {
+    throw "vendor\node\npm.cmd missing after stage"
+}
+# Sanity: node runs
+$nodeSmoke = & (Join-Path $vendorNode "node.exe") --version 2>&1
+Write-Host "  portable node: $nodeSmoke"
+Write-Host ("  vendor\node staged ({0:N1} MB tree)" -f (
+    (Get-ChildItem -Path $vendorNode -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB
+))
+
+# Online-installer config templates (user-editable; offline install-backends.bat never uses these)
+foreach ($cfgName in @("npm-online.npmrc", "online-sources.env")) {
+    $cfgSrc = Join-Path $root "packaging\windows\$cfgName"
+    if (Test-Path -LiteralPath $cfgSrc) {
+        Copy-Item -LiteralPath $cfgSrc -Destination (Join-Path $vendor $cfgName) -Force
+        Write-Host "  + vendor\$cfgName"
+    }
+}
+
 
 # ---------------------------------------------------------------------------
 # 5) Download Python wheels for 3.10+ (win_amd64)
@@ -656,7 +787,7 @@ if (-not $supportedPy -or $supportedPy.Count -eq 0) {
 $supportedFile = Join-Path $vendor "SUPPORTED_PYTHON.txt"
 $supportedBody = @(
     "# CPython minor versions with offline wheels in this build (win_amd64).",
-    "# install.bat rejects any other version (e.g. too-new 3.x without wheels).",
+    "# install-dashboard.bat rejects any other version (e.g. too-new 3.x without wheels).",
     ""
 ) + $supportedPy
 Set-Content -Path $supportedFile -Value ($supportedBody -join "`n") -Encoding UTF8
@@ -672,11 +803,13 @@ $versionsCopy = @"
 OPENCODE_VERSION=$OPENCODE_VERSION
 OH_MY_OPENCODE_VERSION=$OH_MY_OPENCODE_VERSION
 GLAB_VERSION=$GLAB_VERSION
+CODEX_VERSION=$CODEX_VERSION
+NODE_FULL_VERSION=$NODE_FULL_VERSION
 PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
 SUPPORTED_PYTHON=$($supportedPy -join ',')
 BUILT_AT=$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssK")
-NOTE=Run install.bat from this folder. Do not manually unpack vendor files.
+NOTE=Run install-dashboard.bat (app + .venv), install-dashboard-system-python.bat (app, no venv), install-backends.bat (OpenCode via opencoderman + Codex), install-codex.bat (Codex only), or install-opencode-online.bat (OpenCode via opencoderman, needs network + Python).
 "@
 Set-Content -Path (Join-Path $vendor "VERSIONS.txt") -Value $versionsCopy -Encoding UTF8
 Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.env") -Force
@@ -685,24 +818,29 @@ Copy-Item -LiteralPath $versionsFile -Destination (Join-Path $vendor "versions.e
 $howTo = @"
 JIRA Virtual Developer — Windows offline package
 ================================================
-1. Extract the GitHub Actions download ONCE (you should see install.bat here).
+1. Extract the GitHub Actions download ONCE (you should see install-dashboard.bat here).
 2. Do NOT manually unpack vendor\opencode-home.zip.
 3. Install a supported Python (vendor\SUPPORTED_PYTHON.txt), e.g. 3.12 x64.
-4. Run install.bat
-   - Creates .venv and installs Python deps from vendor\python-wheels
-   - Installs OpenCode under %USERPROFILE%\.opencode
-   - Ships prebuilt ops dashboard SPA in web\dist (no Node needed at runtime)
+4. Install:
+      install-dashboard.bat                 — Python + ops dashboard (.venv)
+      install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
+      install-backends.bat                  — OpenCode (opencoderman) + Codex
+      install-codex.bat                     — Codex CLI only
+      install-opencode-online.bat — ONLINE OpenCode (opencoderman; needs Python + network)
 5. Edit .env with Jira / GitLab settings
 6. Start:
       start-backend.bat   → API (+ SPA) on http://0.0.0.0:8080/  (open 127.0.0.1:8080)
       start-frontend.bat  → UI on http://0.0.0.0:5173/         (proxies /api to backend)
       start.bat           → both (backend then frontend)
-7. OpenCode TUI (optional):
+7. OpenCode TUI (after install-backends.bat or install-opencode-online.bat):
       start-opencode.bat
-   NEVER run "opencode" from C:\Users\<you> — black-screen hang.
+      start-opencode-serve.bat
+
 8. Verify:  where opencode
 
 Supported Python (this build): $($supportedPy -join ', ')
+OpenCode pack: opencoderman/ (install.py + agents + skills)
+OpenCoderman pin: opencoderman.pin (exact submodule commit for this build)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 
@@ -722,7 +860,7 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 
 # Zip the payload directory WITHOUT an extra nested folder name:
-# contents of zip root = install.bat, vendor\, src\, ...
+# contents of zip root = install-dashboard.bat, install-backends.bat, install-codex.bat, vendor\, src\, ...
 $tar = Get-Command tar -ErrorAction SilentlyContinue
 if ($tar) {
     Push-Location $payload
@@ -754,7 +892,7 @@ Write-Host ("Folder : {0}" -f $payload)
 Write-Host ("Folder size ~ {0:N1} MB" -f ($payloadSize / 1MB))
 Write-Host ("Zip    : {0} ({1:N1} MB) — for Releases only" -f $zipPath, ($zipSize / 1MB))
 Write-Host ""
-Write-Host "CI uploads the FOLDER (one extract = install.bat at top level)."
+Write-Host "CI uploads the FOLDER (one extract = install-dashboard.bat at top level)."
 Write-Host "Supported Python: $($supportedPy -join ', ')"
 
 if ($env:GITHUB_OUTPUT) {

@@ -285,12 +285,10 @@ def test_build_tasks_session_backfill_and_live(tmp_path):
 def test_apply_settings_all_fields(monkeypatch):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "a")
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
     view = apply_settings_update(
         SettingsUpdate(
-            trigger_labels="ai-assist,bot",
             trigger_on_assignment=True,
             max_concurrent_jobs=3,
             default_model="",  # empty ignored
@@ -328,52 +326,19 @@ def test_build_models_config_label():
     assert r.error == "warn"
 
 
-def test_legacy_jobs_unknown_status(tmp_path, monkeypatch):
+def test_legacy_jobs_helper_is_noop(tmp_path, monkeypatch):
+    """legacy_* synthesis is disabled — always empty regardless of session files."""
     sessions = tmp_path / "sessions"
     sessions.mkdir()
-    log = sessions / "LEG-1_20260115_090000_0.log"
+    log = sessions / "LEG-1_20260115_090000.log"
     log.write_text("output\n", encoding="utf-8")
-    (sessions / "LEG-1_20260115_090000_0.log.session_id").write_text("ses_1")
-    (sessions / "LEG-1_20260115_090000_0.prompt.txt").write_text(
-        "# Direct\n\n## Task\nfrom prompt\n\n# end\n"
-    )
-    # unparseable name skipped
-    (sessions / "junk.log").write_text("x")
-    # covered path skipped
-    covered = {str(log.resolve()), log.name}
-
     monkeypatch.setattr("src.dashboard.service._sessions_dir", lambda: sessions)
     rows = _legacy_jobs_from_sessions(
         issue_key="LEG-1",
-        covered_paths=covered,
         summaries={"LEG-1": "sum"},
         limit=10,
     )
-    # covered so empty
     assert rows == []
-
-    rows = _legacy_jobs_from_sessions(
-        issue_key="LEG-1",
-        covered_paths=set(),
-        summaries={"LEG-1": "sum"},
-        limit=10,
-        suppress_logs_after={"LEG-1": "2026-01-01T00:00:00"},
-    )
-    # started 20260115 >= suppress cutoff -> suppressed
-    assert rows == []
-
-    rows = _legacy_jobs_from_sessions(
-        issue_key="LEG-1",
-        covered_paths=set(),
-        summaries={"LEG-1": "sum"},
-        limit=10,
-        suppress_logs_after={"LEG-1": "2026-12-31T00:00:00"},
-    )
-    # started before cutoff — included
-    assert len(rows) == 1
-    assert rows[0]["status"] == "unknown"
-    assert rows[0]["job_id"].startswith("legacy_")
-    assert rows[0]["opencode_session_id"] == "ses_1"
 
 
 def test_build_jobs_suppress_running_and_summary(tmp_path, monkeypatch):
@@ -461,7 +426,7 @@ def test_build_task_detail_full(tmp_path, isolate_jira_agent_artifacts):
     assert detail is not None
     assert detail["summary"] == "live sum"
     assert detail["description"] == "live desc"
-    assert detail["can_start"] is False  # start only via Mode: build + To Do
+    assert detail["can_start"] is False  # start only via plan_execute + In Progress
     assert detail["can_cancel"] is True
     assert "ses_file" in detail["opencode_session_ids"] or "ses_db" in detail[
         "opencode_session_ids"
@@ -487,19 +452,10 @@ def test_build_task_detail_without_state_jira_and_poll(tmp_path):
         ],
         interval_seconds=10,
     )
-    with patch("src.dashboard.service.poll_snapshot_store", store):
-        with patch(
-            "src.dashboard.service._fetch_live_jira_fields",
-            return_value={
-                "summary": "jira sum",
-                "description": "jira desc",
-                "jira_status": "Open",
-            },
-        ):
-            d = _build_task_detail_without_state("poll-7", processor=None)
+    with patch("src.dashboard.snapshot.poll_snapshot_store", store):
+        d = _build_task_detail_without_state("poll-7", processor=None)
     assert d["issue_key"] == "POLL-7"
-    assert d["summary"] == "jira sum"
-    assert d["description"] == "jira desc"
+    assert d["summary"] == "poll sum"
     assert d["can_start"] is False
 
 
@@ -562,6 +518,13 @@ def test_api_health_meta_jobs_detail(tmp_path):
         r = client.get(f"/api/jobs/{j['job_id']}")
         assert r.status_code == 200
         assert r.json()["job"]["job_id"] == j["job_id"]
+        arts = client.get(f"/api/jobs/{j['job_id']}/artifacts")
+        assert arts.status_code == 200
+        assert arts.json()["job_id"] == j["job_id"]
+        chat = client.get(f"/api/jobs/{j['job_id']}/chat")
+        assert chat.status_code == 200
+        assert chat.json()["job_id"] == j["job_id"]
+        assert "messages" in chat.json()
         assert client.get("/api/jobs/missing-id").status_code == 404
 
 
@@ -592,7 +555,7 @@ def test_api_cancel_start_async(tmp_path):
     r2 = client.post("/api/tasks/CS-1/start")
     assert r2.status_code == 410
     proc.start_plan_execution.assert_not_awaited()
-    assert "Mode: build" in (r2.json().get("detail") or "")
+    assert "plan_execute" in (r2.json().get("detail") or "")
 
     proc.cancel_job = AsyncMock(return_value={"ok": False, "error": "nope"})
     assert client.post("/api/tasks/CS-1/cancel").status_code == 400
@@ -625,6 +588,15 @@ def test_api_settings_patch_updates_poller_and_semaphore(tmp_path, monkeypatch):
     assert poller.interval == 99
     assert poller.board_id == "42"
     proc.resize_job_semaphore.assert_called_with(4)
+    from src.dashboard.snapshot import poll_snapshot_store
+
+    assert poll_snapshot_store.snapshot().get("board_id") == "42"
+
+    bad = client.patch("/api/settings", json={"jira_board_id": "`"})
+    assert bad.status_code == 422
+    wrapped = client.patch("/api/settings", json={"jira_board_id": "`1`"})
+    assert wrapped.status_code == 200
+    assert wrapped.json()["jira_board_id"] == "1"
 
     # poller attribute errors swallowed
     type(poller).interval = property(
@@ -709,8 +681,11 @@ def test_websocket_subscribe(tmp_path):
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:
         data = ws.receive_json()
-        assert data.get("type") == "dashboard"
-        assert "tasks" in data
+        assert data.get("type") == "live"
+        assert "poll" in data
+        assert "tasks" not in data
+        assert "jobs" not in data
+        assert "live_issue_keys" in data
         # send a client ping
         ws.send_text("ping")
         # may get another payload
@@ -748,7 +723,6 @@ def test_poll_status_local_status_from_state(tmp_path):
                 "jira_status": "To Do",
                 "labels": [],
                 "assignee": "bot",
-                "matched_label": False,
                 "matched_assignee": True,
                 "is_todo": True,
                 "will_process": False,

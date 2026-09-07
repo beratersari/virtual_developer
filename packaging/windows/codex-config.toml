@@ -1,0 +1,16 @@
+# Dummy Codex CLI config seeded by Virtual Developer install-codex.bat.
+# Edit this file for your environment. Auth is NOT stored here —
+# run `codex login` (writes auth.json next to this file).
+#
+# Provider / model stay in %USERPROFILE%\.codex, not in the product .env.
+
+model = "gpt-5"
+approval_policy = "untrusted"
+sandbox_mode = "workspace-write"
+
+# Example custom provider (uncomment and fill in):
+# [model_providers.example]
+# name = "Example"
+# base_url = "https://api.example.com/v1"
+# wire_api = "chat"
+# env_key = "EXAMPLE_TOKEN"

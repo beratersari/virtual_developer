@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -253,14 +254,15 @@ def test_run_agent_registers_for_cancel():
     assert "self._running_tasks[task.task_id] = process" in src
 
 
-def test_agent_env_strips_secrets(monkeypatch):
+def test_agent_env_passes_all_process_vars(monkeypatch):
     monkeypatch.setenv("JIRA_API_TOKEN", "secret-jira")
     monkeypatch.setenv("GITLAB_PAT", "secret-pat")
     monkeypatch.setenv("PATH", "/usr/bin")
     env = _agent_subprocess_env()
-    assert "JIRA_API_TOKEN" not in env
-    assert "GITLAB_PAT" not in env
-    assert env.get("PATH") == "/usr/bin"
+    assert env.get("JIRA_API_TOKEN") == "secret-jira"
+    assert env.get("GITLAB_PAT") == "secret-pat"
+    path = env.get("PATH") or ""
+    assert path == "/usr/bin" or path.endswith(os.pathsep + "/usr/bin")
 
 
 def test_router_implementation_beats_oracle():
@@ -318,7 +320,7 @@ async def test_stuck_without_started_at_errors(state_manager, reporter, fake_jir
     assert any("stuck" in c["body"].lower() or "timestamp" in c["body"].lower() for c in fake_jira.comments)
 
 
-def test_cleanup_always_deletes(tmp_path, monkeypatch):
+def test_cleanup_keeps_clone(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 
     monkeypatch.chdir(tmp_path)
@@ -328,7 +330,5 @@ def test_cleanup_always_deletes(tmp_path, monkeypatch):
         gm = GitManager(issue_key="CL-1")
     gm.temp_dir = d
     gm.remote_enabled = True
-    with patch("src.git_manager.settings") as s:
-        s.temp_cleanup_policy = "always"
-        assert gm.cleanup() is True
-    assert not d.exists()
+    assert gm.cleanup() is True
+    assert d.exists()

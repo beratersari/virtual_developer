@@ -1,21 +1,21 @@
-# JIRA Virtual Developer
+# Yaver
 
-**Version:** see root [`VERSION`](VERSION) (currently `0.2.0`)
+**Version:** see root [`VERSION`](VERSION) (currently `0.3.0`)
 
-A Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
+**Yaver** (*the aide*) is a Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
 
 ---
 
 ## What it does
 
-1. **Polls** a Jira board for To Do issues that match trigger labels and/or bot assignee  
-2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`)  
+1. **Discovers** work via **poll** (board To Do + bot assignee) or **webhook** (assignment to the bot, or a comment that mentions the bot). Mode is set in Settings / `JIRA_INTAKE_MODE`.  
+2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`; Mode defaults to build)  
 3. **Runs** OpenCode agents (Prometheus planning, Atlas build, Oracle consult) in temp clones  
 4. **Reports** plans, progress, errors, and completion as Jira comments  
 5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
 6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
 
-There is **no HTTP webhook intake**. Discovery is board polling only. Comment-driven bot commands are not a primary path (legacy plan-start labels still exist; see [Workflows](#workflows)).
+Webhook intake (Jira Server 9.4 + Cloud): register Issue created, Issue updated, and Comment created. Only **assign-to-bot** (not unassign) and **mention-of-bot** start a job. Bot replies are ignored so comments cannot loop. Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`.
 
 ---
 
@@ -27,8 +27,8 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 └───────────────────────────────────────┬───────────────────────────────────────┘
                                         │
                                         ▼
-┌──────────────────────── JIRA Virtual Developer (one process) ────────────────┐
-│  Board Poller  →  Job Processor  →  Agent Runner (opencode run --dir …)       │
+┌──────────────────────── Yaver (one process) ─────────────────────────────────┐
+│  Board Poller  →  Job Processor  →  Agent Runner (opencode serve + --dir)     │
 │        │                  │                                                   │
 │        │                  ├─ temp clone: feature/{ISSUE} from issue {params}  │
 │        │                  ├─ Jira comments (progress / plan / error / done)   │
@@ -42,69 +42,96 @@ There is **no HTTP webhook intake**. Discovery is board polling only. Comment-dr
 |-----------|------|
 | **Board poller** | Sole intake. Reads board/sprint issues; writes a poll snapshot for the UI |
 | **Job processor** | State machine, concurrency limits, plan vs build routing, fail + Jira notify |
-| **Agent runner** | Spawns OpenCode with prompt kit sections; streams session logs |
+| **Agent runner** | Spawns OpenCode with plan/build mode prompts; streams session logs |
 | **Jira client** | REST API v2 + Agile; Bearer (on-prem PAT) or Basic (Cloud email+token) |
 | **Git manager** | Clone, branch, commit identity, push, MR via `glab` / GitLab API |
-| **State store** | Per-issue JSON under `.jira-agent/state/`; job records for the dashboard |
+| **State store** | Per-issue JSON under `YAVER_DATA_DIR/state/`; job records for the dashboard |
 | **Ops dashboard** | REST + WebSocket + static SPA from `web/dist` |
 
-### Agents (Oh My OpenAgent)
+### Agents (stock OpenCode)
 
-| Agent | Role | When |
-|-------|------|------|
-| **Prometheus** | Planning | `Mode: plan` |
-| **Atlas** | Orchestrated implementation | `Mode: build` |
-| **Oracle** | Architecture Q&A | Consultative wording, not implementation |
-| **Sisyphus** | Direct implementation helper | CLI `test-issue` / legacy paths; production board work uses **Mode** |
+| Setting | Role |
+|---------|------|
+| **`DEFAULT_AGENT`** (`derman-build`) | OpenCoderman **derman-build** for `Mode: build` (not stock `build`) |
+| **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
+| **Plan vs build user text** | Short job facts in `agent/PLAN_PROMPT.md` / `agent/BUILD_PROMPT.md`; rules live on the agents |
+| **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
 
 ## Requirements
 
-- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels)  
-- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) with **oh-my-openagent** plugin  
+- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels), **or** the standalone `yaver` / `yaver.exe` from CI (see below)  
+- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) — stock **build** / **plan** agents (no oh-my-openagent)  
 - **Git**  
 - **glab** (GitLab CLI) when push/MR is enabled  
 - Jira access (board browse, comment, optional transitions)  
 - GitLab PAT with clone/push/MR rights when using remote workspaces  
 
+### Standalone executables (no host Python)
+
+CI workflow **Standalone Executables** (`.github/workflows/executables.yml`) freezes the daemon + CLI with PyInstaller:
+
+- Windows x64 → `yaver.exe` (onedir folder + zip)
+- Linux x64 → `yaver` (onedir folder + zip / tar.gz)
+
+Config: [`packaging/pyinstaller/`](packaging/pyinstaller/README.md) (`versions.env`, `yaver.spec`). Extract the artifact, copy `.env.example` → `.env`, run `yaver start`. OpenCode / Codex are **not** inside the binary — install those separately. This does **not** replace the full offline zips (wheels + OpenCode vendor).  
+
 ---
 
 ## Quick start
 
-### Linux / macOS
+### Linux
+
+Same split as Windows: dashboard (Python) vs agent CLIs (OpenCode / Codex).
+See [packaging/linux/README.md](packaging/linux/README.md).
+
+Offline zip (same idea as Windows): download the **Linux Distribution**
+artifact, extract so `vendor/` sits next to the install scripts, then:
+
+```bash
+./install-dashboard.sh    # .venv from vendor/python-wheels
+./install-backends.sh     # OpenCode via opencoderman (vendor CLI / opencode-home.zip)
+./install-codex.sh        # Codex from vendor/codex-*.tar.gz
+```
+
+From a git checkout (needs network unless you already have `vendor/`):
 
 ```bash
 # From repo root
-cp .env.example .env
-# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID, GITLAB_* as needed
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Optional installer (deps + OpenCode + glab heuristics)
+git submodule update --init --recursive   # opencoderman
+./install-dashboard.sh    # .venv, requirements, .env, cli.py init
+./install-backends.sh     # OpenCode via opencoderman (+ Codex if no args)
+# Or one shot:
 ./install.sh
 
-python cli.py init
-python cli.py start
+# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID
+./start-backend.sh        # API + SPA on :8080 (foreground)
+# ./start.sh              # backend + frontend in the background
+# ./start-frontend.sh     # SPA proxy on :5173 (does not kill the daemon)
+# ./stop.sh
 ```
 
-Ops dashboard (default): **http://127.0.0.1:8080**  
-Stop the daemon with **Ctrl+C**.
+Ops dashboard: **http://127.0.0.1:8080**  
+OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`).
 
 ### Windows (offline zip)
 
 CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.md](packaging/windows/README.md)).
 
 ```cmd
-:: Extract zip so install.bat sits next to vendor\ and src\
-install.bat
+:: Extract zip so the install-*.bat scripts sit next to vendor\ and src\
+install-dashboard.bat
+install-backends.bat
+install-codex.bat
+:: Or, use the Python already on PATH (does not create .venv):
+install-dashboard-system-python.bat
 :: Edit .env, then:
-.venv\Scripts\python.exe cli.py start
+start.bat
+::   or: start-backend.bat / start-frontend.bat
 ```
 
-Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
+Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder (after `install-backends.bat`) — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
 
 ### Docker
 
@@ -142,16 +169,19 @@ All of the following roughly apply **for first intake**:
 
 - Issue is on the configured **board**  
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
-- Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and/or** assignee name looks like the bot (when `TRIGGER_ON_ASSIGNMENT=true`)  
+- Assignee name matches `TRIGGER_ASSIGNEE_NAMES`  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-**Trigger labels only mean “allowed to pick up work.”** They do **not** mean the bot
-re-runs the same ticket on every poll after work has already finished (see
-[Plans never auto-start](#plans-never-auto-start-intentional) below).
+**To Do + bot assignee = rework (intentional).** A ticket in a To Do-like
+column assigned to the bot is eligible, including after a previous
+`completed` / `error` / `cancelled` run. The poller **re-queues** that work
+(reset and run again). After accept, the bot moves the board to **In Progress**
+so the next poll does not start another job until the issue is To Do again.
 
-Terminal issues (`error` / `cancelled` / `completed`) reprocess only when moved
-back to **To Do** (or another rework signal such as editing the description after
-an ERROR). A successful **plan** ends in `plan_ready`, which is different — see below.
+The exception is a successful **plan** (`plan_ready`): **`Mode: plan` never
+implements by itself**. Rename label `plan_ready` → `plan_execute` while the
+ticket is In Progress (or open a new build issue) — see
+[After a plan: plan_execute](#after-a-plan-plan_execute).
 
 ---
 
@@ -160,55 +190,57 @@ an ERROR). A successful **plan** ends in `plan_ready`, which is different — se
 ### Plan (`Mode: plan`)
 
 1. Poller accepts issue → state `planning`  
-2. Prometheus runs in a temp clone  
-3. Plan posted to Jira (comment + description) → local state **`plan_ready`**, label **`ai-plan-ready`**  
-4. Bot **stops**. The ticket may still show **To Do** on the board with `bot` — that is normal.  
+2. Planner writes `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not in the clone)  
+3. Plan posted to Jira (comment + description) → local state **`plan_ready`**, label **`plan_ready`**  
+4. Bot moves the board to **In Progress** and **stops**.  
 
-### Plans never auto-start (intentional)
+### After a plan: `plan_execute`
 
-After planning finishes, the issue is **waiting for an explicit implement signal**.
-Sitting on **To Do** with only `bot` / `ai-assist` will **not** start coding.
+`Mode: plan` never starts implementation by itself. Same-ticket implement is
+label-driven. Direct `Mode: build` issues are unchanged.
 
 ```text
-To Do + bot  →  Mode: plan runs  →  plan_ready + ai-plan-ready
-                                         │
-                    still To Do + bot alone │  no further work
-                                         ▼
-                         waiting (not stuck)
-                                         │
+To Do + bot assignee  →  Mode: plan  →  plan_ready + label plan_ready
+                                              │
+                         plan_ready still     │  wait (never implements)
+                                              ▼
           ┌──────────────────────────────┼──────────────────────────────┐
           ▼                              ▼                              ▼
-  Add label                    Open a NEW issue              (Do not rely on
-  ai-start-work                with Mode: build              Mode: build alone
-  or ai-execute                (same {params})               on the plan ticket)
-  while still To Do
-          │                              │
-          └──────────►  build / implement  ◄──────────────────┘
+  Rename label                    Remove plan_ready,              Open a NEW issue
+  plan_ready →                    add plan_refactor,              with Mode: build
+  plan_execute                    comment @bot
+  (In Progress)                   (To Do or In Progress)
+          │                              │                              │
+          │                     same plan session                       │
+          ▼                              ▼                              ▼
+   build session              republish plan +                 independent build
+   implement the plan         restore plan_ready
+   {ISSUE_KEY}.md
+   (label → plan_executed)
 ```
 
 | What you see | What it means |
 |--------------|----------------|
-| To Do + `bot` + local `plan_ready` | Plan done; waiting for start signal |
-| Label `ai-plan-ready` | Bot finished planning (not a start label) |
-| Labels `ai-start-work` or `ai-execute` on To Do | **Start implementation** on that same ticket |
-| New ticket with `Mode: build` + trigger label | Independent build run (recommended for clean history) |
-| Daemon log `Skip cold-start requeue … plan_ready` | Correct — daemon restart will not re-plan or auto-build |
+| `plan_ready` label | Plan done; waiting — will **not** build |
+| In Progress + `plan_execute` | **Start implementation** on that same ticket (even if Mode is still plan) |
+| `plan_refactor` (no `plan_ready`) + comment tagging the bot | Revise the plan on the plan session |
+| New ticket with `Mode: build` + bot assignee | Build run; implements the existing plan for that repo + source + target when one exists |
 
 **How to implement after a plan**
 
-1. **Same ticket:** while status is **To Do**, add label `ai-start-work` or `ai-execute`  
-   (next poll starts the build path), **or**  
-2. **New ticket:** create an issue with the same `{params}` repo/branches and
-   `Mode: build`, plus a trigger label (`bot` / `ai-assist`).
+1. **Same ticket:** rename `plan_ready` → `plan_execute` while **In Progress**, **or**  
+2. **New ticket:** same repo/branches and `Mode: build`, assigned to the bot.
+   The build prompt still implements the existing plan file (not only the
+   new ticket's Jira description).
 
-Changing the plan ticket to `Mode: build` **alone** does **not** auto-start
-(product rule so plans are reviewed before code). Dashboard **Start** is also
-disabled for the same reason.
+Plan and build use **separate** OpenCode sessions for the same repo + source + target.
+
+Dashboard **Start** is disabled.
 
 ### Build (`Mode: build`)
 
 1. Poller accepts issue → prepare git workspace from `{params}`  
-2. Atlas (orchestrator) implements against the plan / description  
+2. Atlas (orchestrator) implements the plan when `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (or the sibling plan for the same repo + branches) exists; otherwise the Jira description
 3. On success: push branch, open MR, comment completion → `completed`  
 4. On failure: state `error` **and** Jira error comment (`_fail_issue` / `post_error`)  
 
@@ -225,10 +257,10 @@ pending → planning | executing → (plan_ready) → completed | error | cancel
 | Status | Meaning for operators |
 |--------|------------------------|
 | `planning` / `executing` | Agent running — poller will not restart from board noise |
-| `plan_ready` | Plan finished; **not** an error. Needs start label or new `Mode: build` issue |
-| `completed` | Done (build delivered or soft no-op completion) |
-| `error` | Failed; fix description / params, then return to To Do (or edit text) to requeue |
-| `cancelled` | Operator cancel; not auto-retried while still To Do |
+| `plan_ready` | Plan finished; **not** an error. Set label `plan_execute` (In Progress) or open a new `Mode: build` issue |
+| `completed` | Done (build delivered or soft no-op completion). Move back to **To Do** (with trigger) to rework. |
+| `error` | Failed; fix description / params, then return to **To Do** (or edit text) to rework. |
+| `cancelled` | Operator cancel. **To Do + trigger is still rework** — move it back to To Do (or leave it there) to run again. |
 
 Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned disk `planning`/`executing` states to `error`.
 
@@ -262,7 +294,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/dashboard` | Full envelope |
 | WS | `/ws` | Live pushes |
 
-Writable runtime settings (examples): board id, poll interval, trigger labels, `trigger_on_assignment`, `max_concurrent_jobs`, default model.  
+Writable runtime settings (examples): board id, poll interval, `trigger_on_assignment`, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
 `DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
 
 ### Building the UI
@@ -284,14 +316,14 @@ Copy [`.env.example`](.env.example) → `.env`. Secrets must never be committed.
 |----------|-------------|
 | `JIRA_HOST` | Base URL (no trailing slash preferred) |
 | `JIRA_API_TOKEN` | Cloud API token **or** on-prem personal access token |
-| `JIRA_EMAIL` | **Cloud only** — with token uses HTTP Basic. Leave empty for on-prem Bearer |
+| `JIRA_EMAIL` | **Cloud/dev only** — with token uses HTTP Basic. Leave empty for Bearer PAT (prod) |
 | `JIRA_PROJECTS` | Comma-separated project keys (reference / allow-list style) |
 | `JIRA_BOARD_ID` | Agile board id to poll (**required** for discovery) |
 
 Auth summary:
 
-- **On-prem Server/DC:** `JIRA_HOST` + `JIRA_API_TOKEN` → `Authorization: Bearer …`  
-- **Jira Cloud:** `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` → Basic email:token  
+- **Prod / on-prem:** `JIRA_HOST` + `JIRA_API_TOKEN` → `Authorization: Bearer …`  
+- **Cloud (dev):** `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` → Basic email:token  
 
 TLS verify is currently off for typical on-prem certs; do not “fix” that without a deliberate secure path.
 
@@ -311,7 +343,7 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 
 | Variable | Default |
 |----------|---------|
-| `TRIGGER_LABELS` | `ai-assist,bot` |
+| `TRIGGER_ASSIGNEE_NAMES` | `jira ai bot,jira-ai-bot,jiraai,devbot` |
 | `TRIGGER_ON_ASSIGNMENT` | `true` |
 | `TRIGGER_MENTIONS` | `@DevBot,@AI` |
 
@@ -330,17 +362,15 @@ Repo URL and branches always come from the issue `{params}` block.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENCODE_CLI` | `opencode` | CLI binary/command |
-| `DEFAULT_MODEL` | (see `.env.example`) | Passed to `opencode run --model` |
-| `DEFAULT_AGENT` | `sisyphus` | Defaults for agent names |
-| `PLANNING_AGENT` | `prometheus` | |
-| `ORCHESTRATOR_AGENT` | `atlas` | |
-| `EXECUTION_CATEGORY` | `deep` | Category for deep work |
-| `PROMPT_KIT_FILE` | `agent/AGENT_PROMPT.md` | Unified prompt kit (`§policy.commit`, `§role.*`) |
-| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
+| `DEFAULT_MODEL` | (see `.env.example`) | Job model for OpenCode and Codex (provider/auth stay in each tool's config) |
+| `DEFAULT_AGENT` | `derman-build` | OpenCoderman derman-build for build jobs |
+| `DEFAULT_PLAN_AGENT` | `derman-plan` | OpenCoderman derman-plan for plan jobs |
+| `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
+| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Legacy clone-relative name only; real plans are `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
 | `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
-| `TEMP_DIR_BASE` | `.temp` | Temp clone root |
-| `TEMP_CLEANUP_POLICY` | `age` / `never` | Cleanup policy (see `.env.example`) |
+| `TEMP_DIR_BASE` | `C:\vd\t` (Windows) / `/vd/t` or `~/vd/t` (Linux) | Temp clone root. Outside the install folder so a zip reinstall keeps workspaces. Keep it short on Windows (MAX_PATH). Clones are not auto-deleted; use dashboard Storage. |
+| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `/vd/yaver` or `~/vd/yaver` (Linux) | Sessions, jobs, OpenCode binds, runtime settings, plans. Survives reinstall. |
 
 List or set models:
 
@@ -392,7 +422,9 @@ virtual_developer/
 ├── VERSION                # SemVer product version
 ├── .env.example           # Config template
 ├── requirements.txt
-├── agent/AGENT_PROMPT.md  # Prompt kit sections
+├── agent/PLAN_PROMPT.md   # Short plan-job user stub
+├── agent/BUILD_PROMPT.md  # Short implement-job user stub
+├── opencoderman/          # Submodule: derman-build + derman-plan agents + skills
 ├── src/
 │   ├── daemon.py          # Process entry: poller + dashboard + monitor
 │   ├── config.py
@@ -442,20 +474,26 @@ feat(dashboard): show poll countdown
 fix(poller): do not requeue in-flight issues
 ```
 
-Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/AGENT_PROMPT.md` / `commitMsgFormat.md`.
+Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/BUILD_PROMPT.md` / `commitMsgFormat.md`.
 
 ---
 
 ## State on disk
 
+Durable paths (not next to the install / git checkout):
+
 ```text
-.jira-agent/
-  state/          # per-issue JSON (status, tokens, plan path, metadata)
-  sessions/       # agent stdout/stderr session logs (not auto-deleted by temp cleanup)
-.temp/            # per-issue git clones (cleanup policy from env)
-.sisyphus/plans/  # plan markdown when using local plans dir
-logs/             # optional log file (LOG_FILE)
+YAVER_DATA_DIR          # C:\vd\yaver  |  /mnt/c/vd/yaver  |  /vd/yaver or ~/vd/yaver
+  state/                # per-issue JSON (status, plan path, metadata)
+  sessions/             # agent session logs (not auto-deleted)
+  jobs/                 # dashboard job records + per-job system logs
+  logs/                 # durable daemon.log
+  plans/{ISSUE_KEY}.md  # plan files (not inside the clone)
+TEMP_DIR_BASE           # C:\vd\t  |  /mnt/c/vd/t  |  /vd/t or ~/vd/t
+  {remote12}_{hash12}/  # per-issue git clones (kept; delete from Storage)
 ```
+
+Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 
 ---
 
@@ -463,13 +501,13 @@ logs/             # optional log file (LOG_FILE)
 
 | Symptom | What to check |
 |---------|----------------|
-| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
-| Ticket on To Do with `bot` but bot does nothing | Local status may be **`plan_ready`** (plan finished). `bot` alone does not re-run or auto-build — add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). |
-| 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL`, host URL, project permissions |
-| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `.jira-agent/sessions/` |
+| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`TRIGGER_ASSIGNEE_NAMES`), `python cli.py process KEY` |
+| Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, rename label `plan_ready` → `plan_execute` while In Progress (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
+| 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
+| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
 | Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
-| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install.bat`; see `packaging/windows/` diag notes |
+| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install-backends.bat`; see `packaging/windows/` diag notes |
 | Stuck `planning`/`executing` | Restart daemon (orphan recovery) or cancel from dashboard; check watchdog logs |
 
 ```bash
@@ -495,7 +533,10 @@ python cli.py show PROJ-123
 | Doc | Purpose |
 |-----|---------|
 | [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
-| [agent/AGENT_PROMPT.md](agent/AGENT_PROMPT.md) | Unified agent prompt kit for target clones |
+| [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | derman-plan — unattended planner |
+| [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | derman-build — unattended implementer |
+| [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Short plan-job user stub |
+| [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Short implement-job user stub |
 | [packaging/windows/README.md](packaging/windows/README.md) | Offline zip design and versioning |
 | [`.env.example`](.env.example) | Full environment template with comments |
 | [web/README.md](web/README.md) | Frontend notes (if present) |

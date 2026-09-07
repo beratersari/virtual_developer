@@ -23,8 +23,34 @@ def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
 
 def test_mark_jira_in_progress_calls_client(processor, fake_jira):
     fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+    fake_jira.assign_issue = MagicMock(return_value=True)
     processor._mark_jira_in_progress("KAN-1")
     fake_jira.transition_to_in_progress.assert_called_once_with("KAN-1")
+    fake_jira.assign_issue.assert_called_once()
+    assert fake_jira.assign_issue.call_args.args[0] == "KAN-1"
+    assert fake_jira.assign_issue.call_args.args[1] == "devbot"
+
+
+def test_mark_jira_in_progress_skips_gitlab_trigger(processor, fake_jira, state_manager):
+    fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+    fake_jira.assign_issue = MagicMock(return_value=True)
+    state_manager.create_state("KAN-12", "mr comment", "please fix")
+    state_manager.update_state(
+        "KAN-12",
+        metadata={"source": "gitlab", "workflow_type": "gitlab_mr"},
+    )
+    assert processor._mark_jira_in_progress("KAN-12") is False
+    assert processor._assign_jira_to_pat_user("KAN-12") is False
+    fake_jira.transition_to_in_progress.assert_not_called()
+    fake_jira.assign_issue.assert_not_called()
+
+
+def test_mark_jira_in_progress_skips_synthetic_gitlab_key(processor, fake_jira):
+    fake_jira.transition_to_in_progress = MagicMock(return_value=True)
+    fake_jira.assign_issue = MagicMock(return_value=True)
+    assert processor._mark_jira_in_progress("GL-ACME-DEMO-4") is False
+    fake_jira.transition_to_in_progress.assert_not_called()
+    fake_jira.assign_issue.assert_not_called()
 
 
 def test_mark_jira_in_progress_soft_fails(processor, fake_jira):
@@ -43,7 +69,7 @@ def test_fail_issue_moves_jira_in_progress(processor, state_manager, fake_jira):
 
     processor._fail_issue(
         "KAN-FAIL",
-        "*Virtual Developer* could not start: the issue description format is incomplete.",
+        "*Yaver* could not start: the issue description format is incomplete.",
         suggestion="Fix {params} and move back to To Do.",
     )
 
@@ -106,11 +132,11 @@ async def test_template_error_moves_jira_in_progress(
         processor,
         "_init_git_manager",
         side_effect=IssueGitConfigError(
-            "*Virtual Developer* could not start: the issue description format "
+            "*Yaver* could not start: the issue description format "
             "is incomplete.\n\n*Missing / invalid:* Mode."
         ),
     ):
-        git = processor._prepare_git_workspace(state)
+        git = processor._prepare_git_workspace_blocking(state)
 
     assert git is None
     assert state_manager.get_state("KAN-TMP").status == TaskStatus.ERROR

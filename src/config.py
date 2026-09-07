@@ -2,13 +2,191 @@
 
 import json
 import os
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.logger import logger
+
+
+def bootstrap_dotenv_into_environ(
+    *paths: Path,
+    override: bool = False,
+) -> int:
+    """Load KEY=VAL pairs from .env file(s) into ``os.environ``.
+
+    Pydantic Settings only maps *declared* fields (``extra=ignore``), so project
+    build tokens (NPM_TOKEN, AWS_*, DOCKER_*, NuGet, etc.) written in ``.env``
+    never reached agent children. This bootstrap copies every ``.env`` key into
+    the process so ``_agent_subprocess_env`` can inherit the full host env.
+
+    Existing process environment wins unless ``override=True``.
+    Returns the number of keys newly applied (approx).
+    """
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return 0
+
+    candidates: List[Path] = []
+    if paths:
+        candidates.extend(Path(p) for p in paths if p)
+    else:
+        # CWD first (how operators run the daemon), then the install folder
+        # (repo root, or the directory next to a frozen yaver.exe), then the
+        # package root next to src/. Frozen resource trees are read-only.
+        candidates.append(Path.cwd() / ".env")
+        candidates.append(Path.cwd() / ".env.agent")
+        try:
+            from src.install_paths import install_root
+
+            root = install_root()
+            candidates.append(root / ".env")
+            candidates.append(root / ".env.agent")
+        except Exception:
+            pass
+        try:
+            pkg_root = Path(__file__).resolve().parent.parent
+            candidates.append(pkg_root / ".env")
+            candidates.append(pkg_root / ".env.agent")
+        except Exception:
+            pass
+
+    applied = 0
+    seen: set = set()
+    for path in candidates:
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            values = dotenv_values(path)
+        except Exception as e:
+            logger.warning(f"Could not read dotenv {path}: {e}")
+            continue
+        for key, value in (values or {}).items():
+            if not key or value is None:
+                continue
+            if not override and key in os.environ:
+                continue
+            os.environ[key] = str(value)
+            applied += 1
+        if applied:
+            logger.debug(f"Loaded dotenv keys from {path} (applied~{applied})")
+    return applied
+
+
+# Ensure .env tokens exist in os.environ before Settings() and agent children run.
+bootstrap_dotenv_into_environ()
+
+
+def _dotenv_quote(value: str) -> str:
+    """Quote a .env value when it contains whitespace or shell-ish characters."""
+    raw = "" if value is None else str(value)
+    if raw == "":
+        return ""
+    if re.search(r'[\s#"\'\\$`]', raw):
+        escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return raw
+
+
+def upsert_dotenv_keys(
+    updates: Dict[str, str],
+    *,
+    path: Optional[Path] = None,
+) -> int:
+    """Insert or replace KEY=value lines in ``.env`` without dropping other keys.
+
+    Used so dashboard-saved Jira host/email/token survive process restart.
+    Never logs secret values. Returns the number of keys written.
+    """
+    if not updates:
+        return 0
+    dest = path or (Path.cwd() / ".env")
+    try:
+        dest = dest.resolve()
+    except OSError:
+        dest = Path(dest)
+    if not dest.is_file():
+        example = dest.with_name(".env.example")
+        try:
+            if example.is_file():
+                dest.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+            else:
+                dest.write_text("", encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Could not create dotenv {dest}: {e}")
+            return 0
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not read dotenv {dest}: {e}")
+        return 0
+    wanted = {str(k).strip(): ("" if v is None else str(v)) for k, v in updates.items() if str(k).strip()}
+    if not wanted:
+        return 0
+    found: set[str] = set()
+    out_lines: List[str] = []
+    for line in text.splitlines(keepends=True):
+        core = line[:-1] if line.endswith("\n") else line
+        if core.endswith("\r"):
+            core = core[:-1]
+        stripped = core.lstrip()
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=", stripped)
+        if m and m.group(1) in wanted:
+            key = m.group(1)
+            out_lines.append(f"{key}={_dotenv_quote(wanted[key])}\n")
+            found.add(key)
+        else:
+            out_lines.append(line if line.endswith("\n") else line + "\n")
+    for key, val in wanted.items():
+        if key not in found:
+            out_lines.append(f"{key}={_dotenv_quote(val)}\n")
+    try:
+        dest.write_text("".join(out_lines), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Could not write dotenv {dest}: {e}")
+        return 0
+    for key, val in wanted.items():
+        os.environ[key] = val
+    logger.info(
+        "Updated .env keys: " + ", ".join(sorted(wanted))
+    )
+    return len(wanted)
+
+
+def compute_stuck_limit_seconds(
+    timeout_seconds: float,
+    max_retries: int,
+    *,
+    extra_attempts: int = 0,
+) -> float:
+    """Wall-clock stuck-watchdog budget for one in-flight issue.
+
+    ``extra_attempts`` covers compact/incomplete continues that are *not*
+    generic error retries.
+    Formula: ``timeout * (retries + extra + 1) * 1.5``.
+    """
+    try:
+        timeout = float(timeout_seconds or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    try:
+        retries = int(max_retries or 0)
+    except (TypeError, ValueError):
+        retries = 0
+    try:
+        extra = int(extra_attempts or 0)
+    except (TypeError, ValueError):
+        extra = 0
+    return timeout * (max(0, retries) + max(0, extra) + 1) * 1.5
 
 
 class Settings(BaseSettings):
@@ -21,12 +199,15 @@ class Settings(BaseSettings):
     )
     
     # JIRA Configuration
-    # - On-prem Server/DC PAT: set JIRA_HOST + JIRA_API_TOKEN (Bearer)
-    # - Jira Cloud API token: set JIRA_HOST + JIRA_EMAIL + JIRA_API_TOKEN (Basic email:token)
+    # - Prod / on-prem PAT: JIRA_HOST + JIRA_API_TOKEN → Bearer
+    # - Cloud (dev): also set JIRA_EMAIL → HTTP Basic (email + API token)
     jira_host: str = Field(default="", description="JIRA instance URL")
     jira_email: str = Field(
         default="",
-        description="Atlassian account email (required for Jira Cloud API tokens; unused for on-prem Bearer PAT)",
+        description=(
+            "Optional Atlassian account email. When set with a token, Jira uses "
+            "HTTP Basic (Cloud API tokens). Leave empty for Bearer PAT (prod/on-prem)."
+        ),
     )
     jira_api_token: str = Field(
         default="",
@@ -39,10 +220,42 @@ class Settings(BaseSettings):
     )
 
     # Oh My OpenAgent Configuration
-    opencode_cli: str = Field(default="opencode", description="OpenCode CLI command")
+    opencode_cli: str = Field(
+        default="opencode",
+        description="OpenCode binary for the TUI and `opencode models`. Jobs use serve.",
+    )
+    opencode_serve_url: str = Field(
+        default="http://127.0.0.1:4096",
+        description="Base URL for the required opencode serve process",
+    )
     project_root: Path = Field(default=Path.cwd(), description="Project root directory")
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
-    default_model: str = Field(default="ollama/Qwen3.5-397B-A17B-FP8", description="Default model for agent tasks")
+    default_model: str = Field(
+        default="ollama/Qwen3.5-397B-A17B-FP8",
+        description="Default model id for OpenCode and Codex jobs (provider/auth stay in each tool's config)",
+    )
+    agent_backend: str = Field(
+        default="opencode",
+        description="Unattended worker: opencode | codex",
+    )
+    codex_cli: str = Field(default="codex", description="Codex CLI binary for AGENT_BACKEND=codex")
+    opencode_context_limit: int = Field(
+        default=128000,
+        description=(
+            "Job-local OpenCode model context cap (0 = no override). "
+            "32k filled in minutes and looped compact/restore; 128k is "
+            "enough for a long build without compacting every turn. "
+            "Zen free models advertise 190k–1M natively."
+        ),
+    )
+    project_repositories: str = Field(
+        default="",
+        description=(
+            "JSON list of saved git remotes for the dashboard New-issue form. "
+            'Example: [{"label":"demo","url":"https://gitlab.com/g/r.git",'
+            '"target_branch":"develop"}]'
+        ),
+    )
     
     # Git Configuration (for commits in target project folder)
     git_user_name: str = Field(default="DevBot", description="Git user name for commits")
@@ -68,17 +281,51 @@ class Settings(BaseSettings):
         default="",
         description="Legacy comma-separated hosts for single GITLAB_PAT (fail-closed when PAT is set)",
     )
+    # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
+    gitlab_webhook_enabled: bool = Field(
+        default=False,
+        description="Accept GitLab Note and Merge Request webhooks on /webhooks/gitlab",
+    )
+    gitlab_webhook_secret: str = Field(
+        default="",
+        description="Shared secret; must match GitLab hook X-Gitlab-Token (empty = accept all)",
+    )
+    gitlab_bot_mentions: str = Field(
+        default="@berat_ai",
+        description="Comma-separated @names that trigger a job (e.g. @berat_ai,@DevBot)",
+    )
+    gitlab_bot_usernames: str = Field(
+        default="",
+        description=(
+            "GitLab usernames of this bot (ignore its own notes to prevent loops). "
+            "Defaults to GITLAB_BOT_MENTIONS without @"
+        ),
+    )
     
-    # Agent Configuration
-    default_agent: str = Field(default="sisyphus")
-    planning_agent: str = Field(default="prometheus")
-    orchestrator_agent: str = Field(default="atlas")
-    execution_category: str = Field(default="deep")
+    # OpenCode agent for Mode: build (and other implementation jobs).
+    # OpenCoderman derman-build, not stock OpenCode ``build``.
+    default_agent: str = Field(
+        default="derman-build",
+        description="OpenCode agent for build jobs (opencoderman derman-build)",
+    )
+    # OpenCode agent for Mode: plan. OpenCoderman derman-plan, not stock ``plan``.
+    default_plan_agent: str = Field(
+        default="derman-plan",
+        description="OpenCode agent for plan jobs (opencoderman derman-plan)",
+    )
 
-    # Agent prompts: one kit file with ## §section_id headers (see agent/AGENT_PROMPT.md)
-    prompt_kit_file: Path = Field(
-        default=Path("agent/AGENT_PROMPT.md"),
-        description="Unified agent prompt kit",
+    # Exactly two mode prompts (agent name does not change prompt text)
+    agent_prompts_dir: Path = Field(
+        default=Path("agent"),
+        description="Directory with PLAN_PROMPT.md and BUILD_PROMPT.md",
+    )
+    plan_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Plan-mode prompt (default: {agent_prompts_dir}/PLAN_PROMPT.md)",
+    )
+    build_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Build-mode prompt (default: {agent_prompts_dir}/BUILD_PROMPT.md)",
     )
     
     # How many agent jobs run at once (raise for large boards / many subtasks)
@@ -91,14 +338,32 @@ class Settings(BaseSettings):
         default=8,
         description="Thread pool size for dispatching issues after a poll",
     )
-    # Board poller is always on (sole intake path)
+    # Board poller interval (used when jira_intake_mode=poll)
     poll_interval_seconds: int = Field(default=30)
+    # poll = board/sprint poller (default). webhook = POST /webhooks/jira only.
+    # Switching at runtime via dashboard; default comes from .env.
+    jira_intake_mode: str = Field(
+        default="poll",
+        description="Jira intake: poll (board poller) or webhook (POST /webhooks/jira)",
+    )
+    jira_webhook_secret: str = Field(
+        default="",
+        description=(
+            "Shared secret for /webhooks/jira. Jira Server 9.4 has no HMAC — "
+            "put the token in the hook URL (?token=). Cloud may send X-Hub-Signature."
+        ),
+    )
 
-    # Ops dashboard (FastAPI UI; no auth in v1 — bind all interfaces by default
-    # so LAN / port-forward access works; set DASHBOARD_HOST=127.0.0.1 to lock down)
+    # Ops dashboard (FastAPI UI). Intentional product defaults (not a security bug):
+    # no auth in v1 + bind 0.0.0.0 + allow_remote so LAN / offline install works.
+    # Operators on untrusted networks: DASHBOARD_HOST=127.0.0.1 and/or
+    # DASHBOARD_ALLOW_REMOTE=false. See AGENTS.md §3b.
     dashboard_host: str = Field(
         default="0.0.0.0",
-        description="Dashboard bind host (0.0.0.0 = all interfaces)",
+        description=(
+            "Dashboard bind host. Default 0.0.0.0 (all interfaces) is intentional; "
+            "use 127.0.0.1 to lock down."
+        ),
     )
     dashboard_port: int = Field(default=8080, description="Dashboard HTTP port")
     dashboard_enabled: bool = Field(default=True, description="Serve ops dashboard with the daemon")
@@ -106,35 +371,31 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "If false, non-loopback dashboard_host is forced back to 127.0.0.1. "
-            "Default true so DASHBOARD_HOST=0.0.0.0 works out of the box."
+            "Default true is intentional so DASHBOARD_HOST=0.0.0.0 works out of the box."
         ),
     )
 
     # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(
         default=Path(".temp"),
-        description="Base directory for temp working folders (relative to agent root)"
-    )
-    temp_dir_format: str = Field(
-        default="{remote_name}_{jira_issue_id}_{timestamp}",
-        description="Temp folder naming format. Available: {remote_name}, {jira_issue_id}, {timestamp}, {uuid}"
-    )
-    temp_cleanup_policy: str = Field(
-        default="age",
         description=(
-            "Temp folder cleanup policy: 'always', 'on_success', 'never', 'age' "
-            "(delete this clone when older than temp_cleanup_max_age_days; also "
-            "sweep the temp base for dirs past that age)"
+            "Base directory for temp clones. Relative ``.temp`` is remapped to "
+            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, /vd/t, or ~/vd/t)."
         ),
     )
-    temp_cleanup_max_age_days: float = Field(
-        default=1.0,
-        description=(
-            "When temp_cleanup_policy is 'age', delete temp clones older than "
-            "this many days (default 1.0 = 24 hours)"
-        ),
-    )
-    
+    @field_validator("temp_dir_base", mode="after")
+    @classmethod
+    def _durable_temp_dir(cls, v: Path) -> Path:
+        from src.paths import _under_pytest, coerce_win_path, default_temp_dir
+
+        v = coerce_win_path(v)
+        if _under_pytest() or v.is_absolute():
+            return v
+        text = str(v).replace("\\", "/").strip()
+        if text in {".temp", "temp", "./.temp"}:
+            return default_temp_dir()
+        return v
+
     # Agent / OpenCode Task Configuration (single wall-clock budget for both)
     agent_task_timeout_seconds: int = Field(
         default=1800,
@@ -164,22 +425,51 @@ class Settings(BaseSettings):
         default=True,
         description="Whether to retry tasks that fail with errors"
     )
-    # Git clone hard timeout (B11) — hung clones must not hold job slots forever
-    git_clone_timeout_seconds: int = Field(
-        default=300,
-        description="Max seconds for git clone (hard kill; default 5 minutes)",
+    agent_task_max_incomplete_retries: int = Field(
+        default=256,
+        description=(
+            "Extra retry budget when a serve session is incomplete after compact "
+            "is waited out. Independent of agent_task_max_retries. "
+            "0 = do not retry incomplete beyond max_retries."
+        ),
     )
-    
-    # Redis / Celery
-    redis_url: str = Field(default="redis://localhost:6379/0")
-    
-    # Logging
-    log_level: str = Field(default="INFO")
-    log_file: Optional[Path] = Field(default=Path("logs/jira-agent.log"))
+    # Git clone hard timeout — large monorepos + many remotes need a high ceiling
+    git_clone_timeout_seconds: int = Field(
+        default=1800,
+        description=(
+            "Max seconds for git clone (hard kill; default 1800 = 30 minutes). "
+            "Raise further for very large repositories."
+        ),
+    )
+    # Submodule init/update (often slower than parent clone when many nested modules)
+    git_submodule_timeout_seconds: int = Field(
+        default=1800,
+        description=(
+            "Max seconds for git submodule update --init --recursive "
+            "(hard kill; default 1800 = 30 minutes). Applied after clone and "
+            "again after work-branch checkout."
+        ),
+    )
+    git_update_submodules: bool = Field(
+        default=True,
+        description=(
+            "After clone (and after work-branch checkout), run "
+            "`git submodule update --init --recursive`. Disable only if "
+            "target repos never use submodules."
+        ),
+    )
+    # Push / fetch / merge / glab MR — hung network ops must not pin job slots forever
+    git_command_timeout_seconds: int = Field(
+        default=300,
+        description=(
+            "Max seconds for non-clone git and glab subprocesses "
+            "(push, fetch, MR create; default 5 minutes)"
+        ),
+    )
     
     # Trigger Configuration - stored as strings, parsed as properties
     trigger_on_assignment: bool = Field(default=True)
-    trigger_labels: str = Field(default="ai-assist,bot")
+    # Optional @mention strings for free-form comment commands (not board intake)
     trigger_mentions: str = Field(default="@DevBot,@AI")
     # Substrings matched against assignee displayName / name / key (case-insensitive)
     trigger_assignee_names: str = Field(
@@ -192,12 +482,16 @@ class Settings(BaseSettings):
     
     @property
     def full_plans_dir(self) -> Path:
-        return Path.cwd() / self.sisyphus_plans_dir
+        """Durable plans live under ``{YAVER_DATA_DIR}/plans``, not the clone."""
+        from src.paths import plans_dir
+
+        return plans_dir()
     
     @property
     def state_dir(self) -> Path:
-        from pathlib import Path as PathLib
-        return PathLib.cwd() / ".jira-agent" / "state"
+        from src.paths import agent_subdir
+
+        return agent_subdir("state")
     
     @property
     def jira_projects_list(self) -> List[str]:
@@ -206,13 +500,6 @@ class Settings(BaseSettings):
             return ["PROJ"]
         return [p.strip() for p in self.jira_projects.split(",") if p.strip()]
     
-    @property
-    def trigger_labels_list(self) -> List[str]:
-        """Get trigger labels as a list."""
-        if not self.trigger_labels:
-            return ["ai-assist", "bot"]
-        return [item.strip() for item in self.trigger_labels.split(",") if item.strip()]
-
     @property
     def trigger_assignee_names_list(self) -> List[str]:
         """Assignee name fragments for bot-assignment trigger (lowercase)."""
@@ -261,7 +548,12 @@ class Settings(BaseSettings):
         return {h: pat for h in hosts}
 
     def gitlab_pat_for_host(self, host: str) -> str:
-        """Return the PAT for ``host`` (exact or parent-domain match), or ''."""
+        """Return the PAT for ``host`` (exact hostname[:port] only).
+
+        Parent-domain matching is intentionally not used: it would send the
+        PAT to ``evil.gitlab.company.com`` when ``gitlab.company.com`` is
+        configured. Add each host (including ``host:port``) in Settings.
+        """
         h = (host or "").strip().lower()
         if not h:
             return ""
@@ -270,10 +562,6 @@ class Settings(BaseSettings):
             return ""
         if h in mapping:
             return mapping[h]
-        # subdomain: api.gitlab.example.com → gitlab.example.com
-        for allowed, pat in mapping.items():
-            if h == allowed or h.endswith("." + allowed):
-                return pat
         return ""
 
     def gitlab_has_any_pat(self) -> bool:
@@ -301,30 +589,25 @@ class Settings(BaseSettings):
         """All configured PAT values (for log redaction)."""
         return list(dict.fromkeys(self.gitlab_host_pat_map().values()))
     
-    def _kit_section(self, section_id: str) -> str:
-        from src.orchestrator.prompt_kit import get_section
-
-        return get_section(section_id, kit_path=self.prompt_kit_file)
-
     @property
     def prompt_planning(self) -> str:
-        """Planning role rules (kit §role.planning)."""
-        return self._kit_section("role.planning")
+        """Plan-mode prompt body (PLAN_PROMPT.md)."""
+        from src.orchestrator.prompt_builder import PromptBuilder
+
+        return PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key="ISSUE",
+        )
 
     @property
     def prompt_execution(self) -> str:
-        """Atlas execution role rules (kit §role.execution)."""
-        return self._kit_section("role.execution")
+        """Build-mode prompt body (BUILD_PROMPT.md)."""
+        from src.orchestrator.prompt_builder import PromptBuilder
 
-    @property
-    def prompt_direct_execution(self) -> str:
-        """Sisyphus direct-execution rules (kit §role.direct)."""
-        return self._kit_section("role.direct")
-
-    @property
-    def prompt_oracle(self) -> str:
-        """Oracle consultation rules (kit §role.oracle)."""
-        return self._kit_section("role.oracle")
+        return PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key="ISSUE",
+        )
 
     def prompt_commit_policy(
         self,
@@ -332,14 +615,11 @@ class Settings(BaseSettings):
         *,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Issue-keyed git policy from kit §policy.commit."""
-        from src.orchestrator.prompt_kit import get_section
+        """Issue-keyed git policy from BUILD_PROMPT.md."""
+        from src.orchestrator.prompt_builder import PromptBuilder
 
-        return get_section(
-            "policy.commit",
-            kit_path=self.prompt_kit_file,
-            issue_key=issue_key,
-            work_branch=work_branch,
+        return PromptBuilder.commit_message_block(
+            issue_key, work_branch=work_branch
         )
 
     @property
@@ -348,6 +628,24 @@ class Settings(BaseSettings):
         if not self.trigger_mentions:
             return ["@DevBot", "@AI"]
         return [item.strip() for item in self.trigger_mentions.split(",") if item.strip()]
+
+    @property
+    def jira_intake_mode_normalized(self) -> str:
+        """``poll`` or ``webhook`` (default poll)."""
+        return _normalize_intake_mode(self.jira_intake_mode)
+
+    @property
+    def gitlab_bot_mentions_list(self) -> List[str]:
+        from src.gitlab.mentions import parse_mention_list
+
+        return parse_mention_list(self.gitlab_bot_mentions)
+
+    @property
+    def gitlab_bot_usernames_list(self) -> List[str]:
+        from src.gitlab.mentions import parse_mention_list
+
+        names = parse_mention_list(self.gitlab_bot_usernames)
+        return names or list(self.gitlab_bot_mentions_list)
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -375,11 +673,205 @@ class Settings(BaseSettings):
 _settings: Optional[Settings] = None
 _current_temp_dir: Optional[Path] = None
 
+# Dashboard runtime overrides (survive process restart; win over .env).
+# Written by apply_settings_update; applied after Settings() loads env.
+_RUNTIME_SETTINGS_NAME = "runtime_settings.json"
+
+# Keys the dashboard may persist (no secrets).
+_RUNTIME_PERSIST_KEYS = frozenset(
+    {
+        "agent_task_timeout_seconds",
+        "agent_task_max_retries",
+        "agent_task_max_incomplete_retries",
+        "poll_interval_seconds",
+        "max_concurrent_jobs",
+        "jira_board_id",
+        "jira_host",
+        "jira_email",
+        "trigger_on_assignment",
+        "default_model",
+        "agent_backend",
+        "project_repositories",
+        "jira_intake_mode",
+        "trigger_mentions",
+        "trigger_assignee_names",
+    }
+)
+
+# Map Settings field → env var name for os.environ mirror (so re-reads stay consistent).
+_RUNTIME_ENV_MIRROR = {
+    "agent_task_timeout_seconds": "AGENT_TASK_TIMEOUT_SECONDS",
+    "agent_task_max_retries": "AGENT_TASK_MAX_RETRIES",
+    "agent_task_max_incomplete_retries": "AGENT_TASK_MAX_INCOMPLETE_RETRIES",
+    "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
+    "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
+    "jira_board_id": "JIRA_BOARD_ID",
+    "jira_host": "JIRA_HOST",
+    "jira_email": "JIRA_EMAIL",
+    "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
+    "default_model": "DEFAULT_MODEL",
+    "agent_backend": "AGENT_BACKEND",
+    "jira_intake_mode": "JIRA_INTAKE_MODE",
+    "trigger_mentions": "TRIGGER_MENTIONS",
+    "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
+}
+
+
+def jira_host_is_cloud(host: Any = None) -> bool:
+    """True for Atlassian Cloud (``*.atlassian.net``). Cloud API tokens need Basic."""
+    text = str(host if host is not None else "").strip().lower()
+    return "atlassian.net" in text
+
+
+def _normalize_intake_mode(raw: Any) -> str:
+    """``poll`` or ``webhook``. Local so Settings bootstrap never imports jira."""
+    text = str(raw or "").strip().lower()
+    if text in {"webhook", "webhooks", "hook", "push", "http"}:
+        return "webhook"
+    return "poll"
+
+
+def runtime_settings_path() -> Path:
+    """Path to JSON file holding dashboard runtime overrides."""
+    from src.paths import agent_data_dir
+
+    dest = agent_data_dir()
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return (dest / _RUNTIME_SETTINGS_NAME).resolve()
+
+
+def load_runtime_settings() -> Dict[str, Any]:
+    """Load dashboard runtime overrides from disk (empty dict if missing)."""
+    path = runtime_settings_path()
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if k in _RUNTIME_PERSIST_KEYS}
+    except Exception as e:
+        logger.warning(f"Could not load runtime settings {path}: {e}")
+        return {}
+
+
+def save_runtime_settings(updates: Dict[str, Any]) -> None:
+    """Merge *updates* into runtime settings file and mirror into os.environ."""
+    path = runtime_settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        current = load_runtime_settings()
+        for key, value in updates.items():
+            if key not in _RUNTIME_PERSIST_KEYS:
+                continue
+            if value is None:
+                continue
+            current[key] = value
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(current, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _mirror_runtime_to_environ(current)
+        logger.info(
+            f"Persisted runtime settings to {path}: "
+            + ", ".join(f"{k}={current[k]!r}" for k in sorted(updates) if k in current)
+        )
+    except Exception as e:
+        logger.error(f"Could not save runtime settings {path}: {e}")
+
+
+def _mirror_runtime_to_environ(data: Dict[str, Any]) -> None:
+    """Keep os.environ in sync so timeout is not lost if something re-reads env."""
+    for key, value in data.items():
+        env_name = _RUNTIME_ENV_MIRROR.get(key)
+        if not env_name:
+            continue
+        if isinstance(value, bool):
+            os.environ[env_name] = "true" if value else "false"
+        else:
+            os.environ[env_name] = str(value)
+
+
+def apply_runtime_settings_to(settings_obj: "Settings") -> None:
+    """Apply persisted dashboard overrides onto a Settings instance (after env load)."""
+    data = load_runtime_settings()
+    if not data:
+        return
+    for key, value in data.items():
+        if not hasattr(settings_obj, key):
+            continue
+        if key == "jira_board_id":
+            text = str(value or "").strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+                text = text[1:-1].strip()
+            if not text.isdigit():
+                logger.warning(
+                    f"Ignoring invalid runtime jira_board_id={value!r} "
+                    f"(need digits, e.g. 1); keeping {getattr(settings_obj, key, None)!r}"
+                )
+                continue
+            value = text
+        if key == "agent_task_timeout_seconds":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Ignoring invalid runtime agent_task_timeout_seconds={value!r}"
+                )
+                continue
+        if key == "jira_email":
+            # Cloud API tokens need email+token Basic. An empty runtime
+            # override (from an old Settings save) must not wipe .env email.
+            host = getattr(settings_obj, "jira_host", "") or data.get("jira_host")
+            if jira_host_is_cloud(host) and not str(value or "").strip():
+                continue
+        if key == "jira_intake_mode":
+            value = _normalize_intake_mode(value)
+        if key == "project_repositories":
+            from src.dashboard.project_repos import project_repositories_to_json
+
+            value = project_repositories_to_json(value)
+        try:
+            setattr(settings_obj, key, value)
+        except Exception as e:
+            logger.warning(f"Could not apply runtime setting {key}={value!r}: {e}")
+    _mirror_runtime_to_environ(data)
+    logger.info(
+        "Applied runtime settings overrides: "
+        + ", ".join(f"{k}={data[k]!r}" for k in sorted(data))
+    )
+
+
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
+        # Dashboard overrides win over .env so agent timeout changes stick.
+        apply_runtime_settings_to(_settings)
     return _settings
+
+
+def live_agent_timeout_seconds(*, default: int = 1800) -> int:
+    """Current OpenCode/agent wall-clock budget (dashboard + runtime + env).
+
+    Re-read on every call so a Settings save of 7200 applies to the in-flight
+    serve turn / next retry, not only jobs that started after the save.
+    """
+    live = get_settings()
+    raw = getattr(live, "agent_task_timeout_seconds", None)
+    try:
+        if raw is None or isinstance(raw, bool):
+            return int(default)
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
 
 def set_current_temp_dir(temp_dir: Optional[Path]) -> None:
     global _current_temp_dir

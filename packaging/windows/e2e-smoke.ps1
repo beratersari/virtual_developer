@@ -4,7 +4,8 @@
   End-to-end Windows smoke test for the offline distribution.
 
 .DESCRIPTION
-  Simulates a realistic user path (deep Downloads nesting), runs install.bat
+  Simulates a realistic user path (deep Downloads nesting), runs
+  install-dashboard.bat then install-backends.bat.
   non-interactively, and verifies opencode.exe is AMD64 and starts.
   Fails the CI job if extract/install would break on Windows MAX_PATH or arch.
 #>
@@ -18,11 +19,23 @@ $ErrorActionPreference = "Stop"
 
 function Write-Step($msg) { Write-Host ""; Write-Host "=== $msg ===" }
 
-if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install.bat"))) {
-    throw "install.bat not found in payload: $PayloadDir"
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-dashboard.bat"))) {
+    throw "install-dashboard.bat not found in payload: $PayloadDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-backends.bat"))) {
+    throw "install-backends.bat not found in payload: $PayloadDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-codex.bat"))) {
+    throw "install-codex.bat not found in payload: $PayloadDir"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "vendor\opencode-home.zip"))) {
     throw "vendor\opencode-home.zip missing — outer package must not expand node_modules"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "opencoderman\install.py"))) {
+    throw "opencoderman\install.py missing — init the submodule and restage the zip"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "packaging\install_opencode.py"))) {
+    throw "packaging\install_opencode.py missing"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "start.bat"))) {
     throw "start.bat missing at payload root (backend + dashboard launcher)"
@@ -134,7 +147,7 @@ try {
     Write-Host "  (skip process exclusion: $($_.Exception.Message))"
 }
 
-Write-Step "Run install.bat non-interactively (home = %USERPROFILE%\.opencode)"
+Write-Step "Run install-dashboard.bat then install-backends.bat (non-interactive)"
 $env:VD_NONINTERACTIVE = "1"
 # Do NOT set VD_OPENCODE_ROOT — product default is %USERPROFILE%\.opencode
 Remove-Item Env:VD_OPENCODE_ROOT -ErrorAction SilentlyContinue
@@ -149,14 +162,20 @@ if (Test-Path -LiteralPath (Join-Path $ocConfigDir "opencode.json")) {
     Remove-Item -LiteralPath (Join-Path $ocConfigDir "opencode.json") -Force -ErrorAction SilentlyContinue
 }
 
-$installBat = Join-Path $deepRoot "install.bat"
-$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$installBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
+$dashBat = Join-Path $deepRoot "install-dashboard.bat"
+$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$dashBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
+if ($p.ExitCode -ne 0) {
+    throw "install-dashboard.bat failed with exit code $($p.ExitCode)"
+}
+
+$beBat = Join-Path $deepRoot "install-backends.bat"
+$p = Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "`"$beBat`"") -WorkingDirectory $deepRoot -Wait -PassThru -NoNewWindow
 if ($p.ExitCode -ne 0) {
     $oc = Join-Path $ocHome "bin\opencode.exe"
     if (Test-Path -LiteralPath $oc) {
         Write-Host "DEBUG opencode.exe size after failed install: $((Get-Item $oc).Length)"
     }
-    throw "install.bat failed with exit code $($p.ExitCode)"
+    throw "install-backends.bat failed with exit code $($p.ExitCode)"
 }
 
 Write-Step "Verify installed OpenCode (AMD64 + --version + valid config JSON)"
@@ -174,6 +193,26 @@ if ($LASTEXITCODE -ne 0) {
     throw "opencode --version failed (exit $LASTEXITCODE): $ver"
 }
 
+$vendorPkg = Join-Path $PayloadDir "vendor\codex-package-x86_64-pc-windows-msvc.tar.gz"
+if (-not (Test-Path -LiteralPath $vendorPkg)) {
+    throw "vendor Codex package missing — ship vendor\codex-package-x86_64-pc-windows-msvc.tar.gz"
+}
+$codexHome = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
+if (-not (Test-Path -LiteralPath $codexHome)) {
+    throw "codex.exe missing after install: $codexHome"
+}
+if (Test-Path -LiteralPath (Join-Path $ocHome "bin\codex.exe")) {
+    throw "codex.exe must not be installed under OpenCode home: $ocHome\bin"
+}
+& $assert -Path $codexHome -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) { throw "codex.exe AMD64 assert failed" }
+$cxVer = & $codexHome --version 2>&1
+Write-Host "codex --version => $cxVer"
+$codexUserCfg = Join-Path $env:USERPROFILE ".codex\config.toml"
+if (-not (Test-Path -LiteralPath $codexUserCfg)) {
+    throw "dummy Codex config missing after install: $codexUserCfg"
+}
+
 # Regression: unescaped "echo ... -> path" used to overwrite opencode.json with "[OK] config ..."
 $homeCfg = Join-Path $ocHome "opencode.json"
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
@@ -183,7 +222,7 @@ foreach ($cfg in @($homeCfg, $globalCfg)) {
     }
     $raw = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop
     if ($raw -match '\[OK\]' -or $raw -match 'config\s+-') {
-        throw "FAIL: config looks like install.bat echo output (redirect bug): $cfg => $raw"
+        throw "FAIL: config looks like installer echo output (redirect bug): $cfg => $raw"
     }
     try {
         $null = $raw | ConvertFrom-Json
@@ -193,66 +232,18 @@ foreach ($cfg in @($homeCfg, $globalCfg)) {
     Write-Host "OK valid JSON: $cfg"
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $ocHome "node_modules\oh-my-opencode"))) {
-    throw "oh-my-opencode plugin missing under $ocHome\node_modules"
-}
-
-# Full plugin package must exist (not a thin junction) with agents + skill markdown
-function Assert-OmoTree([string]$Root, [string]$Label) {
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "package.json"))) {
-        throw "$Label missing package.json: $Root"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\index.js"))) {
-        throw "$Label missing dist\index.js: $Root"
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $Root "dist\agents"))) {
-        throw "$Label missing dist\agents (Sisyphus etc.): $Root"
-    }
-    $md = @(Get-ChildItem -LiteralPath $Root -Recurse -Filter "*.md" -File -ErrorAction SilentlyContinue)
-    if ($md.Count -lt 10) {
-        throw "$Label has only $($md.Count) .md files — skills/agents over-pruned: $Root"
-    }
-    $files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)
-    if ($files.Count -lt 500) {
-        throw "$Label only $($files.Count) files — incomplete plugin tree: $Root"
-    }
-    Write-Host "OK $Label : $($files.Count) files, $($md.Count) md, agents present"
-}
-
-# Primary package id is oh-my-openagent (avoids auto-migration hang)
-$homePlugin = Join-Path $ocHome "node_modules\oh-my-openagent"
-$cachePlugin = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-openagent"
-$configPlugin = Join-Path $ocConfigDir "node_modules\oh-my-openagent"
-Assert-OmoTree $homePlugin "home/openagent"
-Assert-OmoTree $cachePlugin "cache/openagent"
-Assert-OmoTree $configPlugin "config/openagent"
-
-$packagesPlugin = Join-Path $env:USERPROFILE ".cache\opencode\packages\oh-my-openagent"
-if (Test-Path -LiteralPath $packagesPlugin) {
-    Assert-OmoTree $packagesPlugin "cache/packages/openagent"
-} else {
-    Write-Host "WARNING: cache/packages/oh-my-openagent missing"
-}
-
-# Legacy name should also exist offline
-$legacy = Join-Path $env:USERPROFILE ".cache\opencode\node_modules\oh-my-opencode"
-if (-not (Test-Path -LiteralPath (Join-Path $legacy "dist\index.js"))) {
-    throw "Legacy oh-my-opencode cache missing: $legacy"
-}
-Write-Host "OK legacy oh-my-opencode cache present"
-
-# Config must pin NEW package id (legacy name triggers migration + Bun re-fetch)
+# Stock OpenCode: no oh-my-openagent / Sisyphus plugin
 $globalCfg = Join-Path $ocConfigDir "opencode.json"
 $cfgObj = Get-Content -LiteralPath $globalCfg -Raw | ConvertFrom-Json
 $plugins = @($cfgObj.plugin)
-$pinned = $plugins | Where-Object { $_ -match '^oh-my-openagent@' }
-if (-not $pinned) {
-    throw "FAIL: opencode.json must pin oh-my-openagent@VERSION, got: $($plugins -join ', ')"
+$omo = $plugins | Where-Object { $_ -match 'oh-my-opencod' }
+if ($omo) {
+    throw "FAIL: opencode.json must not register oh-my-openagent, got: $($plugins -join ', ')"
 }
 if ($cfgObj.autoupdate -ne $false) {
     Write-Host "WARNING: autoupdate is not false (may hang offline)"
 }
-Write-Host "OK pinned plugin: $($pinned -join ', ')"
+Write-Host "OK stock OpenCode config (plugin empty, default build agent)"
 
 # ripgrep offline seed
 $rg = Join-Path $env:USERPROFILE ".cache\opencode\bin\rg.exe"
@@ -288,7 +279,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "OK Stop-VdProcesses.ps1"
 
-# Env for models.dev skip (set by install.bat via setx; process may not see it)
+# Env for models.dev skip (set by install-backends.bat via setx; process may not see it)
 if ($env:OPENCODE_DISABLE_MODELS_FETCH -ne "1") {
     Write-Host "WARNING: OPENCODE_DISABLE_MODELS_FETCH not set in this process (setx is user-env)"
 }

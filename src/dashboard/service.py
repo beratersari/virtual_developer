@@ -7,28 +7,47 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from src.config import settings
+from src.config import (
+    jira_host_is_cloud,
+    save_runtime_settings,
+    settings,
+    upsert_dotenv_keys,
+)
 from src.dashboard.issue_logs import issue_log_ring
 from src.logger import logger
+from src.dashboard.project_repos import (
+    parse_project_repositories,
+    project_repositories_to_json,
+)
 from src.dashboard.schemas import (
-    GitDeliveryItem,
     GitlabHostCredentialView,
     JobItem,
+    JobRetryAttempt,
     JobsResponse,
     MetaResponse,
     ModelOption,
     ModelsResponse,
     PolledIssueItem,
     PollStatusResponse,
+    ProjectRepositoryItem,
     SettingsUpdate,
     SettingsView,
     TaskItem,
     TasksResponse,
+    QueueItem,
+    QueueResponse,
 )
 from src.opencode_models import list_available_models
 from src.dashboard.snapshot import PollSnapshotStore, poll_snapshot_store
-from src.opencode_sessions import find_sessions_for_issue
-from src.orchestrator.workflow_router import WorkflowType
+from src.opencode_sessions import (
+    extract_session_ids_from_text,
+    find_sessions_for_issue,
+    list_session_chat,
+    strip_internal_markup,
+    strip_omo_mode_wrap,
+    is_omo_mode_wrap_text,
+)
+from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 from src.state.job_store import (
     JobStore,
     description_from_prompt_path,
@@ -43,8 +62,9 @@ if TYPE_CHECKING:
 # Cap large payloads for API safety
 _MAX_SESSION_CHARS = 400_000
 _MAX_PROMPT_CHARS = 200_000
-_MAX_SESSION_LOG_FILES = 5
-_MAX_PROMPT_FILES = 5
+# Higher than one-run: initial + several _retryN session logs per job
+_MAX_SESSION_LOG_FILES = 20
+_MAX_PROMPT_FILES = 20
 
 
 def read_app_version() -> str:
@@ -104,7 +124,6 @@ def build_tasks(
                 issue_key=st.issue_key,
                 summary=st.issue_summary or "",
                 status=st.status.value,
-                progress_percentage=int(st.progress_percentage or 0),
                 workflow_type=meta.get("workflow_type"),
                 jira_assignee=st.jira_assignee,
                 error_message=st.error_message,
@@ -149,12 +168,10 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
-        # Ops list: only issues the Virtual Developer can act on (trigger
-        # label and/or bot assignee). Full board rows stay in the raw
-        # snapshot for counts / debug; UI must not show noise.
-        matched_label = bool(row.get("matched_label"))
+        # Ops list: bot assignee (or already selected this cycle). Full board
+        # rows stay in the raw snapshot; UI must not show noise.
         matched_assignee = bool(row.get("matched_assignee"))
-        if not (matched_label or matched_assignee):
+        if not (matched_assignee or row.get("will_process")):
             continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
@@ -165,12 +182,10 @@ def build_poll_status(
                 jira_status=row.get("jira_status") or "",
                 labels=list(row.get("labels") or []),
                 assignee=row.get("assignee"),
-                matched_label=matched_label,
                 matched_assignee=matched_assignee,
                 is_todo=bool(row.get("is_todo")),
                 will_process=bool(row.get("will_process")),
                 local_status=local.status.value if local else row.get("local_status"),
-                matched_labels=list(row.get("matched_labels") or []),
             )
         )
 
@@ -194,6 +209,24 @@ def build_poll_status(
     )
 
 
+def _settings_project_repositories() -> List[ProjectRepositoryItem]:
+    raw = getattr(settings, "project_repositories", "") or ""
+    return [ProjectRepositoryItem(**item) for item in parse_project_repositories(raw)]
+
+
+def _settings_data_dir() -> str:
+    from src.paths import agent_data_dir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return str(agent_data_dir())
+
+
+def _settings_temp_dir() -> str:
+    from src.paths import resolve_temp_dir_base
+
+    return str(resolve_temp_dir_base())
+
+
 def build_settings_view() -> SettingsView:
     """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
 
@@ -204,11 +237,16 @@ def build_settings_view() -> SettingsView:
         jira_board_id=settings.jira_board_id or "",
         jira_projects=settings.jira_projects or "",
         poll_interval_seconds=int(settings.poll_interval_seconds or 30),
-        trigger_labels=settings.trigger_labels or "",
         trigger_on_assignment=bool(settings.trigger_on_assignment),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
         agent_task_timeout_seconds=int(
             getattr(settings, "agent_task_timeout_seconds", 1800) or 1800
+        ),
+        agent_task_max_retries=int(
+            getattr(settings, "agent_task_max_retries", 3) or 0
+        ),
+        agent_task_max_incomplete_retries=int(
+            getattr(settings, "agent_task_max_incomplete_retries", 256) or 0
         ),
         default_branch="(from Jira issue)",
         dashboard_host=getattr(settings, "dashboard_host", "127.0.0.1") or "127.0.0.1",
@@ -227,35 +265,100 @@ def build_settings_view() -> SettingsView:
             for h in settings.gitlab_allowed_hosts_list
         ],
         default_model=(settings.default_model or "").strip(),
+        agent_backend=(getattr(settings, "agent_backend", None) or "opencode").strip()
+        or "opencode",
+        gitlab_webhook_enabled=bool(
+            getattr(settings, "gitlab_webhook_enabled", False)
+        ),
+        gitlab_bot_mentions=(
+            getattr(settings, "gitlab_bot_mentions", "") or ""
+        ).strip(),
+        gitlab_webhook_secret_configured=bool(
+            (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
+        ),
+        gitlab_webhook_path="/webhooks/gitlab",
+        jira_intake_mode=(
+            settings.jira_intake_mode_normalized
+            if hasattr(settings, "jira_intake_mode_normalized")
+            else str(getattr(settings, "jira_intake_mode", "poll") or "poll")
+        ),
+        jira_webhook_secret_configured=bool(
+            (getattr(settings, "jira_webhook_secret", "") or "").strip()
+        ),
+        jira_webhook_path="/webhooks/jira",
+        trigger_mentions=(getattr(settings, "trigger_mentions", "") or "").strip(),
+        trigger_assignee_names=(
+            getattr(settings, "trigger_assignee_names", "") or ""
+        ).strip(),
+        project_repositories=_settings_project_repositories(),
+        data_dir=_settings_data_dir(),
+        temp_dir_base=_settings_temp_dir(),
     )
 
 
-def build_models_response(*, refresh: bool = False) -> ModelsResponse:
-    """Inventory OpenCode models (CLI + opencode.json). Backend-only business logic."""
-    models, models_err, cfg_path, cfg_model = list_available_models(refresh=refresh)
-    options: List[ModelOption] = []
-    for m in models:
-        mid = m.id
-        name = m.name or mid
-        # Prefer human label from inventory; always include source hint for config rows
-        if name and name != mid and name != mid.split("/")[-1]:
-            label = f"{mid} — {name}"
-        else:
-            label = mid
-        if m.source in ("config", "config_default"):
-            label = f"{label} · config"
-        options.append(
-            ModelOption(
-                id=mid,
-                name=name,
-                provider=m.provider or "",
-                source=m.source,
-                label=label,
+def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) -> ModelOption:
+    label_name = name or mid
+    if label_name and label_name != mid and label_name != mid.split("/")[-1]:
+        label = f"{mid} — {label_name}"
+    else:
+        label = mid
+    if source in ("config", "config_default"):
+        label = f"{label} · config"
+    return ModelOption(
+        id=mid,
+        name=label_name,
+        provider=provider,
+        source=source,
+        label=label,
+    )
+
+
+def build_models_response(*, refresh: bool = False, backend: str = "") -> ModelsResponse:
+    """Inventory models for the selected worker (OpenCode CLI or Codex config)."""
+    from src.backends.base import BACKEND_CODEX, BACKEND_OPENCODE, normalize_backend_name
+
+    name = normalize_backend_name(backend) or BACKEND_OPENCODE
+    default_model = (settings.default_model or "").strip()
+    if name == BACKEND_CODEX:
+        from src.backends.codex import list_codex_config_models
+
+        ids, cfg_path, err = list_codex_config_models()
+        options: List[ModelOption] = []
+        seen: set[str] = set()
+        if default_model:
+            options.append(
+                _model_option(mid=default_model, source="settings")
             )
+            seen.add(default_model)
+        for mid in ids:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            options.append(_model_option(mid=mid, source="config"))
+        return ModelsResponse(
+            default_model=default_model,
+            models=options,
+            backend=BACKEND_CODEX,
+            opencode_config_model=None,
+            opencode_config_path=cfg_path,
+            error=err,
+            server_time=datetime.now().isoformat(timespec="seconds"),
         )
+
+    models, models_err, cfg_path, cfg_model = list_available_models(refresh=refresh)
+    options = [
+        _model_option(
+            mid=m.id,
+            name=m.name or m.id,
+            provider=m.provider or "",
+            source=m.source,
+        )
+        for m in models
+    ]
     return ModelsResponse(
-        default_model=(settings.default_model or "").strip(),
+        default_model=default_model,
         models=options,
+        backend=BACKEND_OPENCODE,
         opencode_config_model=cfg_model,
         opencode_config_path=cfg_path,
         error=models_err,
@@ -263,25 +366,61 @@ def build_models_response(*, refresh: bool = False) -> ModelsResponse:
     )
 
 
-def apply_settings_update(body: SettingsUpdate) -> SettingsView:
-    """Apply runtime settings (including write-only secrets). Does not rewrite .env.
+def _normalize_gitlab_host(raw: Any) -> str:
+    """Lowercase host; strip scheme/path if the operator pasted a URL."""
+    host = str(raw or "").strip().lower()
+    if not host:
+        return ""
+    if "://" in host or "/" in host:
+        try:
+            from urllib.parse import urlparse
 
-    Returns a safe projection (no token values). Callers should refresh live
-    Jira clients when host/token/email change (see ``refresh_runtime_jira_clients``).
+            parsed = urlparse(host if "://" in host else f"https://{host}")
+            host = (parsed.hostname or host).lower()
+        except Exception:
+            host = host.split("/")[0]
+    return host.strip()
+
+
+def apply_settings_update(body: SettingsUpdate) -> SettingsView:
+    """Apply runtime settings (including write-only secrets).
+
+    Non-secret fields persist in runtime_settings.json. Jira host/token
+    and GitLab host PATs are also written to ``.env`` so Test connection and
+    the next daemon start
+    use the saved values. Token is never returned in the view.
+
+    Cloud (``*.atlassian.net``) keeps ``JIRA_EMAIL`` so API tokens stay
+    HTTP Basic. On-prem hosts still clear email so auth is Bearer PAT.
+
+    Callers should refresh live Jira clients when host/token/email change
+    (see ``refresh_runtime_jira_clients``).
     """
     data = body.model_dump(exclude_unset=True)
+    dotenv_updates: Dict[str, str] = {}
 
     if "jira_host" in data and data["jira_host"] is not None:
         host = str(data["jira_host"]).strip().rstrip("/")
+        from src.jira_connection import _normalize_jira_host
+
+        old_h = _normalize_jira_host(settings.jira_host or "")
+        new_h = _normalize_jira_host(host)
+        token_in_patch = bool(str(data.get("jira_api_token") or "").strip())
+        if new_h and old_h and new_h != old_h and not token_in_patch:
+            raise ValueError(
+                "Changing Jira host requires an API token in the same save "
+                "so the stored token is not sent to a new host."
+            )
         settings.jira_host = host
-    if "jira_email" in data and data["jira_email"] is not None:
-        # Empty string clears Cloud email (switch to Bearer / on-prem style)
-        settings.jira_email = str(data["jira_email"]).strip()
+        dotenv_updates["JIRA_HOST"] = host
+        # Non-secret: also survive restart via runtime_settings.json
+        # (applied below with other persist keys)
     if "jira_api_token" in data and data["jira_api_token"] is not None:
         # Write-only: only apply non-empty values so blank UI fields keep current
         tok = str(data["jira_api_token"])
         if tok.strip():
             settings.jira_api_token = tok.strip()
+            dotenv_updates["JIRA_API_TOKEN"] = settings.jira_api_token
 
     # Preferred: full list of per-host credentials from the dashboard
     if "gitlab_credentials" in data and data["gitlab_credentials"] is not None:
@@ -293,33 +432,48 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         new_map: Dict[str, str] = {}
         for item in data["gitlab_credentials"] or []:
             if isinstance(item, dict):
-                host = str(item.get("host") or "").strip().lower()
+                host = _normalize_gitlab_host(item.get("host"))
                 pat_raw = item.get("pat")
+                previous_host = _normalize_gitlab_host(item.get("previous_host"))
             else:
-                host = str(getattr(item, "host", "") or "").strip().lower()
+                host = _normalize_gitlab_host(getattr(item, "host", None))
                 pat_raw = getattr(item, "pat", None)
+                previous_host = _normalize_gitlab_host(
+                    getattr(item, "previous_host", None)
+                )
             if not host:
                 continue
-            # Strip scheme if operator pasted a URL
-            if "://" in host:
-                try:
-                    from urllib.parse import urlparse
-
-                    host = (urlparse(host if "://" in host else f"https://{host}").hostname or host)
-                    host = host.lower()
-                except Exception:
-                    pass
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[host] = pat
             elif host in current:
                 new_map[host] = current[host]
-            # else: new host without PAT — skip (cannot auth)
+            elif previous_host and previous_host in current:
+                # Explicit rename from the Settings UI — not an inferred swap.
+                new_map[host] = current[previous_host]
+        # [] from Settings means "no host rows", not "wipe a legacy GITLAB_PAT
+        # that was never projected as a row". Only clear when host rows existed.
+        clearing_hosts = bool(current) and not new_map
+        keep_legacy_pat = (not new_map) and (not current) and bool(
+            (settings.gitlab_pat or "").strip()
+        )
         if hasattr(settings, "set_gitlab_host_pat_map"):
-            settings.set_gitlab_host_pat_map(new_map)
+            if new_map or clearing_hosts:
+                settings.set_gitlab_host_pat_map(new_map)
         else:
             settings.gitlab_allowed_hosts = ",".join(sorted(new_map.keys()))
-            settings.gitlab_pat = next(iter(new_map.values()), "") if new_map else ""
+            if new_map:
+                settings.gitlab_pat = next(iter(new_map.values()))
+            elif clearing_hosts:
+                settings.gitlab_pat = ""
+        if not keep_legacy_pat:
+            dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+                settings, "gitlab_host_pats", ""
+            ) or ""
+            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+                settings.gitlab_allowed_hosts or ""
+            )
+            dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
     else:
         # Legacy single PAT + host list (still supported)
         if "gitlab_pat" in data and data["gitlab_pat"] is not None:
@@ -339,27 +493,127 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 settings.set_gitlab_host_pat_map(
                     {h: settings.gitlab_pat.strip() for h in hosts}
                 )
+        if "gitlab_pat" in data or "gitlab_allowed_hosts" in data:
+            dotenv_updates["GITLAB_HOST_PATS"] = getattr(
+                settings, "gitlab_host_pats", ""
+            ) or ""
+            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
+                settings.gitlab_allowed_hosts or ""
+            )
+            dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
 
+    # Runtime-persisted fields (survive restart; win over .env)
+    runtime_persist: Dict[str, Any] = {}
+
+    if "jira_host" in data and data["jira_host"] is not None:
+        runtime_persist["jira_host"] = settings.jira_host
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
+        runtime_persist["jira_board_id"] = settings.jira_board_id
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
-    if "trigger_labels" in data and data["trigger_labels"] is not None:
-        settings.trigger_labels = str(data["trigger_labels"])
+        runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
     if "trigger_on_assignment" in data and data["trigger_on_assignment"] is not None:
         settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
+        runtime_persist["trigger_on_assignment"] = settings.trigger_on_assignment
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
+        runtime_persist["max_concurrent_jobs"] = settings.max_concurrent_jobs
     if (
         "agent_task_timeout_seconds" in data
         and data["agent_task_timeout_seconds"] is not None
     ):
-        # Single budget for agent runner + OpenCode CLI process
+        # Single budget for agent runner + OpenCode serve turn
         settings.agent_task_timeout_seconds = int(data["agent_task_timeout_seconds"])
+        runtime_persist["agent_task_timeout_seconds"] = (
+            settings.agent_task_timeout_seconds
+        )
+        dotenv_updates["AGENT_TASK_TIMEOUT_SECONDS"] = str(
+            settings.agent_task_timeout_seconds
+        )
+        logger.info(
+            f"Agent/OpenCode timeout set to "
+            f"{settings.agent_task_timeout_seconds}s "
+            "(in-flight and next jobs use this)"
+        )
+    if "agent_task_max_retries" in data and data["agent_task_max_retries"] is not None:
+        settings.agent_task_max_retries = int(data["agent_task_max_retries"])
+        runtime_persist["agent_task_max_retries"] = settings.agent_task_max_retries
+        logger.info(
+            f"Agent max error retries set to {settings.agent_task_max_retries} "
+            f"(next job uses this)"
+        )
+    if (
+        "agent_task_max_incomplete_retries" in data
+        and data["agent_task_max_incomplete_retries"] is not None
+    ):
+        settings.agent_task_max_incomplete_retries = int(
+            data["agent_task_max_incomplete_retries"]
+        )
+        runtime_persist["agent_task_max_incomplete_retries"] = (
+            settings.agent_task_max_incomplete_retries
+        )
+        logger.info(
+            f"Agent compact/incomplete retries set to "
+            f"{settings.agent_task_max_incomplete_retries} (next job uses this)"
+        )
     if "default_model" in data and data["default_model"] is not None:
         model = str(data["default_model"]).strip()
         if model:
             settings.default_model = model
+            runtime_persist["default_model"] = settings.default_model
+    if "agent_backend" in data and data["agent_backend"] is not None:
+        from src.backends.base import BACKEND_OPENCODE, normalize_backend_name
+
+        name = normalize_backend_name(data["agent_backend"]) or BACKEND_OPENCODE
+        settings.agent_backend = name
+        runtime_persist["agent_backend"] = name
+    if "project_repositories" in data and data["project_repositories"] is not None:
+        encoded = project_repositories_to_json(data["project_repositories"])
+        settings.project_repositories = encoded
+        runtime_persist["project_repositories"] = encoded
+    if "jira_intake_mode" in data and data["jira_intake_mode"] is not None:
+        from src.jira.webhook import normalize_intake_mode
+
+        mode = normalize_intake_mode(data["jira_intake_mode"])
+        settings.jira_intake_mode = mode
+        runtime_persist["jira_intake_mode"] = mode
+        dotenv_updates["JIRA_INTAKE_MODE"] = mode
+        logger.info(f"Jira intake mode set to {mode}")
+    if "jira_webhook_secret" in data and data["jira_webhook_secret"] is not None:
+        tok = str(data["jira_webhook_secret"])
+        if tok.strip():
+            settings.jira_webhook_secret = tok.strip()
+            dotenv_updates["JIRA_WEBHOOK_SECRET"] = settings.jira_webhook_secret
+    if "trigger_mentions" in data and data["trigger_mentions"] is not None:
+        settings.trigger_mentions = str(data["trigger_mentions"]).strip()
+        runtime_persist["trigger_mentions"] = settings.trigger_mentions
+        dotenv_updates["TRIGGER_MENTIONS"] = settings.trigger_mentions
+    if "trigger_assignee_names" in data and data["trigger_assignee_names"] is not None:
+        settings.trigger_assignee_names = str(data["trigger_assignee_names"]).strip()
+        runtime_persist["trigger_assignee_names"] = settings.trigger_assignee_names
+        dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = settings.trigger_assignee_names
+
+    # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
+    # email (Basic). On-prem stays token-only Bearer.
+    if jira_host_is_cloud(getattr(settings, "jira_host", "")):
+        email = (getattr(settings, "jira_email", "") or "").strip()
+        if email:
+            runtime_persist["jira_email"] = email
+            dotenv_updates["JIRA_EMAIL"] = email
+    else:
+        settings.jira_email = ""
+        dotenv_updates["JIRA_EMAIL"] = ""
+        runtime_persist["jira_email"] = ""
+
+    if runtime_persist:
+        # Persist so the next job (and process restart) does not fall back to .env
+        save_runtime_settings(runtime_persist)
+
+    if dotenv_updates:
+        # Token/host/email must land in .env + os.environ so Test + restart work.
+        upsert_dotenv_keys(dotenv_updates)
+
     return build_settings_view()
 
 
@@ -419,9 +673,20 @@ def refresh_runtime_jira_clients(
 
 
 def _parse_session_log_name(name: str) -> Optional[tuple]:
-    """Parse ISSUE_YYYYMMDD_HHMMSS_n.log → (issue_key, started_at iso)."""
+    """Parse session log basename → (issue_key, started_at iso).
+
+    Accepts:
+      ISSUE_YYYYMMDD_HHMMSS.log
+      ISSUE_YYYYMMDD_HHMMSS_retryN.log
+      ISSUE_YYYYMMDD_HHMMSS_N.log  (legacy numeric suffix)
+      ISSUE_type_YYYYMMDD_HHMMSS[.log|_retryN.log]
+    """
     m = re.match(
-        r"^([A-Z][A-Z0-9]+-\d+)_(\d{8})_(\d{6})_\d+\.log$",
+        r"^([A-Z][A-Z0-9]+-\d+)"
+        r"(?:_[A-Za-z][A-Za-z0-9._-]*)?"  # optional task_type
+        r"_(\d{8})_(\d{6})"
+        r"(?:_retry\d+|_\d+)?"
+        r"\.log$",
         name,
         re.IGNORECASE,
     )
@@ -436,99 +701,301 @@ def _parse_session_log_name(name: str) -> Optional[tuple]:
 def _legacy_jobs_from_sessions(
     *,
     issue_key: Optional[str] = None,
-    covered_paths: set,
-    summaries: Dict[str, str],
+    summaries: Optional[Dict[str, str]] = None,
     limit: int = 200,
-    suppress_logs_after: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Synthesize job rows from session logs not already linked to a stored job.
+    """Deprecated: legacy session rows are no longer merged into the jobs list.
 
-    Lets the dashboard show historical runs that finished before JobStore existed.
-
-    ``suppress_logs_after`` maps issue_key → job started_at ISO. Session logs for
-    that issue with started_at >= cutoff are skipped so an in-flight JobStore row
-    is not duplicated as a fake ``legacy_*`` completed job while the agent runs
-    (session file exists before ``session_log_path`` is written on the job).
+    Kept as a no-op so older tests/call sites that import the symbol still work.
+    Retries and multi-attempt OpenCode logs belong on the parent JobStore job
+    (``session_log_paths`` / ``retry_attempts``), not as ``legacy_*`` rows.
     """
-    sessions_dir = _sessions_dir()
-    if not sessions_dir.is_dir():
-        return []
-    needle = (issue_key or "").strip().upper()
-    suppress = {k.upper(): v for k, v in (suppress_logs_after or {}).items()}
-    out: List[Dict[str, Any]] = []
-    paths = (
-        sorted(sessions_dir.glob(f"{needle}_*.log"), key=lambda p: p.name, reverse=True)
-        if needle
-        else sorted(sessions_dir.glob("*.log"), key=lambda p: p.name, reverse=True)
+    return []
+
+
+def _job_session_log_paths(j: Dict[str, Any]) -> List[str]:
+    """Ordered unique session log paths for a job dict."""
+    paths: List[str] = []
+    for p in j.get("session_log_paths") or []:
+        if p and p not in paths:
+            paths.append(str(p))
+    latest = j.get("session_log_path")
+    if latest and latest not in paths:
+        paths.append(str(latest))
+    return paths
+
+
+def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
+    paths: List[str] = []
+    for p in j.get("prompt_paths") or []:
+        if p and p not in paths:
+            paths.append(str(p))
+    latest = j.get("prompt_path")
+    if latest and latest not in paths:
+        paths.append(str(latest))
+    for log in _job_session_log_paths(j):
+        if not str(log).lower().endswith(".log"):
+            continue
+        sib = str(log)[:-4] + ".prompt.txt"
+        if sib in paths:
+            continue
+        try:
+            if Path(sib).is_file():
+                paths.append(sib)
+        except OSError:
+            continue
+    return paths
+
+
+def _resolve_job_backend(j: Dict[str, Any], *, description: str = "") -> str:
+    """opencode | codex. Prefer the stored field, then session id / {params}."""
+    from src.backends.base import normalize_backend_name
+
+    bid = normalize_backend_name(j.get("backend"))
+    if bid:
+        return bid
+    sid = str(j.get("opencode_session_id") or "").strip()
+    if sid.startswith("ses_"):
+        return "opencode"
+    if sid.count("-") >= 4 and len(sid) >= 16:
+        return "codex"
+    text = description or (j.get("description") or "")
+    if text:
+        try:
+            from src.issue_git_spec import parse_issue_git_spec
+
+            spec, _err = parse_issue_git_spec("", text)
+            got = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            if got:
+                return got
+        except Exception:
+            pass
+    return ""
+
+
+def job_dict_to_item(
+    j: Dict[str, Any],
+    *,
+    summaries: Optional[Dict[str, str]] = None,
+    live_keys: Optional[set] = None,
+    active_job_ids: Optional[set] = None,
+    store: Optional[JobStore] = None,
+    include_description: bool = True,
+) -> JobItem:
+    """Enrich one JobStore dict into a JobItem (list or single-job detail)."""
+    summaries = summaries or {}
+    live_keys = live_keys or set()
+    active_job_ids = active_job_ids or set()
+    js = store or default_job_store
+    jid = j.get("job_id") or ""
+    ik = j.get("issue_key") or ""
+    if not j.get("summary") and ik in summaries:
+        j = {**j, "summary": summaries[ik]}
+    description = ""
+    if include_description:
+        j = js.ensure_description(j, persist=str(jid).startswith("job_"))
+        if not (j.get("description") or "").strip() and j.get("prompt_path"):
+            recovered = description_from_prompt_path(j.get("prompt_path"))
+            if recovered:
+                j = {**j, "description": recovered}
+        description = j.get("description") or ""
+    live = jid in active_job_ids or (
+        ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
     )
-    for path in paths:
-        if path.name.endswith(".prompt.txt") or not path.is_file():
-            continue
-        if path.suffix != ".log":
-            continue
-        resolved = str(path.resolve())
-        # Also match by basename in case absolute paths differ
-        if resolved in covered_paths or str(path) in covered_paths:
-            continue
-        # Basename coverage (job may store relative path)
-        if path.name in covered_paths or path.stem in covered_paths:
-            continue
-        parsed = _parse_session_log_name(path.name)
-        if not parsed:
-            continue
-        ik, started = parsed
-        if needle and ik != needle:
-            continue
-        cutoff = suppress.get(ik)
-        if cutoff is not None:
-            # Log timestamp from filename vs job start — suppress overlap window
-            if not cutoff or started >= cutoff[:19]:
+    session_paths = _job_session_log_paths(j)
+    prompt_paths = _job_prompt_paths(j)
+    return JobItem(
+        job_id=jid,
+        issue_key=ik,
+        summary=j.get("summary") or "",
+        description=description,
+        workflow_type=j.get("workflow_type") or "execution",
+        agent=j.get("agent") or "",
+        model=(j.get("model") or None),
+        backend=_resolve_job_backend(j, description=description),
+        status=j.get("status") or "unknown",
+        task_id=j.get("task_id"),
+        task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
+        opencode_session_id=j.get("opencode_session_id"),
+        opencode_session_ids=list(j.get("opencode_session_ids") or []),
+        session_log_path=j.get("session_log_path") or (
+            session_paths[-1] if session_paths else None
+        ),
+        session_log_paths=session_paths,
+        prompt_path=j.get("prompt_path") or (prompt_paths[-1] if prompt_paths else None),
+        prompt_paths=prompt_paths,
+        retry_attempts=_job_retry_attempts(j),
+        error_message=j.get("error_message"),
+        started_at=j.get("started_at"),
+        completed_at=j.get("completed_at"),
+        updated_at=j.get("updated_at"),
+        live=live,
+        feature_branch=j.get("feature_branch") or None,
+        merge_request_url=j.get("merge_request_url") or None,
+        commit_sha=j.get("commit_sha") or None,
+        commit_subject=j.get("commit_subject") or None,
+        commit_url=j.get("commit_url") or None,
+        delivery_status=j.get("delivery_status") or None,
+        delivery_note=j.get("delivery_note") or None,
+        working_directory=(j.get("working_directory") or None),
+        source=str(j.get("source") or "jira"),
+        gitlab_project=j.get("gitlab_project") or None,
+        gitlab_mr_iid=j.get("gitlab_mr_iid"),
+    )
+
+
+def _job_working_directory(j: Dict[str, Any]) -> str:
+    """Clone path stored on the job, else the matching OpenCode session bind."""
+    raw = (j.get("working_directory") or "").strip()
+    if raw:
+        return raw
+    jid = (j.get("job_id") or "").strip()
+    sid = (j.get("opencode_session_id") or "").strip()
+    if not jid and not sid:
+        return ""
+    try:
+        from src.state.session_bind_store import session_bind_store
+
+        for rec in session_bind_store.list_binds(limit=500):
+            wd = (rec.get("working_directory") or "").strip()
+            if not wd:
                 continue
-        sid = None
-        sid_file = path.with_suffix(path.suffix + ".session_id")
-        if sid_file.is_file():
-            try:
-                sid = sid_file.read_text(encoding="utf-8").strip() or None
-            except OSError:
-                sid = None
-        prompt = path.with_suffix(".prompt.txt")
-        # Prefer sibling named like foo.prompt.txt next to foo.log
-        prompt_alt = Path(str(path) + ".prompt.txt")  # unlikely
-        prompt_path = None
-        for candidate in (
-            path.parent / f"{path.stem}.prompt.txt",
-            prompt,
-            prompt_alt,
-        ):
-            if candidate.is_file():
-                prompt_path = str(candidate)
-                break
-        desc = description_from_prompt_path(prompt_path) if prompt_path else ""
-        out.append(
-            {
-                "job_id": f"legacy_{path.stem}",
-                "issue_key": ik,
-                "summary": summaries.get(ik, ""),
-                "description": desc,
-                "workflow_type": "execution",
-                "agent": "",
-                # F6: never imply success for unparsed legacy session logs
-                "status": "unknown",
-                "task_id": None,
-                "opencode_session_id": sid,
-                "opencode_session_ids": [sid] if sid else [],
-                "session_log_path": resolved,
-                "prompt_path": prompt_path,
-                "progress_percentage": 0,
-                "error_message": None,
-                "started_at": started,
-                "completed_at": started,
-                "updated_at": started,
-            }
-        )
-        if len(out) >= limit:
-            break
+            if jid and rec.get("job_id") == jid:
+                return wd
+            if sid and rec.get("session_id") == sid:
+                return wd
+    except Exception:
+        return ""
+    return ""
+
+
+def build_one_job(
+    job_id: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[JobStore] = None,
+    state_manager: Optional[JiraStateManager] = None,
+) -> Optional[JobItem]:
+    """Single enriched job without scanning the whole JobStore list."""
+    js = store or default_job_store
+    raw = js.get_job((job_id or "").strip())
+    if not raw:
+        return None
+    live_keys: set = set()
+    active_job_ids: set = set()
+    if processor is not None:
+        live_keys = set(processor.list_live_processing_keys())
+        active_job_ids = set((processor._active_jobs or {}).values())
+    summaries: Dict[str, str] = {}
+    live_sid = ""
+    ik = (raw.get("issue_key") or "").strip()
+    if state_manager is not None and ik:
+        st = state_manager.get_state(ik)
+        if st and st.issue_summary:
+            summaries[st.issue_key] = st.issue_summary
+        if st:
+            # Run-scoped: only the in-flight job row may inherit the issue session.
+            # After complete, current_job_id is cleared — do not stamp last_ses_*
+            # onto an earlier clone-fail / cancelled run (transcript leak).
+            current_jid = str((st.metadata or {}).get("current_job_id") or "").strip()
+            this_jid = (raw.get("job_id") or "").strip()
+            if current_jid and current_jid == this_jid:
+                live_sid = (st.current_opencode_session_id or "").strip()
+    if live_sid and not (raw.get("opencode_session_id") or "").strip():
+        raw = {**raw, "opencode_session_id": live_sid}
+        ids = list(raw.get("opencode_session_ids") or [])
+        if live_sid not in ids:
+            raw = {**raw, "opencode_session_ids": ids + [live_sid]}
+    item = job_dict_to_item(
+        raw,
+        summaries=summaries,
+        live_keys=live_keys,
+        active_job_ids=active_job_ids,
+        store=js,
+        include_description=True,
+    )
+    wd = _job_working_directory({**raw, "opencode_session_id": item.opencode_session_id})
+    if not wd and processor is not None and ik:
+        try:
+            git = processor._git_for(ik)
+            got = git.get_working_directory() if git is not None else None
+            if got:
+                wd = str(got)
+        except Exception:
+            wd = ""
+    if wd and wd != item.working_directory:
+        item = item.model_copy(update={"working_directory": wd})
+    return item
+
+
+def _job_retry_attempts(j: Dict[str, Any]) -> List[JobRetryAttempt]:
+    out: List[JobRetryAttempt] = []
+    for raw in j.get("retry_attempts") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            out.append(
+                JobRetryAttempt(
+                    attempt_number=int(raw.get("attempt_number") or 0),
+                    label=str(raw.get("label") or ""),
+                    reason=str(raw.get("reason") or ""),
+                    delay_seconds=float(raw.get("delay_seconds") or 0),
+                    failed_session_log_path=raw.get("failed_session_log_path"),
+                    error_message=raw.get("error_message"),
+                    return_code=raw.get("return_code"),
+                    opencode_session_id=raw.get("opencode_session_id"),
+                    task_id=raw.get("task_id"),
+                    timestamp=raw.get("timestamp"),
+                )
+            )
+        except Exception:
+            continue
     return out
+
+
+def job_created_stamp(job: Any) -> str:
+    """Created/started time for list order (newest first).
+
+    Jobs are not grouped by issue key. ``started_at`` is set when the row is
+    created; fall back to ``created_at`` / ``updated_at`` for older records.
+    """
+    if isinstance(job, dict):
+        started = job.get("started_at")
+        created = job.get("created_at")
+        updated = job.get("updated_at")
+    else:
+        started = getattr(job, "started_at", None)
+        created = getattr(job, "created_at", None)
+        updated = getattr(job, "updated_at", None)
+    return str(started or created or updated or "")
+
+
+def _job_matches_search(
+    job: Dict[str, Any],
+    needle: Optional[str],
+    summaries: Optional[Dict[str, str]] = None,
+    descriptions: Optional[Dict[str, str]] = None,
+) -> bool:
+    """True when *needle* appears in issue key, title, or description."""
+    text = (needle or "").strip()
+    if not text:
+        return True
+    n = text.casefold()
+    key = str(job.get("issue_key") or "")
+    title = str(job.get("summary") or "")
+    if not title and summaries:
+        title = str(summaries.get(key) or summaries.get(key.upper()) or "")
+    body = str(job.get("description") or "")
+    if not body.strip() and descriptions:
+        body = str(descriptions.get(key) or descriptions.get(key.upper()) or "")
+    if body:
+        try:
+            from src.issue_git_spec import strip_params_block
+
+            body = strip_params_block(body) or body
+        except Exception:
+            pass
+    return n in key.casefold() or n in title.casefold() or n in body.casefold()
 
 
 def build_jobs(
@@ -554,107 +1021,54 @@ def build_jobs(
         active_job_ids = set((processor._active_jobs or {}).values())
 
     summaries: Dict[str, str] = {}
+    descriptions: Dict[str, str] = {}
     if state_manager is not None:
         for st in state_manager.get_all_states():
             summaries[st.issue_key] = st.issue_summary or ""
+            descriptions[st.issue_key] = st.description or ""
 
     size = int(page_size if page_size is not None else limit or 25)
     size = max(1, min(size, 100))
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
 
-    # Load a wide window so we can merge legacy session rows then paginate
+    # JobStore only — never synthesize legacy_* rows from session files.
+    # Retries live under the parent job (session_log_paths / retry_attempts).
     fetch_cap = 2000
-    raw = js.list_jobs(issue_key=issue_key, limit=fetch_cap, offset=0)
-    covered_paths: set = set()
-    # Open JobStore runs without session_log_path yet — suppress matching session logs
-    suppress_logs_after: Dict[str, str] = {}
+    raw = js.list_jobs(limit=fetch_cap, offset=0)
+    raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
+    raw = [
+        j
+        for j in raw
+        if _job_matches_search(j, issue_key, summaries, descriptions)
+    ]
+    inflight: List[Dict[str, Any]] = []
+    rest: List[Dict[str, Any]] = []
     for j in raw:
-        for key in ("session_log_path", "prompt_path"):
-            p = j.get(key)
-            if p:
-                covered_paths.add(str(p))
-                try:
-                    pp = Path(p)
-                    covered_paths.add(str(pp.resolve()))
-                    covered_paths.add(pp.name)
-                    covered_paths.add(pp.stem)
-                    # Log sibling of .prompt.txt
-                    if pp.name.endswith(".prompt.txt"):
-                        covered_paths.add(pp.name[: -len(".prompt.txt")] + ".log")
-                        covered_paths.add(pp.stem.replace(".prompt", ""))
-                except Exception:
-                    pass
-        st = (j.get("status") or "").lower()
-        if st in ("running", "planning", "executing") and not j.get("session_log_path"):
-            ik = (j.get("issue_key") or "").upper()
-            started = j.get("started_at") or ""
-            if ik and (ik not in suppress_logs_after or started < suppress_logs_after[ik]):
-                suppress_logs_after[ik] = started
-
-    # Merge stored jobs with legacy session-derived rows (newest first after merge)
-    remaining = max(0, fetch_cap - len(raw))
-    if remaining > 0:
-        legacy = _legacy_jobs_from_sessions(
-            issue_key=issue_key,
-            covered_paths=covered_paths,
-            summaries=summaries,
-            limit=remaining,
-            suppress_logs_after=suppress_logs_after,
+        st = str(j.get("status") or "").lower()
+        live = (
+            j.get("issue_key") in live_keys
+            or j.get("job_id") in active_job_ids
+            or st in {"executing", "planning", "running", "pending"}
         )
-        raw = list(raw) + legacy
-        raw.sort(
-            key=lambda j: j.get("started_at") or j.get("updated_at") or "",
-            reverse=True,
-        )
+        (inflight if live else rest).append(j)
+    inflight.sort(key=job_created_stamp, reverse=True)
+    rest.sort(key=job_created_stamp, reverse=True)
+    raw = inflight + rest
 
     total = len(raw)
     page_raw = raw[offset : offset + size]
 
     items: List[JobItem] = []
     for j in page_raw:
-        jid = j.get("job_id") or ""
-        ik = j.get("issue_key") or ""
-        if not j.get("summary") and ik in summaries:
-            j = {**j, "summary": summaries[ik]}
-        # Recover description from this job's prompt — never from live issue state
-        j = js.ensure_description(j, persist=jid.startswith("job_"))
-        if not (j.get("description") or "").strip() and j.get("prompt_path"):
-            recovered = description_from_prompt_path(j.get("prompt_path"))
-            if recovered:
-                j = {**j, "description": recovered}
-        live = jid in active_job_ids or (
-            ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
-        )
         items.append(
-            JobItem(
-                job_id=jid,
-                issue_key=ik,
-                summary=j.get("summary") or "",
-                # Per-job snapshot only (or recovered from that job's prompt file)
-                description=j.get("description") or "",
-                workflow_type=j.get("workflow_type") or "execution",
-                agent=j.get("agent") or "",
-                status=j.get("status") or "unknown",
-                task_id=j.get("task_id"),
-                task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
-                opencode_session_id=j.get("opencode_session_id"),
-                opencode_session_ids=list(j.get("opencode_session_ids") or []),
-                session_log_path=j.get("session_log_path"),
-                prompt_path=j.get("prompt_path"),
-                progress_percentage=int(j.get("progress_percentage") or 0),
-                error_message=j.get("error_message"),
-                started_at=j.get("started_at"),
-                completed_at=j.get("completed_at"),
-                updated_at=j.get("updated_at"),
-                live=live,
-                feature_branch=j.get("feature_branch") or None,
-                merge_request_url=j.get("merge_request_url") or None,
-                commit_sha=j.get("commit_sha") or None,
-                commit_subject=j.get("commit_subject") or None,
-                commit_url=j.get("commit_url") or None,
-                delivery_status=j.get("delivery_status") or None,
-                delivery_note=j.get("delivery_note") or None,
+            job_dict_to_item(
+                j,
+                summaries=summaries,
+                live_keys=live_keys,
+                active_job_ids=active_job_ids,
+                store=js,
+                include_description=bool(issue_key),
             )
         )
     return JobsResponse(
@@ -665,6 +1079,154 @@ def build_jobs(
         issue_key_filter=(issue_key or None),
         server_time=datetime.now().isoformat(timespec="seconds"),
     )
+
+
+def _queue_live_issue_keys(processor: Any = None) -> set:
+    """Issue keys that are already in-flight and must not appear as waiting."""
+    live: set = set()
+    if processor is None:
+        return live
+    list_fn = getattr(processor, "list_live_processing_keys", None)
+    if callable(list_fn):
+        try:
+            live = {(k or "").strip().upper() for k in (list_fn() or []) if k}
+        except Exception:
+            live = set()
+    sm = getattr(processor, "state_manager", None)
+    inflight = getattr(processor, "IN_FLIGHT_STATUSES", None)
+    get_all = getattr(sm, "get_all_states", None) if sm is not None else None
+    if callable(get_all) and inflight:
+        try:
+            for st in get_all() or []:
+                if getattr(st, "status", None) in inflight:
+                    key = (getattr(st, "issue_key", None) or "").strip().upper()
+                    if key:
+                        live.add(key)
+        except Exception:
+            pass
+    return live
+
+
+def build_queue(
+    *,
+    status: Optional[str] = None,
+    limit: int = 200,
+    store: Any = None,
+    processor: Any = None,
+) -> QueueResponse:
+    """List work-queue items for the dashboard (Jira + GitLab).
+
+    Waiting rows whose issue is already in-flight are omitted so the same
+    ticket is not listed under both In flight and Queue.
+    """
+    from src.state.queue_store import work_queue_store as default_queue
+
+    qs = store or default_queue
+    live_keys = _queue_live_issue_keys(processor)
+
+    def _waiting_and_live(rec: Dict[str, Any]) -> bool:
+        if (rec.get("status") or "") != "queued":
+            return False
+        ik = (rec.get("issue_key") or "").strip().upper()
+        if ik and ik in live_keys:
+            return True
+        check = getattr(processor, "_issue_is_in_flight", None) if processor else None
+        return bool(ik and callable(check) and check(ik))
+
+    if status:
+        raw = qs.list_items(status=status, limit=limit)
+    else:
+        raw = qs.list_items(status="queued", limit=limit) + qs.list_items(
+            status="running", limit=limit
+        )
+    raw = [rec for rec in raw if not _waiting_and_live(rec)]
+    items: List[QueueItem] = []
+    queued = len(
+        [
+            rec
+            for rec in qs.list_items(status="queued", limit=500)
+            if not _waiting_and_live(rec)
+        ]
+    )
+    running = len(qs.list_items(status="running", limit=500))
+    for rec in raw:
+        st = rec.get("status") or "queued"
+        try:
+            items.append(
+                QueueItem(
+                    queue_id=rec.get("queue_id") or "",
+                    status=st,
+                    source=rec.get("source") or "jira",
+                    issue_key=rec.get("issue_key") or "",
+                    summary=rec.get("summary") or "",
+                    message=rec.get("message") or "",
+                    repository_url=rec.get("repository_url") or "",
+                    source_branch=rec.get("source_branch") or "",
+                    work_branch=rec.get("work_branch") or "",
+                    target_branch=rec.get("target_branch") or "",
+                    lock_key=rec.get("lock_key") or "",
+                    job_id=rec.get("job_id"),
+                    merge_request_url=rec.get("merge_request_url") or "",
+                    gitlab_note_id=rec.get("gitlab_note_id") or "",
+                    error_message=rec.get("error_message"),
+                    created_at=rec.get("created_at"),
+                    started_at=rec.get("started_at"),
+                    finished_at=rec.get("finished_at"),
+                )
+            )
+        except Exception:
+            continue
+    items.sort(
+        key=lambda i: (
+            {"queued": 0, "running": 1}.get(i.status, 9),
+            i.created_at or "",
+        )
+    )
+    return QueueResponse(
+        items=items,
+        queued_count=queued,
+        running_count=running,
+        total=len(items),
+        server_time=datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+def build_live_envelope(
+    *,
+    state_manager: Optional[JiraStateManager] = None,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[PollSnapshotStore] = None,
+) -> Dict[str, Any]:
+    """Cheap WS tick: poll + clock + live/queue counts. No job/task disk scan."""
+    live_keys: List[str] = []
+    if processor is not None:
+        try:
+            live_keys = sorted(
+                str(k).strip().upper()
+                for k in (processor.list_live_processing_keys() or [])
+                if str(k).strip()
+            )
+        except Exception:
+            live_keys = []
+    queued = 0
+    try:
+        from src.state.queue_store import work_queue_store as default_queue
+
+        live = set(live_keys)
+        queued = sum(
+            1
+            for rec in default_queue.list_items(status="queued", limit=500)
+            if (rec.get("issue_key") or "").strip().upper() not in live
+        )
+    except Exception:
+        queued = 0
+    return {
+        "type": "live",
+        "meta": build_meta().model_dump(),
+        "poll": build_poll_status(store, state_manager).model_dump(),
+        "queue": {"queued_count": queued},
+        "live_issue_keys": live_keys,
+    }
 
 
 def build_dashboard_payload(
@@ -687,6 +1249,7 @@ def build_dashboard_payload(
         ).model_dump(),
         "poll": build_poll_status(store, state_manager).model_dump(),
         "settings": build_settings_view().model_dump(),
+        "queue": build_queue(processor=processor).model_dump(),
     }
 
 
@@ -723,7 +1286,7 @@ def _resolve_job_dict(
 
 
 def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
-    """Delete a session log / prompt under .jira-agent only. Returns path if deleted."""
+    """Delete a session log / prompt under YAVER_DATA_DIR only. Returns path if deleted."""
     if not path_str:
         return None
     try:
@@ -740,11 +1303,9 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         except ValueError:
             return False
 
-    allowed = (
-        _under(Path.cwd() / ".jira-agent")
-        or _under(Path.cwd() / ".jira-agent" / "sessions")
-        or ".jira-agent" in path.parts
-    )
+    from src.paths import under_agent_data
+
+    allowed = under_agent_data(path)
     if not allowed:
         return None
     blocked = {"etc", "proc", "sys", "windows", "system32"}
@@ -754,9 +1315,7 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         path.unlink()
         # Sibling session_id marker next to log
         sid = Path(str(path) + ".session_id")
-        if sid.is_file() and (
-            _under(Path.cwd() / ".jira-agent") or ".jira-agent" in sid.parts
-        ):
+        if sid.is_file() and (under_agent_data(sid) or ".jira-agent" in sid.parts):
             try:
                 sid.unlink()
             except OSError:
@@ -822,19 +1381,31 @@ def delete_job_record(
         store_deleted = js.delete_job(jid) if jid.startswith("job_") else False
 
     if delete_artifacts:
-        for key in ("session_log_path", "prompt_path"):
-            gone = _safe_delete_agent_artifact(job.get(key))
+        # All session/prompt artifacts for this job (initial + retries)
+        artifact_candidates: List[Optional[str]] = []
+        artifact_candidates.extend(_job_session_log_paths(job))
+        artifact_candidates.extend(_job_prompt_paths(job))
+        artifact_candidates.append(job.get("session_log_path"))
+        artifact_candidates.append(job.get("prompt_path"))
+        for raw_ra in job.get("retry_attempts") or []:
+            if isinstance(raw_ra, dict):
+                artifact_candidates.append(raw_ra.get("failed_session_log_path"))
+        seen_art: set = set()
+        for p in artifact_candidates:
+            if not p or p in seen_art:
+                continue
+            seen_art.add(p)
+            gone = _safe_delete_agent_artifact(p)
             if gone:
                 deleted_paths.append(gone)
-        # Common sibling prompt next to log
-        log_path = job.get("session_log_path")
-        if log_path and not job.get("prompt_path"):
+            # Sibling prompt next to each session log
             try:
-                log = Path(str(log_path))
-                sibling = log.parent / f"{log.stem}.prompt.txt"
-                gone = _safe_delete_agent_artifact(str(sibling))
-                if gone:
-                    deleted_paths.append(gone)
+                log = Path(str(p))
+                if log.suffix == ".log":
+                    sibling = log.parent / f"{log.stem}.prompt.txt"
+                    gone = _safe_delete_agent_artifact(str(sibling))
+                    if gone:
+                        deleted_paths.append(gone)
             except Exception:
                 pass
         # Durable per-job system log (daemon lines tagged with job_id)
@@ -968,7 +1539,9 @@ def _sessions_dir() -> Path:
 
         return _default_sessions_dir()
     except Exception:
-        return (Path.cwd() / ".jira-agent" / "sessions").resolve()
+        from src.paths import agent_subdir
+
+        return agent_subdir("sessions").resolve()
 
 
 def _path_under(root: Path, path: Path) -> bool:
@@ -1048,6 +1621,296 @@ def _collect_session_artifacts(issue_key: str) -> Dict[str, Any]:
     return {"session_logs": logs, "prompt_files": prompts}
 
 
+def _artifacts_root() -> Path:
+    from src.paths import agent_data_dir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_data_dir().resolve()
+
+
+def _codex_thread_id(job: Dict[str, Any]) -> str:
+    from src.backends.base import is_session_or_thread_id
+
+    sid = str(job.get("opencode_session_id") or "").strip()
+    if is_session_or_thread_id(sid) and not sid.startswith("ses_"):
+        return sid
+    for raw in job.get("opencode_session_ids") or []:
+        extra = str(raw or "").strip()
+        if is_session_or_thread_id(extra) and not extra.startswith("ses_"):
+            return extra
+    return ""
+
+
+def _prepend_codex_thread_artifact_paths(
+    job: Dict[str, Any],
+    prompt_paths: List[str],
+    log_paths: List[str],
+    *,
+    store: Any = None,
+) -> tuple[List[str], List[str]]:
+    """Older jobs on the same Codex thread belong in this job's transcript."""
+    if _resolve_job_backend(job) != "codex":
+        return prompt_paths, log_paths
+    tid = _codex_thread_id(job)
+    if not tid:
+        return prompt_paths, log_paths
+    issue_key = str(job.get("issue_key") or "").strip()
+    job_id = str(job.get("job_id") or "").strip()
+    if not issue_key:
+        return prompt_paths, log_paths
+    try:
+        from src.state.job_store import JobStore, job_store as default_store
+
+        js = store if store is not None else default_store
+        if js is None:
+            js = JobStore()
+        siblings = list(js.list_jobs(issue_key=issue_key, limit=200))
+    except Exception:
+        return prompt_paths, log_paths
+    extra_prompts: List[str] = []
+    extra_logs: List[str] = []
+    for rec in reversed(siblings):
+        if not isinstance(rec, dict):
+            continue
+        if job_id and rec.get("job_id") == job_id:
+            continue
+        sid = str(rec.get("opencode_session_id") or "").strip()
+        ids = [str(x).strip() for x in (rec.get("opencode_session_ids") or []) if x]
+        if sid != tid and tid not in ids:
+            continue
+        for p in _job_prompt_paths(rec):
+            if p and p not in extra_prompts and p not in prompt_paths:
+                extra_prompts.append(p)
+        for p in _job_session_log_paths(rec):
+            if p and p not in extra_logs and p not in log_paths:
+                extra_logs.append(p)
+    return extra_prompts + prompt_paths, extra_logs + log_paths
+
+
+def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Read prompt/session files for this job.
+
+    Codex resume writes a new JSONL per exec. Include earlier jobs that share
+    the same thread id so the Chat tab shows the full transcript.
+    """
+    if hasattr(job, "model_dump"):
+        job = job.model_dump()
+    if not isinstance(job, dict):
+        return {"prompts": [], "session_logs": []}
+    root = _artifacts_root()
+    prompts: List[Dict[str, Any]] = []
+    logs: List[Dict[str, Any]] = []
+    seen_p: set = set()
+    seen_l: set = set()
+    prompt_paths, log_paths = _prepend_codex_thread_artifact_paths(
+        job, _job_prompt_paths(job), _job_session_log_paths(job)
+    )
+    for p in prompt_paths:
+        if not p or p in seen_p:
+            continue
+        seen_p.add(p)
+        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, root=root))
+    for p in log_paths:
+        if not p or p in seen_l:
+            continue
+        seen_l.add(p)
+        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, root=root))
+    return {"prompts": prompts, "session_logs": logs}
+
+
+def _job_started_ms(job: Dict[str, Any]) -> Optional[int]:
+    raw = job.get("started_at")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).strip())
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return int(dt.timestamp() * 1000)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _session_time_ms(raw: Any) -> int:
+    try:
+        n = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    if n > 10_000_000_000:
+        return int(n)
+    return int(n * 1000)
+
+
+def _job_opencode_session_ids(job: Dict[str, Any]) -> List[str]:
+    """Session ids recorded on this job (history + sidecar + live OpenCode DB)."""
+    ids: List[str] = []
+
+    def _add(raw: Any) -> None:
+        sid = str(raw or "").strip()
+        if sid and sid.startswith("ses_") and sid not in ids:
+            ids.append(sid)
+
+    for sid in job.get("opencode_session_ids") or []:
+        _add(sid)
+    _add(job.get("opencode_session_id"))
+    for attempt in job.get("retry_attempts") or []:
+        if isinstance(attempt, dict):
+            _add(attempt.get("opencode_session_id"))
+    recorded = list(ids)
+    for path in _job_session_log_paths(job):
+        try:
+            marker = Path(str(path) + ".session_id")
+            if marker.is_file():
+                _add(marker.read_text(encoding="utf-8").splitlines()[0])
+        except OSError:
+            pass
+        try:
+            log_path = Path(str(path))
+            if log_path.is_file() and log_path.stat().st_size > 0:
+                raw = log_path.read_text(encoding="utf-8", errors="replace")
+                if len(raw) > 16_000:
+                    raw = raw[:8_000] + "\n" + raw[-8_000:]
+                for sid in extract_session_ids_from_text(raw):
+                    _add(sid)
+        except OSError:
+            continue
+    # Directory scan only when this job has no recorded ses_* (live / early
+    # chat). Never pull a later job's session from a reused clone folder.
+    if recorded:
+        return ids
+    wd = (job.get("working_directory") or "").strip()
+    if wd:
+        try:
+            from src.opencode_sessions import find_sessions_for_directory
+
+            started_ms = _job_started_ms(job)
+            completed_ms = _job_started_ms(
+                {"started_at": job.get("completed_at")}
+            )
+            found = find_sessions_for_directory(wd, limit=20)
+            for rec in found:
+                created_ms = _session_time_ms(rec.get("time_created"))
+                if started_ms is None:
+                    _add(rec.get("id"))
+                    break
+                if created_ms < started_ms - 15_000:
+                    continue
+                if completed_ms and created_ms > completed_ms:
+                    continue
+                _add(rec.get("id"))
+        except Exception:
+            pass
+    return ids
+
+
+_CHAT_WRAP_RESTART_SLACK_MS = 2_000
+
+
+def _job_wrap_restart_ms(job: Dict[str, Any]) -> Optional[int]:
+    """Timestamp where this job's prompt may repeat the previous [search-mode] kit."""
+    started = _job_started_ms(job)
+    if started is None:
+        return None
+    return started - _CHAT_WRAP_RESTART_SLACK_MS
+
+
+def _job_prompt_for_chat(job: Dict[str, Any]) -> str:
+    """Best-effort operator prompt when the session window has no user turn."""
+    from src.state.job_store import extract_task_description_from_prompt
+
+    for path in _job_prompt_paths(job):
+        if not path:
+            continue
+        try:
+            raw = Path(str(path)).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = description_from_prompt_path(path)
+        text = (raw or "").strip()
+        if not text:
+            continue
+        cleaned = strip_internal_markup(text)
+        if is_omo_mode_wrap_text(cleaned):
+            cleaned = strip_omo_mode_wrap(cleaned)
+        extracted = extract_task_description_from_prompt(cleaned)
+        body = (extracted or cleaned).strip()
+        if body:
+            return body
+    for key in ("description", "summary"):
+        body = str(job.get(key) or "").strip()
+        if body:
+            return body
+    return ""
+
+
+def _synthetic_user_message(
+    job: Dict[str, Any], *, session_id: str, text: str
+) -> Dict[str, Any]:
+    return {
+        "id": f"{job.get('job_id') or 'job'}:prompt",
+        "session_id": session_id,
+        "role": "user",
+        "raw_role": "user",
+        "finish": None,
+        "summary": False,
+        "agent": None,
+        "created_at": job.get("started_at"),
+        "parts": [{"id": "prompt", "type": "text", "text": text}],
+    }
+
+
+def collect_job_chat(job: Any) -> Dict[str, Any]:
+    """OpenCode chat for sessions linked to this job.
+
+    Continuing / re-queueing resumes the same ``ses_*``. The dashboard must
+    show the full prompt + model history from that session, including this
+    run's new operator turn (not only the cancelled job's first prompt).
+    """
+    if hasattr(job, "model_dump"):
+        job = job.model_dump()
+    if not isinstance(job, dict):
+        return {
+            "job_id": "",
+            "session_ids": [],
+            "sessions": [],
+            "messages": [],
+        }
+    sids = _job_opencode_session_ids(job)
+    restart_ms = _job_wrap_restart_ms(job)
+    sessions: List[Dict[str, Any]] = []
+    messages: List[Dict[str, Any]] = []
+    for sid in sids:
+        chat = list_session_chat(sid, restart_wraps_at_ms=restart_ms)
+        sessions.append(
+            {
+                "session_id": sid,
+                "title": chat.get("title"),
+                "directory": chat.get("directory"),
+                "message_count": len(chat.get("messages") or []),
+                "truncated": bool(chat.get("truncated")),
+                "error": chat.get("error"),
+            }
+        )
+        for msg in chat.get("messages") or []:
+            messages.append(msg)
+    if not any(m.get("role") == "user" for m in messages):
+        preview = _job_prompt_for_chat(job)
+        if preview:
+            messages.insert(
+                0,
+                _synthetic_user_message(
+                    job, session_id=sids[0] if sids else "", text=preview
+                ),
+            )
+            if sessions:
+                sessions[0]["message_count"] = len(messages)
+    return {
+        "job_id": job.get("job_id") or "",
+        "session_ids": sids,
+        "sessions": sessions,
+        "messages": messages,
+    }
+
+
 def _reconstruct_prompts(state) -> Dict[str, Any]:
     """Metadata for the prompts tab (agent/workflow only).
 
@@ -1055,23 +1918,12 @@ def _reconstruct_prompts(state) -> Dict[str, Any]:
     agent. We do not rebuild a live “assembled” prompt for display.
     """
     workflow = (state.metadata or {}).get("workflow_type") or "execution"
-    agent_name = settings.default_agent
-    if workflow == WorkflowType.PLANNING.value or workflow == "planning":
-        agent_name = settings.planning_agent
-    elif workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
-        agent_name = "oracle"
-    elif workflow == "execution" or (
-        state.status == TaskStatus.EXECUTING
-        and state.plan_path
-        and workflow == WorkflowType.PLANNING.value
-    ):
-        agent_name = settings.orchestrator_agent
-    elif state.plan_path and state.status in (
-        TaskStatus.EXECUTING,
-        TaskStatus.PLAN_READY,
-        TaskStatus.COMPLETED,
-    ):
-        agent_name = settings.orchestrator_agent
+    if workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT)
+    elif workflow in ("planning", "plan"):
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING)
+    else:
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION)
 
     return {
         "workflow_type": workflow,
@@ -1159,18 +2011,45 @@ def _collect_git_deliveries(
     """
     meta = meta or {}
     items: List[Dict[str, Any]] = []
-    seen: set = set()
+    index: Dict[tuple, Dict[str, Any]] = {}
 
-    def _key(d: Dict[str, Any]) -> str:
-        return "|".join(
-            [
-                str(d.get("job_id") or ""),
-                str(d.get("merge_request_url") or ""),
-                str(d.get("commit_sha") or ""),
-                str(d.get("feature_branch") or ""),
-                str(d.get("created_at") or ""),
-            ]
-        )
+    def _identities(d: Dict[str, Any]) -> List[tuple]:
+        """Stable keys so the same MR is not listed three times.
+
+        One push is stored on the job, in ``metadata.git_deliveries``, and again
+        as top-level ``merge_request_url`` / ``feature_branch``. Those rows
+        differ by job_id / created_at / status and used to bypass exact-key
+        dedupe.
+        """
+        ids: List[tuple] = []
+        mr = str(d.get("merge_request_url") or "").strip().rstrip("/")
+        sha = str(d.get("commit_sha") or "").strip().lower()
+        jid = str(d.get("job_id") or "").strip()
+        if mr:
+            ids.append(("mr", mr))
+        if sha:
+            ids.append(("sha", sha))
+        if jid:
+            ids.append(("job", jid))
+        if not ids:
+            branch = str(d.get("feature_branch") or "").strip()
+            if branch:
+                ids.append(("branch", branch))
+        return ids
+
+    def _merge_into(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+        for key in (
+            "job_id",
+            "feature_branch",
+            "merge_request_url",
+            "commit_sha",
+            "commit_subject",
+            "commit_url",
+            "created_at",
+            "status",
+        ):
+            if not dst.get(key) and src.get(key):
+                dst[key] = src[key]
 
     def _add(raw: Dict[str, Any]) -> None:
         if not any(
@@ -1182,22 +2061,33 @@ def _collect_git_deliveries(
             ]
         ):
             return
-        k = _key(raw)
-        if k in seen:
+        row = {
+            "job_id": raw.get("job_id") or None,
+            "feature_branch": raw.get("feature_branch") or None,
+            "merge_request_url": raw.get("merge_request_url") or None,
+            "commit_sha": raw.get("commit_sha") or None,
+            "commit_subject": raw.get("commit_subject") or None,
+            "commit_url": raw.get("commit_url") or None,
+            "created_at": raw.get("created_at") or None,
+            "status": raw.get("status") or None,
+        }
+        ids = _identities(row)
+        if not ids:
             return
-        seen.add(k)
-        items.append(
-            {
-                "job_id": raw.get("job_id"),
-                "feature_branch": raw.get("feature_branch") or None,
-                "merge_request_url": raw.get("merge_request_url") or None,
-                "commit_sha": raw.get("commit_sha") or None,
-                "commit_subject": raw.get("commit_subject") or None,
-                "commit_url": raw.get("commit_url") or None,
-                "created_at": raw.get("created_at") or None,
-                "status": raw.get("status") or None,
-            }
-        )
+        existing: Optional[Dict[str, Any]] = None
+        for ident in ids:
+            hit = index.get(ident)
+            if hit is not None:
+                existing = hit
+                break
+        if existing is not None:
+            _merge_into(existing, row)
+            target = existing
+        else:
+            items.append(row)
+            target = row
+        for ident in _identities(target):
+            index[ident] = target
 
     # 1) Jobs (source of truth per run)
     job_rows: List[Any] = list(jobs or [])
@@ -1263,10 +2153,15 @@ def _build_task_detail_without_state(
     operators can inspect the ticket without a 404.
     """
     key = (issue_key or "").strip().upper()
-    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    # Never open a live Jira client from a no-state stub (arbitrary key SSRF/read)
+    jira_live: Dict[str, Any] = {}
+    if processor is not None:
+        jira_live = _fetch_live_jira_fields(key, processor=processor)
     poll_row: Dict[str, Any] = {}
     try:
-        snap = poll_snapshot_store.snapshot()
+        from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+        snap = snap_store.snapshot()
         for row in snap.get("issues") or []:
             if (row.get("key") or "").strip().upper() == key:
                 poll_row = row
@@ -1294,7 +2189,6 @@ def _build_task_detail_without_state(
         "jira_status": jira_status,
         "jira_live": bool(jira_live),
         "status": str(local_status),
-        "progress_percentage": 0,
         "live": False,
         "can_cancel": False,
         "can_start": False,
@@ -1330,11 +2224,18 @@ def build_task_detail(
     *,
     state_manager: Optional[JiraStateManager] = None,
     processor: Optional["JobProcessor"] = None,
+    include_artifacts: bool = True,
+    include_live_jira: bool = True,
+    jobs: Optional[List[Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Full task detail for dashboard (prompts, sessions, logs, cancel eligibility).
 
     Returns a read-only stub when the issue is on the board but has no local
     agent state yet (so Poll monitor can open any eligible key).
+
+    ``include_artifacts`` / ``include_live_jira`` default True for callers that
+    need the full dump. HTTP handlers pass False so overview paints quickly.
+    Pass ``jobs`` to avoid a second JobStore scan for git deliveries.
     """
     sm = state_manager or JiraStateManager()
     key = (issue_key or "").strip().upper()
@@ -1342,14 +2243,32 @@ def build_task_detail(
     if not state:
         if not key:
             return None
-        return _build_task_detail_without_state(key, processor=processor)
+        # Live Jira GET only for keys on the last poll snapshot (board read).
+        # Arbitrary keys stay stub-only so this is not an open Jira proxy.
+        on_board = False
+        try:
+            from src.dashboard.snapshot import poll_snapshot_store as snap_store
+
+            snap = snap_store.snapshot()
+            on_board = any(
+                str(row.get("key") or "").upper() == key
+                for row in (snap.get("issues") or [])
+                if isinstance(row, dict)
+            )
+        except Exception:
+            on_board = False
+        return _build_task_detail_without_state(
+            key, processor=processor if (on_board and include_live_jira) else None
+        )
 
     live = False
     if processor is not None:
         live = processor._is_live_processing(key)
 
     # Live fields from Jira (not frozen local state / job snapshot)
-    jira_live = _fetch_live_jira_fields(key, processor=processor)
+    jira_live: Dict[str, Any] = {}
+    if include_live_jira:
+        jira_live = _fetch_live_jira_fields(key, processor=processor)
     if jira_live:
         live_summary = jira_live.get("summary") or state.issue_summary or ""
         live_description = jira_live.get("description", "")
@@ -1357,7 +2276,9 @@ def build_task_detail(
         live_summary = state.issue_summary or ""
         live_description = state.description or ""
 
-    artifacts = _collect_session_artifacts(key)
+    artifacts: Dict[str, Any] = {"session_logs": [], "prompt_files": []}
+    if include_artifacts:
+        artifacts = _collect_session_artifacts(key)
     prompts = _reconstruct_prompts(state)
     # Prefer on-disk prompt captures when present (actual text sent to agent)
     if artifacts["prompt_files"]:
@@ -1374,8 +2295,8 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
-    # Plans never auto-start; dashboard does not offer a Start button.
-    # Operator: new Mode: build issue, or ai-start-work / ai-execute label.
+    # Dashboard does not offer a Start button. After a plan, set
+    # label plan_execute while In Progress (or open a new Mode: build issue).
     can_start = False
 
     meta = state.metadata or {}
@@ -1393,23 +2314,24 @@ def build_task_detail(
     job_ids = list(meta.get("job_ids") or [])
     if meta.get("current_job_id") and meta["current_job_id"] not in job_ids:
         job_ids = [*job_ids, meta["current_job_id"]]
-    # Sibling .session_id files next to session logs
-    for log in artifacts["session_logs"]:
-        sid_file = Path(log["path"] + ".session_id")
-        if sid_file.is_file():
-            try:
-                sid = sid_file.read_text(encoding="utf-8").strip()
-                if sid and sid not in session_ids:
-                    session_ids.append(sid)
-                if not current_sid:
-                    current_sid = sid
-            except OSError:
-                pass
-    db_sessions = find_sessions_for_issue(key, limit=20)
-    for s in db_sessions:
-        sid = s.get("id")
-        if sid and sid not in session_ids:
-            session_ids.append(sid)
+    db_sessions: List[Any] = []
+    if include_artifacts:
+        for log in artifacts["session_logs"]:
+            sid_file = Path(log["path"] + ".session_id")
+            if sid_file.is_file():
+                try:
+                    sid = sid_file.read_text(encoding="utf-8").strip()
+                    if sid and sid not in session_ids:
+                        session_ids.append(sid)
+                    if not current_sid:
+                        current_sid = sid
+                except OSError:
+                    pass
+        db_sessions = find_sessions_for_issue(key, limit=20)
+        for s in db_sessions:
+            sid = s.get("id")
+            if sid and sid not in session_ids:
+                session_ids.append(sid)
     if not current_sid and session_ids:
         current_sid = session_ids[-1]
 
@@ -1420,7 +2342,6 @@ def build_task_detail(
         "jira_status": jira_live.get("jira_status") or None,
         "jira_live": bool(jira_live),
         "status": state.status.value,
-        "progress_percentage": int(state.progress_percentage or 0),
         "live": live,
         "can_cancel": can_cancel,
         "can_start": can_start,
@@ -1443,6 +2364,7 @@ def build_task_detail(
         "git_deliveries": _collect_git_deliveries(
             issue_key=key,
             meta=meta,
+            jobs=jobs,
         ),
         "retry_history": retry_history,
         "prompts": prompts,

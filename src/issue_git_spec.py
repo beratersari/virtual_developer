@@ -28,13 +28,14 @@ Aliases inside the block:
 * Repository / Repo / GitLab / Project URL
 * Source branch / Work branch
 * Target branch / MR target / Merge into / Base branch
+* Model / LLM (optional OpenCode model id; empty = settings default)
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 # First {params} ... {params} block (case-insensitive tag; body may span lines)
@@ -46,6 +47,10 @@ _PARAMS_BLOCK = re.compile(
 _JIRA_LINK = re.compile(
     r"\[([^\]|\n]+)\|([^\]|\n]+)(?:\|[^\]\n]+)?\]"
 )
+# Cloud auto-link of an issue key: [KAN-7] or [KAN-7|https://…/browse/KAN-7]
+_JIRA_ISSUE_KEY = re.compile(
+    r"\[([A-Za-z][A-Za-z0-9]+-\d+)(?:\|[^\]\n]+)?\]"
+)
 _MD_LINK = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
 
 _REPO_KEY = r"(?:repository|repo|gitlab(?:\s*url)?|project(?:\s*url)?)"
@@ -55,7 +60,9 @@ _SOURCE_KEY = r"(?:source\s*branch|work\s*branch)"
 _TARGET_KEY = r"(?:target\s*branch|mr\s*target|merge\s*into|merge\s*target|base\s*branch)"
 # Mode / workflow decision inside {params}
 _MODE_KEY = r"(?:mode|workflow(?:\s*mode)?)"
-_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY})"
+_MODEL_KEY = r"(?:model|llm|opencode\s*model|default\s*model)"
+_BACKEND_KEY = r"(?:backend|agent\s*backend|worker)"
+_ANY_KEY = rf"(?:{_REPO_KEY}|{_SOURCE_KEY}|{_TARGET_KEY}|{_MODE_KEY}|{_MODEL_KEY}|{_BACKEND_KEY})"
 
 _REPO_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r])\s*{_REPO_KEY}\s*:\s*(.*?)(?=\s*{_ANY_KEY}\s*:|\Z)"
@@ -69,6 +76,12 @@ _TARGET_FIELD = re.compile(
 _MODE_FIELD = re.compile(
     rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODE_KEY}\s*:\s*(\S+)"
 )
+_MODEL_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_MODEL_KEY}\s*:\s*(\S+)"
+)
+_BACKEND_FIELD = re.compile(
+    rf"(?is)(?:^|[\n\r]|[\s])\s*{_BACKEND_KEY}\s*:\s*(\S+)"
+)
 
 _URL_TOKEN = re.compile(
     r"(?i)\b((?:https?://|git@)[^\s\[\]<>\"']+)"
@@ -80,11 +93,14 @@ Repository: https://gitlab.example.com/group/your-repo.git
 Source branch: feature/PROJ-123
 Target branch: develop
 Mode: plan
+Model: opencode/hy3-free
+Backend: opencode
 {params}
 
-Mode is mandatory (like Repository / Source branch):
-* plan  — generate a plan, append it to the Jira description (no GitLab push)
+Mode is optional (default ``build``):
+* plan  — generate a plan and post it as a Jira comment (no GitLab push)
 * build — implement / execute (push branch + open merge request)
+Model and Backend are optional (default from .env / dashboard Settings).
 """
 
 # Valid mode tokens (aliases → canonical)
@@ -108,6 +124,8 @@ class IssueGitSpec:
     source_branch: str
     target_branch: str
     mode: Optional[str] = None  # "plan" | "build" when present
+    model: Optional[str] = None  # model id; empty = settings default
+    backend: Optional[str] = None  # opencode | codex; empty = settings default
 
 
 class IssueGitConfigError(Exception):
@@ -118,8 +136,18 @@ class IssueGitConfigError(Exception):
         super().__init__(user_message)
 
 
+def _strip_wiki_field_bold(text: str) -> str:
+    """Turn Jira ``*Model:* foo`` / ``*Backend:* bar`` into ``Model: foo``."""
+    return re.sub(r"(?im)^([ \t]*)\*([^*\n]+)\*\s*", r"\1\2 ", text or "")
+
+
 def _expand_links(text: str) -> str:
-    """Turn Jira/markdown links into bare URLs for easier field parsing."""
+    """Turn Jira/markdown links into bare URLs / keys for field parsing.
+
+    Issue-key wiki (``[KAN-7]`` / ``[KAN-7|browse-url]``) must become the
+    key, not the browse URL — otherwise ``Source branch: feature/[KAN-7]``
+    is rejected as an invalid git ref.
+    """
 
     def jira_repl(m: re.Match) -> str:
         left, right = m.group(1).strip(), m.group(2).strip()
@@ -129,6 +157,7 @@ def _expand_links(text: str) -> str:
             return left
         return right
 
+    text = _JIRA_ISSUE_KEY.sub(r"\1", text)
     text = _JIRA_LINK.sub(jira_repl, text)
     text = _MD_LINK.sub(lambda m: m.group(2), text)
     return text
@@ -144,10 +173,85 @@ def _normalize_repo_url(raw: str) -> str:
     return url
 
 
+def _normalize_backend_id(raw: str) -> str:
+    """opencode | codex. Empty if unset."""
+    from src.backends.base import normalize_backend_name
+
+    return normalize_backend_name(raw)
+
+
+def _normalize_model_id(raw: str) -> str:
+    """OpenCode model id (provider/name). Empty if unset or junk."""
+    mid = (raw or "").strip().strip("`").rstrip(".,;")
+    if not mid or len(mid) > 200:
+        return ""
+    if any(ch.isspace() for ch in mid):
+        return ""
+    return mid
+
+
+def _upsert_params_field(
+    description: str,
+    *,
+    key_re: str,
+    label: str,
+    value: str,
+    present: Optional[re.Pattern[str]],
+) -> str:
+    """Set or replace one ``Key:`` line inside the first ``{params}`` block."""
+    text = description or ""
+    if not value:
+        return text
+    m = _PARAMS_BLOCK.search(text)
+    if not m:
+        return text
+    inner = _strip_wiki_field_bold(m.group(1))
+    inner2, n = re.subn(
+        rf"(?im)^([ \t]*\*?[ \t]*(?:{key_re})[ \t]*\*?\s*:\s*)\S+",
+        rf"\g<1>{value}",
+        inner,
+        count=1,
+    )
+    if n == 0 and present is not None and present.search(inner):
+        inner2, n = re.subn(
+            rf"(?is)((?:{key_re})\s*:\s*)\S+",
+            rf"\g<1>{value}",
+            inner,
+            count=1,
+        )
+    if n == 0:
+        inner2 = inner.rstrip() + f"\n{label}: {value}\n"
+    return text[: m.start(1)] + inner2 + text[m.end(1) :]
+
+
+def upsert_params_model(description: str, model: str) -> str:
+    """Set or replace ``Model:`` inside the first ``{params}`` block."""
+    return _upsert_params_field(
+        description,
+        key_re=_MODEL_KEY,
+        label="Model",
+        value=_normalize_model_id(model),
+        present=_MODEL_FIELD,
+    )
+
+
+def upsert_params_backend(description: str, backend: str) -> str:
+    """Set or replace ``Backend:`` inside the first ``{params}`` block."""
+    return _upsert_params_field(
+        description,
+        key_re=_BACKEND_KEY,
+        label="Backend",
+        value=_normalize_backend_id(backend),
+        present=_BACKEND_FIELD,
+    )
+
+
 def _normalize_branch(raw: str) -> str:
     branch = (raw or "").strip().strip("`").strip()
     if branch.startswith("refs/heads/"):
         branch = branch[len("refs/heads/") :]
+    # Jira visual editor wraps issue keys: feature/[KAN-7] or feature/[KAN-7|url]
+    branch = _JIRA_ISSUE_KEY.sub(r"\1", branch)
     return branch
 
 
@@ -174,6 +278,9 @@ def _looks_like_branch(name: str) -> bool:
     if ".." in name:
         return False
     if name.startswith("/") or name.endswith("/"):
+        return False
+    # Leading '-' is a git option (e.g. --mirror), not a ref
+    if name.startswith("-"):
         return False
     return bool(re.match(r"^[A-Za-z0-9._/\-]+$", name))
 
@@ -216,17 +323,69 @@ def _params_block_text(summary: str = "", description: str = "") -> Optional[str
     return block
 
 
+def peek_issue_git_fields(summary: str = "", description: str = "") -> Dict[str, str]:
+    """Best-effort ``{params}`` field peek for dashboard prefills.
+
+    Unlike ``parse_issue_git_spec`` this never fails: missing or invalid
+    fields are empty strings so the operator can complete them in the picker.
+    """
+    empty = {
+        "repository_url": "",
+        "source_branch": "",
+        "target_branch": "",
+        "mode": "",
+        "model": "",
+        "backend": "",
+    }
+    spec, _err = parse_issue_git_spec(summary, description)
+    if spec is not None:
+        return {
+            "repository_url": spec.repository_url or "",
+            "source_branch": spec.source_branch or "",
+            "target_branch": spec.target_branch or "",
+            "mode": spec.mode or "",
+            "model": spec.model or "",
+            "backend": spec.backend or "",
+        }
+    block = _params_block_text(summary, description)
+    if not block:
+        return empty
+    text = _strip_wiki_field_bold(block)
+    repo = _extract_repo(text)
+    source_m = _SOURCE_FIELD.search(text)
+    target_m = _TARGET_FIELD.search(text)
+    mode_m = _MODE_FIELD.search(text)
+    model_m = _MODEL_FIELD.search(text)
+    backend_m = _BACKEND_FIELD.search(text)
+    source = _normalize_branch(source_m.group(1)) if source_m else ""
+    target = _normalize_branch(target_m.group(1)) if target_m else ""
+    mode_raw = (
+        (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
+    )
+    mode = _MODE_ALIASES.get(mode_raw, "")
+    return {
+        "repository_url": repo if _looks_like_git_url(repo) else "",
+        "source_branch": source if _looks_like_branch(source) else "",
+        "target_branch": target if _looks_like_branch(target) else "",
+        "mode": mode,
+        "model": _normalize_model_id(model_m.group(1)) if model_m else "",
+        "backend": _normalize_backend_id(backend_m.group(1)) if backend_m else "",
+    }
+
+
 def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     """Return canonical mode (``plan`` / ``build``) from ``{params}``, or None.
 
     Looks for ``Mode:`` / ``Workflow:`` inside the params block only.
+    When a ``{params}`` block exists but Mode is omitted, defaults to ``build``.
+    No params block → ``None`` (router keeps its no-template heuristics).
     """
     block = _params_block_text(summary, description)
     if not block:
         return None
     m = _MODE_FIELD.search(block)
     if not m:
-        return None
+        return "build"
     token = (m.group(1) or "").strip().lower().strip("`").strip()
     # Drop trailing punctuation
     token = token.rstrip(".,;:")
@@ -273,6 +432,8 @@ def parse_issue_git_spec(
 
     Target branch is optional; when omitted it defaults to the source branch
     (agent will still use ``feature/{KEY}`` as the work branch when they match).
+    Mode is optional (default ``build``). Model and Backend are optional
+    (empty = dashboard / .env defaults).
 
     Returns ``(spec, None)`` on success, or ``(None, user_error_message)`` on failure.
     """
@@ -290,7 +451,7 @@ def parse_issue_git_spec(
 
     if block is None:
         return None, (
-            "*Virtual Developer* could not start: no ``{params}`` block found on the issue.\n\n"
+            "*Yaver* could not start: no ``{params}`` block found on the issue.\n\n"
             "Wrap the git settings between ``{params}`` markers in the *description* "
             "(or summary), then move the issue back to *To Do*:\n\n"
             "{code}\n"
@@ -298,7 +459,7 @@ def parse_issue_git_spec(
             "{code}"
         )
 
-    text = block
+    text = _strip_wiki_field_bold(block)
     repo = _extract_repo(text)
     source_m = _SOURCE_FIELD.search(text)
     target_m = _TARGET_FIELD.search(text)
@@ -307,7 +468,12 @@ def parse_issue_git_spec(
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
     mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
-    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else None
+    # Mode is optional — default build (Model / Backend already optional)
+    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else "build"
+    model_m = _MODEL_FIELD.search(text)
+    model = _normalize_model_id(model_m.group(1)) if model_m else ""
+    backend_m = _BACKEND_FIELD.search(text)
+    backend = _normalize_backend_id(backend_m.group(1)) if backend_m else ""
 
     missing = []
     if not repo:
@@ -319,17 +485,14 @@ def parse_issue_git_spec(
             "Source branch (e.g. `Source branch: feature/PROJ-123` "
             "or `Source branch: develop` to auto-use feature/{KEY})"
         )
-    if not mode:
-        if mode_raw:
-            missing.append(
-                f"Mode (got `{mode_raw}`; must be `plan` or `build`)"
-            )
-        else:
-            missing.append("Mode (e.g. `Mode: plan` or `Mode: build`)")
+    if mode_raw and mode_raw not in _MODE_ALIASES:
+        missing.append(
+            f"Mode (got `{mode_raw}`; must be `plan` or `build`, or omit for build)"
+        )
 
     if missing:
         return None, (
-            "*Virtual Developer* could not start: the issue description format is incomplete.\n\n"
+            "*Yaver* could not start: the issue description format is incomplete.\n\n"
             f"*Missing / invalid:* {', '.join(missing)}.\n\n"
             "Add a ``{params}`` block to the *description* with *all* of these fields, "
             "then move the issue back to *To Do*:\n\n"
@@ -343,7 +506,7 @@ def parse_issue_git_spec(
 
     if not _looks_like_git_url(repo):
         return None, (
-            "*Virtual Developer* could not start: the repository URL looks invalid.\n\n"
+            "*Yaver* could not start: the repository URL looks invalid.\n\n"
             f"Parsed value: `{repo}`\n\n"
             "Use a full HTTPS (or SSH) GitLab URL inside ``{params}``, for example:\n"
             "`Repository: https://gitlab.example.com/group/repo.git`"
@@ -351,14 +514,14 @@ def parse_issue_git_spec(
 
     if not _looks_like_branch(source):
         return None, (
-            "*Virtual Developer* could not start: the source branch name looks invalid.\n\n"
+            "*Yaver* could not start: the source branch name looks invalid.\n\n"
             f"Parsed value: `{source}`\n\n"
             "Example: `Source branch: feature/PROJ-123`"
         )
 
     if not _looks_like_branch(target):
         return None, (
-            "*Virtual Developer* could not start: the target branch name looks invalid.\n\n"
+            "*Yaver* could not start: the target branch name looks invalid.\n\n"
             f"Parsed value: `{target}`\n\n"
             "Example: `Target branch: develop` (must already exist on GitLab)"
         )
@@ -369,6 +532,8 @@ def parse_issue_git_spec(
             source_branch=source,
             target_branch=target,
             mode=mode,
+            model=model or None,
+            backend=backend or None,
         ),
         None,
     )

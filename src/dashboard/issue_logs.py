@@ -2,7 +2,7 @@
 
 Live lines go into a process-wide ring (recent activity / task filters).
 When a ``job_id`` is present, the same line is **appended** to
-``.jira-agent/jobs/{job_id}.system.log`` so job detail survives daemon restarts.
+``YAVER_DATA_DIR/jobs/{job_id}.system.log`` so job detail survives daemon restarts.
 """
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 
 def _default_jobs_dir() -> Path:
-    return Path.cwd() / ".jira-agent" / "jobs"
+    from src.paths import agent_subdir, ensure_agent_data_dir
+
+    ensure_agent_data_dir()
+    return agent_subdir("jobs")
 
 
 def job_system_log_path(job_id: str, *, jobs_dir: Optional[Path] = None) -> Optional[Path]:
@@ -47,7 +50,7 @@ class IssueLogRing:
         self._lines: Deque[Tuple[str, str, Optional[str], Optional[str]]] = deque(
             maxlen=maxlen
         )
-        self._jobs_dir = jobs_dir  # None → resolve at write time from cwd
+        self._jobs_dir = jobs_dir  # None → YAVER_DATA_DIR/jobs at write time
         self._persist = persist
         self._file_locks: Dict[str, threading.Lock] = {}
         self._file_locks_guard = threading.Lock()
@@ -109,11 +112,20 @@ class IssueLogRing:
         with self._lock:
             matched = []
             for ts, msg, jid, ikey in self._lines:
-                if (ikey and ikey.upper() == key_u) or key in msg or key_u in msg:
-                    row: Dict[str, str] = {"timestamp": ts, "message": msg}
-                    if jid:
-                        row["job_id"] = jid
-                    matched.append(row)
+                if ikey and ikey.upper() == key_u:
+                    hit = True
+                elif ikey:
+                    # Tagged for a different issue — do not fall through to
+                    # substring match (KAN-1 must not pull KAN-10 lines).
+                    hit = False
+                else:
+                    hit = _message_mentions_issue_key(msg, key)
+                if not hit:
+                    continue
+                row: Dict[str, str] = {"timestamp": ts, "message": msg}
+                if jid:
+                    row["job_id"] = jid
+                matched.append(row)
         return matched[-limit:]
 
     def for_job_memory(self, job_id: str, *, limit: int = 500) -> List[Dict[str, str]]:
@@ -125,7 +137,7 @@ class IssueLogRing:
         with self._lock:
             matched = []
             for ts, msg, line_jid, ikey in self._lines:
-                if line_jid == jid or needle in msg or jid in msg:
+                if line_jid == jid or needle in msg:
                     row: Dict[str, str] = {
                         "timestamp": ts,
                         "message": msg,
@@ -193,10 +205,51 @@ class IssueLogRing:
             merged = merged[-limit:]
         return merged
 
+    def recent(self, *, limit: int = 2000) -> List[Dict[str, str]]:
+        """Most recent in-memory daemon lines (process lifetime)."""
+        cap = max(0, int(limit or 0))
+        with self._lock:
+            items = list(self._lines)
+        if cap:
+            items = items[-cap:]
+        rows: List[Dict[str, str]] = []
+        for ts, msg, jid, ikey in items:
+            row: Dict[str, str] = {"timestamp": ts, "message": msg}
+            if jid:
+                row["job_id"] = jid
+            if ikey:
+                row["issue_key"] = ikey
+            rows.append(row)
+        return rows
+
 
 _TS_PREFIX = re.compile(
     r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
 )
+
+# Whole issue-key token in free text (not a prefix of a longer key like KAN-10).
+# Lookbehind/ahead: key must not sit inside a longer PROJECT-NNN style id.
+_ISSUE_KEY_IN_MSG_CACHE: Dict[str, re.Pattern] = {}
+
+
+def _message_mentions_issue_key(message: str, issue_key: str) -> bool:
+    """True when ``message`` contains ``issue_key`` as a whole Jira-style key.
+
+    Bare substring matching is wrong: ``KAN-1`` appears inside ``KAN-10``.
+    """
+    key = (issue_key or "").strip()
+    msg = message or ""
+    if not key or not msg:
+        return False
+    pat = _ISSUE_KEY_IN_MSG_CACHE.get(key)
+    if pat is None:
+        # Boundary: not alnum before; not alnum or '-' after (avoids KAN-1 ⊂ KAN-10)
+        pat = re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(key)}(?![A-Za-z0-9\-])",
+            re.IGNORECASE,
+        )
+        _ISSUE_KEY_IN_MSG_CACHE[key] = pat
+    return pat.search(msg) is not None
 
 
 def _extract_timestamp(message: str) -> Optional[str]:

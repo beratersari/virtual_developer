@@ -147,7 +147,7 @@ def test_git_manager_full_setup(tmp_path, monkeypatch):
         s.gitlab_pat = "pat"
         s.temp_dir_base = Path(".temp")
         with patch.object(GitManager, "_clone_into_temp") as clone:
-            with patch.object(GitManager, "_sync_remote_branches"):
+            with patch.object(GitManager, "_materialize_job_remote_refs"):
                 with patch("src.git_manager.set_current_temp_dir"):
                     g = GitManager(
                         issue_key="GS-1",
@@ -308,10 +308,18 @@ async def test_agent_runner_windows_subprocess_and_fallback(tmp_path, monkeypatc
             s.opencode_cli = "opencode"
             s.default_model = "m"
             s.agent_task_timeout_seconds = 30
-            with patch(
-                "asyncio.create_subprocess_exec",
-                new=AsyncMock(return_value=FakeProc()),
-            ):
+            async def fake_serve(task, **kwargs):
+                return {
+                    "task_id": task.task_id,
+                    "returncode": 0,
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "session_file": str(kwargs.get("session_file") or ""),
+                    "opencode_session_id": None,
+                    "progress": 100,
+                }
+
+            with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
                 task = AgentTask(description="d", prompt="p", agent="a", issue_key="W-1")
                 result = await runner.run_agent(task)
                 assert result["returncode"] == 0
@@ -370,10 +378,18 @@ async def test_run_agent_no_on_complete(tmp_path, monkeypatch):
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "err\n",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "progress": 0,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             task = AgentTask(description="d", prompt="p", agent="a")
             r = await runner.run_agent(task)
             assert r["returncode"] == 1
@@ -402,9 +418,7 @@ def test_processor_real_jira_client_branch(tmp_path, monkeypatch):
     with patch("src.processor.settings") as s:
         s.is_configured.return_value = True
         s.jira_host = "https://real.jira.local"
-        s.default_agent = "a"
-        s.planning_agent = "p"
-        s.orchestrator_agent = "o"
+        s.default_agent = "atlas"
         with patch("src.processor.create_jira_client") as f:
             f.return_value = FakeJiraClient()
             JobProcessor()
@@ -429,6 +443,7 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
     state = state_manager.create_state("EXR-1", "s", "d")
     state_manager.update_state("EXR-1", plan_path="p.md")
     git = MagicMock()
+    git.work_branch = "feature/EXR-1"
     git.ensure_feature_branch.return_value = "feature/EXR-1"
     git.get_working_directory.return_value = tmp_path
     git.get_current_branch.return_value = "feature/EXR-1"
@@ -465,7 +480,7 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
 
     with patch.object(proc, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
-            s.orchestrator_agent = "atlas"
+            s.default_agent = "atlas"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             await proc._start_execution_workflow(state)
@@ -475,7 +490,6 @@ async def test_execution_retry_callback_and_direct_retry(proc, state_manager, tm
     with patch.object(proc, "_init_git_manager", return_value=git):
         with patch("src.processor.settings") as s:
             s.default_agent = "sisyphus"
-            s.execution_category = "deep"
             s.agent_task_timeout_seconds = 5
             s.agent_task_max_retries = 2
             await proc._start_execution_workflow(state2)
@@ -492,6 +506,10 @@ async def test_push_progress_exceptions(proc, state_manager):
         await proc._push_and_create_mr(state)
 
     git.get_current_branch.return_value = "feature/x"
+    git.work_branch = "feature/x"
+    git.target_branch = "develop"
+    git.ensure_on_work_branch.return_value = True
+    git.commits_ahead_of_target.return_value = 1
     git.push.return_value = False
     await proc._push_and_create_mr(state)
 

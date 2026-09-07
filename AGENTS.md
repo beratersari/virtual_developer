@@ -1,4 +1,4 @@
-# AGENTS.md — Virtual Developer
+# AGENTS.md — Yaver
 
 Instructions for humans and AI agents working on **this** repository (`virtual_developer`).
 
@@ -6,9 +6,9 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 ## 1. Product snapshot
 
-JIRA Virtual Developer is a Python daemon that:
+Yaver is a Python daemon that:
 
-1. Discovers issues (board poller only)
+1. Discovers issues (board poller **or** Jira webhook — `JIRA_INTAKE_MODE`)
 2. Routes work (plan / direct execution / oracle)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
@@ -25,7 +25,7 @@ JIRA Virtual Developer is a Python daemon that:
 ### Language & layout
 
 - Python 3.12+, type hints on public APIs where practical.
-- Package root: `src/`. Entry points: `cli.py`, `src/daemon.py`.
+- Package root: `src/`. Entry points: `cli.py`, `src/daemon.py` (frozen: `yaver` / `yaver.exe` via `packaging/pyinstaller/`).
 - Prefer small, focused modules; avoid shared mutable singletons across concurrent issues (`JobProcessor.git_manager` / `agent_runner` must not be overwritten mid-flight for parallel jobs when you touch concurrency).
 - Do not log secrets (Jira tokens, GitLab PATs). Never commit `.env`.
 
@@ -48,52 +48,74 @@ JIRA Virtual Developer is a Python daemon that:
 
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
-- Terminal reprocess only when the user moves the issue back to **To Do** (or an explicit rework signal).
-- **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled.
+- **To Do + bot assignee = rework** (intentional). Local `completed` / `error` /
+  `cancelled` on a To Do-like ticket assigned to the bot is re-queued: reset
+  and run again. Putting the issue back on To Do *or* leaving it on To Do
+  after a finished run is the operator rework signal.
+  After accept the bot moves the board to In Progress so the next poll does
+  not start another job until the ticket is To Do again.
+- **Plans wait at `plan_ready`** until label ``plan_execute`` is set on an
+  In Progress ticket. ``Mode: plan`` never starts implementation by itself.
+  Dashboard HTTP Start stays disabled.
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
-- Temp clones: default policy `age` with `TEMP_CLEANUP_MAX_AGE_DAYS=1` (24h); purge on daemon start and hourly.
+- Temp clones are kept. Operators delete them from dashboard Storage. No daemon start, hourly, or job-end auto-purge.
 
-### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
+### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
-Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) only mean
-**“eligible for first intake”** while the issue is To Do-like. They do **not** mean
-“re-run this ticket on every poll forever.”
+Assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** means the issue is eligible
+for poller intake **whenever it is To Do-like**, including after a previous
+completed/error/cancelled run. In-flight (`planning` / `executing`) is never
+restarted from poll noise.
 
 Typical **plan** lifecycle:
 
 ```text
-To Do + bot (or ai-assist)
+To Do + bot assignee
         │
         ▼
-  Mode: plan  →  planning  →  plan_ready
+  Mode: plan  →  planning  →  plan_ready + label plan_ready
         │                        │
-        │                        ├─ Jira label ai-plan-ready
-        │                        ├─ plan comment / description append
+        │                        ├─ plan comment (not the issue description)
+        │                        ├─ board moved to In Progress
         │                        └─ local requeue_eligible = false
         │
-        │   Still To Do + bot alone  →  poller SKIPS (by design)
+        │   plan_ready label still  →  poller SKIPS (wait; never implements)
         │
-        ├─ add label ai-start-work  or  ai-execute  (while To Do)
-        │         → poller plan_start → build on same ticket
+        ├─ remove plan_ready, add plan_refactor, comment @bot
+        │         → same plan session revises the plan → plan_ready again
+        │
+        ├─ rename plan_ready → plan_execute (ticket In Progress)
+        │         → build session: "implement the plan {ISSUE_KEY}.md"
+        │         → label becomes plan_executed
         │
         └─ open a NEW issue with Mode: build (same {params} repo/branches)
-                  → independent build run
+                  → build session implements the existing plan for that
+                    repo + source + target (own build session)
 ```
+
+Plan and build keep **separate** OpenCode sessions per repo + source + target
+(`kind=plan` vs `kind=build`). Plan refactor resumes the plan session. A later
+build on that repo/source/target resumes the build session.
 
 | Situation | Poller / processor behaviour |
 |-----------|------------------------------|
-| No local state + To Do + trigger label | Accept as **new** work |
+| No local state + To Do + bot assignee | Accept as **new** work |
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
-| Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
-| Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
-| Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
-| Local `error` / `cancelled` / `completed` | Requeue only on leave→return To Do, ERROR text change, or other rework signals — not mere label presence |
+| Local `plan_ready` + label `plan_ready` | **Wait.** Do not implement. |
+| Local `plan_ready` + In Progress + `plan_execute` | **Start** implementation (even if Mode is still plan) |
+| Local `plan_ready` + `plan_refactor` (no `plan_ready` label) + comment @bot | **Revise** the plan on the plan session |
+| Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
-**Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
-only `bot`. Operators will see “stuck on To Do with bot label” after a successful
-plan; that is the waiting state until an explicit start signal.
+**Do not “fix”** by starting a build from `Mode: build` on the plan ticket.
+Same-ticket implement is `plan_execute` + In Progress only.
+
+**Do not “fix”** by skipping `completed` / `error` / `cancelled` that are still
+To Do and assigned to the bot. That is the rework loop: To Do means “run again.”
+The bot then moves the issue to In Progress. If In Progress transition fails
+and the ticket stays To Do, the next poll will try again — same rule, not a
+poller bug.
 
 ### Fail → In Progress → fix → To Do requeue (**intentional**)
 
@@ -109,24 +131,25 @@ UX is **not** “leave it sitting on To Do as if nothing happened”:
    step 1). This is so a later operator action **In Progress → To Do** is detected
    as a leave→return (`force_after_in_progress` / `entered_todo_from_elsewhere`).
 4. Operator **fixes** the description (`Mode`, `{params}`, etc.), then **moves the
-   ticket back to To Do** → next poll requeues (`requeue_eligible` + status change).
+   ticket back to To Do** → next poll requeues. **To Do itself is the rework
+   signal** (also if the ticket never left To Do and is still assigned to the bot).
 
-Secondary reprocess path while still on To Do after ERROR: user **edits**
-summary/description (fingerprint change) without leaving the column — still
-requeues once (`text_changed_retry`). Cancelled tickets while still To Do do
-**not** auto-retry.
+Secondary path while still on To Do after ERROR: user **edits**
+summary/description (fingerprint change) without leaving the column
+(`text_changed_retry`). Cancelled + still To Do + bot assignee is also rework
+(same To Do rule).
 
 **Do not treat the following as a bug:** after a *successful* fail path that
 moved the board to In Progress, the poller remembering `in progress` and
 reprocessing when the user returns the issue to To Do. That is the designed
-recovery loop.
+recovery loop. Also not a bug: To Do + bot assignee re-queue after completed /
+error / cancelled.
 
 **Do treat as a bug:** inventing tracker `in progress` when the Jira transition
 **failed** (no matching transition name, locale/workflow without “In Progress”)
-while the board is still To Do — that would re-fire every poll without a user
-move. Fail path must keep tracker aligned with reality in that case; recovery
-then uses description edit fingerprint and/or a real board status change once
-workflows allow In Progress.
+while the board is still To Do — the tracker must stay aligned with the board.
+Rework in that case still happens because the ticket is To Do + bot assignee
+(primary intake), not because of a fake leave→return.
 
 ### Error handling
 
@@ -140,6 +163,133 @@ workflows allow In Progress.
 - No drive-by refactors or unrelated file churn.
 - Comments only for non-obvious intent (not narration of the code).
 
+### OpenCode serve sessions: one-pass, compact, clarifying questions (**hard-won**)
+
+Jobs run **unattended** over `opencode serve` (HTTP). There is **no human reply
+path** (no Jira-comment intake for agent Q&A, no interactive TUI for the job).
+OpenCoderman agents **derman-build** / **derman-plan** (not stock OpenCode
+`build` / `plan`) order the model not to ask clarifying questions. The
+per-job user message is only Jira + branch + plan path
+(`agent/BUILD_PROMPT.md`, `agent/PLAN_PROMPT.md`).
+Treat clarifying-question violations as product failures to recover from —
+not as multi-turn chat.
+
+#### Control loop (intentional)
+
+| Phase | Behaviour | Why |
+|-------|-----------|-----|
+| Task prompt | **One** user POST of BUILD/PLAN kit (`max_turns` style) | One-pass design |
+| Auto-compact | **Wait** for OpenCode idle/auto-resume; **never** inject a user “Continue” for compact | A fake Continue shows up as the operator in chat and races OpenCode’s compact loop |
+| Compact **loop** | **Abort** the in-flight compact turn, wait until **idle**, then **Continue the same session**. Not a new session. Not Continue *while* compact is running. If it loops again after that Continue → `incomplete` / Jira **`compact_loop`** | History stays in this chat; abort stops the spin so Continue does not race compact |
+| Clarifying question | **Leave compact-wait immediately** (do not spin hundreds of “waiting for auto-resume” polls) | Auto-resume never answers a human; spinning burns the wall-clock budget |
+| After question | **One** short unattended nudge (defaults / finish; **not** the full BUILD kit again) | Recover without human; outer retry must not re-blast BUILD |
+| After nudge | Re-assess **last assistant turn only** for “still asking” | Earlier “Shall I…?” in history must not poison a later clean `finish=stop` |
+| After nudge + compact | **Wait** for auto-resume. Compact **recap is not a live question** | Long jobs compact on the nudge turn; the summary often quotes the earlier “Shall I…?” |
+| Stale open todos | After nudge, clean `finish=stop` + only open-todo reasons → may accept complete (todo API lag after `todowrite`) | Processor still gates on plan file / **git delivery** |
+| Still asking after nudge | Last turn is a **real** ask (not a recap/closer) → `incomplete` + Jira category **`question`** | Operators need the real failure mode |
+
+Typical log **good** path after a question:
+
+```text
+[serve] assessment … reasons=[…, 'assistant asked a clarifying question']
+[serve] … leaving compact wait for unattended nudge   # or skip wait if no compact
+[serve] assistant asked a clarifying question — sending one unattended nudge
+# then success (returncode 0) or clear incomplete — not poll 700–990 of auto-resume
+```
+
+Typical log **bug** (fixed; do not reintroduce):
+
+```text
+idle after compact but still incomplete (poll 780,
+  reasons=[open todos…, assistant asked a clarifying question])
+  — waiting for auto-resume (no user message)
+```
+
+Typical log **bug #2** (fixed in serve wait-after-nudge; do not reintroduce):
+
+```text
+[INCOMPLETE] assistant asked a clarifying question (unattended; no human reply path).
+After one nudge still incomplete: open todos: 14 pending, 1 in_progress;
+assistant asked a clarifying question
+```
+
+That fired when the **nudge turn compact-then-stopped** and the summary quoted the
+earlier “Shall I…?”, or when the last text was a polite closer
+(“Let me know if you need anything else”) with stale todos. It is **not** a
+new operator question. `should_wait_after_nudge` must check **compact / summary
+first**, then “still asking”. Never return “don’t wait” solely because
+`assistant_asked_question` is set on a compaction recap.
+
+Regressed once: `5e6cf9e` (`fix(serve): wait after nudge…`) added the wait
+helper but short-circuited on `still_asking` **before** `last_is_summary`.
+Do not put that `if assessment_still_asking: return False` above the compact
+check again.
+
+#### Detection (fail closed, but last-turn only)
+
+- Free-text: last assistant matches “shall I / which DB / please confirm…” heuristics
+  (`assistant_asked_question` in `src/opencode_sessions.py`).
+- **Not** a question: compaction **summary** / recap that quotes an earlier ask;
+  farewell closers (“let me know if you need anything”); a **user** nudge as the
+  last message (reply not landed yet — retry / wait, do not ERROR).
+- Structured: OpenCode **`question` tool** parts with `pending`/`running` on the
+  **last** assistant message only (history tools must not fail a later done turn).
+- `GET /session/status` is only `idle`/`busy`/`retry` — **not** “waiting for human”.
+  Do not use idle alone as success or as “needs clarification”.
+
+#### Delivery after agent success (build)
+
+Orchestrator **always** owns remote delivery when the job returns success:
+
+| Agent did | Orchestrator does |
+|-----------|-------------------|
+| Commit only | `git push` + open MR |
+| Already pushed tip | Treat remote HEAD match as OK; **still open MR** (or reuse existing) |
+| Push fails and tip not on remote | Fail delivery (no fake MR) |
+
+Do **not** skip MR creation because the model ran `git push`. Nudge text tells the
+model not to push; if it still does, delivery must remain correct.
+
+#### MR titles / UTF-8 (Windows)
+
+- MR title often comes from `git log` subject → `glab` or GitLab REST.
+- Always decode git/glab with **`encoding="utf-8"`** and
+  `i18n.logOutputEncoding=utf-8`. Prefer REST JSON for **non-ASCII** titles
+  (Turkish `ğüşıöç`, etc.). Windows console code pages otherwise mojibake titles.
+- This is independent of the clarifying-question path but shows up whenever we
+  reliably open MRs from the orchestrator.
+
+#### Key modules
+
+| Path | Role |
+|------|------|
+| `src/opencode_serve.py` | Serve orchestrator: compact wait, unattended nudge, post-nudge assess |
+| `src/opencode_sessions.py` | Completeness, `assistant_asked_question`, last-turn-only question tools |
+| `src/orchestrator/agent_runner.py` | Retries; do **not** re-send BUILD after question/compact follow-up |
+| `src/processor.py` | `_fail_from_agent_result` category `question`; `_push_and_create_mr` |
+| `src/git_manager.py` | `push` / `head_is_on_remote` / UTF-8 MR create |
+| `src/reporter/jira_reporter.py` | “Clarifying question (unattended)” vs compaction incomplete |
+
+#### Do / don’t
+
+**Do**
+
+- Treat clarifying question + open todos in assessment reasons as a **signal to leave wait**, not to poll forever.
+- Keep one-pass: at most one unattended nudge for questions inside a serve run.
+- After that nudge, **wait out compact / tool-calls**. Compact recap quoting “Shall I…?” is still mid-work.
+- Gate real success on **evidence** (plan file / new commits + push+MR), not “assistant finished speaking”.
+
+**Don’t**
+
+- Inject user “Continue” / Finish-todos **because of** auto-compact.
+- Re-post the full BUILD kit on outer retry when the failure was compact or clarifying question.
+- Scan **whole session history** for open `question` tools when the last turn is a clean stop.
+- Treat a compaction **summary** or “let me know if you need anything” as a live clarifying question.
+- Short-circuit `should_wait_after_nudge` on `still_asking` **before** `last_is_summary` / compact reasons (`5e6cf9e` regression).
+- Continue *while* compact is still running, or open a **new** session to escape a compact loop. Abort first, then Continue the **same** session. Fail `compact_loop` only if it loops again after that.
+- Mark soft COMPLETE when the model only asked a question and delivered nothing (build: no new commits should not look like a happy delivered job without a clear note).
+- “Fix” by inventing a human Q&A loop over Jira comments unless product explicitly adds that intake path.
+
 ---
 
 ## 3. Jira (on-prem)
@@ -152,8 +302,11 @@ JIRA_API_TOKEN=your-api-token-here
 ```
 
 - REST **API v2** (`/rest/api/2/...`), Agile at `/rest/agile/1.0/...`.
-- Auth header: **`Authorization: Bearer {JIRA_API_TOKEN}`** only for on-prem PAT.
-  Cloud may use Basic (email + API token) when `JIRA_EMAIL` is set.
+- Auth:
+  - **Default / prod:** **`Authorization: Bearer {JIRA_API_TOKEN}`**
+    (`JIRA_HOST` + token; leave `JIRA_EMAIL` empty).
+  - **Cloud / dev:** set **`JIRA_EMAIL`** with the API token → HTTP Basic
+    (email + token). Dashboard Settings Test and live clients follow the same rule.
 - No username/password and no Cloud-only `accountId` assumptions for core bot auth.
 - TLS: **`verify=False` on all Jira HTTP** (see §2 HTTP / TLS).
 
@@ -161,8 +314,8 @@ JIRA_API_TOKEN=your-api-token-here
 
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
-- Poller focuses on board/sprint + To Do + trigger labels / bot assignee.
-- **No HTTP webhook intake** — comments are not ingested unless a separate comment-polling path is added later.
+- Poller focuses on board/sprint + To Do + bot assignee (`JIRA_INTAKE_MODE=poll`).
+- **Webhook intake** (`JIRA_INTAKE_MODE=webhook`): `POST /webhooks/jira`. Triggers only on **assignment to** the bot (changelog `assignee.to`; unassign is ignored) or a **comment that mentions** the bot. Bot-authored / `*Yaver*` comments are ignored (loop guard). Poller sleeps while webhook mode is on.
 
 ### Config checklist (common)
 
@@ -170,13 +323,14 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
-| `JIRA_PROJECTS` | Project keys (config/reference; board scopes poller) |
+| `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
-| `TRIGGER_LABELS` | Labels that make an issue eligible (e.g. `ai-assist,bot`) |
-| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments for bot-assignment trigger (e.g. `devbot,jira ai bot`) |
-| `TEMP_CLEANUP_POLICY` | `age` (default) / `always` / `on_success` / `never` |
-| `TEMP_CLEANUP_MAX_AGE_DAYS` | Age cutoff for temp clones (default `1` = 24 hours) |
-| `POLL_INTERVAL_SECONDS` | Board poller interval (poller always runs) |
+| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller requires (e.g. `devbot,jira ai bot`) |
+| `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
+| `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
+| `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
+| `JIRA_INTAKE_MODE` | `poll` (default, board poller) or `webhook` (`POST /webhooks/jira`) |
+| `JIRA_WEBHOOK_SECRET` | Shared token for `/webhooks/jira?token=` (required in webhook mode) |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
@@ -197,10 +351,10 @@ JIRA_API_TOKEN=your-api-token-here
 ### Rules
 
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
-- Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
+- Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, max_concurrent_jobs, agent_task_timeout_seconds (single agent/OpenCode wall-clock budget). Plans never auto-start (see §2).
-- **No dashboard auth in v1** — keep bind host localhost unless operators knowingly open it.
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
+- **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
 ### Layout
@@ -287,7 +441,11 @@ When this daemon’s agents commit inside a **customer/project** temp clone:
 
 - Branch: `feature/{JIRA_ISSUE_ID}` (see `commitMsgFormat.md` / `GitManager`).
 - The **system** pushes and creates the MR; agents should not push.
-- MR title and commit messages for those product MRs must still follow the conventional pattern in §6 (include the issue key in the scope or body, e.g. `feat(PROJ-123): add retry guard`).
+- Commit subjects must **match that repo**: read its `AGENTS.md` and
+  `git log -20 --format=%s`, then copy the dominant pattern and place
+  the Jira key the way that history already does. Fall back to §6
+  (with the issue key in the scope or as `[KEY]`) only when docs and
+  history have no clear format.
 
 ---
 
@@ -373,13 +531,14 @@ glab mr create --title "feat(auth): bearer-only jira token" --description "..." 
 ## 7. Local setup (quick)
 
 ```bash
+git submodule update --init --recursive   # opencoderman (OpenCode CLI + agents/skills)
 cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITLAB_PAT as needed
-./install.sh           # or install.bat
-.venv/bin/python cli.py init
-.venv/bin/python -m src.daemon   # or project’s documented start command
+./install-dashboard.sh
+./install-backends.sh  # OpenCode via opencoderman/install.py; or ./install.sh
+./start-backend.sh     # or ./start.sh
 ```
 
-**Windows (offline zip from CI):** extract artifact → `install.bat` → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
+**Windows (offline zip from CI):** extract artifact → `install-dashboard.bat` + `install-backends.bat` (OpenCode via **opencoderman**) + `install-codex.bat` (Codex) → open TUI only via **`start-opencode.bat`** from the project folder (never bare `opencode` from `%USERPROFILE%`).
 
 ---
 
@@ -391,7 +550,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Keep changes scoped; add tests for behaviour you change.
 - Use conventional `type(scope): summary` for every commit and MR.
 - Keep Jira user-visible on failure/stuck states.
-- Preserve on-prem Bearer auth only (Cloud may use email+token Basic).
+- Preserve Jira auth: Bearer when email empty; Basic only when `JIRA_EMAIL` is set (Cloud/dev).
 - Use **`verify=False`** on every outbound HTTP(S) client (Jira, GitLab, probes).
 - For Windows dist changes: run/extend `packaging/windows/e2e-smoke.ps1` expectations (plugin tree size, `rg.exe`, pinned `oh-my-openagent@`, launcher).
 
@@ -415,22 +574,34 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 
 | Item | Rule |
 |------|------|
-| OpenCode home | **`%USERPROFILE%\.opencode` only** (bin, plugin `node_modules`, configs). No second install at `C:\vd\opencode` unless `VD_OPENCODE_ROOT` is set on purpose. |
-| Global config | Mirror valid JSON to **`%USERPROFILE%\.config\opencode\`** (OpenCode’s real discovery path). |
-| Plugin cache | OpenCode/Bun loads npm plugins from **`%USERPROFILE%\.cache\opencode\`** (`node_modules` and/or `packages/<name>`). Installer must **full-copy** the plugin tree there — **not** a junction. |
+| OpenCode home | **`%USERPROFILE%\.opencode` only** (CLI, stock `opencode.json`, **opencoderman** agents/skills). Install via `opencoderman/install.py` (wrapper: `packaging/install_opencode.py`). The pack **backs up** `~/.opencode` instead of deleting it. Do not write a second tree under `~/.config/opencode`. |
+| OpenCode source | Git submodule **`opencoderman/`** (`https://github.com/beratersari/opencoderman.git`). Pins live in `opencoderman/packaging/versions.env`. Do not re-implement a parallel installer. |
+| Plugin cache | Stock OpenCode only (`plugin: []`). Seed **`rg.exe`** into `%USERPROFILE%\.cache\opencode\bin` from `vendor\bin\rg.exe`. Do **not** junction or copy an oh-my plugin tree. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |
-| Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
+| Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
+| Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Runs `opencoderman/packaging/build_artifact.py --in-place` then `install.py`. Needs **Python** + network to the official OpenCode GitHub release. Offline CLI sources: `opencoderman/vendor/bin/<os>/`, `vendor/bin/opencode`, or `vendor/opencode-home.zip`. |
+| Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
+| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
-### 9.2 cmd.exe / install.bat landmines
+### 9.2 cmd.exe / installer landmines
 
 1. **Never `echo ... -> path` in `.bat` files.** In cmd, `>` is redirect.  
    `echo [OK] config -> %OPENCODE_HOME%\opencode.json` **overwrites** `opencode.json` with the text `[OK] config -` (exactly the “invalid JSON” failure users hit).  
    Same pattern can clobber `opencode.exe`. Always use `^>` or rephrase without `>`.
-2. **`install.bat` must be idempotent:** wipe previous `.opencode`, legacy short paths, stale PATH entries, and broken managed configs before extract — users should only re-run the installer.
+2. **`install-backends.bat` must be idempotent:** `opencoderman/install.py` **renames** `~/.opencode` to `~/.opencode_backup_YYYYMMDD_HHMMSS` (and leftover `~/.config/opencode` the same way), unhooks other OpenCode dirs from PATH, then writes a fresh home. Do not delete those backups. Users should only re-run the installer.
 3. Prefer **PowerShell `-File` scripts** for non-trivial logic; never use PowerShell parameter name **`$args`** (automatic variable — breaks `Start-Process -ArgumentList`).
 
-### 9.3 oh-my-openagent / oh-my-opencode plugin
+### 9.3 oh-my-openagent / oh-my-opencode plugin — **do not install**
+
+Jobs use OpenCoderman **derman-build** / **derman-plan** (not stock
+`build` / `plan`, and not oh-my-openagent). Do **not** register or
+npm-install `oh-my-openagent` / `oh-my-opencode`. `opencode.json` must
+be `"plugin": []` and `autoupdate: false`.
+
+Historical table (why we used to pin the plugin). Keep it so nobody "fixes" a black screen by re-adding the plugin:
+
+### 9.3-legacy (do not reintroduce)
 
 | Symptom | Real cause | Correct approach |
 |---------|------------|------------------|
@@ -462,15 +633,15 @@ User diagnostics (`packaging/windows/collect-opencode-diag.bat`) showed:
 
 **Mitigations already in the dist (keep them):**
 
-- Seed **`%USERPROFILE%\.cache\opencode\bin\rg.exe`** from `vendor\bin\rg.exe` during `install.bat`.
+- Seed **`%USERPROFILE%\.cache\opencode\bin\rg.exe`** from `vendor\bin\rg.exe` during `install-backends.bat`.
 - Set user env **`OPENCODE_DISABLE_MODELS_FETCH=1`** (and set it in `start-opencode.bat`).
 - Launcher always starts in the **product/project folder**, not the user profile.
 
 ### 9.5 CI / packaging process (do not weaken)
 
-1. **Build** on `windows-latest`: `build-dist.ps1` → `vendor/opencode-home.zip` (never expand `node_modules` into the outer artifact).
+1. **Build** on `windows-latest`: checkout **with submodules**, then `build-dist.ps1` → stage **`opencoderman/`** (no `.git`) + `vendor/opencode-home.zip` as a CLI fallback (never expand `node_modules` into the outer artifact).
 2. **`build-dist.ps1` must also** `npm ci` + `npm run build` in `web/` and stage **only** `web/dist` (assert `index.html`; **fail** if `web/node_modules` is staged).
-3. **CI assert payload layout** (fast): `install.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, `vendor/opencode-home.zip`, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification.
+3. **CI assert payload layout** (fast): `install-dashboard.bat`, `install-backends.bat`, `install-codex.bat`, `start.bat`, `start-backend.bat`, `start-frontend.bat`, `web/dist/index.html`, hashed `web/dist/assets/index-*.js`, `opencoderman/install.py`, `opencoderman/vendor/bin/windows/opencode.exe`, `vendor/opencode-home.zip`, **`vendor/codex-package-x86_64-pc-windows-msvc.tar.gz`**, helpers (`Stop-VdProcesses.ps1`, `Wait-Http.ps1`, `serve_frontend.py`). **Do not** run full `e2e-smoke.ps1` install on every push (too slow). Keep `e2e-smoke.ps1` for optional manual/deep verification. The Windows zip already includes the prebuilt SPA — do not run a second Dashboard SPA workflow.
 4. **Artifact naming:** SemVer from `VERSION` + channel (`resolve-version.ps1`). Do not go back to opaque `dev-<sha>` only.
 5. After shipping: delete merged feature branches; do not leave long-lived `feature/*` on origin without an open MR.
 6. **Monitor Windows Distribution CI** after packaging PRs (do not leave humans waiting blind).
@@ -490,7 +661,7 @@ When TUI shows nothing, **logs still exist**:
 
 ### 9.7 Agent_runner note
 
-Daemon/agent runs use `opencode run` with `--dir` on the **issue temp clone**. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI.
+Daemon/agent runs use **opencode serve** with the issue temp clone as the session directory. That path already avoids “home as project.” Packaging mistakes still break agents if the plugin never loads (defaults to non–oh-my agents / wrong names). Keep offline plugin seed correct even if you never open the TUI. `start-backend.bat` / `start.bat` probe `:4096/global/health` and start serve if needed (`Ensure-OpencodeServe.ps1`). `start-opencode-serve.bat` still force-restarts serve.
 
 ### 9.8 Product start scripts, SPA, PowerShell — hard-won devops rules
 
@@ -500,7 +671,7 @@ This subsection captures failures paid for while shipping offline **backend + fr
 
 | Launcher | Port | Process | Notes |
 |----------|------|---------|--------|
-| `start-backend.bat` | **8080** | `python -m src.daemon` | Poller + jobs + REST + WS. Also serves SPA from `web\dist` if present. Bind default **`0.0.0.0`**. |
+| `start-backend.bat` | **8080** | `python -m src.daemon` | Ensures OpenCode serve on **:4096** (reuse if healthy), then poller + jobs + REST + WS. Also serves SPA from `web\dist` if present. Bind default **`0.0.0.0`**. |
 | `start-frontend.bat` | **5173** | `serve_frontend.py` (uvicorn) | Prebuilt SPA + **reverse proxy** `/api` and `/ws` → `http://127.0.0.1:8080`. **No Node/Vite** in the offline package. |
 | `start.bat` | both | calls backend then frontend | Prefer this for “everything up.” |
 | `start-opencode.bat` | n/a | OpenCode TUI only | Unrelated to the ops dashboard. |
@@ -561,7 +732,8 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 
 | Path | Role |
 |------|------|
-| `packaging/windows/start-backend.bat` | Backend launcher |
+| `packaging/windows/start-backend.bat` | Backend launcher (ensures OpenCode serve first) |
+| `packaging/windows/Ensure-OpencodeServe.ps1` | Probe/start sibling `opencode serve` without killing the daemon |
 | `packaging/windows/start-frontend.bat` | Frontend launcher |
 | `packaging/windows/start.bat` | Both |
 | `packaging/windows/Stop-VdProcesses.ps1` | Port free + optional daemon kill |
@@ -576,14 +748,45 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 
 | File | Purpose |
 |------|---------|
-| `README.md` | User-facing setup, architecture, plan_ready / never auto-start |
+| `README.md` | User-facing setup, architecture, plan_ready / To Do return |
+| `CHANGELOG.md` | User-facing release notes (Keep a Changelog) |
+| `packaging/RELEASE_NOTES.md` | GitHub Release body used by tag CI |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |
+| `opencoderman/` | Git submodule: OpenCode installer, agents, skills, CLI pins |
+| `packaging/install_opencode.py` | Yaver wrapper around `opencoderman/install.py` (CLI sources + rg/glab extras) |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
+| `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
+| `packaging/pyinstaller/README.md` | Standalone `yaver` / `yaver.exe` (PyInstaller; CI `executables.yml`) |
+| `packaging/opencoderman_pin.py` | Resolve/write OpenCoderman submodule SHA for each release |
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
-| `agent/AGENT_PROMPT.md` | Unified agent prompt kit (`§policy.commit`, `§role.*`) for target clones |
+| `opencoderman/agents/derman-plan.md` | derman-plan — unattended planner (not stock `plan`) |
+| `opencoderman/agents/derman-build.md` | derman-build — unattended implementer (not stock `build`) |
+| `agent/PLAN_PROMPT.md` | Short plan-job user stub (`Mode: plan`) |
+| `agent/BUILD_PROMPT.md` | Short build-job user stub + git subject format |
+| `src/opencode_serve.py` | Serve loop: compact wait, unattended nudge (see §2 OpenCode serve) |
+| `src/opencode_sessions.py` | Session completeness + clarifying-question detection |
 | `commitMsgFormat.md` | Pointer to kit commit policy for target product repos |
 | `.env.example` | Environment template |
 | `tests/test_logical_issues.py` | Known incorrect behaviours (expected fail until fixed) |
+| `packaging/pyinstaller/` | Frozen `yaver` / `yaver.exe` spec, versions, build + CI |
+
+---
+
+## 11. Standalone executables (PyInstaller)
+
+Additive track. **Does not replace** the Windows/Linux offline zips.
+
+| Item | Rule |
+|------|------|
+| Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
+| Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencode_configs/` (OpenCoderman `agents/` + `skills/` next to the exe) |
+| Not bundled | OpenCode, Codex, Git, glab — still installed separately |
+| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
+| Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
+| OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |
+
+Do **not** drop `windows-dist.yml` / `linux-dist.yml` because this freeze exists.

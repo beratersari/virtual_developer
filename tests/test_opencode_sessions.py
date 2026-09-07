@@ -8,10 +8,21 @@ from pathlib import Path
 import pytest
 
 from src.opencode_sessions import (
+    assess_session_completeness,
+    chat_display_role,
+    compact_output_indicates_premature_exit,
+    compact_related_reasons,
+    detect_compact_in_output,
+    reasons_are_compact_only,
+    strip_compact_reasons,
     find_sessions_for_issue,
+    lookup_session_directory,
     path_contains_issue_key,
+    paths_equivalent,
+    relocate_session_directories,
     resolve_session_id,
 )
+from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
 
 
 def _make_session_db(path: Path, rows: list[dict]) -> Path:
@@ -107,6 +118,73 @@ def session_db(tmp_path: Path) -> Path:
 
 
 # --- path token helper ---
+
+
+def test_title_prefix_match_is_case_insensitive(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "case.db",
+        [
+            {
+                "id": "ses_lower",
+                "title": "proj-1: implement feature",
+                "directory": "/tmp/other",
+                "time_updated": 10,
+            }
+        ],
+    )
+    rows = find_sessions_for_issue("PROJ-1", db_path=db)
+    assert len(rows) == 1
+    assert rows[0]["id"] == "ses_lower"
+
+
+def test_like_underscore_in_issue_key_is_literal(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "us.db",
+        [
+            {
+                "id": "ses_wild",
+                "title": "noise",
+                "directory": "/tmp/PROJX1_extra_clone",
+                "time_updated": 20,
+            },
+            {
+                "id": "ses_real",
+                "title": "agent run",
+                "directory": "/tmp/vd/.temp/repo_PROJ_1_20260101",
+                "time_updated": 10,
+            },
+        ],
+    )
+    rows = find_sessions_for_issue("PROJ_1", db_path=db)
+    ids = {r["id"] for r in rows}
+    assert "ses_real" in ids
+    assert "ses_wild" not in ids
+
+
+def test_substring_flood_does_not_hide_real_issue(tmp_path: Path):
+    """PROJ-10 rows must not crowd PROJ-1 out of the SQL candidate window."""
+    rows = [
+        {
+            "id": f"ses_other_{i}",
+            "title": "not ours",
+            "directory": f"/tmp/PROJ-10_clone_{i}",
+            "time_updated": 1000 + i,
+        }
+        for i in range(80)
+    ]
+    rows.append(
+        {
+            "id": "ses_real_proj1",
+            "title": "PROJ-1: the real one",
+            "directory": "/tmp/unrelated_dir",
+            "time_updated": 1,
+        }
+    )
+    db = _make_session_db(tmp_path / "flood.db", rows)
+    found = find_sessions_for_issue("PROJ-1", db_path=db, limit=5)
+    ids = {r["id"] for r in found}
+    assert "ses_real_proj1" in ids
+    assert all(not i.startswith("ses_other_") for i in ids)
 
 
 def test_path_contains_issue_key_boundaries():
@@ -258,6 +336,45 @@ def test_resolve_returns_none_when_nothing(tmp_path: Path):
     assert resolve_session_id("ZZZ-99", db_path=empty) is None
 
 
+def test_lookup_session_directory_distinguishes_missing_and_error(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "ok.db",
+        [{"id": "ses_here", "title": "t", "directory": "/tmp/x"}],
+    )
+    d, ok = lookup_session_directory("ses_here", db_path=db)
+    assert ok is True
+    assert d == "/tmp/x"
+    d, ok = lookup_session_directory("ses_missing", db_path=db)
+    assert ok is True
+    assert d is None
+    bad = tmp_path / "bad.db"
+    bad.write_text("not sqlite", encoding="utf-8")
+    d, ok = lookup_session_directory("ses_here", db_path=bad)
+    assert ok is False
+    assert d is None
+
+
+def test_relocate_session_directories_rewrites_matching_rows(tmp_path: Path):
+    old = tmp_path / "legacy_clone"
+    new = tmp_path / "short_clone"
+    old.mkdir()
+    new.mkdir()
+    db = _make_session_db(
+        tmp_path / "rel.db",
+        [
+            {"id": "ses_move", "title": "KAN-1: x", "directory": str(old)},
+            {"id": "ses_keep", "title": "other", "directory": str(tmp_path / "other")},
+        ],
+    )
+    n = relocate_session_directories(old, new, db_path=db)
+    assert n == 1
+    d, ok = lookup_session_directory("ses_move", db_path=db)
+    assert ok is True
+    assert paths_equivalent(d, new)
+    keep, _ = lookup_session_directory("ses_keep", db_path=db)
+    assert paths_equivalent(keep, tmp_path / "other")
+
+
 def test_resolve_uses_path_segment_when_no_preferred(session_db: Path):
     sid = resolve_session_id(
         "PROJ-1",
@@ -266,3 +383,795 @@ def test_resolve_uses_path_segment_when_no_preferred(session_db: Path):
     )
     # Exact directory match on path_segment row
     assert sid == "ses_path_segment"
+
+
+# --- completeness / compact premature exit ---
+
+
+def _make_full_session_db(
+    path: Path,
+    *,
+    session_id: str = "ses_test1",
+    todos: list[tuple[str, str]] | None = None,
+    last_message: dict | None = None,
+    messages: list[dict] | None = None,
+) -> Path:
+    """Session + optional todo + message tables matching real OpenCode layout."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute(
+        """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            directory TEXT,
+            agent TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            cost REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE todo (
+            session_id TEXT,
+            content TEXT,
+            status TEXT,
+            priority TEXT,
+            position INTEGER,
+            time_created INTEGER,
+            time_updated INTEGER
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            time_created INTEGER,
+            time_updated INTEGER,
+            data TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO session (
+            id, title, directory, agent,
+            time_created, time_updated, cost, tokens_input, tokens_output
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, "PROJ-1: work", "/tmp/x", "build", 1, 2, 0.0, 80000, 1000),
+    )
+    for i, (content, status) in enumerate(todos or []):
+        con.execute(
+            """
+            INSERT INTO todo (
+                session_id, content, status, priority, position,
+                time_created, time_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, content, status, "high", i, 1, 1),
+        )
+    to_insert = messages if messages is not None else (
+        [last_message] if last_message is not None else []
+    )
+    for i, msg in enumerate(to_insert):
+        con.execute(
+            """
+            INSERT INTO message (id, session_id, time_created, time_updated, data)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                f"msg_{i}",
+                session_id,
+                i + 1,
+                i + 1,
+                json.dumps(msg),
+            ),
+        )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_detect_compact_in_output_patterns():
+    assert detect_compact_in_output("… Compacting session …")
+    assert detect_compact_in_output("session compacted successfully")
+    assert detect_compact_in_output("Context automatically compacted")
+    assert detect_compact_in_output("auto-compact triggered")
+    assert not detect_compact_in_output("implemented compact hash function")
+    assert not detect_compact_in_output("")
+
+
+def test_assess_complete_when_todos_done_and_finish_stop(tmp_path: Path):
+    db = _make_full_session_db(
+        tmp_path / "ok.db",
+        todos=[("Implement", "completed"), ("Commit", "completed")],
+        last_message={"role": "assistant", "finish": "stop", "summary": None},
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["complete"] is True
+    assert r["premature"] is False
+    assert r["open_todos"] == 0
+
+
+def test_assess_premature_open_todos(tmp_path: Path):
+    """Reproduce: process exits 0 while todos remain (compact / mid-work die)."""
+    db = _make_full_session_db(
+        tmp_path / "open.db",
+        todos=[
+            ("Explore", "completed"),
+            ("Build", "in_progress"),
+            ("Commit", "pending"),
+        ],
+        last_message={"role": "assistant", "finish": None},
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["complete"] is False
+    assert r["premature"] is True
+    assert r["open_todos"] == 2
+    assert any("open todos" in x for x in r["reasons"])
+    assert any("unfinished" in x for x in r["reasons"])
+
+
+def test_assess_premature_compaction_summary_stop(tmp_path: Path):
+    """Upstream bug: last msg is compaction summary with finish=stop → exit 0."""
+    db = _make_full_session_db(
+        tmp_path / "compact.db",
+        todos=[("Still working", "pending")],
+        last_message={
+            "role": "assistant",
+            "finish": "stop",
+            "summary": True,
+        },
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["premature"] is True
+    assert any("compaction summary" in x for x in r["reasons"])
+
+
+def test_assess_premature_from_compacting_cli_output(tmp_path: Path):
+    db = _make_full_session_db(
+        tmp_path / "cli.db",
+        todos=[],  # no todos table signal
+        last_message={"role": "assistant", "finish": "tool-calls"},
+    )
+    out = (
+        "read files...\n"
+        "tool: bash\n"
+        "Compacting session to free context…\n"
+    )
+    r = assess_session_completeness(
+        "ses_test1",
+        output_text=out,
+        db_path=db,
+    )
+    assert r["premature"] is True
+    assert r["compact_in_output"] is True
+
+
+def test_assess_no_session_id_with_compact_output_still_flags():
+    r = assess_session_completeness(
+        None,
+        output_text="done some work\ncompacting\n",
+    )
+    assert r["premature"] is True
+    assert r["compact_in_output"] is True
+
+
+def test_assess_compact_output_plus_finish_stop_empty_todos_is_premature(
+    tmp_path: Path,
+):
+    """False success: compact-then-exit-0 with todos gone / finish=stop.
+
+    Production hole: assess treated this as ``clean`` and marked COMPLETED.
+    """
+    db = _make_full_session_db(
+        tmp_path / "false_ok.db",
+        todos=[],
+        last_message={"role": "assistant", "finish": "stop", "summary": None},
+    )
+    out = (
+        "All todos complete.\n"
+        "Compacting session to free context…\n"
+    )
+    r = assess_session_completeness(
+        "ses_test1",
+        output_text=out,
+        db_path=db,
+    )
+    assert r["premature"] is True, r
+    assert r["compact_in_output"] is True
+    assert any("compaction" in x.lower() for x in r["reasons"])
+
+
+def test_assess_sqlite_compact_then_stop_sequence_is_premature(tmp_path: Path):
+    """Session log/DB path must see compaction → assistant stop, not only last row."""
+    db = _make_full_session_db(
+        tmp_path / "seq.db",
+        todos=[("All", "completed")],
+        messages=[
+            {
+                "role": "user",
+                "parts": [{"type": "compaction", "auto": True}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+                "parts": [{"type": "text", "text": "All todos complete."}],
+            },
+        ],
+    )
+    r = assess_session_completeness("ses_test1", db_path=db)
+    assert r["premature"] is True, r
+    assert any("compact-then-stop" in x for x in r["reasons"])
+
+
+def test_strip_compact_reasons_clears_compact_only():
+    r = {
+        "complete": False,
+        "premature": True,
+        "reasons": [
+            "last assistant followed a compaction message (compact-then-stop)",
+            "session log indicates compaction near end of run",
+        ],
+    }
+    assert reasons_are_compact_only(r["reasons"]) is True
+    strip_compact_reasons(r)
+    # Transient CLI compact noise is dropped; compact-then-stop stays incomplete.
+    assert r["complete"] is False
+    assert r["premature"] is True
+    assert r["reasons"] == [
+        "last assistant followed a compaction message (compact-then-stop)",
+    ]
+
+
+def test_strip_compact_reasons_keeps_open_todos():
+    r = {
+        "complete": False,
+        "premature": True,
+        "reasons": [
+            "open todos: 1 pending, 0 in_progress",
+            "last assistant followed a compaction message (compact-then-stop)",
+        ],
+    }
+    strip_compact_reasons(r)
+    assert r["premature"] is True
+    assert r["reasons"] == [
+        "open todos: 1 pending, 0 in_progress",
+        "last assistant followed a compaction message (compact-then-stop)",
+    ]
+
+
+def test_continue_prompt_echo_is_not_premature_compact():
+    """Resume prompt mentions 'compaction' but a finished answer must succeed."""
+    out = (
+        DEFAULT_CONTINUE_PROMPT
+        + "\nImplemented the feature and committed on the work branch.\n"
+    )
+    assert compact_output_indicates_premature_exit(out) is False
+    r = assess_session_completeness(
+        None,
+        output_text=out,
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": None,
+                "parts": [{"type": "text", "text": "Implemented and committed."}],
+            }
+        ],
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["complete"] is True, r
+    assert r["premature"] is False
+
+
+def test_assess_work_after_summary_assistant_is_complete():
+    """Last assistant after a compact *summary* is resumed work, not stop."""
+    messages = [
+        {
+            "role": "user",
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": True,
+            "parts": [{"type": "text", "text": "Compacted."}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": None,
+            "parts": [{"type": "text", "text": "Finished remaining work."}],
+        },
+    ]
+    r = assess_session_completeness(
+        "ses_ok",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["complete"] is True, r
+    assert r["premature"] is False
+
+
+def test_assess_compact_then_stop_message_sequence_is_premature():
+    """Serve/API: last assistant immediately after a compaction user part."""
+    messages = [
+        {
+            "role": "user",
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "role": "assistant",
+            "finish": "stop",
+            "summary": None,
+            "parts": [{"type": "text", "text": "All todos complete."}],
+        },
+    ]
+    r = assess_session_completeness(
+        "ses_api",
+        messages=messages,
+        todos=[{"status": "completed", "content": "All"}],
+    )
+    assert r["premature"] is True, r
+    assert any("compact-then-stop" in x for x in r["reasons"])
+
+
+def test_chat_display_role_compaction_is_not_user():
+    assert (
+        chat_display_role(
+            "user",
+            parts=[{"type": "compaction", "auto": True}],
+        )
+        == "compaction"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {"type": "compaction", "auto": True},
+                {"type": "text", "text": "Session compacted to free context."},
+            ],
+        )
+        == "compaction"
+    )
+    assert (
+        chat_display_role(
+            "assistant",
+            agent="compaction",
+            summary=True,
+            parts=[{"type": "text", "text": "## Compaction summary"}],
+        )
+        == "summary"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "Continue the previous OpenCode session. The last turn stopped early",
+                }
+            ],
+        )
+        == "skip"
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": "implement KAN-1"}])
+        == "user"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "[restore checkpointed session agent configuration after compaction]\n<!-- OMO_INTERNAL_INITIATOR -->",
+                }
+            ],
+        )
+        == "skip"
+    )
+    assert (
+        chat_display_role(
+            "user",
+            parts=[
+                {
+                    "type": "text",
+                    "text": "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+                }
+            ],
+        )
+        == "skip"
+    )
+    media = (
+        "The previous request exceeded the provider's size limit due to "
+        "large media attachments. The conversation was compacted and media "
+        "files were removed from context. If the user was asking about "
+        "attached images or files, explain that the attachments were too "
+        "large to process and suggest they try again with smaller or fewer "
+        "files.\n\n"
+        "Continue if you have next steps, or stop and ask for clarification "
+        "if you are unsure how to proceed."
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": media}]) == "skip"
+    )
+    search = (
+        "[search-mode] MAXIMIZE SEARCH EFFORT. Launch multiple background "
+        "agents IN PARALLEL:\n\n# Build mode\nYou run unattended\n"
+    )
+    # First task prompt is wrapped by the plugin — still the operator message.
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": search}]) == "user"
+    )
+    tagged_task = (
+        "1. TASK: Implement KAN-1 calculator add.\n\n"
+        "<!-- OMO_INTERNAL_INITIATOR -->"
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": tagged_task}])
+        == "user"
+    )
+    after_compact = (
+        "Continue after context compaction. Finish all remaining todos "
+        "and complete the original task."
+    )
+    assert (
+        chat_display_role("user", parts=[{"type": "text", "text": after_compact}])
+        == "skip"
+    )
+
+
+def test_assistant_asked_question_is_not_a_crash():
+    from src.opencode_sessions import (
+        assess_session_completeness,
+        assistant_asked_question,
+    )
+
+    q = (
+        "All module READMEs already exist.\n\n"
+        "Shall I continue with the remaining work?"
+    )
+    assert assistant_asked_question(q) is True
+    assert assistant_asked_question("Implemented the parser and committed.") is False
+    result = assess_session_completeness(
+        "ses_q",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": q}],
+            }
+        ],
+        todos=[{"status": "completed"}],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result["premature"] is True
+    assert any("clarifying question" in str(r) for r in result["reasons"])
+    assert not any("unfinished" in str(r) for r in result["reasons"])
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Which database should we use — Postgres or SQLite?", True),
+        ("What is the preferred API shape?", True),
+        ("Could you clarify the acceptance criteria?", True),
+        ("I need more information: is auth JWT or sessions?", True),
+        ("Any preference on library X vs Y?", True),
+        ("Let me know if you want a different approach.", True),
+        (
+            "All 15 tasks are done. Let me know if you need anything else.",
+            False,
+        ),
+        ("Finished. Let me know if you have any questions.", False),
+        (
+            "Pick one:\nA) Redis\nB) Memcached\nC) In-process cache",
+            True,
+        ),
+        (
+            "Pick one:\n1. Redis\n2. Memcached\n3. In-process cache",
+            True,
+        ),
+        (
+            "Plan written successfully to `C:\\vd\\yaver\\plans\\KAN-7.md`\n\n"
+            "Summary of the plan:\n"
+            "1. **Install a C++ compiler** — g++/cl/clang++ are all absent "
+            "on this Windows host. Use winget install LLVM.LLVM or MSYS2/MinGW.\n"
+            "2. **Modify main.cpp** — add #include <cassert> and "
+            "assert(12 + 12 == 24); before the existing std::cout line.\n"
+            "3. **Compile** with g++ -o main main.cpp — exit 0 means success.\n"
+            "4. **Run** with ./main — should print 24, exit 0.\n"
+            "5. **Commit** as [KAN-7] test: add assert verifying 12+12 equals 24.",
+            False,
+        ),
+        (
+            "Plan written to .yaver-plans\\KAN-482.md.\n\n"
+            "Summary\nTicket — add a unit test.\n\n"
+            "Plan steps for derman-build:\n"
+            "Modify random_sum.cpp\n"
+            "Compile with MSVC cl.exe\n"
+            "Run .\\random_sum.exe\n"
+            "Commit as [KAN-482] feat: add unit test\n\n"
+            "PLAN_DONE\nfile: .yaver-plans/KAN-482.md\n"
+            "implement: no\nquestions: none\n",
+            False,
+        ),
+        ("Please confirm the target branch before I continue.", True),
+        ("Implemented the parser and committed.", False),
+        ("Fixed the bug. Tests pass.", False),
+        (
+            "Fixed the bug. Does the suite pass? Yes, all green.",
+            False,
+        ),
+    ],
+)
+def test_assistant_asked_question_free_form(text, expected):
+    from src.opencode_sessions import assistant_asked_question
+
+    assert assistant_asked_question(text) is expected
+
+
+def test_numbered_plan_summary_is_not_a_clarifying_question():
+    """KAN-7: finished plan steps looked like A/B/C and triggered implement."""
+    from src.opencode_sessions import assess_session_completeness
+
+    plan = (
+        "Plan written successfully to `C:\\vd\\t\\test_project\\.yaver-plans\\KAN-7.md`.\n\n"
+        "**Summary of the plan:**\n\n"
+        "1. **Install a C++ compiler** — `g++`/`cl`/`clang++` are all absent "
+        "on this Windows host. Use `winget install LLVM.LLVM` or MSYS2/MinGW.\n"
+        "2. **Modify `main.cpp`** — add `#include <cassert>` and "
+        "`assert(12 + 12 == 24);` before the existing `std::cout` line.\n"
+        "3. **Compile** with `g++ -o main main.cpp` — exit 0 means success.\n"
+        "4. **Run** with `./main` — should print `24`, exit 0.\n"
+        "5. **Commit** as `[KAN-7] test: add assert verifying 12+12 equals 24`."
+    )
+    result = assess_session_completeness(
+        "ses_plan_summary",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": plan}],
+            }
+        ],
+        todos=[{"status": "completed"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
+def test_free_form_clarifying_question_is_incomplete_not_success():
+    """One-pass daemon must not treat 'Which DB?' as a finished job."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_free_q",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Which database should we use — Postgres or SQLite?",
+                    }
+                ],
+            }
+        ],
+        todos=[],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result["complete"] is False
+    assert result["premature"] is True
+
+
+def test_question_tool_part_is_detected_as_waiting():
+    """OpenCode structured question tool (API-native) marks incomplete."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_q_tool",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "tool-calls",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {
+                            "status": "running",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "header": "DB",
+                                        "question": "Postgres or SQLite?",
+                                        "options": ["Postgres", "SQLite"],
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                ],
+            }
+        ],
+        todos=[{"status": "pending"}],
+    )
+    assert result["assistant_asked_question"] is True
+    assert result.get("question_tool") is True
+    assert result["premature"] is True
+
+
+def test_earlier_question_does_not_poison_later_completion():
+    """Regression: history 'Shall I…?' must not fail a later clean stop.
+
+    Production: after unattended nudge the model finished all work, but
+    assessment still reported clarifying question + stale open todos → ERROR.
+    """
+    from src.opencode_sessions import assess_session_completeness
+
+    done = (
+        "All 16 tasks are marked complete. The work was finished and pushed "
+        "to origin/feature/VOLKAN-12278 in the previous session. "
+        "There is nothing remaining."
+    )
+    result = assess_session_completeness(
+        "ses_done",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Shall I restart the deep exploration?",
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "finish": "tool-calls",
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "question",
+                        "state": {"status": "running", "input": {}},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "unattended nudge"}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [{"type": "text", "text": done}],
+            },
+        ],
+        todos=[{"status": "pending"}] * 15 + [{"status": "in_progress"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("last_finish") == "stop"
+    # Open todos may still flag premature — but NOT clarifying question.
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
+def test_compaction_summary_recap_is_not_a_live_question():
+    """Compact recap quoting 'Shall I…?' must not look like a new ask."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_sum",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {"type": "text", "text": "Shall I restart the deep exploration?"}
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "compaction", "auto": True}],
+            },
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "summary": True,
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "## Compaction\nPreviously asked: Shall I restart "
+                            "the deep exploration and begin rewriting docs?"
+                        ),
+                    }
+                ],
+            },
+        ],
+        todos=[{"status": "pending"}] * 14 + [{"status": "in_progress"}],
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("last_is_summary") is True
+    assert not any("clarifying question" in str(r) for r in result["reasons"])
+
+
+def test_user_nudge_after_question_is_not_still_asking():
+    """Last message is our nudge — wait for the reply, do not fail yet."""
+    from src.opencode_sessions import assess_session_completeness
+
+    result = assess_session_completeness(
+        "ses_nudge_gap",
+        messages=[
+            {
+                "role": "assistant",
+                "finish": "stop",
+                "parts": [
+                    {"type": "text", "text": "Shall I restart the deep exploration?"}
+                ],
+            },
+            {
+                "role": "user",
+                "parts": [{"type": "text", "text": "You are running unattended…"}],
+            },
+        ],
+        todos=[{"status": "pending"}] * 14,
+    )
+    assert result["assistant_asked_question"] is False
+    assert result.get("awaiting_assistant_after_user") is True
+
+
+def test_compact_related_reasons_detects_markers():
+    assert compact_related_reasons(["compaction summary"]) is True
+    assert compact_related_reasons(["open todos: 1 pending, 0 in_progress"]) is False
+    assert compact_related_reasons(
+        ["last assistant followed a compaction message (compact-then-stop)"]
+    )
+
+
+def test_live_incomplete_session_if_present():
+    """Optional: prove real local OpenCode DB still has incomplete KAN-12 session.
+
+    Skips when the known session is gone (clean machines / CI).
+    """
+    from pathlib import Path
+
+    db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    sid = "ses_02ca1287effeEErvnu2CC4dNhK"
+    if not db.is_file():
+        pytest.skip("no local OpenCode DB")
+    # Only run if that session still exists
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute(
+            "SELECT id FROM session WHERE id = ?", (sid,)
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        pytest.skip("known incomplete session not present")
+
+    r = assess_session_completeness(sid, db_path=db)
+    assert r["db_checked"] is True
+    assert r["premature"] is True, r
+    assert r["open_todos"] > 0
+    # Last turn aborted mid-step (finish null) — matches production incomplete
+    assert r["last_finish"] is None or str(r["last_finish"]).lower() in {
+        "tool-calls",
+        "unknown",
+        "",
+    }

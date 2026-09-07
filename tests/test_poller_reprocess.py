@@ -182,15 +182,66 @@ def test_error_still_todo_skips_when_text_unchanged(poller, state_manager):
             "labels": ["bot"],
         },
     }
-    fp = poller.issue_text_fingerprint(issue)
+    fp = poller.issue_text_fingerprint(issue, light=False)
+    fps = poller.text_fingerprints_from_state("s", desc)
     state_manager.create_state("P-SAME", "s", desc)
     state_manager.update_state(
         "P-SAME",
         status=TaskStatus.ERROR,
-        metadata={"requeue_eligible": True, "last_intake_fingerprint": fp},
+        metadata={"requeue_eligible": True, **fps},
     )
     poller._status_before_poll = {"P-SAME": "to do"}
     assert poller.check_status_changes([issue]) == []
+    assert fps["last_intake_fingerprint"] == fp
+
+
+def test_error_light_board_skips_when_summary_unchanged(poller, state_manager):
+    """Board scan without description must not look like a text edit every poll."""
+    from src.state.models import TaskStatus
+
+    poller.state_manager = state_manager
+    summary = "fix auth"
+    full_desc = "Mode: build\n{params}\nrepo: x\n{params}"
+    fps = poller.text_fingerprints_from_state(summary, full_desc)
+    state_manager.create_state("P-LIGHT", summary, full_desc)
+    state_manager.update_state(
+        "P-LIGHT",
+        status=TaskStatus.ERROR,
+        metadata={"requeue_eligible": True, **fps},
+    )
+    poller._status_before_poll = {"P-LIGHT": "to do"}
+    light = {
+        "key": "P-LIGHT",
+        "fields": {
+            "summary": summary,
+            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            "labels": ["bot"],
+        },
+    }
+    assert poller.check_status_changes([light]) == []
+
+
+def test_error_light_board_reprocesses_when_summary_changes(poller, state_manager):
+    from src.state.models import TaskStatus
+
+    poller.state_manager = state_manager
+    fps = poller.text_fingerprints_from_state("old summary", "body")
+    state_manager.create_state("P-SUM", "old summary", "body")
+    state_manager.update_state(
+        "P-SUM",
+        status=TaskStatus.ERROR,
+        metadata={"requeue_eligible": True, **fps},
+    )
+    poller._status_before_poll = {"P-SUM": "to do"}
+    light = {
+        "key": "P-SUM",
+        "fields": {
+            "summary": "new summary",
+            "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+            "labels": ["bot"],
+        },
+    }
+    assert [i["key"] for i in poller.check_status_changes([light])] == ["P-SUM"]
 
 
 def test_process_issue_updates_last_status_after_in_progress(poller, fake_jira):

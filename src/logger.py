@@ -35,17 +35,11 @@ class Colors:
     BOLD = "\033[1m"
     DIM = "\033[2m"
 
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
     CYAN = "\033[36m"
     WHITE = "\033[37m"
 
     BRIGHT_BLACK = "\033[90m"
     BRIGHT_RED = "\033[91m"
-    BRIGHT_GREEN = "\033[92m"
     BRIGHT_YELLOW = "\033[93m"
     BRIGHT_BLUE = "\033[94m"
     BRIGHT_WHITE = "\033[97m"
@@ -172,8 +166,7 @@ class Logger:
         )
 
         stream = sys.stderr if level.value >= LogLevel.WARNING.value else sys.stdout
-        print(formatted, file=stream)
-        stream.flush()
+        _write_stream(stream, formatted)
 
         # Feed dashboard issue/job log buffer (plain text, no ANSI)
         try:
@@ -191,6 +184,7 @@ class Logger:
                 f"[{filename}:{line_no}]  {func_name}  {body}"
             )
             issue_log_ring.append(plain, job_id=jid, issue_key=ikey)
+            _append_daemon_log_file(plain)
         except Exception:
             pass
 
@@ -214,32 +208,76 @@ class Logger:
         self._log(LogLevel.ERROR, message, exc)
 
 
+def configure_stdio() -> None:
+    """Force UTF-8 stdio so frozen Windows consoles do not crash on logs."""
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if callable(reconf):
+            try:
+                reconf(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _write_stream(stream, text: str) -> None:
+    """Print one log line. Never raise — Windows cp1252 cannot encode ≈/—."""
+    try:
+        print(text, file=stream)
+        stream.flush()
+        return
+    except UnicodeEncodeError:
+        pass
+    except Exception:
+        return
+    payload = (text + "\n").encode("utf-8", errors="replace")
+    buf = getattr(stream, "buffer", None)
+    if buf is not None:
+        try:
+            buf.write(payload)
+            buf.flush()
+            return
+        except Exception:
+            pass
+    try:
+        enc = getattr(stream, "encoding", None) or "utf-8"
+        print(text.encode(enc, errors="replace").decode(enc, errors="replace"), file=stream)
+        stream.flush()
+    except Exception:
+        pass
+
+
+configure_stdio()
+
+
+_DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def daemon_log_path() -> Path:
+    """Durable daemon log (plain text) under ``YAVER_DATA_DIR/logs``."""
+    from src.paths import ensure_agent_data_dir, logs_dir
+
+    ensure_agent_data_dir()
+    return logs_dir() / "daemon.log"
+
+
+def _append_daemon_log_file(plain: str) -> None:
+    """Best-effort append so issue reports survive a process restart."""
+    path = daemon_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.stat().st_size > _DAEMON_LOG_MAX_BYTES:
+            tail = path.read_bytes()[-(_DAEMON_LOG_MAX_BYTES // 2) :]
+            path.write_bytes(tail + b"\n")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(plain)
+            if not plain.endswith("\n"):
+                f.write("\n")
+    except OSError:
+        pass
+
+
 # Global logger instance
 logger = Logger()
-
-
-def debug(message: str) -> None:
-    logger.debug(message)
-
-
-def info(message: str) -> None:
-    logger.info(message)
-
-
-def warning(message: str) -> None:
-    logger.warning(message)
-
-
-def error(message: str, exception: Optional[BaseException] = None) -> None:
-    logger.error(message, exception)
-
-
-def critical(message: str, exception: Optional[BaseException] = None) -> None:
-    logger.critical(message, exception)
-
-
-def exception(message: str, exc: BaseException) -> None:
-    logger.exception(message, exc)
 
 
 def set_level(level: LogLevel) -> None:

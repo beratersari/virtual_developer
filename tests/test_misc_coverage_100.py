@@ -18,47 +18,47 @@ from tests.conftest import FakeJiraClient
 
 
 # ---------------------------------------------------------------------------
-# agent_runner: env allowlist + retry/abort/timeout helpers
+# agent_runner: full env inheritance + retry/abort/timeout helpers
 # ---------------------------------------------------------------------------
 
 
-def test_agent_subprocess_env_allowlist_and_strip_secrets(monkeypatch):
+def test_agent_subprocess_env_passes_all(monkeypatch):
     from src.orchestrator.agent_runner import _agent_subprocess_env
 
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/home/test")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setenv("OPENCODE_HOME", "/opt/oc")
-    monkeypatch.setenv("BUN_INSTALL", "/opt/bun")
-    monkeypatch.setenv("npm_config_cache", "/tmp/npm")
+    monkeypatch.setenv("INCLUDE", "C:\\SDK\\include")
+    monkeypatch.setenv("MVCC_HOME", "/opt/mvcc")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", "/opt/cmake")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("GITLAB_PAT", "pat-secret")
-    monkeypatch.setenv("GITLAB_TOKEN", "tok-secret")
-    monkeypatch.setenv("JIRA_API_TOKEN", "jira-secret")
-    monkeypatch.setenv("JIRA_PASSWORD", "pw-secret")
+    monkeypatch.setenv("NPM_TOKEN", "npm-from-env")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-from-env")
+    monkeypatch.setenv("GITLAB_PAT", "gl-from-env")
+    monkeypatch.setenv("JIRA_API_TOKEN", "jira-from-env")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/ssh.sock")
-    monkeypatch.setenv("GIT_ASKPASS", "/bin/askpass")
-    monkeypatch.setenv("VD_GIT_PASSWORD", "git-secret")
-    monkeypatch.setenv("RANDOM_HOST_SECRET", "nope")
 
     env = _agent_subprocess_env()
-    assert env.get("PATH") == "/usr/bin"
-    assert env.get("HOME") == "/home/test"
-    assert env.get("LC_ALL") == "C"
-    assert env.get("OPENCODE_HOME") == "/opt/oc"
-    assert env.get("BUN_INSTALL") == "/opt/bun"
-    assert env.get("npm_config_cache") == "/tmp/npm"
+    path = env.get("PATH") or ""
+    assert path == "/usr/bin" or path.endswith(os.pathsep + "/usr/bin")
+    assert env.get("MVCC_HOME") == "/opt/mvcc"
+    assert env.get("CMAKE_PREFIX_PATH") == "/opt/cmake"
+    assert env.get("INCLUDE") == "C:\\SDK\\include"
     assert env.get("OPENAI_API_KEY") == "sk-test"
     assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    assert env.get("NPM_TOKEN") == "npm-from-env"
+    assert env.get("AWS_SECRET_ACCESS_KEY") == "aws-from-env"
+    assert env.get("GITLAB_PAT") == "gl-from-env"
+    assert env.get("JIRA_API_TOKEN") == "jira-from-env"
+    assert env.get("SSH_AUTH_SOCK") == "/tmp/ssh.sock"
     assert env.get("GCM_INTERACTIVE") == "never"
-    assert "GITLAB_PAT" not in env
-    assert "GITLAB_TOKEN" not in env
-    assert "JIRA_API_TOKEN" not in env
-    assert "JIRA_PASSWORD" not in env
-    assert "SSH_AUTH_SOCK" not in env
-    assert "GIT_ASKPASS" not in env
-    assert "VD_GIT_PASSWORD" not in env
-    assert "RANDOM_HOST_SECRET" not in env
+    wrap = env.get("PATH", "").split(os.pathsep)[0]
+    if env.get("VD_REAL_GIT"):
+        assert "git-wrap" in wrap.replace("\\", "/")
+        shim = Path(wrap) / ("git.cmd" if os.name == "nt" else "git")
+        assert shim.is_file()
+        text = shim.read_text(encoding="utf-8")
+        assert "credential.helper=" in text
+        assert "VD_REAL_GIT" in text
 
 
 def test_agent_subprocess_env_skips_none_values(monkeypatch):
@@ -74,10 +74,11 @@ def test_agent_subprocess_env_skips_none_values(monkeypatch):
     with patch("src.orchestrator.agent_runner.os.environ") as env_mock:
         env_mock.items.return_value = fake_items
         env = _agent_subprocess_env()
-    assert env.get("PATH") == "/bin"
+    path = env.get("PATH") or ""
+    assert path == "/bin" or path.endswith(os.pathsep + "/bin")
     assert "HOME" not in env
     assert env.get("LC_FOO") == "bar"
-    assert "JIRA_API_TOKEN" not in env
+    assert env.get("JIRA_API_TOKEN") == "secret"
 
 
 def test_resolve_opencode_agent_empty_and_unknown():
@@ -85,7 +86,7 @@ def test_resolve_opencode_agent_empty_and_unknown():
 
     assert resolve_opencode_agent_name("") == ""
     assert resolve_opencode_agent_name("custom_agent") == "custom_agent"
-    assert resolve_opencode_agent_name("sisyphus_junior") == "Sisyphus-Junior"
+    assert resolve_opencode_agent_name("sisyphus_junior") == "build"
     assert resolve_opencode_agent_name("Sisyphus - ultraworker") == "Sisyphus - ultraworker"
 
 
@@ -151,10 +152,18 @@ async def test_run_agent_prompt_write_and_session_callback_errors(tmp_path, monk
         s.opencode_cli = "opencode"
         s.default_model = "m"
         s.agent_task_timeout_seconds = 30
-        with patch(
-            "asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=FakeProc()),
-        ):
+        async def fake_serve(task, **kwargs):
+            return {
+                "task_id": task.task_id,
+                "returncode": 0,
+                "stdout": "ok\n",
+                "stderr": "",
+                "session_file": str(kwargs.get("session_file") or ""),
+                "opencode_session_id": None,
+                "progress": 100,
+            }
+
+        with patch.object(runner, "_run_agent_via_serve", side_effect=fake_serve):
             with patch.object(Path, "write_text", boom_write):
                 task = AgentTask(description="d", prompt="p", agent="a", issue_key="CB-1")
                 result = await runner.run_agent(
@@ -382,31 +391,6 @@ def test_cancel_task_and_cancel_all(tmp_path, monkeypatch):
     assert n == 1
 
 
-def test_resolve_session_id_db_fail_and_write_fail(tmp_path):
-    from src.orchestrator.agent_runner import AgentRunner, AgentTask
-
-    runner = AgentRunner(working_directory=tmp_path)
-    task = AgentTask(description="d", prompt="p", agent="a", issue_key="SID-1")
-    session_file = tmp_path / "out.log"
-    session_file.write_text("")
-
-    with patch(
-        "src.opencode_sessions.resolve_session_id",
-        side_effect=RuntimeError("db down"),
-    ):
-        assert (
-            runner._resolve_session_id(task, ["no session"], session_file=session_file)
-            is None
-        )
-
-    # successful parse + write fails
-    with patch.object(Path, "write_text", side_effect=OSError("ro fs")):
-        sid = runner._resolve_session_id(
-            task, ["Session: ses_abc12345"], session_file=session_file
-        )
-    assert sid == "ses_abc12345"
-
-
 def test_get_session_file_path_escape(tmp_path, monkeypatch):
     from src.orchestrator.agent_runner import AgentRunner
 
@@ -463,7 +447,6 @@ def jira_client():
         with patch("src.jira.client.settings") as s:
             s.jira_host = "https://jira.example.com"
             s.jira_api_token = "token"
-            s.jira_email = ""
             from src.jira.client import JiraClient
 
             c = JiraClient()
@@ -484,7 +467,7 @@ def _jresp(status=200, json_data=None, text=""):
     return r
 
 
-def test_jira_cloud_host_without_email_warns():
+def test_jira_cloud_host_without_email_uses_bearer():
     with patch("src.jira.client.httpx.Client") as mock_cls:
         mock_cls.return_value = MagicMock()
         with patch("src.jira.client.settings") as s:
@@ -1301,12 +1284,10 @@ def test_config_property_edges(monkeypatch):
         jira_host="https://j",
         jira_api_token="t",
         jira_projects="",
-        trigger_labels="",
         trigger_mentions="",
         gitlab_allowed_hosts="",
     )
     assert s.jira_projects_list == ["PROJ"]
-    assert s.trigger_labels_list == ["ai-assist", "bot"]
     assert s.trigger_mentions_list == ["@DevBot", "@AI"]
     assert s.gitlab_allowed_hosts_list == []
 
@@ -1314,14 +1295,12 @@ def test_config_property_edges(monkeypatch):
         jira_host="https://j",
         jira_api_token="t",
         jira_projects=" A , , B ",
-        trigger_labels=" x ,y ",
         trigger_mentions=" @A , @B ",
         gitlab_allowed_hosts=" GitLab.com , HOST.Example ",
     )
     assert s2.jira_projects_list == ["A", "B"]
-    assert s2.trigger_labels_list == ["x", "y"]
     assert s2.trigger_mentions_list == ["@A", "@B"]
-    assert s2.gitlab_allowed_hosts_list == ["gitlab.com", "host.example"]
+    assert s2.gitlab_allowed_hosts_list == []
 
     s3 = Settings(jira_host="", jira_api_token="")
     with pytest.raises(ValueError) as ei:
@@ -1392,25 +1371,19 @@ def test_logger_issue_ring_exception(monkeypatch):
 def test_prompt_builder_empty_and_context():
     from src.orchestrator.prompt_builder import PromptBuilder
 
-    body = PromptBuilder._jira_body("I-1", "", "")
+    body = PromptBuilder._jira_title_and_description("I-1", "", "")
     assert "no summary" in body.lower() or "I-1" in body
 
-    prompt = PromptBuilder.build_sisyphus_prompt(
+    prompt = PromptBuilder.build_build_prompt(
         "I-2",
+        "sum",
         "task body",
-        context={
-            "files": ["a.py"],
-            "patterns": ["singleton"],
-            "note": "extra",
-        },
-        summary="sum",
     )
-    assert "a.py" in prompt
-    assert "singleton" in prompt
-    assert "extra" in prompt
+    assert "task body" in prompt
+    assert "sum" in prompt
+    assert "Jira description" in prompt
 
-    # empty context keys skip
-    p2 = PromptBuilder.build_sisyphus_prompt("I-3", "t", context={})
+    p2 = PromptBuilder.build_build_prompt("I-3", "", "t")
     assert "I-3" in p2
 
 

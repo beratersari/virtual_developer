@@ -13,38 +13,61 @@ import pytest
 def _snapshot_paths(root: Path) -> Set[str]:
     if not root.is_dir():
         return set()
-    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+    # Full rglob of a production .jira-agent on WSL/NTFS can hang the
+    # autouse fixture for minutes. Top-level files still catch leaks.
+    try:
+        return {p.name for p in root.iterdir() if p.is_file()}
+    except OSError:
+        return set()
 
 
 @pytest.fixture(autouse=True)
 def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Route job/session writes into tmp and scrub any real-tree leaks.
 
-    Production uses ``Path.cwd()/.jira-agent/...`` and a module-level
-    ``job_store`` singleton. Without isolation, tests leave files in the repo
-    after assertions. Isolated paths live under ``tmp_path/_vd_runtime`` (auto-
-    deleted by pytest); any *new* files under the real project ``.jira-agent``
-    are removed on teardown as a safety net.
+    Production uses ``YAVER_DATA_DIR`` (``C:\\vd\\yaver``, ``/vd/yaver``, …)
+    and a module-level ``job_store`` singleton. Without isolation, tests
+    leave files in the durable dir or leftover ``.jira-agent``. Isolated
+    paths live under ``tmp_path/_vd_runtime`` (auto-deleted by pytest);
+    any *new* files under the real project ``.jira-agent`` are removed on
+    teardown as a safety net.
     """
     project_root = Path.cwd()
     real_agent = (project_root / ".jira-agent").resolve()
     before = _snapshot_paths(real_agent)
+    real_env = project_root / ".env"
+    env_before = real_env.read_text(encoding="utf-8") if real_env.is_file() else None
 
     # Separate from tests that mkdir tmp_path/.jira-agent themselves
     runtime = tmp_path / "_vd_runtime"
     jobs_dir = runtime / "jobs"
     sessions_dir = runtime / "sessions"
+    binds_dir = runtime / "opencode-binds"
+    queue_dir = runtime / "queue"
     jobs_dir.mkdir(parents=True)
     sessions_dir.mkdir(parents=True)
+    binds_dir.mkdir(parents=True)
+    queue_dir.mkdir(parents=True)
 
     from src.state.job_store import JobStore
+    from src.state.session_bind_store import SessionBindStore
+    from src.state.queue_store import WorkQueueStore
     import src.processor as processor_mod
     import src.state.job_store as job_store_mod
+    import src.state.session_bind_store as bind_store_mod
+    import src.state.queue_store as queue_store_mod
 
     isolated_store = JobStore(jobs_dir=jobs_dir)
+    isolated_binds = SessionBindStore(binds_dir=binds_dir)
+    isolated_queue = WorkQueueStore(queue_dir=queue_dir)
     monkeypatch.setattr(job_store_mod, "job_store", isolated_store)
     monkeypatch.setattr(job_store_mod, "_default_jobs_dir", lambda: jobs_dir)
     monkeypatch.setattr(processor_mod, "job_store", isolated_store)
+    monkeypatch.setattr(processor_mod, "work_queue_store", isolated_queue)
+    monkeypatch.setattr(bind_store_mod, "session_bind_store", isolated_binds)
+    monkeypatch.setattr(bind_store_mod, "_default_binds_dir", lambda: binds_dir)
+    monkeypatch.setattr(queue_store_mod, "work_queue_store", isolated_queue)
+    monkeypatch.setattr(queue_store_mod, "_default_queue_dir", lambda: queue_dir)
 
     monkeypatch.setattr(
         "src.orchestrator.agent_runner._default_sessions_dir",
@@ -55,15 +78,35 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         lambda: sessions_dir,
         raising=False,
     )
+    # Never let tests read/write the developer's real OpenCode SQLite DB
+    # (rename relocate would otherwise UPDATE session.directory there).
+    fake_opencode_db = runtime / "opencode.db"
+    monkeypatch.setattr(
+        "src.opencode_sessions._default_db_path",
+        lambda: fake_opencode_db,
+    )
 
     yield {
         "runtime": runtime,
         "jobs_dir": jobs_dir,
         "sessions_dir": sessions_dir,
         "job_store": isolated_store,
+        "session_bind_store": isolated_binds,
+        "binds_dir": binds_dir,
+        "queue_store": isolated_queue,
+        "queue_dir": queue_dir,
     }
 
     shutil.rmtree(runtime, ignore_errors=True)
+
+    # Tests that call apply_settings_update without chdir must not keep
+    # JIRA_EMAIL= (or other dotenv writes) in the developer's real .env.
+    if env_before is not None and real_env.is_file():
+        try:
+            if real_env.read_text(encoding="utf-8") != env_before:
+                real_env.write_text(env_before, encoding="utf-8")
+        except OSError:
+            pass
 
     # Safety net: only remove files created under the real tree during this test
     if real_agent.is_dir():
@@ -103,6 +146,20 @@ class FakeJiraClient:
         self.comments.append(entry)
         return entry
 
+    def get_comments(self, issue_key: str) -> List[Dict[str, Any]]:
+        return [c for c in self.comments if c.get("issue_key") == issue_key]
+
+    def add_labels(self, issue_key: str, labels: List[str]) -> bool:
+        return self.update_issue(issue_key, labels=list(labels or []))
+
+    def remove_labels(self, issue_key: str, labels: List[str]) -> bool:
+        _ = labels
+        return self.update_issue(issue_key, labels=[])
+
+    def replace_label(self, issue_key: str, old: str, new: str) -> bool:
+        _ = old
+        return self.update_issue(issue_key, labels=[new] if new else [])
+
     def update_issue(self, issue_key: str, fields=None, labels=None) -> bool:
         self.updated.append({"issue_key": issue_key, "fields": fields, "labels": labels})
         return True
@@ -124,6 +181,18 @@ class FakeJiraClient:
         return None
 
     def get_sprint_issues(self, sprint_id, fields=None, max_results=100):
+        return []
+
+    def get_myself(self):
+        return {"name": "devbot", "displayName": "DevBot", "key": "devbot"}
+
+    def assign_issue(self, issue_key: str, username: str) -> bool:
+        self.updated.append(
+            {"issue_key": issue_key, "fields": {"assignee": username}, "labels": None}
+        )
+        return True
+
+    def list_webhooks(self):
         return []
 
 
