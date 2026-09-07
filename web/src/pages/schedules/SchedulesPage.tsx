@@ -54,6 +54,7 @@ export function SchedulesPage() {
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<'existing' | 'new'>('existing')
+  const lastGenReload = useRef(0)
 
   const reload = async () => {
     try {
@@ -69,6 +70,9 @@ export function SchedulesPage() {
     void reload()
   }, [])
   useEffect(() => {
+    const now = Date.now()
+    if (now - lastGenReload.current < 1500) return
+    lastGenReload.current = now
     void reload()
   }, [live.generation])
 

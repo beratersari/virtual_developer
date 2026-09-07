@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { dashboardWsUrl, fetchMeta, fetchPoll, fetchSettings } from '../api/client'
 import type { Meta, PollPayload, SettingsPayload } from '../api/types'
+import { shouldBumpLiveGeneration } from '../util/liveTick'
 import { useNow } from '../util/time'
 import { LiveContext, type LiveValue } from './live'
 
@@ -14,12 +15,17 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [queueQueued, setQueueQueued] = useState(0)
   const countdownRef = useRef<{ secs: number; atMs: number } | null>(null)
   const lastServerMs = useRef<number | null>(null)
+  const lastLiveSig = useRef<string>('')
 
   const applyEnvelope = (payload: {
+    type?: string
     meta?: Meta
     poll?: PollPayload
     settings?: SettingsPayload
     queue?: { queued_count?: number }
+    live_issue_keys?: string[]
+    jobs?: unknown
+    tasks?: unknown
   }) => {
     const st = payload.poll?.server_time || payload.meta?.server_time || null
     const nextMs = st ? Date.parse(st) : Number.NaN
@@ -46,7 +52,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     if (payload.queue && typeof payload.queue.queued_count === 'number') {
       setQueueQueued(payload.queue.queued_count)
     }
-    setGeneration((g) => g + 1)
+    const tick = shouldBumpLiveGeneration(payload, lastLiveSig.current)
+    if (tick.bump) {
+      if (tick.sig) lastLiveSig.current = tick.sig
+      setGeneration((g) => g + 1)
+    }
     setError(null)
   }
 
@@ -99,10 +109,14 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         ws.onmessage = (ev) => {
           try {
             applyEnvelope(JSON.parse(ev.data) as {
+              type?: string
               meta?: Meta
               poll?: PollPayload
               settings?: SettingsPayload
               queue?: { queued_count?: number }
+              live_issue_keys?: string[]
+              jobs?: unknown
+              tasks?: unknown
             })
           } catch {
             /* ignore malformed frames */

@@ -160,6 +160,39 @@ def test_plan_and_build_session_maps_are_distinct(tmp_path):
     )
 
 
+def test_opencode_sessions_api_returns_plan_and_build_kind(
+    isolate_jira_agent_artifacts, state_manager
+):
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.api import create_dashboard_app
+
+    store = isolate_jira_agent_artifacts["session_bind_store"]
+    repo = "https://gitlab.example.com/a/r.git"
+    store.upsert(
+        repository_url=repo,
+        branch="feature/x",
+        target_branch="main",
+        session_id="ses_plan",
+        issue_key="KAN-1",
+        kind="plan",
+    )
+    store.upsert(
+        repository_url=repo,
+        branch="feature/x",
+        target_branch="main",
+        session_id="ses_build",
+        issue_key="KAN-1",
+        kind="build",
+    )
+    app = create_dashboard_app(processor=None, state_manager=state_manager)
+    body = TestClient(app).get("/api/opencode-sessions").json()
+    by_sid = {row["session_id"]: row.get("kind") for row in body["sessions"]}
+    assert by_sid["ses_plan"] == "plan"
+    assert by_sid["ses_build"] == "build"
+    assert body["total"] == 2
+
+
 def test_plan_execute_prompt_does_not_treat_yaver_data_dir_as_the_repo():
     text = PromptBuilder.build_plan_execute_prompt(
         r"C:\vd\yaver\plans\KAN-481.md",

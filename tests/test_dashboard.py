@@ -12,7 +12,12 @@ from src.dashboard.api import create_dashboard_app
 from unittest.mock import MagicMock
 
 from src.dashboard.schemas import SettingsUpdate
-from src.dashboard.service import apply_settings_update, build_settings_view, read_app_version
+from src.dashboard.service import (
+    apply_settings_update,
+    build_live_envelope,
+    build_settings_view,
+    read_app_version,
+)
 from src.dashboard.snapshot import PollSnapshotStore
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -21,6 +26,19 @@ from src.state.models import TaskStatus
 @pytest.fixture
 def store():
     return PollSnapshotStore()
+
+
+def test_live_envelope_skips_tasks_and_jobs(tmp_path):
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    proc = MagicMock()
+    proc.list_live_processing_keys.return_value = ["KAN-1"]
+    env = build_live_envelope(state_manager=sm, processor=proc)
+    assert env["type"] == "live"
+    assert env["live_issue_keys"] == ["KAN-1"]
+    assert "tasks" not in env
+    assert "jobs" not in env
+    assert "queued_count" in env["queue"]
+    assert "poll" in env and "meta" in env
 
 
 def test_snapshot_countdown(store):

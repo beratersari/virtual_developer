@@ -1191,6 +1191,44 @@ def build_queue(
     )
 
 
+def build_live_envelope(
+    *,
+    state_manager: Optional[JiraStateManager] = None,
+    processor: Optional["JobProcessor"] = None,
+    store: Optional[PollSnapshotStore] = None,
+) -> Dict[str, Any]:
+    """Cheap WS tick: poll + clock + live/queue counts. No job/task disk scan."""
+    live_keys: List[str] = []
+    if processor is not None:
+        try:
+            live_keys = sorted(
+                str(k).strip().upper()
+                for k in (processor.list_live_processing_keys() or [])
+                if str(k).strip()
+            )
+        except Exception:
+            live_keys = []
+    queued = 0
+    try:
+        from src.state.queue_store import work_queue_store as default_queue
+
+        live = set(live_keys)
+        queued = sum(
+            1
+            for rec in default_queue.list_items(status="queued", limit=500)
+            if (rec.get("issue_key") or "").strip().upper() not in live
+        )
+    except Exception:
+        queued = 0
+    return {
+        "type": "live",
+        "meta": build_meta().model_dump(),
+        "poll": build_poll_status(store, state_manager).model_dump(),
+        "queue": {"queued_count": queued},
+        "live_issue_keys": live_keys,
+    }
+
+
 def build_dashboard_payload(
     *,
     state_manager: Optional[JiraStateManager] = None,

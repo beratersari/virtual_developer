@@ -25,6 +25,7 @@ from src.dashboard.schemas import (
 from src.dashboard.service import (
     apply_settings_update,
     build_dashboard_payload,
+    build_live_envelope,
     build_jobs,
     build_meta,
     build_models_response,
@@ -161,6 +162,15 @@ def create_dashboard_app(
 
     def _payload() -> dict:
         return build_dashboard_payload(
+            state_manager=app.state.state_manager,
+            processor=app.state.processor,
+            store=poll_snapshot_store,
+        )
+
+    def _live_payload() -> dict:
+        """Poll/meta/queue only — used by WebSocket so a 5s poll does not
+        rescan every job/state file on the poller thread."""
+        return build_live_envelope(
             state_manager=app.state.state_manager,
             processor=app.state.processor,
             store=poll_snapshot_store,
@@ -679,7 +689,7 @@ def create_dashboard_app(
 
     @app.get("/api/opencode-sessions")
     def opencode_sessions_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
-        """OpenCode sessions bound to a git repository + work branch."""
+        """OpenCode sessions bound to repo + source + target, split by plan/build."""
         from src.state.session_bind_store import session_bind_store as binds
 
         rows = binds.list_binds(limit=limit)
@@ -1041,18 +1051,18 @@ def create_dashboard_app(
 
         def _on_snapshot(_snap: dict) -> None:
             try:
-                asyncio.run_coroutine_threadsafe(_broadcast(_payload()), loop)
+                asyncio.run_coroutine_threadsafe(_broadcast(_live_payload()), loop)
             except Exception:
                 pass
 
         unsub = poll_snapshot_store.subscribe(_on_snapshot)
         try:
-            await ws.send_json(_payload())
+            await ws.send_json(_live_payload())
             while True:
                 try:
                     await asyncio.wait_for(ws.receive_text(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    await ws.send_json(_payload())
+                    await ws.send_json(_live_payload())
         except WebSocketDisconnect:
             pass
         except Exception as e:

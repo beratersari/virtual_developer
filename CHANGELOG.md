@@ -16,10 +16,12 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ### Changed
 
+- Dashboard WebSocket ticks send poll/meta/queue only (no full job/task rescan every 5s). The UI refetches Jobs/Sessions when live issues or the queue count change, not on every poll countdown.
+
 - Plan files are stored at `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not inside the git clone), so the build agent cannot commit them.
 - After a plan the bot sets label `plan_ready`. Rename it to `plan_execute` while the ticket is **In Progress** to implement (`implement the plan {ISSUE_KEY}.md` on the **build** session). Mode in `{params}` can stay `plan`.
 - To revise a plan: remove `plan_ready`, add `plan_refactor`, and comment tagging the bot (PAT `/myself` identity). The **plan** session is resumed; the bot republishes the plan and restores `plan_ready`.
-- Plan and build keep separate OpenCode session maps per repo + source + target.
+- Plan and build keep separate OpenCode session maps per repo + source + target. The dashboard Sessions page lists them in two sections.
 - Direct `Mode: build` issues implement the durable plan when it exists (this ticket, or the plan-session ticket for the same repo + source + target). Jira text is context only. Without a plan file they still implement the Jira description.
 
 ## [0.2.4] — 2026-09-07

@@ -681,8 +681,11 @@ def test_websocket_subscribe(tmp_path):
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:
         data = ws.receive_json()
-        assert data.get("type") == "dashboard"
-        assert "tasks" in data
+        assert data.get("type") == "live"
+        assert "poll" in data
+        assert "tasks" not in data
+        assert "jobs" not in data
+        assert "live_issue_keys" in data
         # send a client ping
         ws.send_text("ping")
         # may get another payload
