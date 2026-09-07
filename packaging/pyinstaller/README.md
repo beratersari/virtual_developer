@@ -31,7 +31,7 @@ and `C:\vd\t` on Windows).
 ## User flow
 
 1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-*`).
-2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`.
+2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencode_configs/` (agents + skills).
 3. Copy `.env.example` to `.env` and set Jira (and GitLab if you need MRs).
 4. Run `yaver start` (Windows: `yaver.exe start`).
 5. Open http://127.0.0.1:8080
@@ -62,7 +62,7 @@ Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Li
 **Do**
 
 - Keep `PYINSTALLER_MODE=onedir`.
-- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`.
+- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, `opencode_configs/` (agents + skills from the OpenCoderman submodule).
 - Resolve `.env` from the folder next to the exe (`install_root`), not `_MEIPASS`.
 - Re-run **Standalone Executables** after changing `yaver.spec` or `versions.env`.
 

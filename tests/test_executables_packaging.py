@@ -123,6 +123,15 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (payload / "opencoderman.pin").write_text(
         "OPENCODERMAN_COMMIT=deadbeef\n", encoding="utf-8"
     )
+    agents = payload / "opencode_configs" / "agents"
+    skills = payload / "opencode_configs" / "skills"
+    agents.mkdir(parents=True)
+    (agents / "derman-build.md").write_text("build", encoding="utf-8")
+    (agents / "derman-plan.md").write_text("plan", encoding="utf-8")
+    for i in range(10):
+        skill = skills / f"skill-{i}"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
 
 
@@ -134,6 +143,7 @@ def test_assert_payload_reports_missing(tmp_path: Path):
     assert any("yaver" in e for e in errors)
     assert any("_internal" in e for e in errors)
     assert any(".env.example" in e for e in errors)
+    assert any("opencode_configs" in e for e in errors)
 
 
 def test_archive_name_keeps_patch_version(tmp_path: Path):
@@ -155,6 +165,34 @@ def test_build_script_requires_spa_and_onedir():
     assert "--out-dir" in text
     assert 'f"{dest_base.name}.zip"' in text
     assert "dest_base.with_suffix" not in text
+    assert "stage_opencode_configs" in text
+    assert "opencode_configs" in text
+
+
+def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
+    build = _load("yaver_stage_ocfg", PKG / "build.py")
+    repo = tmp_path / "repo"
+    (repo / "opencoderman" / "agents").mkdir(parents=True)
+    (repo / "opencoderman" / "skills" / "python").mkdir(parents=True)
+    (repo / "opencoderman" / "agents" / "derman-build.md").write_text(
+        "build\n", encoding="utf-8"
+    )
+    (repo / "opencoderman" / "agents" / "derman-plan.md").write_text(
+        "plan\n", encoding="utf-8"
+    )
+    for i in range(10):
+        d = repo / "opencoderman" / "skills" / f"s{i}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text("x\n", encoding="utf-8")
+    (repo / "opencoderman" / "skills" / "__pycache__").mkdir()
+    (repo / "opencoderman" / "skills" / "__pycache__" / "x.pyc").write_bytes(b"x")
+    bundled = tmp_path / "payload"
+    dest = build.stage_opencode_configs(bundled, repo_root=repo)
+    assert dest == bundled / "opencode_configs"
+    assert (dest / "agents" / "derman-build.md").is_file()
+    assert (dest / "agents" / "derman-plan.md").is_file()
+    assert len(list((dest / "skills").rglob("SKILL.md"))) == 10
+    assert not (dest / "skills" / "__pycache__").exists()
 
 
 def test_tag_workflows_share_release_notes():
@@ -180,3 +218,4 @@ def test_start_here_does_not_claim_opencode_is_bundled():
     assert "not" in text.lower()
     assert ".env.example" in text
     assert "yaver start" in text or "yaver.exe start" in text
+    assert "opencode_configs" in text

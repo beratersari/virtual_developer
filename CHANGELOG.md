@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [SemVer](https://semver.org/) from the repo root `VERSION` file.
 GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
+## [0.2.4] — 2026-09-07
+
+### Added
+
+- Standalone exe zip now includes `opencode_configs/` next to `yaver.exe` / `yaver`: OpenCoderman `agents/` (`derman-build`, `derman-plan`) and the full `skills/` tree, so operators can copy them into `~/.opencode` without the submodule.
+
+### Fixed
+
+- Frozen `yaver.exe` clone askpass no longer execs the Click CLI (`Usage: yaver.exe --help` / `No such command …\\vd-git-askpass`). The helper is a self-contained `.cmd` / `.sh` that prints `VD_GIT_PASSWORD`.
+
+[0.2.4]: https://github.com/beratersari/virtual_developer/releases/tag/v0.2.4
+
 ## [0.2.3] — 2026-09-06
 
 ### Added

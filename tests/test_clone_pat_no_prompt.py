@@ -22,6 +22,16 @@ import pytest
 from src.git_manager import GitManager
 
 
+@pytest.fixture(autouse=True)
+def isolate_askpass_dir(tmp_path, monkeypatch):
+    """Do not rewrite the operator ``C:\\vd\\yaver\\bin`` askpass during tests."""
+    data = tmp_path / "yaver-data"
+    data.mkdir()
+    monkeypatch.setenv("YAVER_DATA_DIR", str(data))
+    monkeypatch.setenv("VD_DATA_DIR", str(data))
+    monkeypatch.setattr("src.paths.agent_data_dir", lambda: data)
+
+
 def _free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -148,6 +158,71 @@ def test_apply_pat_env_kills_windows_prompt(tmp_path, monkeypatch):
         k == "http.extraHeader" and v.startswith("Authorization: Basic ")
         for k, v in zip(keys, values)
     )
+    askpass = Path(env["GIT_ASKPASS"])
+    helper = askpass.read_text(encoding="utf-8")
+    assert "yaver.exe" not in helper.lower()
+    assert "sys.executable" not in helper
+
+
+def test_askpass_wrapper_never_invokes_frozen_exe():
+    """yaver.exe is a Click CLI — GIT_ASKPASS must not exec it."""
+    content = GitManager._askpass_wrapper_content()
+    assert "yaver.exe" not in content.lower()
+    assert "sys.executable" not in content
+    assert "python" not in content.lower()
+    assert "VD_GIT_PASSWORD" in content
+    assert "oauth2" in content
+
+
+def test_ensure_askpass_ignores_stale_yaver_exe_wrapper(tmp_path, monkeypatch):
+    """A locked helper that execs yaver.exe must not be reused."""
+    monkeypatch.chdir(tmp_path)
+    path = GitManager._ensure_askpass_script()
+    assert path is not None
+    path.write_text(
+        '@echo off\r\n"C:\\app\\yaver.exe" "%~dp0vd-git-askpass.py" %*\r\n',
+        encoding="utf-8",
+    )
+
+    def deny_write(self, *a, **k):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    with patch.object(Path, "write_text", deny_write):
+        again = GitManager._ensure_askpass_script()
+    assert again != path
+    if again is not None:
+        text = again.read_text(encoding="utf-8")
+        assert "yaver.exe" not in text.lower()
+
+
+def test_askpass_helper_prints_password_and_username(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = GitManager._ensure_askpass_script()
+    assert path is not None and path.is_file()
+    env = os.environ.copy()
+    env["VD_GIT_PASSWORD"] = "clone-me-pat"
+    if path.suffix.lower() == ".cmd":
+        prefix = ["cmd.exe", "/c", "call", str(path)]
+    else:
+        prefix = ["sh", str(path)]
+    pw = subprocess.run(
+        [*prefix, "Password for 'https://gitlab.example.com':"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    assert pw.returncode == 0, pw.stderr
+    assert pw.stdout.strip() == "clone-me-pat"
+    user = subprocess.run(
+        [*prefix, "Username for 'https://gitlab.example.com':"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    assert user.returncode == 0, user.stderr
+    assert user.stdout.strip() == "oauth2"
 
 
 def test_clone_with_pat_against_basic_auth_http(tmp_path, monkeypatch):

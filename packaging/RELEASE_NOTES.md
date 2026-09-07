@@ -1,8 +1,15 @@
-# Yaver 0.2.3
+# Yaver 0.2.4
 
-Ships OpenCoderman **`028c79c`** with multi-domain skills (not C++-only).
-The exact submodule commit is in `opencoderman.pin` and
-`opencoderman-028c79c.zip` on this release.
+Standalone exe zip now ships **`opencode_configs/`** next to the binary:
+OpenCoderman `agents/` (`derman-build`, `derman-plan`) and the full
+`skills/` tree. Copy those folders into `~/.opencode` if you install
+OpenCode separately.
+
+Also fixes frozen `yaver.exe` git askpass (it no longer launches
+`yaver.exe` as the credential helper).
+
+The exact OpenCoderman submodule commit is in `opencoderman.pin` and
+`opencoderman-<sha>.zip` on this release.
 
 Changelog: see `CHANGELOG.md` in the source tree.
 
@@ -19,6 +26,7 @@ Each archive is an **onedir** folder:
 
 - `yaver.exe` / `yaver` — CLI + daemon (same commands as `python cli.py`)
 - `_internal/` — bundled Python runtime, SPA (`web/dist`), prompts
+- `opencode_configs/` — OpenCoderman `agents/` + `skills/` (copy into `~/.opencode`)
 - **Config templates (edit these, do not commit secrets):**
   - `.env.example` → copy to `.env` and set Jira / GitLab
   - `versions.env` — pinned freeze versions (Python / Node / PyInstaller)

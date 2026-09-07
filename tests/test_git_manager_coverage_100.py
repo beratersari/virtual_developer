@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -212,6 +213,9 @@ def test_ensure_askpass_script_unix(tmp_path, monkeypatch):
     # rewrite when content differs
     path.write_text("stale", encoding="utf-8")
     path2 = GitManager._ensure_askpass_script()
+    text = path2.read_text(encoding="utf-8")
+    assert "VD_GIT_PASSWORD" in text
+    assert "yaver.exe" not in text.lower()
     py = path2.with_name("vd-git-askpass.py")
     assert "VD_GIT_PASSWORD" in py.read_text(encoding="utf-8")
 
@@ -222,11 +226,19 @@ def test_ensure_askpass_script_windows(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     with patch("src.git_manager.os.name", "nt"):
-        with patch.object(pathlib, "WindowsPath", pathlib.PosixPath):
+        ctx = (
+            patch.object(pathlib, "WindowsPath", pathlib.PosixPath)
+            if os.name != "nt"
+            else patch.object(pathlib, "WindowsPath", pathlib.WindowsPath)
+        )
+        with ctx:
             path = GitManager._ensure_askpass_script()
             assert path.name == "vd-git-askpass.cmd"
             text = path.read_text(encoding="utf-8")
-            assert "vd-git-askpass.py" in text
+            assert "VD_GIT_PASSWORD" in text
+            assert "oauth2" in text
+            assert "yaver.exe" not in text.lower()
+            assert "sys.executable" not in text
             py = path.with_name("vd-git-askpass.py")
             py_text = py.read_text(encoding="utf-8")
             assert "VD_GIT_PASSWORD" in py_text

@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -528,6 +527,10 @@ class GitManager:
             askpass = None
         out["VD_GIT_PASSWORD"] = pat
         out["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+        # Drop a parent/operator GIT_ASKPASS (or a leftover pointing at
+        # yaver.exe) so git cannot exec the product CLI as a helper.
+        out.pop("GIT_ASKPASS", None)
+        out.pop("SSH_ASKPASS", None)
         if askpass is not None:
             out["GIT_ASKPASS"] = str(askpass)
             out["SSH_ASKPASS"] = str(askpass)
@@ -992,14 +995,19 @@ class GitManager:
 
     @staticmethod
     def _write_helper_file(path: Path, content: str) -> bool:
-        """Write ``path`` if needed. Never raise — leftover git may lock it."""
+        """Write ``path`` if needed. True only when on-disk text matches.
+
+        Leftover ``git`` may lock the shared helper (Permission denied).
+        Callers then write a pid-suffixed copy instead of reusing a stale
+        wrapper (a frozen ``yaver.exe`` askpass is not a valid helper).
+        """
         try:
             if path.is_file():
                 try:
                     if path.read_text(encoding="utf-8") == content:
                         return True
                 except OSError:
-                    return True
+                    return False
                 try:
                     mode = path.stat().st_mode
                     if not (mode & 0o200):
@@ -1010,7 +1018,38 @@ class GitManager:
             return True
         except OSError as e:
             logger.warning(f"Could not write git helper {path}: {e}")
-            return path.is_file()
+            return False
+
+    @staticmethod
+    def _askpass_wrapper_content() -> str:
+        """Self-contained askpass — never invoke ``sys.executable``.
+
+        Frozen ``yaver.exe`` is a Click CLI. Pointing GIT_ASKPASS at
+        ``yaver.exe …/vd-git-askpass.py`` makes git run the product binary,
+        which prints ``Usage: yaver.exe --help`` / ``No such command``.
+        The helper must only read ``VD_GIT_PASSWORD`` from the env.
+        """
+        if os.name == "nt":
+            # %1 is the git prompt. Do not use %* — ``cmd /c helper.cmd
+            # Username for …`` treats ``for`` as a FOR loop.
+            return (
+                "@echo off\r\n"
+                "setlocal EnableExtensions DisableDelayedExpansion\r\n"
+                "echo(%~1| %SystemRoot%\\System32\\findstr.exe /I /C:\"username\" >nul\r\n"
+                "if not errorlevel 1 (\r\n"
+                "  echo oauth2\r\n"
+                "  exit /b 0\r\n"
+                ")\r\n"
+                "echo(%VD_GIT_PASSWORD%\r\n"
+                "exit /b 0\r\n"
+            )
+        return (
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *[Uu]sername*) printf '%s\\n' oauth2 ;;\n"
+            "  *) printf '%s\\n' \"$VD_GIT_PASSWORD\" ;;\n"
+            "esac\n"
+        )
 
     @staticmethod
     def _ensure_askpass_script() -> Optional[Path]:
@@ -1043,17 +1082,9 @@ class GitManager:
             GitManager._write_helper_file(py, py_content)
             if os.name == "nt":
                 path = base / "vd-git-askpass.cmd"
-                exe = str(Path(sys.executable).resolve())
-                content = (
-                    "@echo off\r\n"
-                    f"\"{exe}\" \"%~dp0vd-git-askpass.py\" %*\r\n"
-                )
             else:
                 path = base / "vd-git-askpass.sh"
-                content = (
-                    "#!/bin/sh\n"
-                    f"exec '{sys.executable}' '{py}' \"$@\"\n"
-                )
+            content = GitManager._askpass_wrapper_content()
             wrote = GitManager._write_helper_file(path, content)
             if wrote:
                 if os.name != "nt":
@@ -1063,8 +1094,6 @@ class GitManager:
                             py.chmod(0o700)
                     except OSError:
                         pass
-                return path
-            if path.is_file():
                 return path
             fallback = base / (
                 f"vd-git-askpass-{os.getpid()}.cmd"
@@ -1078,6 +1107,23 @@ class GitManager:
                     except OSError:
                         pass
                 return fallback
+            if path.is_file():
+                try:
+                    existing = path.read_text(encoding="utf-8")
+                except OSError:
+                    existing = ""
+                stale = "yaver.exe" in existing.lower() or "sys.executable" in existing
+                if existing and not stale:
+                    logger.warning(
+                        f"Reusing existing askpass helper {path} "
+                        "(wrapper locked by another process)"
+                    )
+                    return path
+                if stale:
+                    logger.warning(
+                        f"Ignoring stale askpass helper {path} "
+                        "(invokes yaver.exe / sys.executable)"
+                    )
             if py.is_file():
                 logger.warning(
                     f"Reusing askpass python helper {py} "

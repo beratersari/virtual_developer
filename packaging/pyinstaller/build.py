@@ -52,6 +52,49 @@ def _exe_name() -> str:
     return "yaver.exe" if os.name == "nt" else "yaver"
 
 
+_SKIP_DIR_NAMES = {".git", "__pycache__", ".pytest_cache"}
+
+
+def _copy_tree_filtered(src: Path, dest: Path) -> int:
+    """Copy ``src`` → ``dest`` skipping VCS/cache dirs. Returns file count."""
+    if not src.is_dir():
+        return 0
+    dest.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for path in src.rglob("*"):
+        if any(part in _SKIP_DIR_NAMES for part in path.parts):
+            continue
+        if not path.is_file():
+            continue
+        target = dest / path.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        count += 1
+    return count
+
+
+def stage_opencode_configs(bundled: Path, *, repo_root: Path | None = None) -> Path:
+    """Copy OpenCoderman agents + skills next to the exe as ``opencode_configs/``."""
+    root = repo_root or ROOT
+    agents = root / "opencoderman" / "agents"
+    skills = root / "opencoderman" / "skills"
+    if not agents.is_dir() or not skills.is_dir():
+        raise FileNotFoundError(
+            "opencoderman/agents and opencoderman/skills are required "
+            "(init the submodule: git submodule update --init --recursive)"
+        )
+    dest = bundled / "opencode_configs"
+    if dest.exists():
+        shutil.rmtree(dest)
+    n_agents = _copy_tree_filtered(agents, dest / "agents")
+    n_skills = _copy_tree_filtered(skills, dest / "skills")
+    if n_agents < 2 or n_skills < 10:
+        raise RuntimeError(
+            f"opencode_configs too small: agents={n_agents} skills={n_skills}"
+        )
+    return dest
+
+
 def _archive(src_dir: Path, dest_base: Path) -> list[Path]:
     """Write zip (and tar.gz on POSIX) of ``src_dir`` next to ``dest_base``."""
     written: list[Path] = []
@@ -157,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             check=True,
             cwd=str(ROOT),
         )
+    stage_opencode_configs(bundled)
 
     version = _product_version()
     version_safe = version.replace("+", ".")

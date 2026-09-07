@@ -21,6 +21,12 @@ REQUIRED_BUNDLED = (
     "agent/BUILD_PROMPT.md",
 )
 
+REQUIRED_OPENCODE_CONFIGS = (
+    "opencode_configs/agents/derman-build.md",
+    "opencode_configs/agents/derman-plan.md",
+)
+MIN_OPENCODE_SKILLS = 10
+
 
 def exe_name() -> str:
     return "yaver.exe" if os.name == "nt" else "yaver"
@@ -48,6 +54,19 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
             errors.append(f"missing bundled {rel}")
     if not internal.is_dir():
         errors.append("missing _internal/ (onedir layout required)")
+    for rel in REQUIRED_OPENCODE_CONFIGS:
+        if not (root / rel).is_file():
+            errors.append(f"missing {rel}")
+    skills = root / "opencode_configs" / "skills"
+    if not skills.is_dir():
+        errors.append("missing opencode_configs/skills/")
+    else:
+        skill_mds = list(skills.rglob("SKILL.md"))
+        if len(skill_mds) < MIN_OPENCODE_SKILLS:
+            errors.append(
+                f"opencode_configs/skills has {len(skill_mds)} SKILL.md "
+                f"(need >= {MIN_OPENCODE_SKILLS})"
+            )
     return errors
 
 
