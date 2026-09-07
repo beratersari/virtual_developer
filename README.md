@@ -179,8 +179,9 @@ column assigned to the bot is eligible, including after a previous
 so the next poll does not start another job until the issue is To Do again.
 
 The exception is a successful **plan** (`plan_ready`): **`Mode: plan` never
-implements**. Change Mode to `build` (or open a new build issue) — see
-[After a plan: set Mode: build](#after-a-plan-set-mode-build).
+implements by itself**. Rename label `plan_ready` → `plan_execute` while the
+ticket is In Progress (or open a new build issue) — see
+[After a plan: plan_execute](#after-a-plan-plan_execute).
 
 ---
 
@@ -189,45 +190,57 @@ implements**. Change Mode to `build` (or open a new build issue) — see
 ### Plan (`Mode: plan`)
 
 1. Poller accepts issue → state `planning`  
-2. Planner runs in a temp clone  
-3. Plan posted to Jira (comment + description) → local state **`plan_ready`**  
+2. Planner writes `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not in the clone)  
+3. Plan posted to Jira (comment + description) → local state **`plan_ready`**, label **`plan_ready`**  
 4. Bot moves the board to **In Progress** and **stops**.  
 
-### After a plan: set Mode: build
+### After a plan: `plan_execute`
 
-`Mode: plan` never starts implementation — not even if you move the ticket
-back to To Do. Change the `{params}` Mode, or open a new ticket.
+`Mode: plan` never starts implementation by itself. Same-ticket implement is
+label-driven. Direct `Mode: build` issues are unchanged.
 
 ```text
-To Do + bot assignee  →  Mode: plan  →  plan_ready
+To Do + bot assignee  →  Mode: plan  →  plan_ready + label plan_ready
                                               │
-                         Mode: plan still     │  wait (never implements)
+                         plan_ready still     │  wait (never implements)
                                               ▼
           ┌──────────────────────────────┼──────────────────────────────┐
-          ▼                              ▼
-  Same ticket:                    Open a NEW issue
-  Mode: build + To Do             with Mode: build
-          │                              │
-          └──────────►  build / implement  ◄──────────────────┘
+          ▼                              ▼                              ▼
+  Rename label                    Remove plan_ready,              Open a NEW issue
+  plan_ready →                    add plan_refactor,              with Mode: build
+  plan_execute                    comment @bot
+  (In Progress)                   (To Do or In Progress)
+          │                              │                              │
+          │                     same plan session                       │
+          ▼                              ▼                              ▼
+   build session              republish plan +                 independent build
+   implement the plan         restore plan_ready
+   {ISSUE_KEY}.md
+   (label → plan_executed)
 ```
 
 | What you see | What it means |
 |--------------|----------------|
-| `plan_ready` + `Mode: plan` | Plan done; waiting — will **not** build |
-| `plan_ready` + `Mode: build` + To Do | **Start implementation** on that same ticket |
-| New ticket with `Mode: build` + bot assignee | Independent build run |
+| `plan_ready` label | Plan done; waiting — will **not** build |
+| In Progress + `plan_execute` | **Start implementation** on that same ticket (even if Mode is still plan) |
+| `plan_refactor` (no `plan_ready`) + comment tagging the bot | Revise the plan on the plan session |
+| New ticket with `Mode: build` + bot assignee | Build run; implements the existing plan for that repo + source + target when one exists |
 
 **How to implement after a plan**
 
-1. **Same ticket:** set `Mode: build` in `{params}` and put it on **To Do**, **or**  
+1. **Same ticket:** rename `plan_ready` → `plan_execute` while **In Progress**, **or**  
 2. **New ticket:** same repo/branches and `Mode: build`, assigned to the bot.
+   The build prompt still implements the existing plan file (not only the
+   new ticket's Jira description).
+
+Plan and build use **separate** OpenCode sessions for the same repo + source + target.
 
 Dashboard **Start** is disabled.
 
 ### Build (`Mode: build`)
 
 1. Poller accepts issue → prepare git workspace from `{params}`  
-2. Atlas (orchestrator) implements against the plan / description  
+2. Atlas (orchestrator) implements the plan when `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (or the sibling plan for the same repo + branches) exists; otherwise the Jira description
 3. On success: push branch, open MR, comment completion → `completed`  
 4. On failure: state `error` **and** Jira error comment (`_fail_issue` / `post_error`)  
 
@@ -244,7 +257,7 @@ pending → planning | executing → (plan_ready) → completed | error | cancel
 | Status | Meaning for operators |
 |--------|------------------------|
 | `planning` / `executing` | Agent running — poller will not restart from board noise |
-| `plan_ready` | Plan finished; **not** an error. Set `Mode: build` (same ticket or a new issue) to implement |
+| `plan_ready` | Plan finished; **not** an error. Set label `plan_execute` (In Progress) or open a new `Mode: build` issue |
 | `completed` | Done (build delivered or soft no-op completion). Move back to **To Do** (with trigger) to rework. |
 | `error` | Failed; fix description / params, then return to **To Do** (or edit text) to rework. |
 | `cancelled` | Operator cancel. **To Do + trigger is still rework** — move it back to To Do (or leave it there) to run again. |
@@ -353,11 +366,11 @@ Repo URL and branches always come from the issue `{params}` block.
 | `DEFAULT_AGENT` | `derman-build` | OpenCoderman derman-build for build jobs |
 | `DEFAULT_PLAN_AGENT` | `derman-plan` | OpenCoderman derman-plan for plan jobs |
 | `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
-| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Plan markdown location |
+| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Legacy clone-relative name only; real plans are `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
 | `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
 | `TEMP_DIR_BASE` | `C:\vd\t` (Windows) / `/vd/t` or `~/vd/t` (Linux) | Temp clone root. Outside the install folder so a zip reinstall keeps workspaces. Keep it short on Windows (MAX_PATH). Clones are not auto-deleted; use dashboard Storage. |
-| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `/vd/yaver` or `~/vd/yaver` (Linux) | Sessions, jobs, OpenCode binds, runtime settings. Survives reinstall. |
+| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `/vd/yaver` or `~/vd/yaver` (Linux) | Sessions, jobs, OpenCode binds, runtime settings, plans. Survives reinstall. |
 
 List or set models:
 
@@ -475,9 +488,9 @@ YAVER_DATA_DIR          # C:\vd\yaver  |  /mnt/c/vd/yaver  |  /vd/yaver or ~/vd/
   sessions/             # agent session logs (not auto-deleted)
   jobs/                 # dashboard job records + per-job system logs
   logs/                 # durable daemon.log
+  plans/{ISSUE_KEY}.md  # plan files (not inside the clone)
 TEMP_DIR_BASE           # C:\vd\t  |  /mnt/c/vd/t  |  /vd/t or ~/vd/t
   {remote12}_{hash12}/  # per-issue git clones (kept; delete from Storage)
-.sisyphus/plans/        # plan markdown when using the local plans dir
 ```
 
 Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
@@ -489,7 +502,7 @@ Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 | Symptom | What to check |
 |---------|----------------|
 | Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`TRIGGER_ASSIGNEE_NAMES`), `python cli.py process KEY` |
-| Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, `{params}` still says `Mode: plan` — change it to `Mode: build` (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
+| Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, rename label `plan_ready` → `plan_execute` while In Progress (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |
 | Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |

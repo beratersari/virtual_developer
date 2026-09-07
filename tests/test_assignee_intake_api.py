@@ -270,7 +270,7 @@ def _params_block(stamp: str, mode: str) -> str:
 
 
 def test_dashboard_start_disabled_points_at_mode_build(tmp_path, monkeypatch):
-    """POST /api/tasks/{key}/start stays 410; operator uses Mode: build."""
+    """POST /api/tasks/{key}/start stays 410; operator uses plan_execute."""
     _isolate_runtime(tmp_path, monkeypatch)
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("KAN-START", "s", _params_block("x", "plan"))
@@ -278,20 +278,20 @@ def test_dashboard_start_disabled_points_at_mode_build(tmp_path, monkeypatch):
     r = http.post("/api/tasks/KAN-START/start")
     assert r.status_code == 410
     detail = r.json().get("detail") or ""
-    assert "Mode: build" in detail
+    assert "plan_execute" in detail
     assert "ai-start-work" not in detail
     assert "ai-execute" not in detail
 
 
 @pytest.mark.asyncio
-async def test_live_jira_mode_plan_does_not_build_until_mode_build(
+async def test_live_jira_mode_plan_does_not_build_until_plan_execute(
     tmp_path, monkeypatch
 ):
-    """Real Jira REST: plan_ready + Mode: plan never builds; Mode: build does.
+    """Real Jira REST: plan_ready never builds; plan_execute + In Progress does.
 
     1. POST issue with Mode: plan, assign PAT user
     2. Local plan_ready + poller on live GET → no implementation
-    3. PUT description Mode: build
+    3. Add plan_execute (In Progress)
     4. Poller + processor on live GET → execution starts
     """
     if not _live_flag():
@@ -328,7 +328,9 @@ async def test_live_jira_mode_plan_does_not_build_until_mode_build(
 
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state(key, f"[vd-mode] plan then build {stamp}", _params_block(stamp, "plan"))
-    sm.update_state(key, status=TaskStatus.PLAN_READY)
+    plan_file = tmp_path / f"{key}.md"
+    plan_file.write_text("# plan\n", encoding="utf-8")
+    sm.update_state(key, status=TaskStatus.PLAN_READY, plan_path=str(plan_file))
 
     live_plan = jira.get_issue(
         key, fields=["summary", "description", "labels", "assignee", "status"]
@@ -345,21 +347,23 @@ async def test_live_jira_mode_plan_does_not_build_until_mode_build(
     )
     print(f"[live mode] {key} plan_ready + Mode: plan → poller skip", flush=True)
 
-    assert jira.update_issue(key, fields={"description": _params_block(stamp, "build")}), (
-        jira.last_error
-    )
+    assert jira.add_labels(key, ["plan_execute"]), jira.last_error
     live_build = jira.get_issue(
         key, fields=["summary", "description", "labels", "assignee", "status"]
     )
     assert live_build
+    live_build.setdefault("fields", {})["status"] = {
+        "name": "In Progress",
+        "statusCategory": {"key": "indeterminate"},
+    }
     poller._plan_start_emitted.discard(key)
     with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
         with patch.object(jira, "get_sprint_issues", return_value=[live_build]):
             accepted = poller.poll_board()
     assert key in [i["key"] for i in accepted], (
-        f"Mode: build ticket not accepted: {[i['key'] for i in accepted]}"
+        f"plan_execute ticket not accepted: {[i['key'] for i in accepted]}"
     )
-    print(f"[live mode] {key} Mode: build → poller accept", flush=True)
+    print(f"[live mode] {key} plan_execute → poller accept", flush=True)
 
     monkeypatch.chdir(tmp_path)
     with patch("src.processor.create_jira_client", return_value=jira):

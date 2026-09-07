@@ -426,7 +426,7 @@ def test_build_task_detail_full(tmp_path, isolate_jira_agent_artifacts):
     assert detail is not None
     assert detail["summary"] == "live sum"
     assert detail["description"] == "live desc"
-    assert detail["can_start"] is False  # start only via Mode: build + To Do
+    assert detail["can_start"] is False  # start only via plan_execute + In Progress
     assert detail["can_cancel"] is True
     assert "ses_file" in detail["opencode_session_ids"] or "ses_db" in detail[
         "opencode_session_ids"
@@ -555,7 +555,7 @@ def test_api_cancel_start_async(tmp_path):
     r2 = client.post("/api/tasks/CS-1/start")
     assert r2.status_code == 410
     proc.start_plan_execution.assert_not_awaited()
-    assert "Mode: build" in (r2.json().get("detail") or "")
+    assert "plan_execute" in (r2.json().get("detail") or "")
 
     proc.cancel_job = AsyncMock(return_value={"ok": False, "error": "nope"})
     assert client.post("/api/tasks/CS-1/cancel").status_code == 400

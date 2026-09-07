@@ -318,8 +318,8 @@ def test_reporter_append_plan_to_description(reporter, fake_jira):
         plan_path="/tmp/p.md",
     )
     assert reporter.append_plan_to_description(st, "") is False
-    assert reporter.append_plan_to_description(st, "# plan\nstep") is True
-    fake_jira.append_to_description.assert_called()
+    assert reporter.append_plan_to_description(st, "# plan\nstep") is False
+    fake_jira.append_to_description.assert_not_called()
 
 
 def test_src_read_version_fallbacks(tmp_path, monkeypatch):

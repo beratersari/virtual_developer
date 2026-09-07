@@ -545,12 +545,13 @@ def test_operator_plan_start_latched_before_handler(
     created = client.create_issue(
         "KAN",
         "planned",
-        "{params}\nMode: build\n{params}",
-        labels=["bot"],
+        "{params}\nMode: plan\n{params}",
+        labels=["bot", "plan_execute"],
     )
     key = created["key"]
     state_manager.create_state(key, "planned", "d")
     state_manager.update_state(key, status=TaskStatus.PLAN_READY)
+    world.issues[key]["status"] = "In Progress"
 
     poller = JiraPoller(client=client, interval_seconds=1, board_id="10")
     poller.state_manager = state_manager

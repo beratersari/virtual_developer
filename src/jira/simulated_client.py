@@ -93,6 +93,14 @@ class SimulatedJiraClient:
     def add_labels(self, issue_key: str, labels: List[str]) -> bool:
         return self.update_issue(issue_key, labels=labels)
 
+    def remove_labels(self, issue_key: str, labels: List[str]) -> bool:
+        _ = issue_key, labels
+        return True
+
+    def replace_label(self, issue_key: str, old: str, new: str) -> bool:
+        _ = issue_key, old, new
+        return True
+
     def append_to_description(self, issue_key: str, suffix: str) -> bool:
         issue = self.get_issue(issue_key)
         old = ""

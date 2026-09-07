@@ -158,6 +158,24 @@ def test_transition_to_in_progress(client):
     assert c.transition_to_in_progress("P-1") is False
 
 
+def test_add_comment_cloud_posts_adf_first():
+    with patch("src.jira.client.httpx.Client") as mock_cls:
+        mock_http = MagicMock()
+        mock_cls.return_value = mock_http
+        with patch("src.jira.client.settings") as s:
+            s.jira_host = "https://ex.atlassian.net"
+            s.jira_api_token = "token"
+            s.jira_email = "a@b.com"
+            c = JiraClient()
+            c.client = mock_http
+    mock_http.post.return_value = _resp(201, {"id": "c1"})
+    assert c.add_comment("P-1", "h3. Title\n\n{code:markdown}\n# p\n{code}")["id"] == "c1"
+    sent = mock_http.post.call_args.kwargs["json"]["body"]
+    assert isinstance(sent, dict)
+    assert sent["type"] == "doc"
+    assert any(n.get("type") == "codeBlock" for n in sent["content"])
+
+
 def test_add_comment_plain_and_adf_fallback(client):
     c, http = client
     http.post.return_value = _resp(201, {"id": "c1"})

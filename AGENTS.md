@@ -54,8 +54,9 @@ Yaver is a Python daemon that:
   after a finished run is the operator rework signal.
   After accept the bot moves the board to In Progress so the next poll does
   not start another job until the ticket is To Do again.
-- **Plans wait at `plan_ready`** until ``Mode: build`` is set. ``Mode: plan``
-  never starts implementation. Dashboard HTTP Start stays disabled.
+- **Plans wait at `plan_ready`** until label ``plan_execute`` is set on an
+  In Progress ticket. ``Mode: plan`` never starts implementation by itself.
+  Dashboard HTTP Start stays disabled.
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
@@ -74,30 +75,41 @@ Typical **plan** lifecycle:
 To Do + bot assignee
         │
         ▼
-  Mode: plan  →  planning  →  plan_ready
+  Mode: plan  →  planning  →  plan_ready + label plan_ready
         │                        │
-        │                        ├─ plan comment / description append
+        │                        ├─ plan comment (not the issue description)
         │                        ├─ board moved to In Progress
         │                        └─ local requeue_eligible = false
         │
-        │   Mode: plan still  →  poller SKIPS (wait; never implements)
+        │   plan_ready label still  →  poller SKIPS (wait; never implements)
         │
-        ├─ operator sets Mode: build (same {params}) + To Do
-        │         → build on same ticket
+        ├─ remove plan_ready, add plan_refactor, comment @bot
+        │         → same plan session revises the plan → plan_ready again
+        │
+        ├─ rename plan_ready → plan_execute (ticket In Progress)
+        │         → build session: "implement the plan {ISSUE_KEY}.md"
+        │         → label becomes plan_executed
         │
         └─ open a NEW issue with Mode: build (same {params} repo/branches)
-                  → independent build run
+                  → build session implements the existing plan for that
+                    repo + source + target (own build session)
 ```
+
+Plan and build keep **separate** OpenCode sessions per repo + source + target
+(`kind=plan` vs `kind=build`). Plan refactor resumes the plan session. A later
+build on that repo/source/target resumes the build session.
 
 | Situation | Poller / processor behaviour |
 |-----------|------------------------------|
 | No local state + To Do + bot assignee | Accept as **new** work |
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
-| Local `plan_ready` + `Mode: plan` | **Wait.** Do not implement. |
-| Local `plan_ready` + `Mode: build` + To Do | **Start** implementation on that issue |
+| Local `plan_ready` + label `plan_ready` | **Wait.** Do not implement. |
+| Local `plan_ready` + In Progress + `plan_execute` | **Start** implementation (even if Mode is still plan) |
+| Local `plan_ready` + `plan_refactor` (no `plan_ready` label) + comment @bot | **Revise** the plan on the plan session |
 | Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
-**Do not “fix”** by starting a build while `{params}` still says `Mode: plan`.
+**Do not “fix”** by starting a build from `Mode: build` on the plan ticket.
+Same-ticket implement is `plan_execute` + In Progress only.
 
 **Do not “fix”** by skipping `completed` / `error` / `cancelled` that are still
 To Do and assigned to the bot. That is the rework loop: To Do means “run again.”
@@ -315,7 +327,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller requires (e.g. `devbot,jira ai bot`) |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
-| `YAVER_DATA_DIR` | Sessions, jobs, state: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
+| `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
 | `JIRA_INTAKE_MODE` | `poll` (default, board poller) or `webhook` (`POST /webhooks/jira`) |
 | `JIRA_WEBHOOK_SECRET` | Shared token for `/webhooks/jira?token=` (required in webhook mode) |
@@ -341,7 +353,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set Mode: build to implement (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 

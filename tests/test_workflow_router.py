@@ -66,7 +66,7 @@ def test_should_auto_start_execution():
 
 
 def test_should_auto_start_planning_never():
-    """Planning stops at plan_ready; build is a To Do return or a new Mode: build issue."""
+    """Planning stops at plan_ready; same-ticket build is plan_execute."""
     assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is False
     assert WorkflowRouter.should_auto_start(WorkflowType.ORACLE_CONSULT) is False
 

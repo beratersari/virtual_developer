@@ -46,7 +46,7 @@ def test_plan_path_includes_title_and_description():
     assert "Jira title" in p and "sum title" in p
     assert "Jira description" in p and "full description body" in p
     assert "derman-plan" in p.lower()
-    assert ".sisyphus/plans/A-1.md" in p
+    assert "plans/A-1.md" in p.replace("\\", "/")
 
 
 def test_plan_with_acceptance():
@@ -78,8 +78,19 @@ def test_build_path_includes_title_description_and_plan():
 def test_plan_path_requires_commit_todo_in_plan_file_instructions():
     p = PromptBuilder.build_plan_prompt("KAN-7", "title", "desc")
     assert "derman-plan" in p.lower()
-    assert ".sisyphus/plans/KAN-7.md" in p
+    assert "plans/KAN-7.md" in p.replace("\\", "/")
     assert "KAN-7" in p
+
+
+def test_plan_execute_prompt_keeps_work_in_the_clone():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_plan_execute_prompt(
+        r"C:\vd\yaver\plans\KAN-481.md",
+        issue_key="KAN-481",
+    )
+    assert p.startswith("implement the plan KAN-481.md")
+    assert "git clone" in p.lower()
+    assert "parent directory as the project" in p.lower()
 
 
 def test_build_without_plan_still_has_description():
@@ -91,6 +102,26 @@ def test_build_without_plan_still_has_description():
     assert "Fix login" in p
     assert "Users cannot login after password reset" in p
     assert "Jira description" in p
+    assert not p.startswith("implement the plan")
+
+
+def test_build_prompt_implements_existing_plan_as_spec(tmp_path):
+    PromptBuilder.clear_prompt_file_cache()
+    plan = tmp_path / "KAN-99.md"
+    plan.write_text("# plan\n- [ ] do the checkboxes\n", encoding="utf-8")
+    p = PromptBuilder.build_build_prompt(
+        "KAN-99",
+        "Build me",
+        "A different scope the agent must not prefer",
+        plan_path=str(plan),
+        work_branch="feature/KAN-99",
+    )
+    assert p.startswith("implement the plan KAN-99.md")
+    assert str(plan) in p
+    assert "do not replace the plan" in p.lower()
+    assert "A different scope the agent must not prefer" in p
+    assert "Build me" in p
+    assert "feature/KAN-99" in p
 
 
 def test_params_block_excluded_from_both_paths():

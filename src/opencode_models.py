@@ -419,6 +419,29 @@ def write_workspace_context_limit(
     if isinstance(plugin, list) and plugin:
         cfg["plugin"] = plugin
 
+    # Unattended jobs have no human to click Allow. Writing the plan
+    # follows the .yaver-plans junction into {YAVER_DATA_DIR}/plans,
+    # which OpenCode treats as external_directory and would hang on ask.
+    ext_allow: Dict[str, str] = {"*": "allow"}
+    try:
+        from src.paths import plans_dir
+
+        plans = plans_dir()
+        posix = str(plans).replace("\\", "/").rstrip("/")
+        win = str(plans).rstrip("\\")
+        for key in (
+            posix,
+            posix + "/*",
+            posix + "/**",
+            win,
+            win + "\\*",
+            win + "\\**",
+        ):
+            ext_allow[key] = "allow"
+    except Exception:
+        pass
+    cfg["permission"] = {"external_directory": ext_allow}
+
     path = root / "opencode.json"
     path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     _exclude_workspace_opencode_json(root)

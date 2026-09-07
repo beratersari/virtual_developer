@@ -357,12 +357,18 @@ async def test_start_plan_execution_from_api(processor, state_manager, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_plan_ready_label_starts_execution(processor, state_manager):
+async def test_plan_ready_label_starts_execution(
+    processor, state_manager, tmp_path
+):
     state = state_manager.create_state("PR-2", "s", "d")
-    state_manager.update_state("PR-2", status=TaskStatus.PLAN_READY)
+    plan = tmp_path / "PR-2.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-2", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
     started = {"ok": False}
 
-    async def fake_exec(st):
+    async def fake_exec(st, **kwargs):
         started["ok"] = True
 
     event = {
@@ -370,13 +376,16 @@ async def test_plan_ready_label_starts_execution(processor, state_manager):
         "issue": {
             "key": "PR-2",
             "fields": {
-                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": [],
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
                 "summary": "s",
                 "description": (
                     "{params}\nRepository: https://g.example/r.git\n"
                     "Source branch: feature/x\nTarget branch: develop\n"
-                    "Mode: build\n{params}"
+                    "Mode: plan\n{params}"
                 ),
             },
         },

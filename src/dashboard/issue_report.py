@@ -148,7 +148,7 @@ def _readme(kind: str, job_item: Any) -> str:
         "states.json              Local issue state machine",
         "system/daemon.log        In-process daemon log ring",
         "system/daemon-file.log   Durable YAVER_DATA_DIR/logs/daemon.log (if any)",
-        "system/logs/             Files from the local logs/ directory (if any)",
+        "system/logs/             Files from YAVER_DATA_DIR/logs and cwd/logs",
         "system/job-logs/         Per-job durable system logs",
         "system/opencode-logs/    Recent OpenCode CLI log files (if present)",
     ]
@@ -169,6 +169,7 @@ def _readme(kind: str, job_item: Any) -> str:
                 "job/chat.json             Session transcript (tool calls, model text)",
                 "job/chat.md               Same transcript, readable",
                 "job/issue.json            Local + live Jira/GitLab issue snapshot",
+                "job/plan.md               Durable plan file from YAVER_DATA_DIR/plans",
                 "job/git.txt               git status / log in the working clone",
             ]
         )
@@ -222,6 +223,7 @@ def _add_runtime(
         "opencode_serve_health": _probe_serve(serve_url),
         "live_issue_keys": live_keys,
         "active_jobs": active_jobs,
+        "paths": _runtime_paths(),
     }
     _write_json(zf, "runtime.json", payload)
 
@@ -349,7 +351,18 @@ def _add_system_logs(zf: zipfile.ZipFile) -> None:
     if durable:
         _write_text(zf, "system/daemon-file.log", durable)
 
-    _add_dir_logs(zf, Path.cwd() / "logs", "system/logs")
+    from src.paths import logs_dir
+
+    seen_logs: set[str] = set()
+    for folder in (logs_dir(), Path.cwd() / "logs"):
+        try:
+            key = str(folder.resolve())
+        except OSError:
+            key = str(folder)
+        if key in seen_logs:
+            continue
+        seen_logs.add(key)
+        _add_dir_logs(zf, folder, "system/logs")
     _add_job_system_log_files(zf)
     _add_opencode_cli_logs(zf)
 
@@ -526,6 +539,7 @@ def _add_job_bundle(
         )
 
     _write_json(zf, "job/issue.json", _safe_call("issue_detail", _issue))
+    _add_job_plan(zf, dumped, state_manager=state_manager)
     wd = dumped.get("working_directory") or ""
     if not str(wd).strip():
         try:
@@ -741,6 +755,54 @@ def _git_missing_explanation(
     else:
         lines.append("  (none)")
     return "\n".join(lines) + "\n"
+
+
+def _runtime_paths() -> Dict[str, str]:
+    from src.paths import agent_data_dir, logs_dir, plans_dir, resolve_temp_dir_base
+
+    return {
+        "data_dir": str(agent_data_dir()),
+        "temp_dir": str(resolve_temp_dir_base()),
+        "plans_dir": str(plans_dir()),
+        "logs_dir": str(logs_dir()),
+        "daemon_log": str(daemon_log_path()),
+    }
+
+
+def _add_job_plan(
+    zf: zipfile.ZipFile,
+    dumped: Dict[str, Any],
+    *,
+    state_manager: Optional["JiraStateManager"] = None,
+) -> None:
+    """Attach the durable plan markdown (YAVER_DATA_DIR/plans)."""
+    from src.paths import plans_dir
+
+    candidates: List[Path] = []
+    key = str(dumped.get("issue_key") or "").strip()
+    if key:
+        candidates.append(plans_dir() / f"{key}.md")
+    if state_manager is not None and key:
+        try:
+            st = state_manager.get_state(key)
+        except Exception:
+            st = None
+        raw = (st.plan_path if st is not None else None) or ""
+        if str(raw).strip():
+            candidates.append(Path(str(raw)))
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        raw = _read_capped_file(path)
+        if raw:
+            _write_text(zf, "job/plan.md", raw)
+            return
 
 
 def _cli_version(binary: str) -> Dict[str, Any]:

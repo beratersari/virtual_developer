@@ -12,6 +12,8 @@ Triggers (anything else is ignored — prevents comment/transition loops):
 * **Comment that mentions the bot** — ``TRIGGER_MENTIONS`` or wiki
   ``[~user]``. Comments authored by the bot, or our own ``*Yaver*`` posts,
   are ignored.
+* **Plan handoff labels** — changelog added ``plan_execute`` or
+  ``plan_refactor`` (same-ticket plan → build / revise).
 
 Accepted events become a ``process_event`` envelope with
 ``webhook_intake=True`` so the processor treats them as an explicit start
@@ -27,6 +29,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs
 
+from src.jira.plan_labels import (
+    changelog_is_plan_handoff,
+    handoff_from_changelog,
+    infer_plan_handoff,
+)
 from src.jira.triggers import (
     assignee_looks_like_bot,
     author_looks_like_bot,
@@ -353,6 +360,32 @@ def decide_jira_webhook(
     }:
         if not key:
             return JiraWebhookDecision(False, "update event missing issue key")
+        if changelog_is_plan_handoff(changelog):
+            clid = _changelog_id(changelog) or key
+            event_id = f"plan-label:{clid}"
+            event = _build_event(
+                webhook_event="jira:issue_updated",
+                issue=issue,
+                trigger="plan_label",
+                event_id=event_id,
+                changelog=changelog or None,
+                timestamp=data.get("timestamp"),
+                raw=data,
+            )
+            handoff = handoff_from_changelog(changelog) or infer_plan_handoff(
+                _as_dict(issue.get("fields"))
+            )
+            if handoff:
+                event["plan_handoff"] = handoff
+            logger.info(f"Jira webhook plan label accepted: {key} changelog={clid}")
+            return JiraWebhookDecision(
+                True,
+                "accepted",
+                event=event,
+                trigger="plan_label",
+                event_id=event_id,
+                raw=data,
+            )
         if changelog_assigned_to_bot(changelog, needles=needles):
             actor = _as_dict(data.get("user") or data.get("account"))
             if actor and author_looks_like_bot(actor, needles=needles):

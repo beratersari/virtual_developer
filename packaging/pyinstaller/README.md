@@ -26,7 +26,7 @@ Operator config is still **`.env` next to the executable**. Secrets are
 never baked into the binary. Copy `.env.example` → `.env` and edit.
 
 Durable data stays in `YAVER_DATA_DIR` / `TEMP_DIR_BASE` (`C:\vd\yaver`
-and `C:\vd\t` on Windows).
+and `C:\vd\t` on Windows). Plans are `{YAVER_DATA_DIR}/plans/`.
 
 ## User flow
 

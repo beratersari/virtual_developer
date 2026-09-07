@@ -19,7 +19,7 @@ def test_substitute_placeholders_defaults():
     )
     assert "T-2" in out
     assert "feature/T-2" in out
-    assert ".sisyphus/plans/T-2.md" in out
+    assert "plans/T-2.md" in out.replace("\\", "/")
 
 
 def test_clear_prompt_kit_cache_noop_safe():

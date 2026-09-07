@@ -457,6 +457,7 @@ def init():
         agent_subdir,
         default_temp_dir,
         ensure_agent_data_dir,
+        plans_dir,
         resolve_temp_dir_base,
     )
     from src.config import upsert_dotenv_keys
@@ -470,7 +471,7 @@ def init():
             if Path(settings.temp_dir_base).is_absolute()
             else default_temp_dir()
         ),
-        settings.full_plans_dir,
+        plans_dir(),
         Path("logs"),
     ]
     upsert_dotenv_keys(

@@ -691,7 +691,9 @@ async def test_handle_created_route_err_and_live(processor, state_manager):
 
 
 @pytest.mark.asyncio
-async def test_handle_updated_reprocess_and_label_fail(processor, state_manager):
+async def test_handle_updated_reprocess_and_label_fail(
+    processor, state_manager, tmp_path
+):
     # terminal without requeue_eligible
     state_manager.create_state("UP-1", "s", "d")
     state_manager.update_state("UP-1", status=TaskStatus.ERROR, metadata={})
@@ -728,22 +730,29 @@ async def test_handle_updated_reprocess_and_label_fail(processor, state_manager)
         )
         m.assert_awaited()
 
-    # plan_ready + To Do + live skip
+    # plan_ready + live skip
+    plan = tmp_path / "UP-L.md"
+    plan.write_text("# plan\n", encoding="utf-8")
     state_manager.create_state("UP-L", "s", "d")
-    state_manager.update_state("UP-L", status=TaskStatus.PLAN_READY)
+    state_manager.update_state(
+        "UP-L", status=TaskStatus.PLAN_READY, plan_path=str(plan)
+    )
     processor._contexts["UP-L"] = {"git": None, "runner": None}
     event = {
         "webhookEvent": "jira:issue_updated",
         "issue": {
             "key": "UP-L",
             "fields": {
-                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": [],
+                "status": {
+                    "name": "In Progress",
+                    "statusCategory": {"key": "indeterminate"},
+                },
+                "labels": ["plan_execute"],
                 "summary": "s",
                 "description": (
                     "{params}\nRepository: https://g.example/r.git\n"
                     "Source branch: feature/x\nTarget branch: develop\n"
-                    "Mode: build\n{params}"
+                    "Mode: plan\n{params}"
                 ),
             },
         },
@@ -785,16 +794,16 @@ async def test_bot_commands_status_cancel_start(processor, state_manager, fake_j
         error_message="prev err",
         metadata={"workflow_type": "planning", "merge_request_url": "http://mr/x"},
     )
-    with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock):
+    with patch.object(processor, "_start_execution_workflow", new_callable=AsyncMock) as m:
         await processor._handle_bot_command("BOT-1", "/start-work")
+        m.assert_not_awaited()
 
     await processor._handle_bot_command("BOT-1", "/status")
     await processor._handle_bot_command("NOSTATE", "/status")
 
-    # start-work when not plan_ready
     state_manager.update_state("BOT-1", status=TaskStatus.PENDING)
     await processor._handle_bot_command("BOT-1", "/start-work")
-    assert any("No plan is ready" in c["body"] for c in fake_jira.comments)
+    assert any("plan_execute" in c["body"] for c in fake_jira.comments)
 
     # cancel with runner
     state_manager.update_state(

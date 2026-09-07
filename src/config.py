@@ -482,7 +482,10 @@ class Settings(BaseSettings):
     
     @property
     def full_plans_dir(self) -> Path:
-        return Path.cwd() / self.sisyphus_plans_dir
+        """Durable plans live under ``{YAVER_DATA_DIR}/plans``, not the clone."""
+        from src.paths import plans_dir
+
+        return plans_dir()
     
     @property
     def state_dir(self) -> Path:

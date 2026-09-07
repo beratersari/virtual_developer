@@ -62,19 +62,40 @@ def normalize_branch(name: str) -> str:
     return branch
 
 
+SESSION_KIND_PLAN = "plan"
+SESSION_KIND_BUILD = "build"
+_SESSION_KINDS = frozenset({SESSION_KIND_PLAN, SESSION_KIND_BUILD})
+
+
+def normalize_session_kind(kind: str = "") -> str:
+    """``plan`` / ``build`` session map, or empty for the legacy bind."""
+    raw = (kind or "").strip().lower()
+    if raw in {"planning", "derman-plan"}:
+        return SESSION_KIND_PLAN
+    if raw in {"execution", "executing", "derman-build"}:
+        return SESSION_KIND_BUILD
+    return raw if raw in _SESSION_KINDS else ""
+
+
 def bind_id_for(
     repository_url: str,
     branch: str,
     target_branch: str = "",
     issue_key: str = "",
+    kind: str = "",
 ) -> str:
     repo_key = normalize_repo_key(repository_url)
     br = normalize_branch(branch)
     tgt = normalize_branch(target_branch)
     issue = (issue_key or "").strip().upper()
-    digest = hashlib.sha256(
-        f"{repo_key}\0{br}\0{tgt}\0{issue}".encode("utf-8")
-    ).hexdigest()[:16]
+    kind_n = normalize_session_kind(kind)
+    # Kind-specific maps are (repo, source/work, target, kind) — no issue
+    # in the key so plan refactor / later builds resume the same chat.
+    if kind_n:
+        material = f"{repo_key}\0{br}\0{tgt}\0{kind_n}"
+    else:
+        material = f"{repo_key}\0{br}\0{tgt}\0{issue}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"osb_{digest}"
 
 
@@ -103,11 +124,25 @@ class SessionBindStore:
         branch: str,
         target_branch: str = "",
         issue_key: str = "",
+        kind: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_repo_key(repository_url) or not normalize_branch(branch):
             return None
         if not normalize_branch(target_branch):
             return None
+        kind_n = normalize_session_kind(kind)
+        if kind_n:
+            # Plan and build maps are separate. A miss must not fall back
+            # to the other kind (derman-plan cannot implement).
+            return self.get_by_id(
+                bind_id_for(
+                    repository_url,
+                    branch,
+                    target_branch,
+                    issue_key="",
+                    kind=kind_n,
+                )
+            )
         bid = bind_id_for(
             repository_url, branch, target_branch, issue_key=issue_key
         )
@@ -173,6 +208,7 @@ class SessionBindStore:
         job_id: Optional[str] = None,
         working_directory: Optional[str] = None,
         target_branch: str = "",
+        kind: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(repository_url, str) or not isinstance(branch, str):
             return None
@@ -184,9 +220,12 @@ class SessionBindStore:
         br = normalize_branch(branch)
         tgt = normalize_branch(target_branch)
         sid = session_id.strip()
+        kind_n = normalize_session_kind(kind)
         if not normalize_repo_key(repo) or not br or not tgt or not sid:
             return None
-        bid = bind_id_for(repo, br, tgt, issue_key=issue_key)
+        bid = bind_id_for(
+            repo, br, tgt, issue_key="" if kind_n else issue_key, kind=kind_n
+        )
         now = _now_iso()
         wd = (working_directory or "").strip() or None
         if wd:
@@ -213,6 +252,7 @@ class SessionBindStore:
                 "branch": br,
                 "target_branch": tgt,
                 "session_id": sid,
+                "kind": kind_n or prev.get("kind") or "",
                 "issue_key": (issue_key or "").strip().upper(),
                 "job_id": job_id or prev.get("job_id"),
                 "working_directory": wd or prev.get("working_directory"),
@@ -223,9 +263,10 @@ class SessionBindStore:
             if prev.get("reset_at"):
                 rec["reset_at"] = prev.get("reset_at")
             self._write(rec)
+        kind_note = f" kind={kind_n}" if kind_n else ""
         logger.info(
             f"Session bind {bid}: {normalize_repo_key(repo)}"
-            f"@{br}→{tgt} → {sid}"
+            f"@{br}→{tgt}{kind_note} → {sid}"
         )
         return rec
 
@@ -290,14 +331,22 @@ class SessionBindStore:
         branch: str,
         target_branch: str = "",
         issue_key: str = "",
+        kind: str = "",
     ) -> bool:
         if not normalize_branch(target_branch):
             return False
+        kind_n = normalize_session_kind(kind)
         ok = self.delete(
             bind_id_for(
-                repository_url, branch, target_branch, issue_key=issue_key
+                repository_url,
+                branch,
+                target_branch,
+                issue_key="" if kind_n else issue_key,
+                kind=kind_n,
             )
         )
+        if kind_n:
+            return ok
         # Leftover pre-issue-key file must not keep a live pointer.
         if (issue_key or "").strip():
             ok = (
@@ -315,16 +364,24 @@ class SessionBindStore:
         session_id: str = "",
         reason: str = "abandoned",
         issue_key: str = "",
+        kind: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_branch(target_branch):
             return None
+        kind_n = normalize_session_kind(kind)
         rec = self.forget_session(
             bind_id_for(
-                repository_url, branch, target_branch, issue_key=issue_key
+                repository_url,
+                branch,
+                target_branch,
+                issue_key="" if kind_n else issue_key,
+                kind=kind_n,
             ),
             session_id=session_id,
             reason=reason,
         )
+        if kind_n:
+            return rec
         # Production upserts include issue_key. Also tombstone the legacy
         # "" bind so get() fallback cannot restore the abandoned ses_*.
         if (issue_key or "").strip():
@@ -342,6 +399,7 @@ class SessionBindStore:
         branch: str,
         target_branch: str,
         issue_key: str = "",
+        kind: str = "",
     ) -> List[str]:
         """Forgotten ses_* for this repo+work+target (any issue, including empty)."""
         out: List[str] = []
@@ -361,6 +419,19 @@ class SessionBindStore:
         tgt = normalize_branch(target_branch)
         if not repo or not br or not tgt:
             return out
+        kind_n = normalize_session_kind(kind)
+        if kind_n:
+            _add(
+                self.get_by_id(
+                    bind_id_for(
+                        repository_url,
+                        branch,
+                        target_branch,
+                        issue_key="",
+                        kind=kind_n,
+                    )
+                )
+            )
         _add(
             self.get_by_id(
                 bind_id_for(

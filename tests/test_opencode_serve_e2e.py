@@ -1597,6 +1597,47 @@ async def test_clarifying_question_gets_one_unattended_nudge_then_ok():
     assert result.continue_count == 1
 
 
+def test_unattended_nudge_prompt_is_plan_safe_for_plan_agents():
+    from src.opencode_serve import (
+        DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT,
+        DEFAULT_UNATTENDED_NUDGE_PROMPT,
+        is_plan_agent,
+        unattended_nudge_prompt,
+    )
+
+    assert is_plan_agent("derman-plan") is True
+    assert is_plan_agent("plan") is True
+    assert is_plan_agent("derman-build") is False
+    assert is_plan_agent(None) is False
+    assert unattended_nudge_prompt("derman-plan") == DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+    assert unattended_nudge_prompt("derman-build") == DEFAULT_UNATTENDED_NUDGE_PROMPT
+    assert "do **not** implement" in DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT.lower()
+    assert "implementation" in DEFAULT_UNATTENDED_NUDGE_PROMPT.lower()
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_nudge_does_not_tell_model_to_implement():
+    """KAN-7: plan-job nudge must not say finish implementation/commit."""
+    from src.opencode_serve import DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+
+    backend = _QuestionThenOkBackend(finish_on_nudge=True)
+    client = FakeServeClient(backend)
+    orch = ServeOrchestrator(
+        client=client,
+        compact_wait_seconds=0.3,
+        compact_poll_seconds=0.05,
+        compact_settle_seconds=0.05,
+    )
+    result = await orch.run(
+        prompt="# derman-plan job\nWrite the plan file only.",
+        title="KAN-7",
+        agent="derman-plan",
+    )
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 2
+    assert backend.prompts[1] == DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_compact_wait_exits_on_clarifying_question_not_poll_900():
     """Regression: idle + open todos + clarifying question must not spin.

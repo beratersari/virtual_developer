@@ -147,13 +147,18 @@ class PromptBuilder:
         description: str,
         *,
         acceptance_criteria: Optional[str] = None,
+        plan_path: Optional[str] = None,
     ) -> str:
         """Plan mode: ``PLAN_PROMPT.md`` + Jira title + description."""
-        plan_rel = f".sisyphus/plans/{issue_key}.md"
+        from src.paths import plans_dir
+
+        plan_abs = (plan_path or "").strip() or str(
+            plans_dir() / f"{issue_key}.md"
+        )
         system = PromptBuilder._load_mode_prompt(
             PromptBuilder.plan_prompt_path(),
             issue_key=issue_key,
-            plan_path=plan_rel,
+            plan_path=plan_abs,
         )
         jira = PromptBuilder._jira_title_and_description(
             issue_key, summary, description
@@ -174,8 +179,15 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Build mode: ``BUILD_PROMPT.md`` + Jira title + description."""
-        plan = (plan_path or "").strip() or f".sisyphus/plans/{issue_key}.md"
+        """Build mode: implement the plan when it exists, else Jira text.
+
+        ``Mode: build`` is not ``plan_execute``. When a durable plan file
+        is present (this ticket or a sibling plan for the same repo /
+        branches), that file is the spec. Jira is context only.
+        """
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
         system = PromptBuilder._load_mode_prompt(
             PromptBuilder.build_prompt_path(),
             issue_key=issue_key,
@@ -185,7 +197,75 @@ class PromptBuilder:
         jira = PromptBuilder._jira_title_and_description(
             issue_key, summary, description
         )
+        plan_exists = False
+        try:
+            plan_exists = bool(plan) and Path(plan).is_file()
+        except OSError:
+            plan_exists = False
+        if plan_exists:
+            lead = PromptBuilder.build_plan_execute_prompt(
+                plan, issue_key=issue_key
+            )
+            context = (
+                "## Jira context (do not replace the plan)\n\n"
+                "Implement the plan above. Title and description are "
+                "background only unless the plan is missing a detail.\n\n"
+                + jira
+            )
+            return PromptBuilder._join_blocks(lead, system, context)
         return PromptBuilder._join_blocks(system, jira)
+
+    @staticmethod
+    def build_plan_execute_prompt(
+        plan_path: str,
+        *,
+        issue_key: str = "",
+    ) -> str:
+        """Same-ticket plan→build: continue the *build* session.
+
+        The plan may live under the host data ``plans/`` dir (absolute
+        path). Naming only that path made the model treat the data dir
+        as the project. Name the plan as ``{ISSUE_KEY}.md`` and say the
+        clone cwd is the only workdir.
+        """
+        path = (plan_path or "").strip() or "plan.md"
+        key = (issue_key or "").strip()
+        name = f"{key}.md" if key else Path(path).name
+        return (
+            f"implement the plan {name}\n\n"
+            f"Read the plan at this absolute path (Yaver data dir — "
+            f"not the product repository):\n"
+            f"{path}\n\n"
+            f"Do all implementation in the current working directory "
+            f"(the git clone already checked out). Do not treat the "
+            f"plan file's parent directory as the project. Do not copy "
+            f"or commit the plan file.\n"
+        )
+
+    @staticmethod
+    def build_plan_refactor_prompt(
+        issue_key: str,
+        comment: str,
+        *,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Revise the existing plan from a Jira comment (same plan session)."""
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.plan_prompt_path(),
+            issue_key=issue_key,
+            plan_path=plan,
+        )
+        body = (comment or "").strip() or "(empty comment)"
+        extra = (
+            f"## Plan refactor\n\n"
+            f"Revise the existing plan at `{plan}`. Overwrite that file. "
+            f"Do not implement product code.\n\n"
+            f"## Operator comment\n\n{body}"
+        )
+        return PromptBuilder._join_blocks(system, extra)
 
     @staticmethod
     def build_oracle_consult_prompt(
@@ -260,7 +340,9 @@ class PromptBuilder:
         title = strip_params_block(mr_title or "").strip()
         who = (author or "").strip() or "someone"
         branch = (work_branch or source_branch or "").strip()
-        plan = (plan_path or "").strip() or f".sisyphus/plans/{issue_key}.md"
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
         system = PromptBuilder._load_mode_prompt(
             PromptBuilder.build_prompt_path(),
             issue_key=issue_key,

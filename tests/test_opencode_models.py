@@ -122,6 +122,7 @@ def test_write_workspace_context_limit_excludes_from_git(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["model"] == "opencode/hy3-free"
     assert data["provider"]["opencode"]["models"]["hy3-free"]["limit"]["context"] == 32768
+    assert data["permission"]["external_directory"]["*"] == "allow"
     exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
     assert "/opencode.json" in exclude
     # Second write must not duplicate the exclude line

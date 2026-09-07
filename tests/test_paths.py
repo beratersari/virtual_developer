@@ -20,6 +20,7 @@ from src.paths import (
     default_data_dir,
     default_temp_dir,
     ensure_agent_data_dir,
+    plans_dir,
     under_agent_data,
 )
 
@@ -100,3 +101,11 @@ def test_pytest_stays_on_local_defaults(monkeypatch: pytest.MonkeyPatch):
     assert default_temp_dir() == Path(".temp")
     assert WSL_DATA_DIR.as_posix().endswith("vd/yaver")
     assert WSL_TEMP_DIR.as_posix().endswith("vd/t")
+
+
+def test_plans_dir_is_under_yaver_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dest = tmp_path / "yaver"
+    monkeypatch.setenv("YAVER_DATA_DIR", str(dest))
+    assert plans_dir() == dest / "plans"

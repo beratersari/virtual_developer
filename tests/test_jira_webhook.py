@@ -568,7 +568,7 @@ async def test_webhook_does_not_restart_inflight(
 
 
 @pytest.mark.asyncio
-async def test_webhook_plan_ready_starts_execution(
+async def test_webhook_plan_ready_mention_does_not_start(
     tmp_path, monkeypatch, fake_jira, reporter
 ):
     monkeypatch.chdir(tmp_path)
@@ -584,8 +584,82 @@ async def test_webhook_plan_ready_starts_execution(
 
     d = _decide(_comment_payload())
     out = await proc.process_event(d.event)
+    assert out["work_started"] is False
+    proc._start_execution_workflow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_webhook_plan_execute_starts_execution(
+    tmp_path, monkeypatch, fake_jira, reporter
+):
+    monkeypatch.chdir(tmp_path)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-7", "s", PARAMS)
+    plan = tmp_path / "KAN-7.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    sm.update_state("KAN-7", status=TaskStatus.PLAN_READY, plan_path=str(plan))
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = reporter
+    proc.jira_client = fake_jira
+    proc._start_execution_workflow = AsyncMock()
+    proc._mark_jira_in_progress = MagicMock()
+
+    payload = {
+        "timestamp": 1,
+        "webhookEvent": "jira:issue_updated",
+        "issue_event_type_name": "issue_updated",
+        "issue": _issue("KAN-7", status="In Progress"),
+        "changelog": {
+            "id": "10900",
+            "items": [
+                {
+                    "field": "labels",
+                    "fromString": "plan_ready",
+                    "toString": "plan_execute",
+                }
+            ],
+        },
+    }
+    payload["issue"]["fields"]["labels"] = ["plan_execute"]
+    payload["issue"]["fields"]["status"] = {
+        "name": "In Progress",
+        "statusCategory": {"key": "indeterminate"},
+    }
+    d = _decide(payload)
+    assert d.accepted is True
+    out = await proc.process_event(d.event)
     assert out["work_started"] is True
     proc._start_execution_workflow.assert_awaited()
+
+
+def test_webhook_plan_execute_handoff_when_issue_fields_still_have_old_labels():
+    """Jira sometimes sends changelog first; issue.fields still list plan_ready."""
+    payload = {
+        "timestamp": 1,
+        "webhookEvent": "jira:issue_updated",
+        "issue_event_type_name": "issue_updated",
+        "issue": _issue("KAN-7", status="In Progress"),
+        "changelog": {
+            "id": "10901",
+            "items": [
+                {
+                    "field": "labels",
+                    "fromString": "plan_ready",
+                    "toString": "plan_execute",
+                }
+            ],
+        },
+    }
+    payload["issue"]["fields"]["labels"] = ["plan_ready"]
+    payload["issue"]["fields"]["status"] = {
+        "name": "In Progress",
+        "statusCategory": {"key": "indeterminate"},
+    }
+    d = _decide(payload)
+    assert d.accepted is True
+    assert (d.event or {}).get("plan_handoff") == "execute"
 
 
 @pytest.mark.asyncio

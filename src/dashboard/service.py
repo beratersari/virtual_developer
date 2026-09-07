@@ -221,6 +221,12 @@ def _settings_data_dir() -> str:
     return str(agent_data_dir())
 
 
+def _settings_temp_dir() -> str:
+    from src.paths import resolve_temp_dir_base
+
+    return str(resolve_temp_dir_base())
+
+
 def build_settings_view() -> SettingsView:
     """Safe settings projection. Does not inventory OpenCode models (see build_models_response).
 
@@ -286,7 +292,7 @@ def build_settings_view() -> SettingsView:
         ).strip(),
         project_repositories=_settings_project_repositories(),
         data_dir=_settings_data_dir(),
-        temp_dir_base=str(getattr(settings, "temp_dir_base", "") or ""),
+        temp_dir_base=_settings_temp_dir(),
     )
 
 
@@ -2252,7 +2258,7 @@ def build_task_detail(
         TaskStatus.CANCELLED,
     }
     # Dashboard does not offer a Start button. After a plan, set
-    # Mode: build (or open a new Mode: build issue).
+    # label plan_execute while In Progress (or open a new Mode: build issue).
     can_start = False
 
     meta = state.metadata or {}

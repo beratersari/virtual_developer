@@ -351,6 +351,45 @@ DEFAULT_UNATTENDED_NUDGE_PROMPT = (
     "you stop. Mark todos completed when the work is done."
 )
 
+# Plan jobs must not be told to implement. The build-oriented nudge above
+# made derman-plan execute after a finished numbered plan summary (KAN-7).
+DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT = (
+    "You are running unattended inside a daemon — there is no human in the "
+    "loop and no one will answer questions. Do not ask clarifying questions, "
+    "confirmation, or multiple-choice options. Choose the safest defaults "
+    "consistent with AGENTS.md, the repository, and the original issue "
+    "description. Finish the plan file only. Do **not** implement product "
+    "code, install tools, compile, or commit. Do **not** git push or open a "
+    "merge request. Mark todos completed when the plan is written."
+)
+
+_PLAN_AGENT_IDS = frozenset(
+    {
+        "derman-plan",
+        "plan",
+        "blueprint",
+        "planner",
+        "prometheus",
+        "metis",
+        "momus",
+    }
+)
+
+
+def is_plan_agent(agent: Optional[str]) -> bool:
+    """True for OpenCoderman / stock plan agents (not derman-build)."""
+    raw = (agent or "").strip().lower().replace("_", "-")
+    if not raw:
+        return False
+    return raw in _PLAN_AGENT_IDS or raw.endswith("-plan")
+
+
+def unattended_nudge_prompt(agent: Optional[str] = None) -> str:
+    """Recovery nudge after a clarifying-question stop. Plan vs build."""
+    if is_plan_agent(agent):
+        return DEFAULT_PLAN_UNATTENDED_NUDGE_PROMPT
+    return DEFAULT_UNATTENDED_NUDGE_PROMPT
+
 # How long to wait for OpenCode auto-compact / auto-resume before re-assessing.
 # Do not POST a user "Continue" while compact is running — that pollutes chat
 # and fights the built-in compact loop.
@@ -568,14 +607,88 @@ class OpenCodeServeClient:
         elif model and "/" in model:
             prov, mid = model.split("/", 1)
             body["model"] = {"providerID": prov, "modelID": mid}
-        r = await self._client.post(
-            f"/session/{session_id}/message",
-            json=body,
-            headers=self._headers(),
-            timeout=timeout or self.timeout_seconds,
+        stop = asyncio.Event()
+        approver = asyncio.create_task(
+            self._auto_approve_permissions(session_id, stop)
         )
-        r.raise_for_status()
-        return r.json() if r.content else {}
+        try:
+            r = await self._client.post(
+                f"/session/{session_id}/message",
+                json=body,
+                headers=self._headers(),
+                timeout=timeout or self.timeout_seconds,
+            )
+            r.raise_for_status()
+            return r.json() if r.content else {}
+        finally:
+            stop.set()
+            approver.cancel()
+            try:
+                await approver
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _auto_approve_permissions(
+        self, session_id: str, stop: asyncio.Event
+    ) -> None:
+        """Unattended jobs cannot click Allow on OpenCode permission prompts.
+
+        Writing ``{YAVER_DATA_DIR}/plans`` via the ``.yaver-plans`` junction
+        triggers ``external_directory`` ask. Poll and allow until the
+        blocking POST /message returns.
+        """
+        while not stop.is_set():
+            try:
+                r = await self._client.get(
+                    "/permission",
+                    headers=self._headers(),
+                    timeout=8.0,
+                )
+                if r.status_code == 200 and r.content:
+                    items = r.json()
+                    if isinstance(items, dict):
+                        items = (
+                            items.get("data")
+                            or items.get("permissions")
+                            or items.get("items")
+                            or []
+                        )
+                    if not isinstance(items, list):
+                        items = []
+                    for req in items:
+                        if not isinstance(req, dict):
+                            continue
+                        rid = str(req.get("id") or "").strip()
+                        if not rid:
+                            continue
+                        sid = str(req.get("sessionID") or session_id).strip()
+                        try:
+                            pr = await self._client.post(
+                                f"/session/{sid}/permissions/{rid}",
+                                json={"response": "always"},
+                                headers=self._headers(),
+                                timeout=8.0,
+                            )
+                            if pr.status_code >= 400:
+                                await self._client.post(
+                                    f"/permission/{rid}/reply",
+                                    json={"reply": "once"},
+                                    headers=self._headers(),
+                                    timeout=8.0,
+                                )
+                            else:
+                                logger.info(
+                                    f"auto-approved OpenCode permission {rid} "
+                                    f"({req.get('permission')})"
+                                )
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
 
     async def list_messages(
         self, session_id: str, *, limit: int = DEFAULT_MESSAGE_LIST_LIMIT
@@ -2219,7 +2332,7 @@ class ServeOrchestrator:
                 try:
                     nudge_msg = await self.client.send_message(
                         sid,
-                        DEFAULT_UNATTENDED_NUDGE_PROMPT,
+                        unattended_nudge_prompt(agent),
                         agent=agent,
                         model=model,
                     )

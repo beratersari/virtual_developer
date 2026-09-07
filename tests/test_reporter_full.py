@@ -79,6 +79,11 @@ def test_post_plan_summary(state):
     cid = r.post_plan_summary(state, plan)
     assert cid is not None
     assert client.updated  # labels update
+    body = client.comments[-1]["body"]
+    assert "line 0" in body
+    assert "line 29" in body
+    assert "this comment" in body.lower()
+    assert "appended to this issue's description" not in body.lower()
 
 
 def test_post_plan_summary_empty_lines(state):

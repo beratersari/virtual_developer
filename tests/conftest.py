@@ -146,6 +146,20 @@ class FakeJiraClient:
         self.comments.append(entry)
         return entry
 
+    def get_comments(self, issue_key: str) -> List[Dict[str, Any]]:
+        return [c for c in self.comments if c.get("issue_key") == issue_key]
+
+    def add_labels(self, issue_key: str, labels: List[str]) -> bool:
+        return self.update_issue(issue_key, labels=list(labels or []))
+
+    def remove_labels(self, issue_key: str, labels: List[str]) -> bool:
+        _ = labels
+        return self.update_issue(issue_key, labels=[])
+
+    def replace_label(self, issue_key: str, old: str, new: str) -> bool:
+        _ = old
+        return self.update_issue(issue_key, labels=[new] if new else [])
+
     def update_issue(self, issue_key: str, fields=None, labels=None) -> bool:
         self.updated.append({"issue_key": issue_key, "fields": fields, "labels": labels})
         return True

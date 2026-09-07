@@ -98,7 +98,7 @@ Backend: opencode
 {params}
 
 Mode is optional (default ``build``):
-* plan  — generate a plan, append it to the Jira description (no GitLab push)
+* plan  — generate a plan and post it as a Jira comment (no GitLab push)
 * build — implement / execute (push branch + open merge request)
 Model and Backend are optional (default from .env / dashboard Settings).
 """

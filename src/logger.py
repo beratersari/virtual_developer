@@ -254,10 +254,10 @@ _DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024
 
 def daemon_log_path() -> Path:
     """Durable daemon log (plain text) under ``YAVER_DATA_DIR/logs``."""
-    from src.paths import agent_subdir, ensure_agent_data_dir
+    from src.paths import ensure_agent_data_dir, logs_dir
 
     ensure_agent_data_dir()
-    return agent_subdir("logs") / "daemon.log"
+    return logs_dir() / "daemon.log"
 
 
 def _append_daemon_log_file(plain: str) -> None:
