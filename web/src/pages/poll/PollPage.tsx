@@ -21,7 +21,7 @@ export function PollPage() {
         description={
           poll.source === 'webhook'
             ? 'Jira intake is in webhook mode. The board poller is idle; jobs start from assignment-to-bot or a mention.'
-            : 'What the poller saw last cycle. Work starts only when a trigger label and bot assignee both match.'
+            : 'What the poller saw last cycle. Work starts when a To Do ticket is assigned to the bot.'
         }
       />
 
@@ -80,11 +80,6 @@ export function PollPage() {
               <div className="mt-1 truncate text-[15px]">{i.summary || '—'}</div>
               <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-text-muted">
                 <span>{i.assignee || 'unassigned'}</span>
-                {i.matched_label && (
-                  <span className="text-success-text">
-                    label {i.matched_labels.join(', ') || 'match'}
-                  </span>
-                )}
                 {i.matched_assignee && <span className="text-success-text">bot assignee</span>}
                 {i.is_todo && <span>To Do</span>}
                 {i.labels.slice(0, 6).map((l) => (

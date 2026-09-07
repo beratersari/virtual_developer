@@ -55,13 +55,9 @@ def identity_matches_bot(
     return False
 
 
-def poller_triggers_on(*, has_trigger_label: bool, assigned_to_bot: bool) -> bool:
-    """Poller intake: ``TRIGGER_LABELS`` and ``TRIGGER_ASSIGNEE_NAMES`` must both match.
-
-    Label-only or assignee-only tickets stay on the board snapshot for ops
-    (matched flags) but are not started.
-    """
-    return bool(has_trigger_label) and bool(assigned_to_bot)
+def poller_triggers_on(*, assigned_to_bot: bool) -> bool:
+    """Poller intake: assignee matches ``TRIGGER_ASSIGNEE_NAMES``."""
+    return bool(assigned_to_bot)
 
 
 def assignee_looks_like_bot(

@@ -263,7 +263,7 @@ async def test_e2e_jira_api_accept_then_stopping_handler_is_silent(
     world, base, client = jira
     steps: List[str] = []
     sm = JiraStateManager(state_dir=tmp_path / "state")
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 
@@ -343,7 +343,7 @@ async def test_e2e_jira_api_accept_then_enqueue_crash_is_silent(
     world, base, client = jira
     steps: List[str] = []
     sm = JiraStateManager(state_dir=tmp_path / "state")
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 
@@ -404,7 +404,7 @@ def test_e2e_control_missing_handler_does_post_error(tmp_path, monkeypatch, jira
     """Contrast: handler is None — operator *does* get an ERROR comment."""
     world, _base, client = jira
     sm = JiraStateManager(state_dir=tmp_path / "state")
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 

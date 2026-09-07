@@ -21,7 +21,6 @@ type Draft = {
   jira_api_token: string
   jira_board_id: string
   poll_interval_seconds: number
-  trigger_labels: string
   trigger_on_assignment: boolean
   jira_intake_mode: string
   jira_webhook_secret: string
@@ -43,7 +42,6 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
-    trigger_labels: s.trigger_labels,
     trigger_on_assignment: s.trigger_on_assignment,
     jira_intake_mode: s.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
     jira_webhook_secret: '',
@@ -115,7 +113,6 @@ export function SettingsPage() {
         jira_host: draft.jira_host.trim(),
         jira_board_id: draft.jira_board_id.trim(),
         poll_interval_seconds: Number(draft.poll_interval_seconds),
-        trigger_labels: draft.trigger_labels,
         trigger_on_assignment: draft.trigger_on_assignment,
         jira_intake_mode: draft.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
         trigger_mentions: draft.trigger_mentions,
@@ -648,7 +645,7 @@ export function SettingsPage() {
           placeholder="devbot,jira ai bot"
         />
         <span className="text-xs text-text-muted">
-          Poller requires this assignment and a trigger label. Unassign does not start work.
+          Poller starts To Do tickets assigned to one of these names. Unassign does not start work.
         </span>
       </label>
       <label className="field">
@@ -670,13 +667,6 @@ export function SettingsPage() {
           value={draft.poll_interval_seconds}
           onChange={(e) => mark('poll_interval_seconds', Number(e.target.value))}
         />
-      </label>
-      <label className="field">
-        <span>Trigger labels</span>
-        <input value={draft.trigger_labels} onChange={(e) => mark('trigger_labels', e.target.value)} />
-        <span className="text-xs text-text-muted">
-          Poller requires one of these labels and a matching bot assignee.
-        </span>
       </label>
       <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
         <input

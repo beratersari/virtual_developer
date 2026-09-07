@@ -44,7 +44,7 @@ from src.state.models import TaskStatus
 from tests.test_simple_task_timing_e2e import _make_local_origin
 
 TRIGGER = "bot"
-E2E_LABEL = "vd-claim-e2e"  # never a TRIGGER_LABELS entry
+E2E_LABEL = "vd-claim-e2e"  # not a start label (ai-start-work / ai-execute)
 SHARED_SOURCE = "feature/vd-claim-shared"
 TARGET = "develop"
 
@@ -476,7 +476,7 @@ def _wire(
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setattr(settings, "temp_dir_base", work / ".temp")
-    monkeypatch.setattr(settings, "trigger_labels", f"{TRIGGER},ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "max_concurrent_jobs", 4)

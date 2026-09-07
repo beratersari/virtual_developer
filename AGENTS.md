@@ -48,10 +48,10 @@ Yaver is a Python daemon that:
 
 - Task statuses: `pending` → `planning` | `executing` → (`plan_ready`) → `completed` | `error` | `cancelled`.
 - **Never** restart work that is in-flight (`planning` / `executing`) from poll noise.
-- **To Do + trigger label + bot assignee = rework** (intentional). Local `completed` / `error` /
-  `cancelled` on a To Do-like ticket with `bot` / `ai-assist` (or bot assignee)
-  is re-queued: reset and run again. Putting the issue back on To Do *or*
-  leaving it on To Do after a finished run is the operator rework signal.
+- **To Do + bot assignee = rework** (intentional). Local `completed` / `error` /
+  `cancelled` on a To Do-like ticket assigned to the bot is re-queued: reset
+  and run again. Putting the issue back on To Do *or* leaving it on To Do
+  after a finished run is the operator rework signal.
   After accept the bot moves the board to In Progress so the next poll does
   not start another job until the ticket is To Do again.
 - **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled. `plan_ready` is **not** rework.
@@ -62,11 +62,10 @@ Yaver is a Python daemon that:
 
 ### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
 
-Trigger labels such as **`bot`** / **`ai-assist`** (from `TRIGGER_LABELS`) **and**
-assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** mean the issue is eligible
+Assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** means the issue is eligible
 for poller intake **whenever it is To Do-like**, including after a previous
-completed/error/cancelled run. Label-only or assignee-only is not enough.
-In-flight (`planning` / `executing`) is never restarted from poll noise.
+completed/error/cancelled run. In-flight (`planning` / `executing`) is never
+restarted from poll noise.
 **`plan_ready`** still does not auto-build.
 
 Typical **plan** lifecycle:
@@ -92,19 +91,19 @@ To Do + bot (or ai-assist)
 
 | Situation | Poller / processor behaviour |
 |-----------|------------------------------|
-| No local state + To Do + trigger label + bot assignee | Accept as **new** work |
+| No local state + To Do + bot assignee | Accept as **new** work |
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
 | Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
 | Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
 | Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
-| Local `error` / `cancelled` / `completed` + To Do + trigger label + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
+| Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
 **Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
 only `bot`. Operators will see “stuck on To Do with bot label” after a successful
 plan; that is the waiting state until an explicit start signal.
 
 **Do not “fix”** by skipping `completed` / `error` / `cancelled` that are still
-To Do with a trigger label. That is the rework loop: To Do means “run again.”
+To Do and assigned to the bot. That is the rework loop: To Do means “run again.”
 The bot then moves the issue to In Progress. If In Progress transition fails
 and the ticket stays To Do, the next poll will try again — same rule, not a
 poller bug.
@@ -124,23 +123,23 @@ UX is **not** “leave it sitting on To Do as if nothing happened”:
    as a leave→return (`force_after_in_progress` / `entered_todo_from_elsewhere`).
 4. Operator **fixes** the description (`Mode`, `{params}`, etc.), then **moves the
    ticket back to To Do** → next poll requeues. **To Do itself is the rework
-   signal** (also if the ticket never left To Do and still has a trigger label).
+   signal** (also if the ticket never left To Do and is still assigned to the bot).
 
 Secondary path while still on To Do after ERROR: user **edits**
 summary/description (fingerprint change) without leaving the column
-(`text_changed_retry`). Cancelled + still To Do + trigger is also rework
+(`text_changed_retry`). Cancelled + still To Do + bot assignee is also rework
 (same To Do rule).
 
 **Do not treat the following as a bug:** after a *successful* fail path that
 moved the board to In Progress, the poller remembering `in progress` and
 reprocessing when the user returns the issue to To Do. That is the designed
-recovery loop. Also not a bug: To Do + trigger re-queue after completed /
+recovery loop. Also not a bug: To Do + bot assignee re-queue after completed /
 error / cancelled.
 
 **Do treat as a bug:** inventing tracker `in progress` when the Jira transition
 **failed** (no matching transition name, locale/workflow without “In Progress”)
 while the board is still To Do — the tracker must stay aligned with the board.
-Rework in that case still happens because the ticket is To Do + trigger
+Rework in that case still happens because the ticket is To Do + bot assignee
 (primary intake), not because of a fake leave→return.
 
 ### Error handling
@@ -306,7 +305,7 @@ JIRA_API_TOKEN=your-api-token-here
 
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
-- Poller focuses on board/sprint + To Do + trigger label **and** bot assignee (`JIRA_INTAKE_MODE=poll`).
+- Poller focuses on board/sprint + To Do + bot assignee (`JIRA_INTAKE_MODE=poll`).
 - **Webhook intake** (`JIRA_INTAKE_MODE=webhook`): `POST /webhooks/jira`. Triggers only on **assignment to** the bot (changelog `assignee.to`; unassign is ignored) or a **comment that mentions** the bot. Bot-authored / `*Yaver*` comments are ignored (loop guard). Poller sleeps while webhook mode is on.
 
 ### Config checklist (common)
@@ -317,8 +316,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
-| `TRIGGER_LABELS` | Poller requires one of these labels **and** a bot assignee |
-| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller also requires (e.g. `devbot,jira ai bot`) |
+| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller requires (e.g. `devbot,jira ai bot`) |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
@@ -344,9 +342,9 @@ JIRA_API_TOKEN=your-api-token-here
 ### Rules
 
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
-- Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, label/assignee match flags, `will_process`, next poll time.
+- Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger labels, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 

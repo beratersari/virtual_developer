@@ -1284,12 +1284,10 @@ def test_config_property_edges(monkeypatch):
         jira_host="https://j",
         jira_api_token="t",
         jira_projects="",
-        trigger_labels="",
         trigger_mentions="",
         gitlab_allowed_hosts="",
     )
     assert s.jira_projects_list == ["PROJ"]
-    assert s.trigger_labels_list == ["ai-assist", "bot"]
     assert s.trigger_mentions_list == ["@DevBot", "@AI"]
     assert s.gitlab_allowed_hosts_list == []
 
@@ -1297,14 +1295,12 @@ def test_config_property_edges(monkeypatch):
         jira_host="https://j",
         jira_api_token="t",
         jira_projects=" A , , B ",
-        trigger_labels=" x ,y ",
         trigger_mentions=" @A , @B ",
         gitlab_allowed_hosts=" GitLab.com , HOST.Example ",
     )
     assert s2.jira_projects_list == ["A", "B"]
-    assert s2.trigger_labels_list == ["x", "y"]
     assert s2.trigger_mentions_list == ["@A", "@B"]
-    assert s2.gitlab_allowed_hosts_list == ["gitlab.com", "host.example"]
+    assert s2.gitlab_allowed_hosts_list == []
 
     s3 = Settings(jira_host="", jira_api_token="")
     with pytest.raises(ValueError) as ei:

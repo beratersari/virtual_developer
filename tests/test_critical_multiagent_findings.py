@@ -262,7 +262,7 @@ def test_p1_plan_start_emitted_every_poll_while_plan_ready(poller, state_manager
     """
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     state_manager.create_state("PS-1", "plan me", "d")
@@ -287,7 +287,7 @@ def test_p1_plan_start_emitted_every_poll_while_plan_ready(poller, state_manager
 def test_p1_plan_start_must_not_reemit_every_poll(poller, state_manager, monkeypatch):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     state_manager.create_state("PS-2", "plan me", "d")
@@ -458,7 +458,7 @@ def test_p4_plan_start_with_only_start_label_must_dispatch(
 ):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     state_manager.create_state("START-1", "s", "d")
@@ -484,7 +484,7 @@ def test_p4_plan_start_with_bot_and_start_label_dispatches(
 ):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     state_manager.create_state("START-2", "s", "d")

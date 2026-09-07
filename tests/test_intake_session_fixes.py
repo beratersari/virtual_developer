@@ -117,7 +117,7 @@ def test_poll_board_treats_completed_todo_as_rework(
     from src.config import settings
 
     poller = _poller(state_manager, fake_jira)
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     state_manager.create_state("PS-DONE", "s", "d")
     state_manager.update_state(
@@ -147,7 +147,7 @@ def test_poll_board_reemits_after_in_progress_to_todo(
     from src.config import settings
 
     poller = _poller(state_manager, fake_jira)
-    monkeypatch.setattr(settings, "trigger_labels", "bot")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     state_manager.create_state("PS-ERR", "s", "d")
     state_manager.update_state(

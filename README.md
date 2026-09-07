@@ -8,7 +8,7 @@
 
 ## What it does
 
-1. **Discovers** work via **poll** (board To Do + trigger label / bot assignee) or **webhook** (assignment to the bot, or a comment that mentions the bot). Mode is set in Settings / `JIRA_INTAKE_MODE`.  
+1. **Discovers** work via **poll** (board To Do + bot assignee) or **webhook** (assignment to the bot, or a comment that mentions the bot). Mode is set in Settings / `JIRA_INTAKE_MODE`.  
 2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`; Mode defaults to build)  
 3. **Runs** OpenCode agents (Prometheus planning, Atlas build, Oracle consult) in temp clones  
 4. **Reports** plans, progress, errors, and completion as Jira comments  
@@ -169,12 +169,11 @@ All of the following roughly apply **for first intake**:
 
 - Issue is on the configured **board**  
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
-- Has a **trigger label** (`TRIGGER_LABELS`, default `ai-assist,bot`) **and**
-  assignee name matches `TRIGGER_ASSIGNEE_NAMES` (both required)  
+- Assignee name matches `TRIGGER_ASSIGNEE_NAMES`  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
-**To Do + label + bot assignee = rework (intentional).** A ticket in a To Do-like
-column with `bot` / `ai-assist` **and** the bot assignee is eligible, including after a previous
+**To Do + bot assignee = rework (intentional).** A ticket in a To Do-like
+column assigned to the bot is eligible, including after a previous
 `completed` / `error` / `cancelled` run. The poller **re-queues** that work
 (reset and run again). After accept, the bot moves the board to **In Progress**
 so the next poll does not start another job until the issue is To Do again.
@@ -221,7 +220,7 @@ To Do + bot  →  Mode: plan runs  →  plan_ready + ai-plan-ready
 | To Do + `bot` + local `plan_ready` | Plan done; waiting for start signal |
 | Label `ai-plan-ready` | Bot finished planning (not a start label) |
 | Labels `ai-start-work` or `ai-execute` on To Do | **Start implementation** on that same ticket |
-| New ticket with `Mode: build` + trigger label | Independent build run (recommended for clean history) |
+| New ticket with `Mode: build` + bot assignee | Independent build run (recommended for clean history) |
 | Daemon log `Skip cold-start requeue … plan_ready` | Correct — daemon restart will not re-plan or auto-build |
 
 **How to implement after a plan**
@@ -229,7 +228,7 @@ To Do + bot  →  Mode: plan runs  →  plan_ready + ai-plan-ready
 1. **Same ticket:** while status is **To Do**, add label `ai-start-work` or `ai-execute`  
    (next poll starts the build path), **or**  
 2. **New ticket:** create an issue with the same `{params}` repo/branches and
-   `Mode: build`, plus a trigger label (`bot` / `ai-assist`).
+   `Mode: build`, assigned to the bot.
 
 Changing the plan ticket to `Mode: build` **alone** does **not** auto-start
 (product rule so plans are reviewed before code). Dashboard **Start** is also
@@ -292,7 +291,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/dashboard` | Full envelope |
 | WS | `/ws` | Live pushes |
 
-Writable runtime settings (examples): board id, poll interval, trigger labels, `trigger_on_assignment`, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
+Writable runtime settings (examples): board id, poll interval, `trigger_on_assignment`, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
 `DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
 
 ### Building the UI
@@ -341,7 +340,7 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 
 | Variable | Default |
 |----------|---------|
-| `TRIGGER_LABELS` | `ai-assist,bot` |
+| `TRIGGER_ASSIGNEE_NAMES` | `jira ai bot,jira-ai-bot,jiraai,devbot` |
 | `TRIGGER_ON_ASSIGNMENT` | `true` |
 | `TRIGGER_MENTIONS` | `@DevBot,@AI` |
 
@@ -499,7 +498,7 @@ Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 
 | Symptom | What to check |
 |---------|----------------|
-| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, trigger label or bot assignee, `python cli.py process KEY` |
+| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`TRIGGER_ASSIGNEE_NAMES`), `python cli.py process KEY` |
 | Ticket on To Do with `bot` but bot does nothing | If local status is **`plan_ready`**, that wait is intentional (`bot` alone does not auto-build). Add `ai-start-work` / `ai-execute`, or open a new `Mode: build` issue. See [Plans never auto-start](#plans-never-auto-start-intentional). If local status is `completed` / `error` / `cancelled`, To Do + trigger **is** rework — check the poll snapshot `will_process` and logs. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |

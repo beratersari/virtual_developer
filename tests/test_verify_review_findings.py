@@ -143,7 +143,7 @@ async def test_plan_start_after_restart_must_start_execution(
     from src.jira.poller import JiraPoller
     from src.processor import JobProcessor
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot,ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     key = "VR-PLAN-1"

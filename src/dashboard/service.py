@@ -168,12 +168,10 @@ def build_poll_status(
 
     issues: List[PolledIssueItem] = []
     for row in raw.get("issues") or []:
-        # Ops list: trigger label and/or bot assignee (partial matches stay
-        # visible so operators see why will_process is false). Full board
+        # Ops list: bot assignee (or already selected this cycle). Full board
         # rows stay in the raw snapshot; UI must not show noise.
-        matched_label = bool(row.get("matched_label"))
         matched_assignee = bool(row.get("matched_assignee"))
-        if not (matched_label or matched_assignee or row.get("will_process")):
+        if not (matched_assignee or row.get("will_process")):
             continue
         key = row.get("key") or ""
         local = sm.get_state(key) if key else None
@@ -184,12 +182,10 @@ def build_poll_status(
                 jira_status=row.get("jira_status") or "",
                 labels=list(row.get("labels") or []),
                 assignee=row.get("assignee"),
-                matched_label=matched_label,
                 matched_assignee=matched_assignee,
                 is_todo=bool(row.get("is_todo")),
                 will_process=bool(row.get("will_process")),
                 local_status=local.status.value if local else row.get("local_status"),
-                matched_labels=list(row.get("matched_labels") or []),
             )
         )
 
@@ -235,7 +231,6 @@ def build_settings_view() -> SettingsView:
         jira_board_id=settings.jira_board_id or "",
         jira_projects=settings.jira_projects or "",
         poll_interval_seconds=int(settings.poll_interval_seconds or 30),
-        trigger_labels=settings.trigger_labels or "",
         trigger_on_assignment=bool(settings.trigger_on_assignment),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
         agent_task_timeout_seconds=int(
@@ -512,9 +507,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
         runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
-    if "trigger_labels" in data and data["trigger_labels"] is not None:
-        settings.trigger_labels = str(data["trigger_labels"])
-        runtime_persist["trigger_labels"] = settings.trigger_labels
     if "trigger_on_assignment" in data and data["trigger_on_assignment"] is not None:
         settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
         runtime_persist["trigger_on_assignment"] = settings.trigger_on_assignment

@@ -250,12 +250,10 @@ class PolledIssueItem(BaseModel):
     jira_status: str = ""
     labels: List[str] = Field(default_factory=list)
     assignee: Optional[str] = None
-    matched_label: bool = False
     matched_assignee: bool = False
     is_todo: bool = False
     will_process: bool = False
     local_status: Optional[str] = None
-    matched_labels: List[str] = Field(default_factory=list)
 
 
 class PollStatusResponse(BaseModel):
@@ -320,7 +318,6 @@ class SettingsView(BaseModel):
     jira_board_id: str = ""
     jira_projects: str = ""
     poll_interval_seconds: int = 30
-    trigger_labels: str = ""
     trigger_on_assignment: bool = True
     max_concurrent_jobs: int = 3
     # Single wall-clock budget for agent runner + OpenCode process (same value)
@@ -489,7 +486,6 @@ class SettingsUpdate(BaseModel):
             )
         return text
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
-    trigger_labels: Optional[str] = Field(default=None, max_length=500)
     trigger_on_assignment: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
     # Agent and OpenCode share this one timeout (orchestrator aborts the serve turn)

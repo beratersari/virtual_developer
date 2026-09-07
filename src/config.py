@@ -469,7 +469,6 @@ class Settings(BaseSettings):
     
     # Trigger Configuration - stored as strings, parsed as properties
     trigger_on_assignment: bool = Field(default=True)
-    trigger_labels: str = Field(default="ai-assist,bot")
     # Optional @mention strings for free-form comment commands (not board intake)
     trigger_mentions: str = Field(default="@DevBot,@AI")
     # Substrings matched against assignee displayName / name / key (case-insensitive)
@@ -498,13 +497,6 @@ class Settings(BaseSettings):
             return ["PROJ"]
         return [p.strip() for p in self.jira_projects.split(",") if p.strip()]
     
-    @property
-    def trigger_labels_list(self) -> List[str]:
-        """Get trigger labels as a list."""
-        if not self.trigger_labels:
-            return ["ai-assist", "bot"]
-        return [item.strip() for item in self.trigger_labels.split(",") if item.strip()]
-
     @property
     def trigger_assignee_names_list(self) -> List[str]:
         """Assignee name fragments for bot-assignment trigger (lowercase)."""
@@ -693,7 +685,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "jira_board_id",
         "jira_host",
         "jira_email",
-        "trigger_labels",
         "trigger_on_assignment",
         "default_model",
         "agent_backend",
@@ -714,7 +705,6 @@ _RUNTIME_ENV_MIRROR = {
     "jira_board_id": "JIRA_BOARD_ID",
     "jira_host": "JIRA_HOST",
     "jira_email": "JIRA_EMAIL",
-    "trigger_labels": "TRIGGER_LABELS",
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
     "agent_backend": "AGENT_BACKEND",

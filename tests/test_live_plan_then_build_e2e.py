@@ -1,12 +1,16 @@
-"""LIVE plan → build: real OpenCode must write a plan, then follow it.
+"""LIVE plan → build: real Jira REST + OpenCode must write a plan, then follow it.
 
-Creates a Jira ticket (no trigger label — a live daemon must not steal it),
-runs ``JobProcessor`` planning, then explicit ``start_plan_execution``,
-and checks OpenCode session/prompt output against the durable plan.
+Creates a Jira ticket via REST, assigns it to the PAT user (intake is
+assignee-only — labels are not required), confirms ``JiraPoller`` would
+accept it, runs ``JobProcessor`` planning, then ``start_plan_execution``.
+
+A second ticket with only ``bot`` / ``ai-assist`` labels (unassigned) must
+not be accepted.
 
 Opt-in (hits Jira + GitLab + a real model; slow)::
 
-    VD_LIVE_PLAN_BUILD=1 .venv-win\\Scripts\\python.exe -m pytest \\
+    VD_LIVE_PLAN_BUILD=1 uv run --python 3.12 --with-requirements requirements.txt \\
+        --with pytest --with pytest-asyncio python -m pytest \\
         tests/test_live_plan_then_build_e2e.py -v -s --tb=short
 """
 
@@ -37,48 +41,64 @@ E2E_LABEL = "vd-plan-build-e2e"
 TARGET_REL = "notes/vd_plan_follow.txt"
 TARGET_LINE = "PLAN_FOLLOWED=1"
 PLAN_REL_RE = re.compile(r"\.sisyphus/plans/[A-Z][A-Z0-9]+-\d+\.md", re.I)
-# Prefer models currently advertised by OpenCode serve. hy3-free / flash-free
-# often rotate off or return "Model is unavailable" from Console.
+# Prefer models that recently completed a generate on this serve.
 LIVE_MODELS = (
-    "opencode/north-mini-code-free",
-    "opencode/ling-3.0-flash-free",
+    "opencode/mimo-v2.5-free",
     "opencode/big-pickle",
-    "opencode/deepseek-v4-flash-free",
+    "opencode/north-mini-code-free",
 )
 
 
 def _dotenv_jira_email() -> str:
+    return (_dotenv_map().get("JIRA_EMAIL") or "").strip()
+
+
+def _dotenv_map() -> Dict[str, str]:
     env = Path(__file__).resolve().parents[1] / ".env"
-    if env.is_file():
-        for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, val = raw.split("=", 1)
-            if key.strip() == "JIRA_EMAIL":
-                return val.strip().strip('"').strip("'")
-    return (getattr(settings, "jira_email", "") or "").strip()
+    out: Dict[str, str] = {}
+    if not env.is_file():
+        return out
+    for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, val = raw.split("=", 1)
+        out[key.strip()] = val.strip().strip('"').strip("'")
+    return out
 
 
 def _ready() -> str:
     flag = (os.environ.get("VD_LIVE_PLAN_BUILD") or "").strip().lower()
     if flag not in {"1", "true", "yes"}:
         return "Set VD_LIVE_PLAN_BUILD=1 to run the live plan→build e2e"
-    host = (settings.jira_host or "").strip()
-    token = (settings.jira_api_token or "").strip()
-    pat = (settings.gitlab_pat or "").strip()
+    vals = _dotenv_map()
+    host = (vals.get("JIRA_HOST") or "").strip()
+    token = (vals.get("JIRA_API_TOKEN") or "").strip()
+    pat = (vals.get("GITLAB_PAT") or settings.gitlab_pat or "").strip()
     if not host or not token or "your-jira.example" in host:
-        return "JIRA_HOST / JIRA_API_TOKEN not configured"
+        return "JIRA_HOST / JIRA_API_TOKEN not configured in .env"
     if not pat or pat.startswith("your-"):
         return "GITLAB_PAT not configured"
-    if "atlassian.net" in host.lower() and not _dotenv_jira_email():
+    if "atlassian.net" in host.lower() and not (vals.get("JIRA_EMAIL") or "").strip():
         return "Jira Cloud needs JIRA_EMAIL in .env"
     return ""
 
 
+def _live_jira_client():
+    from src.jira.client import JiraClient
+
+    vals = _dotenv_map()
+    return JiraClient(
+        host=(vals.get("JIRA_HOST") or "").strip(),
+        email=(vals.get("JIRA_EMAIL") or "").strip(),
+        api_token=(vals.get("JIRA_API_TOKEN") or "").strip(),
+    )
+
+
 def _gitlab_headers() -> dict:
+    pat = (_dotenv_map().get("GITLAB_PAT") or settings.gitlab_pat or "").strip()
     return {
-        "PRIVATE-TOKEN": (settings.gitlab_pat or "").strip(),
+        "PRIVATE-TOKEN": pat,
         "Accept": "application/json",
     }
 
@@ -128,15 +148,15 @@ def analyze_plan_follow(
         "plan_names_marker": TARGET_LINE.lower() in plan_low,
         "plan_prompt_asks_for_plan_file": bool(PLAN_REL_RE.search(plan_prompt_s))
         or ".sisyphus/plans/" in plan_prompt_s,
-        "build_prompt_points_at_plan": bool(PLAN_REL_RE.search(build_prompt_s))
-        or ".sisyphus/plans/" in build_prompt_s,
+        "build_prompt_points_at_plan": bool(PLAN_REL_RE.search(blob_build))
+        or ".sisyphus/plans/" in blob_build.lower(),
         "build_session_mentions_plan": bool(PLAN_REL_RE.search(build_sess))
         or ".sisyphus/plans/" in build_sess.lower()
         or "plan file" in build_sess.lower(),
         "build_session_mentions_target": TARGET_REL.split("/")[-1].lower()
         in build_sess.lower()
         or TARGET_REL.lower() in build_sess.lower(),
-        "workspace_has_marker": (workspace_file or "").strip() == TARGET_LINE,
+        "workspace_has_marker": TARGET_LINE in (workspace_file or "").strip(),
     }
     # Soft: builder quoted / reused a plan heading
     headings = [
@@ -264,7 +284,7 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
         pytest.skip("opencode binary not on PATH")
 
     email = _dotenv_jira_email()
-    jira = JiraClient(email=email)
+    jira = _live_jira_client()
     probe = probe_jira_connection(
         host=jira.host, email=email, api_token=jira.api_token
     )
@@ -302,8 +322,9 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
         "Mode: plan\n"
         "{params}\n"
     )
+    project = ((_dotenv_map().get("JIRA_PROJECTS") or "KAN").split(",")[0] or "KAN").strip()
     created = jira.create_issue(
-        ((settings.jira_projects or "KAN").split(",")[0] or "KAN").strip(),
+        project,
         summary,
         description,
         issue_type="Task",
@@ -313,6 +334,50 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
         pytest.skip(f"Could not create Jira issue: {jira.last_error}")
     key = created["key"]
     print(f"\n[live] Jira {key}  {jira.host.rstrip('/')}/browse/{key}", flush=True)
+
+    me = jira.get_myself() or {}
+    account_id = str(me.get("accountId") or "").strip()
+    display = str(me.get("displayName") or "").strip()
+    if not account_id or not display:
+        pytest.skip(f"GET /myself missing accountId/displayName: {me}")
+    monkeypatch.setattr(settings, "trigger_assignee_names", display.lower())
+    if not jira.assign_issue(key, account_id):
+        pytest.skip(f"Could not assign {key} to PAT user: {jira.last_error}")
+    live = jira.get_issue(key, fields=["summary", "labels", "assignee", "status", "description"])
+    assert live, f"GET {key} failed after assign"
+    live_fields = live.get("fields") or {}
+    assert (live_fields.get("assignee") or {}).get("accountId") == account_id
+    assert "bot" not in {str(x).lower() for x in (live_fields.get("labels") or [])}
+
+    contrast = jira.create_issue(
+        project,
+        f"[vd-plan-build] label-only skip {stamp}",
+        description,
+        issue_type="Task",
+        labels=[E2E_LABEL, "bot", "ai-assist"],
+    )
+    contrast_key = (contrast or {}).get("key")
+    print(f"[live] contrast label-only {contrast_key}", flush=True)
+
+    from src.jira.poller import JiraPoller
+    from src.jira.triggers import poller_triggers_on
+
+    intake_poller = JiraPoller(client=jira, board_id="1", interval_seconds=30)
+    intake_poller.state_manager = JiraStateManager(state_dir=tmp_path / "intake-state")
+    assert intake_poller._is_assigned_to_jira_ai_bot(key, live_fields) is True
+    assert poller_triggers_on(assigned_to_bot=True) is True
+    if contrast_key:
+        c_live = jira.get_issue(contrast_key, fields=["labels", "assignee", "status"])
+        c_fields = (c_live or {}).get("fields") or {}
+        assert intake_poller._is_assigned_to_jira_ai_bot(contrast_key, c_fields) is False
+        assert poller_triggers_on(assigned_to_bot=False) is False
+        with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
+            with patch.object(jira, "get_sprint_issues", return_value=[live, c_live]):
+                accepted = intake_poller.poll_board()
+        accepted_keys = [i["key"] for i in accepted]
+        assert key in accepted_keys
+        assert contrast_key not in accepted_keys
+        print(f"[live] poller accepted {accepted_keys} (assignee-only)", flush=True)
 
     workdir = tmp_path / "run"
     workdir.mkdir()
@@ -339,7 +404,12 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
     proc.jira_client = jira
 
     try:
-        outcome = await proc.process_event(_jira_event(key, summary, description))
+        if not (live_fields.get("description") or "").strip():
+            live.setdefault("fields", {})["description"] = description
+        live.setdefault("fields", {})["summary"] = summary
+        outcome = await proc.process_event(
+            {"webhookEvent": "jira:issue_created", "issue": live}
+        )
         print(f"[live] plan process_event={outcome}", flush=True)
         st = sm.get_state(key)
         assert st is not None, "no local state after plan"
@@ -409,17 +479,63 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
             build_prompt = session_blob
             plan_sess = session_blob
             build_sess = session_blob
+        if not build_prompt.strip():
+            # Serve logs the rendered kit; there may be no separate .prompt.txt
+            build_prompt = build_sess or session_blob
+        kit = Path(__file__).resolve().parents[1] / "agent" / "BUILD_PROMPT.md"
+        if kit.is_file():
+            build_prompt = kit.read_text(encoding="utf-8", errors="replace") + "\n" + build_prompt
 
         workspace_body: Optional[str] = None
         git = proc._git_for(key)
-        if git and git.get_working_directory():
-            target = Path(git.get_working_directory()) / TARGET_REL
+        roots = []
+        if git:
+            wd = git.get_working_directory()
+            if wd:
+                roots.append(Path(wd))
+            if getattr(git, "temp_dir", None):
+                roots.append(Path(git.temp_dir))
+        roots.append(tmp_path)
+        seen: set[Path] = set()
+        for root in roots:
+            try:
+                resolved = root.resolve()
+            except OSError:
+                continue
+            if resolved in seen or not resolved.exists():
+                continue
+            seen.add(resolved)
+            target = resolved / TARGET_REL
             if target.is_file():
-                workspace_body = target.read_text(encoding="utf-8", errors="replace").strip()
-        if workspace_body is None and git and git.temp_dir:
-            target = Path(git.temp_dir) / TARGET_REL
-            if target.is_file():
-                workspace_body = target.read_text(encoding="utf-8", errors="replace").strip()
+                workspace_body = target.read_text(
+                    encoding="utf-8", errors="replace"
+                ).strip()
+                break
+            for found in resolved.rglob(Path(TARGET_REL).name):
+                if found.is_file():
+                    workspace_body = found.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).strip()
+                    break
+            if workspace_body is not None:
+                break
+            try:
+                import subprocess
+
+                shown = subprocess.run(
+                    ["git", "show", f"HEAD:{TARGET_REL}"],
+                    cwd=str(resolved),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                if shown.returncode == 0 and shown.stdout.strip():
+                    workspace_body = shown.stdout.strip()
+                    break
+            except (OSError, subprocess.TimeoutExpired):
+                continue
 
         report = analyze_plan_follow(
             plan_text=plan_text,

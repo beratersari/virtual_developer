@@ -229,7 +229,7 @@ def _wire_processor(tmp_path, monkeypatch, board: BoardJira, repo_url: str):
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setattr(settings, "temp_dir_base", work / ".temp")
-    monkeypatch.setattr(settings, "trigger_labels", f"{TRIGGER},ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "gitlab_pat", "")

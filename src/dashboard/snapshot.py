@@ -75,7 +75,7 @@ class PollSnapshotStore:
     ) -> None:
         now = datetime.now()
         next_at = now + timedelta(seconds=max(1, interval_seconds))
-        matched = sum(1 for i in issues if i.get("matched_label") or i.get("matched_assignee"))
+        matched = sum(1 for i in issues if i.get("matched_assignee"))
         will = sum(1 for i in issues if i.get("will_process"))
         with self._lock:
             self._data.update(

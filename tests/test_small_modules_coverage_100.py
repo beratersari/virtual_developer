@@ -22,16 +22,15 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, TaskStatus
 
 
-def test_config_empty_trigger_labels_and_gitlab_hosts():
+def test_config_empty_gitlab_hosts_and_projects():
     s = Settings(
         jira_host="https://j.example",
         jira_api_token="t",
-        trigger_labels="",
         gitlab_allowed_hosts=" gitlab.com , , example.com ",
         jira_projects="",
     )
-    assert s.trigger_labels_list == ["ai-assist", "bot"]
-    assert s.gitlab_allowed_hosts_list == ["example.com", "gitlab.com"]
+    # Hosts without a PAT are not allowed; list comes from the PAT map.
+    assert s.gitlab_allowed_hosts_list == []
     assert s.jira_projects_list == ["PROJ"]
 
 
@@ -179,7 +178,7 @@ def test_poll_snapshot_listener_and_idle():
     store.begin_poll(board_id="1", interval_seconds=30)
     store.end_poll(
         source="board",
-        issues=[{"key": "K-1", "will_process": True, "matched_label": True}],
+        issues=[{"key": "K-1", "will_process": True, "matched_assignee": True}],
         interval_seconds=30,
         error=None,
     )

@@ -12,12 +12,10 @@ export type PolledIssue = {
   jira_status: string
   labels: string[]
   assignee?: string | null
-  matched_label: boolean
   matched_assignee: boolean
   is_todo: boolean
   will_process: boolean
   local_status?: string | null
-  matched_labels: string[]
 }
 
 export type PollPayload = {
@@ -71,7 +69,6 @@ export type SettingsPayload = {
   jira_board_id: string
   jira_projects: string
   poll_interval_seconds: number
-  trigger_labels: string
   trigger_on_assignment: boolean
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
@@ -489,7 +486,6 @@ export type SettingsPatch = Partial<
     | 'jira_host'
     | 'jira_board_id'
     | 'poll_interval_seconds'
-    | 'trigger_labels'
     | 'trigger_on_assignment'
     | 'max_concurrent_jobs'
     | 'agent_task_timeout_seconds'

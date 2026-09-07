@@ -28,6 +28,7 @@ HOST = "https://jira.example.com"
 _TODO = {
     "status": {"name": "To Do"},
     "labels": ["bot"],
+    "assignee": {"displayName": "DevBot"},
 }
 
 
@@ -116,8 +117,7 @@ def _client(api: AgileJira) -> JiraClient:
 @pytest.fixture
 def trigger_settings():
     with patch("src.jira.poller.settings") as s:
-        s.trigger_labels_list = ["bot"]
-        s.trigger_assignee_names_list = []
+        s.trigger_assignee_names_list = ["devbot"]
         s.trigger_on_assignment = False
         yield s
 

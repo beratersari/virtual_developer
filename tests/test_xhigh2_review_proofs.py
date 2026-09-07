@@ -98,7 +98,6 @@ def test_m2_poller_does_not_widen_to_board_on_sprint_error(state_manager):
         }
     ]
     with patch("src.jira.poller.settings") as s:
-        s.trigger_labels_list = ["bot", "ai-assist"]
         s.trigger_assignee_names_list = []
         result = poller.poll_board()
     poller.client.get_board_issues.assert_not_called()
@@ -142,7 +141,6 @@ def test_m3_pending_on_todo_is_not_requeued(state_manager):
         },
     ]
     with patch("src.jira.poller.settings") as s:
-        s.trigger_labels_list = ["bot"]
         s.trigger_assignee_names_list = ["devbot"]
         result = poller.poll_board()
     keys = {i["key"] for i in result}

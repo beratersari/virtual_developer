@@ -34,11 +34,9 @@ def test_snapshot_countdown(store):
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
                 "assignee": "Jira AI Bot",
-                "matched_label": True,
                 "matched_assignee": True,
                 "is_todo": True,
                 "will_process": True,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
@@ -348,12 +346,10 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
                 "summary": "summary",
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
-                "assignee": None,
-                "matched_label": True,
-                "matched_assignee": False,
+                "assignee": "Jira AI Bot",
+                "matched_assignee": True,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
@@ -372,7 +368,7 @@ def test_api_tasks_and_poll(tmp_path, monkeypatch):
             p = client.get("/api/poll")
             assert p.status_code == 200
             poll = p.json()
-            assert poll["issues"][0]["matched_label"] is True
+            assert poll["issues"][0]["matched_assignee"] is True
             assert "seconds_until_next_poll" in poll
 
             d = client.get("/api/dashboard")
@@ -396,11 +392,9 @@ def test_task_detail_without_local_state(tmp_path):
                 "summary": "from poll",
                 "jira_status": "To Do",
                 "labels": ["ai-assist"],
-                "matched_label": True,
                 "matched_assignee": False,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": ["ai-assist"],
             }
         ],
         interval_seconds=30,
@@ -695,7 +689,7 @@ def test_build_one_job_does_not_inherit_later_run_session(tmp_path):
 
 
 def test_poll_api_hides_unmatched_board_issues(tmp_path):
-    """Poll DTO lists only bot-eligible issues (label or assignee match)."""
+    """Poll DTO lists only bot-assignee issues (or will_process this cycle)."""
     from src.dashboard.service import build_poll_status
 
     sm = JiraStateManager(state_dir=tmp_path / "state")
@@ -705,15 +699,13 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
         issues=[
             {
                 "key": "MATCH-1",
-                "summary": "has trigger",
+                "summary": "assigned this cycle",
                 "jira_status": "To Do",
-                "labels": ["ai-assist"],
-                "assignee": None,
-                "matched_label": True,
-                "matched_assignee": False,
+                "labels": [],
+                "assignee": "Jira AI Bot",
+                "matched_assignee": True,
                 "is_todo": True,
                 "will_process": True,
-                "matched_labels": ["ai-assist"],
             },
             {
                 "key": "NOISE-9",
@@ -721,11 +713,9 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
                 "jira_status": "To Do",
                 "labels": ["other"],
                 "assignee": "Alice",
-                "matched_label": False,
                 "matched_assignee": False,
                 "is_todo": True,
                 "will_process": False,
-                "matched_labels": [],
             },
             {
                 "key": "BOT-2",
@@ -733,11 +723,9 @@ def test_poll_api_hides_unmatched_board_issues(tmp_path):
                 "jira_status": "In Progress",
                 "labels": [],
                 "assignee": "Jira AI Bot",
-                "matched_label": False,
                 "matched_assignee": True,
                 "is_todo": False,
                 "will_process": False,
-                "matched_labels": [],
             },
         ],
         interval_seconds=30,
@@ -1035,13 +1023,11 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
     p = JiraPoller(client=fake_jira, board_id="1", interval_seconds=10)
     p.state_manager = state_manager
     with patch("src.jira.poller.settings") as s:
-        s.trigger_labels_list = ["ai-assist", "bot"]
         s.trigger_assignee_names_list = ["devbot"]
         s.trigger_on_assignment = True
         out = p.poll_board()
     assert len(out) == 1
     snap = store.snapshot()
     assert snap["issues"]
-    assert snap["issues"][0]["matched_label"] is True
     assert snap["issues"][0]["matched_assignee"] is True
     assert snap["issues"][0]["will_process"] is True

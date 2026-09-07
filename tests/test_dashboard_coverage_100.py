@@ -285,12 +285,10 @@ def test_build_tasks_session_backfill_and_live(tmp_path):
 def test_apply_settings_all_fields(monkeypatch):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "a")
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
     view = apply_settings_update(
         SettingsUpdate(
-            trigger_labels="ai-assist,bot",
             trigger_on_assignment=True,
             max_concurrent_jobs=3,
             default_model="",  # empty ignored
@@ -722,7 +720,6 @@ def test_poll_status_local_status_from_state(tmp_path):
                 "jira_status": "To Do",
                 "labels": [],
                 "assignee": "bot",
-                "matched_label": False,
                 "matched_assignee": True,
                 "is_todo": True,
                 "will_process": False,

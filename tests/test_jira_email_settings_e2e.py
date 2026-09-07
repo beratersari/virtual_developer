@@ -162,9 +162,9 @@ def test_e2e_settings_save_refreshes_processor_client_to_bearer(tmp_path, monkey
         sm = JiraStateManager(state_dir=tmp_path / "state")
         app = create_dashboard_app(processor=proc, state_manager=sm)
         http = TestClient(app)
-        r = http.patch("/api/settings", json={"trigger_labels": "bot"})
+        r = http.patch("/api/settings", json={"trigger_assignee_names": "devbot"})
         assert r.status_code == 200
         assert settings.jira_email == "ops@example.com"
-        # Poll-label-only save does not rebuild the client when email stays.
+        # Assignee-name-only save does not rebuild the client when email stays.
         last = created[-1]
         assert last.get("auth") == ("ops@example.com", "tok-123")

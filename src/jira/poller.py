@@ -203,12 +203,6 @@ class JiraPoller:
 
         logger.debug(f"Found {len(issues)} issues from {source}")
 
-        trigger_labels = set(settings.trigger_labels_list)
-        trigger_labels_l = {
-            str(x).strip().lower() for x in trigger_labels if str(x).strip()
-        }
-        logger.debug(f"Trigger labels: {trigger_labels}")
-
         new_issues = []
         todo_issues = []
         plan_start_issues = []  # plan_ready + ai-start-work label (poller-only start)
@@ -235,24 +229,12 @@ class JiraPoller:
             # Track Jira status for all issues so we can detect real To Do re-entry
             self._last_jira_status[issue_key] = status
 
-            matched_labels = sorted(
-                str(x) for x in labels if str(x).strip().lower() in trigger_labels_l
-            )
-            has_label = bool(matched_labels)
             is_assigned_to_bot = self._is_assigned_to_jira_ai_bot(issue_key, fields)
             if is_assigned_to_bot:
                 assigned_to_bot_count += 1
             is_todo = self._is_todo_status(fields)
             seen = issue_key in self._seen_issues
-            should_process = poller_triggers_on(
-                has_trigger_label=has_label,
-                assigned_to_bot=is_assigned_to_bot,
-            )
-            if (has_label or is_assigned_to_bot) and not should_process:
-                logger.info(
-                    f"Skip {issue_key}: poller requires trigger label AND bot "
-                    f"assignee (label={has_label} assignee={is_assigned_to_bot})"
-                )
+            should_process = poller_triggers_on(assigned_to_bot=is_assigned_to_bot)
             # will_process decided after reprocess pass; provisional for new
             provisional_new = should_process and is_todo and not seen
 
@@ -264,9 +246,7 @@ class JiraPoller:
                     "jira_status": status_name,
                     "labels": labels,
                     "assignee": assignee_display,
-                    "matched_label": has_label,
                     "matched_assignee": is_assigned_to_bot,
-                    "matched_labels": matched_labels,
                     "is_todo": is_todo,
                     "will_process": provisional_new,  # updated after reprocess
                     "local_status": local.status.value if local else None,

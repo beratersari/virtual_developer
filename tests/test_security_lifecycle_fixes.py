@@ -204,7 +204,7 @@ def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
 
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "ai-assist")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     result = poller.poll_board()
 
@@ -236,7 +236,7 @@ def test_poller_skips_in_flight_on_todo_with_trigger(tmp_path, monkeypatch):
 
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_labels", "bot")
+
     monkeypatch.setattr(settings, "trigger_on_assignment", False)
     result = poller.poll_board()
     assert [i["key"] for i in result] == []

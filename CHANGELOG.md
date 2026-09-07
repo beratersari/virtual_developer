@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [SemVer](https://semver.org/) from the repo root `VERSION` file.
 GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
+## [Unreleased]
+
+### Removed
+
+- `TRIGGER_LABELS` is gone from Settings, `.env` / `.env.example`, and the dashboard API. Poller intake is To Do + bot assignee (`TRIGGER_ASSIGNEE_NAMES`) only.
+
 ## [0.2.4] — 2026-09-07
 
 ### Added
