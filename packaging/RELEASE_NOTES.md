@@ -1,12 +1,17 @@
-# Yaver 0.2.4
+# Yaver 0.3.0
 
-Standalone exe zip now ships **`opencode_configs/`** next to the binary:
-OpenCoderman `agents/` (`derman-build`, `derman-plan`) and the full
-`skills/` tree. Copy those folders into `~/.opencode` if you install
-OpenCode separately.
+Plan → build is label-driven (`plan_ready` / `plan_execute` /
+`plan_refactor`). Plan and build keep **separate** OpenCode sessions
+for the same repo + source + target. Plans are Jira comments only
+(not the description) and live under `{YAVER_DATA_DIR}/plans/`.
 
-Also fixes frozen `yaver.exe` git askpass (it no longer launches
-`yaver.exe` as the credential helper).
+A new `Mode: build` ticket implements the existing plan when one
+exists for that repo/branches. The ops dashboard Sessions page
+lists plan vs build maps separately. Live WebSocket ticks no longer
+rescan every job on each poll.
+
+OpenCoderman on this release: `derman-plan` is git-read-only and
+ends with `PLAN_DONE`; `derman-build` cannot push.
 
 The exact OpenCoderman submodule commit is in `opencoderman.pin` and
 `opencoderman-<sha>.zip` on this release.
@@ -66,11 +71,13 @@ GitHub attaches **Source code (zip)** and **Source code (tar.gz)** for this tag.
 
 ## Highlights
 
-- Frozen `yaver` / `yaver.exe` from CI
+- Label-driven plan handoff: `plan_ready` → `plan_execute` / `plan_refactor`
+- Separate OpenCode plan vs build sessions; Sessions page split
+- Plans as Jira comments only; files under `{YAVER_DATA_DIR}/plans/`
+- `Mode: build` implements the existing plan when one exists
+- Slim dashboard live ticks (no full job rescan every poll)
 - OpenCoderman **derman-build** / **derman-plan**
-- Codex worker, ops dashboard, Jira webhook intake
-- GitLab MR mention jobs; clone cleanup when an MR closes
-- Serve loop: compact wait, one unattended nudge, no empty MRs after ERROR
+- Frozen `yaver` / `yaver.exe` from CI; offline Windows/Linux zips
 
 ## Config (secrets stay out of the binary)
 

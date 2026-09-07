@@ -8,21 +8,32 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
-### Removed
+## [0.3.0] — 2026-09-08
 
-- `TRIGGER_LABELS` is gone from Settings, `.env` / `.env.example`, and the dashboard API. Poller intake is To Do + bot assignee (`TRIGGER_ASSIGNEE_NAMES`) only.
-- `ai-start-work` / `ai-execute` / `ai-plan-ready` are no longer used.
-- Same-ticket `Mode: build` no longer starts implementation after a plan.
+Plan → build is now label-driven, plan and build keep separate OpenCode sessions, and the ops dashboard is cheaper to live-update.
+
+### Added
+
+- Same-ticket implement: rename `plan_ready` → `plan_execute` while the ticket is **In Progress** (Mode in `{params}` can stay `plan`).
+- Plan revise: remove `plan_ready`, add `plan_refactor`, comment tagging the bot. The **plan** session is resumed.
+- Separate OpenCode session maps for plan vs build (same repo + source + target). Dashboard **Sessions** lists them in two sections.
+- A new `Mode: build` ticket implements the durable plan when one exists (this key, or the plan-session ticket for the same repo/branches).
+- Plans are posted as Jira **comments** (Cloud ADF when possible), never appended to the description.
 
 ### Changed
 
-- Dashboard WebSocket ticks send poll/meta/queue only (no full job/task rescan every 5s). The UI refetches Jobs/Sessions when live issues or the queue count change, not on every poll countdown.
+- Poller intake is To Do + bot assignee (`TRIGGER_ASSIGNEE_NAMES`) only. `TRIGGER_LABELS` and `ai-start-work` / `ai-execute` / `ai-plan-ready` are gone.
+- Same-ticket `Mode: build` no longer starts implementation after a plan.
+- Plan files live at `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not inside the git clone).
+- Dashboard WebSocket ticks send poll/meta/queue only. Jobs/Sessions refetch when live issues or the queue change, not on every 5s countdown.
+- OpenCoderman `derman-plan` is git-read-only and ends with `PLAN_DONE`. `derman-build` cannot push; the named plan is the spec.
 
-- Plan files are stored at `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not inside the git clone), so the build agent cannot commit them.
-- After a plan the bot sets label `plan_ready`. Rename it to `plan_execute` while the ticket is **In Progress** to implement (`implement the plan {ISSUE_KEY}.md` on the **build** session). Mode in `{params}` can stay `plan`.
-- To revise a plan: remove `plan_ready`, add `plan_refactor`, and comment tagging the bot (PAT `/myself` identity). The **plan** session is resumed; the bot republishes the plan and restores `plan_ready`.
-- Plan and build keep separate OpenCode session maps per repo + source + target. The dashboard Sessions page lists them in two sections.
-- Direct `Mode: build` issues implement the durable plan when it exists (this ticket, or the plan-session ticket for the same repo + source + target). Jira text is context only. Without a plan file they still implement the Jira description.
+### Fixed
+
+- Operator comments that @mention the PAT user are accepted for `plan_refactor` even when the token is the same Cloud account.
+- Numbered plan recaps are not treated as multiple-choice questions. Plan-job nudges do not say “implement”.
+
+[0.3.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.3.0
 
 ## [0.2.4] — 2026-09-07
 
