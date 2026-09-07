@@ -11,6 +11,7 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 ### Removed
 
 - `TRIGGER_LABELS` is gone from Settings, `.env` / `.env.example`, and the dashboard API. Poller intake is To Do + bot assignee (`TRIGGER_ASSIGNEE_NAMES`) only.
+- `ai-start-work` / `ai-execute` / `ai-plan-ready` are no longer used. After `plan_ready`, set `Mode: build` (same ticket or a new issue) to implement. `Mode: plan` never starts a build.
 
 ## [0.2.4] — 2026-09-07
 

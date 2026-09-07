@@ -8,7 +8,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from src.config import settings
 from src.dashboard.snapshot import poll_snapshot_store
 from src.jira.client import JiraClient
-from src.jira.triggers import poller_triggers_on
+from src.issue_git_spec import parse_issue_mode
+from src.jira.triggers import jira_body_to_text, poller_triggers_on
 from src.logger import logger
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -202,14 +203,16 @@ class JiraPoller:
             return []
 
         logger.debug(f"Found {len(issues)} issues from {source}")
+        # Previous cycle's board statuses (leave→return). Tests can seed
+        # ``_last_jira_status``; ``start()`` also snapshots this.
+        self._status_before_poll = dict(self._last_jira_status)
 
         new_issues = []
         todo_issues = []
-        plan_start_issues = []  # plan_ready + ai-start-work label (poller-only start)
+        plan_build_issues: List[dict] = []
         checked_count = 0
         assigned_to_bot_count = 0
         snapshot_rows: List[Dict[str, Any]] = []
-        _START_LABELS = frozenset({"ai-start-work", "ai-execute"})
 
         for issue in issues:
             issue_key = issue["key"]
@@ -267,8 +270,8 @@ class JiraPoller:
                 # Exceptions (not rework):
                 #   * in-flight pending/planning/executing — never restart
                 #     from poll noise (PENDING is the accept/ack window)
-                #   * plan_ready — waits for ai-start-work / ai-execute (or a
-                #     new Mode: build issue). bot/ai-assist alone does not build.
+                #   * plan_ready — waits until {params} Mode is build
+                #     (Mode: plan never starts implementation).
                 in_flight = local_st in {
                     TaskStatus.PENDING,
                     TaskStatus.PLANNING,
@@ -297,24 +300,16 @@ class JiraPoller:
                     )
                 todo_issues.append(issue)
 
-            # plan_ready start labels work without requiring bot/ai-assist (P4)
-            if (
-                local
-                and local.status == TaskStatus.PLAN_READY
-                and is_todo
-                and (_START_LABELS & {str(x).strip().lower() for x in labels})
-            ):
-                if issue_key in self._plan_start_emitted:
-                    logger.debug(
-                        f"Skip repeat plan-start emit for {issue_key} (already latched)"
-                    )
-                else:
-                    plan_start_issues.append(issue)
-                    logger.info(
-                        f"Plan-ready start signal for {issue_key} "
-                        f"(label ai-start-work / ai-execute)"
-                    )
-            elif local and local.status != TaskStatus.PLAN_READY:
+                if waiting_plan and issue_key not in self._plan_start_emitted:
+                    enriched = self._enrich_issue_for_work(issue)
+                    if self._issue_mode_is_build(enriched):
+                        plan_build_issues.append(enriched)
+                        logger.info(
+                            f"Plan-ready Mode: build for {issue_key}; "
+                            f"starting implementation"
+                        )
+
+            if local and local.status != TaskStatus.PLAN_READY:
                 self._plan_start_emitted.discard(issue_key)
 
         reprocess_issues = self.check_status_changes(todo_issues)
@@ -322,16 +317,15 @@ class JiraPoller:
         # Deduplicate: prefer create over update when both would fire
         new_keys = {i["key"] for i in new_issues}
         reprocess_issues = [i for i in reprocess_issues if i["key"] not in new_keys]
-        plan_start_issues = [
+        plan_build_issues = [
             i
-            for i in plan_start_issues
+            for i in plan_build_issues
             if i["key"] not in new_keys
             and i["key"] not in {x["key"] for x in reprocess_issues}
         ]
-        reprocess_keys = {i["key"] for i in reprocess_issues} | {
-            i["key"] for i in plan_start_issues
+        will_keys = new_keys | {i["key"] for i in reprocess_issues} | {
+            i["key"] for i in plan_build_issues
         }
-        will_keys = new_keys | reprocess_keys
 
         for row in snapshot_rows:
             row["will_process"] = row["key"] in will_keys
@@ -342,7 +336,7 @@ class JiraPoller:
                 f"{assigned_to_bot_count} assigned to bot, "
                 f"{len(new_issues)} new to process, "
                 f"{len(reprocess_issues)} to reprocess, "
-                f"{len(plan_start_issues)} plan_ready starts"
+                f"{len(plan_build_issues)} plan_ready builds"
             )
 
         poll_snapshot_store.end_poll(
@@ -350,8 +344,7 @@ class JiraPoller:
             issues=snapshot_rows,
             interval_seconds=self.interval,
         )
-        # plan_start goes as is_update so processor uses issue_updated path
-        return new_issues + reprocess_issues + plan_start_issues
+        return new_issues + reprocess_issues + plan_build_issues
 
     @staticmethod
     def issue_text_fingerprint(issue: dict, *, light: Optional[bool] = None) -> str:
@@ -433,9 +426,6 @@ class JiraPoller:
                 )
                 continue
 
-            if state.status not in terminal:
-                continue
-
             if self._issue_has_pending_schedule(issue_key):
                 continue
 
@@ -448,7 +438,8 @@ class JiraPoller:
             # while Jira stayed on To Do after cancel/fail.
             synthetic = frozenset({"__cancelled__", "__terminal_local__"})
 
-            # Real board leave non-To-Do → return to To Do.
+            if state.status not in terminal:
+                continue
             # Require an actual status *name* change: category-"new" columns
             # (e.g. "Selected for Development") are To Do-like for eligibility
             # but are not in the hard-coded English name set. Without prev!=curr
@@ -589,12 +580,21 @@ class JiraPoller:
             logger.warning(f"Could not enrich {issue_key} from Jira: {e}")
         return issue
 
+    @staticmethod
+    def _issue_mode_is_build(issue: dict) -> bool:
+        """True when ``{params}`` Mode is build (plan never implements)."""
+        fields = (issue or {}).get("fields") or {}
+        desc = fields.get("description")
+        if not isinstance(desc, str):
+            desc = jira_body_to_text(desc)
+        return parse_issue_mode(fields.get("summary") or "", desc or "") == "build"
+
     def dispatch_as_update(self, issue_key: str) -> bool:
         """True when this key must use the issue_updated handler.
 
         After a daemon restart ``_seen_issues`` is empty, but disk state and
-        plan-start latches still mean this is not a create. plan_ready +
-        ai-start-work only starts on the update path.
+        plan-start latches still mean this is not a create. plan_ready build
+        after a To Do return uses the update path.
         """
         key = (issue_key or "").strip()
         if not key:

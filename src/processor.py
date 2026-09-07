@@ -2170,9 +2170,8 @@ class JobProcessor:
     ) -> dict:
         """Start execution for a plan_ready issue (explicit label / internal path).
 
-        Plans never auto-start. Operators either add ``ai-start-work`` /
-        ``ai-execute`` (poller) or open a separate issue with ``Mode: build``.
-        Dashboard HTTP Start is disabled (410).
+        Plans wait at ``plan_ready`` until ``Mode: build`` is set (same
+        ticket or a new issue). Dashboard HTTP Start is disabled (410).
 
         Uses the same job semaphore + per-issue lock as ``process_event`` (B7).
         """
@@ -2763,13 +2762,11 @@ class JobProcessor:
         if existing and existing.status in self.IN_FLIGHT_STATUSES:
             logger.info(f"Issue {issue_key} already in progress (status: {existing.status.value}), skipping")
             return False, f"already in progress ({existing.status.value})"
-        # PLAN_READY: do not re-plan from a create event.
-        # Plans never auto-start (intentional). Explicit start only via
-        # ai-start-work / ai-execute labels on issue_updated, a scheduled_job
-        # fire (dashboard schedule), or a new Mode: build issue.
+        # PLAN_READY: never re-plan or build from a create event.
+        # Implementation starts only when Mode is build (same ticket or a
+        # new Mode: build issue). Mode: plan stays waiting.
         if existing and existing.status == TaskStatus.PLAN_READY:
-            if scheduled_job:
-                # Schedule fire is an explicit operator start signal.
+            if scheduled_job and parse_issue_mode(summary, description) == "build":
                 if summary:
                     existing.issue_summary = summary
                 if description:
@@ -2782,7 +2779,7 @@ class JobProcessor:
                 )
                 state = self.state_manager.get_state(issue_key) or existing
                 logger.info(
-                    f"Issue {issue_key} plan_ready + scheduled_job; "
+                    f"Issue {issue_key} plan_ready + scheduled_job + Mode: build; "
                     f"beginning execution (schedule_id={event.get('schedule_id')})"
                 )
                 self._mark_jira_in_progress(issue_key)
@@ -2797,19 +2794,16 @@ class JobProcessor:
                         issue_key,
                         f"Failed to start scheduled plan execution: {e}",
                         suggestion=(
-                            "Check logs. Re-schedule the issue or add "
-                            "ai-start-work / open Mode: build."
+                            "Check logs. Set Mode: build in {{params}} and "
+                            "put the ticket on To Do, or open a new build issue."
                         ),
                     )
                     self._release_context(issue_key, success=False)
-                    # Work was attempted (workflow entry); not a silent no-op.
                     return True, None
             logger.info(
-                f"Issue {issue_key} has plan ready; no auto-start "
-                f"(add label ai-start-work / ai-execute, schedule a run, "
-                f"or open Mode: build issue)"
+                f"Issue {issue_key} has plan ready; waiting for Mode: build"
             )
-            return False, "plan_ready; no auto-start without schedule or start label"
+            return False, "plan_ready; waiting for Mode: build"
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
@@ -2974,21 +2968,12 @@ class JobProcessor:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
             return await self._handle_issue_created(event)
 
-        # plan_ready → execute only on explicit start labels (ai-start-work /
-        # ai-execute). Mode: build alone does NOT auto-start (intentional product
-        # choice — no plan→build autostart). Open a new Mode: build issue to
-        # implement, or add a start label on this ticket while it is To Do.
-        # (scheduled_job create events are handled in _handle_issue_created.)
+        # plan_ready → execute only when {params} Mode is build.
+        # Mode: plan never implements, even if the ticket is To Do again.
         if state.status == TaskStatus.PLAN_READY:
             if self._is_live_processing(issue_key):
                 logger.info(f"{issue_key} plan_ready but already live; skip start")
                 return False, "plan_ready but already live"
-
-            labels = list(fields.get("labels") or [])
-            label_set = {str(x).strip().lower() for x in labels}
-            has_start_label = (
-                "ai-start-work" in label_set or "ai-execute" in label_set
-            )
 
             summary = _issue_text(fields.get("summary", "")) or state.issue_summary or ""
             description = _issue_text(fields.get("description", "") or "")
@@ -3000,7 +2985,8 @@ class JobProcessor:
             if description:
                 state.description = description
 
-            if is_todo and has_start_label:
+            wants_build = parse_issue_mode(summary, description) == "build"
+            if is_todo and wants_build:
                 self.state_manager.update_state(
                     issue_key,
                     issue_summary=state.issue_summary,
@@ -3009,37 +2995,30 @@ class JobProcessor:
                 )
                 state = self.state_manager.get_state(issue_key) or state
                 logger.info(
-                    f"{issue_key} plan_ready + To Do + start label; "
-                    f"beginning execution"
+                    f"{issue_key} plan_ready + Mode: build; beginning execution"
                 )
                 try:
                     await self._start_execution_workflow(state)
                     return True, None
                 except Exception as e:
                     logger.exception(
-                        f"Plan start from label failed for {issue_key}: {e}", e
+                        f"Plan start for Mode: build failed for {issue_key}: {e}", e
                     )
                     self._fail_issue(
                         issue_key,
                         f"Failed to start plan execution: {e}",
                         suggestion=(
-                            "Check logs. To run build: open a new issue with "
-                            "Mode: build, or re-queue with label ai-start-work."
+                            "Check logs. Keep Mode: build in {{params}} and "
+                            "To Do, or open a new Mode: build issue."
                         ),
                     )
                     self._release_context(issue_key, success=False)
                     return True, None
-            if is_todo and not has_start_label:
-                logger.info(
-                    f"{issue_key} plan_ready and To Do; no auto-start "
-                    f"(add ai-start-work / ai-execute, or open Mode: build issue)"
-                )
-                return False, "plan_ready; no start label"
-            logger.debug(
-                f"{issue_key} plan_ready; waiting for explicit start "
-                f"(jira status '{status_name}')"
+            logger.info(
+                f"{issue_key} plan_ready; Mode is not build "
+                f"(jira status '{status_name}') — not implementing"
             )
-            return False, f"plan_ready; jira status '{status_name}'"
+            return False, "plan_ready; Mode is not build"
 
         return False, f"no action for status {state.status.value}"
 
@@ -3070,6 +3049,11 @@ class JobProcessor:
             description = _issue_text(fields.get("description", "") or "")
             if not description:
                 description = state.description or ""
+            if parse_issue_mode(summary, description) != "build":
+                logger.info(
+                    f"{issue_key}: webhook plan_ready ignored (Mode is not build)"
+                )
+                return False, "plan_ready; Mode is not build"
             if summary:
                 state.issue_summary = summary
             if description:
@@ -3136,8 +3120,14 @@ class JobProcessor:
         cmd_lower = command.lower().strip()
         
         if cmd_lower.startswith("/start-work"):
-            # Start execution of existing plan
-            if state and state.status == TaskStatus.PLAN_READY:
+            # Start execution of existing plan only when Mode is build
+            desc = (state.description if state else "") or ""
+            summary = (state.issue_summary if state else "") or ""
+            if (
+                state
+                and state.status == TaskStatus.PLAN_READY
+                and parse_issue_mode(summary, desc) == "build"
+            ):
                 try:
                     await self._start_execution_workflow(state)
                 except Exception as e:
@@ -3154,7 +3144,7 @@ class JobProcessor:
                     "No plan is ready for execution yet.\n\n"
                     "* If planning is still running, wait for the *Plan Ready* comment.\n"
                     "* If planning failed, move the issue back to To Do to re-queue.\n"
-                    "* Then reply with `/start-work` when status is `plan_ready`.",
+                    "* Then set Mode: build in {params} and put the ticket on To Do.",
                 )
         
         elif cmd_lower.startswith("/status"):
@@ -4723,8 +4713,7 @@ class JobProcessor:
                         f"Could not post plan summary for {state.issue_key}: {e}"
                     )
 
-            # Do not auto-start build (intentional). Explicit start labels or a
-            # new Mode: build issue only. Dashboard Start is disabled.
+            # Wait for the operator to move the ticket back to To Do.
 
         else:
             # Planning failed — finish job + requeue_eligible via _fail_issue

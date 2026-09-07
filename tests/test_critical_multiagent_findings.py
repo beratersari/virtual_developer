@@ -55,12 +55,12 @@ def processor(state_manager, reporter, fake_jira, tmp_path, monkeypatch):
     return proc
 
 
-def _todo_fields(name="To Do", labels=None, summary="s", description=None):
+def _todo_fields(name="To Do", labels=None, summary="s", description=None, assignee=None):
     fields = {
         "summary": summary,
         "status": {"name": name, "statusCategory": {"key": "new"}},
         "labels": labels or ["bot"],
-        "assignee": None,
+        "assignee": assignee,
     }
     if description is not None:
         fields["description"] = description
@@ -250,64 +250,70 @@ async def test_s3b_execution_early_return_when_git_none_must_finish_job(
 
 
 # ===========================================================================
-# P1 — plan_ready start labels re-dispatched every poll
+# P1 — plan_ready To Do return is emitted once
 # ===========================================================================
 
 
-def test_p1_plan_start_emitted_every_poll_while_plan_ready(poller, state_manager, monkeypatch):
-    """Document current poller behaviour: start labels re-listed every cycle.
-
-    Correct behaviour (asserted via xfail companion): once dispatched / while
-    already scheduled, do not re-add every poll. This test proves the firehose.
-    """
+def test_p1_plan_ready_mode_plan_does_not_start(poller, state_manager, monkeypatch):
+    """plan_ready + Mode: plan must not start a build."""
     from src.config import settings
 
-
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
 
     state_manager.create_state("PS-1", "plan me", "d")
     state_manager.update_state("PS-1", status=TaskStatus.PLAN_READY)
     poller._seen_issues.add("PS-1")
+    poller._last_jira_status = {"PS-1": "to do"}
 
     issue = {
         "key": "PS-1",
-        "fields": _todo_fields(labels=["bot", "ai-start-work"], summary="plan me"),
+        "fields": _todo_fields(
+            summary="plan me",
+            description="{params}\nMode: plan\n{params}",
+            assignee={"displayName": "DevBot"},
+        ),
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
 
     r1 = poller.poll_board()
-    r2 = poller.poll_board()
-    keys1 = [i["key"] for i in r1]
-    keys2 = [i["key"] for i in r2]
-    assert "PS-1" in keys1
-    assert "PS-1" not in keys2
+    assert "PS-1" not in [i["key"] for i in r1]
 
 
-def test_p1_plan_start_must_not_reemit_every_poll(poller, state_manager, monkeypatch):
+def test_p1_plan_ready_mode_build_emits_once(poller, state_manager, monkeypatch):
     from src.config import settings
 
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
-
-    state_manager.create_state("PS-2", "plan me", "d")
+    desc = (
+        "{params}\nRepository: https://g.example/r.git\n"
+        "Source branch: feature/x\nTarget branch: develop\n"
+        "Mode: build\n{params}"
+    )
+    state_manager.create_state("PS-2", "plan me", desc)
     state_manager.update_state("PS-2", status=TaskStatus.PLAN_READY)
     poller._seen_issues.add("PS-2")
 
     issue = {
         "key": "PS-2",
-        "fields": _todo_fields(labels=["bot", "ai-start-work"], summary="plan me"),
+        "fields": _todo_fields(
+            summary="plan me",
+            description=desc,
+            assignee={"displayName": "DevBot"},
+        ),
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
 
     r1 = poller.poll_board()
     assert "PS-2" in [i["key"] for i in r1]
-    # Second poll must not re-dispatch while still plan_ready (no in-flight claim yet)
-    # Correct design: claim/schedule once, or require status leave plan_ready first.
+
+    poller._plan_start_emitted.add("PS-2")
     r2 = poller.poll_board()
     assert "PS-2" not in [i["key"] for i in r2], (
-        "plan_ready start must not fire on every poll while still plan_ready"
+        "plan_ready Mode: build must not fire on every poll"
     )
 
 
@@ -331,7 +337,7 @@ def test_p1b_completed_still_todo_poller_does_not_reemit(poller, state_manager):
             "fields": {
                 "summary": "s",
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["bot", "ai-start-work"],
+                "labels": ["bot"],
             },
         }
     ]
@@ -449,54 +455,62 @@ def test_p3_error_text_changed_true_when_fingerprint_missing(poller):
 
 
 # ===========================================================================
-# P4 — Plan start requires trigger label, not start labels alone
+# P4 — Plan start is To Do return + bot assignee
 # ===========================================================================
 
 
-def test_p4_plan_start_with_only_start_label_must_dispatch(
+def test_p4_plan_start_unassigned_does_not_dispatch(
     poller, state_manager, monkeypatch
 ):
     from src.config import settings
 
-
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
 
     state_manager.create_state("START-1", "s", "d")
     state_manager.update_state("START-1", status=TaskStatus.PLAN_READY)
     poller._seen_issues.add("START-1")
+    poller._last_jira_status = {"START-1": "in progress"}
 
     issue = {
         "key": "START-1",
-        # Only start label — no bot / ai-assist
-        "fields": _todo_fields(labels=["ai-start-work"], summary="s"),
+        "fields": _todo_fields(labels=[], summary="s", assignee=None),
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
 
     result = poller.poll_board()
-    assert "START-1" in [i["key"] for i in result], (
-        "To Do + plan_ready + ai-start-work must start without requiring bot label"
-    )
+    assert "START-1" not in [i["key"] for i in result]
 
 
-def test_p4_plan_start_with_bot_and_start_label_dispatches(
+def test_p4_plan_start_mode_build_with_assignee_dispatches(
     poller, state_manager, monkeypatch
 ):
     from src.config import settings
 
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
-
-    state_manager.create_state("START-2", "s", "d")
+    desc = (
+        "{params}\nRepository: https://g.example/r.git\n"
+        "Source branch: feature/x\nTarget branch: develop\n"
+        "Mode: build\n{params}"
+    )
+    state_manager.create_state("START-2", "s", desc)
     state_manager.update_state("START-2", status=TaskStatus.PLAN_READY)
     poller._seen_issues.add("START-2")
 
     issue = {
         "key": "START-2",
-        "fields": _todo_fields(labels=["bot", "ai-execute"], summary="s"),
+        "fields": _todo_fields(
+            labels=[],
+            summary="s",
+            description=desc,
+            assignee={"displayName": "DevBot"},
+        ),
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
 
     result = poller.poll_board()
     assert "START-2" in [i["key"] for i in result]

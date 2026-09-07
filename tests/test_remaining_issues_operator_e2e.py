@@ -534,7 +534,7 @@ def test_operator_issue_detail_tsx_cancel_uses_detail_not_route():
 
 
 # ---------------------------------------------------------------------------
-# plan_start latch — label seen, then second poll skips
+# plan_start latch — To Do return seen, then second poll skips
 # ---------------------------------------------------------------------------
 
 
@@ -543,7 +543,10 @@ def test_operator_plan_start_latched_before_handler(
 ):
     world, base, client = jira
     created = client.create_issue(
-        "KAN", "planned", "Mode: plan", labels=["bot", "ai-start-work"]
+        "KAN",
+        "planned",
+        "{params}\nMode: build\n{params}",
+        labels=["bot"],
     )
     key = created["key"]
     state_manager.create_state(key, "planned", "d")
@@ -551,6 +554,7 @@ def test_operator_plan_start_latched_before_handler(
 
     poller = JiraPoller(client=client, interval_seconds=1, board_id="10")
     poller.state_manager = state_manager
+    poller._last_jira_status = {key: "in progress"}
     handled: List[str] = []
     poller._handler = lambda e: handled.append(e["issue"]["key"])
 

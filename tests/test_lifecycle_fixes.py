@@ -98,18 +98,14 @@ def test_fail_issue_still_errors_in_flight(processor, state_manager, fake_jira):
 
 
 # ---------------------------------------------------------------------------
-# plan_ready: Mode:build alone does not start; start label does
+# plan_ready: Mode: plan never builds; Mode: build on To Do does
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manager):
-    state_manager.create_state(
-        "PR-M1",
-        "s",
-        "{params}\nRepository: https://g.example/r.git\n"
-        "Source branch: feature/x\nTarget branch: develop\nMode: build\n{params}",
-    )
+async def test_plan_ready_mode_plan_does_not_start(processor, state_manager):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-M1", "s", desc)
     state_manager.update_state("PR-M1", status=TaskStatus.PLAN_READY)
     started = {"ok": False}
 
@@ -122,13 +118,9 @@ async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manag
             "key": "PR-M1",
             "fields": {
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["ai-assist"],
+                "labels": [],
                 "summary": "s",
-                "description": (
-                    "{params}\nRepository: https://g.example/r.git\n"
-                    "Source branch: feature/x\nTarget branch: develop\n"
-                    "Mode: build\n{params}"
-                ),
+                "description": desc,
             },
         },
     }
@@ -136,6 +128,37 @@ async def test_plan_ready_mode_build_alone_does_not_start(processor, state_manag
         await processor._handle_issue_updated(event)
     assert started["ok"] is False
     assert state_manager.get_state("PR-M1").status == TaskStatus.PLAN_READY
+
+
+@pytest.mark.asyncio
+async def test_plan_ready_mode_build_starts(processor, state_manager):
+    desc = (
+        "{params}\nRepository: https://g.example/r.git\n"
+        "Source branch: feature/x\nTarget branch: develop\n"
+        "Mode: build\n{params}"
+    )
+    state_manager.create_state("PR-M2", "s", desc)
+    state_manager.update_state("PR-M2", status=TaskStatus.PLAN_READY)
+    started = {"ok": False}
+
+    async def fake_exec(st):
+        started["ok"] = True
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "PR-M2",
+            "fields": {
+                "status": {"name": "To Do", "statusCategory": {"key": "new"}},
+                "labels": [],
+                "summary": "s",
+                "description": desc,
+            },
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        await processor._handle_issue_updated(event)
+    assert started["ok"] is True
 
 
 # ---------------------------------------------------------------------------

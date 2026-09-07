@@ -44,7 +44,7 @@ from src.state.models import TaskStatus
 from tests.test_simple_task_timing_e2e import _make_local_origin
 
 TRIGGER = "bot"
-E2E_LABEL = "vd-claim-e2e"  # not a start label (ai-start-work / ai-execute)
+E2E_LABEL = "vd-claim-e2e"
 SHARED_SOURCE = "feature/vd-claim-shared"
 TARGET = "develop"
 

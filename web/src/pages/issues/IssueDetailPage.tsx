@@ -136,8 +136,8 @@ export function IssueDetailPage() {
           )}
           {detail?.status === 'plan_ready' && (
             <p className="mt-2 text-xs text-text-muted">
-              To start build: keep this issue on To Do and add label{' '}
-              <code>ai-start-work</code> or <code>ai-execute</code>. There is no Start button.
+              Plan is ready. Set Mode: build in the ticket {"{params}"} and
+              put it on To Do to implement. There is no Start button.
             </p>
           )}
         </div>

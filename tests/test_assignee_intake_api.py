@@ -255,3 +255,125 @@ def test_live_jira_assignee_only_intake_via_rest_api(tmp_path, monkeypatch):
     if label_key in rows:
         assert rows[label_key].get("matched_assignee") is False
         assert rows[label_key].get("will_process") is False
+
+
+def _params_block(stamp: str, mode: str) -> str:
+    return (
+        "vd mode-handoff e2e (automated; safe to close).\n"
+        "{params}\n"
+        "Repository: https://gitlab.com/beratersari0/test_project.git\n"
+        f"Source branch: feature/vd-mode-{stamp}\n"
+        "Target branch: main\n"
+        f"Mode: {mode}\n"
+        "{params}\n"
+    )
+
+
+def test_dashboard_start_disabled_points_at_mode_build(tmp_path, monkeypatch):
+    """POST /api/tasks/{key}/start stays 410; operator uses Mode: build."""
+    _isolate_runtime(tmp_path, monkeypatch)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-START", "s", _params_block("x", "plan"))
+    http = TestClient(create_dashboard_app(processor=None, state_manager=sm))
+    r = http.post("/api/tasks/KAN-START/start")
+    assert r.status_code == 410
+    detail = r.json().get("detail") or ""
+    assert "Mode: build" in detail
+    assert "ai-start-work" not in detail
+    assert "ai-execute" not in detail
+
+
+@pytest.mark.asyncio
+async def test_live_jira_mode_plan_does_not_build_until_mode_build(
+    tmp_path, monkeypatch
+):
+    """Real Jira REST: plan_ready + Mode: plan never builds; Mode: build does.
+
+    1. POST issue with Mode: plan, assign PAT user
+    2. Local plan_ready + poller on live GET → no implementation
+    3. PUT description Mode: build
+    4. Poller + processor on live GET → execution starts
+    """
+    if not _live_flag():
+        pytest.skip("Set VD_LIVE_JIRA=1 or VD_LIVE_PLAN_BUILD=1")
+
+    from unittest.mock import AsyncMock
+
+    from src.jira.poller import JiraPoller
+    from src.processor import JobProcessor
+    from src.reporter.jira_reporter import JiraReporter
+    from src.state.models import TaskStatus
+
+    jira = _live_jira()
+    me = jira.get_myself()
+    assert me and isinstance(me, dict), "GET /myself failed"
+    account_id = str(me.get("accountId") or "").strip()
+    display = str(me.get("displayName") or me.get("emailAddress") or "").strip()
+    assert account_id and display
+    monkeypatch.setattr(settings, "trigger_assignee_names", display.lower())
+
+    project = ((_dotenv_map().get("JIRA_PROJECTS") or "KAN").split(",")[0] or "KAN").strip()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    created = jira.create_issue(
+        project,
+        f"[vd-mode] plan then build {stamp}",
+        _params_block(stamp, "plan"),
+        issue_type="Task",
+        labels=[E2E_LABEL],
+    )
+    assert created and created.get("key"), jira.last_error
+    key = created["key"]
+    print(f"\n[live mode] created {key}", flush=True)
+    assert jira.assign_issue(key, account_id), jira.last_error
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state(key, f"[vd-mode] plan then build {stamp}", _params_block(stamp, "plan"))
+    sm.update_state(key, status=TaskStatus.PLAN_READY)
+
+    live_plan = jira.get_issue(
+        key, fields=["summary", "description", "labels", "assignee", "status"]
+    )
+    assert live_plan
+    poller = JiraPoller(client=jira, board_id="1", interval_seconds=30)
+    poller.state_manager = sm
+    poller._seen_issues.add(key)
+    with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
+        with patch.object(jira, "get_sprint_issues", return_value=[live_plan]):
+            skipped = poller.poll_board()
+    assert key not in [i["key"] for i in skipped], (
+        f"Mode: plan ticket was sent to implement: {[i['key'] for i in skipped]}"
+    )
+    print(f"[live mode] {key} plan_ready + Mode: plan → poller skip", flush=True)
+
+    assert jira.update_issue(key, fields={"description": _params_block(stamp, "build")}), (
+        jira.last_error
+    )
+    live_build = jira.get_issue(
+        key, fields=["summary", "description", "labels", "assignee", "status"]
+    )
+    assert live_build
+    poller._plan_start_emitted.discard(key)
+    with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
+        with patch.object(jira, "get_sprint_issues", return_value=[live_build]):
+            accepted = poller.poll_board()
+    assert key in [i["key"] for i in accepted], (
+        f"Mode: build ticket not accepted: {[i['key'] for i in accepted]}"
+    )
+    print(f"[live mode] {key} Mode: build → poller accept", flush=True)
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=jira):
+        proc = JobProcessor()
+    proc.state_manager = sm
+    proc.reporter = JiraReporter(client=jira)
+    proc.jira_client = jira
+    proc._start_execution_workflow = AsyncMock(return_value=None)
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": live_build,
+    }
+    outcome = await proc.process_event(event)
+    assert outcome.get("work_started") is True, outcome
+    proc._start_execution_workflow.assert_awaited()
+    print(f"[live mode] {key} processor started execution", flush=True)

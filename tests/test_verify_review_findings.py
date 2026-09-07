@@ -131,7 +131,7 @@ def _seed_opencode_session(
 
 
 # ---------------------------------------------------------------------------
-# 1. plan_ready + ai-start-work after daemon restart
+# 1. plan_ready + To Do return after daemon restart
 # ---------------------------------------------------------------------------
 
 
@@ -139,25 +139,29 @@ def _seed_opencode_session(
 async def test_plan_start_after_restart_must_start_execution(
     state_manager, fake_jira, reporter, tmp_path, monkeypatch
 ):
-    """Cold poller (_seen_issues empty) + start label must start build."""
+    """Cold poller + In Progress → To Do must start build."""
     from src.jira.poller import JiraPoller
     from src.processor import JobProcessor
 
-
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
 
     key = "VR-PLAN-1"
-    state_manager.create_state(key, "plan me", "Mode: plan")
+    desc = (
+        "{params}\nRepository: https://g.example/r.git\n"
+        "Source branch: feature/x\nTarget branch: develop\n"
+        "Mode: build\n{params}"
+    )
+    state_manager.create_state(key, "plan me", desc)
     state_manager.update_state(key, status=TaskStatus.PLAN_READY)
 
     issue = {
         "key": key,
         "fields": {
             "summary": "plan me",
-            "description": "Mode: plan",
+            "description": desc,
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["ai-start-work"],
-            "assignee": None,
+            "labels": [],
+            "assignee": {"displayName": "DevBot"},
         },
     }
 
@@ -165,6 +169,7 @@ async def test_plan_start_after_restart_must_start_execution(
     poller.state_manager = state_manager
     poller._seen_issues = set()
     poller._plan_start_emitted = set()
+    poller._last_jira_status = {key: "in progress"}
     poller.client.get_active_sprint = MagicMock(return_value=None)
     poller.client.get_board_issues = MagicMock(return_value=[issue])
 
@@ -184,7 +189,7 @@ async def test_plan_start_after_restart_must_start_execution(
     event = captured[0]
     assert event["webhookEvent"] == "jira:issue_updated", (
         f"after restart plan-start was sent as {event['webhookEvent']}; "
-        "create path ignores start labels"
+        "create path ignores plan_ready"
     )
 
     monkeypatch.chdir(tmp_path)
@@ -230,7 +235,7 @@ async def test_live_jira_plan_start_after_restart():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     summary = f"[vd-verify] plan-start after restart {stamp}"
     description = (
-        "Automated verification of plan_ready + ai-start-work after restart.\n"
+        "Automated verification of plan_ready + To Do return after restart.\n"
         "Do not process as a real job.\n"
         "Mode: plan\n"
     )
@@ -246,13 +251,10 @@ async def test_live_jira_plan_start_after_restart():
     key = created["key"]
     print(f"\n[live jira] created {key}", flush=True)
 
-    assert client.add_labels(key, ["ai-start-work"]), "add_labels failed"
     live = client.get_issue(key)
     assert live and live.get("key") == key
     fields = live.get("fields") or {}
-    labels = [str(x).lower() for x in (fields.get("labels") or [])]
-    assert "ai-start-work" in labels
-    print(f"[live jira] {key} labels={labels} status={fields.get('status')}", flush=True)
+    print(f"[live jira] {key} status={fields.get('status')}", flush=True)
 
     from pathlib import Path as _P
     import tempfile
@@ -271,7 +273,7 @@ async def test_live_jira_plan_start_after_restart():
             "description": fields.get("description") or description,
             "status": fields.get("status")
             or {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": fields.get("labels") or ["ai-start-work"],
+            "labels": fields.get("labels") or [],
             "assignee": fields.get("assignee"),
         },
     }
@@ -301,7 +303,7 @@ async def test_live_jira_plan_start_after_restart():
     event = captured[0]
     print(f"[live jira] dispatched {event['webhookEvent']}", flush=True)
     assert event["webhookEvent"] == "jira:issue_updated", (
-        f"live restart path sent {event['webhookEvent']} (create ignores start labels)"
+        f"live restart path sent {event['webhookEvent']} (create ignores plan_ready)"
     )
 
     proc = JobProcessor()

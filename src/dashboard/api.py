@@ -916,17 +916,16 @@ def create_dashboard_app(
 
     @app.post("/api/tasks/{issue_key}/start")
     async def task_start(issue_key: str) -> dict:
-        """Deprecated: plans never auto-start; dashboard Start is disabled.
+        """Deprecated: dashboard Start is disabled.
 
-        Use a new issue with Mode: build, or label ai-start-work / ai-execute
-        on a plan_ready ticket while it is To Do.
+        After a plan, set Mode: build in {params} (or open a new build issue).
         """
         raise HTTPException(
             status_code=410,
             detail=(
                 "Starting work from the dashboard is disabled. "
-                "Plans never auto-start: open a new Mode: build issue, or add "
-                "label ai-start-work / ai-execute on a plan_ready ticket in To Do."
+                "After a plan, set Mode: build in {params} and put the "
+                "ticket on To Do, or open a new Mode: build issue."
             ),
         )
 

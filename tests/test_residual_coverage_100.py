@@ -253,7 +253,7 @@ async def test_plan_ready_label_skips_when_live(processor, state_manager):
                 key="LAB-1",
                 event_type="jira:issue_updated",
                 status="In Progress",
-                labels=["ai-start-work"],
+                labels=[],
             )
         )
         m.assert_not_called()
@@ -329,7 +329,7 @@ def test_poller_plan_ready_label_log(state_manager):
         "key": "PR-L",
         "fields": {
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["ai-start-work"],
+            "labels": [],
             "assignee": None,
             "summary": "s",
             "description": "d",

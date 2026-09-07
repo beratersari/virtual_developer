@@ -54,36 +54,36 @@ Yaver is a Python daemon that:
   after a finished run is the operator rework signal.
   After accept the bot moves the board to In Progress so the next poll does
   not start another job until the ticket is To Do again.
-- **Plans never auto-start** (intentional) — see next subsection. Dashboard HTTP Start stays disabled. `plan_ready` is **not** rework.
+- **Plans wait at `plan_ready`** until ``Mode: build`` is set. ``Mode: plan``
+  never starts implementation. Dashboard HTTP Start stays disabled.
 - Failures must set `ERROR` **and** notify Jira (`_fail_issue` / `post_error`). Stuck in-flight jobs are watchdogged in the daemon. Fail/cancel/watchdog use **CAS** so late ERROR cannot overwrite `COMPLETED` / `CANCELLED`.
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
 - Temp clones are kept. Operators delete them from dashboard Storage. No daemon start, hourly, or job-end auto-purge.
 
-### Intake labels vs `plan_ready` (**intentional** — not a stuck bug)
+### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
 Assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** means the issue is eligible
 for poller intake **whenever it is To Do-like**, including after a previous
 completed/error/cancelled run. In-flight (`planning` / `executing`) is never
 restarted from poll noise.
-**`plan_ready`** still does not auto-build.
 
 Typical **plan** lifecycle:
 
 ```text
-To Do + bot (or ai-assist)
+To Do + bot assignee
         │
         ▼
   Mode: plan  →  planning  →  plan_ready
         │                        │
-        │                        ├─ Jira label ai-plan-ready
         │                        ├─ plan comment / description append
+        │                        ├─ board moved to In Progress
         │                        └─ local requeue_eligible = false
         │
-        │   Still To Do + bot alone  →  poller SKIPS (by design)
+        │   Mode: plan still  →  poller SKIPS (wait; never implements)
         │
-        ├─ add label ai-start-work  or  ai-execute  (while To Do)
-        │         → poller plan_start → build on same ticket
+        ├─ operator sets Mode: build (same {params}) + To Do
+        │         → build on same ticket
         │
         └─ open a NEW issue with Mode: build (same {params} repo/branches)
                   → independent build run
@@ -93,14 +93,11 @@ To Do + bot (or ai-assist)
 |-----------|------------------------------|
 | No local state + To Do + bot assignee | Accept as **new** work |
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
-| Local `plan_ready` + To Do + only `bot` / `ai-assist` | **Do not** reprocess or auto-build. Log often: `Skip cold-start requeue … (local status=plan_ready)` |
-| Local `plan_ready` + To Do + **`ai-start-work` or `ai-execute`** | **Start** implementation on that issue |
-| Local `plan_ready` + same ticket edited to `Mode: build` alone | **Do not** auto-promote (intentional) |
+| Local `plan_ready` + `Mode: plan` | **Wait.** Do not implement. |
+| Local `plan_ready` + `Mode: build` + To Do | **Start** implementation on that issue |
 | Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
-**Do not “fix”** by auto-starting `plan_ready` when the ticket sits on To Do with
-only `bot`. Operators will see “stuck on To Do with bot label” after a successful
-plan; that is the waiting state until an explicit start signal.
+**Do not “fix”** by starting a build while `{params}` still says `Mode: plan`.
 
 **Do not “fix”** by skipping `completed` / `error` / `cancelled` that are still
 To Do and assigned to the bot. That is the rework loop: To Do means “run again.”
@@ -344,7 +341,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. Plans never auto-start (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set Mode: build to implement (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -739,7 +736,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 
 | File | Purpose |
 |------|---------|
-| `README.md` | User-facing setup, architecture, plan_ready / never auto-start |
+| `README.md` | User-facing setup, architecture, plan_ready / To Do return |
 | `CHANGELOG.md` | User-facing release notes (Keep a Changelog) |
 | `packaging/RELEASE_NOTES.md` | GitHub Release body used by tag CI |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |

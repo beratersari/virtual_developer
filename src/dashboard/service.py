@@ -2251,8 +2251,8 @@ def build_task_detail(
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
     }
-    # Plans never auto-start; dashboard does not offer a Start button.
-    # Operator: new Mode: build issue, or ai-start-work / ai-execute label.
+    # Dashboard does not offer a Start button. After a plan, set
+    # Mode: build (or open a new Mode: build issue).
     can_start = False
 
     meta = state.metadata or {}

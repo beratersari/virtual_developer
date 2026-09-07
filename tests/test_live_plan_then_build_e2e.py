@@ -1,8 +1,8 @@
 """LIVE plan → build: real Jira REST + OpenCode must write a plan, then follow it.
 
-Creates a Jira ticket via REST, assigns it to the PAT user (intake is
-assignee-only — labels are not required), confirms ``JiraPoller`` would
-accept it, runs ``JobProcessor`` planning, then ``start_plan_execution``.
+Creates a Jira ticket via REST, assigns it to the PAT user, runs
+``JobProcessor`` planning, then the real handoff: PUT ``Mode: build``
+and let the poller + processor start implementation.
 
 A second ticket with only ``bot`` / ``ai-assist`` labels (unassigned) must
 not be accepted.
@@ -82,6 +82,28 @@ def _ready() -> str:
     if "atlassian.net" in host.lower() and not (vals.get("JIRA_EMAIL") or "").strip():
         return "Jira Cloud needs JIRA_EMAIL in .env"
     return ""
+
+
+def _transition_to_todo(jira, issue_key: str) -> bool:
+    """Move a Cloud/on-prem issue back to a To Do-like status."""
+    trans = jira.get_transitions(issue_key) or []
+    hints = (
+        "to do",
+        "todo",
+        "backlog",
+        "open",
+        "yapılacak",
+        "yapilacak",
+        "selected for development",
+    )
+    for t in trans:
+        name = str(t.get("name") or "").lower()
+        to = t.get("to") or {}
+        to_name = str(to.get("name") or "").lower()
+        cat = str((to.get("statusCategory") or {}).get("key") or "").lower()
+        if cat == "new" or any(h in name or h in to_name for h in hints):
+            return bool(jira.do_transition(issue_key, t["id"]))
+    return False
 
 
 def _live_jira_client():
@@ -439,17 +461,50 @@ async def test_live_plan_then_build_follows_plan(tmp_path, monkeypatch):
         print(f"[live] plan bytes={len(plan_text)} path={durable}", flush=True)
         print(plan_text[:1500], flush=True)
 
-        # Operator start signal (same ticket) — not Mode: build auto-promote.
-        started = await proc.start_plan_execution(
-            key, reason="live plan→build e2e start_plan_execution"
+        # Product handoff: Mode: plan must not implement; Mode: build must.
+        handoff = JiraPoller(client=jira, board_id="1", interval_seconds=30)
+        handoff.state_manager = sm
+        handoff._seen_issues.add(key)
+        still_plan = jira.get_issue(
+            key, fields=["summary", "description", "labels", "assignee", "status"]
         )
-        print(f"[live] start_plan_execution={started}", flush=True)
+        assert still_plan
+        with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
+            with patch.object(jira, "get_sprint_issues", return_value=[still_plan]):
+                skipped = handoff.poll_board()
+        assert key not in [i["key"] for i in skipped], (
+            f"Mode: plan started a build: {[i['key'] for i in skipped]}"
+        )
+        print(f"[live] {key} still Mode: plan → poller did not start build", flush=True)
+
+        build_desc = description.replace("Mode: plan", "Mode: build", 1)
+        assert jira.update_issue(key, fields={"description": build_desc}), jira.last_error
+        if not _transition_to_todo(jira, key):
+            pytest.skip(f"{key}: no To Do transition after Mode: build")
+        live_build = jira.get_issue(
+            key, fields=["summary", "description", "labels", "assignee", "status"]
+        )
+        assert live_build
+        handoff._plan_start_emitted.discard(key)
+        with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
+            with patch.object(jira, "get_sprint_issues", return_value=[live_build]):
+                to_build = handoff.poll_board()
+        assert key in [i["key"] for i in to_build], (
+            f"Mode: build not accepted: {[i['key'] for i in to_build]}"
+        )
+        print(f"[live] {key} Mode: build → poller accepted implementation", flush=True)
+
+        build_outcome = await proc.process_event(
+            {"webhookEvent": "jira:issue_updated", "issue": live_build}
+        )
+        print(f"[live] build process_event={build_outcome}", flush=True)
         st2 = sm.get_state(key)
         assert st2 is not None
         print(
             f"[live] after build status={st2.status.value} err={st2.error_message!r}",
             flush=True,
         )
+        assert build_outcome.get("work_started") is True, build_outcome
 
         sessions = tmp_path / "_vd_runtime" / "sessions"
         # conftest isolates sessions here; also search job-linked paths

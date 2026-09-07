@@ -133,7 +133,6 @@ def test_live_plan_start_latch(live_client, isolated_state):
     key = _create(live_client, "plan-start-latch", labels=["bot"])
     isolated_state.create_state(key, "plan", "d")
     isolated_state.update_state(key, status=TaskStatus.PLAN_READY)
-    assert live_client.add_labels(key, ["ai-start-work"])
 
     poller = JiraPoller(
         client=live_client,
@@ -141,6 +140,7 @@ def test_live_plan_start_latch(live_client, isolated_state):
         board_id=settings.jira_board_id,
         state_manager=isolated_state,
     )
+    poller._last_jira_status = {key: "in progress"}
     poller._handler = lambda e: None
     first = poller.poll_board()
     assert any(i["key"] == key for i in first)

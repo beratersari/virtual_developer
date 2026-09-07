@@ -371,8 +371,13 @@ async def test_plan_ready_label_starts_execution(processor, state_manager):
             "key": "PR-2",
             "fields": {
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["ai-assist", "ai-start-work"],
+                "labels": [],
                 "summary": "s",
+                "description": (
+                    "{params}\nRepository: https://g.example/r.git\n"
+                    "Source branch: feature/x\nTarget branch: develop\n"
+                    "Mode: build\n{params}"
+                ),
             },
         },
     }

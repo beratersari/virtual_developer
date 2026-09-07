@@ -728,26 +728,29 @@ async def test_handle_updated_reprocess_and_label_fail(processor, state_manager)
         )
         m.assert_awaited()
 
-    # plan_ready + label + live skip
+    # plan_ready + To Do + live skip
     state_manager.create_state("UP-L", "s", "d")
     state_manager.update_state("UP-L", status=TaskStatus.PLAN_READY)
     processor._contexts["UP-L"] = {"git": None, "runner": None}
-    # Start labels only apply while the board is still To Do-like (product rule)
     event = {
         "webhookEvent": "jira:issue_updated",
         "issue": {
             "key": "UP-L",
             "fields": {
                 "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-                "labels": ["ai-start-work"],
+                "labels": [],
                 "summary": "s",
-                "description": "d",
+                "description": (
+                    "{params}\nRepository: https://g.example/r.git\n"
+                    "Source branch: feature/x\nTarget branch: develop\n"
+                    "Mode: build\n{params}"
+                ),
             },
         },
     }
     await processor._handle_issue_updated(event)
 
-    # plan_ready + label + execution fails
+    # plan_ready + To Do + execution fails
     del processor._contexts["UP-L"]
     with patch.object(
         processor,
