@@ -563,30 +563,17 @@ def test_format_commit_message(gm):
 
 
 def test_configure_and_commit(gm):
-    with patch.object(gm, "_run_git", return_value=_cp()) as rg:
-        with patch("src.git_manager.settings") as s:
-            s.git_user_name = "Bot"
-            s.git_user_email = "b@e.com"
-            gm._configure_git_identity()
-    with patch.object(gm, "_run_git", side_effect=RuntimeError("x")):
-        with patch("src.git_manager.settings") as s:
-            s.git_user_name = "Bot"
-            s.git_user_email = "b@e.com"
-            gm._configure_git_identity()
-
     # no changes
-    with patch.object(gm, "_configure_git_identity"):
-        with patch.object(gm, "_run_git", return_value=_cp(stdout="")):
-            assert gm.commit_changes("GM-1", "s") is True
+    with patch.object(gm, "_run_git", return_value=_cp(stdout="")):
+        assert gm.commit_changes("GM-1", "s") is True
     # with changes
-    with patch.object(gm, "_configure_git_identity"):
-        with patch.object(gm, "_run_git", side_effect=[
-            _cp(stdout=" M file.py\n"),
-            _cp(),
-            _cp(),
-        ]):
-            assert gm.commit_changes("GM-1", "s", "d") is True
-    with patch.object(gm, "_configure_git_identity", side_effect=RuntimeError("x")):
+    with patch.object(gm, "_run_git", side_effect=[
+        _cp(stdout=" M file.py\n"),
+        _cp(),
+        _cp(),
+    ]):
+        assert gm.commit_changes("GM-1", "s", "d") is True
+    with patch.object(gm, "_run_git", side_effect=RuntimeError("x")):
         assert gm.commit_changes("GM-1", "s") is False
 
 

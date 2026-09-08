@@ -361,7 +361,6 @@ def list_available_models(
     return merged, cli_err, path_str, cfg_default
 
 
-DEFAULT_JOB_CONTEXT_LIMIT = 128000
 _EXCLUDE_MARKERS = (
     "/opencode.json",
     "opencode.json",

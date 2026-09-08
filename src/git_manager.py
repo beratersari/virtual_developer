@@ -916,9 +916,8 @@ class GitManager:
             raise GitCloneError(
                 "*Yaver* refused to authenticate: "
                 "no GitLab host→PAT mapping is configured while a PAT is set.\n\n"
-                "Add hosts in dashboard Settings (GitLab credentials), set "
-                "`GITLAB_HOST_PATS={\"gitlab.example.com\":\"glpat-…\"}`, "
-                "or set `GITLAB_ALLOWED_HOSTS` with legacy `GITLAB_PAT`."
+                "Add this host with a PAT in dashboard Settings (GitLab), or set "
+                "`GITLAB_HOST_PATS={\"gitlab.example.com\":\"glpat-…\"}`."
             )
         raise GitCloneError(
             (
@@ -2243,19 +2242,9 @@ class GitManager:
 
         return "\n".join(lines)
 
-    def _configure_git_identity(self) -> None:
-        """Configure git user identity locally in the temp directory."""
-        try:
-            self._run_git(["config", "user.name", settings.git_user_name])
-            self._run_git(["config", "user.email", settings.git_user_email])
-        except RuntimeError:
-            logger.warning("Could not configure git identity locally")
-
     def commit_changes(self, issue_key: str, summary: str, description: str = "") -> bool:
         """Stage all changes and create a commit."""
         try:
-            self._configure_git_identity()
-
             status_result = self._run_git(["status", "--porcelain"])
             if not status_result.stdout.strip():
                 logger.info("No changes to commit.")

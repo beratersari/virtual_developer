@@ -203,7 +203,6 @@ def test_poller_skips_in_flight_on_primary_path(state_manager, fake_jira, monkey
     from src.jira.poller import JiraPoller
 
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     p = JiraPoller(client=fake_jira, interval_seconds=1, board_id="1")
     p.state_manager = state_manager
     state_manager.create_state("IF-1", "s", "d")
@@ -230,7 +229,6 @@ def test_poller_skips_plan_ready_without_start_label(
     from src.jira.poller import JiraPoller
 
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     p = JiraPoller(client=fake_jira, interval_seconds=1, board_id="1")
     p.state_manager = state_manager
     state_manager.create_state("PR-1", "s", "d")

@@ -258,7 +258,6 @@ def jira():
 def trigger_settings():
     with patch("src.jira.poller.settings") as s:
         s.trigger_assignee_names_list = ["devbot"]
-        s.trigger_on_assignment = True
         yield s
 
 

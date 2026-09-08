@@ -175,11 +175,14 @@ def test_cors_not_wildcard(tmp_path, monkeypatch):
 
 
 def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
-    """To Do + trigger is rework: completed local state is still re-queued.
+    """To Do + bot assignee is rework: completed local state is still re-queued.
 
     Intentional (AGENTS.md / README). plan_ready is the exception, not
     completed/error/cancelled.
     """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("COLD-1", "done already", "d")
     sm.update_state("COLD-1", status=TaskStatus.COMPLETED)
@@ -195,17 +198,12 @@ def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
         "fields": {
             "summary": "done already",
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["ai-assist"],
-            "assignee": None,
+            "assignee": {"displayName": "DevBot"},
         },
     }
     poller.client.get_active_sprint.return_value = None
     poller.client.get_board_issues.return_value = [issue]
 
-    from src.config import settings
-
-
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     result = poller.poll_board()
 
     keys = [i["key"] for i in result]
@@ -213,6 +211,9 @@ def test_poller_intakes_terminal_on_todo_with_trigger(tmp_path, monkeypatch):
 
 
 def test_poller_skips_in_flight_on_todo_with_trigger(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     sm.create_state("LIVE-1", "running", "d")
     sm.update_state("LIVE-1", status=TaskStatus.EXECUTING)
@@ -227,17 +228,12 @@ def test_poller_skips_in_flight_on_todo_with_trigger(tmp_path, monkeypatch):
         "fields": {
             "summary": "running",
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["bot"],
-            "assignee": None,
+            "assignee": {"displayName": "DevBot"},
         },
     }
     poller.client.get_active_sprint.return_value = None
     poller.client.get_board_issues.return_value = [issue]
 
-    from src.config import settings
-
-
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     result = poller.poll_board()
     assert [i["key"] for i in result] == []
 

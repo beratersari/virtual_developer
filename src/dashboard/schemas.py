@@ -319,7 +319,6 @@ class SettingsView(BaseModel):
     jira_board_id: str = ""
     jira_projects: str = ""
     poll_interval_seconds: int = 30
-    trigger_on_assignment: bool = True
     max_concurrent_jobs: int = 3
     # Single wall-clock budget for agent runner + OpenCode process (same value)
     agent_task_timeout_seconds: int = 1800
@@ -334,7 +333,7 @@ class SettingsView(BaseModel):
     # Optional Cloud Basic email (not a secret). Empty → Bearer PAT.
     jira_email_configured: bool = False
     jira_email: str = ""
-    # Legacy flat list of hosts (derived from credential map)
+    # Derived from hosts that have a PAT (not a separate allowlist)
     gitlab_allowed_hosts: str = ""
     # Per-host GitLab credentials (hosts only + configured flag; no PAT values)
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
@@ -448,16 +447,16 @@ class SettingsUpdate(BaseModel):
     )
     # Full replace list of host credentials (preferred)
     gitlab_credentials: Optional[List[GitlabHostCredentialUpdate]] = None
-    # Legacy single PAT + hosts (still accepted; merged into map)
+    # Leftover single PAT (still accepted; merged into the host→PAT map)
     gitlab_pat: Optional[str] = Field(
         default=None,
         max_length=4000,
-        description="Legacy write-only single GitLab PAT",
+        description="Leftover write-only single GitLab PAT",
     )
     gitlab_allowed_hosts: Optional[str] = Field(
         default=None,
         max_length=2000,
-        description="Legacy comma-separated hosts for single GITLAB_PAT",
+        description="Leftover hosts for a lone GITLAB_PAT; ignored when a host→PAT map exists",
     )
     jira_board_id: Optional[str] = Field(
         default=None,
@@ -483,7 +482,6 @@ class SettingsUpdate(BaseModel):
             )
         return text
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
-    trigger_on_assignment: Optional[bool] = None
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
     # Agent and OpenCode share this one timeout (orchestrator aborts the serve turn)
     agent_task_timeout_seconds: Optional[int] = Field(
