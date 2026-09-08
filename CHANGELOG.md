@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- Settings tabs group Jira, GitLab, projects, agent, and runtime fields separately. GitLab trigger username is a single field (`GITLAB_BOT_MENTIONS`). Jira assignee name and mention token are the same identity (`TRIGGER_ASSIGNEE_NAMES`).
+
 ### Removed
 
 - Jira webhook intake (`JIRA_INTAKE_MODE`, `JIRA_WEBHOOK_SECRET`, `POST /webhooks/jira`). The board poller is the only Jira intake. GitLab project webhooks are unchanged.

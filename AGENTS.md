@@ -8,7 +8,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 Yaver is a Python daemon that:
 
-1. Discovers issues (board poller **or** Jira webhook — `JIRA_INTAKE_MODE`)
+1. Discovers issues (board poller: To Do + bot assignee)
 2. Routes work (plan / direct execution / oracle)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
@@ -314,8 +314,7 @@ JIRA_API_TOKEN=your-api-token-here
 
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
-- Poller focuses on board/sprint + To Do + bot assignee (`JIRA_INTAKE_MODE=poll`).
-- **Webhook intake** (`JIRA_INTAKE_MODE=webhook`): `POST /webhooks/jira`. Triggers only on **assignment to** the bot (changelog `assignee.to`; unassign is ignored) or a **comment that mentions** the bot. Bot-authored / `*Yaver*` comments are ignored (loop guard). Poller sleeps while webhook mode is on.
+- Poller focuses on board/sprint + To Do + bot assignee. The board poller is the only Jira intake.
 
 ### Config checklist (common)
 
@@ -323,14 +322,12 @@ JIRA_API_TOKEN=your-api-token-here
 |----------|------|
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
-| `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
+| `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles on GitLab webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller requires (e.g. `devbot,jira ai bot`) |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
-| `POLL_INTERVAL_SECONDS` | Board poller interval (used when `JIRA_INTAKE_MODE=poll`) |
-| `JIRA_INTAKE_MODE` | `poll` (default, board poller) or `webhook` (`POST /webhooks/jira`) |
-| `JIRA_WEBHOOK_SECRET` | Shared token for `/webhooks/jira?token=` (required in webhook mode) |
+| `POLL_INTERVAL_SECONDS` | Board poller interval |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
@@ -353,7 +350,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, jira_intake_mode (poll | webhook), jira_webhook_secret (write-only, .env), max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_on_assignment, trigger_mentions, trigger_assignee_names, gitlab_bot_mentions, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
 - **No dashboard auth in v1** and **default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true`** are **intentional** product choices (LAN ops / offline Windows zip). Do not treat unauthenticated remote bind as a bug. Lock down with `DASHBOARD_HOST=127.0.0.1` and/or `DASHBOARD_ALLOW_REMOTE=false` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -581,7 +578,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
 | Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Runs `opencoderman/packaging/build_artifact.py --in-place` then `install.py`. Needs **Python** + network to the official OpenCode GitHub release. Offline CLI sources: `opencoderman/vendor/bin/<os>/`, `vendor/bin/opencode`, or `vendor/opencode-home.zip`. |
 | Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
-| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
+| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only), **`install-opencode-agents.bat`** (copy `agents/` + `skills/` into the detected OpenCode home). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
 ### 9.2 cmd.exe / installer landmines
@@ -756,6 +753,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `src/dashboard/` | Dashboard API and poll snapshot |
 | `opencoderman/` | Git submodule: OpenCode installer, agents, skills, CLI pins |
 | `packaging/install_opencode.py` | Yaver wrapper around `opencoderman/install.py` (CLI sources + rg/glab extras) |
+| `packaging/install_opencode_agents.py` | Copy `agents/` + `skills/` into a detected OpenCode home (no CLI install) |
 | `packaging/windows/README.md` | Offline zip design, versioning table, Windows pain points |
 | `packaging/linux/README.md` | Linux install/start scripts + offline zip (CI `linux-dist.yml`) |
 | `packaging/pyinstaller/README.md` | Standalone `yaver` / `yaver.exe` (PyInstaller; CI `executables.yml`) |
@@ -783,8 +781,8 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencode_configs/` (OpenCoderman `agents/` + `skills/` next to the exe) |
-| Not bundled | OpenCode, Codex, Git, glab — still installed separately |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (full tree, no `.git`), `opencode_configs/` (agents + skills copy), `install-opencode-agents.bat` / `.sh` |
+| Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
 | OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |

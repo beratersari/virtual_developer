@@ -65,7 +65,7 @@ def test_spa_freshness_needles_exist_in_dashboard_source():
     blob = _web_src_blob()
     needles = _required_needles()
     assert "agent_backend" in needles
-    assert "One model id for both OpenCode and Codex jobs" in needles
+    assert "Default model for new jobs." in needles
     assert "Type any id Codex accepts" in needles
     assert "Codex API key" not in needles
     missing = [n for n in needles if n not in blob]
