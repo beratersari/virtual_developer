@@ -89,9 +89,6 @@ export type SettingsPayload = {
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
   gitlab_webhook_path?: string
-  jira_intake_mode?: 'poll' | 'webhook' | string
-  jira_webhook_secret_configured?: boolean
-  jira_webhook_path?: string
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
@@ -496,13 +493,12 @@ export type SettingsPatch = Partial<
     | 'agent_backend'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
-    | 'jira_intake_mode'
     | 'trigger_mentions'
     | 'trigger_assignee_names'
+    | 'gitlab_bot_mentions'
   >
 > & {
   jira_api_token?: string
-  jira_webhook_secret?: string
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
 }

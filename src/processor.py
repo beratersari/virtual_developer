@@ -157,7 +157,7 @@ class JobProcessor:
         self._freeze_session_binds: set[str] = set()
         # GitLab note ids already accepted (webhook retries)
         self._gitlab_seen_notes: set[str] = set()
-        # Jira webhook event ids (comment:… / assignee:… / created:…)
+        # Jira intake event ids (comment:… / assignee:… / created:…)
         self._jira_seen_events: set[str] = set()
         
         logger.info("Initializing JobProcessor")
@@ -2893,8 +2893,6 @@ class JobProcessor:
 
         Events use a ``webhookEvent`` key for historical compatibility with
         the poller envelope (``jira:issue_created`` / ``jira:issue_updated``).
-        HTTP Jira webhooks set ``webhook_intake=True`` (assignment / mention).
-
         Returns a small outcome dict so schedule dispatch can tell a real start
         from a deliberate no-op (e.g. plan_ready without an explicit start).
         """
@@ -3047,11 +3045,7 @@ class JobProcessor:
                 issue_key=issue_key,
                 issue_summary=summary,
                 description=description,
-                triggered_by=(
-                    "scheduled"
-                    if scheduled_job
-                    else ("webhook" if event.get("webhook_intake") else "poller")
-                ),
+                triggered_by=("scheduled" if scheduled_job else "poller"),
                 jira_assignee=assignee,
             )
             self.state_manager.update_state(
@@ -3130,13 +3124,6 @@ class JobProcessor:
 
         is_todo = JiraPoller._is_todo_status(fields)
 
-        webhook_intake = bool(event.get("webhook_intake"))
-
-        # Explicit webhook assignment / mention: start or re-run regardless of
-        # the Jira column. In-flight is still never restarted.
-        if webhook_intake:
-            return await self._handle_webhook_intake(event, state)
-
         # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
         # (poller already required a trigger) resets and runs again.
         # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
@@ -3186,47 +3173,6 @@ class JobProcessor:
             return False, "plan_ready; waiting for plan_execute"
 
         return False, f"no action for status {state.status.value}"
-
-    async def _handle_webhook_intake(
-        self, event: Dict[str, Any], state: Optional[JiraAgentState]
-    ) -> tuple[bool, Optional[str]]:
-        """Assignment-to-bot or mention — explicit start, not poller To Do noise.
-
-        In-flight is never restarted. plan_ready starts execution only on
-        ``plan_execute`` (In Progress). Mentions with ``plan_refactor`` revise
-        the plan. Terminal work is reset and run again even if the board is
-        still In Progress.
-        """
-        issue = event.get("issue") or {}
-        issue_key = issue.get("key") or ""
-        trigger = str(event.get("webhook_trigger") or "webhook")
-        logger.info(
-            f"{issue_key}: webhook intake ({trigger}) "
-            f"local={state.status.value if state else 'none'}"
-        )
-        if self._is_live_processing(issue_key):
-            return False, "already live in processing cache"
-        if state and state.status in self.IN_FLIGHT_STATUSES:
-            return False, f"already in progress ({state.status.value})"
-
-        if state and state.status == TaskStatus.PLAN_READY:
-            handoff = await self._maybe_handle_plan_handoff(event, state)
-            if handoff is not None:
-                return handoff
-            logger.info(
-                f"{issue_key}: webhook plan_ready ignored (need plan_execute)"
-            )
-            return False, "plan_ready; waiting for plan_execute"
-
-        if state and state.status in self.TERMINAL_STATUSES:
-            logger.info(
-                f"Reprocessing {issue_key} from {state.status.value} "
-                f"(webhook {trigger})"
-            )
-            self._reset_for_reprocess(issue_key)
-            return await self._handle_issue_created(event)
-
-        return await self._handle_issue_created(event)
     
     async def _handle_comment_created(self, event: Dict[str, Any]):
         """Handle new comments (for @mentions)."""
@@ -3693,7 +3639,7 @@ class JobProcessor:
         event_id = str(event.get("jira_event_id") or "").strip()
         if event_id:
             if event_id in self._jira_seen_events:
-                logger.info(f"{key}: duplicate Jira webhook event {event_id}; skip")
+                logger.info(f"{key}: duplicate Jira intake event {event_id}; skip")
                 return {
                     "ok": True,
                     "queued": False,

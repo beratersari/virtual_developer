@@ -1288,7 +1288,9 @@ def test_config_property_edges(monkeypatch):
         gitlab_allowed_hosts="",
     )
     assert s.jira_projects_list == ["PROJ"]
-    assert s.trigger_mentions_list == ["@DevBot", "@AI"]
+    assert s.trigger_mentions_list == [
+        n if n.startswith("@") else f"@{n}" for n in s.trigger_assignee_names_list
+    ]
     assert s.gitlab_allowed_hosts_list == []
 
     s2 = Settings(
@@ -1299,7 +1301,9 @@ def test_config_property_edges(monkeypatch):
         gitlab_allowed_hosts=" GitLab.com , HOST.Example ",
     )
     assert s2.jira_projects_list == ["A", "B"]
-    assert s2.trigger_mentions_list == ["@A", "@B"]
+    assert s2.trigger_mentions_list == [
+        n if n.startswith("@") else f"@{n}" for n in s2.trigger_assignee_names_list
+    ]
     assert s2.gitlab_allowed_hosts_list == []
 
     s3 = Settings(jira_host="", jira_api_token="")
@@ -1312,6 +1316,33 @@ def test_config_property_edges(monkeypatch):
     with pytest.raises(ValueError) as ei2:
         s4.validate_or_raise()
     assert "JIRA_API_TOKEN" in str(ei2.value)
+
+
+def test_jira_bot_name_is_one_identity():
+    from src.config import Settings
+
+    s = Settings(trigger_assignee_names="Beratersari")
+    assert s.trigger_assignee_names_list == ["beratersari"]
+    assert s.trigger_mentions_list == ["@beratersari"]
+
+    legacy = Settings(trigger_assignee_names="", trigger_mentions="@DevBot")
+    assert legacy.trigger_assignee_names_list == ["devbot"]
+    assert legacy.trigger_mentions_list == ["@devbot"]
+
+
+def test_gitlab_bot_username_is_a_single_list():
+    from src.config import Settings
+
+    primary = Settings(
+        gitlab_bot_mentions="@BotOne, bot-two",
+        gitlab_bot_usernames="legacy",
+    )
+    assert primary.gitlab_bot_mentions_list == ["botone", "bot-two"]
+    assert primary.gitlab_bot_usernames_list == ["botone", "bot-two"]
+
+    legacy = Settings(gitlab_bot_mentions="", gitlab_bot_usernames="legacy_bot")
+    assert legacy.gitlab_bot_mentions_list == ["legacy_bot"]
+    assert legacy.gitlab_bot_usernames_list == ["legacy_bot"]
 
 
 # ---------------------------------------------------------------------------

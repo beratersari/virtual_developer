@@ -118,6 +118,8 @@ jobs:
             "install-dashboard-system-python.bat",
             "install-opencode-online.bat",
             "install-backends.bat",
+            "install-opencode-agents.bat",
+            "packaging/windows/Install-OpencodeAgents.ps1",
             "install-codex.bat",
             "packaging/install_opencode.py",
             "packaging/windows/Install-Backends.ps1",
@@ -171,8 +173,8 @@ jobs:
           foreach ($needle in @(
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",
-              "Compact wait is unbounded",
-              "One model id for both OpenCode and Codex jobs",
+              "Maximum extra attempts after a timeout or error.",
+              "Default model for new jobs.",
               "Type any id Codex accepts",
               "agent_backend"
             )) {

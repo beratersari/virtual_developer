@@ -190,13 +190,6 @@ def main() -> int:
         expect=(200, 201),
     )
     p.req(
-        "yaver.jira_webhook_bad",
-        "POST",
-        f"{YAVER}/webhooks/jira",
-        body={"webhookEvent": "jira:issue_updated"},
-        expect=(200, 401, 403, 400),
-    )
-    p.req(
         "yaver.gitlab_webhook_bad",
         "POST",
         f"{YAVER}/webhooks/gitlab",

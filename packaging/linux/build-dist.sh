@@ -87,6 +87,7 @@ copy_items=(
   cli.py requirements.txt .env.example VERSION README.md AGENTS.md
   commitMsgFormat.md pytest.ini
   install.sh install-dashboard.sh install-backends.sh install-codex.sh
+  install-opencode-agents.sh
   start.sh start-backend.sh start-frontend.sh start-opencode.sh
   start-opencode-serve.sh stop.sh
   src agent sample_project packaging opencoderman

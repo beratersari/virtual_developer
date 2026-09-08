@@ -739,32 +739,6 @@ class JiraPoller:
                 if settings.jira_board_id:
                     self.board_id = settings.jira_board_id
 
-                from src.jira.webhook import INTAKE_WEBHOOK, normalize_intake_mode
-
-                intake = normalize_intake_mode(
-                    getattr(settings, "jira_intake_mode", None)
-                )
-                if intake == INTAKE_WEBHOOK:
-                    # Poller idle — webhook endpoint is the sole Jira intake.
-                    # Still publish a snapshot so the Board page is not stale.
-                    poll_snapshot_store.begin_poll(
-                        board_id=self.board_id,
-                        interval_seconds=self.interval,
-                    )
-                    poll_snapshot_store.end_poll(
-                        source="webhook",
-                        issues=[],
-                        interval_seconds=self.interval,
-                    )
-                    logger.debug(
-                        "Jira intake mode=webhook; skipping board poll this cycle"
-                    )
-                    for _ in range(self.interval):
-                        if not self._running:
-                            break
-                        time.sleep(1)
-                    continue
-
                 poll_snapshot_store.begin_poll(
                     board_id=self.board_id,
                     interval_seconds=self.interval,

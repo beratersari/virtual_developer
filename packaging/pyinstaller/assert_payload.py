@@ -25,6 +25,10 @@ REQUIRED_OPENCODE_CONFIGS = (
     "opencode_configs/agents/derman-build.md",
     "opencode_configs/agents/derman-plan.md",
 )
+REQUIRED_OPENCODERMAN = (
+    "opencoderman/agents/derman-build.md",
+    "opencoderman/agents/derman-plan.md",
+)
 MIN_OPENCODE_SKILLS = 10
 
 
@@ -67,6 +71,29 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
                 f"opencode_configs/skills has {len(skill_mds)} SKILL.md "
                 f"(need >= {MIN_OPENCODE_SKILLS})"
             )
+    for rel in REQUIRED_OPENCODERMAN:
+        if not (root / rel).is_file():
+            errors.append(f"missing {rel}")
+    ocm_skills = root / "opencoderman" / "skills"
+    if not ocm_skills.is_dir():
+        errors.append("missing opencoderman/skills/")
+    else:
+        ocm_mds = list(ocm_skills.rglob("SKILL.md"))
+        if len(ocm_mds) < MIN_OPENCODE_SKILLS:
+            errors.append(
+                f"opencoderman/skills has {len(ocm_mds)} SKILL.md "
+                f"(need >= {MIN_OPENCODE_SKILLS})"
+            )
+    if plat.startswith("win"):
+        if not (root / "install-opencode-agents.bat").is_file():
+            errors.append("missing install-opencode-agents.bat")
+        if not (root / "Install-OpencodeAgents.ps1").is_file():
+            errors.append("missing Install-OpencodeAgents.ps1")
+    else:
+        if not (root / "install-opencode-agents.sh").is_file():
+            errors.append("missing install-opencode-agents.sh")
+        if not (root / "install_opencode_agents.py").is_file():
+            errors.append("missing install_opencode_agents.py")
     return errors
 
 

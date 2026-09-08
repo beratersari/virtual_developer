@@ -1,4 +1,4 @@
-"""Shared Jira trigger matching (poller + webhook).
+"""Shared Jira trigger matching (board poller).
 
 Assignment and mention checks must stay aligned with Server/DC 9.4 (``name`` /
 ``key`` / wiki ``[~user]``) and Cloud (``accountId`` / ADF mentions).

@@ -162,6 +162,19 @@ def upsert_dotenv_keys(
     return len(wanted)
 
 
+def _jira_bot_names(raw: Any) -> List[str]:
+    """Split a comma list of Jira names; strip @ and empties."""
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in str(raw or "").replace(";", ",").split(","):
+        name = item.strip().lstrip("@").strip()
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
 def compute_stuck_limit_seconds(
     timeout_seconds: float,
     max_retries: int,
@@ -292,13 +305,16 @@ class Settings(BaseSettings):
     )
     gitlab_bot_mentions: str = Field(
         default="@berat_ai",
-        description="Comma-separated @names that trigger a job (e.g. @berat_ai,@DevBot)",
+        description=(
+            "Comma-separated GitLab usernames. Mention one on an MR comment "
+            "to start a job. Comments from these users are ignored."
+        ),
     )
     gitlab_bot_usernames: str = Field(
         default="",
         description=(
-            "GitLab usernames of this bot (ignore its own notes to prevent loops). "
-            "Defaults to GITLAB_BOT_MENTIONS without @"
+            "Deprecated. Ignored when GITLAB_BOT_MENTIONS is set. "
+            "Kept so leftover .env values still load."
         ),
     )
     
@@ -338,21 +354,8 @@ class Settings(BaseSettings):
         default=8,
         description="Thread pool size for dispatching issues after a poll",
     )
-    # Board poller interval (used when jira_intake_mode=poll)
+    # Board poller interval
     poll_interval_seconds: int = Field(default=30)
-    # poll = board/sprint poller (default). webhook = POST /webhooks/jira only.
-    # Switching at runtime via dashboard; default comes from .env.
-    jira_intake_mode: str = Field(
-        default="poll",
-        description="Jira intake: poll (board poller) or webhook (POST /webhooks/jira)",
-    )
-    jira_webhook_secret: str = Field(
-        default="",
-        description=(
-            "Shared secret for /webhooks/jira. Jira Server 9.4 has no HMAC — "
-            "put the token in the hook URL (?token=). Cloud may send X-Hub-Signature."
-        ),
-    )
 
     # Ops dashboard (FastAPI UI). Intentional product defaults (not a security bug):
     # no auth in v1 + bind 0.0.0.0 + allow_remote so LAN / offline install works.
@@ -469,14 +472,14 @@ class Settings(BaseSettings):
     
     # Trigger Configuration - stored as strings, parsed as properties
     trigger_on_assignment: bool = Field(default=True)
-    # Optional @mention strings for free-form comment commands (not board intake)
-    trigger_mentions: str = Field(default="@DevBot,@AI")
-    # Substrings matched against assignee displayName / name / key (case-insensitive)
+    # Deprecated store. Mention tokens are derived from trigger_assignee_names.
+    trigger_mentions: str = Field(default="")
+    # Single Jira bot identity: assignee match and @mention / wiki mention.
     trigger_assignee_names: str = Field(
         default="jira ai bot,jira-ai-bot,jiraai,devbot",
         description=(
-            "Comma-separated name fragments; issue is bot-assigned when any "
-            "fragment appears in assignee displayName, name, or key"
+            "Comma-separated Jira names. Used for To Do assignee intake and "
+            "for comments that @mention the bot"
         ),
     )
     
@@ -502,11 +505,13 @@ class Settings(BaseSettings):
     
     @property
     def trigger_assignee_names_list(self) -> List[str]:
-        """Assignee name fragments for bot-assignment trigger (lowercase)."""
-        raw = (self.trigger_assignee_names or "").strip()
-        if not raw:
+        """Jira bot name fragments (lowercase, no leading @)."""
+        names = _jira_bot_names(self.trigger_assignee_names)
+        if not names:
+            names = _jira_bot_names(self.trigger_mentions)
+        if not names:
             return ["jira ai bot", "jira-ai-bot", "jiraai", "devbot"]
-        return [item.strip().lower() for item in raw.split(",") if item.strip()]
+        return [n.lower() for n in names]
 
     @property
     def gitlab_allowed_hosts_list(self) -> List[str]:
@@ -624,28 +629,21 @@ class Settings(BaseSettings):
 
     @property
     def trigger_mentions_list(self) -> List[str]:
-        """Get trigger mentions as a list."""
-        if not self.trigger_mentions:
-            return ["@DevBot", "@AI"]
-        return [item.strip() for item in self.trigger_mentions.split(",") if item.strip()]
-
-    @property
-    def jira_intake_mode_normalized(self) -> str:
-        """``poll`` or ``webhook`` (default poll)."""
-        return _normalize_intake_mode(self.jira_intake_mode)
+        """@mention form of the same Jira bot names."""
+        return [n if n.startswith("@") else f"@{n}" for n in self.trigger_assignee_names_list]
 
     @property
     def gitlab_bot_mentions_list(self) -> List[str]:
         from src.gitlab.mentions import parse_mention_list
 
-        return parse_mention_list(self.gitlab_bot_mentions)
+        names = parse_mention_list(self.gitlab_bot_mentions)
+        if names:
+            return names
+        return parse_mention_list(getattr(self, "gitlab_bot_usernames", "") or "")
 
     @property
     def gitlab_bot_usernames_list(self) -> List[str]:
-        from src.gitlab.mentions import parse_mention_list
-
-        names = parse_mention_list(self.gitlab_bot_usernames)
-        return names or list(self.gitlab_bot_mentions_list)
+        return list(self.gitlab_bot_mentions_list)
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -692,9 +690,9 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "default_model",
         "agent_backend",
         "project_repositories",
-        "jira_intake_mode",
         "trigger_mentions",
         "trigger_assignee_names",
+        "gitlab_bot_mentions",
     }
 )
 
@@ -711,9 +709,9 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
     "agent_backend": "AGENT_BACKEND",
-    "jira_intake_mode": "JIRA_INTAKE_MODE",
     "trigger_mentions": "TRIGGER_MENTIONS",
     "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
+    "gitlab_bot_mentions": "GITLAB_BOT_MENTIONS",
 }
 
 
@@ -721,14 +719,6 @@ def jira_host_is_cloud(host: Any = None) -> bool:
     """True for Atlassian Cloud (``*.atlassian.net``). Cloud API tokens need Basic."""
     text = str(host if host is not None else "").strip().lower()
     return "atlassian.net" in text
-
-
-def _normalize_intake_mode(raw: Any) -> str:
-    """``poll`` or ``webhook``. Local so Settings bootstrap never imports jira."""
-    text = str(raw or "").strip().lower()
-    if text in {"webhook", "webhooks", "hook", "push", "http"}:
-        return "webhook"
-    return "poll"
 
 
 def runtime_settings_path() -> Path:
@@ -832,8 +822,6 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
             host = getattr(settings_obj, "jira_host", "") or data.get("jira_host")
             if jira_host_is_cloud(host) and not str(value or "").strip():
                 continue
-        if key == "jira_intake_mode":
-            value = _normalize_intake_mode(value)
         if key == "project_repositories":
             from src.dashboard.project_repos import project_repositories_to_json
 

@@ -913,7 +913,6 @@ def _redact_report_text(text: str) -> str:
     for attr in (
         "jira_api_token",
         "gitlab_pat",
-        "jira_webhook_secret",
         "gitlab_webhook_secret",
     ):
         val = str(getattr(settings, attr, "") or "").strip()

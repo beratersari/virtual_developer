@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +108,8 @@ def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     from src.config import settings
 
     monkeypatch.chdir(tmp_path)
+    runtime_path = tmp_path / "runtime_settings.json"
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime_path)
     monkeypatch.setattr(settings, "poll_interval_seconds", 30)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "default_model", "old/m")
@@ -127,6 +130,39 @@ def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     # Single agent/OpenCode wall-clock budget
     assert settings.agent_task_timeout_seconds == 900
     assert view.agent_task_timeout_seconds == 900
+    assert runtime_path.is_file()
+    persisted = json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert persisted["jira_board_id"] == "99"
+    assert persisted["poll_interval_seconds"] == 45
+
+
+def test_apply_settings_update_jira_bot_name_syncs_mentions(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "src.config.runtime_settings_path",
+        lambda: tmp_path / "runtime_settings.json",
+    )
+    monkeypatch.setattr(settings, "trigger_assignee_names", "old")
+    monkeypatch.setattr(settings, "trigger_mentions", "@old")
+    view = apply_settings_update(SettingsUpdate(trigger_assignee_names="Beratersari"))
+    assert view.trigger_assignee_names == "Beratersari"
+    assert settings.trigger_assignee_names_list == ["beratersari"]
+    assert settings.trigger_mentions_list == ["@beratersari"]
+
+
+def test_apply_settings_update_gitlab_bot_mentions(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: tmp_path / "runtime_settings.json")
+    monkeypatch.setattr(settings, "gitlab_bot_mentions", "@old")
+    view = apply_settings_update(SettingsUpdate(gitlab_bot_mentions="new_bot"))
+    assert view.gitlab_bot_mentions == "new_bot"
+    assert settings.gitlab_bot_mentions == "new_bot"
+    assert settings.gitlab_bot_mentions_list == ["new_bot"]
+    assert settings.gitlab_bot_usernames_list == ["new_bot"]
 
 
 def test_settings_view_includes_agent_timeout(monkeypatch):

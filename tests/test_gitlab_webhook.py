@@ -767,6 +767,22 @@ def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
     assert resp.status_code == 401
 
 
+def test_jira_webhook_route_is_gone(fake_jira):
+    """Jira webhook intake was removed; POST /webhooks/jira must not accept work."""
+    from src.dashboard.api import create_dashboard_app
+    from src.processor import JobProcessor
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    client = TestClient(create_dashboard_app(processor=proc))
+    resp = client.post(
+        "/webhooks/jira",
+        json={"webhookEvent": "jira:issue_updated"},
+    )
+    # No handler. SPA catch-all is GET-only, so POST is 404 or 405.
+    assert resp.status_code in {404, 405}
+
+
 def test_decide_gitlab_mr_webhook_accepts_merge(monkeypatch):
     monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
     d = decide_gitlab_mr_webhook(

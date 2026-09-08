@@ -65,6 +65,21 @@ def test_settings_has_no_dead_log_or_temp_format_fields():
     assert "log_level" not in names
     assert "log_file" not in names
     assert "temp_dir_format" not in names
+    assert "jira_intake_mode" not in names
+    assert "jira_webhook_secret" not in names
+
+
+def test_jira_webhook_intake_is_gone():
+    """Jira webhook module, settings fields, and Settings UI must stay removed."""
+    assert not (ROOT / "src" / "jira" / "webhook.py").is_file()
+    types = (ROOT / "web" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
+    settings_ui = (
+        ROOT / "web" / "src" / "pages" / "settings" / "SettingsPage.tsx"
+    ).read_text(encoding="utf-8")
+    assert "jira_webhook_secret" not in types
+    assert "jira_intake_mode" not in types
+    assert "jira_intake_mode" not in settings_ui
+    assert "/webhooks/jira" not in settings_ui
 
 
 def test_frontend_removed_unused_types():

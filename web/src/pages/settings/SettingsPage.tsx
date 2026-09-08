@@ -22,10 +22,8 @@ type Draft = {
   jira_board_id: string
   poll_interval_seconds: number
   trigger_on_assignment: boolean
-  jira_intake_mode: string
-  jira_webhook_secret: string
-  trigger_mentions: string
   trigger_assignee_names: string
+  gitlab_bot_mentions: string
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
@@ -43,10 +41,8 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
     trigger_on_assignment: s.trigger_on_assignment,
-    jira_intake_mode: s.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
-    jira_webhook_secret: '',
-    trigger_mentions: s.trigger_mentions ?? '',
     trigger_assignee_names: s.trigger_assignee_names ?? '',
+    gitlab_bot_mentions: s.gitlab_bot_mentions ?? '',
     max_concurrent_jobs: s.max_concurrent_jobs,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
@@ -114,9 +110,8 @@ export function SettingsPage() {
         jira_board_id: draft.jira_board_id.trim(),
         poll_interval_seconds: Number(draft.poll_interval_seconds),
         trigger_on_assignment: draft.trigger_on_assignment,
-        jira_intake_mode: draft.jira_intake_mode === 'webhook' ? 'webhook' : 'poll',
-        trigger_mentions: draft.trigger_mentions,
         trigger_assignee_names: draft.trigger_assignee_names,
+        gitlab_bot_mentions: draft.gitlab_bot_mentions,
         max_concurrent_jobs: Number(draft.max_concurrent_jobs),
         agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
         agent_task_max_retries: Number(draft.agent_task_max_retries),
@@ -145,9 +140,6 @@ export function SettingsPage() {
           .filter((p) => p.url),
       }
       if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
-      if (draft.jira_webhook_secret.trim()) {
-        body.jira_webhook_secret = draft.jira_webhook_secret.trim()
-      }
       const updated = await patchSettings(body)
       setSettings(updated)
       setDraft(fromSettings(updated))
@@ -168,9 +160,9 @@ export function SettingsPage() {
   return (
     <section className="max-w-2xl space-y-5">
       <PageHeader
-        kicker="Runtime"
+        kicker="Configuration"
         title="Settings"
-        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value. Cloud keeps JIRA_EMAIL from .env (Basic). On-prem saves stay token-only."
+        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value."
       />
 
       <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
@@ -204,11 +196,11 @@ export function SettingsPage() {
 
       {section === 'jira' && (
       <div key="jira" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Jira connection</div>
+      <div className="text-sm font-semibold text-text">Connection</div>
       <p className="text-xs text-text-muted">
-        Host + API token / PAT. Test uses the values below; a blank token tests
-        the last saved token. Cloud uses JIRA_EMAIL from .env as HTTP Basic.
-        On-prem / PAT hosts stay token-only after save.
+        Site URL and API token. A blank token keeps the saved value. Cloud
+        uses JIRA_EMAIL from .env (HTTP Basic). Server and Data Center use
+        the token as a bearer PAT.
       </p>
       <label className="field">
         <span>Host</span>
@@ -233,7 +225,6 @@ export function SettingsPage() {
             setJiraTesting(true)
             const host = draft.jira_host.trim()
             const token = draft.jira_api_token.trim()
-            // Omit blank fields so the API uses the last saved host/token.
             void testJiraConnection({
               ...(host ? { host } : {}),
               ...(token ? { api_token: token } : {}),
@@ -263,39 +254,55 @@ export function SettingsPage() {
           ))}
         </ul>
       )}
+
+      <div className="text-sm font-semibold text-text">Board</div>
+      <label className="field">
+        <span>Board ID</span>
+        <input
+          inputMode="numeric"
+          value={draft.jira_board_id}
+          onChange={(e) => mark('jira_board_id', e.target.value)}
+          placeholder="1"
+        />
+        <span className="text-xs text-text-muted">
+          Numeric Agile board id from the board URL.
+        </span>
+      </label>
+      <label className="field">
+        <span>Poll interval (seconds)</span>
+        <input
+          type="number"
+          value={draft.poll_interval_seconds}
+          onChange={(e) => mark('poll_interval_seconds', Number(e.target.value))}
+        />
+        <span className="text-xs text-text-muted">
+          How often the poller reads the board.
+        </span>
+      </label>
+
+      <div className="text-sm font-semibold text-text">Intake</div>
+      <label className="field">
+        <span>Bot name</span>
+        <input
+          value={draft.trigger_assignee_names}
+          onChange={(e) => mark('trigger_assignee_names', e.target.value)}
+          placeholder="Beratersari"
+        />
+        <span className="text-xs text-text-muted">
+          Jira display name or username. To Do issues assigned to this name
+          are accepted. Comments that @mention the same name tag the bot.
+          Comma-separated if there is more than one.
+        </span>
+      </label>
       </div>
       )}
 
       {section === 'gitlab' && (
       <div key="gitlab" className="vd-fade space-y-3">
-      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
-        <div className="text-sm font-semibold text-text">GitLab project webhook</div>
-        <p className="mt-1 text-xs text-text-muted">
-          Project hook (GitLab.com / CE / EE). Events: Comments and Merge
-          request. Merged or closed MRs delete the matching temp clone. Secret is{' '}
-          <span className="font-mono">X-Gitlab-Token</span>.
-        </p>
-        <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
-          <div>
-            Enabled:{' '}
-            {settings?.gitlab_webhook_enabled === false ? 'no' : 'yes'}
-          </div>
-          <div>
-            Mentions: {settings?.gitlab_bot_mentions || '(none)'}
-          </div>
-          <div>
-            Secret:{' '}
-            {settings?.gitlab_webhook_secret_configured ? 'configured' : 'empty (dev)'}
-          </div>
-          <div>
-            URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
-            {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
-          </div>
-        </dl>
-      </div>
-      <div className="text-sm font-semibold text-text">GitLab credentials</div>
+      <div className="text-sm font-semibold text-text">Credentials</div>
       <p className="text-xs text-text-muted">
-        One row per host. Empty PAT keeps the stored token (including after a host rename).
+        One personal access token per GitLab host. Leave PAT blank to keep
+        the stored token.
       </p>
       {draft.gitlab_cred_rows.map((row, idx) => (
         <div key={idx}>
@@ -408,6 +415,44 @@ export function SettingsPage() {
           Add GitLab host
         </button>
       </p>
+
+      <div className="text-sm font-semibold text-text">Trigger username</div>
+      <label className="field">
+        <span>Bot username</span>
+        <input
+          value={draft.gitlab_bot_mentions}
+          onChange={(e) => mark('gitlab_bot_mentions', e.target.value)}
+          placeholder="berat_ai"
+        />
+        <span className="text-xs text-text-muted">
+          GitLab username that starts a job when mentioned on a merge-request
+          comment. Comments from this user are ignored. Comma-separated if
+          there is more than one.
+        </span>
+      </label>
+
+      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
+        <div className="text-sm font-semibold text-text">Project webhook</div>
+        <p className="mt-1 text-xs text-text-muted">
+          Register a project hook for comments and merge-request events. Merged
+          or closed merge requests delete the matching temp clone. The secret
+          is sent as X-Gitlab-Token.
+        </p>
+        <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
+          <div>
+            Enabled:{' '}
+            {settings?.gitlab_webhook_enabled === false ? 'no' : 'yes'}
+          </div>
+          <div>
+            Secret:{' '}
+            {settings?.gitlab_webhook_secret_configured ? 'configured' : 'empty (dev)'}
+          </div>
+          <div>
+            URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
+            {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
+          </div>
+        </dl>
+      </div>
       </div>
       )}
 
@@ -416,8 +461,7 @@ export function SettingsPage() {
         <div>
           <div className="text-sm font-semibold text-text">Saved projects</div>
           <p className="mt-1 text-xs text-text-muted">
-            Pick these by name on Scheduled → New issue instead of pasting the
-            git URL every time.
+            Named remotes for Scheduled → New issue.
           </p>
         </div>
         {draft.project_repositories.map((row, idx) => (
@@ -554,14 +598,13 @@ export function SettingsPage() {
           <option value="codex">Codex</option>
         </select>
         <span className="mt-1 block text-xs text-text-muted">
-          Same unattended job contract. Per-issue {'{params}'} Backend: overrides this.
-          Provider auth and endpoints stay in each tool&apos;s own config
-          (OpenCode: opencode.json · Codex: ~/.codex/config.toml).
+          Default worker for new jobs. An issue {'{params}'} Backend field
+          overrides this. Provider credentials stay in each tool&apos;s own
+          config (OpenCode: opencode.json · Codex: ~/.codex/config.toml).
         </span>
       </label>
       <p className="text-xs text-text-muted">
-        One model id for both OpenCode and Codex jobs. The list follows the
-        worker above. Other id stays typed.
+        Default model for new jobs. The list follows the selected worker.
       </p>
       <ModelField
         label="Default model"
@@ -577,105 +620,7 @@ export function SettingsPage() {
 
       {section === 'runtime' && (
       <div key="runtime" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Jira intake</div>
-      <p className="text-xs text-text-muted">
-        Poll reads the board on an interval. Webhook waits for Jira to POST
-        assignment-to-bot or a comment that mentions the bot. Default comes
-        from <span className="font-mono">JIRA_INTAKE_MODE</span> in .env.
-      </p>
-      <label className="field">
-        <span>Intake mode</span>
-        <select
-          value={draft.jira_intake_mode}
-          onChange={(e) => mark('jira_intake_mode', e.target.value)}
-        >
-          <option value="poll">Poll (board / sprint)</option>
-          <option value="webhook">Webhook (assignment + mention)</option>
-        </select>
-      </label>
-      {draft.jira_intake_mode === 'webhook' && (
-        <div className="space-y-3 rounded border border-border bg-bg px-4 py-3">
-          <p className="text-xs text-text-muted">
-            Jira Server 9.4: System → WebHooks. Events: Issue created, Issue
-            updated, Comment created. URL includes the token (no HMAC on Server).
-          </p>
-          <dl className="grid gap-1 font-mono text-[11px] text-text-secondary">
-            <div>
-              Secret:{' '}
-              {settings.jira_webhook_secret_configured ? 'configured' : 'missing (required)'}
-            </div>
-            <div>
-              URL: http://&lt;this-host&gt;:{settings.dashboard_port}
-              {settings.jira_webhook_path || '/webhooks/jira'}
-              ?token=&lt;secret&gt;
-            </div>
-          </dl>
-          <label className="field">
-            <span>
-              Webhook secret{' '}
-              {settings.jira_webhook_secret_configured
-                ? '(set — blank keeps it)'
-                : '(required)'}
-            </span>
-            <input
-              type="password"
-              autoComplete="new-password"
-              value={draft.jira_webhook_secret}
-              onChange={(e) => mark('jira_webhook_secret', e.target.value)}
-            />
-          </label>
-        </div>
-      )}
-      <label className="field">
-        <span>Mention tokens</span>
-        <input
-          value={draft.trigger_mentions}
-          onChange={(e) => mark('trigger_mentions', e.target.value)}
-          placeholder="@DevBot,@AI"
-        />
-        <span className="text-xs text-text-muted">
-          Comment must mention one of these (or wiki [~user] matching the bot names).
-        </span>
-      </label>
-      <label className="field">
-        <span>Bot assignee names</span>
-        <input
-          value={draft.trigger_assignee_names}
-          onChange={(e) => mark('trigger_assignee_names', e.target.value)}
-          placeholder="devbot,jira ai bot"
-        />
-        <span className="text-xs text-text-muted">
-          Poller starts To Do tickets assigned to one of these names. Unassign does not start work.
-        </span>
-      </label>
-      <label className="field">
-        <span>Board ID</span>
-        <input
-          inputMode="numeric"
-          value={draft.jira_board_id}
-          onChange={(e) => mark('jira_board_id', e.target.value)}
-          placeholder="1"
-        />
-        <span className="text-xs text-text-muted">
-          Numeric Agile id from the board URL (/jira/software/projects/…/boards/<strong>1</strong>)
-        </span>
-      </label>
-      <label className="field">
-        <span>Poll interval (seconds)</span>
-        <input
-          type="number"
-          value={draft.poll_interval_seconds}
-          onChange={(e) => mark('poll_interval_seconds', Number(e.target.value))}
-        />
-      </label>
-      <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-        <input
-          type="checkbox"
-          checked={draft.trigger_on_assignment}
-          onChange={(e) => mark('trigger_on_assignment', e.target.checked)}
-        />
-        <span style={{ margin: 0 }}>Webhook: also trigger on bot assignment</span>
-      </label>
+      <div className="text-sm font-semibold text-text">Jobs</div>
       <label className="field">
         <span>Max concurrent jobs</span>
         <input
@@ -694,16 +639,12 @@ export function SettingsPage() {
           onChange={(e) => mark('agent_task_timeout_seconds', Number(e.target.value))}
         />
         <span className="text-xs text-text-muted">
-          Wall-clock budget for the OpenCode/Codex turn. Save applies immediately,
-          including an in-flight job (not only the next ticket). Default 1800 = 30 min.
+          Seconds allowed for one agent attempt. A saved change applies
+          immediately, including a running job.
         </span>
       </label>
-      <div className="text-sm font-semibold text-text">Retries &amp; compaction</div>
-      <p className="text-xs text-text-muted">
-        OpenCode auto-compacts in-session. The orchestrator waits for that to
-        finish — it does not inject a Continue user message. Next job uses the
-        saved values.
-      </p>
+
+      <div className="text-sm font-semibold text-text">Retries</div>
       <label className="field">
         <span>Error / timeout retries</span>
         <input
@@ -714,7 +655,7 @@ export function SettingsPage() {
           onChange={(e) => mark('agent_task_max_retries', Number(e.target.value))}
         />
         <span className="text-xs text-text-muted">
-          Extra attempts after a hard error or timeout (0 = no retry). Default 3.
+          Maximum extra attempts after a timeout or error. 0 means no retry.
         </span>
       </label>
       <label className="field">
@@ -729,17 +670,14 @@ export function SettingsPage() {
           }
         />
         <span className="text-xs text-text-muted">
-          Extra serve attempts only when the session is incomplete for a
-          non-compact reason. Compact wait is unbounded (same session until
-          the agent timeout). Default 256.
+          Extra attempts when a session ends incomplete. Compaction on the
+          same session is not counted against this limit.
         </span>
       </label>
 
       <div className="text-sm font-semibold text-text">Data locations</div>
       <p className="text-xs text-text-muted">
-        Same durable layout on Windows and Linux (not next to the install folder
-        or a leftover .jira-agent). Change{' '}
-        <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
+        Change <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
         <span className="font-mono">TEMP_DIR_BASE</span> in .env.
       </p>
       <dl className="space-y-1 font-mono text-[11px] text-text-secondary">

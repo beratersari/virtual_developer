@@ -192,10 +192,6 @@ class FakeJiraClient:
         )
         return True
 
-    def list_webhooks(self):
-        return []
-
-
 @pytest.fixture
 def fake_jira() -> FakeJiraClient:
     return FakeJiraClient()
