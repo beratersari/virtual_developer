@@ -371,6 +371,14 @@ class Settings(BaseSettings):
             "Default true is intentional so DASHBOARD_HOST=0.0.0.0 works out of the box."
         ),
     )
+    dashboard_username: str = Field(
+        default="",
+        description="Ops dashboard login. Empty with password empty = no login.",
+    )
+    dashboard_password: str = Field(
+        default="",
+        description="Ops dashboard login. Does not apply to the poller or GitLab webhooks.",
+    )
 
     # Temp Directory Configuration — per-issue clones are always required
     temp_dir_base: Path = Field(

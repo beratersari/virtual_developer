@@ -38,6 +38,13 @@ _mr_scan_lock = threading.Lock()
 _mr_scan_wanted = False
 _mr_scan_thread: threading.Thread | None = None
 
+# Folder→issue map walks every job + bind. Cache so GET /api/storage (and
+# overlapping Storage polls) do not rescan the store on every click.
+_index_cache_lock = threading.Lock()
+_index_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_index_cache_at = 0.0
+_INDEX_CACHE_SECONDS = 1.5
+
 
 class TempStorageError(Exception):
     """User-facing storage operation failure."""
@@ -107,11 +114,14 @@ def reset_delete_jobs() -> None:
 
 def reset_size_cache() -> None:
     """Test helper: drop cached folder sizes and stop a pending rescan flag."""
-    global _scan_wanted
+    global _scan_wanted, _index_cache, _index_cache_at
     with _size_lock:
         _size_cache.clear()
     with _scan_lock:
         _scan_wanted = False
+    with _index_cache_lock:
+        _index_cache = None
+        _index_cache_at = 0.0
     reset_mr_state_cache()
 
 
@@ -526,6 +536,21 @@ def _fill_missing_summaries(index: Dict[str, Dict[str, Any]]) -> None:
 
 def _clone_issue_index() -> Dict[str, Dict[str, Any]]:
     """Map clone path / folder name → latest Jira key, title, and job id."""
+    global _index_cache, _index_cache_at
+    now = time.monotonic()
+    with _index_cache_lock:
+        cached = _index_cache
+        cached_at = _index_cache_at
+    if cached is not None and now - cached_at < _INDEX_CACHE_SECONDS:
+        return {k: dict(v) for k, v in cached.items()}
+    index = _build_clone_issue_index()
+    with _index_cache_lock:
+        _index_cache = index
+        _index_cache_at = time.monotonic()
+    return index
+
+
+def _build_clone_issue_index() -> Dict[str, Dict[str, Any]]:
     index: Dict[str, Dict[str, Any]] = {}
 
     try:
@@ -1022,7 +1047,8 @@ def sweep_merged_storage_clones() -> List[str]:
     seen: Set[str] = set()
     deleted: List[str] = []
     try:
-        index = _clone_issue_index()
+        # Fresh map — a short GET /api/storage cache must not hide a just-merged MR.
+        index = _build_clone_issue_index()
     except Exception as e:
         logger.debug(f"MR sweep index failed: {e}")
         return deleted

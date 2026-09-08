@@ -4,6 +4,7 @@ export type Meta = {
   version: string
   server_time: string
   app_name: string
+  dashboard_auth?: boolean
 }
 
 export type PolledIssue = {

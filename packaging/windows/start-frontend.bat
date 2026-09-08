@@ -56,8 +56,8 @@ if not exist "%SERVE_PY%" (
     exit /b 1
 )
 
-echo Checking backend at %BACKEND_URL%/api/meta ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "%BACKEND_URL%/api/meta" -TimeoutSec 15
+echo Checking backend at %BACKEND_URL%/api/health ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "%BACKEND_URL%/api/health" -TimeoutSec 15
 if errorlevel 1 (
     echo [ERROR] Backend is not reachable at %BACKEND_URL%
     echo Start it first:  start-backend.bat
@@ -72,7 +72,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\wind
 timeout /t 1 /nobreak >nul
 
 echo Re-checking backend still alive after cleanup...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "%BACKEND_URL%/api/meta" -TimeoutSec 10
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\packaging\windows\Wait-Http.ps1" -Url "%BACKEND_URL%/api/health" -TimeoutSec 10
 if errorlevel 1 (
     echo [ERROR] Backend died or is unreachable after frontend cleanup.
     echo This should not happen. Re-run start-backend.bat, then start-frontend.bat.

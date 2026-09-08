@@ -46,7 +46,7 @@ if [[ ! -f "$SERVE_PY" ]]; then
   exit 1
 fi
 
-if ! vd_wait_http "${BACKEND_URL}/api/meta" 15; then
+if ! vd_wait_http "${BACKEND_URL}/api/health" 15; then
   echo "[ERROR] Backend is not reachable at $BACKEND_URL"
   echo "Start it first:  ./start-backend.sh"
   exit 1
@@ -66,7 +66,7 @@ if command -v lsof >/dev/null 2>&1; then
 fi
 sleep 1
 
-if ! vd_wait_http "${BACKEND_URL}/api/meta" 10; then
+if ! vd_wait_http "${BACKEND_URL}/api/health" 10; then
   echo "[ERROR] Backend died or is unreachable after frontend cleanup."
   echo "Re-run ./start-backend.sh, then ./start-frontend.sh"
   exit 1

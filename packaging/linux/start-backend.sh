@@ -64,7 +64,7 @@ mkdir -p "$LOG_DIR"
 if [[ "$BACKGROUND" -eq 1 ]]; then
   nohup "$VD_PY" -m src.daemon >>"$LOG_DIR/backend.log" 2>&1 &
   echo $! >"$LOG_DIR/backend.pid"
-  if ! vd_wait_http "http://127.0.0.1:${DASH_PORT}/api/meta" 90; then
+  if ! vd_wait_http "http://127.0.0.1:${DASH_PORT}/api/health" 90; then
     echo "[ERROR] Backend did not become ready on port $DASH_PORT."
     echo "See $LOG_DIR/backend.log"
     exit 1

@@ -12,6 +12,14 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
+from src.dashboard.auth import (
+    COOKIE_NAME,
+    DashboardAuthMiddleware,
+    cookie_value,
+    credentials_ok,
+    dashboard_auth_enabled,
+    websocket_authorized,
+)
 from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
@@ -136,7 +144,8 @@ def create_dashboard_app(
         media_type_for_path = None  # type: ignore[assignment]
 
     sm = state_manager or JiraStateManager()
-    # No OpenAPI UI in production path — dashboard has no auth
+    # No OpenAPI UI. Optional dashboard Basic: DASHBOARD_USERNAME + PASSWORD.
+    # Poller is in-process. POST /webhooks/gitlab uses GITLAB_WEBHOOK_SECRET.
     app = FastAPI(
         title="Yaver",
         version="1.0.0",
@@ -146,6 +155,7 @@ def create_dashboard_app(
     )
     app.state.processor = processor
     app.state.state_manager = sm
+    app.add_middleware(DashboardAuthMiddleware)
 
     # Same-origin SPA in production; Vite dev proxy only (never wildcard + credentials)
     dev_origins = [
@@ -177,7 +187,7 @@ def create_dashboard_app(
         )
 
     @app.get("/api/health")
-    def health() -> dict:
+    async def health() -> dict:
         return {"status": "ok", "version": build_meta().version}
 
     @app.post("/api/reports")
@@ -295,8 +305,48 @@ def create_dashboard_app(
         }
 
     @app.get("/api/meta")
-    def meta() -> dict:
+    async def meta() -> dict:
         return build_meta().model_dump()
+
+    @app.post("/api/login")
+    async def login(request: Request) -> Response:
+        if not dashboard_auth_enabled():
+            return Response(content=b'{"ok":true}', media_type="application/json")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        user = str(data.get("username") or "")
+        password = str(data.get("password") or "")
+        if not credentials_ok(user, password):
+            return Response(
+                content=b'{"detail":"Wrong username or password"}',
+                status_code=401,
+                media_type="application/json",
+            )
+        resp = Response(content=b'{"ok":true}', media_type="application/json")
+        resp.set_cookie(
+            COOKIE_NAME,
+            cookie_value(user, password),
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return resp
+
+    @app.post("/api/logout")
+    async def logout() -> Response:
+        # Stay on the event loop. A sync handler waits for a thread-pool
+        # worker; Storage/GitLab work used to fill that pool so Sign out
+        # appeared to ignore the first several clicks.
+        resp = Response(
+            content=b'{"ok":true}',
+            media_type="application/json",
+        )
+        resp.delete_cookie(COOKIE_NAME, path="/")
+        return resp
 
     @app.get("/api/queue")
     def queue_list(
@@ -950,24 +1000,28 @@ def create_dashboard_app(
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
+        if not websocket_authorized(ws):
+            await ws.close(code=4401)
+            return
         await ws.accept()
         clients.add(ws)
         loop = asyncio.get_event_loop()
 
         def _on_snapshot(_snap: dict) -> None:
             try:
-                asyncio.run_coroutine_threadsafe(_broadcast(_live_payload()), loop)
+                data = _live_payload()
+                asyncio.run_coroutine_threadsafe(_broadcast(data), loop)
             except Exception:
                 pass
 
         unsub = poll_snapshot_store.subscribe(_on_snapshot)
         try:
-            await ws.send_json(_live_payload())
+            await ws.send_json(await asyncio.to_thread(_live_payload))
             while True:
                 try:
                     await asyncio.wait_for(ws.receive_text(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    await ws.send_json(_live_payload())
+                    await ws.send_json(await asyncio.to_thread(_live_payload))
         except WebSocketDisconnect:
             pass
         except Exception as e:

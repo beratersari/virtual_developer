@@ -179,11 +179,19 @@ def build_app(*, dist: Path, backend: str) -> FastAPI:
             await client_ws.close()
             return
 
+        extra_headers = []
+        auth = client_ws.headers.get("authorization")
+        cookie = client_ws.headers.get("cookie")
+        if auth:
+            extra_headers.append(("Authorization", auth))
+        if cookie:
+            extra_headers.append(("Cookie", cookie))
         try:
             async with websockets.connect(
                 ws_backend,
                 open_timeout=10,
                 ping_interval=20,
+                additional_headers=extra_headers or None,
             ) as server_ws:
 
                 async def client_to_server() -> None:

@@ -125,8 +125,8 @@ timeout /t 1 /nobreak >nul
 echo Starting daemon in window "VD-Backend"...
 start "VD-Backend" /D "%SCRIPT_DIR%" cmd /c "set DASHBOARD_HOST=0.0.0.0&& set DASHBOARD_ALLOW_REMOTE=true&& set DASHBOARD_PORT=%DASH_PORT%&& set DASHBOARD_ENABLED=true&& set VD_WEB_DIST=%SCRIPT_DIR%\web\dist&& %VD_PY% -m src.daemon & echo. & echo Backend exited. & pause"
 
-echo Waiting for API http://127.0.0.1:%DASH_PORT%/api/meta ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PKG_WIN%\Wait-Http.ps1" -Url "http://127.0.0.1:%DASH_PORT%/api/meta" -TimeoutSec 90
+echo Waiting for API http://127.0.0.1:%DASH_PORT%/api/health ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PKG_WIN%\Wait-Http.ps1" -Url "http://127.0.0.1:%DASH_PORT%/api/health" -TimeoutSec 90
 if errorlevel 1 (
     echo [ERROR] Backend did not become ready on port %DASH_PORT%.
     echo Open the "VD-Backend" window and read the traceback.

@@ -8,6 +8,14 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Added
+
+- Optional dashboard login: `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` at the top of `.env`. Empty = no login. The board poller and `POST /webhooks/gitlab` stay on their own paths.
+
+### Fixed
+
+- Dashboard buttons (including Sign out) respond to a single click again. Storage no longer stacks `/api/storage` polls, Sign out leaves the session immediately, and logout no longer waits behind GitLab/storage work.
+
 ## [0.5.0] — 2026-09-08
 
 Settings no longer have a second GitLab allowlist or a dead assignment switch. Storage deletes clones when GitLab says the MR is merged.

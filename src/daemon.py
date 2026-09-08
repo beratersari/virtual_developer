@@ -209,6 +209,14 @@ class JiraAgentDaemon:
         )
         self._dashboard_app = app
         app.state.loop = self._main_loop or asyncio.get_running_loop()
+        try:
+            import anyio.to_thread
+
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            if limiter.total_tokens < 64:
+                limiter.total_tokens = 64
+        except Exception:
+            pass
         config = uvicorn.Config(
             app,
             host=settings.dashboard_host,

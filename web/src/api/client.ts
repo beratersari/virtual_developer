@@ -69,18 +69,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  const res = await fetch(path, { ...init, headers })
-  const body = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    throw new ApiError(
-      formatApiError(
-        (body as { detail?: unknown })?.detail,
-        `Request failed: ${res.status}`,
-      ),
-      res.status,
-    )
+  const { notifyUnauthorized } = await import('../auth/dashboardAuth')
+  const method = (init?.method || 'GET').toUpperCase()
+  let timer: number | undefined
+  let signal = init?.signal
+  if (!signal && method === 'GET') {
+    const ctrl = new AbortController()
+    timer = window.setTimeout(() => ctrl.abort(), 15_000)
+    signal = ctrl.signal
   }
-  return body as T
+  try {
+    const res = await fetch(path, { ...init, headers, credentials: 'include', signal })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (res.status === 401) notifyUnauthorized()
+      throw new ApiError(
+        formatApiError(
+          (body as { detail?: unknown })?.detail,
+          `Request failed: ${res.status}`,
+        ),
+        res.status,
+      )
+    }
+    return body as T
+  } catch (err) {
+    if (err instanceof ApiError) throw err
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new ApiError('Request timed out', 408)
+    }
+    throw err
+  } finally {
+    if (timer) window.clearTimeout(timer)
+  }
 }
 
 export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): JobItem {
@@ -402,9 +422,12 @@ export async function downloadIssueReport(body: {
   note: string
   job_id?: string
 }): Promise<string> {
+  const { notifyUnauthorized } = await import('../auth/dashboardAuth')
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const res = await fetch('/api/reports', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
+    credentials: 'include',
     body: JSON.stringify({
       kind: body.kind,
       note: body.note,
@@ -412,6 +435,7 @@ export async function downloadIssueReport(body: {
     }),
   })
   if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized()
     const payload = await res.json().catch(() => ({}))
     throw new ApiError(
       formatApiError(

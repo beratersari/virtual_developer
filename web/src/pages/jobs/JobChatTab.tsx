@@ -252,6 +252,7 @@ export function JobChatTab({
   const lastSoft = useRef(0)
   const fetchGen = useRef(0)
   const wasLive = useRef(false)
+  const inFlight = useRef(false)
 
   const load = (soft: boolean) => {
     const id = jobId.trim()
@@ -261,7 +262,9 @@ export function JobChatTab({
       setError(null)
       return
     }
+    if (soft && inFlight.current) return
     const gen = ++fetchGen.current
+    inFlight.current = true
     if (!soft) {
       setLoading(true)
       setError(null)
@@ -280,7 +283,10 @@ export function JobChatTab({
         if (!soft) setError(e instanceof Error ? e.message : 'Failed to load chat')
       })
       .finally(() => {
-        if (gen === fetchGen.current) setLoading(false)
+        if (gen === fetchGen.current) {
+          inFlight.current = false
+          setLoading(false)
+        }
       })
   }
 

@@ -38,6 +38,7 @@ class MetaResponse(BaseModel):
     version: str
     server_time: str
     app_name: str = PRODUCT_NAME
+    dashboard_auth: bool = False
 
 
 class BulkJobDeleteRequest(BaseModel):

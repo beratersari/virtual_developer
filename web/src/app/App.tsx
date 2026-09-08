@@ -7,11 +7,13 @@ import { SchedulesPage } from '../pages/schedules/SchedulesPage'
 import { SessionsPage } from '../pages/sessions/SessionsPage'
 import { SettingsPage } from '../pages/settings/SettingsPage'
 import { StoragePage } from '../pages/storage/StoragePage'
+import { DashboardAuthGate } from '../auth/DashboardAuthGate'
 import { LiveProvider } from './LiveProvider'
 import { Shell } from './Shell'
 
 export default function App() {
   return (
+    <DashboardAuthGate>
     <BrowserRouter>
       <LiveProvider>
         <Routes>
@@ -33,5 +35,6 @@ export default function App() {
         </Routes>
       </LiveProvider>
     </BrowserRouter>
+    </DashboardAuthGate>
   )
 }
