@@ -1,6 +1,6 @@
 # Yaver
 
-**Version:** see root [`VERSION`](VERSION) (currently `0.3.0`)
+**Version:** see root [`VERSION`](VERSION) (currently `0.4.0`)
 
 **Yaver** (*the aide*) is a Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
 

@@ -8,17 +8,25 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-08
+
+Jira intake is poller-only. Settings group fields by tab, and each bot has one name.
+
 ### Added
 
-- Standalone exe zips now include the `opencoderman/` tree plus `install-opencode-agents.bat` / `.sh`, which detect the OpenCode home (`OPENCODE_HOME`, `~/.opencode`, or `opencode` on PATH) and copy `derman-build`, `derman-plan`, and `skills/` there. Offline Windows/Linux zips ship the same script.
+- Standalone exe zips include the `opencoderman/` tree plus `install-opencode-agents.bat` / `.sh`. The script finds the OpenCode home and copies `derman-build`, `derman-plan`, and `skills/` only.
 
 ### Changed
 
-- Settings tabs group Jira, GitLab, projects, agent, and runtime fields separately. GitLab trigger username is a single field (`GITLAB_BOT_MENTIONS`). Jira assignee name and mention token are the same identity (`TRIGGER_ASSIGNEE_NAMES`).
+- Settings tabs: Jira, GitLab, Projects, Agent, Runtime.
+- GitLab trigger username is `GITLAB_BOT_MENTIONS` only.
+- Jira assignee and @mention use `TRIGGER_ASSIGNEE_NAMES` only.
 
 ### Removed
 
 - Jira webhook intake (`JIRA_INTAKE_MODE`, `JIRA_WEBHOOK_SECRET`, `POST /webhooks/jira`). The board poller is the only Jira intake. GitLab project webhooks are unchanged.
+
+[0.4.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.4.0
 
 ## [0.3.0] — 2026-09-08
 
