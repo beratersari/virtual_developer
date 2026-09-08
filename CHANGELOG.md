@@ -8,21 +8,29 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-08
+
+Settings no longer have a second GitLab allowlist or a dead assignment switch. Storage deletes clones when GitLab says the MR is merged.
+
 ### Changed
 
 - GitLab auth is one setting: `GITLAB_HOST_PATS` (host + PAT). A host with a PAT is allowed. `GITLAB_ALLOWED_HOSTS` is leftover only (expands a lone `GITLAB_PAT` when the map is empty).
 - Jobs use the model's advertised context window. `OPENCODE_CONTEXT_LIMIT` defaults to `0` (no workspace override).
+- `JIRA_EMAIL` is optional Cloud Basic only (bottom of `.env.example`). Daily auth is host + token (Bearer).
 
 ### Fixed
 
 - Merged or closed GitLab MRs delete the temp clone again. Session binds no longer count as in-use, and the issue key is enough to find the folder.
 - Storage folders that already show an MR (`!N`) are deleted when that MR is merged or closed, even if GitLab.com cannot reach the webhook. The poller asks GitLab for the same MR Storage displays.
+- Storage shows live GitLab MR status next to each `!N`.
 
 ### Removed
 
 - `TRIGGER_ON_ASSIGNMENT`. Poller intake is always To Do + bot assignee.
 - Unused `.env.example` keys `ASELIXAI_API_KEY` and `PROJECT_ROOT`.
 - `GIT_USER_NAME` / `GIT_USER_EMAIL`. Yaver does not commit; the agent uses the machine git identity.
+
+[0.5.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.5.0
 
 ## [0.4.0] — 2026-09-08
 
