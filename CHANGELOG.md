@@ -8,6 +8,22 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- GitLab auth is one setting: `GITLAB_HOST_PATS` (host + PAT). A host with a PAT is allowed. `GITLAB_ALLOWED_HOSTS` is leftover only (expands a lone `GITLAB_PAT` when the map is empty).
+- Jobs use the model's advertised context window. `OPENCODE_CONTEXT_LIMIT` defaults to `0` (no workspace override).
+
+### Fixed
+
+- Merged or closed GitLab MRs delete the temp clone again. Session binds no longer count as in-use, and the issue key is enough to find the folder.
+- Storage folders that already show an MR (`!N`) are deleted when that MR is merged or closed, even if GitLab.com cannot reach the webhook. The poller asks GitLab for the same MR Storage displays.
+
+### Removed
+
+- `TRIGGER_ON_ASSIGNMENT`. Poller intake is always To Do + bot assignee.
+- Unused `.env.example` keys `ASELIXAI_API_KEY` and `PROJECT_ROOT`.
+- `GIT_USER_NAME` / `GIT_USER_EMAIL`. Yaver does not commit; the agent uses the machine git identity.
+
 ## [0.4.0] — 2026-09-08
 
 Jira intake is poller-only. Settings group fields by tab, and each bot has one name.

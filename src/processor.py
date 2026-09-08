@@ -1,6 +1,7 @@
 """Job processor for handling JIRA events."""
 
 import asyncio
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -1530,7 +1531,7 @@ class JobProcessor:
     def _apply_job_opencode_context_limit(
         self, working_dir: Any, *, model: str = ""
     ) -> None:
-        """Cap the job workspace model window so long runs auto-compact."""
+        """Optionally cap the job workspace model window (0 = model default)."""
         if not working_dir:
             return
         try:
@@ -6066,6 +6067,11 @@ class JobProcessor:
                 }
                 if merge_request_url:
                     patch["merge_request_state"] = "opened"
+                    m = re.search(
+                        r"/merge_requests/(\d+)", str(merge_request_url), re.I
+                    )
+                    if m:
+                        patch["gitlab_mr_iid"] = int(m.group(1))
                 self.job_store.update_job(job_id, **patch)
             except Exception as e:
                 logger.warning(
@@ -6093,6 +6099,9 @@ class JobProcessor:
         if merge_request_url:
             meta_patch["merge_request_url"] = merge_request_url
             meta_patch.setdefault("merge_request_state", "opened")
+            m = re.search(r"/merge_requests/(\d+)", str(merge_request_url), re.I)
+            if m:
+                meta_patch.setdefault("gitlab_mr_iid", int(m.group(1)))
         if commit_sha:
             meta_patch["last_commit_sha"] = commit_sha
         if commit_url:
