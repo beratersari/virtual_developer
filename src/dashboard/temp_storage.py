@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from src.config import settings
 from src.logger import logger
@@ -30,6 +30,13 @@ _size_cache: Dict[str, Dict[str, Any]] = {}
 _scan_lock = threading.Lock()
 _scan_wanted = False
 _scan_thread: threading.Thread | None = None
+
+# Live GitLab MR state for Storage (old jobs often have a URL, no status).
+_mr_state_lock = threading.Lock()
+_mr_state_cache: Dict[str, str] = {}
+_mr_scan_lock = threading.Lock()
+_mr_scan_wanted = False
+_mr_scan_thread: threading.Thread | None = None
 
 
 class TempStorageError(Exception):
@@ -105,6 +112,123 @@ def reset_size_cache() -> None:
         _size_cache.clear()
     with _scan_lock:
         _scan_wanted = False
+    reset_mr_state_cache()
+
+
+def reset_mr_state_cache() -> None:
+    """Drop cached GitLab MR states so Storage Refresh fetches them again."""
+    global _mr_scan_wanted
+    with _mr_state_lock:
+        _mr_state_cache.clear()
+    with _mr_scan_lock:
+        _mr_scan_wanted = False
+
+
+def _cached_mr_state(url: str) -> Optional[str]:
+    key = _norm_mr_url(url)
+    if not key:
+        return None
+    with _mr_state_lock:
+        return _mr_state_cache.get(key)
+
+
+def remember_mr_state(url: str, state: str) -> None:
+    """Record a live GitLab MR state for Storage rows that share this URL."""
+    key = _norm_mr_url(url)
+    st = (state or "").strip().lower()
+    if not key or not st:
+        return
+    with _mr_state_lock:
+        _mr_state_cache[key] = st
+
+
+def _ensure_mr_state_scan() -> None:
+    global _mr_scan_wanted, _mr_scan_thread
+    with _mr_scan_lock:
+        _mr_scan_wanted = True
+        alive = _mr_scan_thread is not None and _mr_scan_thread.is_alive()
+        if alive:
+            return
+        _mr_scan_thread = threading.Thread(
+            target=_mr_state_scan_loop, name="temp-mr-state-scan", daemon=True
+        )
+        _mr_scan_thread.start()
+
+
+def _mr_state_scan_loop() -> None:
+    global _mr_scan_wanted
+    while True:
+        with _mr_scan_lock:
+            if not _mr_scan_wanted:
+                return
+            _mr_scan_wanted = False
+        try:
+            _scan_mr_states_once()
+        except Exception as e:
+            logger.warning(f"Storage MR status scan failed: {e}")
+
+
+def _scan_mr_states_once() -> None:
+    from src.gitlab.client import GitlabClient, parse_merge_request_url
+
+    urls: List[str] = []
+    seen: Set[str] = set()
+    try:
+        for rec in _clone_issue_index().values():
+            url = str(rec.get("merge_request_url") or "").strip()
+            key = _norm_mr_url(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+    except Exception as e:
+        logger.debug(f"Storage MR index failed: {e}")
+        return
+    for url in urls:
+        if _cached_mr_state(url):
+            continue
+        parsed = parse_merge_request_url(url)
+        if not parsed:
+            remember_mr_state(url, "unknown")
+            continue
+        host, project, iid = parsed
+        info = GitlabClient(host=host).get_merge_request(project, iid)
+        if not info:
+            remember_mr_state(url, "unknown")
+            continue
+        state = str(info.get("state") or "").strip().lower() or "unknown"
+        remember_mr_state(url, state)
+        _persist_job_mr_state(url, state)
+
+
+def _persist_job_mr_state(url: str, state: str) -> None:
+    want = _norm_mr_url(url)
+    if not want:
+        return
+    try:
+        from src.state.job_store import job_store
+
+        n = job_store.count_jobs()
+        for job in job_store.list_jobs(limit=max(int(n or 0), 1)):
+            if _norm_mr_url(str(job.get("merge_request_url") or "")) != want:
+                continue
+            jid = str(job.get("job_id") or "")
+            if jid:
+                job_store.update_job(jid, merge_request_state=state)
+    except Exception as e:
+        logger.debug(f"Could not persist MR state for {want}: {e}")
+
+
+def _apply_live_mr_state(row: Dict[str, Any]) -> bool:
+    """Overlay cached GitLab state. Returns True if a fetch is still needed."""
+    url = str(row.get("merge_request_url") or "").strip()
+    if not url:
+        return False
+    live = _cached_mr_state(url)
+    if live:
+        row["merge_request_state"] = live
+        return False
+    return True
 
 
 def _cached_size(name: str, mtime: float | None) -> int | None:
@@ -225,18 +349,9 @@ def _delete_dto(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _in_use_paths() -> Set[Path]:
+def _live_git_paths() -> Set[Path]:
+    """Clone dirs owned by an in-flight GitManager (job still running)."""
     found: Set[Path] = set()
-    try:
-        from src.git_manager import session_bound_workspace_paths
-
-        for p in session_bound_workspace_paths():
-            try:
-                found.add(Path(p).resolve())
-            except (OSError, TypeError):
-                continue
-    except Exception:
-        pass
     try:
         from src.git_manager import GitManager
 
@@ -250,6 +365,52 @@ def _in_use_paths() -> Set[Path]:
                     continue
     except Exception:
         pass
+    return found
+
+
+def _forget_binds_for_clone(clone: Path) -> None:
+    """Drop OpenCode resume pointers so a later job does not reuse a deleted dir."""
+    try:
+        want = Path(clone).resolve()
+    except OSError:
+        return
+    try:
+        from src.state.session_bind_store import session_bind_store
+    except Exception:
+        return
+    try:
+        recs = session_bind_store.list_binds(limit=500)
+    except Exception:
+        return
+    for rec in recs:
+        raw = rec.get("working_directory")
+        bid = str(rec.get("bind_id") or "").strip()
+        if not bid or not raw:
+            continue
+        try:
+            if Path(str(raw)).resolve() != want:
+                continue
+        except OSError:
+            continue
+        try:
+            session_bind_store.forget_session(bid, reason="mr-merged")
+        except Exception as e:
+            logger.debug(f"Could not forget session bind {bid}: {e}")
+
+
+def _in_use_paths() -> Set[Path]:
+    found: Set[Path] = set()
+    try:
+        from src.git_manager import session_bound_workspace_paths
+
+        for p in session_bound_workspace_paths():
+            try:
+                found.add(Path(p).resolve())
+            except (OSError, TypeError):
+                continue
+    except Exception:
+        pass
+    found.update(_live_git_paths())
     return found
 
 
@@ -499,6 +660,7 @@ def build_storage_view() -> Dict[str, Any]:
     folders: List[Dict[str, Any]] = []
     folders_bytes = 0
     sizes_pending = False
+    mr_states_pending = False
     listed: Set[str] = set()
     if base.is_dir():
         try:
@@ -551,6 +713,8 @@ def build_storage_view() -> Dict[str, Any]:
                     _pop_job(entry.name)
                 else:
                     row["delete"] = _delete_dto(job)
+            if _apply_live_mr_state(row):
+                mr_states_pending = True
             folders.append(row)
             listed.add(entry.name)
     for name, job in jobs.items():
@@ -575,6 +739,8 @@ def build_storage_view() -> Dict[str, Any]:
     folders.sort(key=lambda r: str(r.get("name") or "").lower())
     if sizes_pending:
         _ensure_size_scan()
+    if mr_states_pending:
+        _ensure_mr_state_scan()
     return {
         "disk": {
             "volume": volume,
@@ -593,6 +759,7 @@ def build_storage_view() -> Dict[str, Any]:
         "folders_bytes": folders_bytes,
         "folders_label": format_bytes(folders_bytes),
         "sizes_pending": sizes_pending,
+        "mr_states_pending": mr_states_pending,
     }
 
 
@@ -741,7 +908,10 @@ def clone_folder_names_for_mr(
                 )
             )
             same_issue = bool(want_key) and str(job.get("issue_key") or "").upper() == want_key
-            if same_url or same_iid or (same_issue and (same_url or not want_url)):
+            # Issue key is enough. A webhook always has an MR URL; requiring
+            # same_url here dropped every Jira job that only stored the key
+            # (or a slightly different URL) and never gitlab_mr_iid.
+            if same_url or same_iid or same_issue:
                 _add(job.get("working_directory"))
     except Exception as e:
         logger.debug(f"MR clone lookup from jobs failed: {e}")
@@ -768,6 +938,30 @@ def clone_folder_names_for_mr(
                 _add(getattr(gm, "temp_dir", None))
         except Exception as e:
             logger.debug(f"MR clone lookup from live git failed: {e}")
+
+    # Same map Storage uses so a folder that shows !N is deleted when !N merges.
+    try:
+        from src.gitlab.client import parse_merge_request_url
+
+        want_iid = int(mr_iid or 0) or 0
+        if not want_iid and want_url:
+            parsed = parse_merge_request_url(want_url)
+            if parsed:
+                want_iid = int(parsed[2])
+        for lookup, rec in _clone_issue_index().items():
+            rec_url = _norm_mr_url(str(rec.get("merge_request_url") or ""))
+            rec_key = str(rec.get("issue_key") or "").upper()
+            rec_iid = 0
+            parsed = parse_merge_request_url(rec_url) if rec_url else None
+            if parsed:
+                rec_iid = int(parsed[2])
+            same_url = bool(want_url and rec_url == want_url)
+            same_iid = bool(want_iid and rec_iid and want_iid == rec_iid)
+            same_issue = bool(want_key and rec_key == want_key)
+            if same_url or same_iid or same_issue:
+                _add(lookup)
+    except Exception as e:
+        logger.debug(f"MR clone lookup from storage index failed: {e}")
     return names
 
 
@@ -781,7 +975,9 @@ def delete_clones_for_merge_request(
 ) -> List[str]:
     """Queue force-delete of temp clones for a merged or closed MR.
 
-    Skips in-use folders.
+    Skips only an in-flight GitManager clone (job still running). Session
+    binds stay after the job finishes — treating those as in-use made
+    merge/close delete a no-op for every real job.
     """
     names = clone_folder_names_for_mr(
         mr_url=mr_url,
@@ -791,7 +987,7 @@ def delete_clones_for_merge_request(
         source_branch=source_branch,
     )
     deleted: List[str] = []
-    in_use = _in_use_paths()
+    live = _live_git_paths()
     for name in names:
         try:
             target = _validate_delete_target(name, area="temp")
@@ -802,14 +998,66 @@ def delete_clones_for_merge_request(
             resolved = target.resolve()
         except OSError:
             resolved = target
-        if resolved in in_use:
-            logger.info(f"Skip MR-merge delete of {name}: clone is in use")
+        if resolved in live:
+            logger.info(f"Skip MR-merge delete of {name}: clone is in flight")
             continue
+        _forget_binds_for_clone(resolved)
         try:
             queue_delete_temp_folder(name, area="temp")
             deleted.append(name)
         except TempStorageError as e:
             logger.warning(f"Could not queue MR-merge delete of {name}: {e}")
+    return deleted
+
+
+def sweep_merged_storage_clones() -> List[str]:
+    """Delete temp clones whose Storage MR is merged or closed on GitLab.
+
+    GitLab.com cannot POST to a LAN daemon, so merge webhooks often never
+    arrive. Storage already shows the MR; this asks GitLab for that same
+    !N and deletes the folder when the MR is gone.
+    """
+    from src.gitlab.client import GitlabClient, parse_merge_request_url
+
+    seen: Set[str] = set()
+    deleted: List[str] = []
+    try:
+        index = _clone_issue_index()
+    except Exception as e:
+        logger.debug(f"MR sweep index failed: {e}")
+        return deleted
+    for rec in index.values():
+        url = str(rec.get("merge_request_url") or "").strip()
+        parsed = parse_merge_request_url(url) if url else None
+        if not parsed:
+            continue
+        host, project, iid = parsed
+        key = f"{host}/{project}!{iid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            info = GitlabClient(host=host).get_merge_request(project, iid)
+        except Exception as e:
+            logger.debug(f"MR sweep {key} failed: {e}")
+            continue
+        if not info:
+            continue
+        state = str(info.get("state") or "").strip().lower()
+        remember_mr_state(url, state)
+        if state not in {"merged", "closed"}:
+            continue
+        names = delete_clones_for_merge_request(
+            mr_url=url,
+            project_path=project,
+            mr_iid=iid,
+            issue_key=str(rec.get("issue_key") or ""),
+        )
+        if names:
+            logger.info(
+                f"Storage MR {key} is {state} — deleted clones {names}"
+            )
+            deleted.extend(names)
     return deleted
 
 

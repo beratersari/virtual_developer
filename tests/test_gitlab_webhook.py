@@ -915,6 +915,175 @@ def test_dashboard_mr_close_webhook_deletes_clone(
     assert updated["merge_request_state"] == "closed"
 
 
+def test_parse_merge_request_url():
+    from src.gitlab.client import parse_merge_request_url
+
+    assert parse_merge_request_url(
+        "https://gitlab.com/beratersari0/test_project/-/merge_requests/65"
+    ) == ("gitlab.com", "beratersari0/test_project", 65)
+    assert parse_merge_request_url(
+        "https://gitlab.example.com/acme/demo/merge_requests/4"
+    ) == ("gitlab.example.com", "acme/demo", 4)
+    assert parse_merge_request_url("") is None
+
+
+def test_clone_folder_names_uses_storage_mr_index(tmp_path, monkeypatch):
+    """A folder Storage labels with !N is found by that same MR URL."""
+    from src.dashboard.temp_storage import clone_folder_names_for_mr
+    from src.state.job_store import job_store
+
+    base = tmp_path / "t"
+    clone = base / "test_project_abc123"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    job = job_store.create_job(issue_key="KAN-494", summary="live")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.com/beratersari0/test_project/-/merge_requests/65",
+    )
+    names = clone_folder_names_for_mr(
+        mr_url="https://gitlab.com/beratersari0/test_project/-/merge_requests/65",
+        project_path="beratersari0/test_project",
+        mr_iid=65,
+    )
+    assert "test_project_abc123" in names
+
+
+def test_sweep_merged_storage_clones_deletes_when_gitlab_says_merged(
+    tmp_path, monkeypatch
+):
+    from src.dashboard.temp_storage import (
+        reset_delete_jobs,
+        sweep_merged_storage_clones,
+    )
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "test_project_sweep01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    job = job_store.create_job(issue_key="KAN-494", summary="live")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.com/beratersari0/test_project/-/merge_requests/65",
+    )
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_merge_request(self, project, iid):
+            assert project == "beratersari0/test_project"
+            assert iid == 65
+            return {"state": "merged", "iid": 65}
+
+    monkeypatch.setattr("src.gitlab.client.GitlabClient", _Fake)
+    deleted = sweep_merged_storage_clones()
+    assert "test_project_sweep01" in deleted
+
+
+def test_dashboard_mr_merge_deletes_when_only_issue_key_matches(
+    tmp_path, monkeypatch, fake_jira
+):
+    """Webhook URL need not match the job URL; issue key is enough."""
+    from src.dashboard.api import create_dashboard_app
+    from src.dashboard.temp_storage import reset_delete_jobs
+    from src.processor import JobProcessor
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "repo_keyonly01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
+    monkeypatch.chdir(tmp_path)
+
+    job = job_store.create_job(issue_key="KAN-12", summary="add login")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="http://gitlab.example.com/acme/demo/-/merge_requests/4",
+    )
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    app = create_dashboard_app(processor=proc)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhooks/gitlab",
+            json=_mr_lifecycle_payload(),
+            headers={
+                "X-Gitlab-Event": "Merge Request Hook",
+                "X-Gitlab-Token": "tok",
+            },
+        )
+    assert resp.status_code == 200
+    assert "repo_keyonly01" in (resp.json().get("deleted") or [])
+
+
+def test_dashboard_mr_merge_deletes_despite_session_bind(
+    tmp_path, monkeypatch, fake_jira
+):
+    """Finished jobs keep a session bind; that must not block merge delete."""
+    from src.dashboard.api import create_dashboard_app
+    from src.dashboard.temp_storage import reset_delete_jobs
+    from src.processor import JobProcessor
+    from src.state.job_store import job_store
+    from src.state.session_bind_store import session_bind_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "repo_bound01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
+    monkeypatch.chdir(tmp_path)
+
+    job = job_store.create_job(issue_key="KAN-12", summary="add login")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        gitlab_project="acme/demo",
+        gitlab_mr_iid=4,
+    )
+    session_bind_store.upsert(
+        repository_url="https://gitlab.example.com/acme/demo.git",
+        branch="feature/KAN-12",
+        target_branch="develop",
+        session_id="ses_keep",
+        issue_key="KAN-12",
+        working_directory=str(clone.resolve()),
+        kind="build",
+    )
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    app = create_dashboard_app(processor=proc)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhooks/gitlab",
+            json=_mr_lifecycle_payload(),
+            headers={
+                "X-Gitlab-Event": "Merge Request Hook",
+                "X-Gitlab-Token": "tok",
+            },
+        )
+    assert resp.status_code == 200
+    assert "repo_bound01" in (resp.json().get("deleted") or [])
+
+
 def test_decide_gitlab_mr_reopen_does_not_delete(monkeypatch):
     monkeypatch.setattr("src.config.settings.jira_projects", "KAN")
     d = decide_gitlab_mr_webhook(

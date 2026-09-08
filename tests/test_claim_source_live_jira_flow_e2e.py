@@ -477,7 +477,6 @@ def _wire(
     monkeypatch.chdir(work)
     monkeypatch.setattr(settings, "temp_dir_base", work / ".temp")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "1")
     monkeypatch.setattr(settings, "max_concurrent_jobs", 4)
     monkeypatch.setattr(settings, "gitlab_pat", "")

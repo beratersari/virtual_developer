@@ -1,10 +1,15 @@
-# Yaver 0.4.0
+# Yaver 0.5.0
 
-Jira intake is the board poller only. Settings are grouped by tab.
-Each bot has one name: `TRIGGER_ASSIGNEE_NAMES` on Jira (assignee and
-@mention) and `GITLAB_BOT_MENTIONS` on GitLab.
+GitLab auth is one setting: a host with a PAT is allowed
+(`GITLAB_HOST_PATS`). Poller intake is always To Do + bot assignee
+(no `TRIGGER_ON_ASSIGNMENT`). Jobs use the model's context window
+unless you set `OPENCODE_CONTEXT_LIMIT`.
 
-Standalone exe zips now include `opencoderman/` and
+Storage shows live GitLab MR status. When that MR is merged or closed,
+the matching temp clone is deleted even if the webhook cannot reach
+the daemon.
+
+Standalone exe zips still include `opencoderman/` and
 `install-opencode-agents.bat` / `.sh`. That script finds the OpenCode
 home and copies **derman-build**, **derman-plan**, and `skills/` only.
 

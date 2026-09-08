@@ -774,6 +774,13 @@ class JiraPoller:
                                 except Exception as e:
                                     logger.error(f"Dispatch failed for an issue: {e}")
 
+                try:
+                    from src.dashboard.temp_storage import sweep_merged_storage_clones
+
+                    sweep_merged_storage_clones()
+                except Exception as e:
+                    logger.debug(f"Merged-MR clone sweep skipped: {e}")
+
             except Exception as e:
                 logger.error(f"Error during poll: {e}")
                 poll_snapshot_store.end_poll(

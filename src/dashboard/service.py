@@ -237,7 +237,6 @@ def build_settings_view() -> SettingsView:
         jira_board_id=settings.jira_board_id or "",
         jira_projects=settings.jira_projects or "",
         poll_interval_seconds=int(settings.poll_interval_seconds or 30),
-        trigger_on_assignment=bool(settings.trigger_on_assignment),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
         agent_task_timeout_seconds=int(
             getattr(settings, "agent_task_timeout_seconds", 1800) or 1800
@@ -463,12 +462,9 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             dotenv_updates["GITLAB_HOST_PATS"] = getattr(
                 settings, "gitlab_host_pats", ""
             ) or ""
-            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
-                settings.gitlab_allowed_hosts or ""
-            )
             dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
     else:
-        # Legacy single PAT + host list (still supported)
+        # Leftover single PAT + host list: expand into the PAT map (host with PAT = allowed)
         if "gitlab_pat" in data and data["gitlab_pat"] is not None:
             pat = str(data["gitlab_pat"])
             if pat.strip():
@@ -477,7 +473,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             raw = str(data["gitlab_allowed_hosts"])
             hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
             settings.gitlab_allowed_hosts = ",".join(hosts)
-            # If we have a single legacy PAT, expand into host map for runtime use
             if (
                 hasattr(settings, "set_gitlab_host_pat_map")
                 and (settings.gitlab_pat or "").strip()
@@ -490,9 +485,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             dotenv_updates["GITLAB_HOST_PATS"] = getattr(
                 settings, "gitlab_host_pats", ""
             ) or ""
-            dotenv_updates["GITLAB_ALLOWED_HOSTS"] = (
-                settings.gitlab_allowed_hosts or ""
-            )
             dotenv_updates["GITLAB_PAT"] = settings.gitlab_pat or ""
 
     # Runtime-persisted fields (survive restart; win over .env)
@@ -506,9 +498,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
         runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
-    if "trigger_on_assignment" in data and data["trigger_on_assignment"] is not None:
-        settings.trigger_on_assignment = bool(data["trigger_on_assignment"])
-        runtime_persist["trigger_on_assignment"] = settings.trigger_on_assignment
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
         runtime_persist["max_concurrent_jobs"] = settings.max_concurrent_jobs

@@ -285,16 +285,13 @@ def test_build_tasks_session_backfill_and_live(tmp_path):
 def test_apply_settings_all_fields(monkeypatch):
     from src.config import settings
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
     view = apply_settings_update(
         SettingsUpdate(
-            trigger_on_assignment=True,
             max_concurrent_jobs=3,
             default_model="",  # empty ignored
         )
     )
-    assert view.trigger_on_assignment is True
     assert view.max_concurrent_jobs == 3
 
 

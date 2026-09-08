@@ -216,6 +216,9 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
     from src.config import settings
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITLAB_HOST_PATS", "")
+    monkeypatch.setenv("GITLAB_PAT", "old-pat")
+    monkeypatch.setenv("GITLAB_ALLOWED_HOSTS", "old.gitlab")
     (tmp_path / ".env").write_text(
         "JIRA_HOST=https://old.example.com\nJIRA_API_TOKEN=old-token\n",
         encoding="utf-8",
@@ -278,6 +281,8 @@ def test_apply_settings_connection_and_write_only_secrets(tmp_path, monkeypatch)
     assert "JIRA_EMAIL=" in env_text
     assert "GITLAB_HOST_PATS=" in env_text
     assert "pat-cloud" in env_text
+    # Allowed hosts are the PAT-map keys; do not write a sibling allowlist.
+    assert "GITLAB_ALLOWED_HOSTS" not in env_text
 
 
 def test_apply_settings_gitlab_rename_keeps_pat_via_previous_host(
@@ -327,6 +332,41 @@ def test_apply_settings_gitlab_rename_1to1_without_previous_host(
     # Inferred 1:1 rename is refused — PAT stays off the new host
     assert settings.gitlab_pat_for_host("gitlab.company.com") == ""
     assert settings.gitlab_pat_for_host("gitlab.com") == ""
+
+
+def test_settings_leftover_pat_and_hosts_expand_into_map(tmp_path, monkeypatch):
+    """Leftover GITLAB_PAT + hosts become the host→PAT map (host with PAT = allowed)."""
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "src.config.runtime_settings_path",
+        lambda: tmp_path / "runtime_settings.json",
+    )
+    monkeypatch.setenv("GITLAB_HOST_PATS", "")
+    monkeypatch.setenv("GITLAB_PAT", "")
+    monkeypatch.setenv("GITLAB_ALLOWED_HOSTS", "")
+    (tmp_path / ".env").write_text("JIRA_HOST=https://jira.example.com\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "gitlab_host_pats", "")
+    monkeypatch.setattr(settings, "gitlab_pat", "")
+    monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
+    if hasattr(settings, "set_gitlab_host_pat_map"):
+        settings.set_gitlab_host_pat_map({})
+
+    view = apply_settings_update(
+        SettingsUpdate(
+            gitlab_pat="leftover-pat",
+            gitlab_allowed_hosts="gitlab.com, corp.gitlab",
+        )
+    )
+    assert settings.gitlab_pat_for_host("gitlab.com") == "leftover-pat"
+    assert settings.gitlab_pat_for_host("corp.gitlab") == "leftover-pat"
+    assert set(settings.gitlab_allowed_hosts_list) == {"gitlab.com", "corp.gitlab"}
+    assert {c.host for c in view.gitlab_credentials} == {"corp.gitlab", "gitlab.com"}
+    env = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "GITLAB_HOST_PATS=" in env
+    assert "leftover-pat" in env
+    assert "GITLAB_ALLOWED_HOSTS" not in env
 
 
 def test_settings_save_without_gitlab_rows_keeps_legacy_pat(tmp_path, monkeypatch):
@@ -1078,7 +1118,6 @@ def test_poller_publishes_snapshot(fake_jira, state_manager, monkeypatch):
     p.state_manager = state_manager
     with patch("src.jira.poller.settings") as s:
         s.trigger_assignee_names_list = ["devbot"]
-        s.trigger_on_assignment = True
         out = p.poll_board()
     assert len(out) == 1
     snap = store.snapshot()

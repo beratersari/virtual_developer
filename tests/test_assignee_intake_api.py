@@ -66,7 +66,7 @@ def test_settings_api_has_no_trigger_labels(tmp_path, monkeypatch):
     assert "trigger_labels" not in body
     assert "trigger_assignee_names" in body
     assert "trigger_mentions" in body
-    assert "trigger_on_assignment" in body
+    assert "trigger_on_assignment" not in body
 
 
 def test_settings_api_ignores_trigger_labels_patch(tmp_path, monkeypatch):
@@ -79,12 +79,14 @@ def test_settings_api_ignores_trigger_labels_patch(tmp_path, monkeypatch):
         "/api/settings",
         json={
             "trigger_labels": "bot,ai-assist",
+            "trigger_on_assignment": False,
             "trigger_assignee_names": "beratersari,devbot",
         },
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert "trigger_labels" not in body
+    assert "trigger_on_assignment" not in body
     assert "beratersari" in (body.get("trigger_assignee_names") or "")
     again = http.get("/api/settings")
     assert again.status_code == 200

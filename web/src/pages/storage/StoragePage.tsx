@@ -14,8 +14,9 @@ function folderHref(folder: StorageFolder): string | null {
 
 function mrStateLabel(state?: string | null): string {
   const raw = (state || '').trim().toLowerCase()
-  if (!raw) return ''
+  if (!raw) return '…'
   if (raw === 'opened' || raw === 'open') return 'open'
+  if (raw === 'unknown') return 'unknown'
   return raw
 }
 
@@ -145,11 +146,9 @@ function StorageList({
                           >
                             {mrShortLabel(folder.merge_request_url)}
                           </a>
-                          {mrStateLabel(folder.merge_request_state) ? (
-                            <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-                              {mrStateLabel(folder.merge_request_state)}
-                            </span>
-                          ) : null}
+                          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+                            {mrStateLabel(folder.merge_request_state)}
+                          </span>
                         </>
                       ) : null}
                     </div>
@@ -170,11 +169,9 @@ function StorageList({
                         >
                           {mrShortLabel(folder.merge_request_url)}
                         </a>
-                        {mrStateLabel(folder.merge_request_state) ? (
-                          <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
-                            {mrStateLabel(folder.merge_request_state)}
-                          </span>
-                        ) : null}
+                        <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-secondary">
+                          {mrStateLabel(folder.merge_request_state)}
+                        </span>
                       </>
                     ) : null}
                   </div>
@@ -243,8 +240,9 @@ export function StoragePage() {
 
   const deleting = (data?.folders || []).some((folder) => folder.delete?.status === 'deleting')
   const sizesPending = Boolean(data?.sizes_pending)
+  const mrPending = Boolean(data?.mr_states_pending)
   useEffect(() => {
-    if (!deleting && !sizesPending) return
+    if (!deleting && !sizesPending && !mrPending) return
     let cancelled = false
     const tick = async () => {
       try {
@@ -254,7 +252,7 @@ export function StoragePage() {
           setData((prev) => applyDeletes(prev, payload.deletes))
           const still = payload.deletes.some((d) => d.status === 'deleting')
           if (!still) void reload()
-        } else if (sizesPending) {
+        } else if (sizesPending || mrPending) {
           await reload()
         }
       } catch {
@@ -267,7 +265,7 @@ export function StoragePage() {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [deleting, sizesPending])
+  }, [deleting, sizesPending, mrPending])
 
   const onDelete = () => {
     if (!pending) return
@@ -292,7 +290,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue and merge request when one exists. Merged MRs delete the clone automatically."
+        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue and live GitLab MR status when an MR exists. Refresh reloads sizes and MR status. Merged MRs delete the clone automatically."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh

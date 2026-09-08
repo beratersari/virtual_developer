@@ -231,7 +231,6 @@ def test_r3_schedule_existing_todo_must_not_be_poller_eligible_before_fire(
     from src.state.schedule_store import ScheduleStore
 
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
 
     desc = (
         "{params}\n"

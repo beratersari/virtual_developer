@@ -6,7 +6,8 @@ Uses ``PRIVATE-TOKEN`` (all plans) and ``verify=False``
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -37,6 +38,38 @@ def _normalize_host(raw: str) -> str:
         return name
     except Exception:
         return (raw or "").strip().lower().split("/")[0]
+
+
+def parse_merge_request_url(url: str) -> Optional[Tuple[str, str, int]]:
+    """Split ``https://host/group/repo/-/merge_requests/12`` → host, project, iid."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").strip("/")
+    if parsed.port and parsed.port not in (80, 443):
+        host = f"{host}:{parsed.port}"
+    match = re.search(r"^(.*?)/-/merge_requests/(\d+)$", path)
+    if not match:
+        match = re.search(r"^(.*?)/merge_requests/(\d+)$", path)
+    if not host or not match:
+        return None
+    project = (match.group(1) or "").strip("/")
+    if project.endswith(".git"):
+        project = project[:-4]
+    try:
+        iid = int(match.group(2))
+    except (TypeError, ValueError):
+        return None
+    if not project or iid <= 0:
+        return None
+    return host, project, iid
 
 
 class GitlabClient:
@@ -74,6 +107,31 @@ class GitlabClient:
         else:
             ident = quote(str(project or "").strip().strip("/"), safe="")
         return f"{self.api_base}/projects/{ident}"
+
+    def get_merge_request(self, project: Any, mr_iid: int) -> Optional[Dict[str, Any]]:
+        """GET ``/projects/:id/merge_requests/:iid`` (state / merged)."""
+        if not self.api_base:
+            return None
+        try:
+            iid = int(mr_iid)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        url = f"{self._project_url(project)}/merge_requests/{iid}"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                return data if isinstance(data, dict) else None
+            logger.debug(
+                f"GitLab GET MR {project}!{iid} failed ({resp.status_code})"
+            )
+            return None
+        except Exception as e:
+            logger.debug(f"GitLab GET MR {project}!{iid} error: {e}")
+            return None
 
     def post_mr_note(
         self,
