@@ -6,17 +6,8 @@ from unittest.mock import MagicMock
 
 from src.issue_git_spec import peek_issue_git_fields
 from src.jira.client import assign_ident_from_myself, assign_to_pat_user
-from src.jira.webhook import decide_jira_webhook
 from src.scheduler.service import preview_existing_issue, schedule_existing_issue
 from src.state.schedule_store import ScheduleStore
-from tests.test_jira_webhook import (
-    MENTIONS,
-    NEEDLES,
-    SECRET,
-    _assignment_payload,
-    _created_assigned_payload,
-    _headers,
-)
 
 
 def _issue(key: str, description: str, summary: str = "Do work") -> dict:
@@ -197,42 +188,6 @@ def test_assign_to_pat_user_uses_issue_arg_without_refetch():
     client.assign_issue.assert_called_once_with("KAN-3", "devbot")
 
 
-def test_webhook_ignores_self_assignment():
-    payload = _assignment_payload()
-    payload["user"] = {
-        "name": "devbot",
-        "key": "devbot",
-        "displayName": "DevBot",
-    }
-    d = decide_jira_webhook(
-        payload,
-        headers=_headers(),
-        query={"token": SECRET},
-        secret=SECRET,
-        intake_mode="webhook",
-        assignee_needles=NEEDLES,
-        mention_tokens=MENTIONS,
-    )
-    assert not d.accepted
-    assert "self-assignment" in d.reason
-
-
-def test_webhook_still_accepts_human_assignment():
-    payload = _assignment_payload()
-    payload["user"] = {"name": "alice", "displayName": "Alice"}
-    d = decide_jira_webhook(
-        payload,
-        headers=_headers(),
-        query={"token": SECRET},
-        secret=SECRET,
-        intake_mode="webhook",
-        assignee_needles=NEEDLES,
-        mention_tokens=MENTIONS,
-    )
-    assert d.accepted
-    assert d.trigger == "assignment"
-
-
 def test_api_from_issue_picker_writes_params(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -291,23 +246,3 @@ def test_api_from_issue_picker_writes_params(tmp_path, monkeypatch):
     assert "Mode: plan" in written
     assert "Source branch: feature/KAN-API" in written
     client.assign_issue.assert_called_with("KAN-API", "devbot")
-
-
-def test_webhook_ignores_bot_created_issue():
-    payload = _created_assigned_payload()
-    payload["user"] = {
-        "name": "devbot",
-        "key": "devbot",
-        "displayName": "DevBot",
-    }
-    d = decide_jira_webhook(
-        payload,
-        headers=_headers(),
-        query={"token": SECRET},
-        secret=SECRET,
-        intake_mode="webhook",
-        assignee_needles=NEEDLES,
-        mention_tokens=MENTIONS,
-    )
-    assert not d.accepted
-    assert "bot-created" in d.reason

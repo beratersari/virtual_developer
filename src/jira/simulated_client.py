@@ -160,9 +160,6 @@ class SimulatedJiraClient:
             "active": True,
         }
 
-    def list_webhooks(self) -> list:
-        return []
-
     def close(self):
         """Close the HTTP client."""
         self.client.close()

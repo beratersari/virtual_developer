@@ -920,25 +920,6 @@ class JiraClient:
         """Assign ``issue_key`` to the Jira user of this client's PAT."""
         return assign_to_pat_user(self, issue_key)
 
-    def list_webhooks(self) -> List[Dict[str, Any]]:
-        """Admin webhook list (Server/DC 9.4 + Cloud ``/rest/webhooks/1.0``)."""
-        try:
-            response = self.client.get(f"{self.host}/rest/webhooks/1.0/webhook")
-            if response.status_code == 404:
-                return []
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list):
-                return [x for x in data if isinstance(x, dict)]
-            if isinstance(data, dict):
-                values = data.get("values") or data.get("webhooks") or []
-                if isinstance(values, list):
-                    return [x for x in values if isinstance(x, dict)]
-            return []
-        except httpx.HTTPError as e:
-            logger.error(f"Error listing Jira webhooks: {e}")
-            return []
-
     def assign_issue(self, issue_key: str, username: str) -> bool:
         """Assign issue to a user.
 

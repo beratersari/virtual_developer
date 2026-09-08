@@ -124,56 +124,6 @@ def test_str_of_adf_cannot_parse_params():
 
 
 # ---------------------------------------------------------------------------
-# C2 — Webhook Cloud ADF is already flattened (must stay true)
-# ---------------------------------------------------------------------------
-
-
-def test_webhook_assignment_flattens_adf_before_enqueue():
-    from src.jira.webhook import decide_jira_webhook
-
-    payload = {
-        "webhookEvent": "jira:issue_updated",
-        "issue": {
-            "key": "ADF-WH",
-            "fields": {
-                "summary": "implement",
-                "description": _ADF_PARAMS,
-                "assignee": {"displayName": "Jira AI Bot", "name": "devbot"},
-            },
-        },
-        "changelog": {
-            "id": "99",
-            "items": [
-                {
-                    "field": "assignee",
-                    "to": "devbot",
-                    "toString": "Jira AI Bot",
-                }
-            ],
-        },
-    }
-    decision = decide_jira_webhook(
-        payload,
-        headers={"x-webhook-token": "secret"},
-        query={"token": "secret"},
-        enabled=True,
-        secret="secret",
-        intake_mode="webhook",
-        assignee_needles=["devbot", "jira ai bot"],
-        mention_tokens=["@DevBot"],
-    )
-    assert decision.accepted, decision.reason
-    desc = (decision.event or {}).get("issue", {}).get("fields", {}).get(
-        "description"
-    )
-    assert isinstance(desc, str)
-    spec, err = parse_issue_git_spec("implement", desc)
-    assert err is None, err
-    assert spec is not None
-    assert spec.repository_url == REAL_GITLAB
-
-
-# ---------------------------------------------------------------------------
 # C3 — Dashboard cancel must not wait on the workflow issue lock
 # ---------------------------------------------------------------------------
 

@@ -90,13 +90,13 @@ def test_retry_counts_persist_and_reloads(tmp_path, monkeypatch):
     assert dumped.agent_task_max_incomplete_retries == 40
 
 
-def test_settings_import_with_runtime_intake_mode(tmp_path):
-    """Daemon start must not circular-import when runtime has jira_intake_mode."""
+def test_settings_import_ignores_legacy_runtime_intake_mode(tmp_path):
+    """Leftover jira_intake_mode in runtime JSON must not become a Settings field."""
     import os
     import subprocess
     import sys
 
-    agent = tmp_path / ".jira-agent"
+    agent = tmp_path / "yaver-data"
     agent.mkdir()
     (agent / "runtime_settings.json").write_text(
         json.dumps({"jira_intake_mode": "webhook", "jira_board_id": "1"}),
@@ -105,12 +105,14 @@ def test_settings_import_with_runtime_intake_mode(tmp_path):
     root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    env["YAVER_DATA_DIR"] = str(agent)
     env.pop("JIRA_INTAKE_MODE", None)
     proc = subprocess.run(
         [
             sys.executable,
             "-c",
-            "from src.config import settings; print(settings.jira_intake_mode)",
+            "from src.config import settings; "
+            "print(hasattr(settings, 'jira_intake_mode'), settings.jira_board_id)",
         ],
         cwd=str(tmp_path),
         env=env,
@@ -119,7 +121,7 @@ def test_settings_import_with_runtime_intake_mode(tmp_path):
         timeout=30,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip().splitlines()[-1] == "webhook"
+    assert proc.stdout.strip().splitlines()[-1] == "False 1"
 
 
 def test_begin_workflow_uses_live_timeout(tmp_path, monkeypatch, state_manager):

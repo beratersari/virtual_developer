@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Removed
+
+- Jira webhook intake (`JIRA_INTAKE_MODE`, `JIRA_WEBHOOK_SECRET`, `POST /webhooks/jira`). The board poller is the only Jira intake. GitLab project webhooks are unchanged.
+
 ## [0.3.0] — 2026-09-08
 
 Plan → build is now label-driven, plan and build keep separate OpenCode sessions, and the ops dashboard is cheaper to live-update.
