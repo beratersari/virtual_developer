@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Added
+
+- Standalone exe zips now include the `opencoderman/` tree plus `install-opencode-agents.bat` / `.sh`, which detect the OpenCode home (`OPENCODE_HOME`, `~/.opencode`, or `opencode` on PATH) and copy `derman-build`, `derman-plan`, and `skills/` there. Offline Windows/Linux zips ship the same script.
+
 ### Changed
 
 - Settings tabs group Jira, GitLab, projects, agent, and runtime fields separately. GitLab trigger username is a single field (`GITLAB_BOT_MENTIONS`). Jira assignee name and mention token are the same identity (`TRIGGER_ASSIGNEE_NAMES`).

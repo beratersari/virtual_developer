@@ -272,6 +272,7 @@ $copyItems = @(
     "install-dashboard-system-python.bat",
     "install-opencode-online.bat",
     "install-backends.bat",
+    "install-opencode-agents.bat",
     "install-codex.bat",
     "VERSION",
     "README.md",
@@ -825,6 +826,7 @@ JIRA Virtual Developer — Windows offline package
       install-dashboard.bat                 — Python + ops dashboard (.venv)
       install-dashboard-system-python.bat   — same, uses PATH python (no .venv)
       install-backends.bat                  — OpenCode (opencoderman) + Codex
+      install-opencode-agents.bat           — copy agents/skills into detected OpenCode home
       install-codex.bat                     — Codex CLI only
       install-opencode-online.bat — ONLINE OpenCode (opencoderman; needs Python + network)
 5. Edit .env with Jira / GitLab settings

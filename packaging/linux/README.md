@@ -34,6 +34,7 @@ Extract the artifact so the install scripts sit next to `vendor/` and `src/`, th
 ```bash
 ./install-dashboard.sh    # .venv from vendor/python-wheels (no network)
 ./install-backends.sh     # OpenCode via opencoderman/install.py
+./install-opencode-agents.sh  # copy agents/skills into detected OpenCode home
 ./install-codex.sh        # Codex from vendor/codex-*.tar.gz
 ./start-backend.sh
 ```

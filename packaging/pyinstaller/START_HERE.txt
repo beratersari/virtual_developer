@@ -29,12 +29,14 @@ into the executable. Durable data still goes to YAVER_DATA_DIR
 opencoderman.pin records the exact OpenCoderman submodule commit this
 build was frozen against (also attached on the GitHub Release).
 
-opencode_configs/ next to this binary is a copy of OpenCoderman
-agents/ and skills/ (derman-build, derman-plan, and the skill tree).
-Copy those folders into your OpenCode home if you install OpenCode
-separately:
+opencoderman/ next to this binary is the OpenCoderman tree.
+opencode_configs/ holds derman-build, derman-plan, and skills only.
+After OpenCode is installed, copy those into that home:
 
-  Windows:  %USERPROFILE%\.opencode\agents  and  \skills
-  Linux:    ~/.opencode/agents  and  ~/.opencode/skills
+  Windows:  install-opencode-agents.bat
+  Linux:    ./install-opencode-agents.sh
+
+The script finds OPENCODE_HOME, %USERPROFILE%\.opencode / ~/.opencode,
+or opencode on PATH. It does not install the CLI.
 
 Git and glab must be on PATH for clone / push / merge requests.

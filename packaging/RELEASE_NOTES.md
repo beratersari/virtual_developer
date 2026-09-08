@@ -31,7 +31,9 @@ Each archive is an **onedir** folder:
 
 - `yaver.exe` / `yaver` — CLI + daemon (same commands as `python cli.py`)
 - `_internal/` — bundled Python runtime, SPA (`web/dist`), prompts
-- `opencode_configs/` — OpenCoderman `agents/` + `skills/` (copy into `~/.opencode`)
+- `opencoderman/` — OpenCoderman tree (agents, skills, install.py)
+- `install-opencode-agents.bat` / `.sh` — detect the OpenCode home and copy `derman-build`, `derman-plan`, and `skills/`
+- `opencode_configs/` — same agents + skills copy
 - **Config templates (edit these, do not commit secrets):**
   - `.env.example` → copy to `.env` and set Jira / GitLab
   - `versions.env` — pinned freeze versions (Python / Node / PyInstaller)

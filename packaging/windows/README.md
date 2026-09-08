@@ -32,6 +32,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
    - **`install-dashboard-system-python.bat`** — same as dashboard install, **no `.venv`**:
      - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
      - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
+   - **`install-opencode-agents.bat`** — detect the OpenCode home and copy `opencoderman/agents` + `skills` there (does not install the CLI).
    - **`install-backends.bat`** — **OpenCode** via the **opencoderman** submodule (plus Codex when run with no args):
      - Calls `packaging/install_opencode.py` → `opencoderman/install.py`
      - OpenCode to **`%USERPROFILE%\.opencode`** (CLI + agents + skills; stock `plugin: []`)

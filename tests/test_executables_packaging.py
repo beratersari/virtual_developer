@@ -132,6 +132,17 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
         skill = skills / f"skill-{i}"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
+    ocm_agents = payload / "opencoderman" / "agents"
+    ocm_skills = payload / "opencoderman" / "skills"
+    ocm_agents.mkdir(parents=True)
+    (ocm_agents / "derman-build.md").write_text("build", encoding="utf-8")
+    (ocm_agents / "derman-plan.md").write_text("plan", encoding="utf-8")
+    for i in range(10):
+        skill = ocm_skills / f"skill-{i}"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
+    (payload / "install-opencode-agents.bat").write_text("@echo off\n", encoding="utf-8")
+    (payload / "Install-OpencodeAgents.ps1").write_text("param()\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
 
 
@@ -166,7 +177,10 @@ def test_build_script_requires_spa_and_onedir():
     assert 'f"{dest_base.name}.zip"' in text
     assert "dest_base.with_suffix" not in text
     assert "stage_opencode_configs" in text
+    assert "stage_opencoderman" in text
+    assert "stage_agent_installers" in text
     assert "opencode_configs" in text
+    assert "opencoderman" in text
 
 
 def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
@@ -180,6 +194,9 @@ def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
     (repo / "opencoderman" / "agents" / "derman-plan.md").write_text(
         "plan\n", encoding="utf-8"
     )
+    (repo / "opencoderman" / "agents" / "gitlab-reviewer.md").write_text(
+        "review\n", encoding="utf-8"
+    )
     for i in range(10):
         d = repo / "opencoderman" / "skills" / f"s{i}"
         d.mkdir(parents=True, exist_ok=True)
@@ -191,8 +208,13 @@ def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
     assert dest == bundled / "opencode_configs"
     assert (dest / "agents" / "derman-build.md").is_file()
     assert (dest / "agents" / "derman-plan.md").is_file()
+    assert not (dest / "agents" / "gitlab-reviewer.md").exists()
     assert len(list((dest / "skills").rglob("SKILL.md"))) == 10
     assert not (dest / "skills" / "__pycache__").exists()
+    ocm = build.stage_opencoderman(bundled, repo_root=repo)
+    assert ocm == bundled / "opencoderman"
+    assert (ocm / "agents" / "derman-build.md").is_file()
+    assert not (ocm / "skills" / "__pycache__").exists()
 
 
 def test_tag_workflows_share_release_notes():
@@ -219,3 +241,5 @@ def test_start_here_does_not_claim_opencode_is_bundled():
     assert ".env.example" in text
     assert "yaver start" in text or "yaver.exe start" in text
     assert "opencode_configs" in text
+    assert "install-opencode-agents" in text
+    assert "opencoderman/" in text

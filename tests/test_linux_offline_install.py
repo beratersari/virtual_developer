@@ -103,6 +103,8 @@ def test_assert_payload_script_accepts_minimal_tree(tmp_path):
     for rel in (
         "install-dashboard.sh",
         "install-backends.sh",
+        "install-opencode-agents.sh",
+        "packaging/install_opencode_agents.py",
         "install-codex.sh",
         "start.sh",
         "start-backend.sh",

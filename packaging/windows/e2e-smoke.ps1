@@ -25,6 +25,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-dashboard.bat")
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-backends.bat"))) {
     throw "install-backends.bat not found in payload: $PayloadDir"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-opencode-agents.bat"))) {
+    throw "install-opencode-agents.bat not found in payload: $PayloadDir"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "packaging\windows\Install-OpencodeAgents.ps1"))) {
+    throw "packaging\windows\Install-OpencodeAgents.ps1 missing"
+}
 if (-not (Test-Path -LiteralPath (Join-Path $PayloadDir "install-codex.bat"))) {
     throw "install-codex.bat not found in payload: $PayloadDir"
 }

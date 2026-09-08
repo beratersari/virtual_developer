@@ -27,6 +27,7 @@ def test_combined_install_bat_is_removed():
     assert (ROOT / "install-dashboard.bat").is_file()
     assert (ROOT / "install-dashboard-system-python.bat").is_file()
     assert (ROOT / "install-codex.bat").is_file()
+    assert (ROOT / "install-opencode-agents.bat").is_file()
     dash = (ROOT / "install-dashboard.bat").read_text(encoding="utf-8")
     assert "python -m venv" in dash
     assert "python-wheels" in dash

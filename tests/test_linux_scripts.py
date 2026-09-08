@@ -56,6 +56,7 @@ def test_linux_scripts_exist_and_parse():
         "install.sh",
         "install-dashboard.sh",
         "install-backends.sh",
+        "install-opencode-agents.sh",
         "install-codex.sh",
         "start.sh",
         "start-backend.sh",
