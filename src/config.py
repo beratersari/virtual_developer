@@ -253,12 +253,10 @@ class Settings(BaseSettings):
     )
     codex_cli: str = Field(default="codex", description="Codex CLI binary for AGENT_BACKEND=codex")
     opencode_context_limit: int = Field(
-        default=128000,
+        default=0,
         description=(
-            "Job-local OpenCode model context cap (0 = no override). "
-            "32k filled in minutes and looped compact/restore; 128k is "
-            "enough for a long build without compacting every turn. "
-            "Zen free models advertise 190k–1M natively."
+            "Optional job-local OpenCode context cap in tokens. "
+            "0 = use the model's advertised window (no workspace override)."
         ),
     )
     project_repositories: str = Field(
@@ -270,29 +268,25 @@ class Settings(BaseSettings):
         ),
     )
     
-    # Git Configuration (for commits in target project folder)
-    git_user_name: str = Field(default="DevBot", description="Git user name for commits")
-    git_user_email: str = Field(default="devbot@example.com", description="Git user email for commits")
-    
     # GitLab credentials — repository URL and source branch come from each Jira issue
     # (see src/issue_git_spec.py: Repository + Source + Target; MR source → target)
     #
-    # Preferred: per-host PATs as JSON object:
+    # First-class: per-host PATs as JSON. A host with a PAT is allowed.
     #   GITLAB_HOST_PATS={"gitlab.com":"glpat-…","gitlab.internal.com":"glpat-…"}
-    # Legacy (still supported): single GITLAB_PAT + GITLAB_ALLOWED_HOSTS (same PAT for each host)
+    # Leftover (only when the JSON map is empty): one GITLAB_PAT expanded onto
+    # each host in GITLAB_ALLOWED_HOSTS. Not a second allowlist.
     gitlab_host_pats: str = Field(
         default="",
         description='JSON object mapping hostname → PAT, e.g. {"gitlab.com":"glpat-…"}',
     )
     gitlab_pat: str = Field(
         default="",
-        description="Legacy single GitLab PAT (used with GITLAB_ALLOWED_HOSTS when map empty)",
+        description="Leftover single GitLab PAT (expanded onto GITLAB_ALLOWED_HOSTS when map empty)",
     )
-    # Hosts that may receive GITLAB_PAT (clone/push/MR). Required when legacy PAT is set.
-    # Comma-separated hostnames, e.g. "gitlab.example.com,gitlab.com"
+    # Leftover expander only. Ignored when GITLAB_HOST_PATS is set.
     gitlab_allowed_hosts: str = Field(
         default="",
-        description="Legacy comma-separated hosts for single GITLAB_PAT (fail-closed when PAT is set)",
+        description="Leftover comma-separated hosts for a lone GITLAB_PAT (not a separate allowlist)",
     )
     # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
     gitlab_webhook_enabled: bool = Field(
@@ -471,7 +465,6 @@ class Settings(BaseSettings):
     )
     
     # Trigger Configuration - stored as strings, parsed as properties
-    trigger_on_assignment: bool = Field(default=True)
     # Deprecated store. Mention tokens are derived from trigger_assignee_names.
     trigger_mentions: str = Field(default="")
     # Single Jira bot identity: assignee match and @mention / wiki mention.
@@ -515,14 +508,15 @@ class Settings(BaseSettings):
 
     @property
     def gitlab_allowed_hosts_list(self) -> List[str]:
-        """Hosts that have (or are allowed) a GitLab PAT (lowercase)."""
+        """Hosts that have a GitLab PAT (lowercase). A host with a PAT is allowed."""
         return sorted(self.gitlab_host_pat_map().keys())
 
     def gitlab_host_pat_map(self) -> Dict[str, str]:
         """Resolved hostname → PAT map (prefer ``gitlab_host_pats`` JSON).
 
-        Legacy fallback: if the JSON map is empty and ``gitlab_pat`` is set,
-        each host in ``gitlab_allowed_hosts`` gets that same PAT.
+        A host in this map is allowed. Leftover fallback: if the JSON map is
+        empty and ``gitlab_pat`` is set, each host in leftover
+        ``gitlab_allowed_hosts`` gets that same PAT.
         """
         out: Dict[str, str] = {}
         raw = (self.gitlab_host_pats or "").strip()
@@ -574,7 +568,7 @@ class Settings(BaseSettings):
         return bool(self.gitlab_host_pat_map())
 
     def set_gitlab_host_pat_map(self, mapping: Dict[str, str]) -> None:
-        """Persist host→PAT map into runtime settings (JSON + legacy mirrors)."""
+        """Persist host→PAT map. Allowed hosts are the keys (a PAT allows the host)."""
         cleaned: Dict[str, str] = {}
         for k, v in (mapping or {}).items():
             host = str(k or "").strip().lower()
@@ -582,9 +576,9 @@ class Settings(BaseSettings):
             if host and pat:
                 cleaned[host] = pat
         self.gitlab_host_pats = json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
-        # Mirror for older code paths / display
+        # Keep leftover field aligned so it cannot disagree with the map in-memory.
         self.gitlab_allowed_hosts = ",".join(sorted(cleaned.keys()))
-        # Legacy single PAT: keep only when exactly one host (avoids wrong-host use)
+        # Leftover single PAT: keep only when exactly one host (avoids wrong-host use)
         if len(cleaned) == 1:
             self.gitlab_pat = next(iter(cleaned.values()))
         else:
@@ -686,7 +680,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "jira_board_id",
         "jira_host",
         "jira_email",
-        "trigger_on_assignment",
         "default_model",
         "agent_backend",
         "project_repositories",
@@ -706,7 +699,6 @@ _RUNTIME_ENV_MIRROR = {
     "jira_board_id": "JIRA_BOARD_ID",
     "jira_host": "JIRA_HOST",
     "jira_email": "JIRA_EMAIL",
-    "trigger_on_assignment": "TRIGGER_ON_ASSIGNMENT",
     "default_model": "DEFAULT_MODEL",
     "agent_backend": "AGENT_BACKEND",
     "trigger_mentions": "TRIGGER_MENTIONS",

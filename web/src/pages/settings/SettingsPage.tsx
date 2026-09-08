@@ -21,7 +21,6 @@ type Draft = {
   jira_api_token: string
   jira_board_id: string
   poll_interval_seconds: number
-  trigger_on_assignment: boolean
   trigger_assignee_names: string
   gitlab_bot_mentions: string
   max_concurrent_jobs: number
@@ -40,7 +39,6 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
-    trigger_on_assignment: s.trigger_on_assignment,
     trigger_assignee_names: s.trigger_assignee_names ?? '',
     gitlab_bot_mentions: s.gitlab_bot_mentions ?? '',
     max_concurrent_jobs: s.max_concurrent_jobs,
@@ -109,7 +107,6 @@ export function SettingsPage() {
         jira_host: draft.jira_host.trim(),
         jira_board_id: draft.jira_board_id.trim(),
         poll_interval_seconds: Number(draft.poll_interval_seconds),
-        trigger_on_assignment: draft.trigger_on_assignment,
         trigger_assignee_names: draft.trigger_assignee_names,
         gitlab_bot_mentions: draft.gitlab_bot_mentions,
         max_concurrent_jobs: Number(draft.max_concurrent_jobs),
@@ -198,9 +195,7 @@ export function SettingsPage() {
       <div key="jira" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Connection</div>
       <p className="text-xs text-text-muted">
-        Site URL and API token. A blank token keeps the saved value. Cloud
-        uses JIRA_EMAIL from .env (HTTP Basic). Server and Data Center use
-        the token as a bearer PAT.
+        Site URL and API token. A blank token keeps the saved value.
       </p>
       <label className="field">
         <span>Host</span>
@@ -294,6 +289,10 @@ export function SettingsPage() {
           Comma-separated if there is more than one.
         </span>
       </label>
+      <p className="text-xs text-text-muted">
+        Optional later: set JIRA_EMAIL in .env for Cloud HTTP Basic. Daily
+        use is host + token (Bearer).
+      </p>
       </div>
       )}
 
@@ -301,7 +300,8 @@ export function SettingsPage() {
       <div key="gitlab" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Credentials</div>
       <p className="text-xs text-text-muted">
-        One personal access token per GitLab host. Leave PAT blank to keep
+        One personal access token per GitLab host. A host with a PAT is
+        allowed — there is no separate host list. Leave PAT blank to keep
         the stored token.
       </p>
       {draft.gitlab_cred_rows.map((row, idx) => (

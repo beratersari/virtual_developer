@@ -118,7 +118,6 @@ def _client(api: AgileJira) -> JiraClient:
 def trigger_settings():
     with patch("src.jira.poller.settings") as s:
         s.trigger_assignee_names_list = ["devbot"]
-        s.trigger_on_assignment = False
         yield s
 
 

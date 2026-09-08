@@ -139,12 +139,12 @@ def _poller(state_manager, fake_jira):
 def test_poll_board_treats_completed_todo_as_rework(
     state_manager, fake_jira, monkeypatch
 ):
-    """To Do + trigger after completed is intentional rework (not a stuck loop)."""
+    """To Do + bot assignee after completed is intentional rework (not a stuck loop)."""
     from src.config import settings
 
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
     poller = _poller(state_manager, fake_jira)
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     state_manager.create_state("PS-DONE", "s", "d")
     state_manager.update_state(
         "PS-DONE",
@@ -158,7 +158,7 @@ def test_poll_board_treats_completed_todo_as_rework(
         "fields": {
             "summary": "s",
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["bot"],
+            "assignee": {"displayName": "DevBot"},
         },
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)
@@ -172,9 +172,9 @@ def test_poll_board_reemits_after_in_progress_to_todo(
 ):
     from src.config import settings
 
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
     poller = _poller(state_manager, fake_jira)
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     state_manager.create_state("PS-ERR", "s", "d")
     state_manager.update_state(
         "PS-ERR",
@@ -187,7 +187,7 @@ def test_poll_board_reemits_after_in_progress_to_todo(
         "fields": {
             "summary": "s",
             "status": {"name": "To Do", "statusCategory": {"key": "new"}},
-            "labels": ["bot"],
+            "assignee": {"displayName": "DevBot"},
         },
     }
     poller.client.get_active_sprint = MagicMock(return_value=None)

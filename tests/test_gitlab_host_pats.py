@@ -44,6 +44,26 @@ def test_json_map_preferred_over_legacy():
     assert s.gitlab_pat_for_host("other") == ""
 
 
+def test_host_with_pat_is_allowed_even_if_leftover_hosts_disagree():
+    """GITLAB_ALLOWED_HOSTS is not a second allowlist."""
+    s = Settings(
+        gitlab_host_pats='{"gitlab.com":"pat-a"}',
+        gitlab_pat="",
+        gitlab_allowed_hosts="gitlab.internal,other.example",
+    )
+    assert s.gitlab_allowed_hosts_list == ["gitlab.com"]
+    assert s.gitlab_pat_for_host("gitlab.com") == "pat-a"
+    assert s.gitlab_pat_for_host("gitlab.internal") == ""
+    assert s.gitlab_pat_for_host("other.example") == ""
+
+    empty_leftover = Settings(
+        gitlab_host_pats='{"corp.gitlab":"pat-corp"}',
+        gitlab_allowed_hosts="",
+    )
+    assert empty_leftover.gitlab_allowed_hosts_list == ["corp.gitlab"]
+    assert empty_leftover.gitlab_pat_for_host("corp.gitlab") == "pat-corp"
+
+
 def test_subdomain_match():
     s = Settings(gitlab_host_pats='{"gitlab.example.com":"pat-x"}')
     assert s.gitlab_pat_for_host("gitlab.example.com") == "pat-x"
@@ -79,6 +99,23 @@ def test_git_manager_picks_pat_by_host(monkeypatch):
     gm.remote_url = "https://corp.gitlab/group/repo.git"
     assert gm._pat_for_remote() == "pat-corp"
     gm.remote_url = "https://gitlab.com/org/app.git"
+    assert gm._pat_for_remote() == "pat-cloud"
+
+
+def test_git_manager_allows_mapped_host_when_leftover_allowlist_differs(monkeypatch):
+    from src import git_manager as gm_mod
+
+    monkeypatch.setattr(
+        gm_mod.settings,
+        "gitlab_host_pats",
+        '{"gitlab.com":"pat-cloud"}',
+    )
+    monkeypatch.setattr(gm_mod.settings, "gitlab_pat", "")
+    monkeypatch.setattr(gm_mod.settings, "gitlab_allowed_hosts", "other.example")
+
+    gm = GitManager.__new__(GitManager)
+    gm.remote_url = "https://gitlab.com/org/app.git"
+    gm._assert_remote_host_allowed(gm.remote_url)
     assert gm._pat_for_remote() == "pat-cloud"
 
 

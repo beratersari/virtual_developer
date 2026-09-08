@@ -294,7 +294,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/dashboard` | Full envelope |
 | WS | `/ws` | Live pushes |
 
-Writable runtime settings (examples): board id, poll interval, `trigger_on_assignment`, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
+Writable runtime settings (examples): board id, poll interval, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
 `DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
 
 ### Building the UI
@@ -344,16 +344,13 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 | Variable | Default |
 |----------|---------|
 | `TRIGGER_ASSIGNEE_NAMES` | Jira bot name for assignee intake and @mentions |
-| `TRIGGER_ON_ASSIGNMENT` | `true` |
 
 ### GitLab
 
 | Variable | Description |
 |----------|-------------|
-| `GITLAB_PAT` | Clone / push / MR token |
+| `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
 | `GITLAB_BOT_MENTIONS` | GitLab username that starts a job when mentioned on an MR comment |
-| `GITLAB_ALLOWED_HOSTS` | **Required when PAT is set** — comma-separated hosts that may receive the PAT (fail-closed) |
-| `GIT_USER_NAME` / `GIT_USER_EMAIL` | Commit identity in temp clones |
 
 Repo URL and branches always come from the issue `{params}` block.
 
@@ -505,7 +502,7 @@ Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 | Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, rename label `plan_ready` → `plan_execute` while In Progress (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |
-| Git / MR fails | Issue `{params}` complete, `GITLAB_PAT`, `GITLAB_ALLOWED_HOSTS` includes that host, `glab` available |
+| Git / MR fails | Issue `{params}` complete, host has a PAT in `GITLAB_HOST_PATS` (Settings → GitLab), `glab` available |
 | Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
 | Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install-backends.bat`; see `packaging/windows/` diag notes |
 | Stuck `planning`/`executing` | Restart daemon (orphan recovery) or cancel from dashboard; check watchdog logs |
@@ -522,7 +519,7 @@ python cli.py show PROJ-123
 
 1. Keep **`.env`** out of git (tokens, PATs).  
 2. Dashboard has **no auth** — localhost only unless you knowingly expose it.  
-3. `GITLAB_ALLOWED_HOSTS` prevents sending the PAT to arbitrary hosts from issue text.  
+3. A GitLab PAT is only sent to the host it is stored for (`GITLAB_HOST_PATS`).  
 4. Prefer a dedicated Jira bot account with least privilege.  
 5. Never log raw API tokens or PATs.
 

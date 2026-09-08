@@ -28,7 +28,7 @@ def test_e2e_settings_page_has_no_jira_email_field():
     assert "jira_email" not in src
     assert 'type="email"' not in src
     assert "Cloud: account email" not in src
-    assert "JIRA_EMAIL" in src  # help text about Cloud .env email
+    assert "JIRA_EMAIL" in src  # optional note at the bottom of the Jira tab
 
 
 def test_e2e_env_email_uses_basic_until_settings_save(tmp_path, monkeypatch):

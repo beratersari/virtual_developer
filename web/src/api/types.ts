@@ -69,7 +69,6 @@ export type SettingsPayload = {
   jira_board_id: string
   jira_projects: string
   poll_interval_seconds: number
-  trigger_on_assignment: boolean
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
@@ -484,7 +483,6 @@ export type SettingsPatch = Partial<
     | 'jira_host'
     | 'jira_board_id'
     | 'poll_interval_seconds'
-    | 'trigger_on_assignment'
     | 'max_concurrent_jobs'
     | 'agent_task_timeout_seconds'
     | 'agent_task_max_retries'
@@ -553,6 +551,7 @@ export type StoragePayload = {
   sessions_bytes?: number
   sessions_label?: string
   sizes_pending?: boolean
+  mr_states_pending?: boolean
   server_time?: string
 }
 

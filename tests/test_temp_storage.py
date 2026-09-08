@@ -88,6 +88,37 @@ def test_force_rmtree_progress_reports_and_deletes(tmp_path: Path):
     assert seen[-1][1] >= 2
 
 
+def test_storage_view_shows_live_mr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        build_storage_view,
+        remember_mr_state,
+        reset_mr_state_cache,
+    )
+    from src.state.job_store import job_store
+
+    reset_mr_state_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "repo_mrstat"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    job = job_store.create_job(issue_key="KAN-1", summary="old")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url="https://gitlab.com/g/r/-/merge_requests/9",
+    )
+    view = build_storage_view()
+    assert view["mr_states_pending"] is True
+    assert view["folders"][0]["merge_request_url"].endswith("/9")
+    remember_mr_state(
+        "https://gitlab.com/g/r/-/merge_requests/9", "merged"
+    )
+    view2 = build_storage_view()
+    assert view2["folders"][0]["merge_request_state"] == "merged"
+    assert view2["mr_states_pending"] is False
+
+
 def test_resolve_temp_base_and_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from src.config import settings
 

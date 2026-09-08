@@ -1285,6 +1285,8 @@ def test_config_property_edges(monkeypatch):
         jira_api_token="t",
         jira_projects="",
         trigger_mentions="",
+        gitlab_host_pats="",
+        gitlab_pat="",
         gitlab_allowed_hosts="",
     )
     assert s.jira_projects_list == ["PROJ"]
@@ -1298,6 +1300,8 @@ def test_config_property_edges(monkeypatch):
         jira_api_token="t",
         jira_projects=" A , , B ",
         trigger_mentions=" @A , @B ",
+        gitlab_host_pats="",
+        gitlab_pat="",
         gitlab_allowed_hosts=" GitLab.com , HOST.Example ",
     )
     assert s2.jira_projects_list == ["A", "B"]

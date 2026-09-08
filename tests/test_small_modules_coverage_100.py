@@ -26,6 +26,8 @@ def test_config_empty_gitlab_hosts_and_projects():
     s = Settings(
         jira_host="https://j.example",
         jira_api_token="t",
+        gitlab_host_pats="",
+        gitlab_pat="",
         gitlab_allowed_hosts=" gitlab.com , , example.com ",
         jira_projects="",
     )

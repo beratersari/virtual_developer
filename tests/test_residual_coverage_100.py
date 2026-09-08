@@ -391,7 +391,6 @@ def test_poller_parallel_dispatch(tmp_path, state_manager):
     poller.issue_handler = handler
     with patch("src.jira.poller.settings") as s:
         s.poll_dispatch_workers = 4
-        s.trigger_on_assignment = False
         # one cycle then stop
         def stop_after(*a, **k):
             poller._running = False

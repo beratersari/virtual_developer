@@ -264,7 +264,6 @@ async def test_e2e_jira_api_accept_then_stopping_handler_is_silent(
     steps: List[str] = []
     sm = JiraStateManager(state_dir=tmp_path / "state")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 
     with patch("src.processor.create_jira_client", return_value=client):
@@ -344,7 +343,6 @@ async def test_e2e_jira_api_accept_then_enqueue_crash_is_silent(
     steps: List[str] = []
     sm = JiraStateManager(state_dir=tmp_path / "state")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 
     with patch("src.processor.create_jira_client", return_value=client):
@@ -405,7 +403,6 @@ def test_e2e_control_missing_handler_does_post_error(tmp_path, monkeypatch, jira
     world, _base, client = jira
     sm = JiraStateManager(state_dir=tmp_path / "state")
 
-    monkeypatch.setattr(settings, "trigger_on_assignment", False)
     monkeypatch.setattr(settings, "jira_board_id", "10")
 
     created = client.create_issue("KAN", "[vd-e2e] control missing handler", "d", labels=["bot"])
