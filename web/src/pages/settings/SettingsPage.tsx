@@ -562,9 +562,10 @@ export function SettingsPage() {
       <div key="azure" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Credentials</div>
       <p className="text-xs text-text-muted">
-        One personal access token per Azure DevOps Server host. PAT only —
-        no username. Clone and push never prompt. Leave PAT blank to keep
-        the stored token.
+        One personal access token per Azure DevOps Server host. Auth is
+        Basic pat:PAT — username is sent as pat automatically. Clone,
+        push, and PR use this PAT. Leave PAT blank to keep the stored
+        token. Host may be tfs.example.com or include /tfs/YourCollection.
       </p>
       {draft.azure_cred_rows.map((row, idx) => (
         <div key={idx}>
