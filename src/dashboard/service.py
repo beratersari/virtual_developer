@@ -20,6 +20,7 @@ from src.dashboard.project_repos import (
     project_repositories_to_json,
 )
 from src.dashboard.schemas import (
+    AzureHostCredentialView,
     GitlabHostCredentialView,
     JobItem,
     JobRetryAttempt,
@@ -288,6 +289,28 @@ def build_settings_view() -> SettingsView:
             (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
         ),
         gitlab_webhook_path="/webhooks/gitlab",
+        azure_pat_configured=bool(
+            settings.azure_has_any_pat()
+            if hasattr(settings, "azure_has_any_pat")
+            else False
+        ),
+        azure_allowed_hosts=",".join(
+            getattr(settings, "azure_allowed_hosts_list", None) or []
+        ),
+        azure_credentials=[
+            AzureHostCredentialView(host=h, pat_configured=True)
+            for h in (getattr(settings, "azure_allowed_hosts_list", None) or [])
+        ],
+        azure_webhook_enabled=bool(
+            getattr(settings, "azure_webhook_enabled", False)
+        ),
+        azure_bot_mentions=(
+            getattr(settings, "azure_bot_mentions", "") or ""
+        ).strip(),
+        azure_webhook_secret_configured=bool(
+            (getattr(settings, "azure_webhook_secret", "") or "").strip()
+        ),
+        azure_webhook_path="/webhooks/azure",
         trigger_assignee_names=(
             getattr(settings, "trigger_assignee_names", "") or ""
         ).strip(),
@@ -589,6 +612,93 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.gitlab_bot_mentions = mentions
         runtime_persist["gitlab_bot_mentions"] = mentions
         dotenv_updates["GITLAB_BOT_MENTIONS"] = mentions
+    if "gitlab_webhook_enabled" in data and data["gitlab_webhook_enabled"] is not None:
+        enabled = bool(data["gitlab_webhook_enabled"])
+        settings.gitlab_webhook_enabled = enabled
+        runtime_persist["gitlab_webhook_enabled"] = enabled
+        dotenv_updates["GITLAB_WEBHOOK_ENABLED"] = "true" if enabled else "false"
+    if "gitlab_webhook_secret" in data and data["gitlab_webhook_secret"] is not None:
+        secret = str(data["gitlab_webhook_secret"])
+        if secret.strip():
+            settings.gitlab_webhook_secret = secret.strip()
+            dotenv_updates["GITLAB_WEBHOOK_SECRET"] = settings.gitlab_webhook_secret
+
+    if "azure_credentials" in data and data["azure_credentials"] is not None:
+        current = (
+            settings.azure_host_pat_map()
+            if hasattr(settings, "azure_host_pat_map")
+            else {}
+        )
+        new_map: Dict[str, str] = {}
+        for item in data["azure_credentials"] or []:
+            if isinstance(item, dict):
+                host = _normalize_gitlab_host(item.get("host"))
+                pat_raw = item.get("pat")
+                previous_host = _normalize_gitlab_host(item.get("previous_host"))
+            else:
+                host = _normalize_gitlab_host(getattr(item, "host", None))
+                pat_raw = getattr(item, "pat", None)
+                previous_host = _normalize_gitlab_host(
+                    getattr(item, "previous_host", None)
+                )
+            if not host:
+                continue
+            pat = str(pat_raw or "").strip()
+            if pat:
+                new_map[host] = pat
+            elif host in current:
+                new_map[host] = current[host]
+            elif previous_host and previous_host in current:
+                new_map[host] = current[previous_host]
+        clearing_hosts = bool(current) and not new_map
+        keep_legacy_pat = (not new_map) and (not current) and bool(
+            (getattr(settings, "azure_pat", "") or "").strip()
+        )
+        if hasattr(settings, "set_azure_host_pat_map"):
+            if new_map or clearing_hosts:
+                settings.set_azure_host_pat_map(new_map)
+        if not keep_legacy_pat:
+            dotenv_updates["AZURE_HOST_PATS"] = getattr(
+                settings, "azure_host_pats", ""
+            ) or ""
+            dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
+    else:
+        if "azure_pat" in data and data["azure_pat"] is not None:
+            pat = str(data["azure_pat"])
+            if pat.strip():
+                settings.azure_pat = pat.strip()
+        if "azure_allowed_hosts" in data and data["azure_allowed_hosts"] is not None:
+            raw = str(data["azure_allowed_hosts"])
+            hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
+            settings.azure_allowed_hosts = ",".join(hosts)
+            if (
+                hasattr(settings, "set_azure_host_pat_map")
+                and (getattr(settings, "azure_pat", "") or "").strip()
+                and hosts
+            ):
+                settings.set_azure_host_pat_map(
+                    {h: settings.azure_pat.strip() for h in hosts}
+                )
+        if "azure_pat" in data or "azure_allowed_hosts" in data:
+            dotenv_updates["AZURE_HOST_PATS"] = getattr(
+                settings, "azure_host_pats", ""
+            ) or ""
+            dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
+    if "azure_bot_mentions" in data and data["azure_bot_mentions"] is not None:
+        mentions = str(data["azure_bot_mentions"]).strip()
+        settings.azure_bot_mentions = mentions
+        runtime_persist["azure_bot_mentions"] = mentions
+        dotenv_updates["AZURE_BOT_MENTIONS"] = mentions
+    if "azure_webhook_enabled" in data and data["azure_webhook_enabled"] is not None:
+        enabled = bool(data["azure_webhook_enabled"])
+        settings.azure_webhook_enabled = enabled
+        runtime_persist["azure_webhook_enabled"] = enabled
+        dotenv_updates["AZURE_WEBHOOK_ENABLED"] = "true" if enabled else "false"
+    if "azure_webhook_secret" in data and data["azure_webhook_secret"] is not None:
+        secret = str(data["azure_webhook_secret"])
+        if secret.strip():
+            settings.azure_webhook_secret = secret.strip()
+            dotenv_updates["AZURE_WEBHOOK_SECRET"] = settings.azure_webhook_secret
 
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.
@@ -837,6 +947,8 @@ def job_dict_to_item(
         source=str(j.get("source") or "jira"),
         gitlab_project=j.get("gitlab_project") or None,
         gitlab_mr_iid=j.get("gitlab_mr_iid"),
+        azure_project=j.get("azure_project") or None,
+        azure_pr_id=j.get("azure_pr_id"),
     )
 
 
@@ -1164,6 +1276,7 @@ def build_queue(
                     job_id=rec.get("job_id"),
                     merge_request_url=rec.get("merge_request_url") or "",
                     gitlab_note_id=rec.get("gitlab_note_id") or "",
+                    azure_comment_id=rec.get("azure_comment_id") or "",
                     error_message=rec.get("error_message"),
                     created_at=rec.get("created_at"),
                     started_at=rec.get("started_at"),

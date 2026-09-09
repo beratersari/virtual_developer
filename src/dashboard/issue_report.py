@@ -914,6 +914,8 @@ def _redact_report_text(text: str) -> str:
         "jira_api_token",
         "gitlab_pat",
         "gitlab_webhook_secret",
+        "azure_pat",
+        "azure_webhook_secret",
     ):
         val = str(getattr(settings, attr, "") or "").strip()
         if val:
@@ -921,6 +923,10 @@ def _redact_report_text(text: str) -> str:
     try:
         extra = settings.all_gitlab_pats() if hasattr(settings, "all_gitlab_pats") else []
         secrets.extend([str(p) for p in extra if p])
+        extra_az = (
+            settings.all_azure_pats() if hasattr(settings, "all_azure_pats") else []
+        )
+        secrets.extend([str(p) for p in extra_az if p])
     except Exception:
         pass
     for secret in secrets:

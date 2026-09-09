@@ -60,6 +60,11 @@ export function JobsTable({
                     GitLab
                   </span>
                 )}
+                {(j.source || 'jira') === 'azure' && (
+                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                    Azure
+                  </span>
+                )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
                 <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">

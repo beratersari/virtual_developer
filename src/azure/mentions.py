@@ -1,0 +1,109 @@
+"""Detect bot @mentions in Azure DevOps PR comments.
+
+Azure DevOps Server mentions are ``@name`` in plain text (same as GitLab)
+or an HTML identity chip::
+
+    <a href="#" data-vss-mention="version:2.0,{guid}">@Display Name</a>
+
+Configured bot names match either form. GitLab mention helpers are reused
+for the ``@token`` path so both forges share one username list syntax.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Iterable, List
+
+from src.gitlab.mentions import (
+    mentioned_usernames,
+    normalize_mention,
+    parse_mention_list,
+    strip_bot_mentions,
+)
+
+_VSS_MENTION = re.compile(
+    r'data-vss-mention\s*=\s*["\'][^"\']*["\'][^>]*>([^<]+)',
+    re.IGNORECASE,
+)
+_HTML_AT = re.compile(
+    r">\s*@([^<]+?)\s*<",
+    re.IGNORECASE,
+)
+
+
+def html_mention_names(note: str) -> List[str]:
+    """Display names / @labels extracted from Azure identity HTML."""
+    if not note:
+        return []
+    found: List[str] = []
+    seen: set[str] = set()
+    for pat in (_VSS_MENTION, _HTML_AT):
+        for match in pat.finditer(note):
+            name = normalize_mention(match.group(1) or "")
+            if name and name not in seen:
+                seen.add(name)
+                found.append(name)
+    return found
+
+
+def note_mentions_bot(note: str, bot_mentions: Iterable[str]) -> bool:
+    bots = {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+    if not bots:
+        return False
+    names = set(mentioned_usernames(note))
+    names.update(html_mention_names(note))
+    # Azure display names can contain spaces; also match the raw configured
+    # token as a case-insensitive substring after @ (plain or HTML).
+    if bots.intersection(names):
+        return True
+    text = note or ""
+    for bot in bots:
+        if not bot:
+            continue
+        if re.search(
+            rf"(?<![A-Za-z0-9_.-])@{re.escape(bot)}\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        # Display-name mention: "@Yaver Bot" when configured as "Yaver Bot"
+        if " " in bot or "\\" in bot:
+            if re.search(
+                rf"(?<![A-Za-z0-9_.-])@{re.escape(bot)}(?![A-Za-z0-9_.-])",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                return True
+    return False
+
+
+def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
+    """Remove configured @bot tokens and Azure mention chips from the body."""
+    text = note or ""
+    text = re.sub(
+        r'<a\s[^>]*data-vss-mention[^>]*>\s*@?[^<]*</a>',
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = strip_bot_mentions(text, bot_mentions)
+    for name in parse_mention_list(list(bot_mentions)):
+        if " " in name or "\\" in name:
+            text = re.sub(
+                rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}(?![A-Za-z0-9_.-])",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+__all__ = [
+    "html_mention_names",
+    "normalize_mention",
+    "note_mentions_bot",
+    "parse_mention_list",
+    "strip_azure_bot_mentions",
+    "strip_bot_mentions",
+]
