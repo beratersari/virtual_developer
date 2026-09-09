@@ -31,9 +31,9 @@ and `C:\vd\t` on Windows). Plans are `{YAVER_DATA_DIR}/plans/`.
 ## User flow
 
 1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-*`).
-2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencoderman/`, `opencode_configs/`, and `install-opencode-agents.bat` / `.sh`.
+2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencoderman/` (`agents/` + `skills/` only), and one copy script (`install-opencode-agents.bat` on Windows, `install-opencode-agents.sh` on Linux).
 3. Copy `.env.example` to `.env` and set Jira (and GitLab if you need MRs).
-4. If OpenCode is already installed, run `install-opencode-agents.bat` (Windows) or `./install-opencode-agents.sh` (Linux) to copy `derman-build` / `derman-plan` and skills into that home.
+4. If OpenCode is already installed, run that copy script to put `opencoderman/agents` and `opencoderman/skills` into the OpenCode home.
 5. Run `yaver start` (Windows: `yaver.exe start`).
 6. Open http://127.0.0.1:8080
 
@@ -63,7 +63,7 @@ Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Li
 **Do**
 
 - Keep `PYINSTALLER_MODE=onedir`.
-- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, the `opencoderman/` tree, `opencode_configs/`, and `install-opencode-agents.bat` / `.sh`.
+- Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, `opencoderman/agents` + `opencoderman/skills` only, and one copy script (`install-opencode-agents.bat` or `.sh`).
 - Resolve `.env` from the folder next to the exe (`install_root`), not `_MEIPASS`.
 - Re-run **Standalone Executables** after changing `yaver.spec` or `versions.env`.
 

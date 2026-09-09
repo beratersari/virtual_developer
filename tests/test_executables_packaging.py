@@ -123,15 +123,6 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     (payload / "opencoderman.pin").write_text(
         "OPENCODERMAN_COMMIT=deadbeef\n", encoding="utf-8"
     )
-    agents = payload / "opencode_configs" / "agents"
-    skills = payload / "opencode_configs" / "skills"
-    agents.mkdir(parents=True)
-    (agents / "derman-build.md").write_text("build", encoding="utf-8")
-    (agents / "derman-plan.md").write_text("plan", encoding="utf-8")
-    for i in range(10):
-        skill = skills / f"skill-{i}"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
     ocm_agents = payload / "opencoderman" / "agents"
     ocm_skills = payload / "opencoderman" / "skills"
     ocm_agents.mkdir(parents=True)
@@ -142,8 +133,10 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
     (payload / "install-opencode-agents.bat").write_text("@echo off\n", encoding="utf-8")
-    (payload / "Install-OpencodeAgents.ps1").write_text("param()\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
+    (payload / "opencode_configs").mkdir()
+    dup = ap.assert_payload(payload, platform="windows")
+    assert any("opencode_configs" in e for e in dup)
 
 
 def test_assert_payload_reports_missing(tmp_path: Path):
@@ -154,7 +147,7 @@ def test_assert_payload_reports_missing(tmp_path: Path):
     assert any("yaver" in e for e in errors)
     assert any("_internal" in e for e in errors)
     assert any(".env.example" in e for e in errors)
-    assert any("opencode_configs" in e for e in errors)
+    assert any("opencoderman" in e for e in errors)
 
 
 def test_archive_name_keeps_patch_version(tmp_path: Path):
@@ -176,18 +169,20 @@ def test_build_script_requires_spa_and_onedir():
     assert "--out-dir" in text
     assert 'f"{dest_base.name}.zip"' in text
     assert "dest_base.with_suffix" not in text
-    assert "stage_opencode_configs" in text
     assert "stage_opencoderman" in text
     assert "stage_agent_installers" in text
-    assert "opencode_configs" in text
+    assert "opencode_configs" not in text
     assert "opencoderman" in text
+    assert "agents" in text
+    assert "skills" in text
 
 
-def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
-    build = _load("yaver_stage_ocfg", PKG / "build.py")
+def test_stage_opencoderman_copies_only_agents_and_skills(tmp_path: Path):
+    build = _load("yaver_stage_ocm", PKG / "build.py")
     repo = tmp_path / "repo"
     (repo / "opencoderman" / "agents").mkdir(parents=True)
     (repo / "opencoderman" / "skills" / "python").mkdir(parents=True)
+    (repo / "opencoderman" / "install.py").write_text("print(1)\n", encoding="utf-8")
     (repo / "opencoderman" / "agents" / "derman-build.md").write_text(
         "build\n", encoding="utf-8"
     )
@@ -204,17 +199,33 @@ def test_stage_opencode_configs_copies_agents_and_skills(tmp_path: Path):
     (repo / "opencoderman" / "skills" / "__pycache__").mkdir()
     (repo / "opencoderman" / "skills" / "__pycache__" / "x.pyc").write_bytes(b"x")
     bundled = tmp_path / "payload"
-    dest = build.stage_opencode_configs(bundled, repo_root=repo)
-    assert dest == bundled / "opencode_configs"
-    assert (dest / "agents" / "derman-build.md").is_file()
-    assert (dest / "agents" / "derman-plan.md").is_file()
-    assert not (dest / "agents" / "gitlab-reviewer.md").exists()
-    assert len(list((dest / "skills").rglob("SKILL.md"))) == 10
-    assert not (dest / "skills" / "__pycache__").exists()
     ocm = build.stage_opencoderman(bundled, repo_root=repo)
     assert ocm == bundled / "opencoderman"
     assert (ocm / "agents" / "derman-build.md").is_file()
+    assert (ocm / "agents" / "derman-plan.md").is_file()
+    assert (ocm / "agents" / "gitlab-reviewer.md").is_file()
+    assert len(list((ocm / "skills").rglob("SKILL.md"))) == 10
     assert not (ocm / "skills" / "__pycache__").exists()
+    assert not (ocm / "install.py").exists()
+    assert not (bundled / "opencode_configs").exists()
+    names = {p.name for p in ocm.iterdir()}
+    assert names == {"agents", "skills"}
+
+
+def test_stage_agent_installers_ships_one_script(tmp_path: Path, monkeypatch):
+    build = _load("yaver_stage_installers", PKG / "build.py")
+    bundled = tmp_path / "payload"
+    bundled.mkdir()
+    monkeypatch.setattr(build, "ROOT", ROOT)
+    build.stage_agent_installers(bundled)
+    if __import__("os").name == "nt":
+        assert (bundled / "install-opencode-agents.bat").is_file()
+        assert not (bundled / "install-opencode-agents.sh").exists()
+        assert not (bundled / "Install-OpencodeAgents.ps1").exists()
+    else:
+        assert (bundled / "install-opencode-agents.sh").is_file()
+        assert not (bundled / "install-opencode-agents.bat").exists()
+        assert not (bundled / "install_opencode_agents.py").exists()
 
 
 def test_tag_workflows_share_release_notes():
@@ -240,6 +251,8 @@ def test_start_here_does_not_claim_opencode_is_bundled():
     assert "not" in text.lower()
     assert ".env.example" in text
     assert "yaver start" in text or "yaver.exe start" in text
-    assert "opencode_configs" in text
+    assert "opencode_configs" not in text
     assert "install-opencode-agents" in text
     assert "opencoderman/" in text
+    assert "agents/" in text
+    assert "skills/" in text

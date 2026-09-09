@@ -1,17 +1,13 @@
-# Yaver 0.5.0
+# Yaver 0.5.1
 
-GitLab auth is one setting: a host with a PAT is allowed
-(`GITLAB_HOST_PATS`). Poller intake is always To Do + bot assignee
-(no `TRIGGER_ON_ASSIGNMENT`). Jobs use the model's context window
-unless you set `OPENCODE_CONTEXT_LIMIT`.
+Standalone exe zips ship **one** OpenCode kit: `opencoderman/agents`
+and `opencoderman/skills` only. There is no second `opencode_configs/`
+tree. Windows zips include `install-opencode-agents.bat`; Linux zips
+include `install-opencode-agents.sh`. Run that script after OpenCode
+is installed to copy agents and skills into the OpenCode home.
 
-Storage shows live GitLab MR status. When that MR is merged or closed,
-the matching temp clone is deleted even if the webhook cannot reach
-the daemon.
-
-Standalone exe zips still include `opencoderman/` and
-`install-opencode-agents.bat` / `.sh`. That script finds the OpenCode
-home and copies **derman-build**, **derman-plan**, and `skills/` only.
+Plan-refactor now reads every Jira comment page, so a late `@bot`
+mention is not missed on busy tickets.
 
 The exact OpenCoderman submodule commit is in `opencoderman.pin` and
 `opencoderman-<sha>.zip` on this release.
@@ -31,9 +27,8 @@ Each archive is an **onedir** folder:
 
 - `yaver.exe` / `yaver` — CLI + daemon
 - `_internal/` — bundled Python runtime, SPA, prompts
-- `opencoderman/` — OpenCoderman tree
-- `install-opencode-agents.bat` / `.sh` — copy derman-build, derman-plan, skills
-- `opencode_configs/` — the same plan/build agents + skills
+- `opencoderman/agents` + `opencoderman/skills` — derman-build, derman-plan, skills
+- `install-opencode-agents.bat` (Windows) or `install-opencode-agents.sh` (Linux)
 - `.env.example`, `START_HERE.txt`, `VERSION`
 
 ```text
@@ -72,7 +67,8 @@ Each release also attaches `opencoderman-<sha>.zip`.
 - Jira webhook intake removed; board poller only
 - One Jira bot name; one GitLab trigger username
 - Settings tabs: Jira, GitLab, Projects, Agent, Runtime
-- Exe zip ships `opencoderman/` and copies only derman-build / derman-plan
+- Exe zip ships one `opencoderman/` tree (`agents/` + `skills/` only)
+- `plan_refactor` reads every Jira comment page
 
 ## Config (secrets stay out of the binary)
 

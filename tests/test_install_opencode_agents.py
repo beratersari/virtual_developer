@@ -37,8 +37,9 @@ def test_bat_does_not_redirect_with_echo_arrow():
         stripped = line.strip()
         if stripped.lower().startswith("echo") and "->" in stripped:
             pytest.fail(f"cmd.exe echo redirect landmine: {stripped}")
-    assert "-File" in text
-    assert "Install-OpencodeAgents.ps1" in text
+    assert "opencoderman\\agents" in text or "opencoderman\\agents" in text.replace("/", "\\")
+    assert "opencode_configs" not in text
+    assert "Install-OpencodeAgents.ps1" not in text
 
 
 def test_ps1_avoids_automatic_variable_names():
@@ -148,3 +149,12 @@ def test_cli_uses_source_root_and_home(tmp_path: Path):
         == 0
     )
     assert (home / "agents" / "derman-plan.md").is_file()
+
+
+def test_sh_copies_opencoderman_without_python():
+    text = SH.read_text(encoding="utf-8")
+    assert "opencoderman/agents" in text
+    assert "opencoderman/skills" in text
+    assert "python3" not in text
+    assert "install_opencode_agents.py" not in text
+    assert "opencode_configs" not in text

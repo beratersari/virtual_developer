@@ -220,7 +220,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--source-root",
         default="",
-        help="Folder that contains opencoderman/ or opencode_configs/",
+        help="Folder that contains opencoderman/agents and opencoderman/skills",
     )
     parser.add_argument(
         "--opencode-home",

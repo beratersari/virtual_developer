@@ -21,15 +21,16 @@ REQUIRED_BUNDLED = (
     "agent/BUILD_PROMPT.md",
 )
 
-REQUIRED_OPENCODE_CONFIGS = (
-    "opencode_configs/agents/derman-build.md",
-    "opencode_configs/agents/derman-plan.md",
-)
 REQUIRED_OPENCODERMAN = (
     "opencoderman/agents/derman-build.md",
     "opencoderman/agents/derman-plan.md",
 )
 MIN_OPENCODE_SKILLS = 10
+FORBIDDEN_DUPLICATE_CONFIGS = (
+    "opencode_configs",
+    "Install-OpencodeAgents.ps1",
+    "install_opencode_agents.py",
+)
 
 
 def exe_name() -> str:
@@ -58,22 +59,19 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
             errors.append(f"missing bundled {rel}")
     if not internal.is_dir():
         errors.append("missing _internal/ (onedir layout required)")
-    for rel in REQUIRED_OPENCODE_CONFIGS:
-        if not (root / rel).is_file():
-            errors.append(f"missing {rel}")
-    skills = root / "opencode_configs" / "skills"
-    if not skills.is_dir():
-        errors.append("missing opencode_configs/skills/")
-    else:
-        skill_mds = list(skills.rglob("SKILL.md"))
-        if len(skill_mds) < MIN_OPENCODE_SKILLS:
-            errors.append(
-                f"opencode_configs/skills has {len(skill_mds)} SKILL.md "
-                f"(need >= {MIN_OPENCODE_SKILLS})"
-            )
     for rel in REQUIRED_OPENCODERMAN:
         if not (root / rel).is_file():
             errors.append(f"missing {rel}")
+    ocm = root / "opencoderman"
+    if ocm.is_dir():
+        extra = sorted(
+            p.name for p in ocm.iterdir() if p.name not in {"agents", "skills"}
+        )
+        if extra:
+            errors.append(
+                "opencoderman/ must only contain agents/ and skills/ "
+                f"(found {extra})"
+            )
     ocm_skills = root / "opencoderman" / "skills"
     if not ocm_skills.is_dir():
         errors.append("missing opencoderman/skills/")
@@ -84,16 +82,19 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
                 f"opencoderman/skills has {len(ocm_mds)} SKILL.md "
                 f"(need >= {MIN_OPENCODE_SKILLS})"
             )
+    for rel in FORBIDDEN_DUPLICATE_CONFIGS:
+        if (root / rel).exists():
+            errors.append(f"duplicate OpenCode config must not ship: {rel}")
     if plat.startswith("win"):
         if not (root / "install-opencode-agents.bat").is_file():
             errors.append("missing install-opencode-agents.bat")
-        if not (root / "Install-OpencodeAgents.ps1").is_file():
-            errors.append("missing Install-OpencodeAgents.ps1")
+        if (root / "install-opencode-agents.sh").is_file():
+            errors.append("Windows zip must not include install-opencode-agents.sh")
     else:
         if not (root / "install-opencode-agents.sh").is_file():
             errors.append("missing install-opencode-agents.sh")
-        if not (root / "install_opencode_agents.py").is_file():
-            errors.append("missing install_opencode_agents.py")
+        if (root / "install-opencode-agents.bat").is_file():
+            errors.append("Linux zip must not include install-opencode-agents.bat")
     return errors
 
 
