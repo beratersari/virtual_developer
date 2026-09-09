@@ -1,21 +1,31 @@
-# Yaver 0.6.1
+# Yaver 0.7.0
 
-Azure DevOps Server auth matches Creasy and GitLab: HTTP Basic
-`pat:<PAT>` for Settings Test, clone, push, and pull-request create.
-IIS rejects an empty username (`:PAT`), which is why Settings Test
-showed 401 on a valid PAT. Askpass returns username `pat`. Test tries
-`/tfs/DefaultCollection` before treating a host-root 401 as final.
+Schedules can follow up on an existing GitLab MR: look up a saved
+project or paste a URL, store a prompt, post it on the MR at fire
+time, then run the usual note job. Notes written from the dashboard
+are marked so the webhook does not start a second job.
 
-Azure webhooks from 0.6.0 are unchanged: mention the bot on a PR
-comment; Yaver replies on the PR. Completed or abandoned PRs delete
-the matching temp clone.
+Azure webhook, REST, Settings Test, git, and PR workflow steps now
+write `[azure]` lines (never a PAT or Authorization header). A
+rejected comment says why — token header, configured vs extracted
+mentions, empty body, bot reply. Lines that arrive before `job_id`
+exists are copied onto the job, so Job → Logs shows intake.
 
-Settings has an Azure tab: host PATs, bot username, webhook enable, and
-webhook secret. URL: `POST /webhooks/azure` with `X-Azure-Token`.
+Dashboard first paint stays on the ops card. Slow or failed
+`/api/meta` shows Retry instead of a blank Loading, and that
+endpoint no longer waits on blocking Jira or GitLab work.
 
-GitLab leftover PAT is never sent to a TFS `/_git/` remote. Azure
-leftover `AZURE_PAT` + `AZURE_ALLOWED_HOSTS` follows the same rule as
-GitLab when `AZURE_HOST_PATS` is empty.
+`plan_execute` with no plan file comments on Jira and stays at
+`plan_ready`. Pasted git hosts keep a non-default port so on-prem
+PATs match Settings. A last-turn pending `question` tool leaves
+compact-wait for the unattended nudge.
+
+Azure auth is still HTTP Basic `pat:<PAT>` (Settings Test, clone,
+push, PR). Mention the bot on a PR comment; Yaver replies on the
+PR. Completed or abandoned PRs delete the matching temp clone.
+
+Settings has an Azure tab: host PATs, bot username, webhook enable,
+and webhook secret. URL: `POST /webhooks/azure` with `X-Azure-Token`.
 
 Standalone exe zips still ship **one** OpenCode kit: `opencoderman/agents`
 (**derman-build** and **derman-plan** only — not gitlab-reviewer) and
@@ -82,15 +92,16 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- Scheduled follow-up on an existing GitLab MR
+- Azure `[azure]` job trail (webhook reject reasons, REST, git, workflow)
+- Webhook intake lines appear on Job → Logs
+- Ops UI opens on the console card; `/api/meta` does not block on Jira/GitLab
+- `plan_execute` with no plan file comments on Jira
+- Pasted git hosts keep `:8080` / `:8929` for PAT maps
+- Last-turn `question` tool leaves compact-wait for the unattended nudge
 - Azure DevOps Server 2022.2 webhook intake (`POST /webhooks/azure`)
-- Settings tabs: Jira, GitLab, Azure, Projects, Agent, Runtime
 - TFS clone, push, and PR use Basic `pat:<PAT>` (same as Settings Test)
-- Settings keeps a newer `.env` key (including `TRIGGER_ASSIGNEE_NAMES`) unless you later save that same field
-- Dashboard login is the in-page form; Edge does not get a native HTTP/Windows popup on first load
-- Jira webhook intake removed; board poller only
-- One Jira bot name; one GitLab trigger username
 - Exe zip ships one `opencoderman/` tree (`derman-build`, `derman-plan`, `skills/` only)
-- `plan_refactor` reads every Jira comment page
 
 ## Config (secrets stay out of the binary)
 

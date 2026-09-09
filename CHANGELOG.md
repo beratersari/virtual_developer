@@ -8,6 +8,25 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-10
+
+Scheduled follow-up on an existing GitLab MR. Azure jobs write a readable `[azure]` trail, including webhook rejects, and those lines show on Job → Logs.
+
+### Added
+
+- Schedules can look up a saved project or pasted GitLab URL, store a prompt, post it on the MR at fire time, and run the usual note job. Dashboard-written notes are marked so the webhook does not re-fire.
+- Azure webhook, REST, Settings Test, git PAT/PR, and PR workflow steps write `[azure]` lines (no PAT or Authorization). Rejects include token header, configured vs extracted mentions, and a comment preview.
+- Webhook / enqueue lines that land before `job_id` exists are copied onto the job so Job → Logs shows intake, not only the agent run.
+
+### Fixed
+
+- First paint stays on the ops card. Slow or failed `/api/meta` shows Retry instead of a blank Loading. `/api/meta` no longer waits on blocking Jira or GitLab work.
+- `plan_execute` with no plan file comments on Jira, keeps `plan_ready`, and unlatches the poller.
+- Pasted git hosts keep a non-default port (`:8080` / `:8929`) so on-prem GitLab and Azure PATs match Settings.
+- A last-turn pending `question` tool leaves compact-wait for the unattended nudge instead of burning the budget.
+
+[0.7.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.7.0
+
 ## [0.6.1] — 2026-09-09
 
 Azure DevOps Server auth matches Creasy and GitLab: username + PAT as HTTP Basic.
