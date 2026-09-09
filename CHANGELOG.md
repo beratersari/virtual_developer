@@ -8,6 +8,15 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-09
+
+Azure DevOps Server 2022.2 webhooks work like GitLab MR comments.
+
+### Added
+
+- Azure DevOps Server 2022.2 (TFS) project webhooks (`POST /webhooks/azure`) with the same usage as GitLab: `@mention` a PR comment to start a job, Yaver replies on the PR, completed/abandoned PRs delete the temp clone. Clone and push use a host Azure PAT only (empty username, no credential prompt).
+- Settings → Azure: host PATs, bot username, webhook enable, and webhook secret. The ops SPA includes the Azure tab.
+
 ## [0.5.3] — 2026-09-09
 
 Settings follows a newer `.env`, and Edge no longer pops a native login dialog.
@@ -17,6 +26,7 @@ Settings follows a newer `.env`, and Edge no longer pops a native login dialog.
 - Jira → Bot name in Settings showed leftover `.env.example` names after you edited `TRIGGER_ASSIGNEE_NAMES`. Save now writes only changed fields. After restart, a `.env` key is used unless you later save that same field in Settings.
 - Some Edge windows showed a Windows/HTTP username popup that rejected `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. The first SPA probe is always 200; sign-in stays on the in-page Ops console form.
 
+[0.6.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.6.0
 [0.5.3]: https://github.com/beratersari/virtual_developer/releases/tag/v0.5.3
 
 ## [0.5.2] — 2026-09-09

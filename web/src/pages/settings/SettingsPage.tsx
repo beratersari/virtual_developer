@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   fetchSettings,
   patchSettings,
+  testAzureConnection,
   testGitlabConnection,
   testJiraConnection,
 } from '../../api/client'
@@ -23,6 +24,11 @@ type Draft = {
   poll_interval_seconds: number
   trigger_assignee_names: string
   gitlab_bot_mentions: string
+  azure_bot_mentions: string
+  gitlab_webhook_enabled: boolean
+  gitlab_webhook_secret: string
+  azure_webhook_enabled: boolean
+  azure_webhook_secret: string
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
@@ -30,6 +36,7 @@ type Draft = {
   default_model: string
   agent_backend: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
+  azure_cred_rows: GitlabHostCredentialDraft[]
   project_repositories: ProjectRepository[]
 }
 
@@ -41,6 +48,11 @@ function fromSettings(s: SettingsPayload): Draft {
     poll_interval_seconds: s.poll_interval_seconds,
     trigger_assignee_names: s.trigger_assignee_names ?? '',
     gitlab_bot_mentions: s.gitlab_bot_mentions ?? '',
+    azure_bot_mentions: s.azure_bot_mentions ?? '',
+    gitlab_webhook_enabled: s.gitlab_webhook_enabled !== false,
+    gitlab_webhook_secret: '',
+    azure_webhook_enabled: s.azure_webhook_enabled === true,
+    azure_webhook_secret: '',
     max_concurrent_jobs: s.max_concurrent_jobs,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
@@ -48,6 +60,12 @@ function fromSettings(s: SettingsPayload): Draft {
     default_model: s.default_model,
     agent_backend: s.agent_backend || 'opencode',
     gitlab_cred_rows: (s.gitlab_credentials ?? []).map((c) => ({
+      host: c.host,
+      pat: '',
+      pat_configured: Boolean(c.pat_configured),
+      original_host: c.host,
+    })),
+    azure_cred_rows: (s.azure_credentials ?? []).map((c) => ({
       host: c.host,
       pat: '',
       pat_configured: Boolean(c.pat_configured),
@@ -68,13 +86,19 @@ export function SettingsPage() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [section, setSection] = useState<'jira' | 'gitlab' | 'projects' | 'model' | 'runtime'>('jira')
+  const [section, setSection] = useState<
+    'jira' | 'gitlab' | 'azure' | 'projects' | 'model' | 'runtime'
+  >('jira')
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
   )
   const [jiraTesting, setJiraTesting] = useState(false)
   const [gitlabTestingIdx, setGitlabTestingIdx] = useState<number | null>(null)
+  const [azureResults, setAzureResults] = useState<Record<string, GitlabConnectionTestResult>>(
+    {},
+  )
+  const [azureTestingIdx, setAzureTestingIdx] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Draft>>(new Set())
@@ -113,6 +137,11 @@ export function SettingsPage() {
           throw new Error(`GitLab host "${r.host}" needs a PAT`)
         }
       }
+      for (const r of draft.azure_cred_rows) {
+        if (r.host.trim() && !r.pat_configured && !r.pat.trim()) {
+          throw new Error(`Azure DevOps host "${r.host}" needs a PAT`)
+        }
+      }
       const body: Parameters<typeof patchSettings>[0] = {}
       if (dirtyKeys.has('jira_host')) body.jira_host = draft.jira_host.trim()
       if (dirtyKeys.has('jira_board_id')) body.jira_board_id = draft.jira_board_id.trim()
@@ -124,6 +153,21 @@ export function SettingsPage() {
       }
       if (dirtyKeys.has('gitlab_bot_mentions')) {
         body.gitlab_bot_mentions = draft.gitlab_bot_mentions
+      }
+      if (dirtyKeys.has('azure_bot_mentions')) {
+        body.azure_bot_mentions = draft.azure_bot_mentions
+      }
+      if (dirtyKeys.has('gitlab_webhook_enabled')) {
+        body.gitlab_webhook_enabled = draft.gitlab_webhook_enabled
+      }
+      if (dirtyKeys.has('azure_webhook_enabled')) {
+        body.azure_webhook_enabled = draft.azure_webhook_enabled
+      }
+      if (dirtyKeys.has('gitlab_webhook_secret') && draft.gitlab_webhook_secret.trim()) {
+        body.gitlab_webhook_secret = draft.gitlab_webhook_secret.trim()
+      }
+      if (dirtyKeys.has('azure_webhook_secret') && draft.azure_webhook_secret.trim()) {
+        body.azure_webhook_secret = draft.azure_webhook_secret.trim()
       }
       if (dirtyKeys.has('max_concurrent_jobs')) {
         body.max_concurrent_jobs = Number(draft.max_concurrent_jobs)
@@ -143,6 +187,20 @@ export function SettingsPage() {
       if (dirtyKeys.has('agent_backend')) body.agent_backend = draft.agent_backend
       if (dirtyKeys.has('gitlab_cred_rows')) {
         body.gitlab_credentials = draft.gitlab_cred_rows
+          .map((r) => {
+            const host = r.host.trim()
+            const prev = (r.original_host || '').trim()
+            const row: { host: string; pat?: string; previous_host?: string } = { host }
+            if (r.pat.trim()) row.pat = r.pat.trim()
+            if (prev && prev.toLowerCase() !== host.toLowerCase()) {
+              row.previous_host = prev
+            }
+            return row
+          })
+          .filter((r) => r.host)
+      }
+      if (dirtyKeys.has('azure_cred_rows')) {
+        body.azure_credentials = draft.azure_cred_rows
           .map((r) => {
             const host = r.host.trim()
             const prev = (r.original_host || '').trim()
@@ -199,6 +257,7 @@ export function SettingsPage() {
           [
             ['jira', 'Jira'],
             ['gitlab', 'GitLab'],
+            ['azure', 'Azure'],
             ['projects', 'Projects'],
             ['model', 'Agent'],
             ['runtime', 'Runtime'],
@@ -470,20 +529,204 @@ export function SettingsPage() {
           or closed merge requests delete the matching temp clone. The secret
           is sent as X-Gitlab-Token.
         </p>
-        <dl className="mt-2 grid gap-1 font-mono text-[11px] text-text-secondary">
-          <div>
-            Enabled:{' '}
-            {settings?.gitlab_webhook_enabled === false ? 'no' : 'yes'}
-          </div>
-          <div>
-            Secret:{' '}
-            {settings?.gitlab_webhook_secret_configured ? 'configured' : 'empty (dev)'}
-          </div>
-          <div>
-            URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
-            {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
-          </div>
-        </dl>
+        <label className="field mt-2">
+          <span>Enabled</span>
+          <input
+            type="checkbox"
+            checked={draft.gitlab_webhook_enabled}
+            onChange={(e) => mark('gitlab_webhook_enabled', e.target.checked)}
+          />
+        </label>
+        <label className="field">
+          <span>
+            Secret{' '}
+            {settings?.gitlab_webhook_secret_configured ? '(stored)' : ''}
+          </span>
+          <input
+            type="password"
+            value={draft.gitlab_webhook_secret}
+            autoComplete="new-password"
+            onChange={(e) => mark('gitlab_webhook_secret', e.target.value)}
+            placeholder="leave blank to keep current"
+          />
+        </label>
+        <p className="mt-2 font-mono text-[11px] text-text-secondary">
+          URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
+          {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
+        </p>
+      </div>
+      </div>
+      )}
+
+      {section === 'azure' && (
+      <div key="azure" className="vd-fade space-y-3">
+      <div className="text-sm font-semibold text-text">Credentials</div>
+      <p className="text-xs text-text-muted">
+        One personal access token per Azure DevOps Server host. PAT only —
+        no username. Clone and push never prompt. Leave PAT blank to keep
+        the stored token.
+      </p>
+      {draft.azure_cred_rows.map((row, idx) => (
+        <div key={idx}>
+          <label className="field">
+            <span>Host {row.pat_configured ? '(PAT stored)' : ''}</span>
+            <input
+              value={row.host}
+              onChange={(e) => {
+                touch('azure_cred_rows')
+                setDraft((d) => {
+                  if (!d) return d
+                  const rows = [...d.azure_cred_rows]
+                  rows[idx] = { ...rows[idx], host: e.target.value }
+                  return { ...d, azure_cred_rows: rows }
+                })
+              }}
+              placeholder="tfs.example.com"
+            />
+          </label>
+          <label className="field">
+            <span>PAT</span>
+            <input
+              type="password"
+              value={row.pat}
+              autoComplete="new-password"
+              onChange={(e) => {
+                touch('azure_cred_rows')
+                setDraft((d) => {
+                  if (!d) return d
+                  const rows = [...d.azure_cred_rows]
+                  rows[idx] = { ...rows[idx], pat: e.target.value }
+                  return { ...d, azure_cred_rows: rows }
+                })
+              }}
+            />
+          </label>
+          <p className="actions">
+            <button
+              type="button"
+              disabled={azureTestingIdx === idx}
+              onClick={() => {
+                setAzureTestingIdx(idx)
+                void (async () => {
+                  try {
+                    const r = await testAzureConnection({
+                      host: row.host.trim(),
+                      pat: row.pat.trim() || undefined,
+                    })
+                    setAzureResults((m) => ({ ...m, [row.host.trim()]: r }))
+                  } catch (e) {
+                    setAzureResults((m) => ({
+                      ...m,
+                      [row.host.trim()]: {
+                        ok: false,
+                        error: e instanceof Error ? e.message : 'Test failed',
+                      },
+                    }))
+                  } finally {
+                    setAzureTestingIdx(null)
+                  }
+                })()
+              }}
+            >
+              {azureTestingIdx === idx ? 'Testing…' : 'Test'}
+            </button>
+            <button
+              type="button"
+              className="bad"
+              onClick={() => {
+                touch('azure_cred_rows')
+                setDraft((d) =>
+                  d
+                    ? {
+                        ...d,
+                        azure_cred_rows: d.azure_cred_rows.filter((_, i) => i !== idx),
+                      }
+                    : d,
+                )
+              }}
+            >
+              Remove host
+            </button>
+          </p>
+          {azureResults[row.host.trim()] && (
+            <p className={azureResults[row.host.trim()].ok ? 'quiet' : 'err'}>
+              {azureResults[row.host.trim()].message ||
+                azureResults[row.host.trim()].error ||
+                ''}
+            </p>
+          )}
+        </div>
+      ))}
+      <p className="actions">
+        <button
+          type="button"
+          onClick={() => {
+            touch('azure_cred_rows')
+            setDraft((d) =>
+              d
+                ? {
+                    ...d,
+                    azure_cred_rows: [
+                      ...d.azure_cred_rows,
+                      { host: '', pat: '', pat_configured: false, original_host: '' },
+                    ],
+                  }
+                : d,
+            )
+          }}
+        >
+          Add Azure host
+        </button>
+      </p>
+
+      <div className="text-sm font-semibold text-text">Trigger username</div>
+      <label className="field">
+        <span>Bot username</span>
+        <input
+          value={draft.azure_bot_mentions}
+          onChange={(e) => mark('azure_bot_mentions', e.target.value)}
+          placeholder="yaver"
+        />
+        <span className="text-xs text-text-muted">
+          Azure DevOps display name or unique name that starts a job when
+          mentioned on a pull-request comment. Comments from this user are
+          ignored. Comma-separated if there is more than one.
+        </span>
+      </label>
+
+      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
+        <div className="text-sm font-semibold text-text">Service hook</div>
+        <p className="mt-1 text-xs text-text-muted">
+          Register a project Web Hook for pull-request commented and
+          pull-request updated / merged / abandoned. Completed or abandoned
+          pull requests delete the matching temp clone. The secret is sent as
+          X-Azure-Token (or Basic password).
+        </p>
+        <label className="field mt-2">
+          <span>Enabled</span>
+          <input
+            type="checkbox"
+            checked={draft.azure_webhook_enabled}
+            onChange={(e) => mark('azure_webhook_enabled', e.target.checked)}
+          />
+        </label>
+        <label className="field">
+          <span>
+            Secret{' '}
+            {settings?.azure_webhook_secret_configured ? '(stored)' : ''}
+          </span>
+          <input
+            type="password"
+            value={draft.azure_webhook_secret}
+            autoComplete="new-password"
+            onChange={(e) => mark('azure_webhook_secret', e.target.value)}
+            placeholder="leave blank to keep current"
+          />
+        </label>
+        <p className="mt-2 font-mono text-[11px] text-text-secondary">
+          URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
+          {settings?.azure_webhook_path || '/webhooks/azure'}
+        </p>
       </div>
       </div>
       )}
@@ -723,7 +966,8 @@ export function SettingsPage() {
 
       <p className="quiet">
         Jira token {settings.jira_token_configured ? 'set' : 'missing'} · GitLab{' '}
-        {settings.gitlab_pat_configured ? 'set' : 'missing'} · dashboard{' '}
+        {settings.gitlab_pat_configured ? 'set' : 'missing'} · Azure{' '}
+        {settings.azure_pat_configured ? 'set' : 'missing'} · dashboard{' '}
         {settings.dashboard_host}:{settings.dashboard_port}
       </p>
       </div>

@@ -15,7 +15,7 @@
 5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
 6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
 
-Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`. GitLab project webhooks (`POST /webhooks/gitlab`) are separate and still supported.
+Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`. GitLab project webhooks (`POST /webhooks/gitlab`) and Azure DevOps Server 2022.2 service hooks (`POST /webhooks/azure`) are separate and still supported.
 
 ---
 
@@ -266,6 +266,22 @@ Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned di
 
 ---
 
+## Azure DevOps Server 2022.2 (same usage as GitLab)
+
+Mention the bot on a pull-request comment. Yaver clones with the host PAT (no username/password prompt), runs the job, and replies on the PR.
+
+1. Settings → Azure: add the TFS host and a PAT (Code Read & Write).
+2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_WEBHOOK_SECRET=…`, `AZURE_BOT_MENTIONS=@yaver`.
+3. On the Azure DevOps Server project: Service hooks → Web Hooks.
+   - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
+   - URL: `http://<yaver-host>:8080/webhooks/azure`
+   - HTTP header `X-Azure-Token: <same secret>` (or Basic password = secret).
+4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone.
+
+Git clone/push use **PAT only** (`Authorization: Basic` with an empty username, plus Bearer). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
+
+---
+
 ## Ops dashboard
 
 Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
@@ -274,7 +290,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 |--|--|
 | URL | `http://127.0.0.1:8080` |
 | Stack | FastAPI in-daemon + WebSocket `/ws` + React SPA (`web/`) |
-| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller or `POST /webhooks/gitlab`. |
+| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller, `POST /webhooks/gitlab`, or `POST /webhooks/azure`. |
 
 **Frontend is display-only.** Filtering, poll math, and settings rules live on the backend.
 
@@ -287,6 +303,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/jobs/{id}` | Job detail |
 | DELETE | `/api/jobs/{id}` | Delete job record |
 | GET | `/api/tasks/{key}` | Task detail for issue |
+| POST | `/webhooks/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle |
 | POST | `/api/tasks/{key}/cancel` | Cancel live work (preferred over CLI when daemon runs) |
 | GET | `/api/poll` | Last poll snapshot + countdown |
 | GET/PATCH | `/api/settings` | Safe settings (no token values) |

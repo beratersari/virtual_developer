@@ -151,6 +151,45 @@ def test_gitlab_webhook_ignores_dashboard_password(monkeypatch):
     assert r.status_code in {200, 503}
 
 
+def test_azure_webhook_ignores_dashboard_password(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "dashboard_username", "ops")
+    monkeypatch.setattr(settings, "dashboard_password", "s3cret")
+    monkeypatch.setattr(settings, "azure_webhook_enabled", True)
+    monkeypatch.setattr(settings, "azure_webhook_secret", "hook-tok")
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    client = TestClient(create_dashboard_app())
+    payload = {
+        "eventType": "git.pullrequest.updated",
+        "resource": {
+            "pullRequestId": 4,
+            "status": "completed",
+            "title": "feat(KAN-12): x",
+            "sourceRefName": "refs/heads/feature/KAN-12",
+            "targetRefName": "refs/heads/develop",
+            "repository": {
+                "id": "repo-1",
+                "name": "demo",
+                "remoteUrl": "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo",
+                "project": {"name": "Demo"},
+            },
+        },
+        "resourceContainers": {
+            "collection": {
+                "baseUrl": "https://tfs.example.com/tfs/DefaultCollection/"
+            }
+        },
+    }
+    r = client.post(
+        "/webhooks/azure",
+        json=payload,
+        headers={"X-Azure-Token": "hook-tok"},
+    )
+    assert r.status_code != 401
+    assert r.status_code in {200, 503}
+
+
 def test_parse_basic_and_credentials(monkeypatch):
     from src.config import settings
 

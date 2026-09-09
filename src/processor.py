@@ -158,6 +158,8 @@ class JobProcessor:
         self._freeze_session_binds: set[str] = set()
         # GitLab note ids already accepted (webhook retries)
         self._gitlab_seen_notes: set[str] = set()
+        # Azure PR comment ids already accepted (webhook retries)
+        self._azure_seen_comments: set[str] = set()
         # Jira intake event ids (comment:… / assignee:… / created:…)
         self._jira_seen_events: set[str] = set()
         
@@ -239,6 +241,32 @@ class JobProcessor:
             return True
         return str(meta.get("workflow_type") or "").strip().lower() == "gitlab_mr"
 
+    def _is_azure_triggered(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """True when this run was started by an Azure DevOps PR comment.
+
+        Synthetic ``AZ-…`` keys are always Azure. A real Jira key in the PR
+        title is still an Azure trigger — answers go to the PR, not Jira.
+        """
+        from src.azure.keys import is_azure_issue_key
+
+        if is_azure_issue_key(issue_key):
+            return True
+        st = state or self.state_manager.get_state(issue_key)
+        meta = (getattr(st, "metadata", None) if st is not None else None) or {}
+        if str(meta.get("source") or "").strip().lower() == "azure":
+            return True
+        return str(meta.get("workflow_type") or "").strip().lower() == "azure_pr"
+
+    def _is_git_comment_triggered(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """GitLab MR or Azure PR comment — answers go to the forge, not Jira."""
+        return self._is_gitlab_triggered(issue_key, state) or self._is_azure_triggered(
+            issue_key, state
+        )
+
     def _mark_jira_in_progress(self, issue_key: str) -> bool:
         """Move the Jira issue to an In Progress-like status when work starts.
 
@@ -249,7 +277,7 @@ class JobProcessor:
         Returns True only when Jira accepted an In Progress transition (so the
         poller tracker may honestly record ``in progress``).
         """
-        if self._is_gitlab_triggered(issue_key):
+        if self._is_git_comment_triggered(issue_key):
             return False
         moved = False
         try:
@@ -278,7 +306,7 @@ class JobProcessor:
 
     def _assign_jira_to_pat_user(self, issue_key: str) -> bool:
         """Set the Jira assignee to the PAT user. Never used for GitLab jobs."""
-        if self._is_gitlab_triggered(issue_key):
+        if self._is_git_comment_triggered(issue_key):
             return False
         try:
             from src.jira.client import assign_to_pat_user
@@ -361,9 +389,11 @@ class JobProcessor:
         )
         try:
             gitlab_job = self._is_gitlab_triggered(issue_key)
+            azure_job = self._is_azure_triggered(issue_key)
+            forge_job = gitlab_job or azure_job
             # Leave To Do when work fails (missing Mode / {params}, agent crash).
             # Poller + workflow also try this; fail path is the last guarantee.
-            moved_ip = False if gitlab_job else self._mark_jira_in_progress(issue_key)
+            moved_ip = False if forge_job else self._mark_jira_in_progress(issue_key)
             # process_issue may already have transitioned + set tracker before
             # the workflow failed; keep that real IP marker for leave→return.
             already_tracked_ip = self._poller_tracks_in_progress(issue_key)
@@ -398,7 +428,7 @@ class JobProcessor:
                 cur = self.state_manager.get_state(issue_key)
                 if cur is None:
                     # No local state file — still surface the error on Jira
-                    if not gitlab_job:
+                    if not forge_job:
                         self.reporter.post_comment_response(
                             issue_key,
                             f"An error occurred while processing this issue:\n\n"
@@ -416,7 +446,7 @@ class JobProcessor:
             )
             # Only force tracker In Progress when the board actually left To Do
             # (or process_issue already recorded a successful transition).
-            if (not gitlab_job) and (moved_ip or already_tracked_ip):
+            if (not forge_job) and (moved_ip or already_tracked_ip):
                 self._nudge_poller_after_terminal(issue_key, marker="in progress")
             state = updated
             if gitlab_job:
@@ -424,6 +454,16 @@ class JobProcessor:
                     state,
                     (
                         "*Yaver* hit an error on this MR comment:\n\n"
+                        f"```\n{error_text}\n```\n"
+                        + (f"\n{suggestion}" if suggestion else "")
+                    ),
+                )
+                return
+            if azure_job:
+                self._post_azure_pr_reply(
+                    state,
+                    (
+                        "*Yaver* hit an error on this PR comment:\n\n"
                         f"```\n{error_text}\n```\n"
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
@@ -1936,6 +1976,8 @@ class JobProcessor:
                 merge_request_url=tmeta.get("merge_request_url") or None,
                 gitlab_project=tmeta.get("gitlab_project") or None,
                 gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
+                azure_project=tmeta.get("azure_project") or None,
+                azure_pr_id=tmeta.get("azure_pr_id"),
                 model=model_id,
                 backend=self._backend_for_issue(state),
             )
@@ -1982,6 +2024,8 @@ class JobProcessor:
             merge_request_url=meta0.get("merge_request_url") or None,
             gitlab_project=meta0.get("gitlab_project") or None,
             gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
+            azure_project=meta0.get("azure_project") or None,
+            azure_pr_id=meta0.get("azure_pr_id"),
             model=model_id,
             backend=self._backend_for_issue(state),
         )
@@ -3628,6 +3672,56 @@ class JobProcessor:
             "status": live.get("status"),
         }
 
+    async def enqueue_azure_comment(self, event: Any) -> Dict[str, Any]:
+        """Persist an Azure DevOps PR comment and try to start it (or leave it queued)."""
+        from src.azure.webhook import AzurePrCommentEvent
+
+        if not isinstance(event, AzurePrCommentEvent):
+            return {"ok": False, "reason": "invalid event"}
+        existing = self.queue_store.find_note(event.comment_id)
+        if existing:
+            return {
+                "ok": True,
+                "queued": existing.get("status") == "queued",
+                "duplicate": True,
+                "queue_id": existing.get("queue_id"),
+                "issue_key": existing.get("issue_key"),
+                "status": existing.get("status"),
+            }
+        work = GitManager.resolve_work_branch_name(
+            event.issue_key,
+            event.source_branch,
+            event.target_branch,
+            keep_source=True,
+        )
+        lock = workspace_lock_key(
+            event.repository_url, work, event.target_branch
+        )
+        rec = self.queue_store.enqueue(
+            source="azure",
+            issue_key=event.issue_key,
+            summary=event.pr_title or f"PR !{event.pr_id}",
+            message=event.prompt or event.comment_body,
+            repository_url=event.repository_url,
+            source_branch=event.source_branch,
+            work_branch=work,
+            target_branch=event.target_branch,
+            lock_key=lock,
+            azure_comment_id=event.comment_id,
+            merge_request_url=event.pr_url,
+            payload=event.to_dict(),
+        )
+        await self.dispatch_queue()
+        live = self.queue_store.get(rec["queue_id"]) or rec
+        return {
+            "ok": True,
+            "queued": live.get("status") == "queued",
+            "started": live.get("status") == "running",
+            "queue_id": live.get("queue_id"),
+            "issue_key": live.get("issue_key"),
+            "status": live.get("status"),
+        }
+
     async def enqueue_jira_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Persist a Jira intake event and try to start it (or leave it queued)."""
         issue = event.get("issue") or {}
@@ -3891,6 +3985,20 @@ class JobProcessor:
                     self._job_semaphore = _JobSlotLimiter(limit)
                 async with self._job_semaphore:
                     ran = await self._run_gitlab_mr_comment(event)
+                if not ran:
+                    self.queue_store.requeue(
+                        qid, reason="workspace or issue still in-flight"
+                    )
+                    return
+            elif source == "azure":
+                from src.azure.webhook import AzurePrCommentEvent
+
+                event = AzurePrCommentEvent.from_dict(rec.get("payload") or {})
+                if self._job_semaphore is None:
+                    limit = max(1, int(settings.max_concurrent_jobs or 1))
+                    self._job_semaphore = _JobSlotLimiter(limit)
+                async with self._job_semaphore:
+                    ran = await self._run_azure_pr_comment(event)
                 if not ran:
                     self.queue_store.requeue(
                         qid, reason="workspace or issue still in-flight"
@@ -4533,6 +4641,532 @@ class JobProcessor:
             self._fail_issue(
                 state.issue_key,
                 f"GitLab MR comment job failed: {e}",
+            )
+        finally:
+            self._release_context(state.issue_key, success=success)
+
+    def _post_azure_pr_reply(self, state: JiraAgentState, body: str) -> bool:
+        """Post *body* on the Azure DevOps PR stored in issue metadata."""
+        meta = dict(state.metadata or {})
+        host = (meta.get("azure_host") or "").strip()
+        collection = (meta.get("azure_collection_url") or "").strip()
+        project = meta.get("azure_project") or ""
+        repository = (
+            meta.get("azure_repository_id") or meta.get("azure_repository") or ""
+        )
+        iid = meta.get("azure_pr_id")
+        if not (host or collection) or not project or not repository or not iid:
+            logger.error(
+                f"{state.issue_key}: cannot post Azure PR comment "
+                f"(host={host!r} collection={collection!r} "
+                f"project={project!r} repo={repository!r} iid={iid!r})"
+            )
+            return False
+        from src.azure.client import AzureDevOpsClient
+
+        client = AzureDevOpsClient(host=host, collection_url=collection)
+        posted = client.post_pr_comment(
+            project=str(project),
+            repository=repository,
+            pr_id=int(iid),
+            body=body,
+            thread_id=str(meta.get("azure_thread_id") or ""),
+        )
+        return posted is not None
+
+    async def handle_azure_pr_lifecycle(self, event: Any) -> Dict[str, Any]:
+        """Persist PR state and delete the temp clone when completed or abandoned."""
+        from src.azure.webhook import AzurePrLifecycleEvent
+
+        if not isinstance(event, AzurePrLifecycleEvent):
+            logger.warning("handle_azure_pr_lifecycle: invalid event")
+            return {"ok": False, "reason": "invalid event", "deleted": []}
+        state_name = (event.state or "").strip().lower()
+        if event.is_merged:
+            state_name = "completed"
+        elif event.is_closed:
+            state_name = "abandoned"
+        elif (event.action or "").lower() in {"reopened", "created", "active"}:
+            state_name = "active"
+        elif not state_name:
+            state_name = (event.action or "").strip().lower() or "unknown"
+
+        self._record_merge_request_state(
+            issue_key=event.issue_key,
+            mr_url=event.pr_url,
+            project_path=event.project_path,
+            mr_iid=event.pr_id,
+            state=state_name,
+        )
+        if not event.should_delete_clone:
+            return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
+
+        from src.dashboard.temp_storage import delete_clones_for_merge_request
+
+        deleted = delete_clones_for_merge_request(
+            mr_url=event.pr_url,
+            project_path=event.project_path,
+            mr_iid=event.pr_id,
+            issue_key=event.issue_key,
+            source_branch=event.source_branch,
+        )
+        logger.info(
+            f"{event.issue_key}: PR {event.project_path}!{event.pr_id} "
+            f"{state_name} — deleted clones {deleted or '(none)'}"
+        )
+        return {
+            "ok": True,
+            "reason": state_name,
+            "deleted": deleted,
+        }
+
+    async def handle_azure_pr_comment(self, event: Any) -> None:
+        """Clone the PR source branch, run a build, push if needed, reply on the PR."""
+        from src.azure.webhook import AzurePrCommentEvent
+
+        if not isinstance(event, AzurePrCommentEvent):
+            logger.warning("handle_azure_pr_comment: invalid event")
+            return
+        issue_key = event.issue_key
+        from src.log_context import set_issue_key
+
+        set_issue_key(issue_key)
+        if self._job_semaphore is None:
+            limit = max(1, int(settings.max_concurrent_jobs or 1))
+            self._job_semaphore = _JobSlotLimiter(limit)
+
+        async with self._job_semaphore:
+            async with self._get_issue_lock(issue_key):
+                await self._run_azure_pr_comment(event)
+
+    async def _run_azure_pr_comment(self, event: Any) -> bool:
+        from src.azure.webhook import AzurePrCommentEvent
+
+        assert isinstance(event, AzurePrCommentEvent)
+        issue_key = event.issue_key
+        note_id = (event.comment_id or "").strip()
+        if note_id and note_id in self._azure_seen_comments:
+            logger.info(f"{issue_key}: duplicate Azure comment {note_id}; skip")
+            return True
+
+        if self._is_live_processing(issue_key):
+            logger.info(f"{issue_key}: already in-flight; deferring Azure comment")
+            return False
+
+        st = self.state_manager.get_state(issue_key)
+        summary = event.pr_title or f"PR !{event.pr_id}"
+        description = event.prompt
+        meta = {
+            "source": "azure",
+            "azure_host": event.host,
+            "azure_collection_url": event.collection_url,
+            "azure_project": event.project,
+            "azure_repository": event.repository_name,
+            "azure_repository_id": event.repository_id or None,
+            "azure_pr_id": event.pr_id,
+            "merge_request_url": event.pr_url,
+            "azure_thread_id": event.thread_id,
+            "repository_url": event.repository_url,
+            "source_branch": event.source_branch,
+            "target_branch": event.target_branch,
+            "feature_branch": event.source_branch,
+            "workflow_type": "azure_pr",
+            "requeue_eligible": False,
+        }
+        if st is None:
+            st = self.state_manager.create_state(
+                issue_key, summary, description
+            )
+            self.state_manager.update_state(issue_key, metadata=meta)
+        else:
+            if st.status in self.IN_FLIGHT_STATUSES:
+                logger.info(
+                    f"{issue_key}: local status {st.status.value}; "
+                    f"deferring Azure comment"
+                )
+                return False
+            self.state_manager.update_state(
+                issue_key,
+                force=True,
+                status=TaskStatus.PENDING,
+                issue_summary=summary,
+                description=description,
+                error_message=None,
+                progress_percentage=0,
+                completed_at=None,
+                current_task_id=None,
+                current_opencode_session_id=None,
+                metadata=meta,
+            )
+        st = self.state_manager.get_state(issue_key)
+        if st is None:
+            return False
+        if note_id:
+            self._azure_seen_comments.add(note_id)
+            if len(self._azure_seen_comments) > 500:
+                self._azure_seen_comments = set(list(self._azure_seen_comments)[-250:])
+        await self._start_azure_pr_workflow(st, event)
+        return True
+
+    async def _start_azure_pr_workflow(
+        self, state: JiraAgentState, event: Any
+    ) -> None:
+        """Build on the PR source branch, push if the agent committed, reply on the PR."""
+        from src.azure.webhook import AzurePrCommentEvent
+
+        assert isinstance(event, AzurePrCommentEvent)
+        logger.info(
+            f"Starting Azure PR build workflow for {state.issue_key} "
+            f"(PR !{event.pr_id})"
+        )
+        success: Optional[bool] = False
+        try:
+            task = AgentTask(
+                description=f"Azure PR build: {state.issue_key}",
+                prompt=PromptBuilder.build_azure_comment_prompt(
+                    issue_key=state.issue_key,
+                    pr_title=event.pr_title,
+                    pr_url=event.pr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    work_branch=event.source_branch,
+                ),
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                issue_key=state.issue_key,
+                model=self._model_for_issue(state),
+                backend=self._backend_for_issue(state),
+            )
+            job_id = self._begin_workflow_run(
+                state,
+                status=TaskStatus.EXECUTING,
+                task=task,
+                workflow_type="azure_pr",
+                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                job_status="executing",
+            )
+            if job_id is None:
+                logger.info(
+                    f"Azure PR job not started for {state.issue_key}: "
+                    f"begin claim rejected"
+                )
+                return
+
+            try:
+                git = await asyncio.to_thread(
+                    self._init_git_manager,
+                    state.issue_key,
+                    state,
+                    repository_url=event.repository_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    keep_source_work_branch=True,
+                )
+            except (IssueGitConfigError, GitCloneError, GitSourceBranchError, GitTargetBranchError) as e:
+                msg = getattr(e, "user_message", None) or str(e)
+                self._fail_issue(
+                    state.issue_key,
+                    msg,
+                    suggestion="Check repository URL, Azure PAT, and that the PR source/target exist.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            if git is None:
+                self._finish_after_git_missing(state.issue_key)
+                return
+            if self._is_aborted(state.issue_key):
+                self._release_context(state.issue_key, success=False)
+                return
+            try:
+                await asyncio.to_thread(
+                    git.ensure_feature_branch, state.issue_key
+                )
+            except Exception as e:
+                logger.exception(
+                    f"{state.issue_key} Azure branch setup failed: {e}", e
+                )
+                self._fail_issue(
+                    state.issue_key,
+                    f"*Yaver* could not check out `{event.source_branch}`.\n\n`{e}`",
+                    suggestion="Check that the PR source branch exists and the PAT can clone.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            self._record_job_working_directory(
+                state.issue_key, git.get_working_directory()
+            )
+            durable = self._durable_plan_path(state.issue_key)
+            plan_path_for_agent = str(durable) if durable.exists() else None
+            raw_wb = getattr(git, "work_branch", None)
+            work_branch = (
+                raw_wb.strip()
+                if isinstance(raw_wb, str) and raw_wb.strip()
+                else event.source_branch
+            )
+            task.prompt = PromptBuilder.build_azure_comment_prompt(
+                issue_key=state.issue_key,
+                pr_title=event.pr_title,
+                pr_url=event.pr_url,
+                source_branch=event.source_branch,
+                target_branch=event.target_branch,
+                author=event.author_username or event.author_name,
+                comment=event.prompt,
+                work_branch=work_branch,
+                plan_path=plan_path_for_agent,
+            )
+            if work_branch:
+                try:
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={"feature_branch": work_branch},
+                    )
+                except Exception:
+                    pass
+            self._snapshot_delivery_baseline(state.issue_key, git)
+            runner = self._runner_for(state.issue_key)
+            if runner is None:
+                self._fail_issue(
+                    state.issue_key,
+                    "Agent runner was not initialized for this Azure job.",
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+            self._attach_bound_opencode_session(state.issue_key, task, git)
+
+            result = await runner.run_agent_with_retry(
+                task,
+                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
+                    state.issue_key, sp, pp
+                ),
+                on_session_id=lambda sid: self._link_job_opencode_session(
+                    state.issue_key, sid
+                ),
+                timeout_seconds=self._live_timeout_seconds(state),
+                max_retries=(
+                    state.max_retries
+                    if state.max_retries is not None
+                    else settings.agent_task_max_retries
+                ),
+                max_incomplete_retries=_plain_int(
+                    getattr(settings, "agent_task_max_incomplete_retries", 0),
+                    0,
+                ),
+                should_abort=lambda: self._is_aborted(state.issue_key),
+            )
+            self._apply_agent_result_session(state.issue_key, result)
+
+            if self._is_aborted(state.issue_key) or result.get("aborted"):
+                logger.info(
+                    f"Azure PR job aborted for {state.issue_key}; "
+                    f"skipping PR reply"
+                )
+                self._release_context(state.issue_key, success=False)
+                return
+
+            if result.get("returncode") == 0:
+                answer = (result.get("stdout") or "").strip() or "(no output)"
+                pushed = False
+                delivery_note = ""
+                delivery_err = self._assert_build_delivery(state.issue_key)
+                hard_delivery_err = bool(
+                    delivery_err
+                    and not self._is_noop_delivery_message(delivery_err)
+                )
+                if hard_delivery_err:
+                    self._fail_issue(
+                        state.issue_key,
+                        delivery_err,
+                        suggestion=(
+                            "Ensure the agent commits on the PR source "
+                            "branch, then comment again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if self._is_aborted(state.issue_key):
+                    logger.info(
+                        f"Azure PR job aborted for {state.issue_key} "
+                        f"before push; skipping delivery"
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                has_unique = not (
+                    delivery_err and self._is_noop_delivery_message(delivery_err)
+                )
+                push_ok = await self._push_and_create_mr(
+                    state,
+                    existing_mr_url=event.pr_url or None,
+                    open_mr=has_unique,
+                )
+                if self._is_aborted(state.issue_key):
+                    logger.info(
+                        f"Azure PR job aborted for {state.issue_key} "
+                        f"during/after push; not marking completed"
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if not has_unique:
+                    logger.info(
+                        f"{state.issue_key}: Azure PR build finished "
+                        f"with no unique commits to deliver — still "
+                        f"posting PR reply"
+                    )
+                    delivery_note = (
+                        "No unique commits to deliver on this run; "
+                        "existing PR was not re-attributed."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "no_new_commits",
+                            "delivery_note": (delivery_err or delivery_note)[:2000],
+                        },
+                    )
+                elif not push_ok:
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check Azure DevOps remote/credentials, then comment "
+                            "on the PR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                else:
+                    pushed = True
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": None,
+                        },
+                    )
+
+                live = self.state_manager.get_state(state.issue_key) or state
+                meta = dict(live.metadata or {})
+                posted = self._post_azure_pr_reply(
+                    live,
+                    self._gitlab_mr_reply_body(
+                        answer,
+                        pushed=pushed,
+                        branch=str(meta.get("feature_branch") or work_branch or ""),
+                        commit_sha=str(meta.get("last_commit_sha") or ""),
+                        commit_url=str(meta.get("last_commit_url") or ""),
+                        delivery_note=delivery_note,
+                    ),
+                )
+                if not posted:
+                    logger.error(
+                        f"{state.issue_key}: agent succeeded but PR comment failed"
+                    )
+                updated = self.state_manager.update_state_if(
+                    state.issue_key,
+                    expected_statuses={TaskStatus.EXECUTING},
+                    reject_statuses=self.ABORTED_STATUSES,
+                    status=TaskStatus.COMPLETED,
+                    completed_at=datetime.now(),
+                    progress_percentage=100,
+                    current_task_id=None,
+                )
+                if updated is None:
+                    success = False
+                else:
+                    self._finish_job_record(
+                        state.issue_key,
+                        status="completed",
+                        progress_percentage=100,
+                    )
+                    success = True
+            else:
+                outcome = await self._deliver_if_new_commits(
+                    state,
+                    existing_mr_url=event.pr_url or None,
+                    require_new_sha=True,
+                )
+                if outcome == "aborted":
+                    self._release_context(state.issue_key, success=False)
+                    return
+                if outcome == "delivered":
+                    live = self.state_manager.get_state(state.issue_key) or state
+                    meta = dict(live.metadata or {})
+                    note = (
+                        "Agent session reported an error or incomplete stop, "
+                        "but the work branch has commits to deliver. "
+                        "Orchestrator pushed onto the existing PR."
+                    )
+                    self.state_manager.update_state(
+                        state.issue_key,
+                        metadata={
+                            "delivery_status": "delivered",
+                            "delivery_note": note,
+                        },
+                    )
+                    answer = (result.get("stdout") or "").strip() or note
+                    self._post_azure_pr_reply(
+                        live,
+                        self._gitlab_mr_reply_body(
+                            answer,
+                            pushed=True,
+                            branch=str(
+                                meta.get("feature_branch") or work_branch or ""
+                            ),
+                            commit_sha=str(meta.get("last_commit_sha") or ""),
+                            commit_url=str(meta.get("last_commit_url") or ""),
+                            delivery_note=note,
+                        ),
+                    )
+                    updated = self.state_manager.update_state_if(
+                        state.issue_key,
+                        expected_statuses={TaskStatus.EXECUTING},
+                        reject_statuses=self.ABORTED_STATUSES,
+                        status=TaskStatus.COMPLETED,
+                        completed_at=datetime.now(),
+                        progress_percentage=100,
+                        current_task_id=None,
+                    )
+                    if updated is None:
+                        success = False
+                    else:
+                        self._finish_job_record(
+                            state.issue_key,
+                            status="completed",
+                            progress_percentage=100,
+                        )
+                        success = True
+                    return
+                if outcome == "push_failed":
+                    self._fail_issue(
+                        state.issue_key,
+                        self._format_push_fail_error(
+                            self._push_failure_reason(state.issue_key),
+                            existing_mr=True,
+                        ),
+                        suggestion=(
+                            "Check Azure DevOps remote/credentials, then comment "
+                            "on the PR again."
+                        ),
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
+                self._fail_from_agent_result(
+                    state.issue_key,
+                    result,
+                    fallback="Azure PR comment job failed",
+                    suggestion="Check the job session log on the ops dashboard.",
+                )
+        except Exception as e:
+            logger.exception(
+                f"Azure PR workflow crashed for {state.issue_key}: {e}", e
+            )
+            self._fail_issue(
+                state.issue_key,
+                f"Azure PR comment job failed: {e}",
             )
         finally:
             self._release_context(state.issue_key, success=success)
@@ -5205,9 +5839,9 @@ class JobProcessor:
         logger.info(f"State updated to COMPLETED for {state.issue_key}")
 
         live = self.state_manager.get_state(state.issue_key) or state
-        if self._is_gitlab_triggered(state.issue_key, live):
+        if self._is_git_comment_triggered(state.issue_key, live):
             logger.info(
-                f"{state.issue_key}: GitLab-triggered run — "
+                f"{state.issue_key}: GitLab/Azure-triggered run — "
                 "skipping Jira completion comment"
             )
         else:

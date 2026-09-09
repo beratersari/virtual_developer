@@ -21,6 +21,7 @@ from src.dashboard.auth import (
     websocket_authorized,
 )
 from src.dashboard.schemas import (
+    AzureConnectionTestRequest,
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
     IssueReportRequest,
@@ -49,6 +50,7 @@ from src.dashboard.service import (
     delete_job_records,
     refresh_runtime_jira_clients,
 )
+from src.azure_connection import probe_azure_connection
 from src.gitlab_connection import probe_gitlab_connection
 from src.jira_connection import probe_jira_connection
 from src.scheduler.service import (
@@ -146,6 +148,7 @@ def create_dashboard_app(
     sm = state_manager or JiraStateManager()
     # No OpenAPI UI. Optional dashboard Basic: DASHBOARD_USERNAME + PASSWORD.
     # Poller is in-process. POST /webhooks/gitlab uses GITLAB_WEBHOOK_SECRET.
+    # POST /webhooks/azure uses AZURE_WEBHOOK_SECRET.
     app = FastAPI(
         title="Yaver",
         version="1.0.0",
@@ -293,6 +296,92 @@ def create_dashboard_app(
                 "server_time": build_meta().server_time,
             }
         result = await proc.enqueue_gitlab_note(decision.event)
+        return {
+            "ok": True,
+            "issue_key": decision.event.issue_key,
+            "queue_id": result.get("queue_id"),
+            "queued": result.get("queued"),
+            "started": result.get("started"),
+            "status": result.get("status"),
+            "reason": "queued" if result.get("queued") else "accepted",
+            "server_time": build_meta().server_time,
+        }
+
+    @app.post("/webhooks/azure")
+    async def azure_webhook(request: Request) -> dict:
+        """Azure DevOps Server 2022.2 service hook.
+
+        Register on the project: Pull request commented + Pull request
+        updated/merged/abandoned. Secret → X-Azure-Token (or Basic password).
+        """
+        from fastapi.responses import JSONResponse
+
+        from src.azure.webhook import (
+            AZURE_PR_EVENTS,
+            decide_azure_comment_webhook,
+            decide_azure_pr_webhook,
+        )
+
+        headers = {k: v for k, v in request.headers.items()}
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"ok": False, "reason": "invalid json"}, status_code=400
+            )
+        event_name = ""
+        if isinstance(payload, dict):
+            event_name = str(
+                payload.get("eventType") or payload.get("event_type") or ""
+            ).lower()
+        if not event_name:
+            for key, val in headers.items():
+                if str(key).lower() in {"x-azure-event", "x-tfs-event"}:
+                    event_name = str(val or "").lower()
+                    break
+        enabled = bool(getattr(settings, "azure_webhook_enabled", False))
+        secret = str(getattr(settings, "azure_webhook_secret", "") or "")
+        is_pr = event_name in AZURE_PR_EVENTS
+        if is_pr:
+            decision = decide_azure_pr_webhook(
+                payload,
+                headers=headers,
+                enabled=enabled,
+                secret=secret,
+            )
+        else:
+            decision = decide_azure_comment_webhook(
+                payload,
+                headers=headers,
+                enabled=enabled,
+                secret=secret,
+                bot_mentions=list(settings.azure_bot_mentions_list),
+                bot_usernames=list(settings.azure_bot_usernames_list),
+            )
+        if not decision.accepted:
+            status = int(decision.http_status or 200)
+            return JSONResponse(
+                {"ok": False, "reason": decision.reason},
+                status_code=status,
+            )
+        proc = app.state.processor
+        if proc is None or decision.event is None:
+            raise HTTPException(
+                status_code=503, detail="processor not bound; start the daemon"
+            )
+        if is_pr:
+            result = await proc.handle_azure_pr_lifecycle(decision.event)
+            return {
+                "ok": True,
+                "kind": "pull_request",
+                "issue_key": getattr(decision.event, "issue_key", ""),
+                "action": getattr(decision.event, "action", ""),
+                "state": getattr(decision.event, "state", ""),
+                "deleted": result.get("deleted") or [],
+                "reason": result.get("reason") or "accepted",
+                "server_time": build_meta().server_time,
+            }
+        result = await proc.enqueue_azure_comment(decision.event)
         return {
             "ok": True,
             "issue_key": decision.event.issue_key,
@@ -917,6 +1006,21 @@ def create_dashboard_app(
         )
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
+    @app.post("/api/settings/azure/test")
+    def settings_azure_test(body: AzureConnectionTestRequest) -> dict:
+        """Verify an Azure DevOps Server host PAT (connectionData + projects).
+
+        PAT is optional in the body: when omitted/empty, uses the stored PAT
+        for that host. Never echoes the PAT back. Auth is PAT-only (empty user).
+        """
+        result = probe_azure_connection(
+            body.host,
+            pat=body.pat,
+            max_projects=int(body.max_projects or 25),
+        )
+        result["server_time"] = build_meta().server_time
         return result
 
     @app.post("/api/settings/jira/test")

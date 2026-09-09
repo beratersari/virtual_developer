@@ -357,7 +357,11 @@ export function JobsPage() {
                       {q.issue_key || q.queue_id}
                     </span>
                     <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-                      {q.source === 'gitlab' ? 'GitLab' : 'Jira'}
+                      {q.source === 'gitlab'
+                        ? 'GitLab'
+                        : q.source === 'azure'
+                          ? 'Azure'
+                          : 'Jira'}
                     </span>
                     <StatusBadge status="queued" size="sm" />
                   </div>

@@ -1,9 +1,17 @@
-# Yaver 0.5.3
+# Yaver 0.6.0
 
-Settings follows a newer `.env` instead of leftover dashboard saves.
-Edge no longer treats the first dashboard probe as a Windows/HTTP login
-popup; use the in-page Ops console form with `DASHBOARD_USERNAME` and
-`DASHBOARD_PASSWORD`.
+Azure DevOps Server 2022.2 (TFS) project webhooks work like GitLab MR
+comments. Mention the bot on a pull-request comment; Yaver clones with
+the host Azure PAT (no username/password prompt), runs the job, and
+replies on the PR. Completed or abandoned PRs delete the matching temp
+clone.
+
+Settings has an Azure tab: host PATs, bot username, webhook enable, and
+webhook secret. URL: `POST /webhooks/azure` with `X-Azure-Token`.
+
+GitLab leftover PAT is never sent to a TFS `/_git/` remote. Azure
+leftover `AZURE_PAT` + `AZURE_ALLOWED_HOSTS` follows the same rule as
+GitLab when `AZURE_HOST_PATS` is empty.
 
 Standalone exe zips still ship **one** OpenCode kit: `opencoderman/agents`
 (**derman-build** and **derman-plan** only — not gitlab-reviewer) and
@@ -70,11 +78,13 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- Azure DevOps Server 2022.2 webhook intake (`POST /webhooks/azure`)
+- Settings tabs: Jira, GitLab, Azure, Projects, Agent, Runtime
+- TFS clone/push use Azure PAT only (empty username, no GCM prompt)
 - Settings keeps a newer `.env` key (including `TRIGGER_ASSIGNEE_NAMES`) unless you later save that same field
 - Dashboard login is the in-page form; Edge does not get a native HTTP/Windows popup on first load
 - Jira webhook intake removed; board poller only
 - One Jira bot name; one GitLab trigger username
-- Settings tabs: Jira, GitLab, Projects, Agent, Runtime
 - Exe zip ships one `opencoderman/` tree (`derman-build`, `derman-plan`, `skills/` only)
 - `plan_refactor` reads every Jira comment page
 
