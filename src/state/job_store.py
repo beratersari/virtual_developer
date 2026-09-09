@@ -120,6 +120,8 @@ class JobStore:
         merge_request_url: Optional[str] = None,
         gitlab_project: Optional[str] = None,
         gitlab_mr_iid: Optional[int] = None,
+        azure_project: Optional[str] = None,
+        azure_pr_id: Optional[int] = None,
         model: Optional[str] = None,
         backend: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -148,6 +150,8 @@ class JobStore:
             "source": src,
             "gitlab_project": gitlab_project or None,
             "gitlab_mr_iid": gitlab_mr_iid,
+            "azure_project": azure_project or None,
+            "azure_pr_id": azure_pr_id,
             "task_id": task_id,
             "task_ids": [task_id] if task_id else [],
             "opencode_session_id": None,

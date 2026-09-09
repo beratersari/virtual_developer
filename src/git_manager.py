@@ -535,7 +535,22 @@ class GitManager:
             out["GIT_ASKPASS"] = str(askpass)
             out["SSH_ASKPASS"] = str(askpass)
             out["SSH_ASKPASS_REQUIRE"] = "never"
-        basic = base64.b64encode(f"oauth2:{pat}".encode("utf-8")).decode("ascii")
+        azure = self._remote_uses_azure_pat(target)
+        # Azure DevOps Server: PAT is the only secret. Empty username + PAT
+        # (Basic ":PAT") and Bearer extraHeader. Never oauth2 / never prompt.
+        # GitLab keeps oauth2:PAT (existing, do not change).
+        if azure:
+            out["VD_GIT_AUTH"] = "azure"
+            userinfo = f":{pat}"
+            basic = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
+            extra = f"Authorization: Bearer {pat}"
+            rewrite_user = f"https://:{pat}@{host}/"
+        else:
+            out["VD_GIT_AUTH"] = "gitlab"
+            userinfo = f"oauth2:{pat}"
+            basic = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
+            extra = f"Authorization: Basic {basic}"
+            rewrite_user = f"https://oauth2:{pat}@{host}/"
         rewrite_from = (
             f"https://{host}/",
             f"http://{host}/",
@@ -545,16 +560,19 @@ class GitManager:
             f"ssh://git@{host}/",
             f"ssh://{host}/",
         )
-        pairs = [
-            (f"url.https://oauth2:{pat}@{host}/.insteadOf", src)
-            for src in rewrite_from
-        ]
+        pairs = [(f"url.{rewrite_user}.insteadOf", src) for src in rewrite_from]
         # Empty helper resets system GCM / manager-core for this child.
         pairs.append(("credential.helper", ""))
         pairs.append((f"credential.https://{host}.helper", ""))
         if askpass is not None:
             pairs.append(("core.askPass", str(askpass)))
-        pairs.append(("http.extraHeader", f"Authorization: Basic {basic}"))
+        pairs.append(("http.extraHeader", extra))
+        if azure:
+            # Second extraHeader: Basic empty-user + PAT (some TFS 2022.2
+            # collections accept Bearer; others only Basic :PAT).
+            pairs.append(
+                ("http.extraHeader", f"Authorization: Basic {basic}")
+            )
         try:
             base_count = int(out.get("GIT_CONFIG_COUNT") or "0")
         except ValueError:
@@ -769,8 +787,9 @@ class GitManager:
                     f"*Repository:* `{repo_display}`\n"
                     f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
                     "Check that the URL is correct, the project is reachable, "
-                    "and a GitLab PAT is configured for this host in dashboard "
-                    "Settings (or `GITLAB_HOST_PATS`). Then move the issue back to *To Do*."
+                    "and a GitLab or Azure DevOps PAT is configured for this host "
+                    "in dashboard Settings (`GITLAB_HOST_PATS` / `AZURE_HOST_PATS`). "
+                    "Then move the issue back to *To Do*."
                 ),
                 technical=safe_err,
             )
@@ -859,12 +878,65 @@ class GitManager:
             return f"{name}:{port}"
         return name
 
+    @staticmethod
+    def _looks_like_azure_remote(url: str) -> bool:
+        """True for Azure DevOps Server / Services clone URLs (``/_git/``)."""
+        raw = (url or "").lower()
+        if "/_git/" in raw or "/_git?" in raw:
+            return True
+        host = GitManager._host_from_url(url)
+        if host in {"dev.azure.com", "visualstudio.com"} or host.endswith(
+            ".visualstudio.com"
+        ):
+            return True
+        return False
+
+    def _remote_uses_azure_pat(self, url: str = "") -> bool:
+        """True when this remote should authenticate with an Azure PAT.
+
+        Same leftover rule as GitLab: a mapped host PAT, or a lone
+        ``AZURE_PAT`` when the Azure host map is empty. GitLab leftover
+        ``GITLAB_PAT`` is never used for TFS.
+        """
+        target = self.normalize_remote_url(url or self.remote_url or "") or (
+            url or self.remote_url or ""
+        )
+        if not self._looks_like_azure_remote(target):
+            return False
+        return bool(self._azure_pat_for_remote(target))
+
+    def _azure_pat_for_remote(self, url: str = "") -> str:
+        """Azure PAT for this remote — map first, leftover ``AZURE_PAT`` last."""
+        host = self._host_from_url(
+            self.normalize_remote_url(url or self.remote_url or "")
+            or (url or self.remote_url or "")
+        )
+        if not host:
+            return ""
+        if hasattr(settings, "azure_pat_for_host"):
+            mapped = (settings.azure_pat_for_host(host) or "").strip()
+            if mapped:
+                return mapped
+        azure_map = {}
+        if hasattr(settings, "azure_host_pat_map"):
+            try:
+                azure_map = settings.azure_host_pat_map() or {}
+            except Exception:
+                azure_map = {}
+        if azure_map:
+            return ""
+        return (getattr(settings, "azure_pat", "") or "").strip()
+
     def _pat_for_remote(self, url: str = "") -> str:
-        """Resolve GitLab PAT for this remote URL (per-host map).
+        """Resolve GitLab or Azure PAT for this remote URL (per-host maps).
+
+        Azure ``/_git/`` remotes use only Azure credentials: ``AZURE_HOST_PATS``
+        or leftover ``AZURE_PAT`` / ``AZURE_ALLOWED_HOSTS``. A leftover
+        ``GITLAB_PAT`` is never sent to TFS.
 
         A lone ``GITLAB_PAT`` / Settings PAT with no host map still
-        authenticates this job remote (clone/push). Host maps stay exact-match
-        so a stored PAT is never sent to an unlisted host.
+        authenticates a **GitLab** job remote (clone/push). Host maps stay
+        exact-match so a stored PAT is never sent to an unlisted host.
         """
         host = self._host_from_url(
             self.normalize_remote_url(url or self.remote_url or "")
@@ -872,17 +944,29 @@ class GitManager:
         )
         if not host:
             return ""
+        target = self.normalize_remote_url(url or self.remote_url or "") or (
+            url or self.remote_url or ""
+        )
+        if self._looks_like_azure_remote(target):
+            return self._azure_pat_for_remote(target)
+        gitlab = ""
         if hasattr(settings, "gitlab_pat_for_host"):
-            mapped = (settings.gitlab_pat_for_host(host) or "").strip()
-            if mapped:
-                return mapped
+            gitlab = (settings.gitlab_pat_for_host(host) or "").strip()
+        if gitlab:
+            return gitlab
         mapping = {}
         if hasattr(settings, "gitlab_host_pat_map"):
             try:
                 mapping = settings.gitlab_host_pat_map() or {}
             except Exception:
                 mapping = {}
-        if mapping:
+        azure_map = {}
+        if hasattr(settings, "azure_host_pat_map"):
+            try:
+                azure_map = settings.azure_host_pat_map() or {}
+            except Exception:
+                azure_map = {}
+        if mapping or azure_map:
             return ""
         return (getattr(settings, "gitlab_pat", "") or "").strip()
 
@@ -898,20 +982,51 @@ class GitManager:
             if hasattr(settings, "gitlab_host_pat_map")
             else {}
         )
-        if not mapping and not (settings.gitlab_pat or "").strip():
+        azure_map = (
+            settings.azure_host_pat_map()
+            if hasattr(settings, "azure_host_pat_map")
+            else {}
+        )
+        leftover_azure = (getattr(settings, "azure_pat", "") or "").strip()
+        if (
+            not mapping
+            and not azure_map
+            and not (settings.gitlab_pat or "").strip()
+            and not leftover_azure
+        ):
             return
         host = self._host_from_url(url)
         if not host:
             raise GitCloneError(
                 "*Yaver* could not clone: repository URL has no host.\n\n"
-                "Set `Repository: https://gitlab.example.com/group/repo.git` in `{params}`."
+                "Set `Repository: https://gitlab.example.com/group/repo.git` "
+                "or an Azure DevOps `_git` URL in `{params}`."
             )
         pat = self._pat_for_remote(url)
         if pat:
             return
-        allowed = sorted(mapping.keys()) if mapping else list(
-            settings.gitlab_allowed_hosts_list
-        )
+        if self._looks_like_azure_remote(url):
+            leftover_azure = (getattr(settings, "azure_pat", "") or "").strip()
+            if leftover_azure and not azure_map:
+                raise GitCloneError(
+                    "*Yaver* refused to authenticate: "
+                    "no Azure host→PAT mapping is configured while a PAT is set.\n\n"
+                    "Add this host with a PAT in dashboard Settings (Azure), or set "
+                    "`AZURE_HOST_PATS={\"tfs.example.com\":\"…\"}` "
+                    "(or leftover `AZURE_PAT` + `AZURE_ALLOWED_HOSTS`)."
+                )
+            allowed_az = sorted(azure_map.keys()) if azure_map else []
+            raise GitCloneError(
+                (
+                    f"*Yaver* refused to clone Azure DevOps host `{host}` "
+                    "without an Azure PAT.\n\n"
+                    f"Configured Azure hosts: `{', '.join(allowed_az) or '(none)'}`.\n"
+                    "Add this host with a PAT in dashboard Settings (Azure), or set "
+                    "`AZURE_HOST_PATS={\"tfs.example.com\":\"…\"}`. "
+                    "A GitLab PAT is never used for TFS."
+                )
+            )
+        allowed = sorted(set(list(mapping.keys()) + list(azure_map.keys())))
         if not allowed and (settings.gitlab_pat or "").strip():
             raise GitCloneError(
                 "*Yaver* refused to authenticate: "
@@ -924,8 +1039,8 @@ class GitManager:
                 f"*Yaver* refused to send credentials to host "
                 f"`{host}`.\n\n"
                 f"Configured hosts: `{', '.join(allowed) or '(none)'}`.\n"
-                "Add this host with a PAT in dashboard Settings, or update the "
-                "issue Repository URL."
+                "Add this host with a PAT in dashboard Settings (GitLab or "
+                "Azure DevOps), or update the issue Repository URL."
             )
         )
 
@@ -948,8 +1063,11 @@ class GitManager:
         parsed = urlparse(base)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             return None
-        # GitLab convention: username oauth2, password = PAT
-        userinfo = f"oauth2:{quote(pat, safe='')}"
+        # GitLab: oauth2:PAT. Azure DevOps Server: empty user + PAT only.
+        if self._remote_uses_azure_pat(base):
+            userinfo = f":{quote(pat, safe='')}"
+        else:
+            userinfo = f"oauth2:{quote(pat, safe='')}"
         host = parsed.hostname
         netloc = f"{userinfo}@{host}:{parsed.port}" if parsed.port else f"{userinfo}@{host}"
         return urlunparse(
@@ -1036,6 +1154,10 @@ class GitManager:
                 "setlocal EnableExtensions DisableDelayedExpansion\r\n"
                 "echo(%~1| %SystemRoot%\\System32\\findstr.exe /I /C:\"username\" >nul\r\n"
                 "if not errorlevel 1 (\r\n"
+                "  if /I \"%VD_GIT_AUTH%\"==\"azure\" (\r\n"
+                "    echo(\r\n"
+                "    exit /b 0\r\n"
+                "  )\r\n"
                 "  echo oauth2\r\n"
                 "  exit /b 0\r\n"
                 ")\r\n"
@@ -1045,7 +1167,8 @@ class GitManager:
         return (
             "#!/bin/sh\n"
             "case \"$*\" in\n"
-            "  *[Uu]sername*) printf '%s\\n' oauth2 ;;\n"
+            "  *[Uu]sername*)\n"
+            "    if [ \"$VD_GIT_AUTH\" = azure ]; then printf '\\n'; else printf '%s\\n' oauth2; fi ;;\n"
             "  *) printf '%s\\n' \"$VD_GIT_PASSWORD\" ;;\n"
             "esac\n"
         )
@@ -1073,7 +1196,7 @@ class GitManager:
             "import os, sys\n"
             "p = \" \".join(sys.argv[1:]).lower()\n"
             "if \"username\" in p:\n"
-            "    sys.stdout.write(\"oauth2\\n\")\n"
+            "    sys.stdout.write(\"\\n\" if os.environ.get(\"VD_GIT_AUTH\") == \"azure\" else \"oauth2\\n\")\n"
             "else:\n"
             "    sys.stdout.write(os.environ.get(\"VD_GIT_PASSWORD\", \"\") + \"\\n\")\n"
         )
@@ -1671,11 +1794,24 @@ class GitManager:
             r"\1\2:***@",
             text,
         )
-        pats = (
-            settings.all_gitlab_pats()
-            if hasattr(settings, "all_gitlab_pats")
-            else []
-        )
+        pats: list[str] = []
+        if hasattr(settings, "all_git_pats"):
+            try:
+                pats = list(settings.all_git_pats() or [])
+            except Exception:
+                pats = []
+        if not pats:
+            extra = (
+                settings.all_gitlab_pats()
+                if hasattr(settings, "all_gitlab_pats")
+                else []
+            )
+            pats = list(extra or [])
+            if hasattr(settings, "all_azure_pats"):
+                try:
+                    pats.extend(list(settings.all_azure_pats() or []))
+                except Exception:
+                    pass
         if not pats:
             single = (settings.gitlab_pat or "").strip()
             if single:

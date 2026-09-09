@@ -323,6 +323,40 @@ class Settings(BaseSettings):
             "Kept so leftover .env values still load."
         ),
     )
+    # Azure DevOps Server 2022.2 (on-prem TFS) — same PAT shape as GitLab.
+    # First-class: per-host PATs as JSON. A host with a PAT is allowed.
+    #   AZURE_HOST_PATS={"tfs.example.com":"…","tfs.internal:8080":"…"}
+    # Leftover (only when the JSON map is empty): one AZURE_PAT expanded onto
+    # each host in AZURE_ALLOWED_HOSTS. Not a second allowlist.
+    # Clone/push use this PAT only (empty username + PAT). Never prompt.
+    azure_host_pats: str = Field(
+        default="",
+        description='JSON object mapping hostname → Azure PAT, e.g. {"tfs.example.com":"…"}',
+    )
+    azure_pat: str = Field(
+        default="",
+        description="Leftover single Azure PAT (expanded onto AZURE_ALLOWED_HOSTS when map empty)",
+    )
+    azure_allowed_hosts: str = Field(
+        default="",
+        description="Leftover comma-separated hosts for a lone AZURE_PAT (not a separate allowlist)",
+    )
+    azure_webhook_enabled: bool = Field(
+        default=False,
+        description="Accept Azure DevOps Server service hooks on /webhooks/azure",
+    )
+    azure_webhook_secret: str = Field(
+        default="",
+        description="Shared secret; must match service-hook X-Azure-Token (empty = reject)",
+    )
+    azure_bot_mentions: str = Field(
+        default="@yaver",
+        description=(
+            "Comma-separated Azure DevOps display names or unique names. "
+            "Mention one on a pull-request comment to start a job. "
+            "Comments from these users are ignored."
+        ),
+    )
     
     # OpenCode agent for Mode: build (and other implementation jobs).
     # OpenCoderman derman-build, not stock OpenCode ``build``.
@@ -608,6 +642,88 @@ class Settings(BaseSettings):
     def all_gitlab_pats(self) -> List[str]:
         """All configured PAT values (for log redaction)."""
         return list(dict.fromkeys(self.gitlab_host_pat_map().values()))
+
+    @property
+    def azure_allowed_hosts_list(self) -> List[str]:
+        """Hosts that have an Azure PAT (lowercase). A host with a PAT is allowed."""
+        return sorted(self.azure_host_pat_map().keys())
+
+    def azure_host_pat_map(self) -> Dict[str, str]:
+        """Resolved hostname → Azure PAT map (prefer ``azure_host_pats`` JSON).
+
+        Same leftover rule as GitLab: if the JSON map is empty and
+        ``azure_pat`` is set, each host in leftover ``azure_allowed_hosts``
+        gets that same PAT.
+        """
+        out: Dict[str, str] = {}
+        raw = (self.azure_host_pats or "").strip()
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        host = str(k or "").strip().lower()
+                        pat = str(v or "").strip()
+                        if host and pat:
+                            out[host] = pat
+            except json.JSONDecodeError:
+                logger.warning("AZURE_HOST_PATS is not valid JSON; ignoring map")
+
+        if out:
+            return out
+
+        pat = (self.azure_pat or "").strip()
+        if not pat:
+            return {}
+        hosts = [
+            h.strip().lower()
+            for h in (self.azure_allowed_hosts or "").split(",")
+            if h.strip()
+        ]
+        return {h: pat for h in hosts}
+
+    def azure_pat_for_host(self, host: str) -> str:
+        """Return the Azure PAT for ``host`` (exact hostname[:port] only)."""
+        h = (host or "").strip().lower()
+        if not h:
+            return ""
+        mapping = self.azure_host_pat_map()
+        if not mapping:
+            return ""
+        if h in mapping:
+            return mapping[h]
+        return ""
+
+    def azure_has_any_pat(self) -> bool:
+        return bool(self.azure_host_pat_map()) or bool((self.azure_pat or "").strip())
+
+    def set_azure_host_pat_map(self, mapping: Dict[str, str]) -> None:
+        """Persist host→PAT map. Allowed hosts are the keys (a PAT allows the host)."""
+        cleaned: Dict[str, str] = {}
+        for k, v in (mapping or {}).items():
+            host = str(k or "").strip().lower()
+            pat = str(v or "").strip()
+            if host and pat:
+                cleaned[host] = pat
+        self.azure_host_pats = (
+            json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
+        )
+        self.azure_allowed_hosts = ",".join(sorted(cleaned.keys()))
+        if len(cleaned) == 1:
+            self.azure_pat = next(iter(cleaned.values()))
+        else:
+            self.azure_pat = ""
+
+    def all_azure_pats(self) -> List[str]:
+        pats = list(dict.fromkeys(self.azure_host_pat_map().values()))
+        leftover = (self.azure_pat or "").strip()
+        if leftover and leftover not in pats:
+            pats.append(leftover)
+        return pats
+
+    def all_git_pats(self) -> List[str]:
+        """GitLab + Azure PATs (log redaction)."""
+        return list(dict.fromkeys([*self.all_gitlab_pats(), *self.all_azure_pats()]))
     
     @property
     def prompt_planning(self) -> str:
@@ -659,6 +775,16 @@ class Settings(BaseSettings):
     @property
     def gitlab_bot_usernames_list(self) -> List[str]:
         return list(self.gitlab_bot_mentions_list)
+
+    @property
+    def azure_bot_mentions_list(self) -> List[str]:
+        from src.azure.mentions import parse_mention_list
+
+        return parse_mention_list(self.azure_bot_mentions)
+
+    @property
+    def azure_bot_usernames_list(self) -> List[str]:
+        return list(self.azure_bot_mentions_list)
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -710,6 +836,9 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "trigger_mentions",
         "trigger_assignee_names",
         "gitlab_bot_mentions",
+        "azure_bot_mentions",
+        "gitlab_webhook_enabled",
+        "azure_webhook_enabled",
     }
 )
 
@@ -728,6 +857,9 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_mentions": "TRIGGER_MENTIONS",
     "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
     "gitlab_bot_mentions": "GITLAB_BOT_MENTIONS",
+    "azure_bot_mentions": "AZURE_BOT_MENTIONS",
+    "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",
+    "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
 }
 
 

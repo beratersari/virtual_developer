@@ -233,10 +233,12 @@ class JobItem(BaseModel):
     delivery_note: Optional[str] = None
     # Temp clone used for this run (job record or session bind)
     working_directory: Optional[str] = None
-    # jira (default) | gitlab — same job/chat UI, different intake
+    # jira (default) | gitlab | azure — same job/chat UI, different intake
     source: str = "jira"
     gitlab_project: Optional[str] = None
     gitlab_mr_iid: Optional[int] = None
+    azure_project: Optional[str] = None
+    azure_pr_id: Optional[int] = None
 
 
 class JobsResponse(BaseModel):
@@ -349,6 +351,13 @@ class SettingsView(BaseModel):
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
     gitlab_webhook_path: str = "/webhooks/gitlab"
+    azure_pat_configured: bool = False
+    azure_allowed_hosts: str = ""
+    azure_credentials: List["AzureHostCredentialView"] = Field(default_factory=list)
+    azure_webhook_enabled: bool = False
+    azure_bot_mentions: str = ""
+    azure_webhook_secret_configured: bool = False
+    azure_webhook_path: str = "/webhooks/azure"
     trigger_mentions: str = ""
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
@@ -413,6 +422,29 @@ class GitlabConnectionTestRequest(BaseModel):
     max_projects: int = Field(default=25, ge=1, le=50)
 
 
+class AzureHostCredentialView(BaseModel):
+    """Safe projection of one Azure DevOps host credential (no PAT value)."""
+
+    host: str
+    pat_configured: bool = False
+
+
+class AzureHostCredentialUpdate(BaseModel):
+    """One Azure host row from the Settings UI (PAT-only, no username)."""
+
+    host: str = Field(..., min_length=1, max_length=253)
+    pat: Optional[str] = Field(default=None, max_length=4000)
+    previous_host: Optional[str] = Field(default=None, max_length=253)
+
+
+class AzureConnectionTestRequest(BaseModel):
+    """Body for POST /api/settings/azure/test."""
+
+    host: str = Field(..., min_length=1, max_length=253)
+    pat: Optional[str] = Field(default=None, max_length=4000)
+    max_projects: int = Field(default=25, ge=1, le=50)
+
+
 class JiraConnectionTestRequest(BaseModel):
     """Body for POST /api/settings/jira/test.
 
@@ -433,9 +465,9 @@ class JiraConnectionTestRequest(BaseModel):
 class SettingsUpdate(BaseModel):
     """Writable settings (runtime only).
 
-    Secret fields (``jira_api_token``, per-host ``gitlab_credentials[].pat``)
-    are write-only: omit/empty to leave unchanged. They are never echoed in
-    SettingsView.
+    Secret fields (``jira_api_token``, per-host ``gitlab_credentials[].pat``,
+    per-host ``azure_credentials[].pat``) are write-only: omit/empty to leave
+    unchanged. They are never echoed in SettingsView.
     """
 
     jira_host: Optional[str] = Field(default=None, max_length=500)
@@ -538,6 +570,43 @@ class SettingsUpdate(BaseModel):
             "on a merge-request comment"
         ),
     )
+    gitlab_webhook_enabled: Optional[bool] = Field(
+        default=None,
+        description="Accept GitLab project webhooks on /webhooks/gitlab",
+    )
+    gitlab_webhook_secret: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only GitLab X-Gitlab-Token secret (omit to keep current)",
+    )
+    azure_credentials: Optional[List[AzureHostCredentialUpdate]] = None
+    azure_pat: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Leftover write-only single Azure PAT",
+    )
+    azure_allowed_hosts: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Leftover hosts for a lone AZURE_PAT; ignored when a host→PAT map exists",
+    )
+    azure_bot_mentions: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Comma-separated Azure DevOps names that start a job when mentioned "
+            "on a pull-request comment"
+        ),
+    )
+    azure_webhook_enabled: Optional[bool] = Field(
+        default=None,
+        description="Accept Azure DevOps Server service hooks on /webhooks/azure",
+    )
+    azure_webhook_secret: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        description="Write-only Azure X-Azure-Token secret (omit to keep current)",
+    )
 
     @field_validator("agent_backend", mode="before")
     @classmethod
@@ -572,6 +641,7 @@ class QueueItem(BaseModel):
     job_id: Optional[str] = None
     merge_request_url: str = ""
     gitlab_note_id: str = ""
+    azure_comment_id: str = ""
     error_message: Optional[str] = None
     created_at: Optional[str] = None
     started_at: Optional[str] = None

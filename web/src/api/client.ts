@@ -142,6 +142,8 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     source: j.source || 'jira',
     gitlab_project: j.gitlab_project ?? null,
     gitlab_mr_iid: j.gitlab_mr_iid ?? null,
+    azure_project: j.azure_project ?? null,
+    azure_pr_id: j.azure_pr_id ?? null,
   }
 }
 
@@ -291,6 +293,21 @@ export function testGitlabConnection(body: {
   max_projects?: number
 }) {
   return request<GitlabConnectionTestResult>('/api/settings/gitlab/test', {
+    method: 'POST',
+    body: JSON.stringify({
+      host: body.host,
+      pat: body.pat?.trim() || undefined,
+      max_projects: body.max_projects ?? 25,
+    }),
+  })
+}
+
+export function testAzureConnection(body: {
+  host: string
+  pat?: string
+  max_projects?: number
+}) {
+  return request<GitlabConnectionTestResult>('/api/settings/azure/test', {
     method: 'POST',
     body: JSON.stringify({
       host: body.host,

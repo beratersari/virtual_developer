@@ -1,4 +1,4 @@
-"""Persistent work queue for Jira issues and GitLab MR comments.
+"""Persistent work queue for Jira issues, GitLab MR comments, and Azure PR comments.
 
 FIFO per workspace lock (repo + work branch + target). Dashboard lists these
 rows so operators can see what is waiting.
@@ -91,6 +91,7 @@ class WorkQueueStore:
         lock_key: str = "",
         job_id: Optional[str] = None,
         gitlab_note_id: str = "",
+        azure_comment_id: str = "",
         merge_request_url: str = "",
         jira_event_id: str = "",
         payload: Optional[Dict[str, Any]] = None,
@@ -111,6 +112,7 @@ class WorkQueueStore:
             "lock_key": lock_key or "",
             "job_id": job_id,
             "gitlab_note_id": gitlab_note_id or "",
+            "azure_comment_id": azure_comment_id or "",
             "jira_event_id": jira_event_id or "",
             "merge_request_url": merge_request_url or "",
             "payload": payload if isinstance(payload, dict) else {},
@@ -194,7 +196,9 @@ class WorkQueueStore:
         best: Optional[Dict[str, Any]] = None
         with self._lock:
             for rec in self._iter_records():
-                if str(rec.get("gitlab_note_id") or "") != nid:
+                if str(rec.get("gitlab_note_id") or "") != nid and str(
+                    rec.get("azure_comment_id") or ""
+                ) != nid:
                     continue
                 if best is None or (rec.get("created_at") or "") >= (
                     best.get("created_at") or ""

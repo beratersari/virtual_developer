@@ -90,6 +90,13 @@ export type SettingsPayload = {
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
   gitlab_webhook_path?: string
+  azure_pat_configured?: boolean
+  azure_allowed_hosts?: string
+  azure_credentials?: GitlabHostCredential[]
+  azure_webhook_enabled?: boolean
+  azure_bot_mentions?: string
+  azure_webhook_secret_configured?: boolean
+  azure_webhook_path?: string
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
@@ -165,6 +172,8 @@ export type JobItem = {
   source?: string
   gitlab_project?: string | null
   gitlab_mr_iid?: number | null
+  azure_project?: string | null
+  azure_pr_id?: number | null
 }
 
 export type QueueItem = {
@@ -182,6 +191,7 @@ export type QueueItem = {
   job_id?: string | null
   merge_request_url?: string
   gitlab_note_id?: string
+  azure_comment_id?: string
   error_message?: string | null
   created_at?: string | null
   started_at?: string | null
@@ -496,11 +506,19 @@ export type SettingsPatch = Partial<
     | 'trigger_mentions'
     | 'trigger_assignee_names'
     | 'gitlab_bot_mentions'
+    | 'azure_bot_mentions'
+    | 'gitlab_webhook_enabled'
+    | 'azure_webhook_enabled'
   >
 > & {
   jira_api_token?: string
   gitlab_pat?: string
   gitlab_credentials?: { host: string; pat?: string; previous_host?: string }[]
+  azure_pat?: string
+  azure_allowed_hosts?: string
+  azure_credentials?: { host: string; pat?: string; previous_host?: string }[]
+  gitlab_webhook_secret?: string
+  azure_webhook_secret?: string
 }
 
 export type StorageDisk = {

@@ -380,5 +380,69 @@ class PromptBuilder:
         )
         return PromptBuilder._join_blocks(*parts)
 
+    @staticmethod
+    def build_azure_comment_prompt(
+        *,
+        issue_key: str,
+        pr_title: str,
+        pr_url: str,
+        source_branch: str,
+        target_branch: str,
+        author: str,
+        comment: str,
+        work_branch: Optional[str] = None,
+        plan_path: Optional[str] = None,
+    ) -> str:
+        """Build-mode prompt for an Azure DevOps PR @mention.
+
+        Same contract as GitLab MR comments: implement on the existing PR
+        source branch; orchestrator pushes and posts the reply on the PR.
+        """
+        from src.issue_git_spec import strip_params_block
+
+        comment_body = strip_params_block(comment or "").strip()
+        title = strip_params_block(pr_title or "").strip()
+        who = (author or "").strip() or "someone"
+        branch = (work_branch or source_branch or "").strip()
+        from src.paths import plans_dir
+
+        plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.build_prompt_path(),
+            issue_key=issue_key,
+            work_branch=branch or source_branch,
+            plan_path=plan,
+        )
+        parts = [
+            system,
+            f"## Azure DevOps pull request: {issue_key}",
+            (
+                "This run is a **build** follow-up on an existing Azure DevOps "
+                "pull request (not a new Jira ticket). The repository is already "
+                f"checked out on `{source_branch}` (PR into `{target_branch}`). "
+                "Resume any existing OpenCode session for this repo + branch + "
+                "target. Treat the PR comment below as the request."
+            ),
+            f"## PR title\n\n{title or '(no title)'}",
+        ]
+        if pr_url:
+            parts.append(f"## PR URL\n\n{pr_url}")
+        parts.append(
+            f"## Branches\n\n* Source (checked out): `{source_branch}`\n"
+            f"* Target: `{target_branch}`\n"
+            f"* Work branch: `{branch or source_branch}`"
+        )
+        parts.append(f"## Comment from {who}\n\n{comment_body or '(empty comment)'}")
+        parts.append(
+            "## Azure DevOps delivery\n\n"
+            "Implement the comment when it asks for code changes, or when a "
+            "code change is the correct answer. Stay on the prepared work "
+            "branch. Commit if you change files. Do **not** push and do **not** "
+            "open a new pull request — the orchestrator will push onto this "
+            "existing PR. Write a clear final answer for the reviewer; it will "
+            "be posted back on the PR as a comment."
+        )
+        return PromptBuilder._join_blocks(*parts)
+
 
 __all__ = ["PromptBuilder"]

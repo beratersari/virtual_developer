@@ -1057,21 +1057,22 @@ def _is_gitlab_assign_skip(
     source: str = "",
 ) -> bool:
     """True when this is a GitLab MR job — never write a Jira assignee."""
+    from src.azure.keys import is_azure_issue_key
     from src.gitlab.keys import is_gitlab_issue_key
 
-    if is_gitlab_issue_key(issue_key):
+    if is_gitlab_issue_key(issue_key) or is_azure_issue_key(issue_key):
         return True
     src = str(source or "").strip().lower()
-    if src in {"gitlab", "gitlab_mr"}:
+    if src in {"gitlab", "gitlab_mr", "azure", "azure_pr"}:
         return True
     if isinstance(issue, dict):
         fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
         extra = issue.get("metadata") if isinstance(issue.get("metadata"), dict) else {}
         blob = {**fields, **extra, **issue}
-        if str(blob.get("source") or "").strip().lower() == "gitlab":
+        if str(blob.get("source") or "").strip().lower() in {"gitlab", "azure"}:
             return True
         wf = str(blob.get("workflow_type") or "").strip().lower()
-        if wf == "gitlab_mr":
+        if wf in {"gitlab_mr", "azure_pr"}:
             return True
     return False
 
@@ -1113,16 +1114,16 @@ def assign_to_pat_user(
 ) -> bool:
     """Assign a **Jira** issue to the user authenticated by the configured PAT.
 
-    GitLab trigger points never assign (synthetic ``GL-…`` keys, or
-    ``source=gitlab`` / ``workflow_type=gitlab_mr``). Soft-fails (logs +
-    ``False``) — never blocks poll / schedule / start. Skips the write when
-    the ticket is already that user.
+    GitLab / Azure trigger points never assign (synthetic ``GL-…`` / ``AZ-…``
+    keys, or ``source=gitlab|azure``). Soft-fails (logs + ``False``) — never
+    blocks poll / schedule / start. Skips the write when the ticket is already
+    that user.
     """
     key = (issue_key or "").strip()
     if not key or client is None or not hasattr(client, "assign_issue"):
         return False
     if _is_gitlab_assign_skip(key, issue=issue, source=source):
-        logger.debug(f"{key}: skip PAT assign (GitLab trigger, not a Jira handle)")
+        logger.debug(f"{key}: skip PAT assign (GitLab/Azure trigger, not a Jira handle)")
         return False
     try:
         is_cloud = bool(getattr(client, "is_cloud", False))
