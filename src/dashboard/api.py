@@ -1013,7 +1013,8 @@ def create_dashboard_app(
         """Verify an Azure DevOps Server host PAT (connectionData + projects).
 
         PAT is optional in the body: when omitted/empty, uses the stored PAT
-        for that host. Never echoes the PAT back. Auth is PAT-only (empty user).
+        for that host. Never echoes the PAT back. Auth is Basic ``pat:<PAT>``
+        (same as clone/push/MR; IIS rejects an empty username).
         """
         result = probe_azure_connection(
             body.host,

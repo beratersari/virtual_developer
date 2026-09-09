@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from src.azure.client import azure_basic_auth_header
+from src.azure.auth import azure_basic_auth
 from src.config import settings
 from src.logger import logger
 
@@ -31,40 +31,42 @@ def _normalize_host(raw: str) -> str:
 
 
 def _candidate_bases(host: str) -> List[str]:
-    """On-prem TFS often lives at /tfs/DefaultCollection, not the host root."""
+    """On-prem TFS lives at /tfs/<Collection>, not the host root.
+
+    IIS at the origin often 401s even with a valid PAT. Try a user-supplied
+    path first, then ``/tfs/DefaultCollection``, then ``/tfs``, then origin.
+    """
     h = (host or "").strip()
     if not h:
         return []
-    if "://" in h:
-        parsed = urlparse(h)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
-        path = (parsed.path or "").rstrip("/")
-        bases = []
-        if path:
-            bases.append(f"{origin}{path}")
-        bases.extend(
-            [
-                origin,
-                f"{origin}/tfs",
-                f"{origin}/tfs/DefaultCollection",
-            ]
-        )
-        out: List[str] = []
-        seen: set[str] = set()
-        for b in bases:
-            key = b.rstrip("/").lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(b.rstrip("/"))
-        return out
-    local = h.startswith("127.") or h.startswith("localhost")
-    scheme = "http" if local else "https"
-    origin = f"{scheme}://{h}"
-    return [
-        origin,
-        f"{origin}/tfs",
-        f"{origin}/tfs/DefaultCollection",
-    ]
+    if "://" not in h:
+        first = h.split("/", 1)[0]
+        local = first.startswith("127.") or first.startswith("localhost")
+        scheme = "http" if local else "https"
+        h = f"{scheme}://{h}"
+    parsed = urlparse(h)
+    if not parsed.netloc:
+        return []
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    path = (parsed.path or "").rstrip("/")
+    bases: List[str] = []
+    if path:
+        bases.append(f"{origin}{path}")
+    bases.extend(
+        [
+            f"{origin}/tfs/DefaultCollection",
+            f"{origin}/tfs",
+            origin,
+        ]
+    )
+    out: List[str] = []
+    seen: set[str] = set()
+    for b in bases:
+        key = b.rstrip("/").lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(b.rstrip("/"))
+    return out
 
 
 def probe_azure_connection(
@@ -122,42 +124,51 @@ def probe_azure_connection(
 
     headers = {
         "Accept": "application/json",
-        "Authorization": azure_basic_auth_header(token),
+        "Authorization": azure_basic_auth(token),
     }
     timeout = httpx.Timeout(20.0, connect=10.0)
     last_error = ""
     last_status: Optional[int] = None
+    saw_401 = False
+    saw_403 = False
 
     try:
         # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(timeout=timeout, verify=False, headers=headers) as client:
             for base in _candidate_bases(raw_host or h):
                 conn_url = f"{base}/_apis/connectionData"
-                try:
-                    resp = client.get(
-                        conn_url, params={"api-version": "7.1"}
-                    )
-                except httpx.HTTPError as e:
-                    last_error = str(e)
+                resp = None
+                for api_ver in ("7.1", "7.0"):
+                    try:
+                        resp = client.get(
+                            conn_url, params={"api-version": api_ver}
+                        )
+                    except httpx.HTTPError as e:
+                        last_error = str(e)
+                        resp = None
+                        break
+                    last_status = resp.status_code
+                    if resp.status_code == 200:
+                        break
+                    if resp.status_code not in (400, 404):
+                        break
+                if resp is None:
                     continue
                 last_status = resp.status_code
+                # Host-root IIS often 401s; a collection path may still accept
+                # the same PAT. Only fail closed after every candidate.
                 if resp.status_code == 401:
-                    return {
-                        "ok": False,
-                        "host": h,
-                        "error": "Unauthorized (401) — PAT is invalid or revoked",
-                        "http_status": 401,
-                    }
+                    saw_401 = True
+                    last_error = (
+                        f"{conn_url} returned HTTP 401"
+                    )
+                    continue
                 if resp.status_code == 403:
-                    return {
-                        "ok": False,
-                        "host": h,
-                        "error": (
-                            "Forbidden (403) — PAT lacks required scopes "
-                            "(Code: Read & Write)"
-                        ),
-                        "http_status": 403,
-                    }
+                    saw_403 = True
+                    last_error = (
+                        f"{conn_url} returned HTTP 403"
+                    )
+                    continue
                 if resp.status_code != 200:
                     last_error = (
                         f"{conn_url} returned HTTP {resp.status_code}: "
@@ -235,6 +246,26 @@ def probe_azure_connection(
                     ),
                 }
 
+            if saw_401 and not saw_403:
+                return {
+                    "ok": False,
+                    "host": h,
+                    "error": (
+                        "Unauthorized (401) — PAT is invalid or revoked, "
+                        "or the collection path is wrong"
+                    ),
+                    "http_status": 401,
+                }
+            if saw_403:
+                return {
+                    "ok": False,
+                    "host": h,
+                    "error": (
+                        "Forbidden (403) — PAT lacks required scopes "
+                        "(Code: Read & Write)"
+                    ),
+                    "http_status": 403,
+                }
             return {
                 "ok": False,
                 "host": h,

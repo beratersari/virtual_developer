@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote, urlparse, urlunparse
 
+from src.azure.auth import azure_basic_auth, azure_basic_user
 from src.config import settings, set_current_temp_dir
 from src.logger import logger
 from src.process_kill import kill_process_tree, reclaim_workspace
@@ -446,6 +447,8 @@ class GitManager:
         env["GCM_INTERACTIVE"] = "never"
         env["GCM_MODAL_PROMPT"] = "false"
         env["GCM_GUI_PROMPT"] = "false"
+        # INTENTIONAL: on-prem / TLS intercept. Same policy as httpx verify=False.
+        env["GIT_SSL_NO_VERIFY"] = "1"
         if extra:
             env.update(extra)
         return env
@@ -465,8 +468,33 @@ class GitManager:
             "-c",
             "credential.helper=",
             "-c",
+            "http.sslVerify=false",
+            "-c",
             "i18n.logOutputEncoding=utf-8",
         ]
+
+    def _azure_git_config_args(self, *, url: str = "") -> List[str]:
+        """``-c`` flags TFS IIS needs. Negotiate ignores URL userinfo.
+
+        Same as Creasy: Basic ``pat:<PAT>`` on the git command plus askpass.
+        """
+        target = self.normalize_remote_url(url or self.remote_url or "")
+        if not self._remote_uses_azure_pat(target):
+            return []
+        pat = self._azure_pat_for_remote(target)
+        if not pat:
+            return []
+        args = [
+            "-c",
+            f"http.extraHeader=Authorization: {azure_basic_auth(pat)}",
+        ]
+        try:
+            askpass = self._ensure_askpass_script()
+        except OSError:
+            askpass = None
+        if askpass is not None:
+            args.extend(["-c", f"core.askPass={askpass}"])
+        return args
 
     @staticmethod
     def _looks_like_git_lock_error(result: object) -> bool:
@@ -536,17 +564,17 @@ class GitManager:
             out["SSH_ASKPASS"] = str(askpass)
             out["SSH_ASKPASS_REQUIRE"] = "never"
         azure = self._remote_uses_azure_pat(target)
-        # Azure DevOps Server: PAT is the only secret. Empty username + PAT
-        # (Basic ":PAT") and Bearer extraHeader. Never oauth2 / never prompt.
-        # GitLab keeps oauth2:PAT (existing, do not change).
+        # Azure: same as Creasy — Basic pat:<PAT>. IIS rejects empty user
+        # and ignores URL userinfo when it advertises Negotiate. GitLab
+        # keeps oauth2:PAT (existing, do not change).
         if azure:
             out["VD_GIT_AUTH"] = "azure"
-            userinfo = f":{pat}"
-            basic = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
-            extra = f"Authorization: Bearer {pat}"
-            rewrite_user = f"https://:{pat}@{host}/"
+            out["VD_GIT_ASKUSER"] = azure_basic_user()
+            extra = f"Authorization: {azure_basic_auth(pat)}"
+            rewrite_user = f"https://pat:{quote(pat, safe='')}@{host}/"
         else:
             out["VD_GIT_AUTH"] = "gitlab"
+            out["VD_GIT_ASKUSER"] = "oauth2"
             userinfo = f"oauth2:{pat}"
             basic = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
             extra = f"Authorization: Basic {basic}"
@@ -567,12 +595,7 @@ class GitManager:
         if askpass is not None:
             pairs.append(("core.askPass", str(askpass)))
         pairs.append(("http.extraHeader", extra))
-        if azure:
-            # Second extraHeader: Basic empty-user + PAT (some TFS 2022.2
-            # collections accept Bearer; others only Basic :PAT).
-            pairs.append(
-                ("http.extraHeader", f"Authorization: Basic {basic}")
-            )
+        pairs.append(("http.sslVerify", "false"))
         try:
             base_count = int(out.get("GIT_CONFIG_COUNT") or "0")
         except ValueError:
@@ -637,6 +660,7 @@ class GitManager:
             result = self._run_tracked(
                 [
                     *self._unattended_git_prefix(),
+                    *self._azure_git_config_args(),
                     "submodule",
                     "update",
                     "--init",
@@ -741,6 +765,7 @@ class GitManager:
             result = self._run_tracked(
                 [
                     *self._unattended_git_prefix(),
+                    *self._azure_git_config_args(url=clone_url),
                     "clone",
                     "--no-single-branch",
                     clone_url,
@@ -1063,9 +1088,9 @@ class GitManager:
         parsed = urlparse(base)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             return None
-        # GitLab: oauth2:PAT. Azure DevOps Server: empty user + PAT only.
+        # GitLab: oauth2:PAT. Azure DevOps Server: pat:PAT (IIS rejects empty user).
         if self._remote_uses_azure_pat(base):
-            userinfo = f":{quote(pat, safe='')}"
+            userinfo = f"pat:{quote(pat, safe='')}"
         else:
             userinfo = f"oauth2:{quote(pat, safe='')}"
         host = parsed.hostname
@@ -1155,7 +1180,7 @@ class GitManager:
                 "echo(%~1| %SystemRoot%\\System32\\findstr.exe /I /C:\"username\" >nul\r\n"
                 "if not errorlevel 1 (\r\n"
                 "  if /I \"%VD_GIT_AUTH%\"==\"azure\" (\r\n"
-                "    echo(\r\n"
+                "    if defined VD_GIT_ASKUSER (echo(%VD_GIT_ASKUSER%) else echo pat\r\n"
                 "    exit /b 0\r\n"
                 "  )\r\n"
                 "  echo oauth2\r\n"
@@ -1168,7 +1193,7 @@ class GitManager:
             "#!/bin/sh\n"
             "case \"$*\" in\n"
             "  *[Uu]sername*)\n"
-            "    if [ \"$VD_GIT_AUTH\" = azure ]; then printf '\\n'; else printf '%s\\n' oauth2; fi ;;\n"
+            "    if [ \"$VD_GIT_AUTH\" = azure ]; then printf '%s\\n' \"${VD_GIT_ASKUSER:-pat}\"; else printf '%s\\n' oauth2; fi ;;\n"
             "  *) printf '%s\\n' \"$VD_GIT_PASSWORD\" ;;\n"
             "esac\n"
         )
@@ -1196,7 +1221,11 @@ class GitManager:
             "import os, sys\n"
             "p = \" \".join(sys.argv[1:]).lower()\n"
             "if \"username\" in p:\n"
-            "    sys.stdout.write(\"\\n\" if os.environ.get(\"VD_GIT_AUTH\") == \"azure\" else \"oauth2\\n\")\n"
+            "    if os.environ.get(\"VD_GIT_AUTH\") == \"azure\":\n"
+            "        sys.stdout.write(os.environ.get(\"VD_GIT_ASKUSER\") or \"pat\")\n"
+            "        sys.stdout.write(\"\\n\")\n"
+            "    else:\n"
+            "        sys.stdout.write(\"oauth2\\n\")\n"
             "else:\n"
             "    sys.stdout.write(os.environ.get(\"VD_GIT_PASSWORD\", \"\") + \"\\n\")\n"
         )
@@ -1636,6 +1665,7 @@ class GitManager:
         # Disable LFS filter hooks so a broken git-lfs install cannot fail checkout.
         cmd = [
             *self._unattended_git_prefix(),
+            *self._azure_git_config_args(),
             "-c",
             "filter.lfs.smudge=",
             "-c",
@@ -2828,6 +2858,50 @@ class GitManager:
             logger.debug(f"API MR list failed: {e}")
         return None
 
+    def _azure_client_for_remote(self) -> Optional[Any]:
+        """REST client for this Azure remote, same PAT as clone/push."""
+        if not self._looks_like_azure_remote(self.remote_url or ""):
+            return None
+        from src.azure.client import AzureDevOpsClient
+        from src.azure.webhook import parse_azure_git_url
+
+        parsed = parse_azure_git_url(self.remote_url or "") or {}
+        host = parsed.get("host") or self._host_from_url(self.remote_url or "")
+        collection = parsed.get("collection_url") or ""
+        pat = self._azure_pat_for_remote(self.remote_url or "")
+        if not host and not collection:
+            return None
+        return AzureDevOpsClient(host=host, pat=pat, collection_url=collection)
+
+    def _create_or_reuse_azure_pr(
+        self,
+        title: str,
+        body: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> Optional[str]:
+        """Open or reuse an Azure DevOps PR with the host PAT (not glab)."""
+        from src.azure.webhook import parse_azure_git_url
+
+        parsed = parse_azure_git_url(self.remote_url or "") or {}
+        project = parsed.get("project") or ""
+        repository = parsed.get("repository") or ""
+        if not repository:
+            logger.error("Cannot create Azure PR: repository missing from remote URL")
+            return None
+        client = self._azure_client_for_remote()
+        if client is None:
+            logger.error("Cannot create Azure PR: no client for this remote")
+            return None
+        return client.create_pull_request(
+            project=project,
+            repository=repository,
+            source_branch=source_branch,
+            target_branch=target_branch,
+            title=title,
+            description=body,
+        )
+
     def create_merge_request(self, title: str, body: str = "", target_branch: Optional[str] = None) -> Optional[str]:
         if not self.remote_enabled:
             logger.info("Merge request not available (no remote configured).")
@@ -2846,6 +2920,13 @@ class GitManager:
 
         if not target_branch:
             target_branch = (self.target_branch or self.source_branch or "").strip()
+        if self._looks_like_azure_remote(self.remote_url or ""):
+            if not target_branch:
+                logger.error("Cannot create Azure PR: no target branch on GitManager")
+                return None
+            return self._create_or_reuse_azure_pr(
+                title, body, branch, target_branch
+            )
         existing_mr = self._get_existing_mr_url(branch, target_branch=target_branch)
         if existing_mr:
             logger.info(f"MR already exists: {existing_mr}")

@@ -328,7 +328,7 @@ class Settings(BaseSettings):
     #   AZURE_HOST_PATS={"tfs.example.com":"…","tfs.internal:8080":"…"}
     # Leftover (only when the JSON map is empty): one AZURE_PAT expanded onto
     # each host in AZURE_ALLOWED_HOSTS. Not a second allowlist.
-    # Clone/push use this PAT only (empty username + PAT). Never prompt.
+    # Clone/push/MR use this PAT as Basic pat:<PAT> (IIS rejects empty user).
     azure_host_pats: str = Field(
         default="",
         description='JSON object mapping hostname → Azure PAT, e.g. {"tfs.example.com":"…"}',
