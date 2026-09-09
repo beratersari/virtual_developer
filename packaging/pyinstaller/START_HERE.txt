@@ -29,9 +29,8 @@ into the executable. Durable data still goes to YAVER_DATA_DIR
 opencoderman.pin records the exact OpenCoderman submodule commit this
 build was frozen against (also attached on the GitHub Release).
 
-opencoderman/ next to this binary is the OpenCoderman tree.
-opencode_configs/ holds derman-build, derman-plan, and skills only.
-After OpenCode is installed, copy those into that home:
+opencoderman/ next to this binary has only agents/ and skills/.
+After OpenCode is installed, copy them into that home:
 
   Windows:  install-opencode-agents.bat
   Linux:    ./install-opencode-agents.sh

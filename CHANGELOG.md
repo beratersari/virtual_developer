@@ -8,13 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-09
+
+Standalone exe zips ship one OpenCode kit. Plan-refactor reads every Jira comment page.
+
+### Changed
+
+- Exe zip `opencoderman/` contains only `agents/` and `skills/`. The duplicate `opencode_configs/` tree is gone. Windows ships `install-opencode-agents.bat`; Linux ships `install-opencode-agents.sh`.
+
 ### Added
 
 - Optional dashboard login: `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` at the top of `.env`. Empty = no login. The board poller and `POST /webhooks/gitlab` stay on their own paths.
 
 ### Fixed
 
+- `plan_refactor` missed the newest `@bot` comment when Jira returned only the first comment page.
 - Dashboard buttons (including Sign out) respond to a single click again. Storage no longer stacks `/api/storage` polls, Sign out leaves the session immediately, and logout no longer waits behind GitLab/storage work.
+
+[0.5.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.5.1
 
 ## [0.5.0] — 2026-09-08
 
