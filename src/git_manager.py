@@ -568,6 +568,14 @@ class GitManager:
         # and ignores URL userinfo when it advertises Negotiate. GitLab
         # keeps oauth2:PAT (existing, do not change).
         if azure:
+            from src.azure.log import azure_info
+
+            if not getattr(self, "_azure_git_auth_logged", False):
+                self._azure_git_auth_logged = True
+                azure_info(
+                    f"git auth env host={host} scheme=Basic pat:<PAT> "
+                    f"issue={getattr(self, 'issue_key', '') or '-'}"
+                )
             out["VD_GIT_AUTH"] = "azure"
             out["VD_GIT_ASKUSER"] = azure_basic_user()
             extra = f"Authorization: {azure_basic_auth(pat)}"
@@ -932,15 +940,27 @@ class GitManager:
 
     def _azure_pat_for_remote(self, url: str = "") -> str:
         """Azure PAT for this remote — map first, leftover ``AZURE_PAT`` last."""
+        from src.azure.log import azure_info
+
         host = self._host_from_url(
             self.normalize_remote_url(url or self.remote_url or "")
             or (url or self.remote_url or "")
         )
+
+        def _once(msg: str) -> None:
+            key = f"_azure_pat_log_{host or 'none'}"
+            if getattr(self, key, False):
+                return
+            setattr(self, key, True)
+            azure_info(msg)
+
         if not host:
+            _once("git PAT lookup fail no host on remote URL")
             return ""
         if hasattr(settings, "azure_pat_for_host"):
             mapped = (settings.azure_pat_for_host(host) or "").strip()
             if mapped:
+                _once(f"git PAT lookup host={host} source=host-map")
                 return mapped
         azure_map = {}
         if hasattr(settings, "azure_host_pat_map"):
@@ -948,9 +968,18 @@ class GitManager:
                 azure_map = settings.azure_host_pat_map() or {}
             except Exception:
                 azure_map = {}
+        leftover = (getattr(settings, "azure_pat", "") or "").strip()
         if azure_map:
+            _once(
+                f"git PAT lookup miss host={host} "
+                f"mapped_hosts={sorted(azure_map.keys())}"
+            )
             return ""
-        return (getattr(settings, "azure_pat", "") or "").strip()
+        if leftover:
+            _once(f"git PAT lookup host={host} source=leftover-AZURE_PAT")
+            return leftover
+        _once(f"git PAT lookup miss host={host} (no map, no leftover)")
+        return ""
 
     def _pat_for_remote(self, url: str = "") -> str:
         """Resolve GitLab or Azure PAT for this remote URL (per-host maps).
@@ -2870,7 +2899,18 @@ class GitManager:
         collection = parsed.get("collection_url") or ""
         pat = self._azure_pat_for_remote(self.remote_url or "")
         if not host and not collection:
+            from src.azure.log import azure_warning
+
+            azure_warning(
+                f"git REST client skip no host/collection url={self.remote_url!r}"
+            )
             return None
+        from src.azure.log import azure_info
+
+        azure_info(
+            f"git REST client host={host} collection={collection} "
+            f"pat={'yes' if pat else 'no'}"
+        )
         return AzureDevOpsClient(host=host, pat=pat, collection_url=collection)
 
     def _create_or_reuse_azure_pr(
@@ -2886,13 +2926,21 @@ class GitManager:
         parsed = parse_azure_git_url(self.remote_url or "") or {}
         project = parsed.get("project") or ""
         repository = parsed.get("repository") or ""
+        from src.azure.log import azure_error, azure_info
+
         if not repository:
-            logger.error("Cannot create Azure PR: repository missing from remote URL")
+            azure_error(
+                f"create_pr skip repository missing from {self.remote_url!r}"
+            )
             return None
         client = self._azure_client_for_remote()
         if client is None:
-            logger.error("Cannot create Azure PR: no client for this remote")
+            azure_error("create_pr skip no REST client for this remote")
             return None
+        azure_info(
+            f"create_pr via git {project}/{repository} "
+            f"{source_branch} → {target_branch}"
+        )
         return client.create_pull_request(
             project=project,
             repository=repository,

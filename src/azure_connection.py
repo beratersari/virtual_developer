@@ -8,8 +8,8 @@ from urllib.parse import urlparse
 import httpx
 
 from src.azure.auth import azure_basic_auth
+from src.azure.log import azure_info, azure_warning, yn
 from src.config import settings
-from src.logger import logger
 
 
 def _normalize_host(raw: str) -> str:
@@ -85,10 +85,14 @@ def probe_azure_connection(
     raw_host = (host or "").strip()
     h = _normalize_host(raw_host)
     if not h:
+        azure_warning("probe fail host is required")
         return {"ok": False, "error": "host is required", "host": ""}
 
     token = (pat or "").strip()
     provided_pat = bool(token)
+    azure_info(
+        f"probe start host={h} raw={raw_host!r} pat_in_request={yn(provided_pat)}"
+    )
     if not token and hasattr(settings, "azure_pat_for_host"):
         token = (settings.azure_pat_for_host(h) or "").strip()
     if not token:
@@ -104,6 +108,7 @@ def probe_azure_connection(
         if h in mapped or h in allowed:
             token = (getattr(settings, "azure_pat", "") or "").strip()
         elif not provided_pat:
+            azure_warning(f"probe fail no stored PAT host={h}")
             return {
                 "ok": False,
                 "host": h,
@@ -113,6 +118,7 @@ def probe_azure_connection(
                 ),
             }
     if not token:
+        azure_warning(f"probe fail no PAT host={h}")
         return {
             "ok": False,
             "host": h,
@@ -153,8 +159,12 @@ def probe_azure_connection(
                     if resp.status_code not in (400, 404):
                         break
                 if resp is None:
+                    azure_info(f"probe try {conn_url} no response last_error={last_error!r}")
                     continue
                 last_status = resp.status_code
+                azure_info(
+                    f"probe try {conn_url} status={resp.status_code}"
+                )
                 # Host-root IIS often 401s; a collection path may still accept
                 # the same PAT. Only fail closed after every candidate.
                 if resp.status_code == 401:
@@ -221,11 +231,15 @@ def probe_azure_connection(
                     projects_error = (
                         f"Could not list projects (HTTP {proj_resp.status_code})"
                     )
-                    logger.warning(
-                        f"Azure test connection projects list failed for {h}: "
-                        f"{proj_resp.status_code}"
+                    azure_warning(
+                        f"probe projects list failed host={h} "
+                        f"status={proj_resp.status_code}"
                     )
 
+                azure_info(
+                    f"probe ok host={h} collection={base} user={username or '-'} "
+                    f"projects={len(projects)}"
+                )
                 return {
                     "ok": True,
                     "host": h,
@@ -247,6 +261,7 @@ def probe_azure_connection(
                 }
 
             if saw_401 and not saw_403:
+                azure_warning(f"probe fail 401 host={h}")
                 return {
                     "ok": False,
                     "host": h,
@@ -257,6 +272,7 @@ def probe_azure_connection(
                     "http_status": 401,
                 }
             if saw_403:
+                azure_warning(f"probe fail 403 host={h}")
                 return {
                     "ok": False,
                     "host": h,
@@ -266,6 +282,10 @@ def probe_azure_connection(
                     ),
                     "http_status": 403,
                 }
+            azure_warning(
+                f"probe fail host={h} last_status={last_status} "
+                f"error={last_error!r}"
+            )
             return {
                 "ok": False,
                 "host": h,
@@ -277,20 +297,21 @@ def probe_azure_connection(
                 "http_status": last_status,
             }
     except httpx.TimeoutException:
+        azure_warning(f"probe timeout host={h}")
         return {
             "ok": False,
             "host": h,
             "error": f"Timed out reaching {h} (network or host unreachable)",
         }
     except httpx.HTTPError as e:
-        logger.warning(f"Azure test connection HTTP error for {h}: {e}")
+        azure_warning(f"probe HTTP error host={h}: {e}")
         return {
             "ok": False,
             "host": h,
             "error": f"HTTP error contacting Azure DevOps Server: {e}",
         }
     except Exception as e:
-        logger.warning(f"Azure test connection failed for {h}: {e}")
+        azure_warning(f"probe failed host={h}: {e}")
         return {
             "ok": False,
             "host": h,

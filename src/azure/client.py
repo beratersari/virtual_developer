@@ -13,8 +13,8 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from src.azure.auth import azure_basic_auth, azure_basic_auth_header, azure_basic_user
+from src.azure.log import azure_error, azure_info, azure_warning, http_detail, yn
 from src.config import settings
-from src.logger import logger
 
 __all__ = [
     "AzureDevOpsClient",
@@ -95,6 +95,10 @@ class AzureDevOpsClient:
                     mapping = {}
             if leftover and not mapping:
                 self.pat = leftover
+        azure_info(
+            f"client host={self.host or '-'} collection={self.collection_url or '-'} "
+            f"api_base={self.api_base or '-'} pat={yn(self.pat)}"
+        )
 
     def _headers(self) -> Dict[str, str]:
         headers = {
@@ -136,22 +140,48 @@ class AzureDevOpsClient:
                     headers=self._headers(),
                     params={"api-version": _API_VERSION},
                 )
+                ver = _API_VERSION
                 if resp.status_code == 404:
+                    azure_info(
+                        "http "
+                        + http_detail(
+                            method="GET",
+                            url=url,
+                            status=resp.status_code,
+                            api_version=_API_VERSION,
+                            body=resp.text,
+                        )
+                        + " — retry 7.0"
+                    )
                     resp = client.get(
                         url,
                         headers=self._headers(),
                         params={"api-version": _API_VERSION_FALLBACK},
                     )
+                    ver = _API_VERSION_FALLBACK
             if resp.status_code == 200:
                 data = resp.json() if resp.content else {}
+                status = ""
+                if isinstance(data, dict):
+                    status = str(data.get("status") or "")
+                azure_info(
+                    f"get_pr ok {project}/{repository}!{iid} status={status or '-'} "
+                    + http_detail(method="GET", url=url, status=200, api_version=ver)
+                )
                 return data if isinstance(data, dict) else None
-            logger.debug(
-                f"Azure GET PR {project}/{repository}!{iid} failed "
-                f"({resp.status_code})"
+            azure_warning(
+                f"get_pr fail {project}/{repository}!{iid} "
+                + http_detail(
+                    method="GET",
+                    url=url,
+                    status=resp.status_code,
+                    api_version=ver,
+                    body=resp.text,
+                )
             )
             return None
         except Exception as e:
-            logger.debug(f"Azure GET PR {project}/{repository}!{iid} error: {e}")
+            azure_warning(f"get_pr error {project}/{repository}!{iid}: {e}")
             return None
 
     def post_pr_comment(
@@ -165,19 +195,28 @@ class AzureDevOpsClient:
     ) -> Optional[Dict[str, Any]]:
         """POST a PR thread comment (new thread, or reply when thread_id set)."""
         if not self.api_base:
-            logger.error("Azure API base missing; cannot post PR comment")
+            azure_error("post_comment fail api_base missing")
             return None
         text = (body or "").strip()
         if not text:
+            azure_warning(
+                f"post_comment skip empty body {project}/{repository}!{pr_id}"
+            )
             return None
         try:
             iid = int(pr_id)
         except (TypeError, ValueError):
+            azure_error(f"post_comment fail bad pr_id={pr_id!r}")
             return None
         if iid <= 0:
+            azure_error(f"post_comment fail pr_id={iid}")
             return None
         base = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
         tid = (thread_id or "").strip()
+        azure_info(
+            f"post_comment start {project}/{repository}!{iid} "
+            f"thread={tid or 'new'} chars={len(text)} pat={yn(self.pat)}"
+        )
         try:
             with httpx.Client(timeout=30.0, verify=False) as client:
                 if tid and tid.isdigit():
@@ -188,25 +227,33 @@ class AzureDevOpsClient:
                     }
                     posted = self._post_json(client, url, payload)
                     if posted is not None:
-                        logger.info(
-                            f"Posted Azure PR comment on {project}/{repository}!{iid} "
+                        azure_info(
+                            f"post_comment ok {project}/{repository}!{iid} "
                             f"thread={tid} id={posted.get('id')}"
                         )
                         return posted
+                    azure_warning(
+                        f"post_comment thread reply failed; trying new thread "
+                        f"{project}/{repository}!{iid} thread={tid}"
+                    )
                 payload = {
                     "comments": [{"parentCommentId": 0, "content": text, "commentType": 1}],
                     "status": 1,
                 }
                 posted = self._post_json(client, base, payload)
                 if posted is not None:
-                    logger.info(
-                        f"Posted Azure PR thread on {project}/{repository}!{iid} "
-                        f"id={posted.get('id')}"
+                    azure_info(
+                        f"post_comment ok {project}/{repository}!{iid} "
+                        f"new_thread id={posted.get('id')}"
                     )
                     return posted
+                azure_error(
+                    f"post_comment fail {project}/{repository}!{iid} "
+                    f"thread={tid or 'new'}"
+                )
                 return None
         except Exception as e:
-            logger.error(f"Azure PR comment error: {e}")
+            azure_error(f"post_comment error {project}/{repository}!{iid}: {e}")
             return None
 
     def _post_json(
@@ -219,9 +266,29 @@ class AzureDevOpsClient:
             json=payload,
         )
         if resp.status_code in (200, 201):
+            azure_info(
+                "http "
+                + http_detail(
+                    method="POST",
+                    url=url,
+                    status=resp.status_code,
+                    api_version=_API_VERSION,
+                )
+            )
             data = resp.json() if resp.content else {}
             return data if isinstance(data, dict) else {"ok": True}
         if resp.status_code in (400, 404, 415):
+            azure_info(
+                "http "
+                + http_detail(
+                    method="POST",
+                    url=url,
+                    status=resp.status_code,
+                    api_version=_API_VERSION,
+                    body=resp.text,
+                )
+                + " — retry 7.0"
+            )
             resp2 = client.post(
                 url,
                 headers=self._headers(),
@@ -229,16 +296,37 @@ class AzureDevOpsClient:
                 json=payload,
             )
             if resp2.status_code in (200, 201):
+                azure_info(
+                    "http "
+                    + http_detail(
+                        method="POST",
+                        url=url,
+                        status=resp2.status_code,
+                        api_version=_API_VERSION_FALLBACK,
+                    )
+                )
                 data = resp2.json() if resp2.content else {}
                 return data if isinstance(data, dict) else {"ok": True}
-            logger.error(
-                f"Azure PR comment retry failed ({resp2.status_code}): "
-                f"{(resp2.text or '')[:400]}"
+            azure_error(
+                "http "
+                + http_detail(
+                    method="POST",
+                    url=url,
+                    status=resp2.status_code,
+                    api_version=_API_VERSION_FALLBACK,
+                    body=resp2.text,
+                )
             )
             return None
-        logger.error(
-            f"Azure PR comment failed ({resp.status_code}): "
-            f"{(resp.text or '')[:400]}"
+        azure_error(
+            "http "
+            + http_detail(
+                method="POST",
+                url=url,
+                status=resp.status_code,
+                api_version=_API_VERSION,
+                body=resp.text,
+            )
         )
         return None
 
@@ -252,9 +340,11 @@ class AzureDevOpsClient:
     ) -> Optional[str]:
         """Return the web URL of an active PR for source→target, if any."""
         if not self.api_base:
+            azure_warning("find_pr skip api_base missing")
             return None
         source = _ref_name(source_branch)
         if not source:
+            azure_warning("find_pr skip empty source branch")
             return None
         params: Dict[str, Any] = {
             "api-version": _API_VERSION,
@@ -272,24 +362,38 @@ class AzureDevOpsClient:
                     params["api-version"] = _API_VERSION_FALLBACK
                     resp = client.get(url, headers=self._headers(), params=params)
             if resp.status_code != 200:
-                logger.debug(
-                    f"Azure list PR {project}/{repository} failed "
-                    f"({resp.status_code})"
+                azure_warning(
+                    f"find_pr fail {project}/{repository} "
+                    + http_detail(
+                        method="GET",
+                        url=url,
+                        status=resp.status_code,
+                        body=resp.text,
+                    )
                 )
                 return None
             data = resp.json() if resp.content else {}
             rows = data.get("value") if isinstance(data, dict) else data
             if not isinstance(rows, list):
+                azure_warning(
+                    f"find_pr unexpected body {project}/{repository} "
+                    f"type={type(data).__name__}"
+                )
                 return None
+            azure_info(
+                f"find_pr {project}/{repository} source={source} "
+                f"target={target or '-'} matches={len(rows)}"
+            )
             for item in rows:
                 if not isinstance(item, dict):
                     continue
                 web = self._pr_web_url(item, project, repository)
                 if web:
+                    azure_info(f"find_pr hit {web}")
                     return web
             return None
         except Exception as e:
-            logger.debug(f"Azure list PR {project}/{repository} error: {e}")
+            azure_warning(f"find_pr error {project}/{repository}: {e}")
             return None
 
     def create_pull_request(
@@ -304,13 +408,19 @@ class AzureDevOpsClient:
     ) -> Optional[str]:
         """Create a PR (or reuse an active one) using the same PAT as clone/push."""
         if not self.api_base:
-            logger.error("Azure API base missing; cannot create pull request")
+            azure_error("create_pr fail api_base missing")
             return None
         source = _ref_name(source_branch)
         target = _ref_name(target_branch)
         if not source or not target:
-            logger.error("Azure PR create refused: source/target branch missing")
+            azure_error(
+                f"create_pr refuse missing branch source={source!r} target={target!r}"
+            )
             return None
+        azure_info(
+            f"create_pr start {project}/{repository} "
+            f"{source} → {target} title={title!r} pat={yn(self.pat)}"
+        )
         existing = self.find_pull_request(
             project=project,
             repository=repository,
@@ -318,7 +428,7 @@ class AzureDevOpsClient:
             target_branch=target,
         )
         if existing:
-            logger.info(f"Azure PR already exists: {existing}")
+            azure_info(f"create_pr reuse existing {existing}")
             return existing
         payload = {
             "sourceRefName": source,
@@ -331,13 +441,21 @@ class AzureDevOpsClient:
             with httpx.Client(timeout=30.0, verify=False) as client:
                 posted = self._post_json(client, url, payload)
             if not posted:
+                azure_error(
+                    f"create_pr fail {project}/{repository} {source} → {target}"
+                )
                 return None
             web = self._pr_web_url(posted, project, repository)
             if web:
-                logger.info(f"Azure pull request created: {web}")
+                azure_info(f"create_pr ok {web}")
+            else:
+                azure_warning(
+                    f"create_pr posted but no web URL {project}/{repository} "
+                    f"id={posted.get('pullRequestId')}"
+                )
             return web
         except Exception as e:
-            logger.error(f"Azure PR create error: {e}")
+            azure_error(f"create_pr error {project}/{repository}: {e}")
             return None
 
     def _pr_web_url(
