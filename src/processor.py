@@ -2046,6 +2046,12 @@ class JobProcessor:
             set_job_id(job_id)
         except Exception:
             pass
+        try:
+            from src.dashboard.issue_logs import issue_log_ring
+
+            issue_log_ring.attach_issue_lines_to_job(state.issue_key, job_id)
+        except Exception:
+            pass
 
         # Re-check after create: cancel may have won during create_job
         st = self.state_manager.get_state(state.issue_key)
@@ -3746,9 +3752,25 @@ class JobProcessor:
         from src.azure.webhook import AzurePrCommentEvent
 
         if not isinstance(event, AzurePrCommentEvent):
+            from src.azure.log import azure_error
+
+            azure_error("enqueue fail invalid event")
             return {"ok": False, "reason": "invalid event"}
+        from src.azure.log import azure_info
+
+        azure_info(
+            f"enqueue start issue={event.issue_key} "
+            f"pr={event.project_path}!{event.pr_id} comment={event.comment_id} "
+            f"host={event.host} repo={event.repository_url} "
+            f"source={event.source_branch} target={event.target_branch}"
+        )
         existing = self.queue_store.find_note(event.comment_id)
         if existing:
+            azure_info(
+                f"enqueue duplicate comment={event.comment_id} "
+                f"queue_id={existing.get('queue_id')} "
+                f"status={existing.get('status')}"
+            )
             return {
                 "ok": True,
                 "queued": existing.get("status") == "queued",
@@ -3780,8 +3802,17 @@ class JobProcessor:
             merge_request_url=event.pr_url,
             payload=event.to_dict(),
         )
+        azure_info(
+            f"enqueue stored queue_id={rec.get('queue_id')} "
+            f"lock={lock} work_branch={work} status={rec.get('status')}"
+        )
         await self.dispatch_queue()
         live = self.queue_store.get(rec["queue_id"]) or rec
+        azure_info(
+            f"enqueue after-dispatch queue_id={live.get('queue_id')} "
+            f"status={live.get('status')} queued={live.get('status') == 'queued'} "
+            f"started={live.get('status') == 'running'}"
+        )
         return {
             "ok": True,
             "queued": live.get("status") == "queued",
@@ -4060,19 +4091,32 @@ class JobProcessor:
                     )
                     return
             elif source == "azure":
+                from src.azure.log import azure_info
                 from src.azure.webhook import AzurePrCommentEvent
 
                 event = AzurePrCommentEvent.from_dict(rec.get("payload") or {})
+                azure_info(
+                    f"queue run start queue_id={qid} issue={event.issue_key} "
+                    f"pr={event.project_path}!{event.pr_id} "
+                    f"comment={event.comment_id}"
+                )
                 if self._job_semaphore is None:
                     limit = max(1, int(settings.max_concurrent_jobs or 1))
                     self._job_semaphore = _JobSlotLimiter(limit)
                 async with self._job_semaphore:
                     ran = await self._run_azure_pr_comment(event)
                 if not ran:
+                    azure_info(
+                        f"queue run deferred queue_id={qid} issue={event.issue_key} "
+                        f"(workspace or issue still in-flight)"
+                    )
                     self.queue_store.requeue(
                         qid, reason="workspace or issue still in-flight"
                     )
                     return
+                azure_info(
+                    f"queue run finished queue_id={qid} issue={event.issue_key}"
+                )
             else:
                 outcome = await self.process_event(rec.get("payload") or {})
                 if not outcome.get("work_started"):
@@ -4730,14 +4774,22 @@ class JobProcessor:
         )
         iid = meta.get("azure_pr_id")
         if not (host or collection) or not project or not repository or not iid:
-            logger.error(
-                f"{state.issue_key}: cannot post Azure PR comment "
+            from src.azure.log import azure_error
+
+            azure_error(
+                f"reply skip {state.issue_key}: missing PR coords "
                 f"(host={host!r} collection={collection!r} "
                 f"project={project!r} repo={repository!r} iid={iid!r})"
             )
             return False
         from src.azure.client import AzureDevOpsClient
+        from src.azure.log import azure_info, azure_warning
 
+        azure_info(
+            f"reply start {state.issue_key} {project}/{repository}!{iid} "
+            f"host={host} collection={collection} "
+            f"thread={meta.get('azure_thread_id') or '-'} chars={len(body or '')}"
+        )
         client = AzureDevOpsClient(host=host, collection_url=collection)
         posted = client.post_pr_comment(
             project=str(project),
@@ -4746,14 +4798,23 @@ class JobProcessor:
             body=body,
             thread_id=str(meta.get("azure_thread_id") or ""),
         )
-        return posted is not None
+        if posted is None:
+            azure_warning(f"reply fail {state.issue_key} {project}/{repository}!{iid}")
+            return False
+        azure_info(
+            f"reply ok {state.issue_key} {project}/{repository}!{iid} "
+            f"id={posted.get('id')}"
+        )
+        return True
 
     async def handle_azure_pr_lifecycle(self, event: Any) -> Dict[str, Any]:
         """Persist PR state and delete the temp clone when completed or abandoned."""
         from src.azure.webhook import AzurePrLifecycleEvent
 
         if not isinstance(event, AzurePrLifecycleEvent):
-            logger.warning("handle_azure_pr_lifecycle: invalid event")
+            from src.azure.log import azure_warning
+
+            azure_warning("lifecycle handle invalid event")
             return {"ok": False, "reason": "invalid event", "deleted": []}
         state_name = (event.state or "").strip().lower()
         if event.is_merged:
@@ -4772,6 +4833,14 @@ class JobProcessor:
             mr_iid=event.pr_id,
             state=state_name,
         )
+        from src.azure.log import azure_info
+
+        azure_info(
+            f"lifecycle handle issue={event.issue_key} "
+            f"pr={event.project_path}!{event.pr_id} "
+            f"action={event.action} recorded={state_name} "
+            f"delete_clone={event.should_delete_clone}"
+        )
         if not event.should_delete_clone:
             return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
 
@@ -4784,9 +4853,10 @@ class JobProcessor:
             issue_key=event.issue_key,
             source_branch=event.source_branch,
         )
-        logger.info(
-            f"{event.issue_key}: PR {event.project_path}!{event.pr_id} "
-            f"{state_name} — deleted clones {deleted or '(none)'}"
+        azure_info(
+            f"lifecycle clones issue={event.issue_key} "
+            f"pr={event.project_path}!{event.pr_id} "
+            f"{state_name} deleted={deleted or []}"
         )
         return {
             "ok": True,
@@ -4799,7 +4869,9 @@ class JobProcessor:
         from src.azure.webhook import AzurePrCommentEvent
 
         if not isinstance(event, AzurePrCommentEvent):
-            logger.warning("handle_azure_pr_comment: invalid event")
+            from src.azure.log import azure_warning
+
+            azure_warning("comment handle invalid event")
             return
         issue_key = event.issue_key
         from src.log_context import set_issue_key
@@ -4818,13 +4890,19 @@ class JobProcessor:
 
         assert isinstance(event, AzurePrCommentEvent)
         issue_key = event.issue_key
+        from src.azure.log import azure_info
+
         note_id = (event.comment_id or "").strip()
+        azure_info(
+            f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "
+            f"comment={note_id or '-'} host={event.host}"
+        )
         if note_id and note_id in self._azure_seen_comments:
-            logger.info(f"{issue_key}: duplicate Azure comment {note_id}; skip")
+            azure_info(f"job skip duplicate comment={note_id} issue={issue_key}")
             return True
 
         if self._is_live_processing(issue_key):
-            logger.info(f"{issue_key}: already in-flight; deferring Azure comment")
+            azure_info(f"job defer in-flight issue={issue_key} comment={note_id}")
             return False
 
         st = self.state_manager.get_state(issue_key)
@@ -4854,9 +4932,9 @@ class JobProcessor:
             self.state_manager.update_state(issue_key, metadata=meta)
         else:
             if st.status in self.IN_FLIGHT_STATUSES:
-                logger.info(
-                    f"{issue_key}: local status {st.status.value}; "
-                    f"deferring Azure comment"
+                azure_info(
+                    f"job defer local-status={st.status.value} "
+                    f"issue={issue_key} comment={note_id}"
                 )
                 return False
             self.state_manager.update_state(
@@ -4874,6 +4952,7 @@ class JobProcessor:
             )
         st = self.state_manager.get_state(issue_key)
         if st is None:
+            azure_info(f"job fail no state after create issue={issue_key}")
             return False
         if note_id:
             self._azure_seen_comments.add(note_id)
@@ -4889,9 +4968,13 @@ class JobProcessor:
         from src.azure.webhook import AzurePrCommentEvent
 
         assert isinstance(event, AzurePrCommentEvent)
-        logger.info(
-            f"Starting Azure PR build workflow for {state.issue_key} "
-            f"(PR !{event.pr_id})"
+        from src.azure.log import azure_error, azure_info, azure_warning
+
+        azure_info(
+            f"workflow start issue={state.issue_key} pr=!{event.pr_id} "
+            f"repo={event.repository_url} "
+            f"source={event.source_branch} target={event.target_branch} "
+            f"author={(event.author_username or event.author_name)!r}"
         )
         success: Optional[bool] = False
         try:
@@ -4921,11 +5004,11 @@ class JobProcessor:
                 job_status="executing",
             )
             if job_id is None:
-                logger.info(
-                    f"Azure PR job not started for {state.issue_key}: "
-                    f"begin claim rejected"
+                azure_info(
+                    f"workflow skip begin-claim-rejected issue={state.issue_key}"
                 )
                 return
+            azure_info(f"workflow job_id={job_id} issue={state.issue_key}")
 
             try:
                 git = await asyncio.to_thread(
@@ -4939,6 +5022,10 @@ class JobProcessor:
                 )
             except (IssueGitConfigError, GitCloneError, GitSourceBranchError, GitTargetBranchError) as e:
                 msg = getattr(e, "user_message", None) or str(e)
+                azure_error(
+                    f"workflow git-prep fail issue={state.issue_key} "
+                    f"err={type(e).__name__}: {msg}"
+                )
                 self._fail_issue(
                     state.issue_key,
                     msg,
@@ -4947,9 +5034,16 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
             if git is None:
+                azure_error(f"workflow git-missing issue={state.issue_key}")
                 self._finish_after_git_missing(state.issue_key)
                 return
+            azure_info(
+                f"workflow git ready issue={state.issue_key} "
+                f"workdir={git.get_working_directory()} "
+                f"work_branch={getattr(git, 'work_branch', None)}"
+            )
             if self._is_aborted(state.issue_key):
+                azure_info(f"workflow aborted after git issue={state.issue_key}")
                 self._release_context(state.issue_key, success=False)
                 return
             try:
@@ -4957,6 +5051,7 @@ class JobProcessor:
                     git.ensure_feature_branch, state.issue_key
                 )
             except Exception as e:
+                azure_error(f"workflow branch-setup fail issue={state.issue_key}: {e}")
                 logger.exception(
                     f"{state.issue_key} Azure branch setup failed: {e}", e
                 )
@@ -5001,6 +5096,7 @@ class JobProcessor:
             self._snapshot_delivery_baseline(state.issue_key, git)
             runner = self._runner_for(state.issue_key)
             if runner is None:
+                azure_error(f"workflow no agent runner issue={state.issue_key}")
                 self._fail_issue(
                     state.issue_key,
                     "Agent runner was not initialized for this Azure job.",
@@ -5031,9 +5127,16 @@ class JobProcessor:
             )
             self._apply_agent_result_session(state.issue_key, result)
 
+            azure_info(
+                f"workflow agent done issue={state.issue_key} "
+                f"returncode={result.get('returncode')} "
+                f"aborted={bool(result.get('aborted'))} "
+                f"incomplete={bool(result.get('incomplete'))} "
+                f"category={result.get('category') or '-'}"
+            )
             if self._is_aborted(state.issue_key) or result.get("aborted"):
-                logger.info(
-                    f"Azure PR job aborted for {state.issue_key}; "
+                azure_info(
+                    f"workflow aborted after agent issue={state.issue_key}; "
                     f"skipping PR reply"
                 )
                 self._release_context(state.issue_key, success=False)
@@ -5049,6 +5152,10 @@ class JobProcessor:
                     and not self._is_noop_delivery_message(delivery_err)
                 )
                 if hard_delivery_err:
+                    azure_error(
+                        f"workflow delivery fail issue={state.issue_key} "
+                        f"err={delivery_err}"
+                    )
                     self._fail_issue(
                         state.issue_key,
                         delivery_err,
@@ -5081,11 +5188,14 @@ class JobProcessor:
                     )
                     self._release_context(state.issue_key, success=False)
                     return
+                azure_info(
+                    f"workflow push result issue={state.issue_key} "
+                    f"has_unique={has_unique} push_ok={push_ok}"
+                )
                 if not has_unique:
-                    logger.info(
-                        f"{state.issue_key}: Azure PR build finished "
-                        f"with no unique commits to deliver — still "
-                        f"posting PR reply"
+                    azure_info(
+                        f"workflow no unique commits issue={state.issue_key}; "
+                        f"still posting PR reply"
                     )
                     delivery_note = (
                         "No unique commits to deliver on this run; "
@@ -5099,6 +5209,10 @@ class JobProcessor:
                         },
                     )
                 elif not push_ok:
+                    azure_error(
+                        f"workflow push fail issue={state.issue_key} "
+                        f"reason={self._push_failure_reason(state.issue_key)}"
+                    )
                     self._fail_issue(
                         state.issue_key,
                         self._format_push_fail_error(
@@ -5136,8 +5250,9 @@ class JobProcessor:
                     ),
                 )
                 if not posted:
-                    logger.error(
-                        f"{state.issue_key}: agent succeeded but PR comment failed"
+                    azure_error(
+                        f"workflow agent ok but PR comment failed "
+                        f"issue={state.issue_key}"
                     )
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
@@ -5157,11 +5272,22 @@ class JobProcessor:
                         progress_percentage=100,
                     )
                     success = True
+                    azure_info(
+                        f"workflow complete issue={state.issue_key} "
+                        f"pushed={pushed} reply={posted}"
+                    )
             else:
+                azure_warning(
+                    f"workflow agent unsuccessful issue={state.issue_key} "
+                    f"returncode={result.get('returncode')} — checking commits"
+                )
                 outcome = await self._deliver_if_new_commits(
                     state,
                     existing_mr_url=event.pr_url or None,
                     require_new_sha=True,
+                )
+                azure_info(
+                    f"workflow salvage outcome={outcome} issue={state.issue_key}"
                 )
                 if outcome == "aborted":
                     self._release_context(state.issue_key, success=False)
@@ -5235,6 +5361,7 @@ class JobProcessor:
                     suggestion="Check the job session log on the ops dashboard.",
                 )
         except Exception as e:
+            azure_error(f"workflow crash issue={state.issue_key}: {e}")
             logger.exception(
                 f"Azure PR workflow crashed for {state.issue_key}: {e}", e
             )
