@@ -62,6 +62,9 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
     for rel in REQUIRED_OPENCODERMAN:
         if not (root / rel).is_file():
             errors.append(f"missing {rel}")
+    reviewer = root / "opencoderman" / "agents" / "gitlab-reviewer.md"
+    if reviewer.is_file():
+        errors.append("opencoderman/agents must not include gitlab-reviewer.md")
     ocm = root / "opencoderman"
     if ocm.is_dir():
         extra = sorted(

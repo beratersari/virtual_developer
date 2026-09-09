@@ -1,10 +1,11 @@
-# Yaver 0.5.1
+# Yaver 0.5.2
 
 Standalone exe zips ship **one** OpenCode kit: `opencoderman/agents`
-and `opencoderman/skills` only. There is no second `opencode_configs/`
-tree. Windows zips include `install-opencode-agents.bat`; Linux zips
-include `install-opencode-agents.sh`. Run that script after OpenCode
-is installed to copy agents and skills into the OpenCode home.
+(**derman-build** and **derman-plan** only — not gitlab-reviewer) and
+`opencoderman/skills`. There is no second `opencode_configs/` tree.
+Windows zips include `install-opencode-agents.bat`; Linux zips include
+`install-opencode-agents.sh`. That script copies only those two agents
+plus skills into the OpenCode home.
 
 Plan-refactor now reads every Jira comment page, so a late `@bot`
 mention is not missed on busy tickets.
@@ -67,7 +68,7 @@ Each release also attaches `opencoderman-<sha>.zip`.
 - Jira webhook intake removed; board poller only
 - One Jira bot name; one GitLab trigger username
 - Settings tabs: Jira, GitLab, Projects, Agent, Runtime
-- Exe zip ships one `opencoderman/` tree (`agents/` + `skills/` only)
+- Exe zip ships one `opencoderman/` tree (`derman-build`, `derman-plan`, `skills/` only)
 - `plan_refactor` reads every Jira comment page
 
 ## Config (secrets stay out of the binary)
