@@ -1164,10 +1164,13 @@ def create_dashboard_app(
 
         def _on_snapshot(_snap: dict) -> None:
             try:
-                data = _live_payload()
-                asyncio.run_coroutine_threadsafe(_broadcast(data), loop)
+                asyncio.run_coroutine_threadsafe(_push_live(), loop)
             except Exception:
                 pass
+
+        async def _push_live() -> None:
+            data = await asyncio.to_thread(_live_payload)
+            await _broadcast(data)
 
         unsub = poll_snapshot_store.subscribe(_on_snapshot)
         try:

@@ -202,3 +202,97 @@ async def test_blocking_path_still_used_by_to_thread(processor, state_manager):
     assert called["n"] == 1
     m.assert_called_once()
     assert out is not None
+
+
+@pytest.mark.asyncio
+async def test_jira_ack_yields_event_loop(processor, state_manager):
+    """In-progress + Jira ack used to freeze /api/meta (full-page Loading…)."""
+
+    def sleepy(_key):
+        time.sleep(0.8)
+        return True
+
+    ticks: list[float] = []
+
+    async def ticker():
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.05)
+
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "issue": {
+            "key": "NB-JIRA",
+            "fields": {
+                "summary": "loop freeze check",
+                "description": (
+                    "{params}\n"
+                    "Repository: https://gitlab.com/example/x.git\n"
+                    "Source branch: develop\n"
+                    "Target branch: develop\n"
+                    "Mode: build\n"
+                    "{params}"
+                ),
+            },
+        },
+    }
+
+    async def _skip_workflow(_state):
+        return None
+
+    with patch.object(processor, "_mark_jira_in_progress", side_effect=sleepy) as mark:
+        with patch.object(processor.reporter, "post_initial_acknowledgment"):
+            with patch.object(
+                processor, "_start_execution_workflow", side_effect=_skip_workflow
+            ):
+                work = asyncio.create_task(processor.process_event(event))
+                tick_task = asyncio.create_task(ticker())
+                await asyncio.gather(work, tick_task)
+
+    assert mark.called, "expected Jira In Progress to run during the test"
+    assert len(ticks) >= 8, (
+        f"event loop was blocked during Jira In Progress "
+        f"(only {len(ticks)} ticks; need >= 8)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mr_followup_http_yields_event_loop():
+    """Scheduled MR GitLab HTTP must not freeze the dashboard event loop."""
+    from src.scheduler.service import _dispatch_mr_followup
+
+    def sleepy(*_a, **_k):
+        time.sleep(0.8)
+        return None
+
+    ticks: list[float] = []
+
+    async def ticker():
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.05)
+
+    rec = {
+        "issue_description": "please review",
+        "gitlab_host": "gitlab.example.com",
+        "gitlab_project": "acme/demo",
+        "mr_iid": 1,
+        "repository_url": "https://gitlab.example.com/acme/demo.git",
+    }
+    proc = MagicMock()
+    proc.enqueue_gitlab_note = None
+
+    with patch(
+        "src.gitlab.client.GitlabClient.get_merge_request", side_effect=sleepy
+    ) as get_mr:
+        work = asyncio.create_task(_dispatch_mr_followup(proc, rec))
+        tick_task = asyncio.create_task(ticker())
+        await asyncio.gather(work, tick_task)
+
+    assert get_mr.called, "expected GitLab GET MR to run during the test"
+    assert len(ticks) >= 8, (
+        f"event loop was blocked during MR follow-up GitLab HTTP "
+        f"(only {len(ticks)} ticks; need >= 8)"
+    )

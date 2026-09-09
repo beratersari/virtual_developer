@@ -3172,11 +3172,13 @@ class JobProcessor:
         # Claim the board column as soon as we accept the issue — before
         # acknowledgment / git template validation — so incomplete {params}
         # still leave the ticket In Progress for the operator to fix.
-        self._mark_jira_in_progress(issue_key)
+        # Off the event loop: a slow/dead Jira host used to freeze /api/meta
+        # (full-page dashboard "Loading…") for the HTTP timeout.
+        await asyncio.to_thread(self._mark_jira_in_progress, issue_key)
 
         try:
             logger.debug(f"Posting initial acknowledgment for {issue_key}")
-            self.reporter.post_initial_acknowledgment(state)
+            await asyncio.to_thread(self.reporter.post_initial_acknowledgment, state)
         except Exception as e:
             logger.warning(f"Failed to post initial acknowledgment for {issue_key}: {e}")
 
@@ -4148,7 +4150,8 @@ class JobProcessor:
         elif not state_name:
             state_name = (event.action or "").strip().lower() or "unknown"
 
-        self._record_merge_request_state(
+        await asyncio.to_thread(
+            self._record_merge_request_state,
             issue_key=event.issue_key,
             mr_url=event.mr_url,
             project_path=event.project_path,
@@ -4160,7 +4163,8 @@ class JobProcessor:
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
 
-        deleted = delete_clones_for_merge_request(
+        deleted = await asyncio.to_thread(
+            delete_clones_for_merge_request,
             mr_url=event.mr_url,
             project_path=event.project_path,
             mr_iid=event.mr_iid,
