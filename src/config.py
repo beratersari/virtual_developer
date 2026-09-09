@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -160,6 +161,17 @@ def upsert_dotenv_keys(
         "Updated .env keys: " + ", ".join(sorted(wanted))
     )
     return len(wanted)
+
+
+# Poller fallback only when neither .env nor runtime set a name.
+# Do not use this as the Settings field default (that made the UI look
+# like .env.example even after the operator edited TRIGGER_ASSIGNEE_NAMES).
+_FALLBACK_TRIGGER_ASSIGNEE_NAMES = [
+    "jira ai bot",
+    "jira-ai-bot",
+    "jiraai",
+    "devbot",
+]
 
 
 def _jira_bot_names(raw: Any) -> List[str]:
@@ -476,8 +488,9 @@ class Settings(BaseSettings):
     # Deprecated store. Mention tokens are derived from trigger_assignee_names.
     trigger_mentions: str = Field(default="")
     # Single Jira bot identity: assignee match and @mention / wiki mention.
+    # Empty default — never seed the Settings UI with .env.example names.
     trigger_assignee_names: str = Field(
-        default="jira ai bot,jira-ai-bot,jiraai,devbot",
+        default="",
         description=(
             "Comma-separated Jira names. Used for To Do assignee intake and "
             "for comments that @mention the bot"
@@ -511,7 +524,7 @@ class Settings(BaseSettings):
         if not names:
             names = _jira_bot_names(self.trigger_mentions)
         if not names:
-            return ["jira ai bot", "jira-ai-bot", "jiraai", "devbot"]
+            return list(_FALLBACK_TRIGGER_ASSIGNEE_NAMES)
         return [n.lower() for n in names]
 
     @property
@@ -673,9 +686,12 @@ class Settings(BaseSettings):
 _settings: Optional[Settings] = None
 _current_temp_dir: Optional[Path] = None
 
-# Dashboard runtime overrides (survive process restart; win over .env).
+# Dashboard runtime overrides (survive process restart).
 # Written by apply_settings_update; applied after Settings() loads env.
+# A cwd .env key wins when that file is newer than this field's last save
+# (legacy rows without a timestamp never hide a .env value).
 _RUNTIME_SETTINGS_NAME = "runtime_settings.json"
+_RUNTIME_UPDATED_KEY = "_updated"
 
 # Keys the dashboard may persist (no secrets).
 _RUNTIME_PERSIST_KEYS = frozenset(
@@ -733,8 +749,8 @@ def runtime_settings_path() -> Path:
     return (dest / _RUNTIME_SETTINGS_NAME).resolve()
 
 
-def load_runtime_settings() -> Dict[str, Any]:
-    """Load dashboard runtime overrides from disk (empty dict if missing)."""
+def _read_runtime_file() -> Dict[str, Any]:
+    """Raw runtime JSON (includes ``_updated``); empty dict if missing."""
     path = runtime_settings_path()
     if not path.is_file():
         return {}
@@ -743,10 +759,34 @@ def load_runtime_settings() -> Dict[str, Any]:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
-        return {k: v for k, v in data.items() if k in _RUNTIME_PERSIST_KEYS}
+        return data
     except Exception as e:
         logger.warning(f"Could not load runtime settings {path}: {e}")
         return {}
+
+
+def load_runtime_settings() -> Dict[str, Any]:
+    """Load dashboard runtime overrides from disk (empty dict if missing)."""
+    return {
+        k: v for k, v in _read_runtime_file().items() if k in _RUNTIME_PERSIST_KEYS
+    }
+
+
+def _runtime_updated_map(raw: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """Per-field unix times from the last dashboard save of that field."""
+    blob = raw if raw is not None else _read_runtime_file()
+    meta = blob.get(_RUNTIME_UPDATED_KEY)
+    if not isinstance(meta, dict):
+        return {}
+    out: Dict[str, float] = {}
+    for key, value in meta.items():
+        if key not in _RUNTIME_PERSIST_KEYS:
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def save_runtime_settings(updates: Dict[str, Any]) -> None:
@@ -754,16 +794,23 @@ def save_runtime_settings(updates: Dict[str, Any]) -> None:
     path = runtime_settings_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        current = load_runtime_settings()
+        raw = _read_runtime_file()
+        current = {k: v for k, v in raw.items() if k in _RUNTIME_PERSIST_KEYS}
+        updated = _runtime_updated_map(raw)
+        now = time.time()
         for key, value in updates.items():
             if key not in _RUNTIME_PERSIST_KEYS:
                 continue
             if value is None:
                 continue
             current[key] = value
+            updated[key] = now
+        payload: Dict[str, Any] = dict(current)
+        if updated:
+            payload[_RUNTIME_UPDATED_KEY] = updated
         tmp = path.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(current, f, indent=2, ensure_ascii=False)
+            json.dump(payload, f, indent=2, ensure_ascii=False)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
@@ -789,12 +836,71 @@ def _mirror_runtime_to_environ(data: Dict[str, Any]) -> None:
             os.environ[env_name] = str(value)
 
 
+def _first_dotenv_file() -> Optional[Path]:
+    """``.env`` next to the process cwd (start scripts and the frozen exe chdir here)."""
+    try:
+        path = (Path.cwd() / ".env").resolve()
+    except OSError:
+        return None
+    return path if path.is_file() else None
+
+
+def _dotenv_defined_keys(path: Path) -> set[str]:
+    keys: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return keys
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _runtime_keys_superseded_by_dotenv() -> set[str]:
+    """Field names to keep from cwd ``.env`` instead of runtime_settings.json.
+
+    Saving one Settings field must not stamp every other leftover runtime
+    value over a later ``.env`` edit. Compare each field's save time.
+    Legacy rows (no timestamp) never hide a key that ``.env`` defines.
+    """
+    env_path = _first_dotenv_file()
+    if env_path is None:
+        return set()
+    env_keys = _dotenv_defined_keys(env_path)
+    if not env_keys:
+        return set()
+    try:
+        env_mtime = env_path.stat().st_mtime
+    except OSError:
+        return set()
+    raw = _read_runtime_file()
+    if not raw:
+        return set()
+    updated = _runtime_updated_map(raw)
+    skip: set[str] = set()
+    for field, env_name in _RUNTIME_ENV_MIRROR.items():
+        if env_name not in env_keys:
+            continue
+        saved_at = updated.get(field)
+        if saved_at is None or env_mtime > saved_at:
+            skip.add(field)
+    return skip
+
+
 def apply_runtime_settings_to(settings_obj: "Settings") -> None:
     """Apply persisted dashboard overrides onto a Settings instance (after env load)."""
     data = load_runtime_settings()
     if not data:
         return
+    skip_keys = _runtime_keys_superseded_by_dotenv()
     for key, value in data.items():
+        if key in skip_keys:
+            continue
         if not hasattr(settings_obj, key):
             continue
         if key == "jira_board_id":
@@ -830,18 +936,25 @@ def apply_runtime_settings_to(settings_obj: "Settings") -> None:
             setattr(settings_obj, key, value)
         except Exception as e:
             logger.warning(f"Could not apply runtime setting {key}={value!r}: {e}")
-    _mirror_runtime_to_environ(data)
-    logger.info(
-        "Applied runtime settings overrides: "
-        + ", ".join(f"{k}={data[k]!r}" for k in sorted(data))
-    )
+    applied = {k: v for k, v in data.items() if k not in skip_keys}
+    _mirror_runtime_to_environ(applied)
+    if applied:
+        logger.info(
+            "Applied runtime settings overrides: "
+            + ", ".join(f"{k}={applied[k]!r}" for k in sorted(applied))
+        )
+    if skip_keys:
+        logger.info(
+            "Kept .env values (newer than that field's last Settings save): "
+            + ", ".join(sorted(skip_keys))
+        )
 
 
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
-        # Dashboard overrides win over .env so agent timeout changes stick.
+        # Per-field runtime overrides; a newer cwd .env key is kept as-is.
         apply_runtime_settings_to(_settings)
     return _settings
 

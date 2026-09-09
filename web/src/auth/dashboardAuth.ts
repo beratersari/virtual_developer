@@ -8,6 +8,14 @@ export function notifyUnauthorized() {
   unauthorizedHandler?.()
 }
 
+export function isLoginRequiredResponse(status: number, body: unknown): boolean {
+  if (status === 401) return true
+  if (status !== 403) return false
+  if (!body || typeof body !== 'object') return false
+  const rec = body as { code?: unknown; detail?: unknown }
+  return rec.code === 'login_required' || rec.detail === 'Dashboard login required'
+}
+
 export async function loginDashboard(username: string, password: string) {
   const res = await fetch('/api/login', {
     method: 'POST',
@@ -16,8 +24,9 @@ export async function loginDashboard(username: string, password: string) {
     body: JSON.stringify({ username, password }),
   })
   if (!res.ok) {
-    const err = new Error(res.status === 401 ? 'Wrong username or password' : 'Sign in failed')
-    ;(err as Error & { status: number }).status = res.status
+    const failed = res.status === 401 || res.status === 403
+    const err = new Error(failed ? 'Wrong username or password' : 'Sign in failed')
+    ;(err as Error & { status: number }).status = failed ? 401 : res.status
     throw err
   }
 }

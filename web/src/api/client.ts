@@ -8,6 +8,7 @@ import type {
   OpencodeSessionsPayload,
   JiraConnectionTestResult,
   JiraIssueTypesPayload,
+  Meta,
   ModelsPayload,
   PollPayload,
   ScheduleCreateBody,
@@ -82,7 +83,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(path, { ...init, headers, credentials: 'include', signal })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) {
-      if (res.status === 401) notifyUnauthorized()
+      const { isLoginRequiredResponse } = await import('../auth/dashboardAuth')
+      if (isLoginRequiredResponse(res.status, body)) notifyUnauthorized()
       throw new ApiError(
         formatApiError(
           (body as { detail?: unknown })?.detail,
@@ -149,7 +151,7 @@ export function dashboardWsUrl(): string {
 }
 
 export function fetchMeta() {
-  return request<{ version: string; server_time: string; app_name: string }>('/api/meta')
+  return request<Meta>('/api/meta')
 }
 
 export function fetchPoll() {
@@ -435,8 +437,9 @@ export async function downloadIssueReport(body: {
     }),
   })
   if (!res.ok) {
-    if (res.status === 401) notifyUnauthorized()
     const payload = await res.json().catch(() => ({}))
+    const { isLoginRequiredResponse } = await import('../auth/dashboardAuth')
+    if (isLoginRequiredResponse(res.status, payload)) notifyUnauthorized()
     throw new ApiError(
       formatApiError(
         (payload as { detail?: unknown })?.detail,

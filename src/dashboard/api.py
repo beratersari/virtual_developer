@@ -305,8 +305,8 @@ def create_dashboard_app(
         }
 
     @app.get("/api/meta")
-    async def meta() -> dict:
-        return build_meta().model_dump()
+    async def meta(request: Request) -> dict:
+        return build_meta(request).model_dump()
 
     @app.post("/api/login")
     async def login(request: Request) -> Response:
@@ -322,8 +322,8 @@ def create_dashboard_app(
         password = str(data.get("password") or "")
         if not credentials_ok(user, password):
             return Response(
-                content=b'{"detail":"Wrong username or password"}',
-                status_code=401,
+                content=b'{"detail":"Wrong username or password","code":"login_failed"}',
+                status_code=403,
                 media_type="application/json",
             )
         resp = Response(content=b'{"ok":true}', media_type="application/json")
