@@ -1,13 +1,18 @@
-# Yaver 0.5.2
+# Yaver 0.5.3
 
-Standalone exe zips ship **one** OpenCode kit: `opencoderman/agents`
+Settings follows a newer `.env` instead of leftover dashboard saves.
+Edge no longer treats the first dashboard probe as a Windows/HTTP login
+popup; use the in-page Ops console form with `DASHBOARD_USERNAME` and
+`DASHBOARD_PASSWORD`.
+
+Standalone exe zips still ship **one** OpenCode kit: `opencoderman/agents`
 (**derman-build** and **derman-plan** only — not gitlab-reviewer) and
 `opencoderman/skills`. There is no second `opencode_configs/` tree.
 Windows zips include `install-opencode-agents.bat`; Linux zips include
 `install-opencode-agents.sh`. That script copies only those two agents
 plus skills into the OpenCode home.
 
-Plan-refactor now reads every Jira comment page, so a late `@bot`
+Plan-refactor reads every Jira comment page, so a late `@bot`
 mention is not missed on busy tickets.
 
 The exact OpenCoderman submodule commit is in `opencoderman.pin` and
@@ -65,6 +70,8 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- Settings keeps a newer `.env` key (including `TRIGGER_ASSIGNEE_NAMES`) unless you later save that same field
+- Dashboard login is the in-page form; Edge does not get a native HTTP/Windows popup on first load
 - Jira webhook intake removed; board poller only
 - One Jira bot name; one GitLab trigger username
 - Settings tabs: Jira, GitLab, Projects, Agent, Runtime
