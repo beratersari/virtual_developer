@@ -84,6 +84,26 @@ def test_logout_clears_cookie_and_locks_api(monkeypatch):
     assert client.get("/api/meta").json()["authenticated"] is False
 
 
+def test_meta_and_health_handlers_are_async():
+    """Full-page Loading… waits on these; they must not sit on the thread pool."""
+    import asyncio
+    import inspect
+
+    app = create_dashboard_app()
+    found = {path: False for path in ("/api/meta", "/api/health")}
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if path not in found:
+            continue
+        if "GET" not in getattr(route, "methods", set()):
+            continue
+        assert inspect.iscoroutinefunction(route.endpoint) or asyncio.iscoroutinefunction(
+            route.endpoint
+        )
+        found[path] = True
+    assert all(found.values()), found
+
+
 def test_logout_handler_is_async():
     """Sign out must not wait for a sync thread-pool worker."""
     import asyncio

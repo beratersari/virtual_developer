@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from src.azure.keys import resolve_pr_issue_key
+from src.azure.log import azure_info, clip
 from src.azure.mentions import (
+    mention_scan,
     normalize_mention,
     note_mentions_bot,
     parse_mention_list,
@@ -23,7 +25,6 @@ from src.azure.mentions import (
 )
 from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.webhook import WebhookDecision, validate_webhook_token
-from src.logger import logger
 
 
 AZURE_COMMENT_EVENTS = frozenset(
@@ -439,6 +440,23 @@ def _jira_project_keys(explicit: Optional[List[str]]) -> List[str]:
         return []
 
 
+def _token_header_name(headers: Dict[str, str]) -> str:
+    for key in (
+        "x-azure-token",
+        "x-tfs-token",
+        "x-vss-token",
+        "x-webhook-token",
+    ):
+        if _s(headers.get(key)):
+            return key
+    auth = _s(headers.get("authorization"))
+    if auth.lower().startswith("bearer "):
+        return "authorization:bearer"
+    if auth.lower().startswith("basic "):
+        return "authorization:basic"
+    return "none"
+
+
 def _auth_decision(
     *,
     enabled: bool,
@@ -447,15 +465,23 @@ def _auth_decision(
     disabled_reason: str,
 ) -> Optional[WebhookDecision]:
     if not enabled:
+        azure_info(f"webhook reject reason={disabled_reason!r}")
         return WebhookDecision(False, disabled_reason)
     want = (secret or "").strip()
     if not want:
+        azure_info("webhook reject reason='webhook secret required' (AZURE_WEBHOOK_SECRET empty)")
         return WebhookDecision(
             False, "webhook secret required", http_status=401
         )
     token = _provided_token(headers)
+    source = _token_header_name(headers)
     if not validate_webhook_token(token, secret):
+        azure_info(
+            f"webhook reject reason='invalid webhook token' "
+            f"token_header={source} token_present={bool(token)}"
+        )
         return WebhookDecision(False, "invalid webhook token", http_status=401)
+    azure_info(f"webhook auth ok token_header={source}")
     return None
 
 
@@ -484,6 +510,7 @@ def decide_azure_comment_webhook(
         return denied
 
     if event_name and event_name not in AZURE_COMMENT_EVENTS:
+        azure_info(f"comment reject reason='ignored event' event={event_name!r}")
         return WebhookDecision(False, f"ignored event {event_name!r}")
 
     resource = _as_dict(data.get("resource"))
@@ -497,15 +524,30 @@ def decide_azure_comment_webhook(
         comment = resource
     note = _s(comment.get("content") or comment.get("comments"))
     if not note:
+        azure_info(f"comment reject reason='empty comment' event={event_name!r}")
         return WebhookDecision(False, "empty comment")
 
     if note.lstrip().startswith(_REPLY_PREFIX):
+        azure_info(
+            f"comment reject reason='ignored bot reply' event={event_name!r} "
+            f"preview={clip(note)!r}"
+        )
         return WebhookDecision(False, "ignored bot reply")
 
     mentions = parse_mention_list(bot_mentions)
+    scan = mention_scan(note, mentions)
     if not mentions:
+        azure_info(
+            "comment reject reason='no AZURE_BOT_MENTIONS configured' "
+            f"extracted={scan.get('extracted')}"
+        )
         return WebhookDecision(False, "no AZURE_BOT_MENTIONS configured")
     if not note_mentions_bot(note, mentions):
+        azure_info(
+            f"comment reject reason='bot not mentioned' event={event_name!r} "
+            f"configured={scan.get('configured')} extracted={scan.get('extracted')} "
+            f"preview={clip(note)!r}"
+        )
         return WebhookDecision(False, "bot not mentioned")
 
     author = _as_dict(comment.get("author"))
@@ -516,11 +558,19 @@ def decide_azure_comment_webhook(
     )
     bots = set(parse_mention_list(bot_usernames) or mentions)
     if author_unique and author_unique in bots:
+        azure_info(
+            f"comment reject reason='ignored comment from bot user' "
+            f"author_unique={author_unique!r}"
+        )
         return WebhookDecision(False, "ignored comment from bot user")
     author_display = normalize_mention(
         _s(author.get("displayName") or author.get("display_name"))
     )
     if author_display and author_display in bots:
+        azure_info(
+            f"comment reject reason='ignored comment from bot user' "
+            f"author_display={author_display!r}"
+        )
         return WebhookDecision(False, "ignored comment from bot user")
 
     repo = _as_dict(pr.get("repository") or resource.get("repository"))
@@ -530,6 +580,7 @@ def decide_azure_comment_webhook(
     except (TypeError, ValueError):
         pr_id = 0
     if pr_id <= 0:
+        azure_info("comment reject reason='missing pull request id'")
         return WebhookDecision(False, "missing pull request id")
 
     repo_url = _repo_http_url(repo)
@@ -553,6 +604,10 @@ def decide_azure_comment_webhook(
         _s(pr.get("targetRefName") or pr.get("target_ref_name"))
     )
     if not repo_url or not source or not target:
+        azure_info(
+            "comment reject reason='pull request missing repository or source/target branch' "
+            f"repo_url={repo_url!r} source={source!r} target={target!r}"
+        )
         return WebhookDecision(
             False, "pull request missing repository or source/target branch"
         )
@@ -618,10 +673,22 @@ def decide_azure_comment_webhook(
         webhook_event=event_name or "ms.vss-code.git-pullrequest-comment-event",
         raw=data,
     )
-    logger.info(
-        f"Azure PR comment accepted: {event.issue_key} "
-        f"{event.project_path}!{event.pr_id} comment={event.comment_id} "
-        f"title={pr_title[:80]!r}"
+    try:
+        from src.log_context import set_issue_key
+
+        set_issue_key(event.issue_key)
+    except Exception:
+        pass
+    azure_info(
+        f"comment accepted issue={event.issue_key} "
+        f"pr={event.project_path}!{event.pr_id} comment={event.comment_id} "
+        f"thread={event.thread_id or '-'} host={event.host} "
+        f"collection={event.collection_url} "
+        f"repo={event.repository_name} repo_id={event.repository_id} "
+        f"source={event.source_branch} target={event.target_branch} "
+        f"author={(event.author_username or event.author_name)!r} "
+        f"title={pr_title[:80]!r} prompt_chars={len(prompt)} "
+        f"preview={clip(prompt)!r}"
     )
     return WebhookDecision(True, "accepted", event=event)
 
@@ -649,6 +716,7 @@ def decide_azure_pr_webhook(
         return denied
 
     if event_name and event_name not in AZURE_PR_EVENTS:
+        azure_info(f"lifecycle reject reason='ignored event' event={event_name!r}")
         return WebhookDecision(False, f"ignored event {event_name!r}")
 
     resource = _as_dict(data.get("resource"))
@@ -662,6 +730,7 @@ def decide_azure_pr_webhook(
     except (TypeError, ValueError):
         pr_id = 0
     if pr_id <= 0:
+        azure_info(f"lifecycle reject reason='missing pull request id' event={event_name!r}")
         return WebhookDecision(False, "missing pull request id")
 
     status = _s(pr.get("status") or resource.get("status")).lower()
@@ -738,8 +807,12 @@ def decide_azure_pr_webhook(
         webhook_event=event_name or "git.pullrequest.updated",
         raw=data,
     )
-    logger.info(
-        f"Azure PR lifecycle: {event.issue_key} {event.project_path}!{event.pr_id} "
-        f"action={event.action or '-'} state={event.state or '-'}"
+    azure_info(
+        f"lifecycle accepted issue={event.issue_key} "
+        f"pr={event.project_path}!{event.pr_id} "
+        f"action={event.action or '-'} state={event.state or '-'} "
+        f"host={event.host} collection={event.collection_url} "
+        f"source={event.source_branch} target={event.target_branch} "
+        f"url={event.pr_url or '-'}"
     )
     return WebhookDecision(True, "accepted", event=event)

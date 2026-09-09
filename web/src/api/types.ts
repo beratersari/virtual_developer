@@ -253,6 +253,10 @@ export type ScheduleItem = {
   project_key?: string
   label?: string
   source?: string
+  mr_iid?: number
+  gitlab_host?: string
+  gitlab_project?: string
+  merge_request_url?: string
   created_at?: string | null
   updated_at?: string | null
   dispatched_at?: string | null
@@ -297,6 +301,33 @@ export type ScheduleExistingBody = {
   target_branch?: string
   mode?: 'plan' | 'build' | string
   source_branch_mode?: 'custom' | 'issue_key'
+}
+
+export type ScheduleMrPreview = {
+  ok: boolean
+  repository_url: string
+  gitlab_host: string
+  gitlab_project: string
+  mr_iid: number
+  title: string
+  description?: string
+  source_branch: string
+  target_branch: string
+  merge_request_url?: string
+  issue_key?: string
+  mr_state?: string
+  message?: string
+  error?: string
+}
+
+export type ScheduleMrBody = {
+  repository_url: string
+  mr_iid: number
+  prompt: string
+  scheduled_at: string
+  dispatch_now?: boolean
+  model?: string
+  backend?: string
 }
 
 export type ScheduleCreateBody = {

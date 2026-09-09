@@ -168,6 +168,23 @@ def test_issue_log_ring_persists_job_file(tmp_path):
     assert any("hello" in (r.get("message") or "") for r in rows)
 
 
+def test_issue_log_ring_attaches_pre_job_issue_lines(tmp_path):
+    from src.dashboard.issue_logs import IssueLogRing
+
+    ring = IssueLogRing(maxlen=50, jobs_dir=tmp_path, persist=True)
+    ring.append("[azure] comment accepted issue=AZ-1", issue_key="AZ-1")
+    ring.append("[azure] enqueue stored queue_id=q1", issue_key="AZ-1")
+    ring.append("[azure] other issue", issue_key="AZ-2")
+    n = ring.attach_issue_lines_to_job("AZ-1", "job_az1")
+    assert n == 2
+    rows = ring.for_job("job_az1")
+    msgs = [r.get("message") or "" for r in rows]
+    assert any("comment accepted" in m for m in msgs)
+    assert any("enqueue stored" in m for m in msgs)
+    assert not any("other issue" in m for m in msgs)
+    assert ring.attach_issue_lines_to_job("AZ-1", "job_az2") == 0
+
+
 def test_poll_snapshot_listener_and_idle():
     store = PollSnapshotStore()
     seen = []

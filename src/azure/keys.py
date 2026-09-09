@@ -51,8 +51,21 @@ def resolve_pr_issue_key(
     if not found and (pr_description or "").strip():
         found = jira_key_from_closes_line(pr_description, project_keys)
     if found:
+        from src.azure.log import azure_info
+
+        azure_info(
+            f"issue-key from PR title/closes {found} "
+            f"pr={project_path}!{pr_id}"
+        )
         return found
-    return azure_issue_key(project_path or "project", pr_id)
+    key = azure_issue_key(project_path or "project", pr_id)
+    from src.azure.log import azure_info
+
+    azure_info(
+        f"issue-key fallback {key} pr={project_path}!{pr_id} "
+        f"title={ (pr_title or '')[:80]!r}"
+    )
+    return key
 
 
 __all__ = [

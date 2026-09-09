@@ -72,13 +72,19 @@ def last_turn_is_live_question(assessment: Optional[Dict[str, Any]]) -> bool:
 
     A compact recap that quotes "Shall I…?" is not live. Mid-turn
     ``finish=unknown`` / ``tool-calls`` is still working — do not leave
-    compact-wait just because an earlier ask is still in history.
+    compact-wait just because an earlier *text* ask is still in history.
+
+    A pending/running ``question`` tool on this last turn is a live wait
+    even when finish is ``tool-calls`` (OpenCode's usual shape). Auto-resume
+    cannot answer a human; busy compact-wait must leave for the nudge.
     """
     if not assessment_still_asking(assessment):
         return False
     assert isinstance(assessment, dict)
     if assessment.get("last_is_summary"):
         return False
+    if assessment.get("question_tool"):
+        return True
     finish = str(assessment.get("last_finish") or "").strip().lower()
     if finish in _UNFINISHED_FINISH:
         return False

@@ -616,6 +616,11 @@ class Settings(BaseSettings):
             return ""
         if h in mapping:
             return mapping[h]
+        # Settings used to persist hostname without :port. Same host.
+        if ":" in h:
+            name = h.rsplit(":", 1)[0]
+            if name in mapping:
+                return mapping[name]
         return ""
 
     def gitlab_has_any_pat(self) -> bool:
@@ -692,6 +697,11 @@ class Settings(BaseSettings):
             return ""
         if h in mapping:
             return mapping[h]
+        # Settings used to persist hostname without :port. Same host.
+        if ":" in h:
+            name = h.rsplit(":", 1)[0]
+            if name in mapping:
+                return mapping[name]
         return ""
 
     def azure_has_any_pat(self) -> bool:

@@ -113,6 +113,18 @@ class ScheduleCreateRequest(BaseModel):
     backend: str = Field(default="", max_length=40)
 
 
+class ScheduleMrRequest(BaseModel):
+    """Body for POST /api/schedules/mr — follow-up prompt on an existing GitLab MR."""
+
+    repository_url: str = Field(..., min_length=1, max_length=2000)
+    mr_iid: int = Field(..., ge=1, le=2_000_000)
+    prompt: str = Field(..., min_length=1, max_length=100_000)
+    scheduled_at: str
+    dispatch_now: bool = False
+    model: str = Field(default="", max_length=200)
+    backend: str = Field(default="", max_length=40)
+
+
 class ScheduleExistingRequest(BaseModel):
     """Body for POST /api/schedules/from-issue — schedule an existing Jira issue."""
 
@@ -147,7 +159,11 @@ class ScheduleItem(BaseModel):
     issue_key: str = ""
     project_key: str = ""
     label: str = "SCHEDULED_AI_JOB"
-    source: str = "new"  # new | existing
+    source: str = "new"  # new | existing | gitlab_mr
+    mr_iid: int = 0
+    gitlab_host: str = ""
+    gitlab_project: str = ""
+    merge_request_url: str = ""
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     dispatched_at: Optional[str] = None

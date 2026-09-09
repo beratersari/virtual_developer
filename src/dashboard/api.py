@@ -28,6 +28,7 @@ from src.dashboard.schemas import (
     JiraConnectionTestRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
+    ScheduleMrRequest,
     SettingsUpdate,
     TempFolderDeleteRequest,
 )
@@ -60,7 +61,9 @@ from src.scheduler.service import (
     list_project_issue_types,
     list_scheduled_jobs,
     preview_existing_issue,
+    preview_mr_followup,
     schedule_existing_issue,
+    schedule_mr_followup,
 )
 from src.state.schedule_store import schedule_store
 from src.state.job_store import job_store
@@ -316,6 +319,7 @@ def create_dashboard_app(
         """
         from fastapi.responses import JSONResponse
 
+        from src.azure.log import azure_error, azure_info
         from src.azure.webhook import (
             AZURE_PR_EVENTS,
             decide_azure_comment_webhook,
@@ -326,6 +330,7 @@ def create_dashboard_app(
         try:
             payload = await request.json()
         except Exception:
+            azure_error("http webhook reject invalid json")
             return JSONResponse(
                 {"ok": False, "reason": "invalid json"}, status_code=400
             )
@@ -342,6 +347,11 @@ def create_dashboard_app(
         enabled = bool(getattr(settings, "azure_webhook_enabled", False))
         secret = str(getattr(settings, "azure_webhook_secret", "") or "")
         is_pr = event_name in AZURE_PR_EVENTS
+        azure_info(
+            f"http webhook received event={event_name!r} kind="
+            f"{'pull_request' if is_pr else 'comment'} "
+            f"enabled={enabled} secret_configured={bool(secret)}"
+        )
         if is_pr:
             decision = decide_azure_pr_webhook(
                 payload,
@@ -360,17 +370,26 @@ def create_dashboard_app(
             )
         if not decision.accepted:
             status = int(decision.http_status or 200)
+            azure_info(
+                f"http webhook rejected reason={decision.reason!r} http={status}"
+            )
             return JSONResponse(
                 {"ok": False, "reason": decision.reason},
                 status_code=status,
             )
         proc = app.state.processor
         if proc is None or decision.event is None:
+            azure_error("http webhook accepted but processor not bound")
             raise HTTPException(
                 status_code=503, detail="processor not bound; start the daemon"
             )
         if is_pr:
             result = await proc.handle_azure_pr_lifecycle(decision.event)
+            azure_info(
+                f"http webhook lifecycle done issue="
+                f"{getattr(decision.event, 'issue_key', '')} "
+                f"reason={result.get('reason')} deleted={result.get('deleted') or []}"
+            )
             return {
                 "ok": True,
                 "kind": "pull_request",
@@ -382,6 +401,11 @@ def create_dashboard_app(
                 "server_time": build_meta().server_time,
             }
         result = await proc.enqueue_azure_comment(decision.event)
+        azure_info(
+            f"http webhook comment queued issue={decision.event.issue_key} "
+            f"queue_id={result.get('queue_id')} status={result.get('status')} "
+            f"started={result.get('started')} queued={result.get('queued')}"
+        )
         return {
             "ok": True,
             "issue_key": decision.event.issue_key,
@@ -637,6 +661,53 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=400,
                 detail=result.get("error") or "Failed to schedule existing issue",
+            )
+        result = _maybe_dispatch_now(result, body.dispatch_now)
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "message": result.get("message"),
+            "dispatched": bool(result.get("dispatched")),
+            "dispatch_error": result.get("dispatch_error"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/schedules/mr-preview")
+    def schedules_mr_preview(
+        repository_url: str = Query(..., description="GitLab project or MR URL"),
+        mr_iid: int = Query(default=0, ge=0, description="Merge request iid"),
+    ) -> dict:
+        """Load an existing GitLab MR (title, branches) before scheduling."""
+        result = preview_mr_followup(repository_url, mr_iid)
+        result["server_time"] = build_meta().server_time
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "MR preview failed",
+            )
+        return result
+
+    @app.post("/api/schedules/mr")
+    async def schedules_mr(body: ScheduleMrRequest) -> dict:
+        """Schedule a follow-up prompt on an existing GitLab merge request.
+
+        At fire time the prompt is posted on the MR, then the usual GitLab
+        MR job runs and posts the agent answer.
+        """
+        result = schedule_mr_followup(
+            repository_url=body.repository_url,
+            mr_iid=body.mr_iid,
+            prompt=body.prompt,
+            scheduled_at=body.scheduled_at,
+            model=body.model or "",
+            backend=body.backend or "",
+            store=schedule_store,
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Failed to schedule MR follow-up",
             )
         result = _maybe_dispatch_now(result, body.dispatch_now)
         return {
@@ -1114,10 +1185,13 @@ def create_dashboard_app(
 
         def _on_snapshot(_snap: dict) -> None:
             try:
-                data = _live_payload()
-                asyncio.run_coroutine_threadsafe(_broadcast(data), loop)
+                asyncio.run_coroutine_threadsafe(_push_live(), loop)
             except Exception:
                 pass
+
+        async def _push_live() -> None:
+            data = await asyncio.to_thread(_live_payload)
+            await _broadcast(data)
 
         unsub = poll_snapshot_store.subscribe(_on_snapshot)
         try:

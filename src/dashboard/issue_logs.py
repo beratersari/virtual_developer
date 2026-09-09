@@ -78,6 +78,40 @@ class IssueLogRing:
         if self._persist and jid:
             self._append_job_file(jid, ts, message, issue_key=ikey)
 
+    def attach_issue_lines_to_job(self, issue_key: str, job_id: str) -> int:
+        """Copy recent issue lines that have no job_id onto this job.
+
+        Webhook / enqueue log before ``_begin_workflow_run`` sets job_id.
+        Without this they never appear on Job → Logs.
+        """
+        key = (issue_key or "").strip()
+        jid = (job_id or "").strip()
+        if not key or not jid:
+            return 0
+        key_u = key.upper()
+        moved = 0
+        with self._lock:
+            updated: Deque[Tuple[str, str, Optional[str], Optional[str]]] = deque(
+                maxlen=self._lines.maxlen
+            )
+            pending: List[Tuple[str, str]] = []
+            for ts, msg, line_jid, ikey in self._lines:
+                if (
+                    not line_jid
+                    and ikey
+                    and ikey.upper() == key_u
+                ):
+                    updated.append((ts, msg, jid, ikey))
+                    pending.append((ts, msg))
+                    moved += 1
+                else:
+                    updated.append((ts, msg, line_jid, ikey))
+            self._lines = updated
+        for ts, msg in pending:
+            if self._persist:
+                self._append_job_file(jid, ts, msg, issue_key=key)
+        return moved
+
     def _append_job_file(
         self,
         job_id: str,

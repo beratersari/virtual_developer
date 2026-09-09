@@ -394,7 +394,12 @@ def build_models_response(*, refresh: bool = False, backend: str = "") -> Models
 
 
 def _normalize_gitlab_host(raw: Any) -> str:
-    """Lowercase host; strip scheme/path if the operator pasted a URL."""
+    """Lowercase host[:port]; strip scheme/path if the operator pasted a URL.
+
+    ``urlparse().hostname`` drops the port. Azure DevOps Server and on-prem
+    GitLab are often ``host:8080`` / ``host:8929``; clone lookup is exact
+    ``hostname:port``, so a saved ``tfs.corp`` never matches ``tfs.corp:8080``.
+    """
     host = str(raw or "").strip().lower()
     if not host:
         return ""
@@ -403,7 +408,16 @@ def _normalize_gitlab_host(raw: Any) -> str:
             from urllib.parse import urlparse
 
             parsed = urlparse(host if "://" in host else f"https://{host}")
-            host = (parsed.hostname or host).lower()
+            name = (parsed.hostname or "").lower()
+            if not name:
+                return host.split("/")[0]
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            if port and port not in (80, 443):
+                return f"{name}:{port}"
+            return name
         except Exception:
             host = host.split("/")[0]
     return host.strip()

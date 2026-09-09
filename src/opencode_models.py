@@ -10,6 +10,7 @@ Sources (merged, de-duplicated):
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -195,12 +196,16 @@ def models_from_opencode_config(
 
 def models_from_cli(
     *,
-    timeout: float = 12.0,
+    timeout: float = 4.0,
     opencode_cli: Optional[str] = None,
 ) -> Tuple[List[ModelInfo], Optional[str]]:
     """Run ``opencode models`` and parse plain id lines (or verbose JSON blocks)."""
     cli = (opencode_cli or settings.opencode_cli or "opencode").strip() or "opencode"
     cmd = cli.split() + ["models"]
+    env = os.environ.copy()
+    # models.dev fetch hangs the dashboard "Loading models…" on offline / flaky nets
+    env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
     try:
         proc = subprocess.run(
             cmd,
@@ -208,6 +213,7 @@ def models_from_cli(
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except FileNotFoundError:
         return [], f"OpenCode CLI not found: {cli}"
@@ -314,7 +320,7 @@ def _merge_models(*groups: Sequence[ModelInfo]) -> List[ModelInfo]:
 def list_available_models(
     *,
     refresh: bool = False,
-    timeout: float = 12.0,
+    timeout: float = 4.0,
 ) -> Tuple[List[ModelInfo], Optional[str], Optional[str], Optional[str]]:
     """Return (models, error, config_path, config_default_model).
 

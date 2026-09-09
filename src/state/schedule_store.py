@@ -77,12 +77,16 @@ class ScheduleStore:
         source: str = "new",
         model: str = "",
         backend: str = "",
+        mr_iid: int = 0,
+        gitlab_host: str = "",
+        gitlab_project: str = "",
+        merge_request_url: str = "",
     ) -> Dict[str, Any]:
         """Persist a schedule after the Jira issue is known (created or existing)."""
         schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
         now = _now_iso()
         src = (source or "new").strip().lower()
-        if src not in ("new", "existing"):
+        if src not in ("new", "existing", "gitlab_mr"):
             src = "new"
         rec: Dict[str, Any] = {
             "schedule_id": schedule_id,
@@ -101,8 +105,13 @@ class ScheduleStore:
             "issue_description": issue_description or "",
             "project_key": project_key or "",
             "label": SCHEDULE_LABEL,
-            # new = we created the Jira issue; existing = schedule an issue that already exists
+            # new = we created the Jira issue; existing = existing Jira;
+            # gitlab_mr = follow-up prompt on an existing merge request
             "source": src,
+            "mr_iid": int(mr_iid or 0),
+            "gitlab_host": (gitlab_host or "").strip(),
+            "gitlab_project": (gitlab_project or "").strip(),
+            "merge_request_url": (merge_request_url or "").strip(),
             "created_at": now,
             "updated_at": now,
             "dispatched_at": None,

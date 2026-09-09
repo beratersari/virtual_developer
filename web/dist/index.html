@@ -5,10 +5,80 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Yaver</title>
-    <script type="module" crossorigin src="/assets/index-BMtD_5ol.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Cru5IFNd.css">
+    <style>
+      html, body { background: #0b1020; color: #f4f6ff; margin: 0; min-height: 100%; }
+      #root { min-height: 100vh; }
+      .vd-boot {
+        min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        padding: 2.5rem 1rem; box-sizing: border-box; position: relative; overflow: hidden;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      .vd-boot::before {
+        content: ""; position: absolute; inset: 0; pointer-events: none;
+        background:
+          radial-gradient(900px 480px at 50% -10%, rgba(255,122,69,0.18), transparent 55%),
+          radial-gradient(700px 420px at 100% 100%, rgba(91,157,255,0.10), transparent 50%);
+      }
+      .vd-boot-card {
+        position: relative; width: 100%; max-width: 400px; overflow: hidden;
+        border: 1px solid #2c3a5e; border-radius: 16px;
+        background: rgba(22, 32, 56, 0.9);
+        box-shadow: 0 24px 80px rgba(0,0,0,0.45);
+      }
+      .vd-boot-bar { height: 4px; background: #ff7a45; }
+      .vd-boot-body { padding: 1.75rem 2rem 2rem; }
+      .vd-boot-mark {
+        width: 36px; height: 36px; border-radius: 8px; display: inline-flex;
+        align-items: center; justify-content: center; font-weight: 700; font-size: 14px;
+        color: #ff7a45; background: rgba(255,122,69,0.16);
+      }
+      .vd-boot-kicker {
+        font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase;
+        color: #7b88a8;
+      }
+      .vd-boot-title { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+      .vd-boot-blurb { margin: 8px 0 0; font-size: 14px; color: #b4bfd9; }
+      .vd-boot-row {
+        margin-top: 1.5rem; display: flex; align-items: center; gap: 12px;
+        border: 1px solid #2c3a5e; border-radius: 12px; padding: 12px 14px;
+        background: rgba(17, 24, 44, 0.7);
+      }
+      .vd-boot-spin {
+        width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+        border: 2px solid #ff7a45; border-right-color: transparent;
+        animation: vd-boot-spin 0.65s linear infinite;
+      }
+      .vd-boot-status { font-size: 14px; font-weight: 500; }
+      .vd-boot-hint { font-size: 12px; color: #7b88a8; margin-top: 2px; }
+      @keyframes vd-boot-spin { to { transform: rotate(360deg); } }
+    </style>
+    <script type="module" crossorigin src="/assets/index-VvVT0bxf.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-39oDll73.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="vd-boot">
+        <div class="vd-boot-card">
+          <div class="vd-boot-bar"></div>
+          <div class="vd-boot-body">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="vd-boot-mark">Y</span>
+              <div>
+                <div class="vd-boot-kicker">Yaver</div>
+                <div class="vd-boot-title">Ops console</div>
+              </div>
+            </div>
+            <p class="vd-boot-blurb">Checking this session.</p>
+            <div class="vd-boot-row">
+              <span class="vd-boot-spin" aria-hidden="true"></span>
+              <div>
+                <div class="vd-boot-status">Opening console</div>
+                <div class="vd-boot-hint">One moment</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

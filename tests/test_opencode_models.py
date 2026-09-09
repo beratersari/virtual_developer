@@ -67,6 +67,22 @@ def test_models_from_cli_parses_lines():
     assert [m.id for m in items] == ["opencode/a", "opencode/b"]
 
 
+def test_models_from_cli_disables_models_dev_fetch():
+    """Dashboard model picker must not hang on models.dev (offline / slow net)."""
+    mock = MagicMock()
+    mock.returncode = 0
+    mock.stdout = "opencode/a\n"
+    mock.stderr = ""
+    with patch("src.opencode_models.subprocess.run", return_value=mock) as run:
+        items, err = models_from_cli(timeout=4.0)
+    assert err is None
+    assert [m.id for m in items] == ["opencode/a"]
+    kwargs = run.call_args.kwargs
+    assert kwargs.get("timeout") == 4.0
+    env = kwargs.get("env") or {}
+    assert env.get("OPENCODE_DISABLE_MODELS_FETCH") == "1"
+
+
 def test_list_available_models_merges_sources(tmp_path, monkeypatch):
     clear_models_cache()
     cfg = {

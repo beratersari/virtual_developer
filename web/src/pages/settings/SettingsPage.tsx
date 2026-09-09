@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   fetchSettings,
   patchSettings,
@@ -13,6 +13,7 @@ import type {
   ProjectRepository,
   SettingsPayload,
 } from '../../api/types'
+import { useLive } from '../../app/live'
 import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
@@ -81,8 +82,13 @@ function fromSettings(s: SettingsPayload): Draft {
 }
 
 export function SettingsPage() {
-  const [settings, setSettings] = useState<SettingsPayload | null>(null)
-  const [draft, setDraft] = useState<Draft | null>(null)
+  const live = useLive()
+  const [settings, setSettings] = useState<SettingsPayload | null>(
+    () => live.settings,
+  )
+  const [draft, setDraft] = useState<Draft | null>(() =>
+    live.settings ? fromSettings(live.settings) : null,
+  )
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -102,6 +108,8 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Draft>>(new Set())
+  const dirtyRef = useRef(false)
+  dirtyRef.current = dirty
 
   const touch = (key: keyof Draft) => {
     setDirty(true)
@@ -118,10 +126,16 @@ export function SettingsPage() {
   }
 
   useEffect(() => {
+    if (settings || !live.settings) return
+    setSettings(live.settings)
+    setDraft(fromSettings(live.settings))
+  }, [live.settings, settings])
+
+  useEffect(() => {
     void fetchSettings()
       .then((s) => {
         setSettings(s)
-        setDraft(fromSettings(s))
+        if (!dirtyRef.current) setDraft(fromSettings(s))
       })
       .catch((e: Error) => setError(e.message))
   }, [])

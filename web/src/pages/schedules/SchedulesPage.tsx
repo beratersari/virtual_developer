@@ -9,12 +9,15 @@ import {
   fetchSettings,
   patchSettings,
   previewScheduleIssue,
+  previewScheduleMr,
   scheduleExistingIssue,
+  scheduleMrFollowup,
 } from '../../api/client'
 import type {
   JiraIssueType,
   ProjectRepository,
   ScheduleItem,
+  ScheduleMrPreview,
   SchedulePreview,
 } from '../../api/types'
 import { useLive } from '../../app/live'
@@ -53,7 +56,7 @@ export function SchedulesPage() {
   const [cancelId, setCancelId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [mode, setMode] = useState<'existing' | 'new'>('existing')
+  const [mode, setMode] = useState<'existing' | 'new' | 'mr'>('existing')
   const lastGenReload = useRef(0)
 
   const reload = async () => {
@@ -83,10 +86,9 @@ export function SchedulesPage() {
         title="Scheduled"
         description={
           <>
-            Queue a run for a chosen time. If an existing issue has no valid{' '}
-            <span className="font-mono">{'{params}'}</span> block, pick the
-            project and branches here — same as a new issue — and we write
-            them back to Jira on Schedule / Run now.
+            Queue a run for a chosen time. Existing MR posts your prompt on
+            the merge request when it fires, then posts the agent answer when
+            OpenCode finishes.
           </>
         }
       />
@@ -109,8 +111,23 @@ export function SchedulesPage() {
         >
           New issue
         </button>
+        <button
+          type="button"
+          className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
+            mode === 'mr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
+          }`}
+          onClick={() => setMode('mr')}
+        >
+          Existing MR
+        </button>
       </div>
-      {mode === 'existing' ? <Existing onDone={() => void reload()} /> : <CreateNew onDone={() => void reload()} />}
+      {mode === 'existing' ? (
+        <Existing onDone={() => void reload()} />
+      ) : mode === 'mr' ? (
+        <ExistingMr onDone={() => void reload()} />
+      ) : (
+        <CreateNew onDone={() => void reload()} />
+      )}
       {error && <p className="text-sm text-danger-text">{error}</p>}
       <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
         {rows.map((s) => (
@@ -122,7 +139,23 @@ export function SchedulesPage() {
             ) : (
               '—'
             )}{' '}
-            {s.title} · {s.mode}
+            {s.source === 'gitlab_mr' && s.mr_iid ? (
+              <>
+                {s.merge_request_url ? (
+                  <a
+                    className="font-mono text-accent-text hover:underline"
+                    href={s.merge_request_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    !{s.mr_iid}
+                  </a>
+                ) : (
+                  <span className="font-mono">!{s.mr_iid}</span>
+                )}{' '}
+              </>
+            ) : null}
+            {s.title} · {s.source === 'gitlab_mr' ? 'mr follow-up' : s.mode}
             {s.backend ? (
               <>
                 {' '}
@@ -186,7 +219,11 @@ export function SchedulesPage() {
       <ConfirmDialog
         open={Boolean(cancelId)}
         title="Cancel this schedule?"
-        body="Does not delete the Jira issue."
+        body={
+          rows.find((s) => s.schedule_id === cancelId)?.source === 'gitlab_mr'
+            ? 'Does not close the merge request or delete posted notes.'
+            : 'Does not delete the Jira issue.'
+        }
         confirmLabel="Cancel it"
         danger
         busy={busy}
@@ -204,6 +241,244 @@ export function SchedulesPage() {
         onCancel={() => setCancelId(null)}
       />
     </section>
+  )
+}
+
+function ExistingMr({ onDone }: { onDone: () => void }) {
+  const live = useLive()
+  const [projects, setProjects] = useState<ProjectRepository[]>(
+    live.settings?.project_repositories || [],
+  )
+  const [repo, setRepo] = useState('')
+  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
+  const [iid, setIid] = useState('')
+  const [preview, setPreview] = useState<ScheduleMrPreview | null>(null)
+  const [prompt, setPrompt] = useState('')
+  const [when, setWhen] = useState(defaultWhen)
+  const [model, setModel] = useState('')
+  const [backend, setBackend] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [looking, setLooking] = useState(false)
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const seeded = useRef(false)
+
+  useEffect(() => {
+    const rows = live.settings?.project_repositories
+    if (rows) setProjects(rows)
+  }, [live.settings])
+
+  useEffect(() => {
+    if (seeded.current) return
+    const rows = live.settings?.project_repositories || []
+    if (!rows.length) return
+    seeded.current = true
+    const last = (() => {
+      try {
+        return window.localStorage.getItem(LAST_REPO_KEY) || ''
+      } catch {
+        return ''
+      }
+    })()
+    const preferred = rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
+    if (preferred) {
+      setRepoPick(preferred.url)
+      setRepo(preferred.url)
+    }
+  }, [live.settings])
+
+  const get = async () => {
+    setErr(null)
+    setLooking(true)
+    try {
+      const n = Number(iid)
+      const p = await previewScheduleMr(repo.trim(), Number.isFinite(n) ? n : 0)
+      setPreview(p)
+      setModelsLoading(true)
+      if (p.repository_url) setRepo(p.repository_url)
+      if (p.mr_iid) setIid(String(p.mr_iid))
+    } catch (e) {
+      setPreview(null)
+      setPrompt('')
+      setModel('')
+      setBackend('')
+      setErr(e instanceof Error ? e.message : 'MR lookup failed')
+    } finally {
+      setLooking(false)
+    }
+  }
+
+  const submit = async (e: FormEvent, dispatchNow = false) => {
+    e.preventDefault()
+    if (!preview || modelsLoading) return
+    const n = Number(iid)
+    if (!repo.trim()) {
+      setErr('Pick a project or enter a repository URL')
+      return
+    }
+    if (!Number.isFinite(n) || n < 1) {
+      setErr('MR iid must be a positive number')
+      return
+    }
+    if (!prompt.trim()) {
+      setErr('Prompt is required')
+      return
+    }
+    setBusy(true)
+    setErr(null)
+    try {
+      await scheduleMrFollowup({
+        repository_url: repo.trim(),
+        mr_iid: n,
+        prompt: prompt.trim(),
+        scheduled_at: scheduledAtForSubmit(when, dispatchNow),
+        dispatch_now: dispatchNow,
+        model: model.trim() || undefined,
+        backend: backend.trim() || undefined,
+      })
+      try {
+        window.localStorage.setItem(LAST_REPO_KEY, repo.trim())
+      } catch {
+        /* ignore */
+      }
+      setPreview(null)
+      setPrompt('')
+      setIid('')
+      onDone()
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : 'Failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
+
+  return (
+    <form onSubmit={(e) => void submit(e)}>
+      {projects.length > 0 && (
+        <label className="field">
+          <span>Project</span>
+          <select
+            value={repoPick}
+            onChange={(e) => {
+              const v = e.target.value
+              setRepoPick(v)
+              setPreview(null)
+              if (v === CUSTOM_REPO) {
+                setRepo('')
+                return
+              }
+              const hit = projects.find((p) => p.url === v)
+              if (hit) setRepo(hit.url)
+            }}
+          >
+            {projects.map((p) => (
+              <option key={p.url} value={p.url}>
+                {p.label || p.url}
+              </option>
+            ))}
+            <option value={CUSTOM_REPO}>Other URL…</option>
+          </select>
+        </label>
+      )}
+      {(isCustom || projects.length === 0) && (
+        <label className="field">
+          <span>Repository</span>
+          <input
+            value={repo}
+            onChange={(e) => {
+              setRepo(e.target.value)
+              setPreview(null)
+            }}
+            placeholder="https://gitlab.com/group/repo.git"
+            required
+          />
+        </label>
+      )}
+      {!isCustom && repo ? <p className="quiet font-mono text-xs">{repo}</p> : null}
+      <label className="field">
+        <span>MR iid</span>
+        <input
+          value={iid}
+          onChange={(e) => {
+            setIid(e.target.value.replace(/[^\d]/g, ''))
+            setPreview(null)
+          }}
+          inputMode="numeric"
+          placeholder="12"
+          required
+        />
+      </label>
+      <p className="actions">
+        <button type="button" disabled={looking || !repo.trim() || !iid.trim()} onClick={() => void get()}>
+          {looking ? 'Looking up…' : 'Look up'}
+        </button>
+      </p>
+      {preview && (
+        <>
+          <p className="quiet">
+            {preview.gitlab_project}!{preview.mr_iid} — {preview.title}
+            {preview.source_branch ? ` · ${preview.source_branch} → ${preview.target_branch}` : ''}
+            {preview.issue_key ? ` · ${preview.issue_key}` : ''}
+          </p>
+          <label className="field">
+            <span>Prompt</span>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={10}
+              className="min-h-[10rem] font-mono text-xs"
+              required
+            />
+            <span className="mt-1 block text-xs text-text-muted">
+              Posted on the MR as a *Yaver* note marked “written in the ops
+              dashboard”. The agent answer is posted there when OpenCode finishes.
+            </span>
+          </label>
+          <BackendField
+            value={backend}
+            onChange={(v) => {
+              setModelsLoading(true)
+              setBackend(v)
+            }}
+            fallback={live.settings?.agent_backend || 'opencode'}
+          />
+          <ModelField
+            value={model}
+            onChange={setModel}
+            fallback={live.settings?.default_model || ''}
+            backend={backend || live.settings?.agent_backend || 'opencode'}
+            onLoadingChange={setModelsLoading}
+          />
+          <ScheduleWhenField value={when} onChange={setWhen} />
+          <p className="actions">
+            <button type="submit" className="go" disabled={busy || modelsLoading}>
+              {busy ? (
+                <>
+                  <Spinner /> Scheduling…
+                </>
+              ) : modelsLoading ? (
+                <>
+                  <Spinner /> Loading models…
+                </>
+              ) : (
+                'Schedule'
+              )}
+            </button>
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={busy || modelsLoading}
+              onClick={(e) => void submit(e, true)}
+            >
+              Run now
+            </button>
+          </p>
+        </>
+      )}
+      {err && <p className="err">{err}</p>}
+    </form>
   )
 }
 

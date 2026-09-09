@@ -447,7 +447,8 @@ class JiraAgentDaemon:
                             f"Issue {state.issue_key} in-flight with no started_at; "
                             f"marking ERROR"
                         )
-                        self._abort_stuck_issue(
+                        await asyncio.to_thread(
+                            self._abort_stuck_issue,
                             state,
                             (
                                 f"Job stuck in '{state.status.value}' with no start timestamp. "
@@ -465,7 +466,8 @@ class JiraAgentDaemon:
                         f"Issue {state.issue_key} stuck in {state.status.value} "
                         f"for {int(age)}s (limit {int(limit_seconds)}s)"
                     )
-                    self._abort_stuck_issue(
+                    await asyncio.to_thread(
+                        self._abort_stuck_issue,
                         state,
                         (
                             f"Job stuck in '{state.status.value}' for {int(age)}s "

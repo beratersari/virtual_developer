@@ -13,6 +13,8 @@ import type {
   PollPayload,
   ScheduleCreateBody,
   ScheduleItem,
+  ScheduleMrBody,
+  ScheduleMrPreview,
   SchedulePreview,
   SchedulesPayload,
   SettingsPatch,
@@ -65,22 +67,29 @@ export function formatApiError(detail: unknown, fallback: string): string {
   return String(detail)
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers)
-  if (init?.body && !headers.has('Content-Type')) {
+async function request<T>(
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<T> {
+  const { timeoutMs, ...rest } = init || {}
+  const headers = new Headers(rest.headers)
+  if (rest.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const { notifyUnauthorized } = await import('../auth/dashboardAuth')
-  const method = (init?.method || 'GET').toUpperCase()
+  const method = (rest.method || 'GET').toUpperCase()
   let timer: number | undefined
-  let signal = init?.signal
-  if (!signal && method === 'GET') {
+  let signal = rest.signal
+  // Auth gate used to sit on "Loading…" for the full 15s GET budget when the
+  // daemon event loop was busy (Jira/GitLab on the loop, models CLI, …).
+  const budget = timeoutMs ?? (method === 'GET' ? 15_000 : undefined)
+  if (!signal && budget != null) {
     const ctrl = new AbortController()
-    timer = window.setTimeout(() => ctrl.abort(), 15_000)
+    timer = window.setTimeout(() => ctrl.abort(), budget)
     signal = ctrl.signal
   }
   try {
-    const res = await fetch(path, { ...init, headers, credentials: 'include', signal })
+    const res = await fetch(path, { ...rest, headers, credentials: 'include', signal })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) {
       const { isLoginRequiredResponse } = await import('../auth/dashboardAuth')
@@ -152,8 +161,9 @@ export function dashboardWsUrl(): string {
   return `${proto}://${window.location.host}/ws`
 }
 
-export function fetchMeta() {
-  return request<Meta>('/api/meta')
+export function fetchMeta(opts?: { timeoutMs?: number }) {
+  // Cheap JSON; a long hang here is the full-page loading screen.
+  return request<Meta>('/api/meta', { timeoutMs: opts?.timeoutMs ?? 4_000 })
 }
 
 export function fetchPoll() {
@@ -429,6 +439,34 @@ export function cancelSchedule(scheduleId: string) {
     `/api/schedules/${encodeURIComponent(scheduleId)}/cancel`,
     { method: 'POST' },
   )
+}
+
+export function previewScheduleMr(repositoryUrl: string, mrIid: number) {
+  const params = new URLSearchParams({
+    repository_url: repositoryUrl.trim(),
+    mr_iid: String(mrIid || 0),
+  })
+  return request<ScheduleMrPreview>(`/api/schedules/mr-preview?${params.toString()}`)
+}
+
+export function scheduleMrFollowup(body: ScheduleMrBody) {
+  const payload: Record<string, unknown> = {
+    repository_url: body.repository_url,
+    mr_iid: body.mr_iid,
+    prompt: body.prompt,
+    scheduled_at: body.scheduled_at,
+  }
+  if (body.dispatch_now) payload.dispatch_now = true
+  if (body.model) payload.model = body.model
+  if (body.backend) payload.backend = body.backend
+  return request<{
+    ok: boolean
+    schedule: ScheduleItem
+    issue_key?: string
+    message?: string
+    dispatched?: boolean
+    dispatch_error?: string
+  }>('/api/schedules/mr', { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export function previewScheduleIssue(issueKey: string) {
