@@ -1,10 +1,14 @@
-# Yaver 0.6.0
+# Yaver 0.6.1
 
-Azure DevOps Server 2022.2 (TFS) project webhooks work like GitLab MR
-comments. Mention the bot on a pull-request comment; Yaver clones with
-the host Azure PAT (no username/password prompt), runs the job, and
-replies on the PR. Completed or abandoned PRs delete the matching temp
-clone.
+Azure DevOps Server auth matches Creasy and GitLab: HTTP Basic
+`pat:<PAT>` for Settings Test, clone, push, and pull-request create.
+IIS rejects an empty username (`:PAT`), which is why Settings Test
+showed 401 on a valid PAT. Askpass returns username `pat`. Test tries
+`/tfs/DefaultCollection` before treating a host-root 401 as final.
+
+Azure webhooks from 0.6.0 are unchanged: mention the bot on a PR
+comment; Yaver replies on the PR. Completed or abandoned PRs delete
+the matching temp clone.
 
 Settings has an Azure tab: host PATs, bot username, webhook enable, and
 webhook secret. URL: `POST /webhooks/azure` with `X-Azure-Token`.
@@ -80,7 +84,7 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 - Azure DevOps Server 2022.2 webhook intake (`POST /webhooks/azure`)
 - Settings tabs: Jira, GitLab, Azure, Projects, Agent, Runtime
-- TFS clone/push use Azure PAT only (empty username, no GCM prompt)
+- TFS clone, push, and PR use Basic `pat:<PAT>` (same as Settings Test)
 - Settings keeps a newer `.env` key (including `TRIGGER_ASSIGNEE_NAMES`) unless you later save that same field
 - Dashboard login is the in-page form; Edge does not get a native HTTP/Windows popup on first load
 - Jira webhook intake removed; board poller only
