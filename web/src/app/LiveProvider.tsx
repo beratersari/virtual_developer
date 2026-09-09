@@ -95,15 +95,22 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     let ws: WebSocket | null = null
     let closed = false
     let retry: number | undefined
+    let attempt = 0
 
     const connect = () => {
       if (closed) return
       try {
         ws = new WebSocket(dashboardWsUrl())
-        ws.onopen = () => setConnected(true)
+        ws.onopen = () => {
+          attempt = 0
+          setConnected(true)
+        }
         ws.onclose = () => {
           setConnected(false)
-          if (!closed) retry = window.setTimeout(connect, 2000)
+          if (closed) return
+          const delay = Math.min(15_000, 2_000 * (1 + attempt))
+          attempt += 1
+          retry = window.setTimeout(connect, delay)
         }
         ws.onerror = () => setConnected(false)
         ws.onmessage = (ev) => {
@@ -124,7 +131,9 @@ export function LiveProvider({ children }: { children: ReactNode }) {
         }
       } catch {
         setConnected(false)
-        retry = window.setTimeout(connect, 2000)
+        const delay = Math.min(15_000, 2_000 * (1 + attempt))
+        attempt += 1
+        retry = window.setTimeout(connect, delay)
       }
     }
 

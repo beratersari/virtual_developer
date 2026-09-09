@@ -274,7 +274,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 |--|--|
 | URL | `http://127.0.0.1:8080` |
 | Stack | FastAPI in-daemon + WebSocket `/ws` + React SPA (`web/`) |
-| Auth | **None in v1** — keep bind host localhost unless you put a proxy/auth in front |
+| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller or `POST /webhooks/gitlab`. |
 
 **Frontend is display-only.** Filtering, poll math, and settings rules live on the backend.
 

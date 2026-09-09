@@ -83,9 +83,12 @@ def read_app_version() -> str:
 
 
 def build_meta() -> MetaResponse:
+    from src.dashboard.auth import dashboard_auth_enabled
+
     return MetaResponse(
         version=read_app_version(),
         server_time=datetime.now().isoformat(timespec="seconds"),
+        dashboard_auth=dashboard_auth_enabled(),
     )
 
 

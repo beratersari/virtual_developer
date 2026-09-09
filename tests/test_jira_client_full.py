@@ -222,10 +222,84 @@ def test_transition_issue_by_name(client):
 
 def test_get_comments(client):
     c, http = client
-    http.get.return_value = _resp(200, {"comments": [{"id": "1"}]})
+    http.get.return_value = _resp(
+        200, {"startAt": 0, "maxResults": 50, "total": 1, "comments": [{"id": "1"}]}
+    )
     assert len(c.get_comments("P-1")) == 1
+    params = http.get.call_args.kwargs.get("params") or {}
+    assert params.get("startAt") == 0
+    assert params.get("maxResults") == 50
     http.get.return_value = _resp(500)
     assert c.get_comments("P-1") == []
+
+
+def test_get_comments_walks_every_jira_page(client):
+    """Jira defaults to 50/page. Unpaged GET would miss the newest @bot comment."""
+    c, http = client
+    page0 = [{"id": str(i), "body": f"filler {i}"} for i in range(50)]
+    page1 = [{"id": "50", "body": "filler 50"}] + [
+        {"id": "51", "body": "[~devbot] please revise the plan"}
+    ]
+
+    def _get(url, params=None, **_k):
+        start = int((params or {}).get("startAt") or 0)
+        if start == 0:
+            return _resp(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": 52,
+                    "comments": page0,
+                },
+            )
+        if start == 50:
+            return _resp(
+                200,
+                {
+                    "startAt": 50,
+                    "maxResults": 50,
+                    "total": 52,
+                    "comments": page1,
+                },
+            )
+        return _resp(200, {"startAt": start, "maxResults": 50, "total": 52, "comments": []})
+
+    http.get.side_effect = _get
+    rows = c.get_comments("BUSY-1")
+    assert len(rows) == 52
+    assert rows[-1]["body"] == "[~devbot] please revise the plan"
+    starts = [call.kwargs.get("params", {}).get("startAt") for call in http.get.call_args_list]
+    assert starts == [0, 50]
+
+
+def test_get_comments_empty_key_does_not_call_jira(client):
+    c, http = client
+    assert c.get_comments("") == []
+    http.get.assert_not_called()
+
+
+def test_get_comments_keeps_first_page_if_later_page_fails(client):
+    c, http = client
+
+    def _get(url, params=None, **_k):
+        start = int((params or {}).get("startAt") or 0)
+        if start == 0:
+            return _resp(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": 80,
+                    "comments": [{"id": str(i)} for i in range(50)],
+                },
+            )
+        return _resp(500)
+
+    http.get.side_effect = _get
+    rows = c.get_comments("P-2")
+    assert len(rows) == 50
+    assert rows[0]["id"] == "0"
 
 
 def test_assign_and_attachment(client, tmp_path):

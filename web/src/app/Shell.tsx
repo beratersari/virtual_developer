@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { signOutDashboard } from '../auth/dashboardAuth'
 import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
 import { formatChatTime, formatDashboardClock, useNow } from '../util/time'
@@ -147,6 +148,15 @@ export function Shell() {
               {live.connected ? 'Connected' : 'Reconnecting'}
             </span>
           </div>
+          {live.meta?.dashboard_auth ? (
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary w-full justify-center text-xs"
+              onClick={() => signOutDashboard()}
+            >
+              Sign out
+            </button>
+          ) : null}
         </div>
       </aside>
 

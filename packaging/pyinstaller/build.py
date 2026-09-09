@@ -73,41 +73,12 @@ def _copy_tree_filtered(src: Path, dest: Path) -> int:
     return count
 
 
-def stage_opencode_configs(bundled: Path, *, repo_root: Path | None = None) -> Path:
-    """Copy derman-build / derman-plan and skills next to the exe."""
-    root = repo_root or ROOT
-    agents = root / "opencoderman" / "agents"
-    skills = root / "opencoderman" / "skills"
-    if not agents.is_dir() or not skills.is_dir():
-        raise FileNotFoundError(
-            "opencoderman/agents and opencoderman/skills are required "
-            "(init the submodule: git submodule update --init --recursive)"
-        )
-    dest = bundled / "opencode_configs"
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest_agents = dest / "agents"
-    dest_agents.mkdir(parents=True)
-    n_agents = 0
-    for name in ("derman-build.md", "derman-plan.md"):
-        src = agents / name
-        if not src.is_file():
-            raise FileNotFoundError(f"required agent missing: {src}")
-        shutil.copy2(src, dest_agents / name)
-        n_agents += 1
-    n_skills = _copy_tree_filtered(skills, dest / "skills")
-    if n_agents != 2 or n_skills < 10:
-        raise RuntimeError(
-            f"opencode_configs too small: agents={n_agents} skills={n_skills}"
-        )
-    return dest
-
-
 def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
-    """Copy the OpenCoderman tree (no .git) next to the exe."""
+    """Copy only opencoderman/agents and opencoderman/skills next to the exe."""
     root = repo_root or ROOT
-    src = root / "opencoderman"
-    if not (src / "agents").is_dir() or not (src / "skills").is_dir():
+    src_agents = root / "opencoderman" / "agents"
+    src_skills = root / "opencoderman" / "skills"
+    if not src_agents.is_dir() or not src_skills.is_dir():
         raise FileNotFoundError(
             "opencoderman/agents and opencoderman/skills are required "
             "(init the submodule: git submodule update --init --recursive)"
@@ -115,33 +86,36 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
     dest = bundled / "opencoderman"
     if dest.exists():
         shutil.rmtree(dest)
-    n = _copy_tree_filtered(src, dest)
-    if n < 12:
-        raise RuntimeError(f"opencoderman tree too small: files={n}")
+    n_agents = _copy_tree_filtered(src_agents, dest / "agents")
+    n_skills = _copy_tree_filtered(src_skills, dest / "skills")
+    if n_agents < 2 or n_skills < 10:
+        raise RuntimeError(
+            f"opencoderman agents/skills too small: agents={n_agents} skills={n_skills}"
+        )
     if not (dest / "agents" / "derman-build.md").is_file():
         raise RuntimeError("opencoderman/agents/derman-build.md missing after copy")
     if not (dest / "agents" / "derman-plan.md").is_file():
         raise RuntimeError("opencoderman/agents/derman-plan.md missing after copy")
+    extra = [p.name for p in dest.iterdir() if p.name not in {"agents", "skills"}]
+    if extra:
+        raise RuntimeError(f"opencoderman/ must only contain agents/ and skills/: {extra}")
     return dest
 
 
 def stage_agent_installers(bundled: Path) -> None:
-    """Ship the detect-and-copy helpers next to the binary."""
-    bat = ROOT / "install-opencode-agents.bat"
-    ps1 = ROOT / "packaging" / "windows" / "Install-OpencodeAgents.ps1"
-    sh = ROOT / "install-opencode-agents.sh"
-    py = ROOT / "packaging" / "install_opencode_agents.py"
-    if bat.is_file():
+    """Ship one copy script for this OS (bat on Windows, sh on Linux)."""
+    if os.name == "nt":
+        bat = ROOT / "install-opencode-agents.bat"
+        if not bat.is_file():
+            raise FileNotFoundError(f"missing {bat}")
         shutil.copy2(bat, bundled / "install-opencode-agents.bat")
-    if ps1.is_file():
-        shutil.copy2(ps1, bundled / "Install-OpencodeAgents.ps1")
-    if sh.is_file():
-        dest_sh = bundled / "install-opencode-agents.sh"
-        shutil.copy2(sh, dest_sh)
-        if os.name != "nt":
-            dest_sh.chmod(dest_sh.stat().st_mode | 0o111)
-    if py.is_file():
-        shutil.copy2(py, bundled / "install_opencode_agents.py")
+        return
+    sh = ROOT / "install-opencode-agents.sh"
+    if not sh.is_file():
+        raise FileNotFoundError(f"missing {sh}")
+    dest_sh = bundled / "install-opencode-agents.sh"
+    shutil.copy2(sh, dest_sh)
+    dest_sh.chmod(dest_sh.stat().st_mode | 0o111)
 
 
 def _archive(src_dir: Path, dest_base: Path) -> list[Path]:
@@ -249,7 +223,6 @@ def main(argv: list[str] | None = None) -> int:
             check=True,
             cwd=str(ROOT),
         )
-    stage_opencode_configs(bundled)
     stage_opencoderman(bundled)
     stage_agent_installers(bundled)
 

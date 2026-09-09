@@ -483,11 +483,24 @@ async def test_e2e_cancel_sticky_against_late_begin_and_context(
     reason="Set VD_E2E_LIVE=1 to hit a running daemon on :8080",
 )
 def test_e2e_live_backend_and_frontend_reachable():
-    """Smoke: live backend /api/meta and frontend SPA root."""
+    """Smoke: live backend health + SPA. Meta may require dashboard login."""
     import httpx
 
     with httpx.Client(timeout=5.0, verify=False) as c:
+        health = c.get("http://127.0.0.1:8080/api/health")
+        assert health.status_code == 200
+        assert health.json().get("status") == "ok"
+
         meta = c.get("http://127.0.0.1:8080/api/meta")
+        if meta.status_code == 401:
+            user = os.environ.get("DASHBOARD_USERNAME", "admin")
+            password = os.environ.get("DASHBOARD_PASSWORD", "admin")
+            login = c.post(
+                "http://127.0.0.1:8080/api/login",
+                json={"username": user, "password": password},
+            )
+            assert login.status_code == 200
+            meta = c.get("http://127.0.0.1:8080/api/meta")
         assert meta.status_code == 200
         body = meta.json()
         assert "version" in body or "server_time" in body
@@ -497,6 +510,6 @@ def test_e2e_live_backend_and_frontend_reachable():
         assert "html" in (spa.headers.get("content-type") or "").lower() or "<!DOCTYPE" in spa.text[:200] or "<html" in spa.text[:200].lower()
 
         # Frontend proxy reaches backend
-        proxied = c.get("http://127.0.0.1:5173/api/meta")
+        proxied = c.get("http://127.0.0.1:5173/api/health")
         assert proxied.status_code == 200
-        assert proxied.json().get("version") == body.get("version")
+        assert proxied.json().get("status") == "ok"

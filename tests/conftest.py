@@ -22,6 +22,15 @@ def _snapshot_paths(root: Path) -> Set[str]:
 
 
 @pytest.fixture(autouse=True)
+def disable_dashboard_auth(monkeypatch: pytest.MonkeyPatch):
+    """Keep dashboard APIs open unless a test sets login credentials."""
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "dashboard_username", "")
+    monkeypatch.setattr(settings, "dashboard_password", "")
+
+
+@pytest.fixture(autouse=True)
 def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Route job/session writes into tmp and scrub any real-tree leaks.
 
@@ -85,6 +94,12 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "src.opencode_sessions._default_db_path",
         lambda: fake_opencode_db,
     )
+    try:
+        from src.dashboard.temp_storage import reset_size_cache
+
+        reset_size_cache()
+    except Exception:
+        pass
 
     yield {
         "runtime": runtime,

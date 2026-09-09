@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { deleteTempFolder, fetchStorage, fetchStorageDeletes } from '../../api/client'
 import type { StorageDeleteJob, StorageFolder, StoragePayload } from '../../api/types'
@@ -223,14 +223,19 @@ export function StoragePage() {
   const [data, setData] = useState<StoragePayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState<StorageFolder | null>(null)
+  const reloadInFlight = useRef(false)
 
   const reload = async (refresh = false) => {
+    if (reloadInFlight.current && !refresh) return
+    reloadInFlight.current = true
     try {
       const payload = await fetchStorage({ refresh })
       setData(payload)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Load failed')
+    } finally {
+      reloadInFlight.current = false
     }
   }
 
@@ -244,26 +249,33 @@ export function StoragePage() {
   useEffect(() => {
     if (!deleting && !sizesPending && !mrPending) return
     let cancelled = false
+    let timer: number | undefined
     const tick = async () => {
+      if (cancelled) return
       try {
         if (deleting) {
           const payload = await fetchStorageDeletes()
           if (cancelled) return
           setData((prev) => applyDeletes(prev, payload.deletes))
           const still = payload.deletes.some((d) => d.status === 'deleting')
-          if (!still) void reload()
-        } else if (sizesPending || mrPending) {
+          if (!still) await reload()
+        } else if (!reloadInFlight.current) {
           await reload()
         }
       } catch {
         /* keep last known snapshot */
       }
+      if (!cancelled) {
+        // Wait for the previous GET to finish before the next one. An 800ms
+        // interval while /api/storage was slow filled Chrome's 6-connection
+        // cap and made Sign out / other buttons ignore the first clicks.
+        timer = window.setTimeout(tick, deleting ? 400 : 2500)
+      }
     }
-    const id = window.setInterval(() => void tick(), deleting ? 400 : 800)
     void tick()
     return () => {
       cancelled = true
-      window.clearInterval(id)
+      if (timer) window.clearTimeout(timer)
     }
   }, [deleting, sizesPending, mrPending])
 

@@ -32,7 +32,11 @@ from src.temp_fs import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_delete_jobs():
+def _clear_delete_jobs(monkeypatch: pytest.MonkeyPatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "dashboard_username", "")
+    monkeypatch.setattr(settings, "dashboard_password", "")
     reset_delete_jobs()
     reset_size_cache()
     yield
@@ -45,6 +49,27 @@ def _wait_gone(path: Path, timeout: float = 5.0) -> None:
     while path.exists() and time.time() < deadline:
         time.sleep(0.04)
     assert not path.exists(), f"still exists after {timeout}s: {path}"
+
+
+def test_clone_issue_index_reuses_short_cache(monkeypatch):
+    from src.dashboard import temp_storage as ts
+
+    ts.reset_size_cache()
+    calls = {"n": 0}
+    real = ts._build_clone_issue_index
+
+    def wrapped():
+        calls["n"] += 1
+        return real()
+
+    monkeypatch.setattr(ts, "_build_clone_issue_index", wrapped)
+    first = ts._clone_issue_index()
+    second = ts._clone_issue_index()
+    assert calls["n"] == 1
+    assert first == second
+    ts.reset_size_cache()
+    ts._clone_issue_index()
+    assert calls["n"] == 2
 
 
 def test_format_bytes():

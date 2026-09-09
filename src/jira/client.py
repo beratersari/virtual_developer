@@ -895,15 +895,55 @@ class JiraClient:
             logger.error(f"Error transitioning issue {issue_key}: {e}")
             return False
     
+    # Jira REST v2 GET /issue/{key}/comment — Server/DC 11 and Cloud default.
+    _COMMENT_PAGE_SIZE = 50
+    _COMMENT_MAX_PAGES = 200
+
     def get_comments(self, issue_key: str) -> List[Dict[str, Any]]:
-        """Get all comments for an issue."""
+        """Get all comments for an issue (every Jira page).
+
+        ``GET /issue/{key}/comment`` is paginated. Server/DC 11 and Cloud
+        document ``startAt=0``, ``maxResults=50``, oldest first. A single
+        unpaged GET only sees the first page, so ``plan_refactor`` can miss
+        the newest ``@bot`` comment on a busy ticket.
+        """
+        key = (issue_key or "").strip()
+        if not key:
+            return []
+        all_comments: List[Dict[str, Any]] = []
+        start_at = 0
+        page_size = self._COMMENT_PAGE_SIZE
         try:
-            response = self.client.get(f"/issue/{issue_key}/comment")
-            response.raise_for_status()
-            return response.json().get("comments", [])
+            for _ in range(self._COMMENT_MAX_PAGES):
+                response = self.client.get(
+                    f"/issue/{key}/comment",
+                    params={"startAt": start_at, "maxResults": page_size},
+                )
+                response.raise_for_status()
+                data = response.json() if response.content else {}
+                if not isinstance(data, dict):
+                    break
+                batch = data.get("comments") or []
+                if not isinstance(batch, list):
+                    break
+                all_comments.extend(row for row in batch if isinstance(row, dict))
+                returned = len(batch)
+                start_at += returned
+                total = data.get("total")
+                try:
+                    total_n = int(total) if total is not None else 0
+                except (TypeError, ValueError):
+                    total_n = 0
+                if returned == 0:
+                    break
+                if total_n and start_at >= total_n:
+                    break
+                if returned < page_size:
+                    break
+            return all_comments
         except httpx.HTTPError as e:
             logger.error(f"Error fetching comments for {issue_key}: {e}")
-            return []
+            return all_comments
     
     def get_myself(self) -> Optional[Dict[str, Any]]:
         """Current user (Server ``name`` / Cloud ``accountId``)."""
