@@ -46,9 +46,15 @@ echo Source skills : %SRC_SKILLS%
 if not exist "%OC_HOME%\agents\" mkdir "%OC_HOME%\agents"
 if not exist "%OC_HOME%\skills\" mkdir "%OC_HOME%\skills"
 
-robocopy "%SRC_AGENTS%" "%OC_HOME%\agents" /E /NFL /NDL /NJH /NJS /NC /NS /NP >nul
-if errorlevel 8 (
-    echo [ERROR] robocopy agents failed with exit %ERRORLEVEL%
+copy /Y "%SRC_AGENTS%\derman-build.md" "%OC_HOME%\agents\derman-build.md" >nul
+if errorlevel 1 (
+    echo [ERROR] copy derman-build.md failed
+    call :maybe_pause
+    exit /b 1
+)
+copy /Y "%SRC_AGENTS%\derman-plan.md" "%OC_HOME%\agents\derman-plan.md" >nul
+if errorlevel 1 (
+    echo [ERROR] copy derman-plan.md failed
     call :maybe_pause
     exit /b 1
 )

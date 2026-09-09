@@ -781,7 +781,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/` + `skills/`), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` and `skills/`; no gitlab-reviewer), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |

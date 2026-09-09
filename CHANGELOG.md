@@ -8,6 +8,12 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-09
+
+Exe zip `opencoderman/agents` is only **derman-build** and **derman-plan**. The copy scripts do not install `gitlab-reviewer`.
+
+[0.5.2]: https://github.com/beratersari/virtual_developer/releases/tag/v0.5.2
+
 ## [0.5.1] — 2026-09-09
 
 Standalone exe zips ship one OpenCode kit. Plan-refactor reads every Jira comment page.

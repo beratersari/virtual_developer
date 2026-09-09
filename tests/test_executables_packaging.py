@@ -203,7 +203,7 @@ def test_stage_opencoderman_copies_only_agents_and_skills(tmp_path: Path):
     assert ocm == bundled / "opencoderman"
     assert (ocm / "agents" / "derman-build.md").is_file()
     assert (ocm / "agents" / "derman-plan.md").is_file()
-    assert (ocm / "agents" / "gitlab-reviewer.md").is_file()
+    assert not (ocm / "agents" / "gitlab-reviewer.md").exists()
     assert len(list((ocm / "skills").rglob("SKILL.md"))) == 10
     assert not (ocm / "skills" / "__pycache__").exists()
     assert not (ocm / "install.py").exists()

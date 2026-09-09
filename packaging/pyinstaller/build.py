@@ -73,8 +73,11 @@ def _copy_tree_filtered(src: Path, dest: Path) -> int:
     return count
 
 
+_PLAN_BUILD_AGENTS = ("derman-build.md", "derman-plan.md")
+
+
 def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
-    """Copy only opencoderman/agents and opencoderman/skills next to the exe."""
+    """Copy plan/build agents + skills only (no gitlab-reviewer)."""
     root = repo_root or ROOT
     src_agents = root / "opencoderman" / "agents"
     src_skills = root / "opencoderman" / "skills"
@@ -86,16 +89,27 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
     dest = bundled / "opencoderman"
     if dest.exists():
         shutil.rmtree(dest)
-    n_agents = _copy_tree_filtered(src_agents, dest / "agents")
+    dest_agents = dest / "agents"
+    dest_agents.mkdir(parents=True)
+    n_agents = 0
+    for name in _PLAN_BUILD_AGENTS:
+        src = src_agents / name
+        if not src.is_file():
+            raise FileNotFoundError(f"required agent missing: {src}")
+        shutil.copy2(src, dest_agents / name)
+        n_agents += 1
     n_skills = _copy_tree_filtered(src_skills, dest / "skills")
-    if n_agents < 2 or n_skills < 10:
+    if n_agents != 2 or n_skills < 10:
         raise RuntimeError(
             f"opencoderman agents/skills too small: agents={n_agents} skills={n_skills}"
         )
-    if not (dest / "agents" / "derman-build.md").is_file():
-        raise RuntimeError("opencoderman/agents/derman-build.md missing after copy")
-    if not (dest / "agents" / "derman-plan.md").is_file():
-        raise RuntimeError("opencoderman/agents/derman-plan.md missing after copy")
+    extra_agents = sorted(
+        p.name for p in dest_agents.iterdir() if p.name not in _PLAN_BUILD_AGENTS
+    )
+    if extra_agents:
+        raise RuntimeError(
+            f"opencoderman/agents must only contain derman-build and derman-plan: {extra_agents}"
+        )
     extra = [p.name for p in dest.iterdir() if p.name not in {"agents", "skills"}]
     if extra:
         raise RuntimeError(f"opencoderman/ must only contain agents/ and skills/: {extra}")

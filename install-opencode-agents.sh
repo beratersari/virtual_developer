@@ -58,7 +58,8 @@ echo "Source agents : $SRC_AGENTS"
 echo "Source skills : $SRC_SKILLS"
 
 mkdir -p "$OC_HOME/agents" "$OC_HOME/skills"
-cp -a "$SRC_AGENTS/." "$OC_HOME/agents/"
+cp -a "$SRC_AGENTS/derman-build.md" "$OC_HOME/agents/derman-build.md"
+cp -a "$SRC_AGENTS/derman-plan.md" "$OC_HOME/agents/derman-plan.md"
 cp -a "$SRC_SKILLS/." "$OC_HOME/skills/"
 
 if [[ ! -f "$OC_HOME/agents/derman-build.md" || ! -f "$OC_HOME/agents/derman-plan.md" ]]; then
