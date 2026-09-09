@@ -82,13 +82,22 @@ def read_app_version() -> str:
     return "0.0.0"
 
 
-def build_meta() -> MetaResponse:
-    from src.dashboard.auth import dashboard_auth_enabled
+def build_meta(request: Any = None) -> MetaResponse:
+    from src.dashboard.auth import dashboard_auth_enabled, request_authorized
 
+    enabled = dashboard_auth_enabled()
+    if not enabled:
+        authed = True
+    elif request is not None:
+        authed = request_authorized(request)
+    else:
+        # Internal callers (WS payload, issue report) already passed the gate.
+        authed = True
     return MetaResponse(
         version=read_app_version(),
         server_time=datetime.now().isoformat(timespec="seconds"),
-        dashboard_auth=dashboard_auth_enabled(),
+        dashboard_auth=enabled,
+        authenticated=authed,
     )
 
 

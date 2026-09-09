@@ -1,8 +1,14 @@
-"""Optional HTTP Basic for the ops dashboard.
+"""Optional cookie login for the ops dashboard.
 
 Set both ``DASHBOARD_USERNAME`` and ``DASHBOARD_PASSWORD`` in ``.env``.
 Empty pair = no login (LAN default). The Jira poller is in-process and
 never hits this. ``POST /webhooks/gitlab`` keeps its own token.
+
+Do not send HTTP 401 or ``WWW-Authenticate: Basic``. Edge (especially on
+a machine-name / LAN URL) treats that as a Windows/HTTP popup. That
+popup never reaches ``POST /api/login``, so ``.env`` credentials look
+rejected. The SPA probes ``GET /api/meta`` (always 200) and shows the
+in-page form.
 """
 
 from __future__ import annotations
@@ -89,6 +95,11 @@ def is_exempt_path(method: str, path: str) -> bool:
         return True
     if raw == "/api/health" or raw.startswith("/api/health/"):
         return True
+    # Auth probe for the SPA login gate. A 401 here makes Edge (intranet /
+    # saved Basic) show a native popup that cannot succeed — the browser
+    # retries Authorization: Basic without our cookie / X-Yaver-Login.
+    if verb == "GET" and raw.rstrip("/") == "/api/meta":
+        return True
     if raw.rstrip("/") == "/webhooks/gitlab":
         return True
     if verb == "POST" and raw.rstrip("/") in {"/api/logout", "/api/login"}:
@@ -149,18 +160,7 @@ class DashboardAuthMiddleware:
             await self.app(scope, receive, send)
             return
         if not _explicit_basic(headers):
-            body = b'{"detail":"Dashboard login required"}'
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode("ascii")),
-                    ],
-                }
-            )
-            await send({"type": "http.response.body", "body": body})
+            await _send_login_required(send)
             return
         user, password = parse_basic_header(headers.get("authorization") or "")
         if credentials_ok(user, password):
@@ -182,18 +182,26 @@ class DashboardAuthMiddleware:
             await self.app(scope, receive, send_with_cookie)
             return
 
-        body = b'{"detail":"Dashboard login required"}'
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"content-length", str(len(body)).encode("ascii")),
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": body})
+        await _send_login_required(send)
+
+
+LOGIN_REQUIRED_BODY = b'{"detail":"Dashboard login required","code":"login_required"}'
+
+
+async def _send_login_required(send: Send) -> None:
+    """403, never 401. Edge treats 401 as Windows/HTTP Basic on some origins."""
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(LOGIN_REQUIRED_BODY)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": LOGIN_REQUIRED_BODY})
 
 
 def _cookie_from_header(header: str) -> str:

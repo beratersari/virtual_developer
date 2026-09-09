@@ -39,6 +39,9 @@ class MetaResponse(BaseModel):
     server_time: str
     app_name: str = PRODUCT_NAME
     dashboard_auth: bool = False
+    # Cookie session present. GET /api/meta is always 200 so Edge does not
+    # pop a native HTTP/Windows login dialog on the first SPA probe.
+    authenticated: bool = True
 
 
 class BulkJobDeleteRequest(BaseModel):

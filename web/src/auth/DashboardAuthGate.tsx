@@ -25,8 +25,13 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false
     void fetchMeta()
-      .then(() => {
+      .then((meta) => {
         if (cancelled) return
+        if (meta.dashboard_auth && meta.authenticated === false) {
+          setNeedLogin(true)
+          setReady(false)
+          return
+        }
         setNeedLogin(false)
         setReady(true)
       })

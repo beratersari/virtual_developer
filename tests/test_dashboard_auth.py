@@ -31,12 +31,18 @@ def test_settings_require_login_when_configured(monkeypatch):
     monkeypatch.setattr(settings, "dashboard_password", "s3cret")
     client = TestClient(create_dashboard_app())
     denied = client.get("/api/settings")
-    assert denied.status_code == 401
+    assert denied.status_code == 403
+    assert denied.json().get("code") == "login_required"
     assert "basic" not in (denied.headers.get("www-authenticate") or "").lower()
     page = client.get("/")
     assert page.status_code == 200
+    # First SPA probe must be 200 so Edge does not pop Windows/HTTP Basic.
+    probe = client.get("/api/meta")
+    assert probe.status_code == 200
+    assert probe.json()["dashboard_auth"] is True
+    assert probe.json()["authenticated"] is False
     chrome = client.get("/api/settings", headers={"Authorization": _basic("ops", "s3cret")})
-    assert chrome.status_code == 401
+    assert chrome.status_code == 403
     ok = client.get(
         "/api/settings",
         headers={
@@ -45,12 +51,18 @@ def test_settings_require_login_when_configured(monkeypatch):
         },
     )
     assert ok.status_code == 200
+    assert client.get("/api/meta").json()["authenticated"] is True
     client.cookies.clear()
     wrong = client.get(
         "/api/settings",
         headers={"Authorization": _basic("ops", "nope"), "X-Yaver-Login": "1"},
     )
-    assert wrong.status_code == 401
+    assert wrong.status_code == 403
+    bad_login = client.post(
+        "/api/login", json={"username": "ops", "password": "nope"}
+    )
+    assert bad_login.status_code == 403
+    assert bad_login.json().get("code") == "login_failed"
 
 
 def test_logout_clears_cookie_and_locks_api(monkeypatch):
@@ -68,7 +80,8 @@ def test_logout_clears_cookie_and_locks_api(monkeypatch):
         "/api/settings",
         headers={"Authorization": _basic("ops", "s3cret")},
     )
-    assert locked.status_code == 401
+    assert locked.status_code == 403
+    assert client.get("/api/meta").json()["authenticated"] is False
 
 
 def test_logout_handler_is_async():
