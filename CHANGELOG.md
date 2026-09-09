@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Azure DevOps Server auth matches Creasy: REST, Settings Test, clone, push, and PR create all send HTTP Basic `pat:<PAT>`. IIS rejects an empty username (`:PAT`) and ignores URL userinfo when it advertises Windows Negotiate — that was the Settings Test 401 with a valid PAT. Askpass now returns username `pat`. Test no longer treats a 401 on the host root as final before trying `/tfs/DefaultCollection`.
+
 ## [0.6.0] — 2026-09-09
 
 Azure DevOps Server 2022.2 webhooks work like GitLab MR comments.

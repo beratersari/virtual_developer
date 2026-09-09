@@ -331,7 +331,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
-| `AZURE_HOST_PATS` | JSON hostname → Azure PAT. Clone/push use PAT only (empty username, no prompt) |
+| `AZURE_HOST_PATS` | JSON hostname → Azure PAT. Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user) |
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` |

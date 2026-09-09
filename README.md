@@ -278,7 +278,7 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
    - HTTP header `X-Azure-Token: <same secret>` (or Basic password = secret).
 4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone.
 
-Git clone/push use **PAT only** (`Authorization: Basic` with an empty username, plus Bearer). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
+Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
 
 ---
 
