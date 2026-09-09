@@ -17,8 +17,10 @@ from urllib.parse import urlparse
 from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
 from src.azure.mentions import (
+    ASK_HANDOFF_REASON,
     mention_scan,
     normalize_mention,
+    note_is_ask_handoff,
     note_mentions_bot,
     parse_mention_list,
     strip_azure_bot_mentions,
@@ -549,6 +551,12 @@ def decide_azure_comment_webhook(
             f"preview={clip(note)!r}"
         )
         return WebhookDecision(False, "bot not mentioned")
+    if note_is_ask_handoff(note, bot_mentions or mentions):
+        azure_info(
+            f"comment reject reason={ASK_HANDOFF_REASON!r} event={event_name!r} "
+            f"preview={clip(note)!r}"
+        )
+        return WebhookDecision(False, ASK_HANDOFF_REASON)
 
     author = _as_dict(comment.get("author"))
     author_unique = normalize_mention(

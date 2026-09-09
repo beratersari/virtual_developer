@@ -15,8 +15,11 @@ import re
 from typing import Iterable, List
 
 from src.gitlab.mentions import (
+    ASK_HANDOFF_REASON,
+    flatten_comment_text,
     mentioned_usernames,
     normalize_mention,
+    note_is_ask_handoff,
     parse_mention_list,
     strip_bot_mentions,
 )
@@ -116,9 +119,12 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 __all__ = [
+    "ASK_HANDOFF_REASON",
+    "flatten_comment_text",
     "html_mention_names",
     "mention_scan",
     "normalize_mention",
+    "note_is_ask_handoff",
     "note_mentions_bot",
     "parse_mention_list",
     "strip_azure_bot_mentions",

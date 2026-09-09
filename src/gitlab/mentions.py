@@ -65,3 +65,85 @@ def strip_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
             flags=re.IGNORECASE,
         )
     return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+ASK_HANDOFF_REASON = "ignored /ask handoff"
+
+_VSS_CHIP = re.compile(
+    r"<a\s[^>]*data-vss-mention[^>]*>(.*?)</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def flatten_comment_text(note: str) -> str:
+    """Plain text for command scans (Azure mention chips, leftover HTML)."""
+    text = note or ""
+    text = _VSS_CHIP.sub(lambda m: f" {m.group(1) or ''} ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return text.replace("\xa0", " ").replace("&nbsp;", " ")
+
+
+def _ask_handoff_names(bot_mentions: Iterable[str]) -> List[str]:
+    """Configured bot names, longest first (display names before tokens)."""
+    names: List[str] = []
+    seen: set[str] = set()
+    for raw in bot_mentions or []:
+        text = str(raw or "").strip()
+        if text.startswith("@"):
+            text = text[1:].strip()
+        candidates = [text] if text else []
+        norm = normalize_mention(raw)
+        if norm:
+            candidates.append(norm)
+        for name in candidates:
+            key = name.lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(name)
+    names.sort(key=len, reverse=True)
+    return names
+
+
+def _name_is_configured_bot(raw_name: str, names: List[str]) -> bool:
+    token = (raw_name or "").strip()
+    if token.startswith("@"):
+        token = token[1:].strip()
+    if not token:
+        return False
+    low = token.lower()
+    first = low.split()[0] if low.split() else ""
+    for name in names:
+        key = name.lower()
+        if low == key or first == key:
+            return True
+    return False
+
+
+def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
+    """True when the comment contains ``@bot /ask`` for a configured bot.
+
+    That form is routed to another agent. Yaver must not start a job.
+    ``/asking`` and ``/ask-review`` are not this command.
+    """
+    names = _ask_handoff_names(bot_mentions)
+    if not names:
+        return False
+    raw = note or ""
+    for match in _VSS_CHIP.finditer(raw):
+        after = raw[match.end() :]
+        if re.match(r"\s*/ask(?![A-Za-z0-9_-])", after, flags=re.IGNORECASE):
+            if _name_is_configured_bot(match.group(1) or "", names):
+                return True
+    text = flatten_comment_text(raw)
+    if not text:
+        return False
+    for name in names:
+        if not name:
+            continue
+        if re.search(
+            rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}\s*/ask(?![A-Za-z0-9_-])",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
