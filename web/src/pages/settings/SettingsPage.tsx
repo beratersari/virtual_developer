@@ -77,9 +77,19 @@ export function SettingsPage() {
   const [gitlabTestingIdx, setGitlabTestingIdx] = useState<number | null>(null)
   const [saved, setSaved] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
+  const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Draft>>(new Set())
+
+  const touch = (key: keyof Draft) => {
+    setDirty(true)
+    setDirtyKeys((prev) => {
+      const next = new Set(prev)
+      next.add(key)
+      return next
+    })
+  }
 
   const mark = <K extends keyof Draft>(key: K, value: Draft[K]) => {
-    setDirty(true)
+    touch(key)
     setDraft((d) => (d ? { ...d, [key]: value } : d))
   }
 
@@ -103,19 +113,36 @@ export function SettingsPage() {
           throw new Error(`GitLab host "${r.host}" needs a PAT`)
         }
       }
-      const body: Parameters<typeof patchSettings>[0] = {
-        jira_host: draft.jira_host.trim(),
-        jira_board_id: draft.jira_board_id.trim(),
-        poll_interval_seconds: Number(draft.poll_interval_seconds),
-        trigger_assignee_names: draft.trigger_assignee_names,
-        gitlab_bot_mentions: draft.gitlab_bot_mentions,
-        max_concurrent_jobs: Number(draft.max_concurrent_jobs),
-        agent_task_timeout_seconds: Number(draft.agent_task_timeout_seconds),
-        agent_task_max_retries: Number(draft.agent_task_max_retries),
-        agent_task_max_incomplete_retries: Number(draft.agent_task_max_incomplete_retries),
-        default_model: draft.default_model.trim(),
-        agent_backend: draft.agent_backend,
-        gitlab_credentials: draft.gitlab_cred_rows
+      const body: Parameters<typeof patchSettings>[0] = {}
+      if (dirtyKeys.has('jira_host')) body.jira_host = draft.jira_host.trim()
+      if (dirtyKeys.has('jira_board_id')) body.jira_board_id = draft.jira_board_id.trim()
+      if (dirtyKeys.has('poll_interval_seconds')) {
+        body.poll_interval_seconds = Number(draft.poll_interval_seconds)
+      }
+      if (dirtyKeys.has('trigger_assignee_names')) {
+        body.trigger_assignee_names = draft.trigger_assignee_names
+      }
+      if (dirtyKeys.has('gitlab_bot_mentions')) {
+        body.gitlab_bot_mentions = draft.gitlab_bot_mentions
+      }
+      if (dirtyKeys.has('max_concurrent_jobs')) {
+        body.max_concurrent_jobs = Number(draft.max_concurrent_jobs)
+      }
+      if (dirtyKeys.has('agent_task_timeout_seconds')) {
+        body.agent_task_timeout_seconds = Number(draft.agent_task_timeout_seconds)
+      }
+      if (dirtyKeys.has('agent_task_max_retries')) {
+        body.agent_task_max_retries = Number(draft.agent_task_max_retries)
+      }
+      if (dirtyKeys.has('agent_task_max_incomplete_retries')) {
+        body.agent_task_max_incomplete_retries = Number(
+          draft.agent_task_max_incomplete_retries,
+        )
+      }
+      if (dirtyKeys.has('default_model')) body.default_model = draft.default_model.trim()
+      if (dirtyKeys.has('agent_backend')) body.agent_backend = draft.agent_backend
+      if (dirtyKeys.has('gitlab_cred_rows')) {
+        body.gitlab_credentials = draft.gitlab_cred_rows
           .map((r) => {
             const host = r.host.trim()
             const prev = (r.original_host || '').trim()
@@ -126,21 +153,26 @@ export function SettingsPage() {
             }
             return row
           })
-          .filter((r) => r.host),
-        project_repositories: draft.project_repositories
+          .filter((r) => r.host)
+      }
+      if (dirtyKeys.has('project_repositories')) {
+        body.project_repositories = draft.project_repositories
           .map((p) => ({
             label: p.label.trim(),
             url: p.url.trim(),
             target_branch: (p.target_branch || '').trim(),
             source_branch: (p.source_branch || '').trim(),
           }))
-          .filter((p) => p.url),
+          .filter((p) => p.url)
       }
-      if (draft.jira_api_token.trim()) body.jira_api_token = draft.jira_api_token.trim()
+      if (dirtyKeys.has('jira_api_token') && draft.jira_api_token.trim()) {
+        body.jira_api_token = draft.jira_api_token.trim()
+      }
       const updated = await patchSettings(body)
       setSettings(updated)
       setDraft(fromSettings(updated))
       setDirty(false)
+      setDirtyKeys(new Set())
       setSaved(true)
       window.setTimeout(() => setSaved(false), 1800)
     } catch (e) {
@@ -159,7 +191,7 @@ export function SettingsPage() {
       <PageHeader
         kicker="Configuration"
         title="Settings"
-        description="Non-secret fields stay in runtime settings. Jira host/token and GitLab PATs are also written to .env so the next start uses them. Leave secret fields blank to keep the current value."
+        description="Save writes only the fields you changed. After restart, a .env key is used unless you later save that same field here. Leave secret fields blank to keep the current value."
       />
 
       <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
@@ -311,7 +343,7 @@ export function SettingsPage() {
             <input
               value={row.host}
               onChange={(e) => {
-                setDirty(true)
+                touch('gitlab_cred_rows')
                 setDraft((d) => {
                   if (!d) return d
                   const rows = [...d.gitlab_cred_rows]
@@ -328,7 +360,7 @@ export function SettingsPage() {
               value={row.pat}
               autoComplete="new-password"
               onChange={(e) => {
-                setDirty(true)
+                touch('gitlab_cred_rows')
                 setDraft((d) => {
                   if (!d) return d
                   const rows = [...d.gitlab_cred_rows]
@@ -371,7 +403,7 @@ export function SettingsPage() {
               type="button"
               className="bad"
               onClick={() => {
-                setDirty(true)
+                touch('gitlab_cred_rows')
                 setDraft((d) =>
                   d
                     ? {
@@ -398,7 +430,7 @@ export function SettingsPage() {
         <button
           type="button"
           onClick={() => {
-            setDirty(true)
+            touch('gitlab_cred_rows')
             setDraft((d) =>
               d
                 ? {
@@ -473,7 +505,7 @@ export function SettingsPage() {
                 placeholder="demo"
                 onChange={(e) => {
                   const label = e.target.value
-                  setDirty(true)
+                  touch('project_repositories')
                   setDraft((d) => {
                     if (!d) return d
                     const next = d.project_repositories.slice()
@@ -490,7 +522,7 @@ export function SettingsPage() {
                 placeholder="https://gitlab.com/group/repo.git"
                 onChange={(e) => {
                   const url = e.target.value
-                  setDirty(true)
+                  touch('project_repositories')
                   setDraft((d) => {
                     if (!d) return d
                     const next = d.project_repositories.slice()
@@ -508,7 +540,7 @@ export function SettingsPage() {
                   placeholder="develop"
                   onChange={(e) => {
                     const target_branch = e.target.value
-                    setDirty(true)
+                    touch('project_repositories')
                     setDraft((d) => {
                       if (!d) return d
                       const next = d.project_repositories.slice()
@@ -525,7 +557,7 @@ export function SettingsPage() {
                   placeholder="optional"
                   onChange={(e) => {
                     const source_branch = e.target.value
-                    setDirty(true)
+                    touch('project_repositories')
                     setDraft((d) => {
                       if (!d) return d
                       const next = d.project_repositories.slice()
@@ -541,7 +573,7 @@ export function SettingsPage() {
                 type="button"
                 className="vd-btn-ghost text-danger-text"
                 onClick={() => {
-                  setDirty(true)
+                  touch('project_repositories')
                   setDraft((d) =>
                     d
                       ? {
@@ -563,7 +595,7 @@ export function SettingsPage() {
           <button
             type="button"
             onClick={() => {
-              setDirty(true)
+              touch('project_repositories')
               setDraft((d) =>
                 d
                   ? {

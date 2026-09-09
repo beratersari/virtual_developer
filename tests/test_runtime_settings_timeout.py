@@ -12,16 +12,22 @@ from src.dashboard.service import apply_settings_update, build_settings_view
 from src.state.models import TaskStatus
 
 
+def _isolate_runtime(tmp_path, monkeypatch):
+    """Keep apply_settings_update / save_runtime_settings off C:\\vd\\yaver."""
+    runtime = tmp_path / "runtime_settings.json"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.runtime_settings_path", lambda: runtime)
+    return runtime
+
+
 def test_timeout_update_persists_and_reloads(tmp_path, monkeypatch):
     from src import config as config_mod
     from src.config import (
         apply_runtime_settings_to,
         load_runtime_settings,
-        runtime_settings_path,
-        save_runtime_settings,
     )
 
-    monkeypatch.chdir(tmp_path)
+    runtime = _isolate_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(config_mod.settings, "agent_task_timeout_seconds", 1800)
 
     view = apply_settings_update(
@@ -30,14 +36,17 @@ def test_timeout_update_persists_and_reloads(tmp_path, monkeypatch):
     assert view.agent_task_timeout_seconds == 120
     assert config_mod.settings.agent_task_timeout_seconds == 120
 
-    path = runtime_settings_path()
-    assert path.is_file()
-    data = json.loads(path.read_text(encoding="utf-8"))
+    assert runtime.is_file()
+    data = json.loads(runtime.read_text(encoding="utf-8"))
     assert data["agent_task_timeout_seconds"] == 120
     assert load_runtime_settings()["agent_task_timeout_seconds"] == 120
+    assert "agent_task_timeout_seconds" in (data.get("_updated") or {})
 
-    # Simulate restart: Settings from env, then apply runtime file
-    config_mod.settings.agent_task_timeout_seconds = 15  # pretend .env was 15
+    # Restart without a cwd .env: runtime must still win.
+    env_file = tmp_path / ".env"
+    if env_file.is_file():
+        env_file.unlink()
+    config_mod.settings.agent_task_timeout_seconds = 15
     apply_runtime_settings_to(config_mod.settings)
     assert config_mod.settings.agent_task_timeout_seconds == 120
     assert build_settings_view().agent_task_timeout_seconds == 120
@@ -47,7 +56,7 @@ def test_runtime_settings_ignore_invalid_board_id(tmp_path, monkeypatch):
     from src import config as config_mod
     from src.config import apply_runtime_settings_to, save_runtime_settings
 
-    monkeypatch.chdir(tmp_path)
+    _isolate_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(config_mod.settings, "jira_board_id", "1")
     save_runtime_settings({"jira_board_id": "`"})
     apply_runtime_settings_to(config_mod.settings)
@@ -62,7 +71,7 @@ def test_retry_counts_persist_and_reloads(tmp_path, monkeypatch):
     from src import config as config_mod
     from src.config import apply_runtime_settings_to, load_runtime_settings
 
-    monkeypatch.chdir(tmp_path)
+    _isolate_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(config_mod.settings, "agent_task_max_retries", 3)
     monkeypatch.setattr(config_mod.settings, "agent_task_max_incomplete_retries", 256)
 
@@ -88,6 +97,99 @@ def test_retry_counts_persist_and_reloads(tmp_path, monkeypatch):
     dumped = build_settings_view()
     assert dumped.agent_task_max_retries == 7
     assert dumped.agent_task_max_incomplete_retries == 40
+
+
+def test_settings_field_default_is_not_env_example_names():
+    from src.config import Settings
+
+    default = Settings.model_fields["trigger_assignee_names"].default
+    assert default == ""
+
+
+def test_newer_dotenv_keeps_trigger_names_over_stale_runtime(tmp_path, monkeypatch):
+    """Editing .env after a dashboard save must show in Settings on restart."""
+    import time
+
+    from src.config import Settings, apply_runtime_settings_to
+
+    monkeypatch.chdir(tmp_path)
+    runtime = tmp_path / "runtime_settings.json"
+    runtime.write_text(
+        '{"trigger_assignee_names": "jira ai bot,jira-ai-bot,jiraai,devbot"}\n',
+        encoding="utf-8",
+    )
+    time.sleep(0.05)
+    (tmp_path / ".env").write_text(
+        "TRIGGER_ASSIGNEE_NAMES=My Display Bot\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.config.runtime_settings_path",
+        lambda: runtime,
+    )
+    loaded = Settings(trigger_assignee_names="My Display Bot")
+    apply_runtime_settings_to(loaded)
+    assert loaded.trigger_assignee_names == "My Display Bot"
+
+
+def test_newer_runtime_still_overrides_dotenv_trigger_names(tmp_path, monkeypatch):
+    import time
+
+    from src.config import Settings, apply_runtime_settings_to, save_runtime_settings
+
+    _isolate_runtime(tmp_path, monkeypatch)
+    (tmp_path / ".env").write_text(
+        "TRIGGER_ASSIGNEE_NAMES=FromEnv\n",
+        encoding="utf-8",
+    )
+    time.sleep(0.05)
+    save_runtime_settings({"trigger_assignee_names": "FromDashboard"})
+    loaded = Settings(trigger_assignee_names="FromEnv")
+    apply_runtime_settings_to(loaded)
+    assert loaded.trigger_assignee_names == "FromDashboard"
+
+
+def test_legacy_runtime_without_timestamps_keeps_dotenv_trigger_names(
+    tmp_path, monkeypatch
+):
+    """Old runtime_settings.json dumps must not hide a .env bot name."""
+    from src.config import Settings, apply_runtime_settings_to
+
+    runtime = _isolate_runtime(tmp_path, monkeypatch)
+    runtime.write_text(
+        '{"trigger_assignee_names": "jira ai bot,jira-ai-bot,jiraai,devbot"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TRIGGER_ASSIGNEE_NAMES=Beratersari\n",
+        encoding="utf-8",
+    )
+    loaded = Settings(trigger_assignee_names="Beratersari")
+    apply_runtime_settings_to(loaded)
+    assert loaded.trigger_assignee_names == "Beratersari"
+
+
+def test_saving_timeout_does_not_override_dotenv_trigger_names(tmp_path, monkeypatch):
+    """A later Settings save of timeout must not re-stamp leftover bot names."""
+    from src.config import Settings, apply_runtime_settings_to, save_runtime_settings
+
+    runtime = _isolate_runtime(tmp_path, monkeypatch)
+    runtime.write_text(
+        '{"trigger_assignee_names": "devbot", "agent_task_timeout_seconds": 1800}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "TRIGGER_ASSIGNEE_NAMES=My Display Bot\n",
+        encoding="utf-8",
+    )
+    save_runtime_settings({"agent_task_timeout_seconds": 120})
+    loaded = Settings(
+        trigger_assignee_names="My Display Bot",
+        agent_task_timeout_seconds=1800,
+    )
+    apply_runtime_settings_to(loaded)
+    assert loaded.trigger_assignee_names == "My Display Bot"
+    assert loaded.agent_task_timeout_seconds == 120
 
 
 def test_settings_import_ignores_legacy_runtime_intake_mode(tmp_path):
