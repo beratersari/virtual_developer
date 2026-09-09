@@ -1,20 +1,27 @@
 """Azure DevOps Server REST client (2022.2 / TFS).
 
-Uses PAT-only auth: ``Authorization: Basic`` with an empty username
-(``base64(':' + PAT)``) — no operator username/password. ``verify=False``
-is the product TLS policy (on-prem / intercept; no custom-CA path yet).
+PAT auth is the same as Creasy: ``Authorization: Basic pat:<PAT>``.
+IIS rejects an empty username (``:PAT`` / Bearer). ``verify=False`` is
+the product TLS policy (on-prem / intercept; no custom-CA path yet).
 """
 
 from __future__ import annotations
 
-import base64
 from typing import Any, Dict, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
 
+from src.azure.auth import azure_basic_auth, azure_basic_auth_header, azure_basic_user
 from src.config import settings
 from src.logger import logger
+
+__all__ = [
+    "AzureDevOpsClient",
+    "azure_basic_auth",
+    "azure_basic_auth_header",
+    "azure_basic_user",
+]
 
 # Azure DevOps Server 2022.2 ships REST 7.1; 7.0 is accepted as fallback.
 _API_VERSION = "7.1"
@@ -43,11 +50,13 @@ def _normalize_host(raw: str) -> str:
         return (raw or "").strip().lower().split("/")[0]
 
 
-def azure_basic_auth_header(pat: str) -> str:
-    """RFC7617 Basic with empty user — Azure PAT is the password, nothing else."""
-    token = (pat or "").strip()
-    blob = base64.b64encode(f":{token}".encode("utf-8")).decode("ascii")
-    return f"Basic {blob}"
+def _ref_name(branch: str) -> str:
+    name = (branch or "").strip()
+    if not name:
+        return ""
+    if name.startswith("refs/"):
+        return name
+    return f"refs/heads/{name}"
 
 
 class AzureDevOpsClient:
@@ -93,7 +102,7 @@ class AzureDevOpsClient:
             "Content-Type": "application/json",
         }
         if self.pat:
-            headers["Authorization"] = azure_basic_auth_header(self.pat)
+            headers["Authorization"] = azure_basic_auth(self.pat)
         return headers
 
     def _repo_url(self, project: str, repository: Any) -> str:
@@ -231,4 +240,123 @@ class AzureDevOpsClient:
             f"Azure PR comment failed ({resp.status_code}): "
             f"{(resp.text or '')[:400]}"
         )
+        return None
+
+    def find_pull_request(
+        self,
+        *,
+        project: str,
+        repository: Any,
+        source_branch: str,
+        target_branch: str = "",
+    ) -> Optional[str]:
+        """Return the web URL of an active PR for source→target, if any."""
+        if not self.api_base:
+            return None
+        source = _ref_name(source_branch)
+        if not source:
+            return None
+        params: Dict[str, Any] = {
+            "api-version": _API_VERSION,
+            "searchCriteria.sourceRefName": source,
+            "searchCriteria.status": "active",
+        }
+        target = _ref_name(target_branch)
+        if target:
+            params["searchCriteria.targetRefName"] = target
+        url = f"{self._repo_url(project, repository)}/pullrequests"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers(), params=params)
+                if resp.status_code == 404:
+                    params["api-version"] = _API_VERSION_FALLBACK
+                    resp = client.get(url, headers=self._headers(), params=params)
+            if resp.status_code != 200:
+                logger.debug(
+                    f"Azure list PR {project}/{repository} failed "
+                    f"({resp.status_code})"
+                )
+                return None
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                return None
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                web = self._pr_web_url(item, project, repository)
+                if web:
+                    return web
+            return None
+        except Exception as e:
+            logger.debug(f"Azure list PR {project}/{repository} error: {e}")
+            return None
+
+    def create_pull_request(
+        self,
+        *,
+        project: str,
+        repository: Any,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str = "",
+    ) -> Optional[str]:
+        """Create a PR (or reuse an active one) using the same PAT as clone/push."""
+        if not self.api_base:
+            logger.error("Azure API base missing; cannot create pull request")
+            return None
+        source = _ref_name(source_branch)
+        target = _ref_name(target_branch)
+        if not source or not target:
+            logger.error("Azure PR create refused: source/target branch missing")
+            return None
+        existing = self.find_pull_request(
+            project=project,
+            repository=repository,
+            source_branch=source,
+            target_branch=target,
+        )
+        if existing:
+            logger.info(f"Azure PR already exists: {existing}")
+            return existing
+        payload = {
+            "sourceRefName": source,
+            "targetRefName": target,
+            "title": title or source_branch,
+            "description": description or title or "",
+        }
+        url = f"{self._repo_url(project, repository)}/pullrequests"
+        try:
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                posted = self._post_json(client, url, payload)
+            if not posted:
+                return None
+            web = self._pr_web_url(posted, project, repository)
+            if web:
+                logger.info(f"Azure pull request created: {web}")
+            return web
+        except Exception as e:
+            logger.error(f"Azure PR create error: {e}")
+            return None
+
+    def _pr_web_url(
+        self, data: Dict[str, Any], project: str, repository: Any
+    ) -> Optional[str]:
+        links = data.get("_links") if isinstance(data.get("_links"), dict) else {}
+        web = links.get("web") if isinstance(links.get("web"), dict) else {}
+        href = str(web.get("href") or "").strip()
+        if href:
+            return href
+        iid = data.get("pullRequestId")
+        try:
+            pr_id = int(iid)
+        except (TypeError, ValueError):
+            pr_id = 0
+        if pr_id <= 0 or not self.api_base:
+            return None
+        proj = quote(str(project or "").strip().strip("/"), safe="")
+        repo = quote(str(repository or "").strip(), safe="")
+        if proj and repo:
+            return f"{self.api_base}/{proj}/_git/{repo}/pullrequest/{pr_id}"
         return None

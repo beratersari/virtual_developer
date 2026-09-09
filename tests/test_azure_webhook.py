@@ -422,7 +422,8 @@ def test_azure_client_posts_thread(monkeypatch):
     assert "/pullrequests/4/threads" in captured["url"]
     assert captured["headers"]["Authorization"].startswith("Basic ")
     decoded = base64.b64decode(captured["headers"]["Authorization"][6:]).decode()
-    assert decoded == ":azpat-test"
+    assert decoded == "pat:azpat-test"
+    assert not decoded.startswith(":")
     assert "oauth2" not in decoded
     assert captured["json"]["comments"][0]["content"].startswith("*Yaver*")
 
@@ -886,7 +887,8 @@ def test_azure_pat_not_sent_to_gitlab_host(monkeypatch):
     assert "refused" in str(exc.value).lower() or "credentials" in str(exc.value).lower()
 
 
-def test_azure_git_env_uses_empty_user_and_bearer(monkeypatch, tmp_path):
+def test_azure_git_env_uses_pat_user_basic(monkeypatch, tmp_path):
+    from src.azure.auth import azure_basic_auth
     from src.config import Settings
     from src.git_manager import GitManager
 
@@ -899,14 +901,24 @@ def test_azure_git_env_uses_empty_user_and_bearer(monkeypatch, tmp_path):
     gm.remote_url = "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
     env = gm._apply_pat_to_git_env(gm._base_git_env())
     assert env["VD_GIT_AUTH"] == "azure"
+    assert env["VD_GIT_ASKUSER"] == "pat"
     assert env["VD_GIT_PASSWORD"] == "AZURE-SECRET-PAT"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GCM_INTERACTIVE"] == "never"
+    assert env["GIT_SSL_NO_VERIFY"] == "1"
     values = [env[k] for k in env if k.startswith("GIT_CONFIG_VALUE_")]
     keys = [env[k] for k in env if k.startswith("GIT_CONFIG_KEY_")]
-    assert any("Authorization: Bearer AZURE-SECRET-PAT" == v for v in values)
-    assert any(k.startswith("url.https://:AZURE-SECRET-PAT@tfs.example.com/") for k in keys)
+    assert any(v == f"Authorization: {azure_basic_auth('AZURE-SECRET-PAT')}" for v in values)
+    assert any(k.startswith("url.https://pat:AZURE-SECRET-PAT@tfs.example.com/") for k in keys)
     assert not any("oauth2:AZURE-SECRET-PAT" in (k + v) for k, v in zip(keys, values))
+    assert not any("Authorization: Bearer" in v for v in values)
+    decoded = None
+    for v in values:
+        if v.startswith("Authorization: Basic "):
+            decoded = base64.b64decode(v.split(" ", 2)[2]).decode("ascii")
+    assert decoded == "pat:AZURE-SECRET-PAT"
+    argv = gm._azure_git_config_args()
+    assert any(a.startswith("http.extraHeader=Authorization: Basic ") for a in argv)
 
 
 def test_gitlab_git_env_still_uses_oauth2(monkeypatch, tmp_path):
@@ -1047,41 +1059,44 @@ def test_settings_keep_azure_pat_when_row_blank(monkeypatch):
     assert s.azure_pat_for_host("tfs.example.com") == "keep-me"
 
 
-def test_askpass_azure_prints_empty_username(tmp_path, monkeypatch):
+def test_askpass_azure_prints_pat_username(tmp_path, monkeypatch):
     from src.git_manager import GitManager
 
     monkeypatch.setenv("YAVER_DATA_DIR", str(tmp_path / "yaver-data"))
     content = GitManager._askpass_wrapper_content()
     assert "oauth2" in content
     assert "azure" in content.lower()
-    py = (
-        "import os, sys\n"
-        "p = \" \".join(sys.argv[1:]).lower()\n"
-        "if \"username\" in p:\n"
-        "    sys.stdout.write(\"\\n\" if os.environ.get(\"VD_GIT_AUTH\") == \"azure\" else \"oauth2\\n\")\n"
-        "else:\n"
-        "    sys.stdout.write(os.environ.get(\"VD_GIT_PASSWORD\", \"\") + \"\\n\")\n"
-    )
-    helper = tmp_path / "ask.py"
-    helper.write_text(py, encoding="utf-8")
-    import subprocess
-    import sys
-
+    assert "pat" in content.lower()
+    path = GitManager._ensure_askpass_script()
+    assert path is not None and path.is_file()
     env = os.environ.copy()
     env["VD_GIT_AUTH"] = "azure"
+    env["VD_GIT_ASKUSER"] = "pat"
     env["VD_GIT_PASSWORD"] = "secret-pat"
-    user = subprocess.check_output(
-        [sys.executable, str(helper), "Username for 'https://tfs':"],
-        env=env,
+    if path.suffix.lower() == ".cmd":
+        prefix = ["cmd.exe", "/c", "call", str(path)]
+    else:
+        prefix = ["sh", str(path)]
+    import subprocess
+
+    user = subprocess.run(
+        [*prefix, "Username for 'https://tfs':"],
+        capture_output=True,
         text=True,
-    )
-    password = subprocess.check_output(
-        [sys.executable, str(helper), "Password:"],
         env=env,
-        text=True,
+        timeout=15,
     )
-    assert user == "\n"
-    assert password.strip() == "secret-pat"
+    password = subprocess.run(
+        [*prefix, "Password:"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    assert user.returncode == 0, user.stderr
+    assert password.returncode == 0, password.stderr
+    assert user.stdout.strip() == "pat"
+    assert password.stdout.strip() == "secret-pat"
 
 
 def test_fail_issue_posts_azure_reply_not_jira(

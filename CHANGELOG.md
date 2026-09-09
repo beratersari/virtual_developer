@@ -8,6 +8,14 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-09
+
+Azure DevOps Server auth matches Creasy and GitLab: username + PAT as HTTP Basic.
+
+### Fixed
+
+- Settings Test, clone, push, and PR create all send HTTP Basic `pat:<PAT>`. IIS rejects an empty username (`:PAT`) and ignores URL userinfo when it advertises Windows Negotiate — that was the Settings Test 401 with a valid PAT. Askpass returns username `pat`. Test continues past a 401 on the host root and tries `/tfs/DefaultCollection`.
+
 ## [0.6.0] — 2026-09-09
 
 Azure DevOps Server 2022.2 webhooks work like GitLab MR comments.
@@ -26,6 +34,7 @@ Settings follows a newer `.env`, and Edge no longer pops a native login dialog.
 - Jira → Bot name in Settings showed leftover `.env.example` names after you edited `TRIGGER_ASSIGNEE_NAMES`. Save now writes only changed fields. After restart, a `.env` key is used unless you later save that same field in Settings.
 - Some Edge windows showed a Windows/HTTP username popup that rejected `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`. The first SPA probe is always 200; sign-in stays on the in-page Ops console form.
 
+[0.6.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.6.1
 [0.6.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.6.0
 [0.5.3]: https://github.com/beratersari/virtual_developer/releases/tag/v0.5.3
 
