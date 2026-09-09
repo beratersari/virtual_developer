@@ -276,7 +276,7 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
    - URL: `http://<yaver-host>:8080/webhooks/azure`
    - HTTP header `X-Azure-Token: <same secret>` (or Basic password = secret).
-4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone.
+4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
 
@@ -367,7 +367,7 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 | Variable | Description |
 |----------|-------------|
 | `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
-| `GITLAB_BOT_MENTIONS` | GitLab username that starts a job when mentioned on an MR comment |
+| `GITLAB_BOT_MENTIONS` | GitLab username that starts a job when mentioned on an MR comment. `@name /ask` is ignored (another agent). |
 
 Repo URL and branches always come from the issue `{params}` block.
 

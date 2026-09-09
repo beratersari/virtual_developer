@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-10
+
+`@bot /ask` on a GitLab or Azure comment is not a Yaver job.
+
+### Changed
+
+- GitLab and Azure webhooks ignore a comment that contains `@mention_name /ask` (any spacing, HTML mention chip included). That command is for another agent. `/asking` and `/ask-review` still start a job. Merge/PR lifecycle hooks are unchanged.
+
+[0.7.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.7.1
+
 ## [0.7.0] — 2026-09-10
 
 Scheduled follow-up on an existing GitLab MR. Azure jobs write a readable `[azure]` trail, including webhook rejects, and those lines show on Job → Logs.

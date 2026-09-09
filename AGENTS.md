@@ -336,7 +336,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` |
 | `AZURE_WEBHOOK_SECRET` | Shared secret; must match service-hook `X-Azure-Token` |
-| `AZURE_BOT_MENTIONS` | Display/unique names that start a job when mentioned on a PR comment |
+| `AZURE_BOT_MENTIONS` | Display/unique names that start a job when mentioned on a PR comment. `@name /ask` is ignored (another agent). |
 
 ---
 

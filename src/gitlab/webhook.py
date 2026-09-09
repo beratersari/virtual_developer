@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
+    ASK_HANDOFF_REASON,
+    note_is_ask_handoff,
     note_mentions_bot,
     normalize_mention,
     parse_mention_list,
@@ -278,6 +280,12 @@ def decide_gitlab_note_webhook(
         return WebhookDecision(False, "no GITLAB_BOT_MENTIONS configured")
     if not note_mentions_bot(note, mentions):
         return WebhookDecision(False, "bot not mentioned")
+    if note_is_ask_handoff(note, bot_mentions or mentions):
+        logger.info(
+            f"GitLab note ignored /ask handoff "
+            f"preview={note.strip()[:80]!r}"
+        )
+        return WebhookDecision(False, ASK_HANDOFF_REASON)
 
     user = _as_dict(data.get("user"))
     author = normalize_mention(

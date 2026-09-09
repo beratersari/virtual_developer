@@ -1,9 +1,14 @@
-# Yaver 0.7.0
+# Yaver 0.7.1
 
-Schedules can follow up on an existing GitLab MR: look up a saved
-project or paste a URL, store a prompt, post it on the MR at fire
-time, then run the usual note job. Notes written from the dashboard
-are marked so the webhook does not start a second job.
+`@bot /ask …` on a GitLab MR or Azure PR comment is not a Yaver job.
+That command is routed to another agent. The webhook returns
+`ignored /ask handoff` and does not enqueue. `/asking` and
+`/ask-review` still start a job. Merge and PR lifecycle hooks are
+unchanged.
+
+Schedules can still follow up on an existing GitLab MR: look up a
+saved project or paste a URL, store a prompt, post it on the MR at
+fire time, then run the usual note job.
 
 Azure webhook, REST, Settings Test, git, and PR workflow steps now
 write `[azure]` lines (never a PAT or Authorization header). A
@@ -92,6 +97,7 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- `@bot /ask` on GitLab or Azure comments is ignored (another agent)
 - Scheduled follow-up on an existing GitLab MR
 - Azure `[azure]` job trail (webhook reject reasons, REST, git, workflow)
 - Webhook intake lines appear on Job → Logs
