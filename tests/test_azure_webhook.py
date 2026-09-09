@@ -1161,3 +1161,27 @@ def test_event_roundtrip_dict():
     assert again.issue_key == "KAN-7"
     assert again.pr_id == 4
     assert again.source_branch == "feature/login"
+
+
+def test_mention_scan_lists_extracted_and_configured():
+    from src.azure.log import clip
+    from src.azure.mentions import mention_scan
+
+    scan = mention_scan("@yaver please look", ["yaver", "Yaver Bot"])
+    assert scan["matched"] is True
+    assert "yaver" in scan["extracted"]
+    assert "yaver" in scan["configured"]
+    miss = mention_scan("DOMAIN\\alice said hi", ["yaver"])
+    assert miss["matched"] is False
+    assert clip("one   two\nthree", 7) == "one tw…"
+
+
+def test_comment_reject_reasons_unchanged_when_bot_not_mentioned():
+    d = decide_azure_comment_webhook(
+        _pr_comment_payload(note="no mention here"),
+        headers={"X-Azure-Token": "s"},
+        secret="s",
+        bot_mentions=["@yaver"],
+    )
+    assert d.accepted is False
+    assert d.reason == "bot not mentioned"

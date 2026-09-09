@@ -46,6 +46,22 @@ def html_mention_names(note: str) -> List[str]:
     return found
 
 
+def mention_scan(note: str, bot_mentions: Iterable[str]) -> dict:
+    """Configured bots vs names found in the comment (for reject logs)."""
+    bots = sorted(
+        {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+    )
+    extracted = sorted(
+        set(mentioned_usernames(note)) | set(html_mention_names(note))
+    )
+    matched = bool(set(bots) & set(extracted))
+    return {
+        "configured": bots,
+        "extracted": extracted,
+        "matched": matched,
+    }
+
+
 def note_mentions_bot(note: str, bot_mentions: Iterable[str]) -> bool:
     bots = {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
     if not bots:
@@ -101,6 +117,7 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 __all__ = [
     "html_mention_names",
+    "mention_scan",
     "normalize_mention",
     "note_mentions_bot",
     "parse_mention_list",

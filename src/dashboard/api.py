@@ -319,6 +319,7 @@ def create_dashboard_app(
         """
         from fastapi.responses import JSONResponse
 
+        from src.azure.log import azure_error, azure_info
         from src.azure.webhook import (
             AZURE_PR_EVENTS,
             decide_azure_comment_webhook,
@@ -329,6 +330,7 @@ def create_dashboard_app(
         try:
             payload = await request.json()
         except Exception:
+            azure_error("http webhook reject invalid json")
             return JSONResponse(
                 {"ok": False, "reason": "invalid json"}, status_code=400
             )
@@ -345,6 +347,11 @@ def create_dashboard_app(
         enabled = bool(getattr(settings, "azure_webhook_enabled", False))
         secret = str(getattr(settings, "azure_webhook_secret", "") or "")
         is_pr = event_name in AZURE_PR_EVENTS
+        azure_info(
+            f"http webhook received event={event_name!r} kind="
+            f"{'pull_request' if is_pr else 'comment'} "
+            f"enabled={enabled} secret_configured={bool(secret)}"
+        )
         if is_pr:
             decision = decide_azure_pr_webhook(
                 payload,
@@ -363,17 +370,26 @@ def create_dashboard_app(
             )
         if not decision.accepted:
             status = int(decision.http_status or 200)
+            azure_info(
+                f"http webhook rejected reason={decision.reason!r} http={status}"
+            )
             return JSONResponse(
                 {"ok": False, "reason": decision.reason},
                 status_code=status,
             )
         proc = app.state.processor
         if proc is None or decision.event is None:
+            azure_error("http webhook accepted but processor not bound")
             raise HTTPException(
                 status_code=503, detail="processor not bound; start the daemon"
             )
         if is_pr:
             result = await proc.handle_azure_pr_lifecycle(decision.event)
+            azure_info(
+                f"http webhook lifecycle done issue="
+                f"{getattr(decision.event, 'issue_key', '')} "
+                f"reason={result.get('reason')} deleted={result.get('deleted') or []}"
+            )
             return {
                 "ok": True,
                 "kind": "pull_request",
@@ -385,6 +401,11 @@ def create_dashboard_app(
                 "server_time": build_meta().server_time,
             }
         result = await proc.enqueue_azure_comment(decision.event)
+        azure_info(
+            f"http webhook comment queued issue={decision.event.issue_key} "
+            f"queue_id={result.get('queue_id')} status={result.get('status')} "
+            f"started={result.get('started')} queued={result.get('queued')}"
+        )
         return {
             "ok": True,
             "issue_key": decision.event.issue_key,
