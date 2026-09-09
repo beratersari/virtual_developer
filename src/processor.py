@@ -2384,6 +2384,61 @@ class JobProcessor:
             extra_needles=getattr(live, "trigger_assignee_names_list", None) or [],
         )
 
+    def _release_plan_execute_latch(self, issue_key: str) -> None:
+        """Allow the next poll to emit plan_execute again (skip / missing plan)."""
+        key = (issue_key or "").strip()
+        if not key:
+            return
+        poller = getattr(self, "_poller", None)
+        latch = getattr(poller, "_plan_start_emitted", None) if poller else None
+        if isinstance(latch, set):
+            latch.discard(key)
+
+    def _notify_plan_execute_without_plan(
+        self, issue_key: str, state: Optional[JiraAgentState]
+    ) -> None:
+        """Tell Jira the implement label fired but no plan file exists.
+
+        Keep local status at plan_ready so the next poll can retry once the
+        file is restored. Drop the poller execute latch or this skip is
+        one-shot until the operator removes and re-adds the label.
+        """
+        self._release_plan_execute_latch(issue_key)
+        st = state or self.state_manager.get_state(issue_key)
+        meta = (st.metadata if st is not None else None) or {}
+        if meta.get("plan_execute_missing_plan_notified"):
+            return
+        plan_path = str(self._durable_plan_path(issue_key))
+        msg = (
+            f"plan_execute is set but no plan file was found on disk "
+            f"(`{plan_path}`). Implement did not start.\n\n"
+            "Restore that file (or the path stored on the issue) and keep "
+            "the ticket *In Progress* with label `plan_execute`. "
+            "The next poll will retry."
+        )
+        posted = False
+        try:
+            if st is not None:
+                posted = bool(self.reporter.post_error(st, msg, category="error"))
+        except Exception as e:
+            logger.warning(f"{issue_key}: missing-plan Jira post_error failed: {e}")
+        if not posted:
+            try:
+                self.reporter.post_comment_response(issue_key, msg)
+                posted = True
+            except Exception as e:
+                logger.warning(
+                    f"{issue_key}: missing-plan Jira comment failed: {e}"
+                )
+        if posted and st is not None:
+            try:
+                self.state_manager.update_state(
+                    issue_key,
+                    metadata={"plan_execute_missing_plan_notified": True},
+                )
+            except Exception:
+                pass
+
     async def _maybe_handle_plan_handoff(
         self, event: Dict[str, Any], state: Optional[JiraAgentState]
     ) -> Optional[tuple[bool, Optional[str]]]:
@@ -2435,12 +2490,16 @@ class JobProcessor:
                     has_plan = False
             if not has_plan:
                 logger.info(f"{issue_key} plan_execute but no plan file on disk")
+                self._notify_plan_execute_without_plan(issue_key, state)
                 return False, "plan_execute without a plan"
             self.state_manager.update_state(
                 issue_key,
                 issue_summary=state.issue_summary,
                 description=state.description,
-                metadata={"workflow_type": WorkflowType.EXECUTION.value},
+                metadata={
+                    "workflow_type": WorkflowType.EXECUTION.value,
+                    "plan_execute_missing_plan_notified": False,
+                },
             )
             state = self.state_manager.get_state(issue_key) or state
             self._apply_plan_labels(
