@@ -71,6 +71,7 @@ class GitlabMrNoteEvent:
             "mr_url": self.mr_url,
             "discussion_id": self.discussion_id,
             "webhook_event": self.webhook_event,
+            "raw": self.raw if isinstance(self.raw, dict) else {},
         }
 
     @classmethod

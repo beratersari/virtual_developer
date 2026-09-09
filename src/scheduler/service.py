@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set
 
+from src.brand import COMMENT_PREFIX
 from src.config import settings
 from src.issue_git_spec import (
     _normalize_backend_id,
@@ -561,6 +562,171 @@ def schedule_existing_issue(
                 pass
 
 
+def _mr_branches(mr: Dict[str, Any]) -> tuple[str, str]:
+    src = str(mr.get("source_branch") or mr.get("source_branch_name") or "").strip()
+    tgt = str(mr.get("target_branch") or mr.get("target_branch_name") or "").strip()
+    return src, tgt
+
+
+def preview_mr_followup(
+    repository_url: str,
+    mr_iid: Any = 0,
+) -> Dict[str, Any]:
+    """Load an existing GitLab MR for the Scheduled → MR form.
+
+    Hard-fail if the repo URL / iid cannot be parsed or GitLab does not
+    return the merge request. No schedule is written.
+    """
+    from src.gitlab.client import (
+        GitlabClient,
+        parse_merge_request_url,
+        project_from_repo_url,
+    )
+    from src.gitlab.keys import resolve_mr_issue_key
+
+    raw_url = (repository_url or "").strip()
+    parsed_mr = parse_merge_request_url(raw_url)
+    host = ""
+    project = ""
+    iid = 0
+    try:
+        iid = int(mr_iid or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    if parsed_mr:
+        host, project, url_iid = parsed_mr
+        if iid <= 0:
+            iid = url_iid
+    else:
+        parsed_repo = project_from_repo_url(raw_url)
+        if parsed_repo:
+            host, project = parsed_repo
+    if not host or not project:
+        return {
+            "ok": False,
+            "error": "Need a GitLab project URL (or MR page URL).",
+        }
+    if iid <= 0:
+        return {"ok": False, "error": "Merge request iid must be a positive number."}
+
+    client = GitlabClient(host=host)
+    mr = client.get_merge_request(project, iid)
+    if not isinstance(mr, dict):
+        return {
+            "ok": False,
+            "error": (
+                f"Could not load {project}!{iid} on {host}. "
+                "Check the URL, iid, and that a GitLab PAT is saved for this host."
+            ),
+            "repository_url": raw_url,
+            "gitlab_host": host,
+            "gitlab_project": project,
+            "mr_iid": iid,
+        }
+    src, tgt = _mr_branches(mr)
+    title = str(mr.get("title") or "").strip()
+    desc = str(mr.get("description") or "")
+    web = str(mr.get("web_url") or "").strip()
+    if parsed_mr:
+        scheme = (
+            "http"
+            if host.startswith("127.") or host.startswith("localhost")
+            else "https"
+        )
+        repo_url = f"{scheme}://{host}/{project}.git"
+    else:
+        repo_url = raw_url
+    keys = list(getattr(settings, "jira_projects_list", None) or [])
+    issue_key = resolve_mr_issue_key(
+        mr_title=title,
+        mr_description=desc,
+        project_path=project,
+        mr_iid=iid,
+        project_keys=keys,
+    )
+    state = str(mr.get("state") or "opened").strip().lower()
+    return {
+        "ok": True,
+        "repository_url": repo_url,
+        "gitlab_host": host,
+        "gitlab_project": project,
+        "mr_iid": iid,
+        "title": title,
+        "description": desc,
+        "source_branch": src,
+        "target_branch": tgt,
+        "merge_request_url": web,
+        "issue_key": issue_key,
+        "mr_state": state,
+        "message": (
+            f"{project}!{iid} — {title or '(no title)'} "
+            f"({src or '?'} → {tgt or '?'})"
+        ),
+    }
+
+
+def schedule_mr_followup(
+    *,
+    repository_url: str,
+    mr_iid: Any,
+    prompt: str,
+    scheduled_at: str,
+    model: str = "",
+    backend: str = "",
+    store: Optional[ScheduleStore] = None,
+) -> Dict[str, Any]:
+    """Schedule a follow-up prompt on an existing GitLab merge request.
+
+    Hard-fail if the MR cannot be loaded or the prompt is empty. No Jira
+    issue is created. At fire time the prompt is posted on the MR, then
+    the existing GitLab MR job runs and posts the agent answer.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {"ok": False, "error": "Prompt is required."}
+    preview = preview_mr_followup(repository_url, mr_iid)
+    if not preview.get("ok"):
+        return preview
+    try:
+        at_dt = parse_schedule_at(scheduled_at)
+    except ValueError as e:
+        return {"ok": False, "error": f"invalid scheduled_at: {e}"}
+    scheduled_iso = at_dt.isoformat(timespec="seconds")
+    iid = int(preview.get("mr_iid") or 0)
+    project = str(preview.get("gitlab_project") or "")
+    title = str(preview.get("title") or f"MR !{iid}")
+    ss = store or schedule_store
+    rec = ss.create(
+        title=title,
+        description=text,
+        repository_url=str(preview.get("repository_url") or repository_url),
+        source_branch=str(preview.get("source_branch") or ""),
+        target_branch=str(preview.get("target_branch") or ""),
+        mode="build",
+        scheduled_at=scheduled_iso,
+        issue_key=str(preview.get("issue_key") or ""),
+        issue_description=text,
+        project_key="",
+        source="gitlab_mr",
+        model=(model or "").strip(),
+        backend=(backend or "").strip(),
+        mr_iid=iid,
+        gitlab_host=str(preview.get("gitlab_host") or ""),
+        gitlab_project=project,
+        merge_request_url=str(preview.get("merge_request_url") or ""),
+    )
+    logger.info(
+        f"Schedule MR follow-up {project}!{iid} "
+        f"schedule_id={rec.get('schedule_id')} at={scheduled_iso}"
+    )
+    return {
+        "ok": True,
+        "schedule": rec,
+        "issue_key": rec.get("issue_key") or "",
+        "message": f"Scheduled follow-up on {project}!{iid}",
+    }
+
+
 def create_scheduled_job(
     *,
     title: str,
@@ -862,7 +1028,10 @@ def _schedule_workspace_lock_kwargs(
     repo = (rec.get("repository_url") or "").strip()
     src = (rec.get("source_branch") or "").strip()
     tgt = (rec.get("target_branch") or "").strip()
-    work = GitManager.resolve_work_branch_name(issue_key, src, tgt)
+    keep_source = (rec.get("source") or "").strip().lower() == "gitlab_mr"
+    work = GitManager.resolve_work_branch_name(
+        issue_key, src, tgt, keep_source=keep_source
+    )
     return {
         "repository_url": repo,
         "work_branch": work,
@@ -1124,6 +1293,156 @@ def dispatch_schedule_now(
     }
 
 
+def format_dashboard_mr_prompt_note(prompt: str) -> str:
+    """MR note for a prompt typed in the ops dashboard (not a GitLab comment).
+
+    Lead with ``*Yaver*`` so the GitLab webhook treats it as bot output and
+    does not start a second job from this same note.
+    """
+    text = (prompt or "").strip()
+    return f"{COMMENT_PREFIX} — written in the ops dashboard\n\n{text}"
+
+
+def _gitlab_mr_followup_http(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Blocking GitLab GET MR + POST note. Must not run on the asyncio loop."""
+    from src.gitlab.client import GitlabClient, project_from_repo_url
+
+    prompt = (
+        (rec.get("issue_description") or rec.get("description") or "")
+    ).strip()
+    if not prompt:
+        return {"ok": False, "error": "Scheduled MR prompt is empty."}
+    host = str(rec.get("gitlab_host") or "").strip()
+    project = str(rec.get("gitlab_project") or "").strip()
+    try:
+        iid = int(rec.get("mr_iid") or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    if (not host or not project) and rec.get("repository_url"):
+        pair = project_from_repo_url(str(rec.get("repository_url") or ""))
+        if pair:
+            host = host or pair[0]
+            project = project or pair[1]
+    if not host or not project or iid <= 0:
+        return {"ok": False, "error": "Schedule is missing GitLab host, project, or iid."}
+
+    client = GitlabClient(host=host)
+    mr = client.get_merge_request(project, iid)
+    if not isinstance(mr, dict):
+        return {
+            "ok": False,
+            "error": f"Could not load {project}!{iid} on {host} at dispatch.",
+        }
+    src, tgt = _mr_branches(mr)
+    src = src or str(rec.get("source_branch") or "")
+    tgt = tgt or str(rec.get("target_branch") or "")
+    title = str(mr.get("title") or rec.get("title") or f"MR !{iid}")
+    desc = str(mr.get("description") or "")
+    web = str(mr.get("web_url") or rec.get("merge_request_url") or "")
+    repo_url = str(rec.get("repository_url") or "").strip()
+    if not repo_url:
+        repo_url = (
+            f"http://{host}/{project}.git"
+            if host.startswith("127.") or host.startswith("localhost")
+            else f"https://{host}/{project}.git"
+        )
+    posted = client.post_mr_note(
+        project=project,
+        mr_iid=iid,
+        body=format_dashboard_mr_prompt_note(prompt),
+    )
+    if not posted:
+        return {
+            "ok": False,
+            "error": f"Could not post the prompt on {project}!{iid}.",
+        }
+    return {
+        "ok": True,
+        "mr": mr,
+        "posted": posted,
+        "host": host,
+        "project": project,
+        "iid": iid,
+        "prompt": prompt,
+        "repo_url": repo_url,
+        "src": src,
+        "tgt": tgt,
+        "title": title,
+        "desc": desc,
+        "web": web,
+    }
+
+
+async def _dispatch_mr_followup(
+    processor: "JobProcessor", rec: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Post the scheduled prompt on the MR, then enqueue the GitLab MR job."""
+    from src.gitlab.keys import resolve_mr_issue_key
+    from src.gitlab.webhook import GitlabMrNoteEvent
+
+    posted_info = await asyncio.to_thread(_gitlab_mr_followup_http, rec)
+    if not posted_info.get("ok"):
+        return posted_info
+    mr = posted_info["mr"]
+    posted = posted_info["posted"]
+    host = str(posted_info["host"])
+    project = str(posted_info["project"])
+    iid = int(posted_info["iid"])
+    prompt = str(posted_info["prompt"])
+    repo_url = str(posted_info["repo_url"])
+    src = str(posted_info["src"] or "")
+    tgt = str(posted_info["tgt"] or "")
+    title = str(posted_info["title"])
+    desc = str(posted_info["desc"] or "")
+    web = str(posted_info["web"] or "")
+    note_id = str(posted.get("id") or "")
+    discussion_id = str(posted.get("discussion_id") or "")
+    keys = list(getattr(settings, "jira_projects_list", None) or [])
+    issue_key = (rec.get("issue_key") or "").strip().upper() or resolve_mr_issue_key(
+        mr_title=title,
+        mr_description=desc,
+        project_path=project,
+        mr_iid=iid,
+        project_keys=keys,
+    )
+    event = GitlabMrNoteEvent(
+        issue_key=issue_key,
+        note_id=note_id,
+        note_body=prompt,
+        prompt=prompt,
+        author_username="dashboard",
+        author_name="Scheduled",
+        project_id=int(mr.get("project_id") or 0),
+        project_path=project,
+        repository_url=repo_url,
+        host=host,
+        mr_iid=iid,
+        mr_title=title,
+        mr_description=desc,
+        source_branch=src,
+        target_branch=tgt,
+        mr_url=web,
+        discussion_id=discussion_id,
+        webhook_event="schedule",
+        raw={
+            "model": (rec.get("model") or "").strip(),
+            "backend": (rec.get("backend") or "").strip(),
+        },
+    )
+    enqueue = getattr(processor, "enqueue_gitlab_note", None)
+    if not callable(enqueue):
+        return {"ok": False, "error": "Processor cannot enqueue GitLab MR jobs."}
+    outcome = await enqueue(event)
+    if not isinstance(outcome, dict) or not outcome.get("ok"):
+        msg = (
+            (outcome or {}).get("reason")
+            if isinstance(outcome, dict)
+            else None
+        ) or "enqueue_gitlab_note failed"
+        return {"ok": False, "error": str(msg)}
+    return {"ok": True, "outcome": outcome, "issue_key": issue_key}
+
+
 async def _dispatch_claimed_schedule(
     *,
     processor: "JobProcessor",
@@ -1148,6 +1467,27 @@ async def _dispatch_claimed_schedule(
                 f"({live.get('status')}); not starting work"
             )
             return
+        if (live.get("source") or "").strip().lower() == "gitlab_mr":
+            outcome = await _dispatch_mr_followup(processor, live)
+            if not isinstance(outcome, dict) or not outcome.get("ok"):
+                msg = (
+                    (outcome or {}).get("error")
+                    if isinstance(outcome, dict)
+                    else None
+                ) or "MR follow-up dispatch failed"
+                _finish_schedule_dispatch(
+                    store, schedule_id, status="error", error_message=str(msg)[:1000]
+                )
+                logger.warning(
+                    f"Schedule {schedule_id} MR follow-up failed: {msg}"
+                )
+                return
+            _finish_schedule_dispatch(store, schedule_id, status="dispatched")
+            logger.info(
+                f"Schedule {schedule_id} dispatched MR follow-up "
+                f"{live.get('gitlab_project')}!{live.get('mr_iid')}"
+            )
+            return
         inflight = _issue_in_flight_reason(processor, issue_key)
         if inflight:
             _finish_schedule_dispatch(
@@ -1165,8 +1505,10 @@ async def _dispatch_claimed_schedule(
             client = jira_client
             if client is None:
                 client = getattr(processor, "jira_client", None)
-            issue = _issue_payload_for_dispatch(
-                claimed_rec or live, jira_client=client
+            issue = await asyncio.to_thread(
+                _issue_payload_for_dispatch,
+                claimed_rec or live,
+                jira_client=client,
             )
             live = store.get(schedule_id) or live
             if (live.get("status") or "").lower() != "dispatching":

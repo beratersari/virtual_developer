@@ -40,6 +40,49 @@ def _normalize_host(raw: str) -> str:
         return (raw or "").strip().lower().split("/")[0]
 
 
+def project_from_repo_url(url: str) -> Optional[Tuple[str, str]]:
+    """Split a clone or project URL into ``(host[:port], group/repo)``.
+
+    Accepts ``https://host/group/repo.git``, ``git@host:group/repo.git``,
+    and an MR page URL (path after ``/-/`` is dropped).
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("git@"):
+        rest = raw[4:]
+        if ":" not in rest:
+            return None
+        host, path = rest.split(":", 1)
+        path = path.strip().removesuffix(".git").strip("/")
+        host = host.strip().lower()
+        if host and path:
+            return host, path
+        return None
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if parsed.port and parsed.port not in (80, 443):
+        host = f"{host}:{parsed.port}"
+    path = (parsed.path or "").strip("/")
+    if "/-/" in path:
+        path = path.split("/-/", 1)[0]
+    elif "/merge_requests/" in path:
+        path = path.split("/merge_requests/", 1)[0]
+    if path.endswith(".git"):
+        path = path[:-4]
+    path = path.strip("/")
+    if not path:
+        return None
+    return host, path
+
+
 def parse_merge_request_url(url: str) -> Optional[Tuple[str, str, int]]:
     """Split ``https://host/group/repo/-/merge_requests/12`` → host, project, iid."""
     raw = (url or "").strip()
@@ -108,6 +151,56 @@ class GitlabClient:
             ident = quote(str(project or "").strip().strip("/"), safe="")
         return f"{self.api_base}/projects/{ident}"
 
+    def resolve_project(self, project: Any) -> Optional[Dict[str, Any]]:
+        """GET ``/projects/:id`` or match ``path_with_namespace`` from the list."""
+        if not self.api_base:
+            return None
+        url = self._project_url(project)
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                if isinstance(data, dict) and data.get("id") is not None:
+                    return data
+        except Exception as e:
+            logger.debug(f"GitLab GET project {project!r} error: {e}")
+        want = str(project or "").strip().strip("/").lower()
+        if not want or want.isdigit():
+            return None
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(
+                    f"{self.api_base}/projects",
+                    headers=self._headers(),
+                    params={"simple": True, "membership": True},
+                )
+            if resp.status_code != 200:
+                return None
+            rows = resp.json() if resp.content else []
+        except Exception as e:
+            logger.debug(f"GitLab LIST projects error: {e}")
+            return None
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get("path_with_namespace") or "").strip().lower()
+            if path == want:
+                return row
+        return None
+
+    def _project_ident(self, project: Any) -> Any:
+        """Prefer numeric project id so encoded ``group/repo`` paths work."""
+        raw = project
+        if isinstance(project, int) or (isinstance(project, str) and str(project).isdigit()):
+            return project
+        found = self.resolve_project(project)
+        if found and found.get("id") is not None:
+            return found["id"]
+        return raw
+
     def get_merge_request(self, project: Any, mr_iid: int) -> Optional[Dict[str, Any]]:
         """GET ``/projects/:id/merge_requests/:iid`` (state / merged)."""
         if not self.api_base:
@@ -118,7 +211,8 @@ class GitlabClient:
             return None
         if iid <= 0:
             return None
-        url = f"{self._project_url(project)}/merge_requests/{iid}"
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{iid}"
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
                 resp = client.get(url, headers=self._headers())
@@ -148,7 +242,8 @@ class GitlabClient:
         text = (body or "").strip()
         if not text:
             return None
-        url = f"{self._project_url(project)}/merge_requests/{int(mr_iid)}/notes"
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/notes"
         payload: Dict[str, Any] = {"body": text}
         # Thread reply — supported on CE and EE when discussion_id is present
         if (discussion_id or "").strip():

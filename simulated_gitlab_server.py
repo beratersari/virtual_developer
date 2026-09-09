@@ -195,6 +195,7 @@ def api_mr(pid: str, iid: int):
         {
             "id": iid,
             "iid": mr.iid,
+            "project_id": p.id,
             "title": mr.title,
             "description": mr.description,
             "source_branch": mr.source_branch,

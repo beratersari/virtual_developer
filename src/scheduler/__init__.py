@@ -10,7 +10,9 @@ from src.scheduler.service import (
     list_scheduled_jobs,
     parse_schedule_at,
     preview_existing_issue,
+    preview_mr_followup,
     schedule_existing_issue,
+    schedule_mr_followup,
     wait_inflight_dispatches,
 )
 
@@ -24,6 +26,8 @@ __all__ = [
     "list_scheduled_jobs",
     "parse_schedule_at",
     "preview_existing_issue",
+    "preview_mr_followup",
     "schedule_existing_issue",
+    "schedule_mr_followup",
     "wait_inflight_dispatches",
 ]

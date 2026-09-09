@@ -28,6 +28,7 @@ from src.dashboard.schemas import (
     JiraConnectionTestRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
+    ScheduleMrRequest,
     SettingsUpdate,
     TempFolderDeleteRequest,
 )
@@ -60,7 +61,9 @@ from src.scheduler.service import (
     list_project_issue_types,
     list_scheduled_jobs,
     preview_existing_issue,
+    preview_mr_followup,
     schedule_existing_issue,
+    schedule_mr_followup,
 )
 from src.state.schedule_store import schedule_store
 from src.state.job_store import job_store
@@ -637,6 +640,53 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=400,
                 detail=result.get("error") or "Failed to schedule existing issue",
+            )
+        result = _maybe_dispatch_now(result, body.dispatch_now)
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "message": result.get("message"),
+            "dispatched": bool(result.get("dispatched")),
+            "dispatch_error": result.get("dispatch_error"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/schedules/mr-preview")
+    def schedules_mr_preview(
+        repository_url: str = Query(..., description="GitLab project or MR URL"),
+        mr_iid: int = Query(default=0, ge=0, description="Merge request iid"),
+    ) -> dict:
+        """Load an existing GitLab MR (title, branches) before scheduling."""
+        result = preview_mr_followup(repository_url, mr_iid)
+        result["server_time"] = build_meta().server_time
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "MR preview failed",
+            )
+        return result
+
+    @app.post("/api/schedules/mr")
+    async def schedules_mr(body: ScheduleMrRequest) -> dict:
+        """Schedule a follow-up prompt on an existing GitLab merge request.
+
+        At fire time the prompt is posted on the MR, then the usual GitLab
+        MR job runs and posts the agent answer.
+        """
+        result = schedule_mr_followup(
+            repository_url=body.repository_url,
+            mr_iid=body.mr_iid,
+            prompt=body.prompt,
+            scheduled_at=body.scheduled_at,
+            model=body.model or "",
+            backend=body.backend or "",
+            store=schedule_store,
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Failed to schedule MR follow-up",
             )
         result = _maybe_dispatch_now(result, body.dispatch_now)
         return {

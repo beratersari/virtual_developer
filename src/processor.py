@@ -1544,6 +1544,10 @@ class JobProcessor:
         mid = (getattr(spec, "model", None) or "").strip() if spec else ""
         if mid:
             return mid
+        meta = getattr(state, "metadata", None) or {}
+        mid = str(meta.get("model") or "").strip()
+        if mid:
+            return mid
         return (getattr(settings, "default_model", "") or "").strip()
 
     def _backend_for_issue(self, state: Any) -> str:
@@ -1561,6 +1565,10 @@ class JobProcessor:
             except Exception:
                 spec = None
             bid = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            if bid:
+                return bid
+            meta = getattr(state, "metadata", None) or {}
+            bid = normalize_backend_name(meta.get("backend"))
             if bid:
                 return bid
         return (
@@ -4254,6 +4262,7 @@ class JobProcessor:
         st = self.state_manager.get_state(issue_key)
         summary = event.mr_title or f"MR !{event.mr_iid}"
         description = event.prompt
+        extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
         meta = {
             "source": "gitlab",
             "gitlab_host": event.host,
@@ -4268,6 +4277,8 @@ class JobProcessor:
             "feature_branch": event.source_branch,
             "workflow_type": "gitlab_mr",
             "requeue_eligible": False,
+            "model": str(extra.get("model") or "").strip(),
+            "backend": str(extra.get("backend") or "").strip(),
         }
         if st is None:
             st = self.state_manager.create_state(
