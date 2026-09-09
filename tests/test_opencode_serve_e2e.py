@@ -358,6 +358,17 @@ def test_last_turn_is_live_question_requires_stop_not_summary():
         is False
     )
     assert last_turn_is_live_question({"last_finish": "stop"}) is False
+    assert (
+        last_turn_is_live_question(
+            {
+                "assistant_asked_question": True,
+                "question_tool": True,
+                "last_finish": "tool-calls",
+                "last_is_summary": False,
+            }
+        )
+        is True
+    )
 
 
 def test_assess_serve_turn_open_todos_and_summary():
