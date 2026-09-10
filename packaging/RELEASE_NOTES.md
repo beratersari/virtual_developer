@@ -1,3 +1,9 @@
+# Yaver 0.9.2
+
+Azure Schedule → Run now now queues the job. TFS comment ids
+restart at 1 on every new thread; dedup uses PR + thread +
+comment so a second Run now is not treated as a duplicate.
+
 # Yaver 0.9.1
 
 Schedule can follow up on an existing Azure DevOps PR the same

@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-09-10
+
+Azure Schedule → Run now queues a job even when TFS comment ids restart at 1.
+
+### Fixed
+
+- Azure Schedule → Run now posted the prompt on the PR but did not queue a job. Dedup now uses PR + thread + comment, same queue path as GitLab.
+
+[0.9.2]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.2
+
 ## [0.9.1] — 2026-09-10
 
 Azure PR follow-up on Schedule. TFS PR create, commit links, and Storage status.
