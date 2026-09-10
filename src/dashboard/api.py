@@ -29,6 +29,7 @@ from src.dashboard.schemas import (
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     ScheduleMrRequest,
+    SchedulePrRequest,
     SettingsUpdate,
     TempFolderDeleteRequest,
 )
@@ -62,8 +63,10 @@ from src.scheduler.service import (
     list_scheduled_jobs,
     preview_existing_issue,
     preview_mr_followup,
+    preview_pr_followup,
     schedule_existing_issue,
     schedule_mr_followup,
+    schedule_pr_followup,
 )
 from src.state.schedule_store import schedule_store
 from src.state.job_store import job_store
@@ -770,6 +773,53 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=400,
                 detail=result.get("error") or "Failed to schedule MR follow-up",
+            )
+        result = _maybe_dispatch_now(result, body.dispatch_now)
+        return {
+            "ok": True,
+            "schedule": result.get("schedule"),
+            "issue_key": result.get("issue_key"),
+            "message": result.get("message"),
+            "dispatched": bool(result.get("dispatched")),
+            "dispatch_error": result.get("dispatch_error"),
+            "server_time": build_meta().server_time,
+        }
+
+    @app.get("/api/schedules/pr-preview")
+    def schedules_pr_preview(
+        repository_url: str = Query(..., description="Azure git or PR URL"),
+        pr_id: int = Query(default=0, ge=0, description="Pull request id"),
+    ) -> dict:
+        """Load an existing Azure DevOps PR (title, branches) before scheduling."""
+        result = preview_pr_followup(repository_url, pr_id)
+        result["server_time"] = build_meta().server_time
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "PR preview failed",
+            )
+        return result
+
+    @app.post("/api/schedules/pr")
+    async def schedules_pr(body: SchedulePrRequest) -> dict:
+        """Schedule a follow-up prompt on an existing Azure DevOps pull request.
+
+        At fire time the prompt is posted on the PR, then the usual Azure
+        PR job runs and posts the agent answer.
+        """
+        result = schedule_pr_followup(
+            repository_url=body.repository_url,
+            pr_id=body.pr_id,
+            prompt=body.prompt,
+            scheduled_at=body.scheduled_at,
+            model=body.model or "",
+            backend=body.backend or "",
+            store=schedule_store,
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Failed to schedule PR follow-up",
             )
         result = _maybe_dispatch_now(result, body.dispatch_now)
         return {

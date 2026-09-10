@@ -125,6 +125,18 @@ class ScheduleMrRequest(BaseModel):
     backend: str = Field(default="", max_length=40)
 
 
+class SchedulePrRequest(BaseModel):
+    """Body for POST /api/schedules/pr — follow-up prompt on an existing Azure PR."""
+
+    repository_url: str = Field(..., min_length=1, max_length=2000)
+    pr_id: int = Field(..., ge=1, le=2_000_000)
+    prompt: str = Field(..., min_length=1, max_length=100_000)
+    scheduled_at: str
+    dispatch_now: bool = False
+    model: str = Field(default="", max_length=200)
+    backend: str = Field(default="", max_length=40)
+
+
 class ScheduleExistingRequest(BaseModel):
     """Body for POST /api/schedules/from-issue — schedule an existing Jira issue."""
 
@@ -159,11 +171,17 @@ class ScheduleItem(BaseModel):
     issue_key: str = ""
     project_key: str = ""
     label: str = "SCHEDULED_AI_JOB"
-    source: str = "new"  # new | existing | gitlab_mr
+    source: str = "new"  # new | existing | gitlab_mr | azure_pr
     mr_iid: int = 0
     gitlab_host: str = ""
     gitlab_project: str = ""
     merge_request_url: str = ""
+    pr_id: int = 0
+    azure_host: str = ""
+    azure_collection_url: str = ""
+    azure_project: str = ""
+    azure_repository: str = ""
+    azure_repository_id: str = ""
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     dispatched_at: Optional[str] = None

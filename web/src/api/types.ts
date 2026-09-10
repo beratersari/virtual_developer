@@ -259,6 +259,12 @@ export type ScheduleItem = {
   gitlab_host?: string
   gitlab_project?: string
   merge_request_url?: string
+  pr_id?: number
+  azure_host?: string
+  azure_collection_url?: string
+  azure_project?: string
+  azure_repository?: string
+  azure_repository_id?: string
   created_at?: string | null
   updated_at?: string | null
   dispatched_at?: string | null
@@ -325,6 +331,36 @@ export type ScheduleMrPreview = {
 export type ScheduleMrBody = {
   repository_url: string
   mr_iid: number
+  prompt: string
+  scheduled_at: string
+  dispatch_now?: boolean
+  model?: string
+  backend?: string
+}
+
+export type SchedulePrPreview = {
+  ok: boolean
+  repository_url: string
+  azure_host: string
+  azure_collection_url?: string
+  azure_project: string
+  azure_repository: string
+  azure_repository_id?: string
+  pr_id: number
+  title: string
+  description?: string
+  source_branch: string
+  target_branch: string
+  merge_request_url?: string
+  issue_key?: string
+  pr_state?: string
+  message?: string
+  error?: string
+}
+
+export type SchedulePrBody = {
+  repository_url: string
+  pr_id: number
   prompt: string
   scheduled_at: string
   dispatch_now?: boolean
