@@ -367,14 +367,14 @@ class SettingsView(BaseModel):
     gitlab_trigger_user: str = ""
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
-    gitlab_webhook_path: str = "/webhooks/gitlab"
+    gitlab_webhook_path: str = "/yaver/webhook/gitlab"
     azure_pat_configured: bool = False
     azure_allowed_hosts: str = ""
     azure_credentials: List["AzureHostCredentialView"] = Field(default_factory=list)
     azure_webhook_enabled: bool = False
     azure_trigger_user: str = ""
     azure_bot_mentions: str = ""
-    azure_webhook_path: str = "/webhooks/azure"
+    azure_webhook_path: str = "/yaver/webhook/azure"
     jira_trigger_user: str = ""
     trigger_mentions: str = ""
     trigger_assignee_names: str = ""
@@ -602,7 +602,7 @@ class SettingsUpdate(BaseModel):
     )
     gitlab_webhook_enabled: Optional[bool] = Field(
         default=None,
-        description="Accept GitLab project webhooks on /webhooks/gitlab",
+        description="Accept GitLab project webhooks on /yaver/webhook/gitlab",
     )
     gitlab_webhook_secret: Optional[str] = Field(
         default=None,
@@ -635,7 +635,7 @@ class SettingsUpdate(BaseModel):
     )
     azure_webhook_enabled: Optional[bool] = Field(
         default=None,
-        description="Accept Azure DevOps Server service hooks on /webhooks/azure",
+        description="Accept Azure DevOps Server service hooks on /yaver/webhook/azure",
     )
 
     @field_validator("agent_backend", mode="before")

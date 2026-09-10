@@ -159,7 +159,7 @@ def test_gitlab_webhook_ignores_dashboard_password(monkeypatch):
         },
     }
     r = client.post(
-        "/webhooks/gitlab",
+        "/yaver/webhook/gitlab",
         json=payload,
         headers={
             "X-Gitlab-Event": "Merge Request Hook",
@@ -202,12 +202,43 @@ def test_azure_webhook_ignores_dashboard_password(monkeypatch):
         },
     }
     r = client.post(
-        "/webhooks/azure",
+        "/yaver/webhook/azure",
         json=payload,
         headers={"X-Azure-Token": "hook-tok"},
     )
     assert r.status_code != 401
     assert r.status_code in {200, 503}
+
+
+def test_legacy_webhook_paths_still_exempt(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "dashboard_username", "ops")
+    monkeypatch.setattr(settings, "dashboard_password", "s3cret")
+    monkeypatch.setattr(settings, "gitlab_webhook_enabled", True)
+    monkeypatch.setattr(settings, "gitlab_webhook_secret", "hook-tok")
+    monkeypatch.setattr(settings, "azure_webhook_enabled", True)
+    client = TestClient(create_dashboard_app())
+    gl = client.post(
+        "/webhooks/gitlab",
+        json={"object_kind": "note"},
+        headers={"X-Gitlab-Token": "hook-tok", "X-Gitlab-Event": "Note Hook"},
+    )
+    az = client.post(
+        "/webhooks/azure",
+        json={"eventType": "git.pullrequest.commented"},
+        headers={"X-Azure-Token": "hook-tok"},
+    )
+    assert gl.status_code != 401
+    assert az.status_code != 401
+
+
+def test_settings_advertise_yaver_webhook_paths():
+    from src.dashboard.service import build_settings_view
+
+    view = build_settings_view()
+    assert view.gitlab_webhook_path == "/yaver/webhook/gitlab"
+    assert view.azure_webhook_path == "/yaver/webhook/azure"
 
 
 def test_parse_basic_and_credentials(monkeypatch):

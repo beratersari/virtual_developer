@@ -291,7 +291,7 @@ def test_gitlab_http_ask_does_not_enqueue(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_payload(note="@berat_ai /ask what is this?"),
             headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
         )
@@ -315,7 +315,7 @@ def test_azure_http_ask_does_not_enqueue(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/azure",
+            "/yaver/webhook/azure",
             json=_pr_comment_payload(note="@yaver /ask what is this?"),
             headers={"X-Azure-Token": "tok"},
         )
@@ -347,7 +347,7 @@ def test_gitlab_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_payload(note="@berat_ai /execute please implement"),
             headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
         )
@@ -377,7 +377,7 @@ def test_azure_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/azure",
+            "/yaver/webhook/azure",
             json=_pr_comment_payload(note="@yaver /execute please implement"),
             headers={"X-Azure-Token": "tok"},
         )
@@ -403,7 +403,7 @@ def test_azure_http_html_chip_ask_does_not_enqueue(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/azure",
+            "/yaver/webhook/azure",
             json=_pr_comment_payload(note=note),
             headers={"X-Azure-Token": "tok"},
         )

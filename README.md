@@ -15,7 +15,7 @@
 5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
 6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
 
-Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`. GitLab project webhooks (`POST /webhooks/gitlab`) and Azure DevOps Server 2022.2 service hooks (`POST /webhooks/azure`) are separate and still supported.
+Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`. GitLab project webhooks (`POST /yaver/webhook/gitlab`) and Azure DevOps Server 2022.2 service hooks (`POST /yaver/webhook/azure`) are separate and still supported.
 
 ---
 
@@ -274,7 +274,7 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
 2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_TRIGGER_USER=yaver`.
 3. On the Azure DevOps Server project: Service hooks → Web Hooks.
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
-   - URL: `http://<yaver-host>:8080/webhooks/azure`
+   - URL: `http://<yaver-host>:8080/yaver/webhook/azure`
    - No webhook secret or password.
 4. Comment `@yaver /execute what does login do?` on a PR. Mention without `/execute` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
@@ -290,7 +290,7 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 |--|--|
 | URL | `http://127.0.0.1:8080` |
 | Stack | FastAPI in-daemon + WebSocket `/ws` + React SPA (`web/`) |
-| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller, `POST /webhooks/gitlab`, or `POST /webhooks/azure`. |
+| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller, `POST /yaver/webhook/gitlab`, or `POST /yaver/webhook/azure`. |
 
 **Frontend is display-only.** Filtering, poll math, and settings rules live on the backend.
 
@@ -303,7 +303,8 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | GET | `/api/jobs/{id}` | Job detail |
 | DELETE | `/api/jobs/{id}` | Delete job record |
 | GET | `/api/tasks/{key}` | Task detail for issue |
-| POST | `/webhooks/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle |
+| POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
+| POST | `/yaver/webhook/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle (`/webhooks/azure` still works) |
 | POST | `/api/tasks/{key}/cancel` | Cancel live work (preferred over CLI when daemon runs) |
 | GET | `/api/poll` | Last poll snapshot + countdown |
 | GET/PATCH | `/api/settings` | Safe settings (no token values) |

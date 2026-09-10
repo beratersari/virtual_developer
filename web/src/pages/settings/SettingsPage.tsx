@@ -563,7 +563,7 @@ export function SettingsPage() {
         </label>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
-          {settings?.gitlab_webhook_path || '/webhooks/gitlab'}
+          {settings?.gitlab_webhook_path || '/yaver/webhook/gitlab'}
         </p>
       </div>
       </div>
@@ -726,7 +726,7 @@ export function SettingsPage() {
         </label>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
-          {settings?.azure_webhook_path || '/webhooks/azure'}
+          {settings?.azure_webhook_path || '/yaver/webhook/azure'}
         </p>
       </div>
       </div>

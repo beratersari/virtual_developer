@@ -313,7 +313,7 @@ class Settings(BaseSettings):
     # GitLab MR comment webhook (CE + EE; project-level Note hook on all plans)
     gitlab_webhook_enabled: bool = Field(
         default=False,
-        description="Accept GitLab Note and Merge Request webhooks on /webhooks/gitlab",
+        description="Accept GitLab Note and Merge Request webhooks on /yaver/webhook/gitlab",
     )
     gitlab_webhook_secret: str = Field(
         default="",
@@ -359,7 +359,7 @@ class Settings(BaseSettings):
     )
     azure_webhook_enabled: bool = Field(
         default=False,
-        description="Accept Azure DevOps Server service hooks on /webhooks/azure",
+        description="Accept Azure DevOps Server service hooks on /yaver/webhook/azure",
     )
     azure_webhook_secret: str = Field(
         default="",

@@ -38,7 +38,7 @@ app = Flask(__name__)
 CORS(app)
 
 DAEMON_WEBHOOK = os.environ.get(
-    "VD_GITLAB_WEBHOOK_URL", "http://127.0.0.1:8080/webhooks/gitlab"
+    "VD_GITLAB_WEBHOOK_URL", "http://127.0.0.1:8080/yaver/webhook/gitlab"
 )
 WEBHOOK_SECRET = os.environ.get("GITLAB_WEBHOOK_SECRET", "")
 SIM_PORT = int(os.environ.get("GITLAB_SIM_PORT", "8091"))

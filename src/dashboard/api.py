@@ -150,8 +150,8 @@ def create_dashboard_app(
 
     sm = state_manager or JiraStateManager()
     # No OpenAPI UI. Optional dashboard Basic: DASHBOARD_USERNAME + PASSWORD.
-    # Poller is in-process. POST /webhooks/gitlab uses GITLAB_WEBHOOK_SECRET.
-    # POST /webhooks/azure has no secret.
+    # Poller is in-process. POST /yaver/webhook/gitlab uses GITLAB_WEBHOOK_SECRET.
+    # POST /yaver/webhook/azure has no secret. Legacy /webhooks/* still works.
     app = FastAPI(
         title="Yaver",
         version="1.0.0",
@@ -223,6 +223,7 @@ def create_dashboard_app(
         }
         return Response(content=payload, media_type="application/zip", headers=headers)
 
+    @app.post("/yaver/webhook/gitlab")
     @app.post("/webhooks/gitlab")
     async def gitlab_webhook(request: Request) -> dict:
         """GitLab project webhook (CE and EE).
@@ -333,6 +334,7 @@ def create_dashboard_app(
             "server_time": build_meta().server_time,
         }
 
+    @app.post("/yaver/webhook/azure")
     @app.post("/webhooks/azure")
     async def azure_webhook(request: Request) -> dict:
         """Azure DevOps Server 2022.2 service hook.
