@@ -276,7 +276,7 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
    - URL: `http://<yaver-host>:8080/webhooks/azure`
    - No webhook secret or password.
-4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
+4. Comment `@yaver /execute what does login do?` on a PR. Mention without `/execute` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
 
@@ -367,14 +367,14 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 | Variable | Description |
 |----------|-------------|
 | `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
-| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job when mentioned on an MR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored (another agent). |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /execute` in an MR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 ### Azure DevOps
 
 | Variable | Description |
 |----------|-------------|
 | `AZURE_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / PR) |
-| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job when mentioned on a PR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored. |
+| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /execute` in a PR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 Repo URL and branches always come from the issue `{params}` block.
 

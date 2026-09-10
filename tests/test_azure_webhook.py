@@ -36,7 +36,7 @@ from src.state.models import TaskStatus
 
 def _pr_comment_payload(
     *,
-    note: str = "@yaver what does login do?",
+    note: str = "@yaver /execute what does login do?",
     unique_name: str = "DOMAIN\\alice",
     display_name: str = "Alice",
     source: str = "refs/heads/feature/login",
@@ -53,6 +53,7 @@ def _pr_comment_payload(
             "comment": {
                 "id": comment_id,
                 "parentCommentId": 0,
+                "threadId": 8,
                 "author": {
                     "displayName": display_name,
                     "uniqueName": unique_name,
@@ -60,6 +61,15 @@ def _pr_comment_payload(
                 },
                 "content": note,
                 "commentType": 1,
+                "_links": {
+                    "self": {
+                        "href": (
+                            "https://tfs.example.com/tfs/DefaultCollection/"
+                            f"_apis/git/repositories/repo-guid/pullRequests/{pr_id}"
+                            f"/threads/8/comments/{comment_id}"
+                        )
+                    }
+                },
             },
             "pullRequest": {
                 "pullRequestId": pr_id,
@@ -229,6 +239,7 @@ def test_decide_accepts_pr_mention():
     assert d.event.source_branch == "feature/login"
     assert d.event.target_branch == "develop"
     assert d.event.prompt == "what does login do?"
+    assert d.event.thread_id == "8"
     assert d.event.host == "tfs.example.com"
     assert d.event.collection_url.endswith("/tfs/DefaultCollection")
 
@@ -594,7 +605,7 @@ async def test_processor_azure_posts_reply_and_pushes(
         return {"id": 101}
 
     decision = decide_azure_comment_webhook(
-        _pr_comment_payload(note="@yaver please fix the login bug"),
+        _pr_comment_payload(note="@yaver /execute please fix the login bug"),
         headers={"X-Azure-Token": "s"},
         secret="s",
         bot_mentions=["@yaver"],
@@ -1035,7 +1046,7 @@ def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):
             },
             "object_attributes": {
                 "id": 1,
-                "note": "@berat_ai hi",
+                "note": "@berat_ai /execute hi",
                 "noteable_type": "MergeRequest",
                 "discussion_id": "d1",
             },

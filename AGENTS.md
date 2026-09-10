@@ -325,7 +325,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
-| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job when mentioned on an MR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored. |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /execute` in an MR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored. |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
@@ -336,7 +336,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` (no secret) |
-| `AZURE_TRIGGER_USER` | Display/unique names that start a job when mentioned on a PR comment. Comma-separated, no `@`. `@name /ask` in a comment is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /execute` in a PR comment. Comma-separated, no `@`. Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 ---
 

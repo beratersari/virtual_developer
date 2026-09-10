@@ -598,7 +598,7 @@ def test_operator_gitlab_webhook_binds_description_key(tmp_path, monkeypatch):
         },
         "object_attributes": {
             "id": 77,
-            "note": "@bot please continue",
+            "note": "@bot /execute please continue",
             "noteable_type": "MergeRequest",
             "project_id": 1,
             "discussion_id": "disc-1",

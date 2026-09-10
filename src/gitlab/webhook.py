@@ -16,11 +16,15 @@ from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_MISSING_REASON,
+    author_is_configured_bot,
+    format_execute_usage_note,
     note_is_ask_handoff,
+    note_is_execute_command,
     note_mentions_bot,
-    normalize_mention,
     parse_mention_list,
     strip_bot_mentions,
+    strip_slash_command,
 )
 from src.logger import logger
 
@@ -145,6 +149,7 @@ class WebhookDecision:
     reason: str
     event: Optional[Any] = None
     http_status: int = 200
+    usage_note: bool = False
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -280,20 +285,19 @@ def decide_gitlab_note_webhook(
         return WebhookDecision(False, "no GITLAB_TRIGGER_USER configured")
     if not note_mentions_bot(note, mentions):
         return WebhookDecision(False, "bot not mentioned")
+
+    user = _as_dict(data.get("user"))
+    if author_is_configured_bot(
+        [_s(user.get("username")), _s(user.get("name"))],
+        bot_usernames or mentions,
+    ):
+        return WebhookDecision(False, "ignored comment from bot user")
     if note_is_ask_handoff(note, bot_mentions or mentions):
         logger.info(
             f"GitLab note ignored /ask handoff "
             f"preview={note.strip()[:80]!r}"
         )
         return WebhookDecision(False, ASK_HANDOFF_REASON)
-
-    user = _as_dict(data.get("user"))
-    author = normalize_mention(
-        _s(user.get("username")) or _s(user.get("username")) or _s(user.get("name"))
-    )
-    bots = set(parse_mention_list(bot_usernames) or mentions)
-    if author and author in bots:
-        return WebhookDecision(False, "ignored comment from bot user")
 
     project = _as_dict(data.get("project"))
     repository = _as_dict(data.get("repository"))
@@ -328,6 +332,7 @@ def decide_gitlab_note_webhook(
         )
 
     prompt = strip_bot_mentions(note, mentions)
+    prompt = strip_slash_command(prompt, "execute")
     if not prompt:
         prompt = note.strip()
 
@@ -374,12 +379,45 @@ def decide_gitlab_note_webhook(
         webhook_event=event_name or "Note Hook",
         raw=data,
     )
+    if not note_is_execute_command(note, bot_mentions or mentions):
+        logger.info(
+            f"GitLab note mention without /execute "
+            f"{event.project_path}!{event.mr_iid} note={event.note_id} "
+            f"preview={note.strip()[:80]!r}"
+        )
+        return WebhookDecision(
+            False, EXECUTE_MISSING_REASON, event=event, usage_note=True
+        )
     logger.info(
         f"GitLab MR note accepted: {event.issue_key} "
         f"{event.project_path}!{event.mr_iid} note={event.note_id} "
         f"title={mr_title[:80]!r}"
     )
     return WebhookDecision(True, "accepted", event=event)
+
+
+def post_gitlab_usage_note(
+    event: GitlabMrNoteEvent, bot_name: str = ""
+) -> bool:
+    """Reply in the MR discussion with /execute usage. Never a new thread."""
+    discussion_id = (getattr(event, "discussion_id", "") or "").strip()
+    if not discussion_id:
+        logger.warning(
+            "GitLab usage note skipped: no discussion_id "
+            f"{getattr(event, 'project_path', '')}!{getattr(event, 'mr_iid', '')}"
+        )
+        return False
+    from src.gitlab.client import GitlabClient
+
+    client = GitlabClient(host=getattr(event, "host", "") or "")
+    posted = client.post_mr_note(
+        project=getattr(event, "project_id", 0) or getattr(event, "project_path", ""),
+        mr_iid=int(getattr(event, "mr_iid", 0) or 0),
+        body=format_execute_usage_note(bot_name),
+        discussion_id=discussion_id,
+        allow_new_thread=False,
+    )
+    return posted is not None
 
 
 def _jira_project_keys(explicit: Optional[List[str]]) -> List[str]:

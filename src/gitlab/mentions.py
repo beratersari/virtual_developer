@@ -47,6 +47,40 @@ def mentioned_usernames(note: str) -> List[str]:
     return found
 
 
+def identity_key(raw: str) -> str:
+    """Account token for self-mention checks (last segment of DOMAIN\\user)."""
+    text = (raw or "").strip()
+    if text.startswith("@"):
+        text = text[1:].strip()
+    if not text:
+        return ""
+    if "\\" in text:
+        text = text.rsplit("\\", 1)[-1]
+    elif "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    if "@" in text:
+        text = text.split("@", 1)[0]
+    return normalize_mention(text)
+
+
+def author_is_configured_bot(
+    author_values: Iterable[str], bot_names: Iterable[str]
+) -> bool:
+    """True when the comment author is a configured trigger user.
+
+    Uses the account tail of ``DOMAIN\\user`` / ``user@host`` so a domain
+    prefix cannot mark every teammate as the bot.
+    """
+    bots = {identity_key(x) for x in bot_names or [] if identity_key(x)}
+    if not bots:
+        return False
+    for raw in author_values or []:
+        key = identity_key(raw)
+        if key and key in bots:
+            return True
+    return False
+
+
 def note_mentions_bot(note: str, bot_mentions: Iterable[str]) -> bool:
     bots = {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
     if not bots:
@@ -68,6 +102,8 @@ def strip_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 ASK_HANDOFF_REASON = "ignored /ask handoff"
+EXECUTE_MISSING_REASON = "mention without /execute"
+EXECUTE_COMMAND = "execute"
 
 _VSS_CHIP = re.compile(
     r"<a\s[^>]*data-vss-mention[^>]*>(.*?)</a>",
@@ -119,19 +155,24 @@ def _name_is_configured_bot(raw_name: str, names: List[str]) -> bool:
     return False
 
 
-def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
-    """True when the comment contains ``@bot /ask`` for a configured bot.
+def note_has_slash_command(
+    note: str, bot_mentions: Iterable[str], command: str
+) -> bool:
+    """True when the comment contains ``@bot /command`` for a configured bot.
 
-    That form is routed to another agent. Yaver must not start a job.
-    ``/asking`` and ``/ask-review`` are not this command.
+    Command match is a word boundary so ``/asking`` is not ``/ask``.
     """
+    cmd = (command or "").strip().lstrip("/")
+    if not cmd:
+        return False
     names = _ask_handoff_names(bot_mentions)
     if not names:
         return False
     raw = note or ""
+    cmd_re = rf"/{re.escape(cmd)}(?![A-Za-z0-9_-])"
     for match in _VSS_CHIP.finditer(raw):
         after = raw[match.end() :]
-        if re.match(r"\s*/ask(?![A-Za-z0-9_-])", after, flags=re.IGNORECASE):
+        if re.match(rf"\s*{cmd_re}", after, flags=re.IGNORECASE):
             if _name_is_configured_bot(match.group(1) or "", names):
                 return True
     text = flatten_comment_text(raw)
@@ -141,9 +182,50 @@ def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
         if not name:
             continue
         if re.search(
-            rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}\s*/ask(?![A-Za-z0-9_-])",
+            rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}\s*{cmd_re}",
             text,
             flags=re.IGNORECASE,
         ):
             return True
     return False
+
+
+def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
+    """True when the comment contains ``@bot /ask`` for a configured bot.
+
+    That form is routed to another agent. Yaver must not start a job.
+    ``/asking`` and ``/ask-review`` are not this command.
+    """
+    return note_has_slash_command(note, bot_mentions, "ask")
+
+
+def note_is_execute_command(note: str, bot_mentions: Iterable[str]) -> bool:
+    """True when the comment contains ``@bot /execute`` for a configured bot."""
+    return note_has_slash_command(note, bot_mentions, EXECUTE_COMMAND)
+
+
+def strip_slash_command(text: str, command: str) -> str:
+    """Remove ``/command`` tokens (word-boundary) from a prompt body."""
+    cmd = (command or "").strip().lstrip("/")
+    if not cmd:
+        return (text or "").strip()
+    out = re.sub(
+        rf"(?<![A-Za-z0-9_-])/{re.escape(cmd)}(?![A-Za-z0-9_-])",
+        "",
+        text or "",
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
+def format_execute_usage_note(bot_name: str = "yaver") -> str:
+    """Thread reply when the bot is mentioned without ``/execute``."""
+    from src.brand import COMMENT_PREFIX
+
+    name = identity_key(bot_name) or "yaver"
+    return (
+        f"{COMMENT_PREFIX}\n\n"
+        "I only start work when you mention me with `/execute`.\n\n"
+        f"Example: `@{name} /execute <what to do>`\n\n"
+        "`/ask` is handled by another agent."
+    )

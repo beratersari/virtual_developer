@@ -275,6 +275,29 @@ def create_dashboard_app(
                 bot_mentions=list(settings.gitlab_bot_mentions_list),
                 bot_usernames=list(settings.gitlab_bot_usernames_list),
             )
+        if decision.usage_note:
+            posted = False
+            if decision.event is not None:
+                try:
+                    from src.gitlab.webhook import post_gitlab_usage_note
+
+                    names = list(settings.gitlab_bot_mentions_list or [])
+                    posted = bool(
+                        post_gitlab_usage_note(
+                            decision.event, bot_name=names[0] if names else ""
+                        )
+                    )
+                except Exception:
+                    posted = False
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reason": decision.reason,
+                    "usage_note": True,
+                    "usage_note_posted": posted,
+                },
+                status_code=int(decision.http_status or 200),
+            )
         if not decision.accepted:
             status = int(decision.http_status or 200)
             return JSONResponse(
@@ -366,6 +389,33 @@ def create_dashboard_app(
                 secret="",
                 bot_mentions=list(settings.azure_bot_mentions_list),
                 bot_usernames=list(settings.azure_bot_usernames_list),
+            )
+        if decision.usage_note:
+            posted = False
+            if decision.event is not None:
+                try:
+                    from src.azure.webhook import post_azure_usage_note
+
+                    names = list(settings.azure_bot_mentions_list or [])
+                    posted = bool(
+                        post_azure_usage_note(
+                            decision.event, bot_name=names[0] if names else ""
+                        )
+                    )
+                except Exception:
+                    posted = False
+            azure_info(
+                f"http webhook usage note reason={decision.reason!r} "
+                f"posted={posted}"
+            )
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reason": decision.reason,
+                    "usage_note": True,
+                    "usage_note_posted": posted,
+                },
+                status_code=int(decision.http_status or 200),
             )
         if not decision.accepted:
             status = int(decision.http_status or 200)
