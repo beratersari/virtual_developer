@@ -786,6 +786,16 @@ class JobProcessor:
         meta_patch["requeue_eligible"] = False
         # Drop live pointer only; history keys stay in meta_patch
         meta_patch["current_job_id"] = None
+        st0 = self.state_manager.get_state(issue_key)
+        meta0 = dict((st0.metadata or {}) if st0 else {})
+        src0 = str(meta0.get("source") or "").strip().lower()
+        wt0 = str(meta0.get("workflow_type") or "").strip().lower()
+        if src0 in {"gitlab", "azure"} or wt0 in {"gitlab_mr", "azure_pr"}:
+            # Jira To Do rework is a board job. Leave forge coords behind so
+            # completion/errors post on Jira, not the last MR/PR thread.
+            meta_patch["source"] = "jira"
+            if wt0 in {"gitlab_mr", "azure_pr"}:
+                meta_patch["workflow_type"] = None
         self.state_manager.update_state(
             issue_key,
             force=True,  # intentional reopen: terminal → PENDING for reprocess
@@ -2218,14 +2228,25 @@ class JobProcessor:
             message=reason,
             status=TaskStatus.CANCELLED,
         )
-        # Drop leftover queued/running rows so a later schedule of this issue
-        # is not blocked forever by a stale ``running`` claim.
+        # Close the running claim and leftover Jira poller rows. GitLab/Azure
+        # follow-ups still queued for this key are extra work — leave them.
         try:
             nq = self.queue_store.finish_open_for_issue(
                 issue_key,
                 status="cancelled",
                 error_message=reason,
                 job_id=live_job_id,
+                include_queued=False,
+                include_running=True,
+            )
+            nq += self.queue_store.finish_open_for_issue(
+                issue_key,
+                status="cancelled",
+                error_message=reason,
+                job_id=live_job_id,
+                sources={"jira"},
+                include_queued=True,
+                include_running=False,
             )
             if nq:
                 logger.info(
@@ -3703,7 +3724,15 @@ class JobProcessor:
 
         if not isinstance(event, GitlabMrNoteEvent):
             return {"ok": False, "reason": "invalid event"}
-        existing = self.queue_store.find_note(event.note_id)
+        from src.gitlab.keys import gitlab_note_key
+
+        note_key = gitlab_note_key(
+            host=event.host,
+            project_path=event.project_path,
+            project_id=event.project_id,
+            note_id=event.note_id,
+        )
+        existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
             return {
                 "ok": True,
@@ -3734,7 +3763,7 @@ class JobProcessor:
             work_branch=work,
             target_branch=event.target_branch,
             lock_key=lock,
-            gitlab_note_id=event.note_id,
+            gitlab_note_id=note_key,
             merge_request_url=event.mr_url,
             payload=event.to_dict(),
         )
@@ -3771,6 +3800,8 @@ class JobProcessor:
             event.thread_id,
             event.comment_id,
             event.comment_body or event.prompt,
+            repository_url=event.repository_url,
+            project_path=event.project_path,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
@@ -4096,6 +4127,14 @@ class JobProcessor:
                 async with self._job_semaphore:
                     ran = await self._run_gitlab_mr_comment(event)
                 if not ran:
+                    live_st = self.state_manager.get_state(event.issue_key)
+                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                        self.queue_store.finish(
+                            qid,
+                            status="skipped",
+                            error_message="plan_ready; waiting for plan_execute",
+                        )
+                        return
                     self.queue_store.requeue(
                         qid, reason="workspace or issue still in-flight"
                     )
@@ -4116,6 +4155,14 @@ class JobProcessor:
                 async with self._job_semaphore:
                     ran = await self._run_azure_pr_comment(event)
                 if not ran:
+                    live_st = self.state_manager.get_state(event.issue_key)
+                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                        self.queue_store.finish(
+                            qid,
+                            status="skipped",
+                            error_message="plan_ready; waiting for plan_execute",
+                        )
+                        return
                     azure_info(
                         f"queue run deferred queue_id={qid} issue={event.issue_key} "
                         f"(workspace or issue still in-flight)"
@@ -4315,7 +4362,14 @@ class JobProcessor:
 
         assert isinstance(event, GitlabMrNoteEvent)
         issue_key = event.issue_key
-        note_id = (event.note_id or "").strip()
+        from src.gitlab.keys import gitlab_note_key
+
+        note_id = gitlab_note_key(
+            host=event.host,
+            project_path=event.project_path,
+            project_id=event.project_id,
+            note_id=event.note_id,
+        )
         if note_id and note_id in self._gitlab_seen_notes:
             logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
             return True
@@ -4325,6 +4379,11 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
+        if st is not None and st.status == TaskStatus.PLAN_READY:
+            logger.info(
+                f"{issue_key}: plan_ready; GitLab comment waits for plan_execute"
+            )
+            return False
         summary = event.mr_title or f"MR !{event.mr_iid}"
         description = event.prompt
         extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
@@ -4817,7 +4876,12 @@ class JobProcessor:
                 repository=repository,
                 pr_id=int(iid),
                 comment_id=comment_id,
-                comment_content=str(state.description or state.issue_summary or ""),
+                comment_content=str(
+                    meta.get("azure_comment_body")
+                    or state.description
+                    or state.issue_summary
+                    or ""
+                ),
             )
             if thread_id:
                 self.state_manager.update_state(
@@ -4932,6 +4996,8 @@ class JobProcessor:
             event.thread_id,
             event.comment_id,
             event.comment_body or event.prompt,
+            repository_url=event.repository_url,
+            project_path=event.project_path,
         )
         azure_info(
             f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "
@@ -4946,6 +5012,11 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
+        if st is not None and st.status == TaskStatus.PLAN_READY:
+            azure_info(
+                f"job defer plan_ready issue={issue_key} comment={note_id}"
+            )
+            return False
         summary = event.pr_title or f"PR !{event.pr_id}"
         description = event.prompt
         extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
@@ -4960,6 +5031,7 @@ class JobProcessor:
             "merge_request_url": event.pr_url,
             "azure_thread_id": event.thread_id,
             "azure_comment_id": event.comment_id or None,
+            "azure_comment_body": event.comment_body or event.prompt or "",
             "repository_url": event.repository_url,
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,

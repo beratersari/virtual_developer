@@ -315,12 +315,16 @@ class WorkQueueStore:
         status: str = "cancelled",
         error_message: Optional[str] = None,
         job_id: Optional[str] = None,
+        sources: Optional[set] = None,
+        include_queued: bool = True,
+        include_running: bool = True,
     ) -> int:
-        """Terminal-finish every queued/running row for one issue.
+        """Terminal-finish open rows for one issue.
 
-        Dashboard Stop must do this; otherwise a leftover ``running`` row
-        blocks ``claim_next`` for the same issue forever (schedule-again
-        sits in the queue and never starts).
+        Dashboard Stop must close the leftover ``running`` claim and any
+        Jira poller leftover. GitLab/Azure follow-ups that are still
+        ``queued`` are extra work and stay unless *include_queued* is true
+        for those sources.
         """
         key = (issue_key or "").strip().upper()
         if not key:
@@ -333,6 +337,13 @@ class WorkQueueStore:
                 if rec.get("status") not in _OPEN:
                     continue
                 if (rec.get("issue_key") or "").strip().upper() != key:
+                    continue
+                src = (rec.get("source") or "jira").strip().lower()
+                if sources is not None and src not in sources:
+                    continue
+                if rec.get("status") == "queued" and not include_queued:
+                    continue
+                if rec.get("status") == "running" and not include_running:
                     continue
                 qid = rec.get("queue_id")
                 if not qid:
@@ -367,16 +378,22 @@ class WorkQueueStore:
         return n
 
     def requeue(self, queue_id: str, *, reason: str = "") -> Optional[Dict[str, Any]]:
-        """Put a running item back to queued (in-flight collision)."""
-        rec = self.update(
-            queue_id,
-            status="queued",
-            started_at=None,
-            error_message=(reason or "")[:500] or None,
-        )
-        if rec:
+        """Put a running item back to queued (in-flight collision).
+
+        Only ``running`` rows move. A cancelled/completed/skipped row must
+        not come back to life if the worker loses a race with Stop.
+        """
+        with self._lock:
+            rec = self.get(queue_id)
+            if not rec or rec.get("status") != "running":
+                return None
+            rec["status"] = "queued"
+            rec["started_at"] = None
+            rec["error_message"] = (reason or "")[:500] or None
+            rec["updated_at"] = _now_iso()
+            self._write(rec)
             logger.info(f"Queue requeue {queue_id}: {reason or 'retry later'}")
-        return rec
+            return rec
 
     def cancel(self, queue_id: str) -> bool:
         rec = self.get(queue_id)
