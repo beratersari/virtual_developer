@@ -481,6 +481,22 @@ Use [Conventional Commits](https://www.conventionalcommits.org/)-style messages 
 
 Scopes are optional but encouraged: `jira`, `state`, `processor`, `git`, `daemon`, `auth`, `release`, etc.
 
+### Atomic commits (mandatory)
+
+One commit = one idea. Do **not** squash unrelated fixes into a single
+“update stuff” commit.
+
+- Split by behaviour: mention parsing vs identity seed vs Settings copy
+  vs SPA rebuild are separate commits.
+- Each commit must leave the tree working (tests for that change still
+  make sense on that commit alone).
+- Tests that prove the change travel with the production files, not in
+  a later dump.
+- Do not mix `feat`/`fix` with an unrelated `chore(web): rebuild SPA`;
+  rebuild the SPA in its own commit when the UI changed.
+- Default branch for these commits is `develop`. Push the series to
+  `origin/develop` (or open an MR into `develop`).
+
 ### Examples (good)
 
 ```text
