@@ -16,10 +16,15 @@ to learn how this repo tests. Follow those rules over generic
 advice.
 
 Raise **line, branch, and condition** coverage. For every missed
-path, write a real test of that condition or edge case. When a
-function calls another function, cover it with `expect_call` (or
-this repo's equivalent) and the **exact** parameters. Do **not**
-add hacky tests whose only job is to paint coverage green.
+path, write a real test of that condition or edge case
+(boundaries, equivalence classes, legal and illegal state
+transitions). When a function calls another function, cover it
+with `expect_call` (or this repo's equivalent) and the **exact**
+parameters, plus once / call-order / not-called. If deleting
+that production call would not fail the test, the test is
+wrong. Do **not** add hacky tests whose only job is to paint
+coverage green. Do not stop at "tests pass" — stop when the
+coverage report for the ticket's files has no closable miss.
 
 Then match neighboring tests and the unit-test practices on the
 derman-test agent.

@@ -20,6 +20,8 @@ def test_test_prompt_requires_agents_md_and_unit_tests_only():
     assert "hacky" in text.lower()
     assert "expect_call" in text
     assert "exact" in text.lower()
+    assert "not-called" in text or "assert_not_called" in text
+    assert "boundaries" in text.lower()
     assert "feature/KAN-9" in text
     assert "KAN-9" in text
 
