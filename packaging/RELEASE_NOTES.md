@@ -1,3 +1,19 @@
+# Yaver 0.9.4
+
+Comment jobs start on `@mention /yaver` (was `/execute`).
+A mention without `/yaver` still gets a usage note.
+
+`Mode: test` runs derman-test: unit tests only, after reading
+the clone AGENTS.md. Push + MR like build.
+
+TFS mentions match identity chips, `@<VSID>` GUIDs, and
+`CORP\user`. The PAT user's id is seeded from `/tfs`
+connectionData. Reviewer GUIDs on the PR count as the bot.
+
+derman-build stays on the already checked-out work branch
+(no git checkout / switch). Plan and build write tests the
+way derman-test requires.
+
 # Yaver 0.9.3
 
 GitLab replies stay in the MR discussion (Discussions

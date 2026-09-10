@@ -33,7 +33,7 @@ def isolate_jira_agent_artifacts():
 
 def test_submodule_is_present():
     assert (OCM / "install.py").is_file()
-    assert (OCM / "agents" / "gitlab-reviewer.md").is_file()
+    assert (OCM / "agents" / "code-reviewer.md").is_file()
     assert (OCM / "packaging" / "versions.env").is_file()
     assert (OCM / "skills" / "python" / "SKILL.md").is_file()
 
@@ -88,12 +88,14 @@ def test_install_opencode_writes_agents_skills_and_cli(tmp_path):
         require_binary=True,
     )
     assert dest.is_file()
-    assert dest.name == "gitlab-reviewer.md"
+    assert dest.name == "code-reviewer.md"
     oc = home / ".opencode"
     assert (oc / "bin" / binary_name()).is_file()
+    assert (oc / "agents" / "code-reviewer.md").is_file()
     assert (oc / "agents" / "gitlab-reviewer.md").is_file()
     assert (oc / "agents" / "derman-build.md").is_file()
     assert (oc / "agents" / "derman-plan.md").is_file()
+    assert (oc / "agents" / "derman-test.md").is_file()
     assert (oc / "skills" / "python" / "SKILL.md").is_file()
     cfg = (oc / "opencode.json").read_text(encoding="utf-8")
     assert '"plugin": []' in cfg

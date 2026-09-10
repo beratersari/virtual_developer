@@ -54,7 +54,8 @@ Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCo
 |---------|------|
 | **`DEFAULT_AGENT`** (`derman-build`) | OpenCoderman **derman-build** for `Mode: build` (not stock `build`) |
 | **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
-| **Plan vs build user text** | Short job facts in `agent/PLAN_PROMPT.md` / `agent/BUILD_PROMPT.md`; rules live on the agents |
+| **`DEFAULT_TEST_AGENT`** (`derman-test`) | OpenCoderman **derman-test** for `Mode: test` (unit tests only) |
+| **Plan / build / test user text** | Short job facts in `agent/PLAN_PROMPT.md` / `BUILD_PROMPT.md` / `TEST_PROMPT.md`; rules live on the agents |
 | **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
@@ -276,7 +277,7 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
    - URL: `http://<yaver-host>:8080/yaver/webhook/azure`
    - No webhook secret or password.
-4. Comment `@yaver /execute what does login do?` on a PR. Mention without `/execute` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
+4. Comment `@yaver /yaver what does login do?` on a PR. Mention without `/yaver` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
 
@@ -368,14 +369,14 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 | Variable | Description |
 |----------|-------------|
 | `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
-| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /execute` in an MR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 ### Azure DevOps
 
 | Variable | Description |
 |----------|-------------|
 | `AZURE_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / PR) |
-| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /execute` in a PR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 Repo URL and branches always come from the issue `{params}` block.
 
@@ -556,6 +557,7 @@ python cli.py show PROJ-123
 |-----|---------|
 | [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
 | [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | derman-plan — unattended planner |
+| [opencoderman/agents/derman-test.md](opencoderman/agents/derman-test.md) | derman-test — unattended unit-test writer |
 | [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | derman-build — unattended implementer |
 | [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Short plan-job user stub |
 | [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Short implement-job user stub |

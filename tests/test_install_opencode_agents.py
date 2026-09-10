@@ -39,6 +39,7 @@ def test_bat_does_not_redirect_with_echo_arrow():
             pytest.fail(f"cmd.exe echo redirect landmine: {stripped}")
     assert "derman-build.md" in text
     assert "derman-plan.md" in text
+    assert "derman-test.md" in text
     assert "gitlab-reviewer" not in text
     assert "opencode_configs" not in text
     assert "Install-OpencodeAgents.ps1" not in text
@@ -109,6 +110,7 @@ def test_install_agents_copies_into_home(tmp_path: Path):
     skills.mkdir(parents=True)
     (agents / "derman-build.md").write_text("build\n", encoding="utf-8")
     (agents / "derman-plan.md").write_text("plan\n", encoding="utf-8")
+    (agents / "derman-test.md").write_text("test\n", encoding="utf-8")
     (agents / "gitlab-reviewer.md").write_text("review\n", encoding="utf-8")
     for i in range(10):
         d = src / "opencoderman" / "skills" / f"s{i}"
@@ -132,6 +134,7 @@ def test_cli_uses_source_root_and_home(tmp_path: Path):
     (src / "opencoderman" / "skills" / "s0").mkdir(parents=True)
     (src / "opencoderman" / "agents" / "derman-build.md").write_text("b\n", encoding="utf-8")
     (src / "opencoderman" / "agents" / "derman-plan.md").write_text("p\n", encoding="utf-8")
+    (src / "opencoderman" / "agents" / "derman-test.md").write_text("t\n", encoding="utf-8")
     for i in range(10):
         d = src / "opencoderman" / "skills" / f"s{i}"
         d.mkdir(parents=True, exist_ok=True)
@@ -157,6 +160,7 @@ def test_sh_copies_opencoderman_without_python():
     text = SH.read_text(encoding="utf-8")
     assert "derman-build.md" in text
     assert "derman-plan.md" in text
+    assert "derman-test.md" in text
     assert "gitlab-reviewer" not in text
     assert "python3" not in text
     assert "install_opencode_agents.py" not in text

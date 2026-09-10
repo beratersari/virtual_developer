@@ -9,7 +9,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 Yaver is a Python daemon that:
 
 1. Discovers issues (board poller: To Do + bot assignee)
-2. Routes work (plan / direct execution / oracle)
+2. Routes work (plan / build / test / oracle)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
 5. Pushes feature branches and opens merge requests
@@ -325,7 +325,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
-| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /execute` in an MR comment (comma-separated, no `@`). Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored. |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored. |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
@@ -336,7 +336,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret) |
-| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /execute` in a PR comment. Comma-separated, no `@`. Mention without `/execute` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment. Comma-separated, no `@`. Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 
 ---
 
@@ -480,6 +480,22 @@ Use [Conventional Commits](https://www.conventionalcommits.org/)-style messages 
 | `perf` | Performance |
 
 Scopes are optional but encouraged: `jira`, `state`, `processor`, `git`, `daemon`, `auth`, `release`, etc.
+
+### Atomic commits (mandatory)
+
+One commit = one idea. Do **not** squash unrelated fixes into a single
+“update stuff” commit.
+
+- Split by behaviour: mention parsing vs identity seed vs Settings copy
+  vs SPA rebuild are separate commits.
+- Each commit must leave the tree working (tests for that change still
+  make sense on that commit alone).
+- Tests that prove the change travel with the production files, not in
+  a later dump.
+- Do not mix `feat`/`fix` with an unrelated `chore(web): rebuild SPA`;
+  rebuild the SPA in its own commit when the UI changed.
+- Default branch for these commits is `develop`. Push the series to
+  `origin/develop` (or open an MR into `develop`).
 
 ### Examples (good)
 
@@ -771,6 +787,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `packaging/windows/versions.env` | Pinned OpenCode / oh-my-openagent / glab / Python / Node |
 | `packaging/windows/collect-opencode-diag.bat` | User black-screen diagnostics bundle |
 | `opencoderman/agents/derman-plan.md` | derman-plan — unattended planner (not stock `plan`) |
+| `opencoderman/agents/derman-test.md` | derman-test — unattended unit-test writer |
 | `opencoderman/agents/derman-build.md` | derman-build — unattended implementer (not stock `build`) |
 | `agent/PLAN_PROMPT.md` | Short plan-job user stub (`Mode: plan`) |
 | `agent/BUILD_PROMPT.md` | Short build-job user stub + git subject format |
@@ -791,7 +808,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` and `skills/`; no gitlab-reviewer), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` and `skills/`; no gitlab-reviewer), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |

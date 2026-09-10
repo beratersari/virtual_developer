@@ -24,6 +24,7 @@ REQUIRED_BUNDLED = (
 REQUIRED_OPENCODERMAN = (
     "opencoderman/agents/derman-build.md",
     "opencoderman/agents/derman-plan.md",
+    "opencoderman/agents/derman-test.md",
 )
 MIN_OPENCODE_SKILLS = 10
 FORBIDDEN_DUPLICATE_CONFIGS = (

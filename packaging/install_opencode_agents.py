@@ -2,8 +2,9 @@
 """Copy derman-build / derman-plan and skills into an existing OpenCode home.
 
 Does not install the OpenCode CLI. Detects the home, then copies only
-``derman-build.md`` and ``derman-plan.md`` plus ``skills/``. Other
-OpenCoderman agents (for example gitlab-reviewer) are left in the zip.
+``derman-build.md``, ``derman-plan.md``, and ``derman-test.md`` plus
+``skills/``. Other OpenCoderman agents (for example gitlab-reviewer)
+are left in the zip.
 
 Home detection (first match):
 
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-AGENT_MARKERS = ("derman-build.md", "derman-plan.md")
+AGENT_MARKERS = ("derman-build.md", "derman-plan.md", "derman-test.md")
 HOME_MARKERS = (
     Path("bin") / "opencode.exe",
     Path("bin") / "opencode",
@@ -163,7 +164,7 @@ def find_opencode_home(
 
 
 def _copy_plan_build_agents(src: Path, dest: Path) -> int:
-    """Copy only derman-build.md and derman-plan.md into dest."""
+    """Copy derman-build / derman-plan / derman-test into dest."""
     dest.mkdir(parents=True, exist_ok=True)
     count = 0
     for name in AGENT_MARKERS:

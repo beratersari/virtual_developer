@@ -1,4 +1,4 @@
-"""``@bot /execute`` starts a job. Mention without it posts a usage note."""
+"""``@bot /yaver`` starts a job. Mention without it posts a usage note."""
 
 from __future__ import annotations
 
@@ -51,19 +51,54 @@ def _az(note: str, *, unique_name: str = "DOMAIN\\alice", bots=None):
 @pytest.mark.parametrize(
     "note,bots,expect",
     [
-        ("@berat_ai /execute fix login", ["berat_ai"], True),
-        ("@Berat_AI /EXECUTE please", ["@berat_ai"], True),
-        ("@berat_ai/execute compact", ["berat_ai"], True),
-        ("@berat_ai\n/execute multiline", ["berat_ai"], True),
+        ("@berat_ai /yaver fix login", ["berat_ai"], True),
+        ("@Berat_AI /YAVER please", ["@berat_ai"], True),
+        ("@berat_ai/yaver compact", ["berat_ai"], True),
+        ("@berat_ai\n/yaver multiline", ["berat_ai"], True),
         (
-            '<a href="#" data-vss-mention="version:2.0,g">@Yaver</a> /execute html',
+            '<a href="#" data-vss-mention="version:2.0,g">@Yaver</a> /yaver html',
             ["yaver"],
             True,
         ),
+        (
+            '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a>&nbsp;/yaver fix',
+            ["yaver"],
+            True,
+        ),
+        (
+            '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a>'
+            "<span> </span>/yaver fix",
+            ["yaver"],
+            True,
+        ),
+        (
+            '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a><br>/yaver fix',
+            ["CORP\\Yaver"],
+            True,
+        ),
+        ("@Yaver Bot /yaver fix", ["yaver"], True),
+        ("@yaver @alice /yaver fix", ["yaver"], False),
+        (
+            '<a href="#" data-vss-mention="version:2.0,g">@yaver</a> '
+            '<a href="#" data-vss-mention="version:2.0,g2">@alice</a> /yaver fix',
+            ["yaver"],
+            False,
+        ),
         ("@berat_ai please look", ["berat_ai"], False),
         ("@berat_ai /executing", ["berat_ai"], False),
-        ("@berat_ai /execute-now", ["berat_ai"], False),
-        ("@other /execute", ["berat_ai"], False),
+        ("@berat_ai /yaver-now", ["berat_ai"], False),
+        ("@other /yaver", ["berat_ai"], False),
+        (
+            '<a href="#" data-vss-mention="version:2.0,'
+            'ad96260c-ea80-6eeb-93b0-c942399631d0"></a>&nbsp;/yaver fix',
+            ["ad96260c-ea80-6eeb-93b0-c942399631d0"],
+            True,
+        ),
+        (
+            "@<ad96260c-ea80-6eeb-93b0-c942399631d0> /yaver fix",
+            ["ad96260c-ea80-6eeb-93b0-c942399631d0"],
+            True,
+        ),
         ("", ["berat_ai"], False),
     ],
 )
@@ -72,21 +107,24 @@ def test_note_is_execute_command_matrix(note, bots, expect):
 
 
 def test_strip_execute_leaves_the_task_text():
-    assert strip_slash_command("/execute fix login", "execute") == "fix login"
-    assert strip_slash_command("fix /execute login", "execute") == "fix login"
+    assert strip_slash_command("/yaver fix login", "yaver") == "fix login"
+    assert strip_slash_command("fix /yaver login", "yaver") == "fix login"
 
 
 def test_identity_key_uses_account_tail():
+    from src.gitlab.mentions import parse_mention_list
+
     assert identity_key("DOMAIN\\yaver") == "yaver"
     assert identity_key("yaver@corp.local") == "yaver"
     assert identity_key("@Yaver") == "yaver"
+    assert parse_mention_list("CORP\\Yaver, otherbot") == ["yaver", "otherbot"]
     assert author_is_configured_bot(["DOMAIN\\yaver"], ["yaver"])
     assert not author_is_configured_bot(["DOMAIN\\alice"], ["yaver"])
     assert not author_is_configured_bot(["CORP\\alice"], ["CORP\\yaver"])
 
 
 def test_gitlab_accepts_execute_and_strips_it():
-    d = _gl("@berat_ai /execute what does login do?")
+    d = _gl("@berat_ai /yaver what does login do?")
     assert d.accepted is True
     assert d.usage_note is False
     assert d.event is not None
@@ -95,12 +133,48 @@ def test_gitlab_accepts_execute_and_strips_it():
 
 
 def test_azure_accepts_execute_and_strips_it():
-    d = _az("@yaver /execute what does login do?")
+    d = _az("@yaver /yaver what does login do?")
     assert d.accepted is True
     assert d.usage_note is False
     assert d.event is not None
     assert d.event.prompt == "what does login do?"
     assert d.event.thread_id == "8"
+
+
+def test_azure_accepts_tfs_chip_nbsp_then_execute():
+    note = (
+        '<a href="#" data-vss-mention="version:2.0,guid">@Yaver Bot</a>'
+        "&nbsp;/yaver fix the tests"
+    )
+    d = _az(note, bots=["CORP\\Yaver"])
+    assert d.accepted is True, d.reason
+    assert d.usage_note is False
+    assert d.event is not None
+    assert "fix the tests" in d.event.prompt
+
+
+def test_azure_accepts_guid_chip_when_trigger_is_guid():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    note = (
+        f'<a href="#" data-vss-mention="version:2.0,{bot_id}"></a>'
+        "&nbsp;/yaver fix the tests"
+    )
+    d = _az(note, bots=[bot_id])
+    assert d.accepted is True, d.reason
+    assert d.usage_note is False
+
+
+def test_azure_accepts_markdown_guid_mention():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    d = _az(f"@<{bot_id}> /yaver fix the tests", bots=[bot_id])
+    assert d.accepted is True, d.reason
+
+
+def test_azure_two_mentions_then_execute_is_usage_note():
+    d = _az("@yaver @alice /yaver fix the tests")
+    assert d.accepted is False
+    assert d.usage_note is True
+    assert d.reason == EXECUTE_MISSING_REASON
 
 
 @pytest.mark.parametrize(
@@ -138,13 +212,13 @@ def test_azure_mention_without_execute_is_usage_note(note):
 
 
 def test_self_mention_is_ignored_no_usage_note():
-    d = _gl("@berat_ai /execute ping", username="berat_ai")
+    d = _gl("@berat_ai /yaver ping", username="berat_ai")
     assert d.accepted is False
     assert d.usage_note is False
     assert d.reason == "ignored comment from bot user"
 
     d2 = _az(
-        "@yaver /execute ping",
+        "@yaver /yaver ping",
         unique_name="DOMAIN\\yaver",
         bots=["yaver"],
     )
@@ -227,7 +301,7 @@ def test_azure_find_thread_does_not_pick_first_comment_id_one(monkeypatch):
             {"id": 8, "comments": [{"id": 1, "content": "old overview"}]},
             {
                 "id": 9,
-                "comments": [{"id": 1, "content": "@yaver /execute fix tests"}],
+                "comments": [{"id": 1, "content": "@yaver /yaver fix tests"}],
             },
         ]
     }
@@ -265,7 +339,7 @@ def test_azure_find_thread_does_not_pick_first_comment_id_one(monkeypatch):
             repository="demo",
             pr_id=4,
             comment_id="1",
-            comment_content="@yaver /execute fix tests",
+            comment_content="@yaver /yaver fix tests",
         )
         == "9"
     )
@@ -313,7 +387,7 @@ def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
 def test_usage_note_starts_with_product_prefix():
     body = format_execute_usage_note("berat_ai")
     assert body.startswith("*Yaver*")
-    assert "@berat_ai /execute" in body
+    assert "@berat_ai /yaver" in body
 
 
 def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
@@ -350,7 +424,7 @@ def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     assert posted.get("discussion_id") == "disc-1"
     assert posted.get("allow_new_thread") is False
     assert "*Yaver*" in (posted.get("body") or "")
-    assert "/execute" in (posted.get("body") or "")
+    assert "/yaver" in (posted.get("body") or "")
 
 
 def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):

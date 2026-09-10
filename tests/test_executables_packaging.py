@@ -128,6 +128,7 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
     ocm_agents.mkdir(parents=True)
     (ocm_agents / "derman-build.md").write_text("build", encoding="utf-8")
     (ocm_agents / "derman-plan.md").write_text("plan", encoding="utf-8")
+    (ocm_agents / "derman-test.md").write_text("test", encoding="utf-8")
     for i in range(10):
         skill = ocm_skills / f"skill-{i}"
         skill.mkdir(parents=True)
@@ -188,6 +189,9 @@ def test_stage_opencoderman_copies_only_agents_and_skills(tmp_path: Path):
     )
     (repo / "opencoderman" / "agents" / "derman-plan.md").write_text(
         "plan\n", encoding="utf-8"
+    )
+    (repo / "opencoderman" / "agents" / "derman-test.md").write_text(
+        "test\n", encoding="utf-8"
     )
     (repo / "opencoderman" / "agents" / "gitlab-reviewer.md").write_text(
         "review\n", encoding="utf-8"

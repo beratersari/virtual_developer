@@ -38,9 +38,15 @@ def test_route_mode_build():
     assert wt == WorkflowType.EXECUTION
 
 
+def test_route_mode_test():
+    wt = WorkflowRouter.route_issue("X-1", "cover login", _params("test"))
+    assert wt == WorkflowType.TESTING
+
+
 def test_route_mode_aliases():
     assert WorkflowRouter.route_issue("X-1", "s", _params("planning")) == WorkflowType.PLANNING
     assert WorkflowRouter.route_issue("X-1", "s", _params("execute")) == WorkflowType.EXECUTION
+    assert WorkflowRouter.route_issue("X-1", "s", _params("testing")) == WorkflowType.TESTING
 
 
 def test_route_missing_mode_still_routes_template_checked_later():
@@ -63,6 +69,7 @@ def test_route_params_without_mode_defaults_to_build():
 
 def test_should_auto_start_execution():
     assert WorkflowRouter.should_auto_start(WorkflowType.EXECUTION) is True
+    assert WorkflowRouter.should_auto_start(WorkflowType.TESTING) is True
 
 
 def test_should_auto_start_planning_never():
@@ -75,8 +82,10 @@ def test_get_agent_for_workflow_all_types():
     with patch("src.orchestrator.workflow_router.settings") as s:
         s.default_agent = "derman-build"
         s.default_plan_agent = "derman-plan"
+        s.default_test_agent = "derman-test"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "derman-plan"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "derman-build"
+        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.TESTING) == "derman-test"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT) == "oracle"
         s.default_agent = "sisyphus"
         s.default_plan_agent = None
@@ -101,4 +110,9 @@ def test_extract_mention_command_not_found():
 def test_no_comment_workflow_type():
     assert not hasattr(WorkflowType, "COMMENT_RESPONSE")
     assert not hasattr(WorkflowType, "DIRECT_EXECUTION")
-    assert {w.value for w in WorkflowType} == {"planning", "execution", "oracle"}
+    assert {w.value for w in WorkflowType} == {
+        "planning",
+        "execution",
+        "testing",
+        "oracle",
+    }

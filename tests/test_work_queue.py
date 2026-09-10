@@ -25,7 +25,7 @@ def _note(note_id: int, prompt: str = "look at this"):
         },
         "object_attributes": {
             "id": note_id,
-            "note": f"@berat_ai /execute {prompt}",
+            "note": f"@berat_ai /yaver {prompt}",
             "noteable_type": "MergeRequest",
             "discussion_id": f"d{note_id}",
         },
@@ -424,7 +424,7 @@ async def test_second_gitlab_message_waits_on_same_work_branch(
 async def test_gitlab_followup_stays_queued_while_same_repo_is_live(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
 ):
-    """Second /execute on the same repo+source+target waits; it is not skipped."""
+    """Second /yaver on the same repo+source+target waits; it is not skipped."""
     from src.dashboard.service import build_queue
     from src.state.models import TaskStatus
 

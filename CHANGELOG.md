@@ -8,6 +8,30 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-09-10
+
+`@mention /yaver` starts comment jobs. `Mode: test` writes unit tests only. TFS identity chips and GUIDs match the bot. Plan/build stay on the work branch.
+
+### Added
+
+- `Mode: test` runs OpenCoderman **derman-test** (unit tests only; read the clone `AGENTS.md` first). Delivery is the same as build (push + MR). Plan, build, and test keep separate sessions.
+
+### Changed
+
+- GitLab and Azure comment jobs start on `@mention /yaver` (was `/execute`). A mention without `/yaver` still gets a usage note. `/ask` is unchanged.
+- derman-build and derman-plan require unit tests for each change, following derman-test.
+
+### Fixed
+
+- TFS `@<VSID>` / `data-vss-mention` GUIDs, `CORP\user` triggers, and chip + `&nbsp;` / `<span>` before `/yaver`.
+- PAT identity is seeded from `/tfs` `connectionData`; reviewer GUIDs on the PR count as the bot.
+- Long `GL-` / `AZ-` fallback keys no longer collide after the 48-character cut.
+- GitLab note ids and Azure comment ids are scoped per project/repo. `plan_ready` is not wiped by a forge comment. Stop keeps queued GitLab/Azure follow-ups. Cancelled queue rows cannot be requeued.
+- derman-build cannot `git checkout` / `git switch` (last-match bash order). File restore still works.
+- Offline zip CI looks for `code-reviewer.md` after the OpenCoderman rename.
+
+[0.9.4]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.4
+
 ## [0.9.3] — 2026-09-10
 
 GitLab replies stay in the MR discussion. Azure comments that reuse id 1 are not collapsed. Follow-ups stay on Queue. Storage deletes only the matching clone.

@@ -391,11 +391,15 @@ class Settings(BaseSettings):
         default="derman-plan",
         description="OpenCode agent for plan jobs (opencoderman derman-plan)",
     )
+    default_test_agent: str = Field(
+        default="derman-test",
+        description="OpenCode agent for test jobs (opencoderman derman-test)",
+    )
 
-    # Exactly two mode prompts (agent name does not change prompt text)
+    # Mode prompts (agent name does not change prompt text)
     agent_prompts_dir: Path = Field(
         default=Path("agent"),
-        description="Directory with PLAN_PROMPT.md and BUILD_PROMPT.md",
+        description="Directory with PLAN_PROMPT.md, BUILD_PROMPT.md, TEST_PROMPT.md",
     )
     plan_prompt_file: Optional[Path] = Field(
         default=None,
@@ -404,6 +408,10 @@ class Settings(BaseSettings):
     build_prompt_file: Optional[Path] = Field(
         default=None,
         description="Build-mode prompt (default: {agent_prompts_dir}/BUILD_PROMPT.md)",
+    )
+    test_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Test-mode prompt (default: {agent_prompts_dir}/TEST_PROMPT.md)",
     )
     
     # How many agent jobs run at once (raise for large boards / many subtasks)

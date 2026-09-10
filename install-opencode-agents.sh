@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_AGENTS="$HERE/opencoderman/agents"
 SRC_SKILLS="$HERE/opencoderman/skills"
 
-if [[ ! -f "$SRC_AGENTS/derman-build.md" || ! -f "$SRC_AGENTS/derman-plan.md" || ! -d "$SRC_SKILLS" ]]; then
+if [[ ! -f "$SRC_AGENTS/derman-build.md" || ! -f "$SRC_AGENTS/derman-plan.md" || ! -f "$SRC_AGENTS/derman-test.md" || ! -d "$SRC_SKILLS" ]]; then
   echo "[ERROR] opencoderman/agents and opencoderman/skills not found next to this script." >&2
   echo "        Expected: $SRC_AGENTS" >&2
   echo "                  $SRC_SKILLS" >&2
@@ -60,10 +60,11 @@ echo "Source skills : $SRC_SKILLS"
 mkdir -p "$OC_HOME/agents" "$OC_HOME/skills"
 cp -a "$SRC_AGENTS/derman-build.md" "$OC_HOME/agents/derman-build.md"
 cp -a "$SRC_AGENTS/derman-plan.md" "$OC_HOME/agents/derman-plan.md"
+cp -a "$SRC_AGENTS/derman-test.md" "$OC_HOME/agents/derman-test.md"
 cp -a "$SRC_SKILLS/." "$OC_HOME/skills/"
 
-if [[ ! -f "$OC_HOME/agents/derman-build.md" || ! -f "$OC_HOME/agents/derman-plan.md" ]]; then
-  echo "[ERROR] Copy finished but derman-build.md / derman-plan.md is missing." >&2
+if [[ ! -f "$OC_HOME/agents/derman-build.md" || ! -f "$OC_HOME/agents/derman-plan.md" || ! -f "$OC_HOME/agents/derman-test.md" ]]; then
+  echo "[ERROR] Copy finished but derman-build.md / derman-plan.md / derman-test.md is missing." >&2
   exit 1
 fi
 

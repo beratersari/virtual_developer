@@ -1,8 +1,8 @@
 """Build short per-job user prompts: job facts + Jira title/description.
 
 Stable unattended rules live on the OpenCoderman ``derman-plan`` /
-``derman-build`` agents. These files only pass issue key, branch, plan
-path, and Jira text.
+``derman-build`` / ``derman-test`` agents. These files only pass issue
+key, branch, plan path, and Jira text.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ class PromptBuilder:
 
     @staticmethod
     def _agent_dir() -> Path:
-        """Directory containing PLAN_PROMPT.md / BUILD_PROMPT.md."""
+        """Directory containing PLAN_PROMPT.md / BUILD_PROMPT.md / TEST_PROMPT.md."""
         candidates: list[Path] = []
         custom = getattr(settings, "agent_prompts_dir", None)
         if custom:
@@ -72,6 +72,14 @@ class PromptBuilder:
             p = Path(custom)
             return p if p.is_absolute() else Path.cwd() / p
         return PromptBuilder._agent_dir() / "BUILD_PROMPT.md"
+
+    @staticmethod
+    def test_prompt_path() -> Path:
+        custom = getattr(settings, "test_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "TEST_PROMPT.md"
 
     @staticmethod
     def _join_blocks(*parts: str) -> str:
@@ -213,6 +221,25 @@ class PromptBuilder:
                 + jira
             )
             return PromptBuilder._join_blocks(lead, system, context)
+        return PromptBuilder._join_blocks(system, jira)
+
+    @staticmethod
+    def build_test_prompt(
+        issue_key: str,
+        summary: str,
+        description: str,
+        *,
+        work_branch: Optional[str] = None,
+    ) -> str:
+        """Test mode: unit tests only. Read this clone's AGENTS.md first."""
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.test_prompt_path(),
+            issue_key=issue_key,
+            work_branch=work_branch,
+        )
+        jira = PromptBuilder._jira_title_and_description(
+            issue_key, summary, description
+        )
         return PromptBuilder._join_blocks(system, jira)
 
     @staticmethod

@@ -286,6 +286,14 @@ def test_parse_issue_mode_helper():
         parse_issue_mode(
             "",
             "{params}\nRepository: https://g.com/a/b.git\n"
+            "Source branch: develop\nMode: test\n{params}",
+        )
+        == "test"
+    )
+    assert (
+        parse_issue_mode(
+            "",
+            "{params}\nRepository: https://g.com/a/b.git\n"
             "Source branch: develop\n{params}",
         )
         == "build"

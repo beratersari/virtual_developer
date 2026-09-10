@@ -175,7 +175,8 @@ class JobProcessor:
         self.jira_client = create_jira_client(simulated=use_simulated)
         logger.debug(
             f"JobProcessor initialized - derman-build={settings.default_agent} "
-            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')}"
+            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')} "
+            f"derman-test={getattr(settings, 'default_test_agent', 'derman-test')}"
         )
     
     # Statuses where an agent is actively running — never restart these from updates
@@ -209,7 +210,7 @@ class JobProcessor:
     ) -> WorkflowType:
         """Pick plan vs build vs oracle from the issue text.
 
-        * Explicit ``Mode: plan|build`` selects the workflow.
+        * Explicit ``Mode: plan|build|test`` selects the workflow.
         * Otherwise ``WorkflowRouter.route_issue`` (keyword / oracle heuristics).
         * Template validity (Repository, Source, Target, **Mode**) is **not**
           checked here — same path as always: ``require_issue_git_spec`` inside
@@ -220,6 +221,8 @@ class JobProcessor:
             return WorkflowType.PLANNING
         if mode == "build":
             return WorkflowType.EXECUTION
+        if mode == "test":
+            return WorkflowType.TESTING
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
     def _is_gitlab_triggered(
@@ -786,6 +789,16 @@ class JobProcessor:
         meta_patch["requeue_eligible"] = False
         # Drop live pointer only; history keys stay in meta_patch
         meta_patch["current_job_id"] = None
+        st0 = self.state_manager.get_state(issue_key)
+        meta0 = dict((st0.metadata or {}) if st0 else {})
+        src0 = str(meta0.get("source") or "").strip().lower()
+        wt0 = str(meta0.get("workflow_type") or "").strip().lower()
+        if src0 in {"gitlab", "azure"} or wt0 in {"gitlab_mr", "azure_pr"}:
+            # Jira To Do rework is a board job. Leave forge coords behind so
+            # completion/errors post on Jira, not the last MR/PR thread.
+            meta_patch["source"] = "jira"
+            if wt0 in {"gitlab_mr", "azure_pr"}:
+                meta_patch["workflow_type"] = None
         self.state_manager.update_state(
             issue_key,
             force=True,  # intentional reopen: terminal → PENDING for reprocess
@@ -1213,7 +1226,7 @@ class JobProcessor:
         return repo, branch, target
 
     def _session_kind_for_issue(self, issue_key: str) -> str:
-        """``plan`` or ``build`` map for this issue's current workflow."""
+        """``plan`` / ``build`` / ``test`` map for this issue's current workflow."""
         from src.state.session_bind_store import normalize_session_kind
 
         st = self.state_manager.get_state(issue_key)
@@ -1225,6 +1238,9 @@ class JobProcessor:
             if st.status == TaskStatus.PLANNING:
                 return "plan"
             if st.status == TaskStatus.EXECUTING:
+                wt = str(meta.get("workflow_type") or "").strip().lower()
+                if wt == "testing":
+                    return "test"
                 return "build"
         return ""
 
@@ -2218,14 +2234,25 @@ class JobProcessor:
             message=reason,
             status=TaskStatus.CANCELLED,
         )
-        # Drop leftover queued/running rows so a later schedule of this issue
-        # is not blocked forever by a stale ``running`` claim.
+        # Close the running claim and leftover Jira poller rows. GitLab/Azure
+        # follow-ups still queued for this key are extra work — leave them.
         try:
             nq = self.queue_store.finish_open_for_issue(
                 issue_key,
                 status="cancelled",
                 error_message=reason,
                 job_id=live_job_id,
+                include_queued=False,
+                include_running=True,
+            )
+            nq += self.queue_store.finish_open_for_issue(
+                issue_key,
+                status="cancelled",
+                error_message=reason,
+                job_id=live_job_id,
+                sources={"jira"},
+                include_queued=True,
+                include_running=False,
             )
             if nq:
                 logger.info(
@@ -3196,6 +3223,8 @@ class JobProcessor:
                 await self._start_planning_workflow(state)
             elif workflow_type == WorkflowType.EXECUTION:
                 await self._start_execution_workflow(state)
+            elif workflow_type == WorkflowType.TESTING:
+                await self._start_execution_workflow(state, kind="test")
             elif workflow_type == WorkflowType.ORACLE_CONSULT:
                 await self._start_oracle_consultation(state)
             return True, None
@@ -3703,7 +3732,15 @@ class JobProcessor:
 
         if not isinstance(event, GitlabMrNoteEvent):
             return {"ok": False, "reason": "invalid event"}
-        existing = self.queue_store.find_note(event.note_id)
+        from src.gitlab.keys import gitlab_note_key
+
+        note_key = gitlab_note_key(
+            host=event.host,
+            project_path=event.project_path,
+            project_id=event.project_id,
+            note_id=event.note_id,
+        )
+        existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
             return {
                 "ok": True,
@@ -3734,7 +3771,7 @@ class JobProcessor:
             work_branch=work,
             target_branch=event.target_branch,
             lock_key=lock,
-            gitlab_note_id=event.note_id,
+            gitlab_note_id=note_key,
             merge_request_url=event.mr_url,
             payload=event.to_dict(),
         )
@@ -3771,6 +3808,8 @@ class JobProcessor:
             event.thread_id,
             event.comment_id,
             event.comment_body or event.prompt,
+            repository_url=event.repository_url,
+            project_path=event.project_path,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
@@ -4096,6 +4135,14 @@ class JobProcessor:
                 async with self._job_semaphore:
                     ran = await self._run_gitlab_mr_comment(event)
                 if not ran:
+                    live_st = self.state_manager.get_state(event.issue_key)
+                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                        self.queue_store.finish(
+                            qid,
+                            status="skipped",
+                            error_message="plan_ready; waiting for plan_execute",
+                        )
+                        return
                     self.queue_store.requeue(
                         qid, reason="workspace or issue still in-flight"
                     )
@@ -4116,6 +4163,14 @@ class JobProcessor:
                 async with self._job_semaphore:
                     ran = await self._run_azure_pr_comment(event)
                 if not ran:
+                    live_st = self.state_manager.get_state(event.issue_key)
+                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                        self.queue_store.finish(
+                            qid,
+                            status="skipped",
+                            error_message="plan_ready; waiting for plan_execute",
+                        )
+                        return
                     azure_info(
                         f"queue run deferred queue_id={qid} issue={event.issue_key} "
                         f"(workspace or issue still in-flight)"
@@ -4315,7 +4370,14 @@ class JobProcessor:
 
         assert isinstance(event, GitlabMrNoteEvent)
         issue_key = event.issue_key
-        note_id = (event.note_id or "").strip()
+        from src.gitlab.keys import gitlab_note_key
+
+        note_id = gitlab_note_key(
+            host=event.host,
+            project_path=event.project_path,
+            project_id=event.project_id,
+            note_id=event.note_id,
+        )
         if note_id and note_id in self._gitlab_seen_notes:
             logger.info(f"{issue_key}: duplicate GitLab note {note_id}; skip")
             return True
@@ -4325,6 +4387,11 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
+        if st is not None and st.status == TaskStatus.PLAN_READY:
+            logger.info(
+                f"{issue_key}: plan_ready; GitLab comment waits for plan_execute"
+            )
+            return False
         summary = event.mr_title or f"MR !{event.mr_iid}"
         description = event.prompt
         extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
@@ -4817,7 +4884,12 @@ class JobProcessor:
                 repository=repository,
                 pr_id=int(iid),
                 comment_id=comment_id,
-                comment_content=str(state.description or state.issue_summary or ""),
+                comment_content=str(
+                    meta.get("azure_comment_body")
+                    or state.description
+                    or state.issue_summary
+                    or ""
+                ),
             )
             if thread_id:
                 self.state_manager.update_state(
@@ -4932,6 +5004,8 @@ class JobProcessor:
             event.thread_id,
             event.comment_id,
             event.comment_body or event.prompt,
+            repository_url=event.repository_url,
+            project_path=event.project_path,
         )
         azure_info(
             f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "
@@ -4946,6 +5020,11 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
+        if st is not None and st.status == TaskStatus.PLAN_READY:
+            azure_info(
+                f"job defer plan_ready issue={issue_key} comment={note_id}"
+            )
+            return False
         summary = event.pr_title or f"PR !{event.pr_id}"
         description = event.prompt
         extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
@@ -4960,6 +5039,7 @@ class JobProcessor:
             "merge_request_url": event.pr_url,
             "azure_thread_id": event.thread_id,
             "azure_comment_id": event.comment_id or None,
+            "azure_comment_body": event.comment_body or event.prompt or "",
             "repository_url": event.repository_url,
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,
@@ -5694,11 +5774,22 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
 
     async def _start_execution_workflow(
-        self, state: JiraAgentState, *, from_plan_execute: bool = False
+        self,
+        state: JiraAgentState,
+        *,
+        from_plan_execute: bool = False,
+        kind: str = "build",
     ):
+        kind_n = (kind or "build").strip().lower()
+        if kind_n not in {"build", "test"}:
+            kind_n = "build"
+        is_test = kind_n == "test"
+        wf = WorkflowType.TESTING if is_test else WorkflowType.EXECUTION
+        agent = WorkflowRouter.get_agent_for_workflow(wf)
         logger.info(
-            f"Starting execution (build) workflow for {state.issue_key}"
-            + (" (plan_execute)" if from_plan_execute else "")
+            f"Starting {'test' if is_test else 'execution (build)'} workflow "
+            f"for {state.issue_key}"
+            + (" (plan_execute)" if from_plan_execute and not is_test else "")
         )
         workflow_start_time = datetime.now()
 
@@ -5706,15 +5797,25 @@ class JobProcessor:
         plan_for_prompt = self._resolve_plan_for_build(state.issue_key) or ""
 
         # Create task first (rebuild prompt after clone with work_branch)
-        task = AgentTask(
-            description=f"Execute: {state.issue_key}",
-            prompt=PromptBuilder.build_build_prompt(
+        if is_test:
+            first_prompt = PromptBuilder.build_test_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+            )
+            task_label = f"Test: {state.issue_key}"
+        else:
+            first_prompt = PromptBuilder.build_build_prompt(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
                 description=state.description or "",
                 plan_path=plan_for_prompt or None,
-            ),
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+            )
+            task_label = f"Execute: {state.issue_key}"
+        task = AgentTask(
+            description=task_label,
+            prompt=first_prompt,
+            agent=agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -5725,8 +5826,8 @@ class JobProcessor:
             state,
             status=TaskStatus.EXECUTING,
             task=task,
-            workflow_type="execution",
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+            workflow_type=wf.value,
+            agent=agent,
             job_status="executing",
             started_at=workflow_start_time,
         )
@@ -5764,7 +5865,14 @@ class JobProcessor:
         # issue key) and commit policy use the real checked-out source.
         raw_wb = getattr(git, "work_branch", None)
         work_branch = raw_wb.strip() if isinstance(raw_wb, str) and raw_wb.strip() else None
-        if from_plan_execute:
+        if is_test:
+            task.prompt = PromptBuilder.build_test_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                work_branch=work_branch,
+            )
+        elif from_plan_execute:
             task.prompt = PromptBuilder.build_plan_execute_prompt(
                 plan_path_for_agent or str(durable_now),
                 issue_key=state.issue_key,

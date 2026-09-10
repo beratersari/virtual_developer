@@ -16,12 +16,15 @@ from typing import Iterable, List
 
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
+    extract_mention_guids,
     flatten_comment_text,
     format_execute_usage_note,
     identity_key,
     mentioned_usernames,
+    normalize_guid,
     normalize_mention,
     note_is_ask_handoff,
     note_is_execute_command,
@@ -38,6 +41,53 @@ _HTML_AT = re.compile(
     r">\s*@([^<]+?)\s*<",
     re.IGNORECASE,
 )
+_AT_HANDLE = re.compile(
+    r"(?<![A-Za-z0-9._-])@("
+    r"(?:[^\s@<>/]+\\)?[^\s@<>/]+"
+    r"(?:\s+[A-Za-z][A-Za-z0-9.'-]*){0,4}"
+    r")"
+)
+
+
+def expand_guid_mentions(
+    note: str,
+    bot_mentions: Iterable[str],
+    *,
+    lookup=None,
+) -> List[str]:
+    """GUIDs (and resolved names) that belong to a configured trigger user.
+
+    TFS often puts only the identity id in the chip / ``@<guid>``. When
+    *lookup* maps that id to display/unique names, we treat it as the bot
+    if those names match ``AZURE_TRIGGER_USER``.
+    """
+    extra: List[str] = []
+    bots = {
+        identity_key(x) or normalize_mention(x)
+        for x in bot_mentions or []
+        if identity_key(x) or normalize_mention(x)
+    }
+    bots.update(
+        g for x in (bot_mentions or []) if (g := normalize_guid(str(x)))
+    )
+    if not bots:
+        return extra
+    for gid in extract_mention_guids(note):
+        if gid in bots:
+            extra.append(gid)
+            continue
+        if lookup is None:
+            continue
+        try:
+            aliases = list(lookup(gid) or [])
+        except Exception:
+            aliases = []
+        keys = {identity_key(a) or normalize_mention(a) for a in aliases}
+        keys.discard("")
+        if bots.intersection(keys):
+            extra.append(gid)
+            extra.extend(a for a in aliases if str(a).strip())
+    return extra
 
 
 def html_mention_names(note: str) -> List[str]:
@@ -52,14 +102,25 @@ def html_mention_names(note: str) -> List[str]:
             if name and name not in seen:
                 seen.add(name)
                 found.append(name)
+    for gid in extract_mention_guids(note):
+        if gid not in seen:
+            seen.add(gid)
+            found.append(gid)
+    plain = re.sub(r"<[^>]+>", " ", note or "")
+    for match in _AT_HANDLE.finditer(plain):
+        name = normalize_mention(match.group(1) or "")
+        if name and name not in seen:
+            seen.add(name)
+            found.append(name)
     return found
 
 
 def mention_scan(note: str, bot_mentions: Iterable[str]) -> dict:
     """Configured bots vs names found in the comment (for reject logs)."""
     bots = sorted(
-        {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+        {identity_key(x) or normalize_mention(x) for x in bot_mentions if x}
     )
+    bots = [b for b in bots if b]
     extracted = sorted(
         set(mentioned_usernames(note)) | set(html_mention_names(note))
     )
@@ -72,7 +133,11 @@ def mention_scan(note: str, bot_mentions: Iterable[str]) -> dict:
 
 
 def note_mentions_bot(note: str, bot_mentions: Iterable[str]) -> bool:
-    bots = {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+    bots = {
+        identity_key(x) or normalize_mention(x)
+        for x in bot_mentions
+        if identity_key(x) or normalize_mention(x)
+    }
     if not bots:
         return False
     names = set(mentioned_usernames(note))
@@ -126,13 +191,17 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 __all__ = [
     "ASK_HANDOFF_REASON",
+    "EXECUTE_COMMAND",
     "EXECUTE_MISSING_REASON",
     "author_is_configured_bot",
+    "expand_guid_mentions",
+    "extract_mention_guids",
     "flatten_comment_text",
     "format_execute_usage_note",
     "html_mention_names",
     "identity_key",
     "mention_scan",
+    "normalize_guid",
     "normalize_mention",
     "note_is_ask_handoff",
     "note_is_execute_command",

@@ -64,16 +64,21 @@ def normalize_branch(name: str) -> str:
 
 SESSION_KIND_PLAN = "plan"
 SESSION_KIND_BUILD = "build"
-_SESSION_KINDS = frozenset({SESSION_KIND_PLAN, SESSION_KIND_BUILD})
+SESSION_KIND_TEST = "test"
+_SESSION_KINDS = frozenset(
+    {SESSION_KIND_PLAN, SESSION_KIND_BUILD, SESSION_KIND_TEST}
+)
 
 
 def normalize_session_kind(kind: str = "") -> str:
-    """``plan`` / ``build`` session map, or empty for the legacy bind."""
+    """``plan`` / ``build`` / ``test`` session map, or empty for the legacy bind."""
     raw = (kind or "").strip().lower()
     if raw in {"planning", "derman-plan"}:
         return SESSION_KIND_PLAN
     if raw in {"execution", "executing", "derman-build"}:
         return SESSION_KIND_BUILD
+    if raw in {"testing", "derman-test", "tester"}:
+        return SESSION_KIND_TEST
     return raw if raw in _SESSION_KINDS else ""
 
 

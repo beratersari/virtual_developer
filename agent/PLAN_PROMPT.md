@@ -21,5 +21,8 @@ questions: none
 The commit checkbox in the plan must tell **derman-build** to match
 this repo's `AGENTS.md` + `git log` and include `{ISSUE_KEY}` the way
 that history already does.
+Each implementation step in the plan must also tell **derman-build**
+to write unit tests of that change following the **derman-test**
+agent.
 
 The Jira request is below.

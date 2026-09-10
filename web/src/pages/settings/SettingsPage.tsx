@@ -526,8 +526,8 @@ export function SettingsPage() {
           placeholder="berat_ai, yaver"
         />
         <span className="text-xs text-text-muted">
-          GitLab username, no @. Start a job with @name /execute on a
-          merge-request comment. Mention without /execute gets a usage note
+          GitLab username, no @. Start a job with @name /yaver on a
+          merge-request comment. Mention without /yaver gets a usage note
           in the thread. Comments from this user are ignored. Comma-separated
           if there is more than one.
         </span>
@@ -703,7 +703,7 @@ export function SettingsPage() {
         />
         <span className="text-xs text-text-muted">
           Azure DevOps display name or unique name, no @. Start a job with
-          @name /execute on a pull-request comment. Mention without /execute
+          @name /yaver on a pull-request comment. Mention without /yaver
           gets a usage note in the thread. Comments from this user are
           ignored. Comma-separated if there is more than one.
         </span>

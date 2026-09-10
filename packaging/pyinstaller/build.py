@@ -73,7 +73,7 @@ def _copy_tree_filtered(src: Path, dest: Path) -> int:
     return count
 
 
-_PLAN_BUILD_AGENTS = ("derman-build.md", "derman-plan.md")
+_PLAN_BUILD_AGENTS = ("derman-build.md", "derman-plan.md", "derman-test.md")
 
 
 def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
@@ -99,7 +99,7 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
         shutil.copy2(src, dest_agents / name)
         n_agents += 1
     n_skills = _copy_tree_filtered(src_skills, dest / "skills")
-    if n_agents != 2 or n_skills < 10:
+    if n_agents != len(_PLAN_BUILD_AGENTS) or n_skills < 10:
         raise RuntimeError(
             f"opencoderman agents/skills too small: agents={n_agents} skills={n_skills}"
         )
@@ -108,7 +108,7 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
     )
     if extra_agents:
         raise RuntimeError(
-            f"opencoderman/agents must only contain derman-build and derman-plan: {extra_agents}"
+            f"opencoderman/agents must only contain plan/build/test agents: {extra_agents}"
         )
     extra = [p.name for p in dest.iterdir() if p.name not in {"agents", "skills"}]
     if extra:

@@ -17,7 +17,15 @@ from src.azure.keys import (
     is_azure_issue_key,
     resolve_pr_issue_key,
 )
+from src.azure.identity import (
+    parse_authenticated_user,
+    reset_identity_cache,
+    reviewer_bot_aliases,
+    seed_identity_aliases,
+)
 from src.azure.mentions import (
+    expand_guid_mentions,
+    extract_mention_guids,
     html_mention_names,
     note_mentions_bot,
     parse_mention_list,
@@ -37,7 +45,7 @@ from src.state.models import TaskStatus
 
 def _pr_comment_payload(
     *,
-    note: str = "@yaver /execute what does login do?",
+    note: str = "@yaver /yaver what does login do?",
     unique_name: str = "DOMAIN\\alice",
     display_name: str = "Alice",
     source: str = "refs/heads/feature/login",
@@ -149,6 +157,17 @@ def test_azure_issue_key_stable():
     assert not is_azure_issue_key("KAN-1")
 
 
+def test_azure_issue_key_long_paths_do_not_collide():
+    prefix = "DefaultCollection/MyVeryLongEnterpriseProduct/api-gateway-v"
+    a = azure_issue_key(prefix + "2", 5)
+    b = azure_issue_key(prefix + "3", 5)
+    assert a != b
+    assert a == azure_issue_key(prefix + "2", 5)
+    assert a.startswith("AZ-") and a.endswith("-5")
+    assert b.startswith("AZ-") and b.endswith("-5")
+    assert all(c.isalnum() or c == "-" for c in a)
+
+
 def test_resolve_pr_issue_key_prefers_jira_then_closes_then_az():
     keys = ["KAN", "PROJ"]
     assert (
@@ -183,9 +202,35 @@ def test_resolve_pr_issue_key_prefers_jira_then_closes_then_az():
 
 def test_mention_plain_and_html():
     assert parse_mention_list("@yaver, DevBot") == ["yaver", "devbot"]
+    assert parse_mention_list("CORP\\Yaver") == ["yaver"]
     assert note_mentions_bot("@yaver please look", ["yaver"])
     assert note_mentions_bot("hey @Yaver!", ["@yaver"])
+    assert note_mentions_bot("@Yaver /yaver x", ["CORP\\Yaver"])
+    assert note_mentions_bot(
+        '<a href="#" data-vss-mention="version:2.0,guid">@Yaver Bot</a> hi',
+        ["CORP\\Yaver"],
+    )
     assert not note_mentions_bot("no one tagged", ["yaver"])
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    assert extract_mention_guids(
+        f'<a href="#" data-vss-mention="version:2.0,{bot_id}">@Yaver</a>'
+    ) == [bot_id]
+    assert extract_mention_guids(f"@<{bot_id}> /yaver fix") == [bot_id]
+    assert note_mentions_bot(
+        f'<a href="#" data-vss-mention="version:2.0,{bot_id}"></a> hi',
+        [bot_id],
+    )
+    assert note_mentions_bot(f"@<{bot_id}> please", [bot_id])
+    assert expand_guid_mentions(
+        f"@<{bot_id}> /yaver x",
+        ["yaver"],
+        lookup=lambda gid: ["CORP\\Yaver", "Yaver Bot"] if gid == bot_id else [],
+    ) == [bot_id, "CORP\\Yaver", "Yaver Bot"]
+    assert expand_guid_mentions(
+        f"@<{bot_id}> /yaver x",
+        ["yaver"],
+        lookup=lambda gid: ["CORP\\alice"] if gid == bot_id else [],
+    ) == []
     html = (
         '<a href="#" data-vss-mention="version:2.0,guid">@Yaver</a> please look'
     )
@@ -198,6 +243,177 @@ def test_mention_plain_and_html():
     stripped = strip_azure_bot_mentions(html + " explain", ["yaver"])
     assert "explain" in stripped
     assert "@yaver" not in stripped.lower()
+
+
+def test_identity_aliases_resolve_tfs_mention_guid():
+    import json
+    import socket
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse
+
+    from src.azure.client import AzureDevOpsClient
+
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = urlparse(self.path).path
+            if path.endswith(f"/_apis/identities/{bot_id}"):
+                body = json.dumps(
+                    {
+                        "id": bot_id,
+                        "providerDisplayName": "Yaver Bot",
+                        "properties": {
+                            "Account": {"$value": "CORP\\Yaver"},
+                        },
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                s = socket.create_connection(httpd.server_address, timeout=0.2)
+                s.close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise RuntimeError("identity test server did not start")
+        host, port = httpd.server_address
+        client = AzureDevOpsClient(
+            host=str(host),
+            collection_url=f"http://{host}:{port}/tfs/DefaultCollection",
+            pat="azpat-test",
+        )
+        names = client.identity_aliases(bot_id)
+        assert "Yaver Bot" in names
+        assert "CORP\\Yaver" in names
+        extra = expand_guid_mentions(
+            f"@<{bot_id}> /yaver fix",
+            ["yaver"],
+            lookup=client.identity_aliases,
+        )
+        assert bot_id in extra
+        assert any(x.lower().startswith("yaver") or "Yaver" in x for x in extra)
+    finally:
+        httpd.shutdown()
+
+
+def test_seed_identity_aliases_only_when_trigger_matches():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    ident = parse_authenticated_user(
+        {
+            "authenticatedUser": {
+                "id": bot_id,
+                "providerDisplayName": "Yaver Bot",
+                "properties": {"Account": {"$value": "CORP\\Yaver"}},
+            }
+        }
+    )
+    assert ident is not None
+    extra = seed_identity_aliases(["yaver"], ident)
+    assert bot_id in extra
+    assert "CORP\\Yaver" in extra
+    assert seed_identity_aliases(["otherbot"], ident) == []
+
+
+def test_reviewer_bot_aliases_take_pr_guid():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    pr = {
+        "reviewers": [
+            {
+                "id": bot_id,
+                "displayName": "Yaver Bot",
+                "uniqueName": "CORP\\Yaver",
+            },
+            {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "displayName": "Alice"},
+        ]
+    }
+    extra = reviewer_bot_aliases(pr, ["yaver"], bot_id=bot_id)
+    assert bot_id in extra
+    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" not in extra
+
+
+def test_connection_data_identity_is_read_from_tfs_root():
+    import json
+    import socket
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse
+
+    from src.azure.identity import fetch_bot_identity, reset_identity_cache
+
+    reset_identity_cache()
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = urlparse(self.path).path
+            if path.endswith("/tfs/_apis/connectionData"):
+                body = json.dumps(
+                    {
+                        "authenticatedUser": {
+                            "id": bot_id,
+                            "providerDisplayName": "Yaver Bot",
+                            "uniqueName": "CORP\\Yaver",
+                        }
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                s = socket.create_connection(httpd.server_address, timeout=0.2)
+                s.close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise RuntimeError("connectionData test server did not start")
+        host, port = httpd.server_address
+        user = fetch_bot_identity(
+            host=f"{host}:{port}",
+            collection_url=f"http://{host}:{port}/tfs/DefaultCollection",
+            pat="azpat-test",
+        )
+        assert user is not None
+        assert user["id"] == bot_id
+        assert "Yaver Bot" in user["names"]
+    finally:
+        httpd.shutdown()
+        reset_identity_cache()
 
 
 def test_webhook_token_same_as_gitlab():
@@ -665,7 +881,7 @@ async def test_processor_azure_posts_reply_and_pushes(
         return {"id": 101}
 
     decision = decide_azure_comment_webhook(
-        _pr_comment_payload(note="@yaver /execute please fix the login bug"),
+        _pr_comment_payload(note="@yaver /yaver please fix the login bug"),
         headers={"X-Azure-Token": "s"},
         secret="s",
         bot_mentions=["@yaver"],
@@ -1256,7 +1472,7 @@ def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):
             },
             "object_attributes": {
                 "id": 1,
-                "note": "@berat_ai /execute hi",
+                "note": "@berat_ai /yaver hi",
                 "noteable_type": "MergeRequest",
                 "discussion_id": "d1",
             },
