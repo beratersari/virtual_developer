@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- GitLab and Azure comment jobs start on `@mention /yaver` (was `/execute`). A mention without `/yaver` still gets a usage note. `/ask` is unchanged.
+
 ## [0.9.3] — 2026-09-10
 
 GitLab replies stay in the MR discussion. Azure comments that reuse id 1 are not collapsed. Follow-ups stay on Queue. Storage deletes only the matching clone.

@@ -37,7 +37,7 @@ from src.state.models import TaskStatus
 
 def _pr_comment_payload(
     *,
-    note: str = "@yaver /execute what does login do?",
+    note: str = "@yaver /yaver what does login do?",
     unique_name: str = "DOMAIN\\alice",
     display_name: str = "Alice",
     source: str = "refs/heads/feature/login",
@@ -149,6 +149,17 @@ def test_azure_issue_key_stable():
     assert not is_azure_issue_key("KAN-1")
 
 
+def test_azure_issue_key_long_paths_do_not_collide():
+    prefix = "DefaultCollection/MyVeryLongEnterpriseProduct/api-gateway-v"
+    a = azure_issue_key(prefix + "2", 5)
+    b = azure_issue_key(prefix + "3", 5)
+    assert a != b
+    assert a == azure_issue_key(prefix + "2", 5)
+    assert a.startswith("AZ-") and a.endswith("-5")
+    assert b.startswith("AZ-") and b.endswith("-5")
+    assert all(c.isalnum() or c == "-" for c in a)
+
+
 def test_resolve_pr_issue_key_prefers_jira_then_closes_then_az():
     keys = ["KAN", "PROJ"]
     assert (
@@ -183,8 +194,14 @@ def test_resolve_pr_issue_key_prefers_jira_then_closes_then_az():
 
 def test_mention_plain_and_html():
     assert parse_mention_list("@yaver, DevBot") == ["yaver", "devbot"]
+    assert parse_mention_list("CORP\\Yaver") == ["yaver"]
     assert note_mentions_bot("@yaver please look", ["yaver"])
     assert note_mentions_bot("hey @Yaver!", ["@yaver"])
+    assert note_mentions_bot("@Yaver /yaver x", ["CORP\\Yaver"])
+    assert note_mentions_bot(
+        '<a href="#" data-vss-mention="version:2.0,guid">@Yaver Bot</a> hi',
+        ["CORP\\Yaver"],
+    )
     assert not note_mentions_bot("no one tagged", ["yaver"])
     html = (
         '<a href="#" data-vss-mention="version:2.0,guid">@Yaver</a> please look'
@@ -665,7 +682,7 @@ async def test_processor_azure_posts_reply_and_pushes(
         return {"id": 101}
 
     decision = decide_azure_comment_webhook(
-        _pr_comment_payload(note="@yaver /execute please fix the login bug"),
+        _pr_comment_payload(note="@yaver /yaver please fix the login bug"),
         headers={"X-Azure-Token": "s"},
         secret="s",
         bot_mentions=["@yaver"],
@@ -1256,7 +1273,7 @@ def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):
             },
             "object_attributes": {
                 "id": 1,
-                "note": "@berat_ai /execute hi",
+                "note": "@berat_ai /yaver hi",
                 "noteable_type": "MergeRequest",
                 "discussion_id": "d1",
             },

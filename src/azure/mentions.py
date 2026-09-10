@@ -16,6 +16,7 @@ from typing import Iterable, List
 
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
     flatten_comment_text,
@@ -58,8 +59,9 @@ def html_mention_names(note: str) -> List[str]:
 def mention_scan(note: str, bot_mentions: Iterable[str]) -> dict:
     """Configured bots vs names found in the comment (for reject logs)."""
     bots = sorted(
-        {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+        {identity_key(x) or normalize_mention(x) for x in bot_mentions if x}
     )
+    bots = [b for b in bots if b]
     extracted = sorted(
         set(mentioned_usernames(note)) | set(html_mention_names(note))
     )
@@ -72,7 +74,11 @@ def mention_scan(note: str, bot_mentions: Iterable[str]) -> dict:
 
 
 def note_mentions_bot(note: str, bot_mentions: Iterable[str]) -> bool:
-    bots = {normalize_mention(x) for x in bot_mentions if normalize_mention(x)}
+    bots = {
+        identity_key(x) or normalize_mention(x)
+        for x in bot_mentions
+        if identity_key(x) or normalize_mention(x)
+    }
     if not bots:
         return False
     names = set(mentioned_usernames(note))
@@ -126,6 +132,7 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 __all__ = [
     "ASK_HANDOFF_REASON",
+    "EXECUTE_COMMAND",
     "EXECUTE_MISSING_REASON",
     "author_is_configured_bot",
     "flatten_comment_text",

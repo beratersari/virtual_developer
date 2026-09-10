@@ -76,6 +76,11 @@ def _az(note: str, *, bots=None):
             ["Yaver Bot"],
             True,
         ),
+        (
+            '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a>&nbsp;/ask',
+            ["yaver"],
+            True,
+        ),
         ("<p>@berat_ai /ask</p> wrapped", ["berat_ai"], True),
         ("@berat_ai /ask?", ["berat_ai"], True),
         ("@berat_ai /ask.", ["berat_ai"], True),
@@ -141,11 +146,11 @@ def test_gitlab_decide_rejects_ask_handoff(note):
 @pytest.mark.parametrize(
     "note",
     [
-        "@berat_ai /execute what does login do?",
-        "@berat_ai /execute please implement the plan",
-        "@berat_ai /execute /asking is this ok",
-        "@berat_ai /execute /ask-review the diff",
-        "@oracle /ask\n@berat_ai /execute ship it",
+        "@berat_ai /yaver what does login do?",
+        "@berat_ai /yaver please implement the plan",
+        "@berat_ai /yaver /asking is this ok",
+        "@berat_ai /yaver /ask-review the diff",
+        "@oracle /ask\n@berat_ai /yaver ship it",
     ],
 )
 def test_gitlab_decide_still_accepts_normal_mention(note):
@@ -215,11 +220,11 @@ def test_azure_decide_rejects_ask_handoff(note):
 @pytest.mark.parametrize(
     "note",
     [
-        "@yaver /execute what does login do?",
-        "@yaver /execute please implement the plan",
-        "@yaver /execute /asking is this ok",
-        "@yaver /execute /ask-review the diff",
-        "@oracle /ask\n@yaver /execute ship it",
+        "@yaver /yaver what does login do?",
+        "@yaver /yaver please implement the plan",
+        "@yaver /yaver /asking is this ok",
+        "@yaver /yaver /ask-review the diff",
+        "@oracle /ask\n@yaver /yaver ship it",
     ],
 )
 def test_azure_decide_still_accepts_normal_mention(note):
@@ -348,7 +353,7 @@ def test_gitlab_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
     with TestClient(app) as client:
         resp = client.post(
             "/yaver/webhook/gitlab",
-            json=_mr_payload(note="@berat_ai /execute please implement"),
+            json=_mr_payload(note="@berat_ai /yaver please implement"),
             headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
         )
     assert resp.status_code == 200
@@ -378,7 +383,7 @@ def test_azure_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
     with TestClient(app) as client:
         resp = client.post(
             "/yaver/webhook/azure",
-            json=_pr_comment_payload(note="@yaver /execute please implement"),
+            json=_pr_comment_payload(note="@yaver /yaver please implement"),
             headers={"X-Azure-Token": "tok"},
         )
     assert resp.status_code == 200

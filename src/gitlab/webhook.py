@@ -16,6 +16,7 @@ from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
     format_execute_usage_note,
@@ -332,7 +333,7 @@ def decide_gitlab_note_webhook(
         )
 
     prompt = strip_bot_mentions(note, mentions)
-    prompt = strip_slash_command(prompt, "execute")
+    prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
     if not prompt:
         prompt = note.strip()
 
@@ -381,7 +382,7 @@ def decide_gitlab_note_webhook(
     )
     if not note_is_execute_command(note, bot_mentions or mentions):
         logger.info(
-            f"GitLab note mention without /execute "
+            f"GitLab note mention without /yaver "
             f"{event.project_path}!{event.mr_iid} note={event.note_id} "
             f"preview={note.strip()[:80]!r}"
         )
@@ -399,7 +400,7 @@ def decide_gitlab_note_webhook(
 def post_gitlab_usage_note(
     event: GitlabMrNoteEvent, bot_name: str = ""
 ) -> bool:
-    """Reply in the MR discussion with /execute usage. Never a new thread."""
+    """Reply in the MR discussion with /yaver usage. Never a new thread."""
     discussion_id = (getattr(event, "discussion_id", "") or "").strip()
     from src.gitlab.client import GitlabClient
 

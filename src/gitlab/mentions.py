@@ -26,7 +26,8 @@ def parse_mention_list(raw: str | Sequence[str] | None) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
     for p in parts:
-        n = normalize_mention(p)
+        # DOMAIN\user / user@host → account tail (Azure uniqueName).
+        n = identity_key(p) or normalize_mention(p)
         if n and n not in seen:
             seen.add(n)
             out.append(n)
@@ -102,8 +103,8 @@ def strip_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 ASK_HANDOFF_REASON = "ignored /ask handoff"
-EXECUTE_MISSING_REASON = "mention without /execute"
-EXECUTE_COMMAND = "execute"
+EXECUTE_MISSING_REASON = "mention without /yaver"
+EXECUTE_COMMAND = "yaver"
 
 _VSS_CHIP = re.compile(
     r"<a\s[^>]*data-vss-mention[^>]*>(.*?)</a>",
@@ -128,6 +129,9 @@ def _ask_handoff_names(bot_mentions: Iterable[str]) -> List[str]:
         if text.startswith("@"):
             text = text[1:].strip()
         candidates = [text] if text else []
+        ident = identity_key(raw)
+        if ident:
+            candidates.append(ident)
         norm = normalize_mention(raw)
         if norm:
             candidates.append(norm)
@@ -171,7 +175,9 @@ def note_has_slash_command(
     raw = note or ""
     cmd_re = rf"/{re.escape(cmd)}(?![A-Za-z0-9_-])"
     for match in _VSS_CHIP.finditer(raw):
-        after = raw[match.end() :]
+        # TFS often inserts &nbsp; or a wrapper span between the chip
+        # and /yaver. Flatten those. Another @mention must stay a miss.
+        after = flatten_comment_text(raw[match.end() :])
         if re.match(rf"\s*{cmd_re}", after, flags=re.IGNORECASE):
             if _name_is_configured_bot(match.group(1) or "", names):
                 return True
@@ -200,7 +206,7 @@ def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
 
 
 def note_is_execute_command(note: str, bot_mentions: Iterable[str]) -> bool:
-    """True when the comment contains ``@bot /execute`` for a configured bot."""
+    """True when the comment contains ``@bot /yaver`` for a configured bot."""
     return note_has_slash_command(note, bot_mentions, EXECUTE_COMMAND)
 
 
@@ -219,13 +225,13 @@ def strip_slash_command(text: str, command: str) -> str:
 
 
 def format_execute_usage_note(bot_name: str = "yaver") -> str:
-    """Thread reply when the bot is mentioned without ``/execute``."""
+    """Thread reply when the bot is mentioned without ``/yaver``."""
     from src.brand import COMMENT_PREFIX
 
     name = identity_key(bot_name) or "yaver"
     return (
         f"{COMMENT_PREFIX}\n\n"
-        "I only start work when you mention me with `/execute`.\n\n"
-        f"Example: `@{name} /execute <what to do>`\n\n"
+        "I only start work when you mention me with `/yaver`.\n\n"
+        f"Example: `@{name} /yaver <what to do>`\n\n"
         "`/ask` is handled by another agent."
     )

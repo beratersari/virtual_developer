@@ -18,6 +18,7 @@ from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
 from src.azure.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
     format_execute_usage_note,
@@ -56,25 +57,38 @@ def azure_comment_key(
     thread_id: str = "",
     comment_id: str = "",
     body: str = "",
+    repository_url: str = "",
+    project_path: str = "",
 ) -> str:
     """Stable queue/dedup id. TFS comment ids restart at 1 on every thread.
 
-    With a thread id the key is ``pr:thread:comment``. Without one, two new
-    threads would both be ``pr::1``; include a body hash so they stay
-    distinct. The same webhook retry still matches (same body).
+    With a thread id the key is ``repo:pr:thread:comment``. Without one, two
+    new threads would both be ``repo:pr::1``; include a body hash so they
+    stay distinct. The same webhook retry still matches (same body).
+
+    PR numbers and thread ids restart per repository, so the key includes
+    the git remote (or project/repo path) when the caller has it.
     """
+    from src.state.session_bind_store import normalize_repo_key
+
     pid = str(pr_id or "").strip()
     tid = str(thread_id or "").strip()
     cid = str(comment_id or "").strip()
     if not pid and not tid and not cid:
         return ""
+    repo = normalize_repo_key(repository_url or "") or (
+        (project_path or "").strip().strip("/").lower()
+    )
     if tid:
-        return f"{pid}:{tid}:{cid}"
-    text = (body or "").strip()
-    if text:
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
-        return f"{pid}:{digest}:{cid}"
-    return f"{pid}::{cid}"
+        tail = f"{pid}:{tid}:{cid}"
+    else:
+        text = (body or "").strip()
+        if text:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+            tail = f"{pid}:{digest}:{cid}"
+        else:
+            tail = f"{pid}::{cid}"
+    return f"{repo}:{tail}" if repo else tail
 
 
 @dataclass
@@ -661,7 +675,7 @@ def decide_azure_comment_webhook(
         )
 
     prompt = strip_azure_bot_mentions(note, mentions)
-    prompt = strip_slash_command(prompt, "execute")
+    prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
     if not prompt:
         prompt = note.strip()
 
@@ -746,7 +760,7 @@ def decide_azure_comment_webhook(
 
 
 def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> bool:
-    """Reply in the PR thread with /execute usage. Never a new thread."""
+    """Reply in the PR thread with /yaver usage. Never a new thread."""
     thread_id = (getattr(event, "thread_id", "") or "").strip()
     from src.azure.client import AzureDevOpsClient
 

@@ -29,7 +29,7 @@ from src.state.models import TaskStatus
 
 def _mr_payload(
     *,
-    note: str = "@berat_ai /execute what does login do?",
+    note: str = "@berat_ai /yaver what does login do?",
     username: str = "alice",
     notable: str = "MergeRequest",
     source: str = "feature/login",
@@ -104,6 +104,16 @@ def test_gitlab_issue_key_stable():
     assert gitlab_issue_key("Group/Sub/Repo.git", 12) == "GL-GROUP-SUB-REPO-GIT-12"
     assert is_gitlab_issue_key("GL-ACME-DEMO-4")
     assert not is_gitlab_issue_key("KAN-1")
+
+
+def test_gitlab_issue_key_long_paths_do_not_collide():
+    ga = gitlab_issue_key("group/" + "x" * 60 + "/alpha", 1)
+    gb = gitlab_issue_key("group/" + "x" * 60 + "/bravo", 1)
+    assert ga != gb
+    assert ga == gitlab_issue_key("group/" + "x" * 60 + "/alpha", 1)
+    assert ga.startswith("GL-") and ga.endswith("-1")
+    assert gb.startswith("GL-") and gb.endswith("-1")
+    assert all(c.isalnum() or c == "-" for c in ga)
 
 
 def test_jira_key_from_mr_title_uses_project_keys():
@@ -522,7 +532,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
         return {"id": 202}
 
     decision = decide_gitlab_note_webhook(
-        _mr_payload(note="@berat_ai /execute what does login do?"),
+        _mr_payload(note="@berat_ai /yaver what does login do?"),
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
         secret="s",
         bot_mentions=["@berat_ai"],
@@ -718,7 +728,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
         return {"id": 101}
 
     decision = decide_gitlab_note_webhook(
-        _mr_payload(note="@berat_ai /execute please fix the login bug"),
+        _mr_payload(note="@berat_ai /yaver please fix the login bug"),
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
         secret="s",
         bot_mentions=["@berat_ai"],
