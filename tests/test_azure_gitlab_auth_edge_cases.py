@@ -381,15 +381,17 @@ def test_29_probe_never_echoes_token(monkeypatch):
     captured = {}
 
     def get(url, headers, params):
-        if "connectionData" in url and "DefaultCollection" in url:
+        if "/tfs/_apis/connectionData" in url:
             return _Resp(200, {"authenticatedUser": {"id": "1", "uniqueName": "bot"}})
-        if "projects" in url:
+        if "/tfs/_apis/projects" in url:
             return _Resp(200, {"value": []})
         return _Resp(401)
 
     monkeypatch.setattr(
         "src.azure_connection.httpx.Client", _httpx_client(get, captured=captured)
     )
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
     out = probe_azure_connection("tfs.example.com", pat="super-secret-token")
     assert out["ok"] is True
     blob = str(out)
@@ -399,16 +401,18 @@ def test_29_probe_never_echoes_token(monkeypatch):
 
 def test_30_probe_origin_401_then_collection_200(monkeypatch):
     def get(url, headers, params):
-        if "/tfs/DefaultCollection/_apis/connectionData" in url:
+        if "/tfs/_apis/connectionData" in url:
             return _Resp(200, {"authenticatedUser": {"id": "u", "displayName": "Bot"}})
-        if "/tfs/DefaultCollection/_apis/projects" in url:
+        if "/tfs/_apis/projects" in url:
             return _Resp(200, {"value": [{"id": "p", "name": "Demo"}]})
         return _Resp(401)
 
     monkeypatch.setattr("src.azure_connection.httpx.Client", _httpx_client(get))
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
     out = probe_azure_connection("tfs.example.com", pat="ok")
     assert out["ok"] is True
-    assert out["collection_url"].endswith("/tfs/DefaultCollection")
+    assert out["collection_url"].rstrip("/").endswith("/tfs")
     assert out["project_count"] == 1
 
 
@@ -424,7 +428,7 @@ def test_31_probe_all_401(monkeypatch):
 
 def test_32_probe_403_wins_over_earlier_401(monkeypatch):
     def get(url, headers, params):
-        if "DefaultCollection" in url:
+        if "/tfs/_apis/connectionData" in url:
             return _Resp(403)
         return _Resp(401)
 
@@ -469,18 +473,18 @@ def test_34_probe_http_error(monkeypatch):
     assert "HTTP error" in out["error"]
 
 
-def test_35_candidate_bases_collection_before_origin():
+def test_35_candidate_bases_tfs_root_not_collection():
     bases = _candidate_bases("tfs.example.com")
-    assert bases[0].endswith("/tfs/DefaultCollection")
-    assert bases[-1] == "https://tfs.example.com"
+    assert "https://tfs.example.com" in bases
+    assert "https://tfs.example.com/tfs" in bases
     custom = _candidate_bases("https://tfs.example.com/tfs/MyCol")
-    assert custom[0] == "https://tfs.example.com/tfs/MyCol"
+    assert custom[0] == "https://tfs.example.com/tfs"
 
 
 def test_36_candidate_bases_localhost_is_http():
     bases = _candidate_bases("127.0.0.1:8080")
     assert all(b.startswith("http://") for b in bases)
-    assert any(b.endswith("/tfs/DefaultCollection") for b in bases)
+    assert any(b.endswith("/tfs") for b in bases)
 
 
 def test_37_normalize_host_port_and_scheme():
@@ -496,15 +500,17 @@ def test_38_probe_uses_stored_host_pat(monkeypatch):
     captured = {}
 
     def get(url, headers, params):
-        if "DefaultCollection" in url and "connectionData" in url:
+        if "/tfs/_apis/connectionData" in url:
             return _Resp(200, {"authenticatedUser": {"id": "1", "uniqueName": "bot"}})
-        if "projects" in url:
+        if "/tfs/_apis/projects" in url:
             return _Resp(200, {"value": []})
         return _Resp(404)
 
     monkeypatch.setattr(
         "src.azure_connection.httpx.Client", _httpx_client(get, captured=captured)
     )
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
     out = probe_azure_connection("tfs.example.com")
     assert out["ok"] is True
     assert _decode_basic(captured["headers"]["Authorization"]) == "pat:STORED-PAT"

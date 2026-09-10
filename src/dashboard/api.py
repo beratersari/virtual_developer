@@ -377,6 +377,17 @@ def create_dashboard_app(
                 {"ok": False, "reason": decision.reason},
                 status_code=status,
             )
+        try:
+            from src.azure_connection import remember_azure_collection
+
+            ev = decision.event
+            if ev is not None:
+                remember_azure_collection(
+                    getattr(ev, "host", "") or "",
+                    getattr(ev, "collection_url", "") or "",
+                )
+        except Exception:
+            pass
         proc = app.state.processor
         if proc is None or decision.event is None:
             azure_error("http webhook accepted but processor not bound")
