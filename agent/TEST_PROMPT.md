@@ -16,7 +16,9 @@ to learn how this repo tests. Follow those rules over generic
 advice.
 
 Raise **line, branch, and condition** coverage. For every missed
-path, write a real test of that condition or edge case. Do **not**
+path, write a real test of that condition or edge case. When a
+function calls another function, cover it with `expect_call` (or
+this repo's equivalent) and the **exact** parameters. Do **not**
 add hacky tests whose only job is to paint coverage green.
 
 Then match neighboring tests and the unit-test practices on the
