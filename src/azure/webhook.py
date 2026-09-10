@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
@@ -194,6 +194,9 @@ def extract_azure_thread_id(
     for raw in (
         comment.get("threadId"),
         comment.get("thread_id"),
+        resource.get("threadId"),
+        resource.get("thread_id"),
+        resource.get("pullRequestThreadId"),
         _as_dict(resource.get("pullRequestThread")).get("id"),
         _as_dict(resource.get("thread")).get("id"),
     ):
@@ -348,7 +351,7 @@ def parse_azure_git_url(url: str) -> Optional[Dict[str, str]]:
         host_port = f"{host}:{parsed.port}"
     else:
         host_port = host
-    path = (parsed.path or "").strip("/")
+    path = unquote((parsed.path or "").strip("/"))
     if path.endswith(".git"):
         path = path[:-4]
     match = re.search(
@@ -404,7 +407,7 @@ def parse_pull_request_url(url: str) -> Optional[tuple[str, str, int]]:
     except Exception:
         return None
     host = (parsed.hostname or "").lower()
-    path = (parsed.path or "").strip("/")
+    path = unquote((parsed.path or "").strip("/"))
     if parsed.port and parsed.port not in (80, 443):
         host = f"{host}:{parsed.port}"
     match = re.search(
@@ -717,18 +720,30 @@ def decide_azure_comment_webhook(
 def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> bool:
     """Reply in the PR thread with /execute usage. Never a new thread."""
     thread_id = (getattr(event, "thread_id", "") or "").strip()
-    if not thread_id:
-        azure_info(
-            "usage note skipped: no thread_id "
-            f"{getattr(event, 'project_path', '')}!{getattr(event, 'pr_id', '')}"
-        )
-        return False
     from src.azure.client import AzureDevOpsClient
 
     client = AzureDevOpsClient(
         host=getattr(event, "host", "") or "",
         collection_url=getattr(event, "collection_url", "") or "",
     )
+    if not thread_id:
+        thread_id = client.find_thread_id_for_comment(
+            project=str(getattr(event, "project", "") or ""),
+            repository=(
+                getattr(event, "repository_id", "")
+                or getattr(event, "repository_name", "")
+            ),
+            pr_id=int(getattr(event, "pr_id", 0) or 0),
+            comment_id=str(getattr(event, "comment_id", "") or ""),
+        )
+        if thread_id:
+            event.thread_id = thread_id
+    if not thread_id:
+        azure_info(
+            "usage note skipped: no thread_id "
+            f"{getattr(event, 'project_path', '')}!{getattr(event, 'pr_id', '')}"
+        )
+        return False
     posted = client.post_pr_comment(
         project=str(getattr(event, "project", "") or ""),
         repository=(

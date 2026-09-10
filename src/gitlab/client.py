@@ -227,6 +227,39 @@ class GitlabClient:
             logger.debug(f"GitLab GET MR {project}!{iid} error: {e}")
             return None
 
+    def find_discussion_id_for_note(
+        self, *, project: Any, mr_iid: int, note_id: str
+    ) -> str:
+        """GET ``/notes/:id`` and return ``discussion_id`` for a thread reply."""
+        nid = str(note_id or "").strip()
+        if not nid or not self.api_base:
+            return ""
+        try:
+            iid = int(mr_iid)
+        except (TypeError, ValueError):
+            return ""
+        if iid <= 0:
+            return ""
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{iid}/notes/{quote(nid, safe='')}"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code != 200:
+                logger.debug(
+                    f"GitLab GET note {project}!{iid} #{nid} failed "
+                    f"({resp.status_code})"
+                )
+                return ""
+            data = resp.json() if resp.content else {}
+            if not isinstance(data, dict):
+                return ""
+            did = str(data.get("discussion_id") or data.get("discussionId") or "").strip()
+            return did
+        except Exception as e:
+            logger.debug(f"GitLab GET note {project}!{iid} #{nid} error: {e}")
+            return ""
+
     def post_mr_note(
         self,
         *,

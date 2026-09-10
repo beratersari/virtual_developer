@@ -4166,11 +4166,25 @@ class JobProcessor:
         from src.gitlab.client import GitlabClient
 
         client = GitlabClient(host=host)
+        discussion_id = str(meta.get("gitlab_discussion_id") or "").strip()
+        note_id = str(meta.get("gitlab_note_id") or "").strip()
+        if not discussion_id and note_id:
+            discussion_id = client.find_discussion_id_for_note(
+                project=project,
+                mr_iid=int(iid),
+                note_id=note_id,
+            )
+            if discussion_id:
+                self.state_manager.update_state(
+                    state.issue_key,
+                    metadata={"gitlab_discussion_id": discussion_id},
+                )
         posted = client.post_mr_note(
             project=project,
             mr_iid=int(iid),
             body=body,
-            discussion_id=str(meta.get("gitlab_discussion_id") or ""),
+            discussion_id=discussion_id,
+            allow_new_thread=False,
         )
         return posted is not None
 
@@ -4319,6 +4333,7 @@ class JobProcessor:
             "gitlab_mr_iid": event.mr_iid,
             "merge_request_url": event.mr_url,
             "gitlab_discussion_id": event.discussion_id,
+            "gitlab_note_id": event.note_id or None,
             "repository_url": event.repository_url,
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,
@@ -4791,12 +4806,27 @@ class JobProcessor:
             f"thread={meta.get('azure_thread_id') or '-'} chars={len(body or '')}"
         )
         client = AzureDevOpsClient(host=host, collection_url=collection)
+        thread_id = str(meta.get("azure_thread_id") or "").strip()
+        comment_id = str(meta.get("azure_comment_id") or "").strip()
+        if not thread_id and comment_id:
+            thread_id = client.find_thread_id_for_comment(
+                project=str(project),
+                repository=repository,
+                pr_id=int(iid),
+                comment_id=comment_id,
+            )
+            if thread_id:
+                self.state_manager.update_state(
+                    state.issue_key,
+                    metadata={"azure_thread_id": thread_id},
+                )
         posted = client.post_pr_comment(
             project=str(project),
             repository=repository,
             pr_id=int(iid),
             body=body,
-            thread_id=str(meta.get("azure_thread_id") or ""),
+            thread_id=thread_id,
+            allow_new_thread=False,
         )
         if posted is None:
             azure_warning(f"reply fail {state.issue_key} {project}/{repository}!{iid}")
@@ -4908,6 +4938,7 @@ class JobProcessor:
         st = self.state_manager.get_state(issue_key)
         summary = event.pr_title or f"PR !{event.pr_id}"
         description = event.prompt
+        extra = event.raw if isinstance(getattr(event, "raw", None), dict) else {}
         meta = {
             "source": "azure",
             "azure_host": event.host,
@@ -4918,12 +4949,15 @@ class JobProcessor:
             "azure_pr_id": event.pr_id,
             "merge_request_url": event.pr_url,
             "azure_thread_id": event.thread_id,
+            "azure_comment_id": event.comment_id or None,
             "repository_url": event.repository_url,
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,
             "feature_branch": event.source_branch,
             "workflow_type": "azure_pr",
             "requeue_eligible": False,
+            "model": str(extra.get("model") or "").strip(),
+            "backend": str(extra.get("backend") or "").strip(),
         }
         if st is None:
             st = self.state_manager.create_state(

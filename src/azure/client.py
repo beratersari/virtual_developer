@@ -8,7 +8,7 @@ the product TLS policy (on-prem / intercept; no custom-CA path yet).
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
@@ -110,8 +110,9 @@ class AzureDevOpsClient:
         return headers
 
     def _repo_url(self, project: str, repository: Any) -> str:
-        proj = quote(str(project or "").strip().strip("/"), safe="")
-        ident = str(repository or "").strip()
+        # Unquote first so "Tank%20Projeleri" is not encoded as Tank%2520…
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        ident = unquote(str(repository or "").strip())
         if not ident.isdigit() and "-" not in ident:
             ident = quote(ident, safe="")
         if proj:
@@ -183,6 +184,77 @@ class AzureDevOpsClient:
         except Exception as e:
             azure_warning(f"get_pr error {project}/{repository}!{iid}: {e}")
             return None
+
+    def find_thread_id_for_comment(
+        self,
+        *,
+        project: str,
+        repository: Any,
+        pr_id: int,
+        comment_id: str,
+    ) -> str:
+        """Find the PR thread that contains *comment_id* (TFS omits threadId)."""
+        cid = str(comment_id or "").strip()
+        if not cid or not self.api_base:
+            return ""
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return ""
+        if iid <= 0:
+            return ""
+        url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(
+                    url,
+                    headers=self._headers(),
+                    params={"api-version": _API_VERSION},
+                )
+                ver = _API_VERSION
+                if resp.status_code in (400, 404, 415):
+                    resp = client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"api-version": _API_VERSION_FALLBACK},
+                    )
+                    ver = _API_VERSION_FALLBACK
+            if resp.status_code != 200:
+                azure_warning(
+                    f"find_thread fail {project}/{repository}!{iid} "
+                    + http_detail(
+                        method="GET",
+                        url=url,
+                        status=resp.status_code,
+                        api_version=ver,
+                        body=resp.text,
+                    )
+                )
+                return ""
+            data = resp.json() if resp.content else {}
+            rows = data.get("value") if isinstance(data, dict) else data
+            if not isinstance(rows, list):
+                return ""
+            for thread in rows:
+                if not isinstance(thread, dict):
+                    continue
+                tid = thread.get("id")
+                if tid is None or tid == "":
+                    continue
+                for item in thread.get("comments") or []:
+                    if isinstance(item, dict) and str(item.get("id") or "") == cid:
+                        azure_info(
+                            f"find_thread ok {project}/{repository}!{iid} "
+                            f"comment={cid} thread={tid}"
+                        )
+                        return str(tid)
+            azure_warning(
+                f"find_thread miss {project}/{repository}!{iid} comment={cid}"
+            )
+            return ""
+        except Exception as e:
+            azure_warning(f"find_thread error {project}/{repository}!{iid}: {e}")
+            return ""
 
     def post_pr_comment(
         self,
@@ -484,8 +556,8 @@ class AzureDevOpsClient:
             pr_id = 0
         if pr_id <= 0 or not self.api_base:
             return None
-        proj = quote(str(project or "").strip().strip("/"), safe="")
-        repo = quote(str(repository or "").strip(), safe="")
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        repo = quote(unquote(str(repository or "").strip()), safe="")
         if proj and repo:
             return f"{self.api_base}/{proj}/_git/{repo}/pullrequest/{pr_id}"
         return None

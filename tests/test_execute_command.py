@@ -178,6 +178,78 @@ def test_extract_azure_thread_id_from_links():
     assert extract_azure_thread_id(comment, {}) == "12"
     assert extract_azure_thread_id({"id": 77, "parentCommentId": 0}, {}) == ""
     assert extract_azure_thread_id({"threadId": 9}, {}) == "9"
+    assert extract_azure_thread_id({"id": 1}, {"threadId": 4}) == "4"
+
+
+def test_azure_finds_thread_id_from_comment_list(monkeypatch):
+    from src.azure.client import AzureDevOpsClient
+
+    class FakeResp:
+        status_code = 200
+        content = b'{"value":[{"id":8,"comments":[{"id":77}]}]}'
+        text = '{"value":[{"id":8,"comments":[{"id":77}]}]}'
+
+        def json(self):
+            return {"value": [{"id": 8, "comments": [{"id": 77}]}]}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr("src.azure.client.httpx.Client", FakeClient)
+    c = AzureDevOpsClient(
+        host="tfs.example.com",
+        pat="azpat-test",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+    )
+    assert (
+        c.find_thread_id_for_comment(
+            project="Demo", repository="demo", pr_id=4, comment_id="77"
+        )
+        == "8"
+    )
+
+
+def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
+    from src.dashboard.api import create_dashboard_app
+    from src.processor import JobProcessor
+
+    payload = _pr_comment_payload(note="@yaver please implement")
+    payload["resource"]["comment"].pop("threadId", None)
+    payload["resource"]["comment"].pop("_links", None)
+    posted = {}
+
+    def fake_find(self, **kwargs):
+        return "8"
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 3}
+
+    monkeypatch.setattr("src.config.settings.azure_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.azure_bot_mentions", "@yaver")
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.enqueue_azure_comment = AsyncMock()
+    app = create_dashboard_app(processor=proc)
+    with patch(
+        "src.azure.client.AzureDevOpsClient.find_thread_id_for_comment", fake_find
+    ), patch("src.azure.client.AzureDevOpsClient.post_pr_comment", fake_post):
+        with TestClient(app) as client:
+            resp = client.post("/yaver/webhook/azure", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["usage_note"] is True
+    assert posted.get("thread_id") == "8"
+    assert posted.get("allow_new_thread") is False
 
 
 def test_usage_note_starts_with_product_prefix():

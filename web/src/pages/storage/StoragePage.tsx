@@ -21,8 +21,11 @@ function mrStateLabel(state?: string | null): string {
 }
 
 function mrShortLabel(url: string): string {
-  const m = /\/merge_requests\/(\d+)/i.exec(url)
-  return m ? `!${m[1]}` : 'MR'
+  const gl = /\/merge_requests\/(\d+)/i.exec(url)
+  if (gl) return `!${gl[1]}`
+  const az = /\/pullrequest\/(\d+)/i.exec(url)
+  if (az) return `!${az[1]}`
+  return 'MR'
 }
 
 function folderLabel(folder: StorageFolder): string {

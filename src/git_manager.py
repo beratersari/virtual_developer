@@ -2488,14 +2488,43 @@ class GitManager:
         return sha or None
 
     def build_commit_url(self, commit_sha: Optional[str] = None) -> Optional[str]:
-        """Best-effort GitLab web URL for a commit (https://host/group/repo/-/commit/SHA)."""
+        """Web URL for a commit (GitLab ``/-/commit/SHA``, Azure ``/commit/SHA?refName=``)."""
         sha = (commit_sha or self.get_last_commit_sha() or "").strip()
         if not sha:
             return None
+        if self._looks_like_azure_remote(self.remote_url or ""):
+            return self._azure_commit_url(sha)
         host, project = self._gitlab_host_and_project()
         if not host or not project:
             return None
         return f"https://{host}/{project}/-/commit/{sha}"
+
+    def _azure_commit_url(self, sha: str) -> Optional[str]:
+        """TFS commit page: ``…/_git/Repo/commit/SHA?refName=refs/heads/branch``."""
+        from src.azure.webhook import parse_azure_git_url
+
+        parsed = parse_azure_git_url(self.remote_url or "") or {}
+        collection = str(parsed.get("collection_url") or "").rstrip("/")
+        project = str(parsed.get("project") or "").strip("/")
+        repo = str(parsed.get("repository") or "").strip("/")
+        if not collection or not repo:
+            return None
+        if project:
+            base = f"{collection}/{project}/_git/{repo}"
+        else:
+            base = f"{collection}/_git/{repo}"
+        url = f"{base}/commit/{sha}"
+        branch = (
+            (self.work_branch or "").strip()
+            or (self.source_branch or "").strip()
+        )
+        if branch.lower().startswith("refs/"):
+            ref = branch
+        elif branch:
+            ref = f"refs/heads/{branch}"
+        else:
+            return url
+        return f"{url}?refName={quote(ref, safe='/')}"
 
     def status(self) -> str:
         """Get git status output."""

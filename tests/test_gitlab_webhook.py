@@ -708,6 +708,8 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     assert "*Yaver*" in body
     assert "Fixed the login bug." in body
     assert "Pushed new commits" in body
+    assert posted.get("discussion_id") == "disc-1"
+    assert posted.get("allow_new_thread") is False
     assert (st.metadata or {}).get("merge_request_url") == (
         "https://gitlab.example.com/acme/demo/-/merge_requests/4"
     )
