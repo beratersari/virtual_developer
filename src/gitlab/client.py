@@ -230,7 +230,11 @@ class GitlabClient:
     def find_discussion_id_for_note(
         self, *, project: Any, mr_iid: int, note_id: str
     ) -> str:
-        """GET ``/notes/:id`` and return ``discussion_id`` for a thread reply."""
+        """Return the discussion that contains *note_id* (for a thread reply).
+
+        GET ``/notes/:id`` does not include ``discussion_id``. Scan
+        ``/discussions`` and match the note.
+        """
         nid = str(note_id or "").strip()
         if not nid or not self.api_base:
             return ""
@@ -241,24 +245,72 @@ class GitlabClient:
         if iid <= 0:
             return ""
         ident = self._project_ident(project)
-        url = f"{self._project_url(ident)}/merge_requests/{iid}/notes/{quote(nid, safe='')}"
+        note_url = (
+            f"{self._project_url(ident)}/merge_requests/{iid}/notes/"
+            f"{quote(nid, safe='')}"
+        )
+        list_url = f"{self._project_url(ident)}/merge_requests/{iid}/discussions"
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
-                resp = client.get(url, headers=self._headers())
-            if resp.status_code != 200:
-                logger.debug(
-                    f"GitLab GET note {project}!{iid} #{nid} failed "
-                    f"({resp.status_code})"
-                )
-                return ""
-            data = resp.json() if resp.content else {}
-            if not isinstance(data, dict):
-                return ""
-            did = str(data.get("discussion_id") or data.get("discussionId") or "").strip()
-            return did
+                resp = client.get(note_url, headers=self._headers())
+                if resp.status_code == 200:
+                    data = resp.json() if resp.content else {}
+                    if isinstance(data, dict):
+                        did = str(
+                            data.get("discussion_id") or data.get("discussionId") or ""
+                        ).strip()
+                        if did:
+                            return did
+                page = 1
+                while page <= 10:
+                    resp = client.get(
+                        list_url,
+                        headers=self._headers(),
+                        params={"per_page": 100, "page": page},
+                    )
+                    if resp.status_code != 200:
+                        logger.debug(
+                            f"GitLab GET discussions {project}!{iid} failed "
+                            f"({resp.status_code})"
+                        )
+                        return ""
+                    rows = resp.json() if resp.content else []
+                    if not isinstance(rows, list):
+                        return ""
+                    for disc in rows:
+                        if not isinstance(disc, dict):
+                            continue
+                        for note in disc.get("notes") or []:
+                            if isinstance(note, dict) and str(note.get("id") or "") == nid:
+                                return str(disc.get("id") or "").strip()
+                    nxt = str(resp.headers.get("X-Next-Page") or "").strip()
+                    if not nxt:
+                        break
+                    try:
+                        page = int(nxt)
+                    except ValueError:
+                        break
+            return ""
         except Exception as e:
             logger.debug(f"GitLab GET note {project}!{iid} #{nid} error: {e}")
             return ""
+
+    def _normalize_note_payload(
+        self, data: Dict[str, Any], discussion_id: str = ""
+    ) -> Dict[str, Any]:
+        """Expose note ``id`` + ``discussion_id`` from Notes or Discussions JSON."""
+        did = (discussion_id or "").strip()
+        notes = data.get("notes")
+        if isinstance(notes, list) and notes and isinstance(notes[0], dict):
+            first = notes[0]
+            out = dict(data)
+            out["id"] = first.get("id") or data.get("id")
+            out["discussion_id"] = did or str(data.get("id") or "")
+            return out
+        out = dict(data)
+        if did and not out.get("discussion_id"):
+            out["discussion_id"] = did
+        return out
 
     def post_mr_note(
         self,
@@ -269,10 +321,12 @@ class GitlabClient:
         discussion_id: str = "",
         allow_new_thread: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """POST ``/projects/:id/merge_requests/:iid/notes`` (CE + EE).
+        """Post a thread reply, or open a new discussion.
 
-        When *discussion_id* is set, only reply in that discussion. A failed
-        reply must not become a new top-level note.
+        Replies use ``POST .../discussions/:id/notes``. A new overview
+        comment uses ``POST .../discussions`` so the response includes
+        the discussion id. The Notes create API ignores
+        ``in_reply_to_discussion_id`` (that field is draft-notes only).
         """
         if not self.api_base:
             logger.error("GitLab API base missing; cannot post MR note")
@@ -281,28 +335,34 @@ class GitlabClient:
         if not text:
             return None
         ident = self._project_ident(project)
-        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/notes"
-        payload: Dict[str, Any] = {"body": text}
+        base = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}"
         did = (discussion_id or "").strip()
         if did:
-            payload["in_reply_to_discussion_id"] = did
+            url = f"{base}/discussions/{quote(did, safe='')}/notes"
         elif not allow_new_thread:
             logger.warning(
                 f"GitLab MR note skip: no discussion_id (thread-only) "
                 f"{project}!{mr_iid}"
             )
             return None
+        else:
+            url = f"{base}/discussions"
+        payload: Dict[str, Any] = {"body": text}
         try:
             # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             with httpx.Client(timeout=30.0, verify=False) as client:
                 resp = client.post(url, headers=self._headers(), json=payload)
                 if resp.status_code in (200, 201):
                     data = resp.json() if resp.content else {}
+                    if not isinstance(data, dict):
+                        data = {"ok": True}
+                    posted = self._normalize_note_payload(data, did)
                     logger.info(
                         f"Posted GitLab MR note on {project}!{mr_iid} "
-                        f"note_id={data.get('id')}"
+                        f"note_id={posted.get('id')} "
+                        f"discussion={posted.get('discussion_id') or did or '-'}"
                     )
-                    return data if isinstance(data, dict) else {"ok": True}
+                    return posted
                 logger.error(
                     f"GitLab MR note failed ({resp.status_code}): "
                     f"{(resp.text or '')[:400]}"

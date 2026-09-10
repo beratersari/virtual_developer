@@ -353,7 +353,7 @@ def test_gitlab_client_does_not_fallback_to_new_note(monkeypatch):
             return False
 
         def post(self, url, headers=None, json=None):
-            calls.append(json)
+            calls.append({"url": url, "json": json})
             return FakeResp()
 
     monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
@@ -363,7 +363,8 @@ def test_gitlab_client_does_not_fallback_to_new_note(monkeypatch):
     )
     assert out is None
     assert len(calls) == 1
-    assert calls[0]["in_reply_to_discussion_id"] == "d1"
+    assert "/discussions/d1/notes" in calls[0]["url"]
+    assert calls[0]["json"] == {"body": "*Yaver*\n\nhi"}
 
 
 def test_azure_client_does_not_fallback_to_new_thread(monkeypatch):
