@@ -17,6 +17,10 @@ Jira title/description below are context only — do not replace the
 plan with a different scope. If the plan file is missing, implement
 the Jira request.
 
+For each change, write unit tests following the **derman-test**
+agent (`AGENTS.md` first, real coverage, `expect_call` with exact
+parameters).
+
 Do **not** copy the plan into this repository and do **not** commit
 it. Stay on `{WORK_BRANCH}` (already checked out). Do **not**
 `git checkout`, `git switch`, or create another branch. File
