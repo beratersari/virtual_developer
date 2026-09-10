@@ -1,3 +1,17 @@
+# Yaver 0.9.1
+
+Schedule can follow up on an existing Azure DevOps PR the same
+way as a GitLab MR.
+
+Replies (usage notes, OpenCode results, errors) stay in the
+triggering MR/PR thread.
+
+Azure PR create no longer double-encodes project names with
+spaces. Job-detail commit links use
+`/commit/{sha}?refName=refs/heads/{branch}`. Storage shows
+Azure PR status and does not spam `Folder not found` for
+stale clone names.
+
 # Yaver 0.9.0
 
 GitLab and Azure comment jobs start only on `@mention /execute`.
