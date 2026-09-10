@@ -64,7 +64,7 @@ Yaver is a Python daemon that:
 
 ### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
-Assignment to a name in **`TRIGGER_ASSIGNEE_NAMES`** means the issue is eligible
+Assignment to a name in **`JIRA_TRIGGER_USER`** means the issue is eligible
 for poller intake **whenever it is To Do-like**, including after a previous
 completed/error/cancelled run. In-flight (`planning` / `executing`) is never
 restarted from poll noise.
@@ -324,7 +324,8 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
-| `TRIGGER_ASSIGNEE_NAMES` | Assignee name fragments the poller requires (e.g. `devbot,jira ai bot`) |
+| `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job when mentioned on an MR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored. |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
@@ -336,7 +337,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` |
 | `AZURE_WEBHOOK_SECRET` | Shared secret; must match service-hook `X-Azure-Token` |
-| `AZURE_BOT_MENTIONS` | Display/unique names that start a job when mentioned on a PR comment. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Display/unique names that start a job when mentioned on a PR comment. Comma-separated, no `@`. `@name /ask` in a comment is ignored (another agent). |
 
 ---
 
@@ -356,7 +357,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, trigger_mentions, trigger_assignee_names, gitlab_bot_mentions, azure_bot_mentions, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /webhooks/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /webhooks/azure` (webhook keeps `AZURE_WEBHOOK_SECRET`). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 

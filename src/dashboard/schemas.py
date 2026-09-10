@@ -364,6 +364,7 @@ class SettingsView(BaseModel):
     # Unattended worker: opencode | codex
     agent_backend: str = "opencode"
     gitlab_webhook_enabled: bool = False
+    gitlab_trigger_user: str = ""
     gitlab_bot_mentions: str = ""
     gitlab_webhook_secret_configured: bool = False
     gitlab_webhook_path: str = "/webhooks/gitlab"
@@ -371,9 +372,11 @@ class SettingsView(BaseModel):
     azure_allowed_hosts: str = ""
     azure_credentials: List["AzureHostCredentialView"] = Field(default_factory=list)
     azure_webhook_enabled: bool = False
+    azure_trigger_user: str = ""
     azure_bot_mentions: str = ""
     azure_webhook_secret_configured: bool = False
     azure_webhook_path: str = "/webhooks/azure"
+    jira_trigger_user: str = ""
     trigger_mentions: str = ""
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
@@ -568,23 +571,35 @@ class SettingsUpdate(BaseModel):
         max_length=40,
         description="Full replace of saved git remotes for the New-issue form",
     )
+    jira_trigger_user: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Comma-separated Jira names for To Do assignee intake and @mentions"
+        ),
+    )
     trigger_mentions: Optional[str] = Field(
         default=None,
         max_length=500,
-        description="Deprecated; same identity as trigger_assignee_names",
+        description="Leftover; same identity as jira_trigger_user",
     )
     trigger_assignee_names: Optional[str] = Field(
         default=None,
         max_length=500,
-        description="Jira bot name for assignee intake and @mentions",
+        description="Leftover; same identity as jira_trigger_user",
     )
-    gitlab_bot_mentions: Optional[str] = Field(
+    gitlab_trigger_user: Optional[str] = Field(
         default=None,
         max_length=500,
         description=(
             "Comma-separated GitLab usernames that start a job when mentioned "
             "on a merge-request comment"
         ),
+    )
+    gitlab_bot_mentions: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Leftover; same identity as gitlab_trigger_user",
     )
     gitlab_webhook_enabled: Optional[bool] = Field(
         default=None,
@@ -606,13 +621,18 @@ class SettingsUpdate(BaseModel):
         max_length=2000,
         description="Leftover hosts for a lone AZURE_PAT; ignored when a host→PAT map exists",
     )
-    azure_bot_mentions: Optional[str] = Field(
+    azure_trigger_user: Optional[str] = Field(
         default=None,
         max_length=500,
         description=(
             "Comma-separated Azure DevOps names that start a job when mentioned "
             "on a pull-request comment"
         ),
+    )
+    azure_bot_mentions: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Leftover; same identity as azure_trigger_user",
     )
     azure_webhook_enabled: Optional[bool] = Field(
         default=None,

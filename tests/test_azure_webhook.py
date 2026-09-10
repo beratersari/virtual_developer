@@ -326,7 +326,7 @@ def test_decide_ignores_non_comment_and_no_mention():
         bot_mentions=[],
     )
     assert not d7.accepted
-    assert "AZURE_BOT_MENTIONS" in d7.reason
+    assert "AZURE_TRIGGER_USER" in d7.reason
     d8 = decide_azure_comment_webhook(
         _pr_lifecycle_payload(),
         headers={"X-Azure-Token": "s"},
@@ -959,7 +959,8 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     view = apply_settings_update(body)
     assert view.azure_pat_configured is True
     assert "tfs.example.com" in view.azure_allowed_hosts
-    assert view.azure_bot_mentions == "@yaver"
+    assert view.azure_bot_mentions == "yaver"
+    assert view.azure_trigger_user == "yaver"
     assert s.azure_pat_for_host("tfs.example.com") == "az-pat-1"
     shown = build_settings_view()
     assert shown.azure_credentials[0].pat_configured is True

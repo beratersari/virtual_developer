@@ -1325,28 +1325,37 @@ def test_config_property_edges(monkeypatch):
 def test_jira_bot_name_is_one_identity():
     from src.config import Settings
 
-    s = Settings(trigger_assignee_names="Beratersari")
+    s = Settings(jira_trigger_user="Beratersari")
     assert s.trigger_assignee_names_list == ["beratersari"]
     assert s.trigger_mentions_list == ["@beratersari"]
 
-    legacy = Settings(trigger_assignee_names="", trigger_mentions="@DevBot")
-    assert legacy.trigger_assignee_names_list == ["devbot"]
-    assert legacy.trigger_mentions_list == ["@devbot"]
+    leftover = Settings(
+        jira_trigger_user="",
+        trigger_assignee_names="",
+        trigger_mentions="@DevBot",
+    )
+    assert leftover.trigger_assignee_names_list == ["devbot"]
+    assert leftover.trigger_mentions_list == ["@devbot"]
 
 
 def test_gitlab_bot_username_is_a_single_list():
     from src.config import Settings
 
     primary = Settings(
-        gitlab_bot_mentions="@BotOne, bot-two",
+        gitlab_trigger_user="@BotOne, bot-two",
+        gitlab_bot_mentions="@old",
         gitlab_bot_usernames="legacy",
     )
     assert primary.gitlab_bot_mentions_list == ["botone", "bot-two"]
     assert primary.gitlab_bot_usernames_list == ["botone", "bot-two"]
 
-    legacy = Settings(gitlab_bot_mentions="", gitlab_bot_usernames="legacy_bot")
-    assert legacy.gitlab_bot_mentions_list == ["legacy_bot"]
-    assert legacy.gitlab_bot_usernames_list == ["legacy_bot"]
+    leftover = Settings(
+        gitlab_trigger_user="",
+        gitlab_bot_mentions="",
+        gitlab_bot_usernames="legacy_bot",
+    )
+    assert leftover.gitlab_bot_mentions_list == ["legacy_bot"]
+    assert leftover.gitlab_bot_usernames_list == ["legacy_bot"]
 
 
 # ---------------------------------------------------------------------------

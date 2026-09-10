@@ -165,7 +165,7 @@ def upsert_dotenv_keys(
 
 # Poller fallback only when neither .env nor runtime set a name.
 # Do not use this as the Settings field default (that made the UI look
-# like .env.example even after the operator edited TRIGGER_ASSIGNEE_NAMES).
+# like .env.example even after the operator edited JIRA_TRIGGER_USER).
 _FALLBACK_TRIGGER_ASSIGNEE_NAMES = [
     "jira ai bot",
     "jira-ai-bot",
@@ -174,8 +174,13 @@ _FALLBACK_TRIGGER_ASSIGNEE_NAMES = [
 ]
 
 
-def _jira_bot_names(raw: Any) -> List[str]:
-    """Split a comma list of Jira names; strip @ and empties."""
+def format_trigger_users(raw: Any) -> str:
+    """Comma-separated trigger names. No leading ``@`` (same for every provider)."""
+    return ", ".join(_trigger_user_names(raw))
+
+
+def _trigger_user_names(raw: Any) -> List[str]:
+    """Split a comma list; strip ``@`` and empties. Keep first-seen spelling."""
     out: List[str] = []
     seen: set[str] = set()
     for item in str(raw or "").replace(";", ",").split(","):
@@ -185,6 +190,11 @@ def _jira_bot_names(raw: Any) -> List[str]:
             seen.add(key)
             out.append(name)
     return out
+
+
+def _jira_bot_names(raw: Any) -> List[str]:
+    """Split a comma list of Jira names; strip @ and empties."""
+    return _trigger_user_names(raw)
 
 
 def compute_stuck_limit_seconds(
@@ -309,18 +319,24 @@ class Settings(BaseSettings):
         default="",
         description="Shared secret; must match GitLab hook X-Gitlab-Token (empty = accept all)",
     )
-    gitlab_bot_mentions: str = Field(
-        default="@berat_ai",
+    gitlab_trigger_user: str = Field(
+        default="",
         description=(
             "Comma-separated GitLab usernames. Mention one on an MR comment "
             "to start a job. Comments from these users are ignored."
         ),
     )
+    gitlab_bot_mentions: str = Field(
+        default="",
+        description=(
+            "Leftover. Used only when GITLAB_TRIGGER_USER is empty."
+        ),
+    )
     gitlab_bot_usernames: str = Field(
         default="",
         description=(
-            "Deprecated. Ignored when GITLAB_BOT_MENTIONS is set. "
-            "Kept so leftover .env values still load."
+            "Leftover. Used only when GITLAB_TRIGGER_USER and "
+            "GITLAB_BOT_MENTIONS are empty."
         ),
     )
     # Azure DevOps Server 2022.2 (on-prem TFS) — same PAT shape as GitLab.
@@ -349,12 +365,18 @@ class Settings(BaseSettings):
         default="",
         description="Shared secret; must match service-hook X-Azure-Token (empty = reject)",
     )
-    azure_bot_mentions: str = Field(
-        default="@yaver",
+    azure_trigger_user: str = Field(
+        default="",
         description=(
             "Comma-separated Azure DevOps display names or unique names. "
             "Mention one on a pull-request comment to start a job. "
             "Comments from these users are ignored."
+        ),
+    )
+    azure_bot_mentions: str = Field(
+        default="",
+        description=(
+            "Leftover. Used only when AZURE_TRIGGER_USER is empty."
         ),
     )
     
@@ -518,17 +540,20 @@ class Settings(BaseSettings):
         ),
     )
     
-    # Trigger Configuration - stored as strings, parsed as properties
-    # Deprecated store. Mention tokens are derived from trigger_assignee_names.
-    trigger_mentions: str = Field(default="")
-    # Single Jira bot identity: assignee match and @mention / wiki mention.
+    # One Jira trigger list: To Do assignee intake and @mention / wiki mention.
     # Empty default — never seed the Settings UI with .env.example names.
-    trigger_assignee_names: str = Field(
+    jira_trigger_user: str = Field(
         default="",
         description=(
             "Comma-separated Jira names. Used for To Do assignee intake and "
             "for comments that @mention the bot"
         ),
+    )
+    # Leftover stores. Used only when JIRA_TRIGGER_USER is empty.
+    trigger_mentions: str = Field(default="")
+    trigger_assignee_names: str = Field(
+        default="",
+        description="Leftover. Used only when JIRA_TRIGGER_USER is empty.",
     )
     
     @property
@@ -551,15 +576,50 @@ class Settings(BaseSettings):
             return ["PROJ"]
         return [p.strip() for p in self.jira_projects.split(",") if p.strip()]
     
+    def resolved_jira_trigger_user(self) -> str:
+        """Jira trigger list: ``JIRA_TRIGGER_USER`` then leftover names. No ``@``."""
+        for raw in (
+            self.jira_trigger_user,
+            self.trigger_assignee_names,
+            self.trigger_mentions,
+        ):
+            text = format_trigger_users(raw)
+            if text:
+                return text
+        return ""
+
+    def resolved_gitlab_trigger_user(self) -> str:
+        """GitLab trigger list: ``GITLAB_TRIGGER_USER`` then leftovers. No ``@``."""
+        for raw in (
+            self.gitlab_trigger_user,
+            self.gitlab_bot_mentions,
+            getattr(self, "gitlab_bot_usernames", "") or "",
+        ):
+            text = format_trigger_users(raw)
+            if text:
+                return text
+        return ""
+
+    def resolved_azure_trigger_user(self) -> str:
+        """Azure trigger list: ``AZURE_TRIGGER_USER`` then leftover mentions. No ``@``."""
+        for raw in (self.azure_trigger_user, self.azure_bot_mentions):
+            text = format_trigger_users(raw)
+            if text:
+                return text
+        return ""
+
     @property
-    def trigger_assignee_names_list(self) -> List[str]:
+    def jira_trigger_user_list(self) -> List[str]:
         """Jira bot name fragments (lowercase, no leading @)."""
-        names = _jira_bot_names(self.trigger_assignee_names)
-        if not names:
-            names = _jira_bot_names(self.trigger_mentions)
+        names = _jira_bot_names(self.resolved_jira_trigger_user())
         if not names:
             return list(_FALLBACK_TRIGGER_ASSIGNEE_NAMES)
         return [n.lower() for n in names]
+
+    @property
+    def trigger_assignee_names_list(self) -> List[str]:
+        """Alias of ``jira_trigger_user_list`` (leftover name)."""
+        return list(self.jira_trigger_user_list)
 
     @property
     def gitlab_allowed_hosts_list(self) -> List[str]:
@@ -774,27 +834,32 @@ class Settings(BaseSettings):
         return [n if n.startswith("@") else f"@{n}" for n in self.trigger_assignee_names_list]
 
     @property
-    def gitlab_bot_mentions_list(self) -> List[str]:
+    def gitlab_trigger_user_list(self) -> List[str]:
         from src.gitlab.mentions import parse_mention_list
 
-        names = parse_mention_list(self.gitlab_bot_mentions)
-        if names:
-            return names
-        return parse_mention_list(getattr(self, "gitlab_bot_usernames", "") or "")
+        return parse_mention_list(self.resolved_gitlab_trigger_user())
+
+    @property
+    def gitlab_bot_mentions_list(self) -> List[str]:
+        return list(self.gitlab_trigger_user_list)
 
     @property
     def gitlab_bot_usernames_list(self) -> List[str]:
-        return list(self.gitlab_bot_mentions_list)
+        return list(self.gitlab_trigger_user_list)
+
+    @property
+    def azure_trigger_user_list(self) -> List[str]:
+        from src.azure.mentions import parse_mention_list
+
+        return parse_mention_list(self.resolved_azure_trigger_user())
 
     @property
     def azure_bot_mentions_list(self) -> List[str]:
-        from src.azure.mentions import parse_mention_list
-
-        return parse_mention_list(self.azure_bot_mentions)
+        return list(self.azure_trigger_user_list)
 
     @property
     def azure_bot_usernames_list(self) -> List[str]:
-        return list(self.azure_bot_mentions_list)
+        return list(self.azure_trigger_user_list)
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -845,10 +910,14 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "project_repositories",
         "trigger_mentions",
         "trigger_assignee_names",
+        "jira_trigger_user",
+        "gitlab_trigger_user",
+        "azure_trigger_user",
         "gitlab_bot_mentions",
         "azure_bot_mentions",
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
+        "azure_collection_urls",
     }
 )
 
@@ -866,6 +935,9 @@ _RUNTIME_ENV_MIRROR = {
     "agent_backend": "AGENT_BACKEND",
     "trigger_mentions": "TRIGGER_MENTIONS",
     "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
+    "jira_trigger_user": "JIRA_TRIGGER_USER",
+    "gitlab_trigger_user": "GITLAB_TRIGGER_USER",
+    "azure_trigger_user": "AZURE_TRIGGER_USER",
     "gitlab_bot_mentions": "GITLAB_BOT_MENTIONS",
     "azure_bot_mentions": "AZURE_BOT_MENTIONS",
     "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",

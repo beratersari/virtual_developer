@@ -169,7 +169,7 @@ All of the following roughly apply **for first intake**:
 
 - Issue is on the configured **board**  
 - Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
-- Assignee name matches `TRIGGER_ASSIGNEE_NAMES`  
+- Assignee name matches `JIRA_TRIGGER_USER`  
 - Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
 
 **To Do + bot assignee = rework (intentional).** A ticket in a To Do-like
@@ -271,7 +271,7 @@ Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned di
 Mention the bot on a pull-request comment. Yaver clones with the host PAT (no username/password prompt), runs the job, and replies on the PR.
 
 1. Settings → Azure: add the TFS host and a PAT (Code Read & Write).
-2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_WEBHOOK_SECRET=…`, `AZURE_BOT_MENTIONS=@yaver`.
+2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_WEBHOOK_SECRET=…`, `AZURE_TRIGGER_USER=yaver`.
 3. On the Azure DevOps Server project: Service hooks → Web Hooks.
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
    - URL: `http://<yaver-host>:8080/webhooks/azure`
@@ -360,14 +360,21 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 
 | Variable | Default |
 |----------|---------|
-| `TRIGGER_ASSIGNEE_NAMES` | Jira bot name for assignee intake and @mentions |
+| `JIRA_TRIGGER_USER` | Jira bot names for assignee intake and mentions (comma-separated, no `@`) |
 
 ### GitLab
 
 | Variable | Description |
 |----------|-------------|
 | `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
-| `GITLAB_BOT_MENTIONS` | GitLab username that starts a job when mentioned on an MR comment. `@name /ask` is ignored (another agent). |
+| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job when mentioned on an MR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored (another agent). |
+
+### Azure DevOps
+
+| Variable | Description |
+|----------|-------------|
+| `AZURE_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / PR) |
+| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job when mentioned on a PR comment (comma-separated, no `@`). `@name /ask` in a comment is ignored. |
 
 Repo URL and branches always come from the issue `{params}` block.
 
@@ -515,7 +522,7 @@ Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 
 | Symptom | What to check |
 |---------|----------------|
-| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`TRIGGER_ASSIGNEE_NAMES`), `python cli.py process KEY` |
+| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`JIRA_TRIGGER_USER`), `python cli.py process KEY` |
 | Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, rename label `plan_ready` → `plan_execute` while In Progress (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
 | 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
 | Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |

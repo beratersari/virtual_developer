@@ -540,10 +540,10 @@ def decide_azure_comment_webhook(
     scan = mention_scan(note, mentions)
     if not mentions:
         azure_info(
-            "comment reject reason='no AZURE_BOT_MENTIONS configured' "
+            "comment reject reason='no AZURE_TRIGGER_USER configured' "
             f"extracted={scan.get('extracted')}"
         )
-        return WebhookDecision(False, "no AZURE_BOT_MENTIONS configured")
+        return WebhookDecision(False, "no AZURE_TRIGGER_USER configured")
     if not note_mentions_bot(note, mentions):
         azure_info(
             f"comment reject reason='bot not mentioned' event={event_name!r} "

@@ -282,8 +282,15 @@ def build_settings_view() -> SettingsView:
         gitlab_webhook_enabled=bool(
             getattr(settings, "gitlab_webhook_enabled", False)
         ),
+        gitlab_trigger_user=(
+            settings.resolved_gitlab_trigger_user()
+            if hasattr(settings, "resolved_gitlab_trigger_user")
+            else (getattr(settings, "gitlab_trigger_user", "") or "")
+        ).strip(),
         gitlab_bot_mentions=(
-            getattr(settings, "gitlab_bot_mentions", "") or ""
+            settings.resolved_gitlab_trigger_user()
+            if hasattr(settings, "resolved_gitlab_trigger_user")
+            else (getattr(settings, "gitlab_bot_mentions", "") or "")
         ).strip(),
         gitlab_webhook_secret_configured=bool(
             (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
@@ -304,15 +311,29 @@ def build_settings_view() -> SettingsView:
         azure_webhook_enabled=bool(
             getattr(settings, "azure_webhook_enabled", False)
         ),
+        azure_trigger_user=(
+            settings.resolved_azure_trigger_user()
+            if hasattr(settings, "resolved_azure_trigger_user")
+            else (getattr(settings, "azure_trigger_user", "") or "")
+        ).strip(),
         azure_bot_mentions=(
-            getattr(settings, "azure_bot_mentions", "") or ""
+            settings.resolved_azure_trigger_user()
+            if hasattr(settings, "resolved_azure_trigger_user")
+            else (getattr(settings, "azure_bot_mentions", "") or "")
         ).strip(),
         azure_webhook_secret_configured=bool(
             (getattr(settings, "azure_webhook_secret", "") or "").strip()
         ),
         azure_webhook_path="/webhooks/azure",
+        jira_trigger_user=(
+            settings.resolved_jira_trigger_user()
+            if hasattr(settings, "resolved_jira_trigger_user")
+            else (getattr(settings, "jira_trigger_user", "") or "")
+        ).strip(),
         trigger_assignee_names=(
-            getattr(settings, "trigger_assignee_names", "") or ""
+            settings.resolved_jira_trigger_user()
+            if hasattr(settings, "resolved_jira_trigger_user")
+            else (getattr(settings, "trigger_assignee_names", "") or "")
         ).strip(),
         trigger_mentions=",".join(
             getattr(settings, "trigger_mentions_list", None) or []
@@ -603,29 +624,36 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
-    if "trigger_assignee_names" in data and data["trigger_assignee_names"] is not None:
-        names = str(data["trigger_assignee_names"]).strip()
-        settings.trigger_assignee_names = names
-        runtime_persist["trigger_assignee_names"] = names
-        dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = names
-        derived = ",".join(getattr(settings, "trigger_mentions_list", None) or [])
-        settings.trigger_mentions = derived
-        runtime_persist["trigger_mentions"] = derived
-        dotenv_updates["TRIGGER_MENTIONS"] = derived
+    from src.config import format_trigger_users
+
+    jira_trigger = None
+    if "jira_trigger_user" in data and data["jira_trigger_user"] is not None:
+        jira_trigger = str(data["jira_trigger_user"]).strip()
+    elif "trigger_assignee_names" in data and data["trigger_assignee_names"] is not None:
+        jira_trigger = str(data["trigger_assignee_names"]).strip()
     elif "trigger_mentions" in data and data["trigger_mentions"] is not None:
-        # Legacy clients: treat mentions as the same Jira bot names.
-        names = str(data["trigger_mentions"]).strip()
-        settings.trigger_assignee_names = names
-        settings.trigger_mentions = names
-        runtime_persist["trigger_assignee_names"] = names
-        runtime_persist["trigger_mentions"] = names
-        dotenv_updates["TRIGGER_ASSIGNEE_NAMES"] = names
-        dotenv_updates["TRIGGER_MENTIONS"] = names
-    if "gitlab_bot_mentions" in data and data["gitlab_bot_mentions"] is not None:
-        mentions = str(data["gitlab_bot_mentions"]).strip()
-        settings.gitlab_bot_mentions = mentions
-        runtime_persist["gitlab_bot_mentions"] = mentions
-        dotenv_updates["GITLAB_BOT_MENTIONS"] = mentions
+        jira_trigger = str(data["trigger_mentions"]).strip()
+    if jira_trigger is not None:
+        jira_trigger = format_trigger_users(jira_trigger)
+        settings.jira_trigger_user = jira_trigger
+        settings.trigger_assignee_names = jira_trigger
+        settings.trigger_mentions = jira_trigger
+        runtime_persist["jira_trigger_user"] = jira_trigger
+        runtime_persist["trigger_assignee_names"] = jira_trigger
+        runtime_persist["trigger_mentions"] = jira_trigger
+        dotenv_updates["JIRA_TRIGGER_USER"] = jira_trigger
+    gitlab_trigger = None
+    if "gitlab_trigger_user" in data and data["gitlab_trigger_user"] is not None:
+        gitlab_trigger = str(data["gitlab_trigger_user"]).strip()
+    elif "gitlab_bot_mentions" in data and data["gitlab_bot_mentions"] is not None:
+        gitlab_trigger = str(data["gitlab_bot_mentions"]).strip()
+    if gitlab_trigger is not None:
+        gitlab_trigger = format_trigger_users(gitlab_trigger)
+        settings.gitlab_trigger_user = gitlab_trigger
+        settings.gitlab_bot_mentions = gitlab_trigger
+        runtime_persist["gitlab_trigger_user"] = gitlab_trigger
+        runtime_persist["gitlab_bot_mentions"] = gitlab_trigger
+        dotenv_updates["GITLAB_TRIGGER_USER"] = gitlab_trigger
     if "gitlab_webhook_enabled" in data and data["gitlab_webhook_enabled"] is not None:
         enabled = bool(data["gitlab_webhook_enabled"])
         settings.gitlab_webhook_enabled = enabled
@@ -698,11 +726,18 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 settings, "azure_host_pats", ""
             ) or ""
             dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
-    if "azure_bot_mentions" in data and data["azure_bot_mentions"] is not None:
-        mentions = str(data["azure_bot_mentions"]).strip()
-        settings.azure_bot_mentions = mentions
-        runtime_persist["azure_bot_mentions"] = mentions
-        dotenv_updates["AZURE_BOT_MENTIONS"] = mentions
+    azure_trigger = None
+    if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
+        azure_trigger = str(data["azure_trigger_user"]).strip()
+    elif "azure_bot_mentions" in data and data["azure_bot_mentions"] is not None:
+        azure_trigger = str(data["azure_bot_mentions"]).strip()
+    if azure_trigger is not None:
+        azure_trigger = format_trigger_users(azure_trigger)
+        settings.azure_trigger_user = azure_trigger
+        settings.azure_bot_mentions = azure_trigger
+        runtime_persist["azure_trigger_user"] = azure_trigger
+        runtime_persist["azure_bot_mentions"] = azure_trigger
+        dotenv_updates["AZURE_TRIGGER_USER"] = azure_trigger
     if "azure_webhook_enabled" in data and data["azure_webhook_enabled"] is not None:
         enabled = bool(data["azure_webhook_enabled"])
         settings.azure_webhook_enabled = enabled

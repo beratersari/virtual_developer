@@ -23,9 +23,9 @@ type Draft = {
   jira_api_token: string
   jira_board_id: string
   poll_interval_seconds: number
-  trigger_assignee_names: string
-  gitlab_bot_mentions: string
-  azure_bot_mentions: string
+  jira_trigger_user: string
+  gitlab_trigger_user: string
+  azure_trigger_user: string
   gitlab_webhook_enabled: boolean
   gitlab_webhook_secret: string
   azure_webhook_enabled: boolean
@@ -47,9 +47,9 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
-    trigger_assignee_names: s.trigger_assignee_names ?? '',
-    gitlab_bot_mentions: s.gitlab_bot_mentions ?? '',
-    azure_bot_mentions: s.azure_bot_mentions ?? '',
+    jira_trigger_user: s.jira_trigger_user ?? s.trigger_assignee_names ?? '',
+    gitlab_trigger_user: s.gitlab_trigger_user ?? s.gitlab_bot_mentions ?? '',
+    azure_trigger_user: s.azure_trigger_user ?? s.azure_bot_mentions ?? '',
     gitlab_webhook_enabled: s.gitlab_webhook_enabled !== false,
     gitlab_webhook_secret: '',
     azure_webhook_enabled: s.azure_webhook_enabled === true,
@@ -162,14 +162,14 @@ export function SettingsPage() {
       if (dirtyKeys.has('poll_interval_seconds')) {
         body.poll_interval_seconds = Number(draft.poll_interval_seconds)
       }
-      if (dirtyKeys.has('trigger_assignee_names')) {
-        body.trigger_assignee_names = draft.trigger_assignee_names
+      if (dirtyKeys.has('jira_trigger_user')) {
+        body.jira_trigger_user = draft.jira_trigger_user
       }
-      if (dirtyKeys.has('gitlab_bot_mentions')) {
-        body.gitlab_bot_mentions = draft.gitlab_bot_mentions
+      if (dirtyKeys.has('gitlab_trigger_user')) {
+        body.gitlab_trigger_user = draft.gitlab_trigger_user
       }
-      if (dirtyKeys.has('azure_bot_mentions')) {
-        body.azure_bot_mentions = draft.azure_bot_mentions
+      if (dirtyKeys.has('azure_trigger_user')) {
+        body.azure_trigger_user = draft.azure_trigger_user
       }
       if (dirtyKeys.has('gitlab_webhook_enabled')) {
         body.gitlab_webhook_enabled = draft.gitlab_webhook_enabled
@@ -382,15 +382,15 @@ export function SettingsPage() {
 
       <div className="text-sm font-semibold text-text">Intake</div>
       <label className="field">
-        <span>Bot name</span>
+        <span>Trigger user (JIRA_TRIGGER_USER)</span>
         <input
-          value={draft.trigger_assignee_names}
-          onChange={(e) => mark('trigger_assignee_names', e.target.value)}
-          placeholder="Beratersari"
+          value={draft.jira_trigger_user}
+          onChange={(e) => mark('jira_trigger_user', e.target.value)}
+          placeholder="Beratersari, jira ai bot"
         />
         <span className="text-xs text-text-muted">
-          Jira display name or username. To Do issues assigned to this name
-          are accepted. Comments that @mention the same name tag the bot.
+          Jira display name or username, no @. To Do issues assigned to this
+          name are accepted. Comments that mention the same name tag the bot.
           Comma-separated if there is more than one.
         </span>
       </label>
@@ -523,16 +523,16 @@ export function SettingsPage() {
 
       <div className="text-sm font-semibold text-text">Trigger username</div>
       <label className="field">
-        <span>Bot username</span>
+        <span>Trigger user (GITLAB_TRIGGER_USER)</span>
         <input
-          value={draft.gitlab_bot_mentions}
-          onChange={(e) => mark('gitlab_bot_mentions', e.target.value)}
-          placeholder="berat_ai"
+          value={draft.gitlab_trigger_user}
+          onChange={(e) => mark('gitlab_trigger_user', e.target.value)}
+          placeholder="berat_ai, yaver"
         />
         <span className="text-xs text-text-muted">
-          GitLab username that starts a job when mentioned on a merge-request
-          comment. Comments from this user are ignored. Comma-separated if
-          there is more than one.
+          GitLab username, no @. Mention this name on a merge-request comment
+          to start a job. Comments from this user are ignored. Comma-separated
+          if there is more than one.
         </span>
       </label>
 
@@ -579,7 +579,9 @@ export function SettingsPage() {
         One personal access token per Azure DevOps Server host. Auth is
         Basic pat:PAT — username is sent as pat automatically. Clone,
         push, and PR use this PAT. Leave PAT blank to keep the stored
-        token. Host may be tfs.example.com or include /tfs/YourCollection.
+        token. Host can be tfs.example.com or tfs.example.com/tfs.
+        Test authenticates at /tfs/_apis/connectionData (Creasy 0.9.1),
+        not /tfs/YourCollection.
       </p>
       {draft.azure_cred_rows.map((row, idx) => (
         <div key={idx}>
@@ -696,15 +698,15 @@ export function SettingsPage() {
 
       <div className="text-sm font-semibold text-text">Trigger username</div>
       <label className="field">
-        <span>Bot username</span>
+        <span>Trigger user (AZURE_TRIGGER_USER)</span>
         <input
-          value={draft.azure_bot_mentions}
-          onChange={(e) => mark('azure_bot_mentions', e.target.value)}
-          placeholder="yaver"
+          value={draft.azure_trigger_user}
+          onChange={(e) => mark('azure_trigger_user', e.target.value)}
+          placeholder="yaver, Yaver Bot"
         />
         <span className="text-xs text-text-muted">
-          Azure DevOps display name or unique name that starts a job when
-          mentioned on a pull-request comment. Comments from this user are
+          Azure DevOps display name or unique name, no @. Mention this name on
+          a pull-request comment to start a job. Comments from this user are
           ignored. Comma-separated if there is more than one.
         </span>
       </label>
