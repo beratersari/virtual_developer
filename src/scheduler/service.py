@@ -1705,6 +1705,8 @@ def _azure_pr_followup_http(rec: Dict[str, Any]) -> Dict[str, Any]:
     comments = posted.get("comments")
     if isinstance(comments, list) and comments and isinstance(comments[0], dict):
         comment_id = str(comments[0].get("id") or "")
+    if not comment_id:
+        comment_id = f"thread-{thread_id}" if thread_id else ""
     return {
         "ok": True,
         "pr": pr,

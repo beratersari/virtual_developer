@@ -1082,6 +1082,56 @@ async def test_enqueue_azure_dedup(tmp_path, monkeypatch, fake_jira):
     assert first["queue_id"] == second["queue_id"]
 
 
+@pytest.mark.asyncio
+async def test_enqueue_azure_schedule_comment_id_one_is_not_global_dup(
+    tmp_path, monkeypatch, fake_jira
+):
+    """TFS root comments are id=1 on every new thread. Must still queue."""
+    from src.azure.webhook import AzurePrCommentEvent
+    from src.processor import JobProcessor
+    from src.state.queue_store import WorkQueueStore
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "q")
+    proc.dispatch_queue = AsyncMock(return_value=0)
+
+    def _ev(thread_id: str) -> AzurePrCommentEvent:
+        return AzurePrCommentEvent(
+            issue_key="KAN-12",
+            comment_id="1",
+            comment_body="prompt",
+            prompt="prompt",
+            author_username="dashboard",
+            author_name="Scheduled",
+            collection_url="https://tfs.example.com/tfs/DefaultCollection",
+            project="Demo",
+            repository_id="demo",
+            repository_name="demo",
+            project_path="Demo/demo",
+            repository_url=(
+                "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
+            ),
+            host="tfs.example.com",
+            pr_id=4,
+            pr_title="feat(KAN-12): x",
+            pr_description="",
+            source_branch="feature/login",
+            target_branch="develop",
+            pr_url="",
+            thread_id=thread_id,
+        )
+
+    first = await proc.enqueue_azure_comment(_ev("8"))
+    second = await proc.enqueue_azure_comment(_ev("9"))
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second.get("duplicate") is not True
+    assert first["queue_id"] != second["queue_id"]
+    assert proc.queue_store.get(second["queue_id"])["status"] == "queued"
+
+
 def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):
     from src.gitlab.webhook import decide_gitlab_note_webhook
 

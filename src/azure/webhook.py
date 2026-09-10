@@ -50,6 +50,16 @@ AZURE_PR_EVENTS = frozenset(
 )
 
 
+def azure_comment_key(pr_id: Any, thread_id: str = "", comment_id: str = "") -> str:
+    """Stable queue/dedup id. TFS comment ids restart at 1 on every thread."""
+    pid = str(pr_id or "").strip()
+    tid = str(thread_id or "").strip()
+    cid = str(comment_id or "").strip()
+    if not pid and not tid and not cid:
+        return ""
+    return f"{pid}:{tid}:{cid}"
+
+
 @dataclass
 class AzurePrCommentEvent:
     """One PR comment that mentioned the bot."""
@@ -100,6 +110,7 @@ class AzurePrCommentEvent:
             "pr_url": self.pr_url,
             "thread_id": self.thread_id,
             "webhook_event": self.webhook_event,
+            "raw": self.raw if isinstance(self.raw, dict) else {},
         }
 
     @classmethod
