@@ -80,7 +80,7 @@ def test_offline_install_backends_and_codex(tmp_path, monkeypatch):
     cfg = home / ".opencode" / "opencode.json"
     assert cfg.is_file()
     assert '"plugin": []' in cfg.read_text(encoding="utf-8")
-    assert (home / ".opencode" / "agents" / "gitlab-reviewer.md").is_file()
+    assert (home / ".opencode" / "agents" / "code-reviewer.md").is_file()
     assert not (home / ".config" / "opencode" / "opencode.json").exists()
 
     proc2 = subprocess.run(
@@ -120,7 +120,8 @@ def test_assert_payload_script_accepts_minimal_tree(tmp_path):
         "vendor/bin/opencode",
         "opencoderman/install.py",
         "opencoderman.pin",
-        "opencoderman/agents/gitlab-reviewer.md",
+        "opencoderman/agents/code-reviewer.md",
+        "opencoderman/agents/derman-test.md",
         "opencoderman/vendor/bin/linux/opencode",
         "packaging/install_opencode.py",
         "vendor/bin/glab",
