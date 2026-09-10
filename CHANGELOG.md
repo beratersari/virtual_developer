@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-10
+
+One trigger list per provider. Azure Settings Test uses Creasy 0.9.1 TFS identity (`/tfs`, not `/tfs/<Collection>`).
+
+### Changed
+
+- One trigger list per provider: `JIRA_TRIGGER_USER`, `GITLAB_TRIGGER_USER`, `AZURE_TRIGGER_USER` (comma-separated names, no `@`). Leftover `TRIGGER_ASSIGNEE_NAMES` / `GITLAB_BOT_MENTIONS` / `AZURE_BOT_MENTIONS` still load when the new key is empty.
+
+### Fixed
+
+- Azure Settings Test follows Creasy 0.9.1: identity is `https://<server>/tfs/_apis/connectionData`. Collection-scoped `connectionData` is 400 on TFS. Hostname-only Test tries the host then `/tfs`. Clone still uses the webhook collection.
+
+[0.8.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.8.0
+
 ## [0.7.1] — 2026-09-10
 
 `@bot /ask` on a GitLab or Azure comment is not a Yaver job.

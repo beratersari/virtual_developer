@@ -19,12 +19,13 @@ def test_azure_basic_auth_is_not_empty_username():
     assert not decoded.startswith(":")
 
 
-def test_candidate_bases_try_collection_before_origin():
+def test_candidate_bases_try_tfs_app_root_not_collection():
     bases = _candidate_bases("tfs.example.com")
-    assert bases[0].endswith("/tfs/DefaultCollection")
-    assert bases[-1] == "https://tfs.example.com"
+    assert "https://tfs.example.com" in bases
+    assert "https://tfs.example.com/tfs" in bases
+    assert not any(b.endswith("/tfs/DefaultCollection") for b in bases)
     with_path = _candidate_bases("https://tfs.example.com/tfs/MyCol")
-    assert with_path[0] == "https://tfs.example.com/tfs/MyCol"
+    assert with_path[0] == "https://tfs.example.com/tfs"
 
 
 def test_probe_azure_skips_host_root_401_then_succeeds(monkeypatch):
@@ -53,7 +54,7 @@ def test_probe_azure_skips_host_root_401_then_succeeds(monkeypatch):
             return False
 
         def get(self, url, params=None):
-            if "/tfs/DefaultCollection/_apis/connectionData" in url:
+            if url.rstrip("/").endswith("/tfs/_apis/connectionData") or "/tfs/_apis/connectionData" in url:
                 return FakeResp(
                     200,
                     {
@@ -64,17 +65,138 @@ def test_probe_azure_skips_host_root_401_then_succeeds(monkeypatch):
                         }
                     },
                 )
-            if "/tfs/DefaultCollection/_apis/projects" in url:
+            if "/tfs/_apis/projects" in url:
                 return FakeResp(200, {"value": [{"id": "p1", "name": "Demo"}]})
             return FakeResp(401)
 
     monkeypatch.setattr("src.azure_connection.httpx.Client", FakeClient)
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
     out = probe_azure_connection("tfs.example.com", pat="valid-pat")
     assert out["ok"] is True
     assert out["user"]["username"] == "bot@corp"
     assert out["project_count"] == 1
     decoded = base64.b64decode(captured["auth"].split(" ", 1)[1]).decode("ascii")
     assert decoded == "pat:valid-pat"
+
+
+def test_probe_azure_discovers_named_collection(monkeypatch):
+    """Hostname-only Test must not stop at /tfs/DefaultCollection."""
+
+    class FakeResp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self.content = b"{}" if payload is not None else b""
+            self.text = ""
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            self.headers = k.get("headers") or {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            if "/tfs/ExampleCollection/_apis/connectionData" in url:
+                return FakeResp(400, {"message": "collection-scoped connectionData"})
+            if "/tfs/_apis/connectionData" in url:
+                return FakeResp(
+                    200,
+                    {"authenticatedUser": {"id": "u1", "uniqueName": "bot@corp"}},
+                )
+            if "/tfs/_apis/projects" in url:
+                return FakeResp(200, {"value": [{"id": "p1", "name": "Demo"}]})
+            return FakeResp(401)
+
+    monkeypatch.setattr("src.azure_connection.httpx.Client", FakeClient)
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
+    out = probe_azure_connection("tfs.example.com", pat="valid-pat")
+    assert out["ok"] is True
+    assert out["collection_url"].rstrip("/").endswith("/tfs")
+    assert out["user"]["username"] == "bot@corp"
+
+
+def test_probe_sends_fedauth_suppress(monkeypatch):
+    captured = {}
+
+    class FakeResp:
+        status_code = 401
+        content = b""
+        text = "denied"
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            captured["headers"] = k.get("headers") or {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr("src.azure_connection.httpx.Client", FakeClient)
+    probe_azure_connection("tfs.example.com", pat="valid-pat")
+    assert captured["headers"].get("X-TFS-FedAuthRedirect") == "Suppress"
+    decoded = base64.b64decode(
+        captured["headers"]["Authorization"].split(" ", 1)[1]
+    ).decode("ascii")
+    assert decoded == "pat:valid-pat"
+
+
+def test_probe_uses_remembered_collection(monkeypatch):
+    class FakeResp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self.content = b"{}" if payload is not None else b""
+            self.text = ""
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            if "/tfs/_apis/connectionData" in url:
+                return FakeResp(
+                    200,
+                    {"authenticatedUser": {"id": "u1", "uniqueName": "bot@corp"}},
+                )
+            if "/tfs/_apis/projects" in url:
+                return FakeResp(200, {"value": []})
+            return FakeResp(401)
+
+    monkeypatch.setattr("src.azure_connection.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "src.azure_connection.remembered_azure_collection",
+        lambda host: "https://tfs.example.com/tfs/ExampleCollection",
+    )
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    out = probe_azure_connection("tfs.example.com", pat="valid-pat")
+    assert out["ok"] is True
+    assert out["collection_url"].rstrip("/").endswith("/tfs")
 
 
 def test_probe_azure_all_401_is_unauthorized(monkeypatch):

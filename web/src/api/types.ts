@@ -87,6 +87,7 @@ export type SettingsPayload = {
   default_model: string
   agent_backend?: string
   gitlab_webhook_enabled?: boolean
+  gitlab_trigger_user?: string
   gitlab_bot_mentions?: string
   gitlab_webhook_secret_configured?: boolean
   gitlab_webhook_path?: string
@@ -94,9 +95,11 @@ export type SettingsPayload = {
   azure_allowed_hosts?: string
   azure_credentials?: GitlabHostCredential[]
   azure_webhook_enabled?: boolean
+  azure_trigger_user?: string
   azure_bot_mentions?: string
   azure_webhook_secret_configured?: boolean
   azure_webhook_path?: string
+  jira_trigger_user?: string
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
@@ -536,6 +539,9 @@ export type SettingsPatch = Partial<
     | 'project_repositories'
     | 'trigger_mentions'
     | 'trigger_assignee_names'
+    | 'jira_trigger_user'
+    | 'gitlab_trigger_user'
+    | 'azure_trigger_user'
     | 'gitlab_bot_mentions'
     | 'azure_bot_mentions'
     | 'gitlab_webhook_enabled'

@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 import httpx
 
 from src.azure.auth import azure_basic_auth
 from src.azure.log import azure_info, azure_warning, yn
+from src.azure.urls import identity_root, identity_roots
 from src.config import settings
+
+# TFS redirects anonymous/Negotiate probes to a login page unless suppressed.
+# Same PAT then 401s at the host root even though /tfs/<Collection> is fine.
+_PROBE_HEADERS = {
+    "Accept": "application/json",
+    "X-TFS-FedAuthRedirect": "Suppress",
+}
 
 
 def _normalize_host(raw: str) -> str:
@@ -30,43 +39,181 @@ def _normalize_host(raw: str) -> str:
         return (raw or "").strip().lower().split("/")[0]
 
 
-def _candidate_bases(host: str) -> List[str]:
-    """On-prem TFS lives at /tfs/<Collection>, not the host root.
+def _netloc(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"https://{text.split('/', 1)[0]}"
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return ""
+    return (parsed.netloc or "").strip()
 
-    IIS at the origin often 401s even with a valid PAT. Try a user-supplied
-    path first, then ``/tfs/DefaultCollection``, then ``/tfs``, then origin.
-    """
-    h = (host or "").strip()
-    if not h:
+
+def _origins(host: str) -> List[str]:
+    """Scheme+host candidates. Hostname-only tries https then http."""
+    raw = (host or "").strip()
+    if not raw:
         return []
-    if "://" not in h:
-        first = h.split("/", 1)[0]
-        local = first.startswith("127.") or first.startswith("localhost")
-        scheme = "http" if local else "https"
-        h = f"{scheme}://{h}"
-    parsed = urlparse(h)
-    if not parsed.netloc:
-        return []
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    path = (parsed.path or "").rstrip("/")
-    bases: List[str] = []
-    if path:
-        bases.append(f"{origin}{path}")
-    bases.extend(
-        [
-            f"{origin}/tfs/DefaultCollection",
-            f"{origin}/tfs",
-            origin,
-        ]
-    )
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if not parsed.netloc:
+            return []
+        return [f"{parsed.scheme}://{parsed.netloc}"]
+    first = raw.split("/", 1)[0]
+    local = first.startswith("127.") or first.startswith("localhost")
+    if local:
+        return [f"http://{first}"]
+    return [f"https://{first}", f"http://{first}"]
+
+
+def _dedupe_bases(bases: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
     for b in bases:
-        key = b.rstrip("/").lower()
-        if key not in seen:
+        key = (b or "").rstrip("/").lower()
+        if key and key not in seen:
             seen.add(key)
-            out.append(b.rstrip("/"))
+            out.append((b or "").rstrip("/"))
     return out
+
+
+def _configured_urls(host: str) -> List[str]:
+    """Turn a Settings host into full URLs. Hostname-only tries https then http."""
+    raw = (host or "").strip()
+    if not raw:
+        return []
+    if "://" in raw:
+        return [raw.rstrip("/")]
+    first = raw.split("/", 1)[0]
+    rest = raw[len(first) :].rstrip("/")
+    local = first.startswith("127.") or first.startswith("localhost")
+    schemes = ["http"] if local else ["https", "http"]
+    return [f"{scheme}://{first}{rest}" for scheme in schemes]
+
+
+def _candidate_bases(host: str, extra: Optional[Iterable[str]] = None) -> List[str]:
+    """Creasy 0.9.1 identity roots: ``/tfs``, not ``/tfs/<Collection>``.
+
+    Collection-scoped ``connectionData`` returns 400 on TFS.
+    """
+    roots: List[str] = []
+    for item in extra or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if "://" not in text:
+            text = f"https://{text}"
+        roots.extend(identity_roots(identity_root(text) or text))
+    for configured in _configured_urls(host):
+        roots.extend(identity_roots(configured))
+    return _dedupe_bases(roots)
+
+
+def _collection_names(payload: Any) -> List[str]:
+    raw = payload.get("value") if isinstance(payload, dict) else payload
+    if not isinstance(raw, list):
+        return []
+    names: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("id") or "").strip()
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return names
+
+
+def _discover_collection_bases(client: httpx.Client, origins: List[str]) -> List[str]:
+    """List /tfs/<Collection> from the server so hostname-only Test works.
+
+    Clone already has the collection on the git URL. Settings Test only has
+    the host, so DefaultCollection is often the wrong guess.
+    """
+    found: List[str] = []
+    for origin in origins:
+        for prefix in ("/tfs", ""):
+            listed = False
+            for ver in ("7.1", "7.0", "6.0", "4.1"):
+                url = f"{origin}{prefix}/_apis/projectCollections"
+                try:
+                    resp = client.get(url, params={"api-version": ver})
+                except httpx.HTTPError:
+                    break
+                azure_info(
+                    f"probe collections {url} api={ver} status={resp.status_code}"
+                )
+                if resp.status_code == 200:
+                    try:
+                        payload = resp.json() if resp.content else {}
+                    except Exception:
+                        payload = {}
+                    for name in _collection_names(payload):
+                        found.append(f"{origin}{prefix}/{name}")
+                        if prefix:
+                            found.append(f"{origin}/{name}")
+                    listed = True
+                    break
+                if resp.status_code not in (400, 404):
+                    break
+            if listed:
+                break
+    return _dedupe_bases(found)
+
+
+def remembered_azure_collection(host: str) -> str:
+    """Last collection URL learned from a webhook or a successful Test."""
+    h = _normalize_host(host)
+    if not h:
+        return ""
+    try:
+        from src.config import load_runtime_settings
+
+        raw = load_runtime_settings().get("azure_collection_urls")
+    except Exception:
+        return ""
+    data: Any = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get(h) or "").strip()
+
+
+def remember_azure_collection(host: str, collection_url: str) -> None:
+    """Keep /tfs/<Collection> so the next hostname-only Test does not 401."""
+    h = _normalize_host(host)
+    url = (collection_url or "").rstrip("/")
+    if not h or not url or "/_apis/" in url.lower():
+        return
+    url = identity_root(url) or url
+    try:
+        from src.config import load_runtime_settings, save_runtime_settings
+
+        raw = load_runtime_settings().get("azure_collection_urls")
+        data: Any = raw
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if str(data.get(h) or "").rstrip("/") == url:
+            return
+        data[h] = url
+        save_runtime_settings({"azure_collection_urls": json.dumps(data, sort_keys=True)})
+        azure_info(f"probe remember collection host={h} collection={url}")
+    except Exception as e:
+        azure_warning(f"probe remember collection failed host={h}: {e}")
 
 
 def probe_azure_connection(
@@ -129,7 +276,7 @@ def probe_azure_connection(
         }
 
     headers = {
-        "Accept": "application/json",
+        **_PROBE_HEADERS,
         "Authorization": azure_basic_auth(token),
     }
     timeout = httpx.Timeout(20.0, connect=10.0)
@@ -137,11 +284,16 @@ def probe_azure_connection(
     last_status: Optional[int] = None
     saw_401 = False
     saw_403 = False
+    tried: List[str] = []
 
     try:
         # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
         with httpx.Client(timeout=timeout, verify=False, headers=headers) as client:
-            for base in _candidate_bases(raw_host or h):
+            extra: List[str] = []
+            remembered = remembered_azure_collection(h)
+            if remembered:
+                extra.append(identity_root(remembered) or remembered)
+            for base in _candidate_bases(raw_host or h, extra):
                 conn_url = f"{base}/_apis/connectionData"
                 resp = None
                 for api_ver in ("7.1", "7.0"):
@@ -162,11 +314,12 @@ def probe_azure_connection(
                     azure_info(f"probe try {conn_url} no response last_error={last_error!r}")
                     continue
                 last_status = resp.status_code
+                tried.append(f"{conn_url} → {resp.status_code}")
                 azure_info(
                     f"probe try {conn_url} status={resp.status_code}"
                 )
-                # Host-root IIS often 401s; a collection path may still accept
-                # the same PAT. Only fail closed after every candidate.
+                # Creasy 0.9.1: collection-scoped connectionData is 400.
+                # Host root may 401 (Negotiate). /tfs is the identity root.
                 if resp.status_code == 401:
                     saw_401 = True
                     last_error = (
@@ -240,6 +393,7 @@ def probe_azure_connection(
                     f"probe ok host={h} collection={base} user={username or '-'} "
                     f"projects={len(projects)}"
                 )
+                remember_azure_collection(h, identity_root(base) or base)
                 return {
                     "ok": True,
                     "host": h,
@@ -261,14 +415,19 @@ def probe_azure_connection(
                 }
 
             if saw_401 and not saw_403:
-                azure_warning(f"probe fail 401 host={h}")
+                azure_warning(f"probe fail 401 host={h} tried={tried}")
+                hint = (
+                    "Unauthorized (401) at the TFS identity root. Creasy 0.9.1 "
+                    "authenticates at https://<server>/tfs/_apis/connectionData "
+                    "(not /tfs/<Collection>). Check the PAT and try Host "
+                    "tfs.example.com/tfs."
+                )
+                if tried:
+                    hint += " Tried: " + "; ".join(tried[:8])
                 return {
                     "ok": False,
                     "host": h,
-                    "error": (
-                        "Unauthorized (401) — PAT is invalid or revoked, "
-                        "or the collection path is wrong"
-                    ),
+                    "error": hint,
                     "http_status": 401,
                 }
             if saw_403:

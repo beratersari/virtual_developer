@@ -277,7 +277,7 @@ def decide_gitlab_note_webhook(
 
     mentions = parse_mention_list(bot_mentions)
     if not mentions:
-        return WebhookDecision(False, "no GITLAB_BOT_MENTIONS configured")
+        return WebhookDecision(False, "no GITLAB_TRIGGER_USER configured")
     if not note_mentions_bot(note, mentions):
         return WebhookDecision(False, "bot not mentioned")
     if note_is_ask_handoff(note, bot_mentions or mentions):

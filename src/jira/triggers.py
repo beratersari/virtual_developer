@@ -56,7 +56,7 @@ def identity_matches_bot(
 
 
 def poller_triggers_on(*, assigned_to_bot: bool) -> bool:
-    """Poller intake: assignee matches ``TRIGGER_ASSIGNEE_NAMES``."""
+    """Poller intake: assignee matches ``JIRA_TRIGGER_USER``."""
     return bool(assigned_to_bot)
 
 
@@ -64,7 +64,7 @@ def assignee_looks_like_bot(
     assignee: Optional[dict],
     needles: Optional[Iterable[str]] = None,
 ) -> bool:
-    """True when issue assignee matches ``TRIGGER_ASSIGNEE_NAMES`` fragments."""
+    """True when issue assignee matches ``JIRA_TRIGGER_USER`` fragments."""
     if not assignee or not isinstance(assignee, dict):
         return False
     return identity_matches_bot(

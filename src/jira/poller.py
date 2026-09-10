@@ -60,8 +60,8 @@ class JiraPoller:
     def _assignee_looks_like_bot(assignee: Optional[dict]) -> bool:
         """True when assignee name matches any configured bot name fragment.
 
-        Fragments come from ``TRIGGER_ASSIGNEE_NAMES`` (see settings
-        ``trigger_assignee_names_list``). Match is case-insensitive substring
+        Fragments come from ``JIRA_TRIGGER_USER`` (see settings
+        ``jira_trigger_user_list``). Match is case-insensitive substring
         against displayName, name, key, and accountId (Cloud).
         """
         from src.jira.triggers import assignee_looks_like_bot
