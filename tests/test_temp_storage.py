@@ -183,6 +183,239 @@ def test_storage_view_resolves_azure_pr_state(tmp_path: Path, monkeypatch: pytes
     assert _lookup_review_state(pr_url) == "completed"
 
 
+def test_same_review_url_requires_azure_repo_not_just_pr_number():
+    from src.dashboard.temp_storage import _same_review_url
+
+    left = "https://tfs/tfs/Col/App/_git/a/pullrequest/4"
+    right = "https://tfs/tfs/Col/Other/_git/b/pullrequest/4"
+    assert _same_review_url(left, right) is False
+    assert _same_review_url(left, left) is True
+    assert _same_review_url(
+        "https://tfs/tfs/Col/App/_git/a/pullrequest/4/",
+        "https://tfs/tfs/Col/App/_git/a/pullrequest/4",
+    ) is True
+
+
+def test_merge_does_not_delete_other_repo_same_pr_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        clone_folder_names_for_mr,
+        delete_clones_for_merge_request,
+        reset_delete_jobs,
+    )
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    keep = base / "repo_b_pr4"
+    drop = base / "repo_a_pr4"
+    keep.mkdir(parents=True)
+    drop.mkdir(parents=True)
+    (keep / "x.txt").write_text("keep", encoding="utf-8")
+    (drop / "x.txt").write_text("drop", encoding="utf-8")
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+
+    other = job_store.create_job(issue_key="KAN-1", summary="other repo")
+    job_store.update_job(
+        other["job_id"],
+        working_directory=str(keep.resolve()),
+        merge_request_url="https://tfs/tfs/Col/Other/_git/b/pullrequest/4",
+        azure_project="Other",
+        azure_pr_id=4,
+    )
+    mine = job_store.create_job(issue_key="KAN-2", summary="this repo")
+    job_store.update_job(
+        mine["job_id"],
+        working_directory=str(drop.resolve()),
+        merge_request_url="https://tfs/tfs/Col/App/_git/a/pullrequest/4",
+        azure_project="App",
+        azure_pr_id=4,
+    )
+
+    names = clone_folder_names_for_mr(
+        mr_url="https://tfs/tfs/Col/App/_git/a/pullrequest/4",
+        project_path="tfs/Col/App/a",
+        mr_iid=4,
+        issue_key="KAN-2",
+    )
+    assert "repo_a_pr4" in names
+    assert "repo_b_pr4" not in names
+    deleted = delete_clones_for_merge_request(
+        mr_url="https://tfs/tfs/Col/App/_git/a/pullrequest/4",
+        project_path="tfs/Col/App/a",
+        mr_iid=4,
+        issue_key="KAN-2",
+    )
+    assert "repo_a_pr4" in deleted
+    assert "repo_b_pr4" not in deleted
+
+
+def test_merge_deletes_folder_for_project_and_iid_without_page_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    """Job stored project + iid (no MR page URL) still maps to that clone."""
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        clone_folder_names_for_mr,
+        delete_clones_for_merge_request,
+        reset_delete_jobs,
+    )
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    clone = base / "acme_demo_mr4"
+    other = base / "acme_other_mr4"
+    clone.mkdir(parents=True)
+    other.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+
+    job = job_store.create_job(issue_key="KAN-12", summary="mr job")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        gitlab_project="acme/demo",
+        gitlab_mr_iid=4,
+        repository_url="https://gitlab.example.com/acme/demo.git",
+    )
+    other_job = job_store.create_job(issue_key="KAN-99", summary="other")
+    job_store.update_job(
+        other_job["job_id"],
+        working_directory=str(other.resolve()),
+        gitlab_project="acme/other",
+        gitlab_mr_iid=4,
+        repository_url="https://gitlab.example.com/acme/other.git",
+    )
+
+    names = clone_folder_names_for_mr(
+        mr_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        project_path="acme/demo",
+        mr_iid=4,
+        repository_url="https://gitlab.example.com/acme/demo.git",
+    )
+    assert "acme_demo_mr4" in names
+    assert "acme_other_mr4" not in names
+    deleted = delete_clones_for_merge_request(
+        mr_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        project_path="acme/demo",
+        mr_iid=4,
+        repository_url="https://gitlab.example.com/acme/demo.git",
+    )
+    assert "acme_demo_mr4" in deleted
+    assert "acme_other_mr4" not in deleted
+
+
+def test_merge_does_not_delete_jira_clone_that_only_shares_issue_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        clone_folder_names_for_mr,
+        delete_clones_for_merge_request,
+        reset_delete_jobs,
+    )
+    from src.state.job_store import job_store
+    from src.state.session_bind_store import SessionBindStore
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    jira_clone = base / "jira_kan12"
+    pr_clone = base / "azure_pr4"
+    other_develop = base / "other_develop"
+    jira_clone.mkdir(parents=True)
+    pr_clone.mkdir(parents=True)
+    other_develop.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    binds = SessionBindStore(binds_dir=tmp_path / "binds")
+    monkeypatch.setattr(
+        "src.state.session_bind_store.session_bind_store", binds
+    )
+    binds.upsert(
+        repository_url="https://tfs/tfs/Col/Other/_git/other",
+        branch="develop",
+        target_branch="develop",
+        issue_key="KAN-12",
+        working_directory=str(other_develop.resolve()),
+        session_id="ses_other",
+    )
+
+    jira = job_store.create_job(issue_key="KAN-12", summary="plan", source="jira")
+    job_store.update_job(
+        jira["job_id"],
+        working_directory=str(jira_clone.resolve()),
+    )
+    azure = job_store.create_job(issue_key="KAN-12", summary="pr job", source="azure")
+    job_store.update_job(
+        azure["job_id"],
+        working_directory=str(pr_clone.resolve()),
+        merge_request_url=(
+            "https://tfs/tfs/Col/Demo/_git/demo/pullrequest/4"
+        ),
+        azure_project="Demo",
+        azure_pr_id=4,
+    )
+
+    names = clone_folder_names_for_mr(
+        mr_url="https://tfs/tfs/Col/Demo/_git/demo/pullrequest/4",
+        project_path="tfs/Col/Demo/demo",
+        mr_iid=4,
+        issue_key="KAN-12",
+        source_branch="develop",
+    )
+    assert "azure_pr4" in names
+    assert "jira_kan12" not in names
+    assert "other_develop" not in names
+    deleted = delete_clones_for_merge_request(
+        mr_url="https://tfs/tfs/Col/Demo/_git/demo/pullrequest/4",
+        project_path="tfs/Col/Demo/demo",
+        mr_iid=4,
+        issue_key="KAN-12",
+        source_branch="develop",
+    )
+    assert "azure_pr4" in deleted
+    assert "jira_kan12" not in deleted
+    assert "other_develop" not in deleted
+
+
+def test_fill_missing_mr_does_not_paint_jira_clone_with_pr_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    from src.dashboard.temp_storage import _build_clone_issue_index
+    from src.state.job_store import job_store
+    from src.state.manager import JiraStateManager
+
+    base = tmp_path / "t"
+    clone = base / "jira_only"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr("src.config.settings.temp_dir_base", base)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    monkeypatch.setattr("src.state.manager.JiraStateManager", lambda *a, **k: sm)
+    sm.create_state("KAN-12", "plan", "d")
+    sm.update_state(
+        "KAN-12",
+        metadata={
+            "merge_request_url": (
+                "https://tfs/tfs/Col/Demo/_git/demo/pullrequest/4"
+            ),
+            "merge_request_state": "completed",
+            "source": "azure",
+        },
+    )
+    job = job_store.create_job(issue_key="KAN-12", summary="plan", source="jira")
+    job_store.update_job(job["job_id"], working_directory=str(clone.resolve()))
+
+    index = _build_clone_issue_index()
+    rec = None
+    for row in index.values():
+        if str(row.get("issue_key") or "").upper() == "KAN-12":
+            rec = row
+            break
+    assert rec is not None
+    assert not rec.get("merge_request_url")
+
+
 def test_sweep_merged_skips_missing_names_and_deletes_existing_azure_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

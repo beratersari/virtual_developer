@@ -122,6 +122,7 @@ class JobStore:
         gitlab_mr_iid: Optional[int] = None,
         azure_project: Optional[str] = None,
         azure_pr_id: Optional[int] = None,
+        repository_url: Optional[str] = None,
         model: Optional[str] = None,
         backend: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -152,6 +153,7 @@ class JobStore:
             "gitlab_mr_iid": gitlab_mr_iid,
             "azure_project": azure_project or None,
             "azure_pr_id": azure_pr_id,
+            "repository_url": (repository_url or "").strip() or None,
             "task_id": task_id,
             "task_ids": [task_id] if task_id else [],
             "opencode_session_id": None,

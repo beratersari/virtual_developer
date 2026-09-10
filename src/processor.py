@@ -1986,6 +1986,7 @@ class JobProcessor:
                 gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
                 azure_project=tmeta.get("azure_project") or None,
                 azure_pr_id=tmeta.get("azure_pr_id"),
+                repository_url=tmeta.get("repository_url") or None,
                 model=model_id,
                 backend=self._backend_for_issue(state),
             )
@@ -2034,6 +2035,7 @@ class JobProcessor:
             gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
             azure_project=meta0.get("azure_project") or None,
             azure_pr_id=meta0.get("azure_pr_id"),
+            repository_url=meta0.get("repository_url") or None,
             model=model_id,
             backend=self._backend_for_issue(state),
         )
@@ -4236,6 +4238,7 @@ class JobProcessor:
             mr_iid=event.mr_iid,
             issue_key=event.issue_key,
             source_branch=event.source_branch,
+            repository_url=getattr(event, "repository_url", "") or "",
         )
         logger.info(
             f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
@@ -4263,19 +4266,11 @@ class JobProcessor:
         try:
             n = self.job_store.count_jobs()
             for job in self.job_store.list_jobs(limit=max(int(n or 0), 1)):
-                job_url = str(job.get("merge_request_url") or "").strip().rstrip("/")
-                same_url = bool(url and job_url.lower() == url.lower())
-                same_iid = (
-                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
-                    and int(mr_iid or 0) > 0
-                    and (
-                        not path
-                        or str(job.get("gitlab_project") or "").strip().lower()
-                        == path.lower()
-                    )
-                )
-                same_issue = bool(key) and str(job.get("issue_key") or "").upper() == key
-                if not (same_url or same_iid or (same_issue and url)):
+                from src.dashboard.temp_storage import _job_matches_review
+
+                if not _job_matches_review(
+                    job, mr_url=url, project_path=path, mr_iid=mr_iid
+                ):
                     continue
                 patch: Dict[str, Any] = {"merge_request_state": state}
                 if url:
@@ -4891,6 +4886,7 @@ class JobProcessor:
             mr_iid=event.pr_id,
             issue_key=event.issue_key,
             source_branch=event.source_branch,
+            repository_url=getattr(event, "repository_url", "") or "",
         )
         azure_info(
             f"lifecycle clones issue={event.issue_key} "
