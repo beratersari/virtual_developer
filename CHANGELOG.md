@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-09-10
+
+GitLab replies stay in the MR discussion. Azure comments that reuse id 1 are not collapsed. Follow-ups stay on Queue. Storage deletes only the matching clone.
+
+### Fixed
+
+- GitLab usage notes and job replies use the Discussions API so they stay in the same MR thread.
+- Azure webhook comments that omit `threadId` (comment id 1 on every new thread) are no longer treated as one queue item.
+- GitLab and Azure follow-up `/execute` comments stay queued and visible while the same ticket is in flight.
+- Storage no longer deletes a Jira plan folder, or another repo's clone, when a PR/MR is merged or closed.
+
+[0.9.3]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.3
+
 ## [0.9.2] — 2026-09-10
 
 Azure Schedule → Run now queues a job even when TFS comment ids restart at 1.

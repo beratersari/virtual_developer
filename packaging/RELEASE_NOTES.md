@@ -1,3 +1,18 @@
+# Yaver 0.9.3
+
+GitLab replies stay in the MR discussion (Discussions
+API, not Notes `in_reply_to_discussion_id`).
+
+Azure comments that omit threadId are no longer collapsed
+when every new thread starts at comment id 1.
+
+A second `@mention /execute` on the same ticket stays on
+the Queue tab until the live job finishes.
+
+Storage deletes only the clone for that project + MR/PR
+id — not a Jira plan folder that shares the issue key,
+and not another repo with the same PR number.
+
 # Yaver 0.9.2
 
 Azure Schedule → Run now now queues the job. TFS comment ids
