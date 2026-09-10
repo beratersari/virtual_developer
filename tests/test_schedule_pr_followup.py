@@ -9,6 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
+from src.dashboard.service import build_queue
+from src.gitlab.webhook import GitlabMrNoteEvent
 from src.processor import JobProcessor
 from src.scheduler.service import (
     _dispatch_pr_followup,
@@ -16,6 +18,8 @@ from src.scheduler.service import (
     preview_pr_followup,
     schedule_pr_followup,
 )
+from src.state.manager import JiraStateManager
+from src.state.queue_store import WorkQueueStore
 from src.state.schedule_store import ScheduleStore
 
 
@@ -174,6 +178,117 @@ async def test_dispatch_pr_followup_posts_overview_and_enqueues(monkeypatch):
     assert event.comment_id == "1"
     assert event.prompt == "Please add a log line."
     assert event.raw.get("backend") == "opencode"
+
+
+def _schedule_rec(**extra) -> dict:
+    rec = {
+        "issue_description": "Please add a log line.",
+        "azure_host": "tfs.example.com",
+        "azure_collection_url": "https://tfs.example.com/tfs/DefaultCollection",
+        "azure_project": "Demo",
+        "azure_repository": "demo",
+        "azure_repository_id": "repo-guid",
+        "pr_id": 4,
+        "repository_url": AZURE_REPO,
+        "source_branch": "feature/login",
+        "target_branch": "develop",
+        "merge_request_url": (
+            "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo/pullrequest/4"
+        ),
+        "issue_key": "KAN-12",
+        "model": "x",
+        "backend": "opencode",
+    }
+    rec.update(extra)
+    return rec
+
+
+@pytest.mark.asyncio
+async def test_azure_schedule_run_now_appears_in_queue_like_gitlab(
+    tmp_path, monkeypatch, fake_jira
+):
+    """Same path as GitLab schedule: post prompt, real enqueue, stay queued.
+
+    TFS returns comment id 1 on every new thread. A second Run now must
+    still create a second queue row (GitLab note ids are unique; Azure's
+    are not).
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_projects", "KAN")
+    monkeypatch.setattr(settings, "max_concurrent_jobs", 1)
+    _patch_get_pr(monkeypatch)
+    threads = {"n": 7}
+
+    def fake_post(self, **kwargs):
+        threads["n"] += 1
+        tid = threads["n"]
+        return {
+            "id": tid,
+            "comments": [{"id": 1, "content": kwargs.get("body")}],
+        }
+
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.post_pr_comment", fake_post
+    )
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = JiraStateManager(state_dir=tmp_path / "state")
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "q")
+    proc.dispatch_queue = AsyncMock(return_value=0)
+
+    first = await _dispatch_pr_followup(proc, _schedule_rec())
+    second = await _dispatch_pr_followup(
+        proc, _schedule_rec(issue_description="Second prompt on same PR.")
+    )
+    assert first["ok"] is True, first
+    assert second["ok"] is True, second
+    assert first["outcome"].get("duplicate") is not True
+    assert second["outcome"].get("duplicate") is not True
+    assert first["outcome"]["queue_id"] != second["outcome"]["queue_id"]
+
+    queued = proc.queue_store.list_items(status="queued")
+    assert len(queued) == 2
+    sources = {r.get("source") for r in queued}
+    assert sources == {"azure"}
+    keys = {r.get("azure_comment_id") for r in queued}
+    assert "4:8:1" in keys
+    assert "4:9:1" in keys
+    assert "1" not in keys
+
+    gl = GitlabMrNoteEvent(
+        issue_key="GL-ACME-DEMO-4",
+        note_id="9001",
+        note_body="gitlab prompt",
+        prompt="gitlab prompt",
+        author_username="dashboard",
+        author_name="Scheduled",
+        project_id=1,
+        project_path="acme/demo",
+        repository_url="https://gitlab.example.com/acme/demo.git",
+        host="gitlab.example.com",
+        mr_iid=4,
+        mr_title="Add login",
+        mr_description="",
+        source_branch="feature/login",
+        target_branch="develop",
+        mr_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        discussion_id="disc-1",
+        webhook_event="schedule",
+    )
+    gl_out = await proc.enqueue_gitlab_note(gl)
+    assert gl_out["ok"] is True
+    assert gl_out.get("duplicate") is not True
+
+    view = build_queue(store=proc.queue_store, processor=proc, limit=50)
+    ids = {item.queue_id for item in view.items}
+    assert first["outcome"]["queue_id"] in ids
+    assert second["outcome"]["queue_id"] in ids
+    assert gl_out["queue_id"] in ids
+    azure_rows = [i for i in view.items if i.source == "azure"]
+    assert len(azure_rows) == 2
+    assert all(i.status == "queued" for i in azure_rows)
 
 
 def test_dashboard_pr_schedule_endpoints(tmp_path, monkeypatch, fake_jira):

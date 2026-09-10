@@ -3749,7 +3749,7 @@ class JobProcessor:
 
     async def enqueue_azure_comment(self, event: Any) -> Dict[str, Any]:
         """Persist an Azure DevOps PR comment and try to start it (or leave it queued)."""
-        from src.azure.webhook import AzurePrCommentEvent
+        from src.azure.webhook import AzurePrCommentEvent, azure_comment_key
 
         if not isinstance(event, AzurePrCommentEvent):
             from src.azure.log import azure_error
@@ -3764,10 +3764,13 @@ class JobProcessor:
             f"host={event.host} repo={event.repository_url} "
             f"source={event.source_branch} target={event.target_branch}"
         )
-        existing = self.queue_store.find_note(event.comment_id)
+        note_key = azure_comment_key(
+            event.pr_id, event.thread_id, event.comment_id
+        )
+        existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
             azure_info(
-                f"enqueue duplicate comment={event.comment_id} "
+                f"enqueue duplicate comment={note_key} "
                 f"queue_id={existing.get('queue_id')} "
                 f"status={existing.get('status')}"
             )
@@ -3798,7 +3801,7 @@ class JobProcessor:
             work_branch=work,
             target_branch=event.target_branch,
             lock_key=lock,
-            azure_comment_id=event.comment_id,
+            azure_comment_id=note_key,
             merge_request_url=event.pr_url,
             payload=event.to_dict(),
         )
@@ -4916,13 +4919,15 @@ class JobProcessor:
                 await self._run_azure_pr_comment(event)
 
     async def _run_azure_pr_comment(self, event: Any) -> bool:
-        from src.azure.webhook import AzurePrCommentEvent
+        from src.azure.webhook import AzurePrCommentEvent, azure_comment_key
 
         assert isinstance(event, AzurePrCommentEvent)
         issue_key = event.issue_key
         from src.azure.log import azure_info
 
-        note_id = (event.comment_id or "").strip()
+        note_id = azure_comment_key(
+            event.pr_id, event.thread_id, event.comment_id
+        )
         azure_info(
             f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "
             f"comment={note_id or '-'} host={event.host}"
