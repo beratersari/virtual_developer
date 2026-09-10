@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from typing import Optional, Sequence
 
 from src.gitlab.keys import (
     jira_key_from_closes_line,
     jira_key_from_mr_title,
     jira_key_from_text,
+    project_path_slug,
 )
 
 
@@ -18,11 +18,7 @@ def azure_issue_key(project_path: str, pr_id: int) -> str:
     Example: ``DefaultCollection/Demo/app`` + 12 → ``AZ-DEFAULTCOLLECTION-DEMO-APP-12``.
     Prefer a Jira key from the PR title when ``JIRA_PROJECTS`` matches.
     """
-    raw = (project_path or "project").strip().strip("/")
-    parts = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper()
-    if not parts:
-        parts = "PROJECT"
-    parts = parts[:48].rstrip("-") or "PROJECT"
+    parts = project_path_slug(project_path)
     try:
         iid = int(pr_id)
     except (TypeError, ValueError):

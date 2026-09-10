@@ -2,8 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import List, Optional, Sequence
+
+
+def project_path_slug(project_path: str, *, max_len: int = 48) -> str:
+    """Filesystem-safe project slug for ``GL-`` / ``AZ-`` fallback keys.
+
+    Short paths stay readable. Paths that would be cut at *max_len* keep an
+    8-hex digest of the full slug so two long remotes cannot collide.
+    """
+    raw = (project_path or "project").strip().strip("/")
+    parts = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper()
+    if not parts:
+        parts = "PROJECT"
+    if len(parts) <= max_len:
+        return parts
+    digest = hashlib.sha256(parts.encode("utf-8")).hexdigest()[:8].upper()
+    head_len = max(1, max_len - 1 - len(digest))
+    head = parts[:head_len].rstrip("-") or "PROJECT"
+    return f"{head}-{digest}"
 
 
 def gitlab_issue_key(project_path: str, mr_iid: int) -> str:
@@ -13,11 +32,7 @@ def gitlab_issue_key(project_path: str, mr_iid: int) -> str:
     Prefer :func:`jira_key_from_mr_title` when the MR title carries a real
     Jira key from ``JIRA_PROJECTS``.
     """
-    raw = (project_path or "project").strip().strip("/")
-    parts = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper()
-    if not parts:
-        parts = "PROJECT"
-    parts = parts[:48].rstrip("-") or "PROJECT"
+    parts = project_path_slug(project_path)
     try:
         iid = int(mr_iid)
     except (TypeError, ValueError):
@@ -27,6 +42,29 @@ def gitlab_issue_key(project_path: str, mr_iid: int) -> str:
 
 def is_gitlab_issue_key(issue_key: str) -> bool:
     return (issue_key or "").strip().upper().startswith("GL-")
+
+
+def gitlab_note_key(
+    *,
+    host: str = "",
+    project_path: str = "",
+    project_id: object = 0,
+    note_id: str = "",
+) -> str:
+    """Queue/dedup id. GitLab note ids restart per project, not globally."""
+    nid = str(note_id or "").strip()
+    if not nid:
+        return ""
+    proj = (project_path or "").strip().strip("/").lower()
+    h = (host or "").strip().lower()
+    if h and proj:
+        return f"{h}/{proj}:{nid}"
+    if proj:
+        return f"{proj}:{nid}"
+    pid = str(project_id or "").strip()
+    if pid and pid != "0":
+        return f"{pid}:{nid}"
+    return nid
 
 
 def _normalize_project_keys(project_keys: Optional[Sequence[str]]) -> List[str]:
