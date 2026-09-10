@@ -15,6 +15,9 @@ def test_test_prompt_requires_agents_md_and_unit_tests_only():
     assert "derman-test" in text
     assert "AGENTS.md" in text
     assert "unit tests only" in text.lower() or "Write **unit tests only**" in text
+    assert "line" in text.lower() and "branch" in text.lower()
+    assert "condition" in text.lower()
+    assert "hacky" in text.lower()
     assert "feature/KAN-9" in text
     assert "KAN-9" in text
 
