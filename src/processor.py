@@ -3765,7 +3765,10 @@ class JobProcessor:
             f"source={event.source_branch} target={event.target_branch}"
         )
         note_key = azure_comment_key(
-            event.pr_id, event.thread_id, event.comment_id
+            event.pr_id,
+            event.thread_id,
+            event.comment_id,
+            event.comment_body or event.prompt,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
@@ -4817,6 +4820,7 @@ class JobProcessor:
                 repository=repository,
                 pr_id=int(iid),
                 comment_id=comment_id,
+                comment_content=str(state.description or state.issue_summary or ""),
             )
             if thread_id:
                 self.state_manager.update_state(
@@ -4926,7 +4930,10 @@ class JobProcessor:
         from src.azure.log import azure_info
 
         note_id = azure_comment_key(
-            event.pr_id, event.thread_id, event.comment_id
+            event.pr_id,
+            event.thread_id,
+            event.comment_id,
+            event.comment_body or event.prompt,
         )
         azure_info(
             f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "
