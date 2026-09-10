@@ -21,6 +21,8 @@ from src.azure.mentions import (
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
+    expand_guid_mentions,
+    extract_mention_guids,
     format_execute_usage_note,
     mention_scan,
     note_is_ask_handoff,
@@ -606,7 +608,9 @@ def decide_azure_comment_webhook(
             f"extracted={scan.get('extracted')}"
         )
         return WebhookDecision(False, "no AZURE_TRIGGER_USER configured")
-    if not note_mentions_bot(note, mentions):
+    pending_guids = extract_mention_guids(note)
+    mentioned = note_mentions_bot(note, mentions)
+    if not mentioned and not pending_guids:
         azure_info(
             f"comment reject reason='bot not mentioned' event={event_name!r} "
             f"configured={scan.get('configured')} extracted={scan.get('extracted')} "
@@ -615,25 +619,6 @@ def decide_azure_comment_webhook(
         return WebhookDecision(False, "bot not mentioned")
 
     author = _as_dict(comment.get("author"))
-    if author_is_configured_bot(
-        [
-            _s(author.get("uniqueName") or author.get("unique_name")),
-            _s(author.get("directoryAlias") or author.get("principalName")),
-            _s(author.get("displayName") or author.get("display_name")),
-        ],
-        bot_usernames or mentions,
-    ):
-        azure_info(
-            f"comment reject reason='ignored comment from bot user' "
-            f"author={_s(author.get('uniqueName') or author.get('displayName'))!r}"
-        )
-        return WebhookDecision(False, "ignored comment from bot user")
-    if note_is_ask_handoff(note, bot_mentions or mentions):
-        azure_info(
-            f"comment reject reason={ASK_HANDOFF_REASON!r} event={event_name!r} "
-            f"preview={clip(note)!r}"
-        )
-        return WebhookDecision(False, ASK_HANDOFF_REASON)
 
     repo = _as_dict(pr.get("repository") or resource.get("repository"))
     project = _as_dict(repo.get("project") or resource.get("project"))
@@ -690,6 +675,76 @@ def decide_azure_comment_webhook(
         or _host_from_url(collection_url)
         or _s(parsed.get("host"))
     )
+    trigger_names = list(mentions)
+    from src.azure.identity import (
+        fetch_bot_identity,
+        reviewer_bot_aliases,
+        seed_identity_aliases,
+    )
+
+    identity = fetch_bot_identity(host=host, collection_url=collection_url)
+    trigger_names.extend(seed_identity_aliases(mentions, identity))
+    trigger_names.extend(
+        reviewer_bot_aliases(
+            pr,
+            trigger_names,
+            bot_id=str((identity or {}).get("id") or ""),
+        )
+    )
+    extra = expand_guid_mentions(note, trigger_names)
+    if pending_guids and not extra and not mentioned:
+        try:
+            from src.azure.client import AzureDevOpsClient
+
+            extra = expand_guid_mentions(
+                note,
+                trigger_names,
+                lookup=AzureDevOpsClient(
+                    host=host, collection_url=collection_url
+                ).identity_aliases,
+            )
+        except Exception:
+            extra = []
+    if extra:
+        trigger_names = list(trigger_names) + extra
+        mentioned = True
+    if not mentioned:
+        mentioned = note_mentions_bot(note, trigger_names)
+    author_ids = [
+        _s(author.get("id")),
+        _s(author.get("descriptor")),
+    ]
+    if author_is_configured_bot(
+        [
+            *author_ids,
+            _s(author.get("uniqueName") or author.get("unique_name")),
+            _s(author.get("directoryAlias") or author.get("principalName")),
+            _s(author.get("displayName") or author.get("display_name")),
+        ],
+        bot_usernames or trigger_names,
+    ) or (
+        identity
+        and _s(author.get("id"))
+        and _s(author.get("id")).lower() == str(identity.get("id") or "").lower()
+    ):
+        azure_info(
+            f"comment reject reason='ignored comment from bot user' "
+            f"author={_s(author.get('uniqueName') or author.get('displayName') or author.get('id'))!r}"
+        )
+        return WebhookDecision(False, "ignored comment from bot user")
+    if not mentioned:
+        azure_info(
+            f"comment reject reason='bot not mentioned' event={event_name!r} "
+            f"configured={scan.get('configured')} extracted={scan.get('extracted')} "
+            f"guids={pending_guids} preview={clip(note)!r}"
+        )
+        return WebhookDecision(False, "bot not mentioned")
+    if note_is_ask_handoff(note, bot_mentions or trigger_names):
+        azure_info(
+            f"comment reject reason={ASK_HANDOFF_REASON!r} event={event_name!r} "
+            f"preview={clip(note)!r}"
+        )
+        return WebhookDecision(False, ASK_HANDOFF_REASON)
     pr_url = _pr_web_url(
         pr, repo, collection_url, project_name, repo_name, pr_id
     )
@@ -737,7 +792,7 @@ def decide_azure_comment_webhook(
         set_issue_key(event.issue_key)
     except Exception:
         pass
-    if not note_is_execute_command(note, bot_mentions or mentions):
+    if not note_is_execute_command(note, bot_mentions or trigger_names):
         azure_info(
             f"comment reject reason={EXECUTE_MISSING_REASON!r} event={event_name!r} "
             f"thread={event.thread_id or '-'} preview={clip(note)!r}"
