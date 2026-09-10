@@ -18,8 +18,10 @@ plan with a different scope. If the plan file is missing, implement
 the Jira request.
 
 Do **not** copy the plan into this repository and do **not** commit
-it. Stay on `{WORK_BRANCH}`. Do **not** push or open an MR (Yaver
-does that).
+it. Stay on `{WORK_BRANCH}` (already checked out). Do **not**
+`git checkout`, `git switch`, or create another branch. File
+restore (`git checkout -- path`) is fine. Do **not** push or open
+an MR (Yaver does that).
 Include `{ISSUE_KEY}` in the commit the way **this repo's** `AGENTS.md`
 and `git log` already do.
 
