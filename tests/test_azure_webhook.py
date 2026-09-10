@@ -302,7 +302,7 @@ def test_decide_ignores_non_comment_and_no_mention():
         secret="good",
         bot_mentions=["@yaver"],
     )
-    assert d4.http_status == 401
+    assert d4.accepted is True
     d5 = decide_azure_comment_webhook(
         _pr_comment_payload(),
         headers={"X-Azure-Token": "s"},
@@ -318,7 +318,14 @@ def test_decide_ignores_non_comment_and_no_mention():
         secret="",
         bot_mentions=["@yaver"],
     )
-    assert d6.http_status == 401
+    assert d6.accepted is True
+    d6b = decide_azure_comment_webhook(
+        _pr_comment_payload(),
+        headers={},
+        secret="",
+        bot_mentions=["@yaver"],
+    )
+    assert d6b.accepted is True
     d7 = decide_azure_comment_webhook(
         _pr_comment_payload(),
         headers={"X-Azure-Token": "s"},
@@ -659,15 +666,23 @@ def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira)
     assert proc.enqueue_azure_comment.await_count == 1
 
 
-def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
+def test_dashboard_webhook_has_no_secret(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
 
-    monkeypatch.setattr("src.config.settings.azure_webhook_secret", "tok")
     monkeypatch.setattr("src.config.settings.azure_webhook_enabled", True)
     monkeypatch.setattr("src.config.settings.azure_bot_mentions", "@yaver")
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
+    proc.enqueue_azure_comment = AsyncMock(
+        return_value={
+            "ok": True,
+            "queued": True,
+            "queue_id": "q_test",
+            "issue_key": "AZ-1",
+            "status": "queued",
+        }
+    )
     app = create_dashboard_app(processor=proc)
     client = TestClient(app)
     resp = client.post(
@@ -675,7 +690,8 @@ def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
         json=_pr_comment_payload(),
         headers={"X-Azure-Token": "nope"},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
 
 
 def test_dashboard_webhook_disabled(fake_jira, monkeypatch):
@@ -832,16 +848,15 @@ def test_settings_save_azure_webhook_enable_and_secret(monkeypatch):
     view = apply_settings_update(
         SettingsUpdate(
             azure_webhook_enabled=True,
-            azure_webhook_secret="hook-secret",
             azure_bot_mentions="@yaver",
         )
     )
     assert s.azure_webhook_enabled is True
-    assert s.azure_webhook_secret == "hook-secret"
     assert view.azure_webhook_enabled is True
-    assert view.azure_webhook_secret_configured is True
     shown = build_settings_view()
-    assert "hook-secret" not in shown.model_dump_json()
+    dumped = shown.model_dump_json()
+    assert "azure_webhook_secret" not in dumped
+    assert "azure_webhook_secret_configured" not in dumped
 
 
 def test_settings_leftover_azure_pat_and_hosts(monkeypatch):

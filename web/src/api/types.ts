@@ -97,7 +97,6 @@ export type SettingsPayload = {
   azure_webhook_enabled?: boolean
   azure_trigger_user?: string
   azure_bot_mentions?: string
-  azure_webhook_secret_configured?: boolean
   azure_webhook_path?: string
   jira_trigger_user?: string
   trigger_mentions?: string
@@ -555,7 +554,6 @@ export type SettingsPatch = Partial<
   azure_allowed_hosts?: string
   azure_credentials?: { host: string; pat?: string; previous_host?: string }[]
   gitlab_webhook_secret?: string
-  azure_webhook_secret?: string
 }
 
 export type StorageDisk = {

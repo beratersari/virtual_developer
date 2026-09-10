@@ -29,7 +29,6 @@ type Draft = {
   gitlab_webhook_enabled: boolean
   gitlab_webhook_secret: string
   azure_webhook_enabled: boolean
-  azure_webhook_secret: string
   max_concurrent_jobs: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
@@ -53,7 +52,6 @@ function fromSettings(s: SettingsPayload): Draft {
     gitlab_webhook_enabled: s.gitlab_webhook_enabled !== false,
     gitlab_webhook_secret: '',
     azure_webhook_enabled: s.azure_webhook_enabled === true,
-    azure_webhook_secret: '',
     max_concurrent_jobs: s.max_concurrent_jobs,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
@@ -180,9 +178,7 @@ export function SettingsPage() {
       if (dirtyKeys.has('gitlab_webhook_secret') && draft.gitlab_webhook_secret.trim()) {
         body.gitlab_webhook_secret = draft.gitlab_webhook_secret.trim()
       }
-      if (dirtyKeys.has('azure_webhook_secret') && draft.azure_webhook_secret.trim()) {
-        body.azure_webhook_secret = draft.azure_webhook_secret.trim()
-      }
+
       if (dirtyKeys.has('max_concurrent_jobs')) {
         body.max_concurrent_jobs = Number(draft.max_concurrent_jobs)
       }
@@ -716,8 +712,7 @@ export function SettingsPage() {
         <p className="mt-1 text-xs text-text-muted">
           Register a project Web Hook for pull-request commented and
           pull-request updated / merged / abandoned. Completed or abandoned
-          pull requests delete the matching temp clone. The secret is sent as
-          X-Azure-Token (or Basic password).
+          pull requests delete the matching temp clone. No webhook secret.
         </p>
         <label className="field mt-2">
           <span>Enabled</span>
@@ -725,19 +720,6 @@ export function SettingsPage() {
             type="checkbox"
             checked={draft.azure_webhook_enabled}
             onChange={(e) => mark('azure_webhook_enabled', e.target.checked)}
-          />
-        </label>
-        <label className="field">
-          <span>
-            Secret{' '}
-            {settings?.azure_webhook_secret_configured ? '(stored)' : ''}
-          </span>
-          <input
-            type="password"
-            value={draft.azure_webhook_secret}
-            autoComplete="new-password"
-            onChange={(e) => mark('azure_webhook_secret', e.target.value)}
-            placeholder="leave blank to keep current"
           />
         </label>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">

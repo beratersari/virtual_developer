@@ -321,9 +321,6 @@ def build_settings_view() -> SettingsView:
             if hasattr(settings, "resolved_azure_trigger_user")
             else (getattr(settings, "azure_bot_mentions", "") or "")
         ).strip(),
-        azure_webhook_secret_configured=bool(
-            (getattr(settings, "azure_webhook_secret", "") or "").strip()
-        ),
         azure_webhook_path="/webhooks/azure",
         jira_trigger_user=(
             settings.resolved_jira_trigger_user()
@@ -743,11 +740,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.azure_webhook_enabled = enabled
         runtime_persist["azure_webhook_enabled"] = enabled
         dotenv_updates["AZURE_WEBHOOK_ENABLED"] = "true" if enabled else "false"
-    if "azure_webhook_secret" in data and data["azure_webhook_secret"] is not None:
-        secret = str(data["azure_webhook_secret"])
-        if secret.strip():
-            settings.azure_webhook_secret = secret.strip()
-            dotenv_updates["AZURE_WEBHOOK_SECRET"] = settings.azure_webhook_secret
 
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.

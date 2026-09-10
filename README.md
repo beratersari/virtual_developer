@@ -271,11 +271,11 @@ Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned di
 Mention the bot on a pull-request comment. Yaver clones with the host PAT (no username/password prompt), runs the job, and replies on the PR.
 
 1. Settings → Azure: add the TFS host and a PAT (Code Read & Write).
-2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_WEBHOOK_SECRET=…`, `AZURE_TRIGGER_USER=yaver`.
+2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_TRIGGER_USER=yaver`.
 3. On the Azure DevOps Server project: Service hooks → Web Hooks.
    - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
    - URL: `http://<yaver-host>:8080/webhooks/azure`
-   - HTTP header `X-Azure-Token: <same secret>` (or Basic password = secret).
+   - No webhook secret or password.
 4. Comment `@yaver what does login do?` on a PR. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.

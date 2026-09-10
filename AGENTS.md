@@ -335,8 +335,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_HOST_PATS` | JSON hostname → Azure PAT. Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user) |
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
-| `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` |
-| `AZURE_WEBHOOK_SECRET` | Shared secret; must match service-hook `X-Azure-Token` |
+| `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/webhooks/azure` (no secret) |
 | `AZURE_TRIGGER_USER` | Display/unique names that start a job when mentioned on a PR comment. Comma-separated, no `@`. `@name /ask` in a comment is ignored (another agent). |
 
 ---
@@ -358,7 +357,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
 - Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
-- Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /webhooks/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /webhooks/azure` (webhook keeps `AZURE_WEBHOOK_SECRET`). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
+- Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /webhooks/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /webhooks/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
 ### Layout
