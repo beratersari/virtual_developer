@@ -381,6 +381,8 @@ Open: `http://127.0.0.1:8080` after daemon start.
 | GET | `/api/dashboard` | Full envelope |
 | POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
 | POST | `/yaver/webhook/azure` | Azure PR comment + lifecycle (`/webhooks/azure` still works) |
+| GET | `/api/schedules/pr-preview` | Look up an Azure PR before scheduling a follow-up |
+| POST | `/api/schedules/pr` | Schedule a follow-up prompt on an existing Azure PR |
 | WS | `/ws` | Live dashboard pushes |
 
 ---

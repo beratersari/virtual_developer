@@ -401,15 +401,25 @@ def post_gitlab_usage_note(
 ) -> bool:
     """Reply in the MR discussion with /execute usage. Never a new thread."""
     discussion_id = (getattr(event, "discussion_id", "") or "").strip()
+    from src.gitlab.client import GitlabClient
+
+    client = GitlabClient(host=getattr(event, "host", "") or "")
+    project = getattr(event, "project_id", 0) or getattr(event, "project_path", "")
+    mr_iid = int(getattr(event, "mr_iid", 0) or 0)
+    if not discussion_id:
+        discussion_id = client.find_discussion_id_for_note(
+            project=project,
+            mr_iid=mr_iid,
+            note_id=str(getattr(event, "note_id", "") or ""),
+        )
+        if discussion_id:
+            event.discussion_id = discussion_id
     if not discussion_id:
         logger.warning(
             "GitLab usage note skipped: no discussion_id "
             f"{getattr(event, 'project_path', '')}!{getattr(event, 'mr_iid', '')}"
         )
         return False
-    from src.gitlab.client import GitlabClient
-
-    client = GitlabClient(host=getattr(event, "host", "") or "")
     posted = client.post_mr_note(
         project=getattr(event, "project_id", 0) or getattr(event, "project_path", ""),
         mr_iid=int(getattr(event, "mr_iid", 0) or 0),

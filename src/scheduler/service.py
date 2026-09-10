@@ -727,6 +727,207 @@ def schedule_mr_followup(
     }
 
 
+def _strip_git_ref(ref: str) -> str:
+    text = (ref or "").strip()
+    for prefix in ("refs/heads/", "refs/tags/"):
+        if text.lower().startswith(prefix):
+            return text[len(prefix) :]
+    return text
+
+
+def preview_pr_followup(
+    repository_url: str,
+    pr_id: Any = 0,
+) -> Dict[str, Any]:
+    """Load an existing Azure DevOps PR for the Scheduled → PR form.
+
+    Hard-fail if the repo URL / id cannot be parsed or TFS does not
+    return the pull request. No schedule is written.
+    """
+    from src.azure.client import AzureDevOpsClient
+    from src.azure.keys import resolve_pr_issue_key
+    from src.azure.webhook import parse_azure_git_url, parse_pull_request_url
+
+    raw_url = (repository_url or "").strip()
+    iid = 0
+    try:
+        iid = int(pr_id or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    parsed_pr = parse_pull_request_url(raw_url)
+    git_url = raw_url
+    if parsed_pr:
+        _host, _path, url_iid = parsed_pr
+        if iid <= 0:
+            iid = url_iid
+        git_url = re.sub(
+            r"/(?:pullrequest|pullRequest)/\d+/?$",
+            "",
+            raw_url,
+            flags=re.IGNORECASE,
+        )
+    parsed = parse_azure_git_url(git_url)
+    if not parsed:
+        return {
+            "ok": False,
+            "error": (
+                "Need an Azure DevOps git URL "
+                "(…/_git/Repo) or a pull-request page URL."
+            ),
+        }
+    if iid <= 0:
+        return {"ok": False, "error": "Pull request id must be a positive number."}
+
+    host = str(parsed.get("host") or "")
+    collection = str(parsed.get("collection_url") or "")
+    project = str(parsed.get("project") or "")
+    repo = str(parsed.get("repository") or "")
+    project_path = str(parsed.get("project_path") or "")
+    client = AzureDevOpsClient(host=host, collection_url=collection)
+    pr = client.get_pull_request(project, repo, iid)
+    if not isinstance(pr, dict):
+        return {
+            "ok": False,
+            "error": (
+                f"Could not load {project}/{repo}!{iid} on {host}. "
+                "Check the URL, PR id, and that an Azure PAT is saved for this host."
+            ),
+            "repository_url": raw_url,
+            "azure_host": host,
+            "azure_collection_url": collection,
+            "azure_project": project,
+            "azure_repository": repo,
+            "pr_id": iid,
+        }
+    src = _strip_git_ref(
+        str(pr.get("sourceRefName") or pr.get("source_ref_name") or "")
+    )
+    tgt = _strip_git_ref(
+        str(pr.get("targetRefName") or pr.get("target_ref_name") or "")
+    )
+    title = str(pr.get("title") or "").strip()
+    desc = str(pr.get("description") or "")
+    repo_obj = pr.get("repository") if isinstance(pr.get("repository"), dict) else {}
+    repo_name = str(repo_obj.get("name") or repo)
+    repo_id = str(repo_obj.get("id") or repo_name)
+    remote = str(repo_obj.get("remoteUrl") or repo_obj.get("remote_url") or "").strip()
+    if remote:
+        repo_url = remote
+    else:
+        repo_url = git_url
+    links = pr.get("_links") if isinstance(pr.get("_links"), dict) else {}
+    web = ""
+    web_link = links.get("web") if isinstance(links.get("web"), dict) else {}
+    web = str(web_link.get("href") or "").strip()
+    if not web and collection and project and repo_name:
+        web = (
+            f"{collection.rstrip('/')}/{project}/_git/{repo_name}"
+            f"/pullrequest/{iid}"
+        )
+    keys = list(getattr(settings, "jira_projects_list", None) or [])
+    issue_key = resolve_pr_issue_key(
+        pr_title=title,
+        pr_description=desc,
+        project_path=project_path or f"{project}/{repo_name}",
+        pr_id=iid,
+        project_keys=keys,
+    )
+    state = str(pr.get("status") or "active").strip().lower()
+    try:
+        from src.azure_connection import remember_azure_collection
+
+        remember_azure_collection(host, collection)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "repository_url": repo_url,
+        "azure_host": host,
+        "azure_collection_url": collection,
+        "azure_project": project,
+        "azure_repository": repo_name,
+        "azure_repository_id": repo_id,
+        "pr_id": iid,
+        "title": title,
+        "description": desc,
+        "source_branch": src,
+        "target_branch": tgt,
+        "merge_request_url": web,
+        "issue_key": issue_key,
+        "pr_state": state,
+        "message": (
+            f"{project}/{repo_name}!{iid} — {title or '(no title)'} "
+            f"({src or '?'} → {tgt or '?'})"
+        ),
+    }
+
+
+def schedule_pr_followup(
+    *,
+    repository_url: str,
+    pr_id: Any,
+    prompt: str,
+    scheduled_at: str,
+    model: str = "",
+    backend: str = "",
+    store: Optional[ScheduleStore] = None,
+) -> Dict[str, Any]:
+    """Schedule a follow-up prompt on an existing Azure DevOps pull request.
+
+    Hard-fail if the PR cannot be loaded or the prompt is empty. No Jira
+    issue is created. At fire time the prompt is posted on the PR, then
+    the existing Azure PR job runs and posts the agent answer.
+    """
+    text = (prompt or "").strip()
+    if not text:
+        return {"ok": False, "error": "Prompt is required."}
+    preview = preview_pr_followup(repository_url, pr_id)
+    if not preview.get("ok"):
+        return preview
+    try:
+        at_dt = parse_schedule_at(scheduled_at)
+    except ValueError as e:
+        return {"ok": False, "error": f"invalid scheduled_at: {e}"}
+    scheduled_iso = at_dt.isoformat(timespec="seconds")
+    iid = int(preview.get("pr_id") or 0)
+    project = str(preview.get("azure_project") or "")
+    repo = str(preview.get("azure_repository") or "")
+    title = str(preview.get("title") or f"PR !{iid}")
+    ss = store or schedule_store
+    rec = ss.create(
+        title=title,
+        description=text,
+        repository_url=str(preview.get("repository_url") or repository_url),
+        source_branch=str(preview.get("source_branch") or ""),
+        target_branch=str(preview.get("target_branch") or ""),
+        mode="build",
+        scheduled_at=scheduled_iso,
+        issue_key=str(preview.get("issue_key") or ""),
+        issue_description=text,
+        project_key="",
+        source="azure_pr",
+        model=(model or "").strip(),
+        backend=(backend or "").strip(),
+        merge_request_url=str(preview.get("merge_request_url") or ""),
+        pr_id=iid,
+        azure_host=str(preview.get("azure_host") or ""),
+        azure_collection_url=str(preview.get("azure_collection_url") or ""),
+        azure_project=project,
+        azure_repository=repo,
+        azure_repository_id=str(preview.get("azure_repository_id") or ""),
+    )
+    logger.info(
+        f"Schedule PR follow-up {project}/{repo}!{iid} "
+        f"schedule_id={rec.get('schedule_id')} at={scheduled_iso}"
+    )
+    return {
+        "ok": True,
+        "schedule": rec,
+        "issue_key": rec.get("issue_key") or "",
+        "message": f"Scheduled follow-up on {project}/{repo}!{iid}",
+    }
+
+
 def create_scheduled_job(
     *,
     title: str,
@@ -1443,6 +1644,152 @@ async def _dispatch_mr_followup(
     return {"ok": True, "outcome": outcome, "issue_key": issue_key}
 
 
+def _azure_pr_followup_http(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Blocking Azure GET PR + POST comment. Must not run on the asyncio loop."""
+    from src.azure.client import AzureDevOpsClient
+
+    prompt = (
+        (rec.get("issue_description") or rec.get("description") or "")
+    ).strip()
+    if not prompt:
+        return {"ok": False, "error": "Scheduled PR prompt is empty."}
+    host = str(rec.get("azure_host") or "").strip()
+    collection = str(rec.get("azure_collection_url") or "").strip()
+    project = str(rec.get("azure_project") or "").strip()
+    repository = str(
+        rec.get("azure_repository_id") or rec.get("azure_repository") or ""
+    ).strip()
+    try:
+        iid = int(rec.get("pr_id") or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    if not (host or collection) or not project or not repository or iid <= 0:
+        return {
+            "ok": False,
+            "error": "Schedule is missing Azure host, project, repository, or PR id.",
+        }
+
+    client = AzureDevOpsClient(host=host, collection_url=collection)
+    pr = client.get_pull_request(project, repository, iid)
+    if not isinstance(pr, dict):
+        return {
+            "ok": False,
+            "error": f"Could not load {project}/{repository}!{iid} on {host} at dispatch.",
+        }
+    src = _strip_git_ref(
+        str(pr.get("sourceRefName") or rec.get("source_branch") or "")
+    ) or str(rec.get("source_branch") or "")
+    tgt = _strip_git_ref(
+        str(pr.get("targetRefName") or rec.get("target_branch") or "")
+    ) or str(rec.get("target_branch") or "")
+    title = str(pr.get("title") or rec.get("title") or f"PR !{iid}")
+    desc = str(pr.get("description") or "")
+    repo_obj = pr.get("repository") if isinstance(pr.get("repository"), dict) else {}
+    repo_name = str(repo_obj.get("name") or rec.get("azure_repository") or repository)
+    repo_id = str(repo_obj.get("id") or rec.get("azure_repository_id") or repository)
+    remote = str(repo_obj.get("remoteUrl") or rec.get("repository_url") or "").strip()
+    posted = client.post_pr_comment(
+        project=project,
+        repository=repo_id or repository,
+        pr_id=iid,
+        body=format_dashboard_mr_prompt_note(prompt),
+        allow_new_thread=True,
+    )
+    if not posted:
+        return {
+            "ok": False,
+            "error": f"Could not post the prompt on {project}/{repo_name}!{iid}.",
+        }
+    thread_id = str(posted.get("id") or "")
+    comment_id = ""
+    comments = posted.get("comments")
+    if isinstance(comments, list) and comments and isinstance(comments[0], dict):
+        comment_id = str(comments[0].get("id") or "")
+    return {
+        "ok": True,
+        "pr": pr,
+        "posted": posted,
+        "host": host,
+        "collection": collection,
+        "project": project,
+        "repository": repo_name,
+        "repository_id": repo_id,
+        "iid": iid,
+        "prompt": prompt,
+        "repo_url": remote or str(rec.get("repository_url") or ""),
+        "src": src,
+        "tgt": tgt,
+        "title": title,
+        "desc": desc,
+        "web": str(rec.get("merge_request_url") or ""),
+        "thread_id": thread_id,
+        "comment_id": comment_id,
+    }
+
+
+async def _dispatch_pr_followup(
+    processor: "JobProcessor", rec: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Post the scheduled prompt on the PR, then enqueue the Azure PR job."""
+    from src.azure.keys import resolve_pr_issue_key
+    from src.azure.webhook import AzurePrCommentEvent
+
+    posted_info = await asyncio.to_thread(_azure_pr_followup_http, rec)
+    if not posted_info.get("ok"):
+        return posted_info
+    iid = int(posted_info["iid"])
+    project = str(posted_info["project"])
+    repo_name = str(posted_info["repository"])
+    prompt = str(posted_info["prompt"])
+    keys = list(getattr(settings, "jira_projects_list", None) or [])
+    issue_key = (rec.get("issue_key") or "").strip().upper() or resolve_pr_issue_key(
+        pr_title=str(posted_info["title"]),
+        pr_description=str(posted_info.get("desc") or ""),
+        project_path=f"{project}/{repo_name}",
+        pr_id=iid,
+        project_keys=keys,
+    )
+    event = AzurePrCommentEvent(
+        issue_key=issue_key,
+        comment_id=str(posted_info.get("comment_id") or ""),
+        comment_body=prompt,
+        prompt=prompt,
+        author_username="dashboard",
+        author_name="Scheduled",
+        collection_url=str(posted_info.get("collection") or ""),
+        project=project,
+        repository_id=str(posted_info.get("repository_id") or repo_name),
+        repository_name=repo_name,
+        project_path=f"{project}/{repo_name}",
+        repository_url=str(posted_info.get("repo_url") or ""),
+        host=str(posted_info.get("host") or ""),
+        pr_id=iid,
+        pr_title=str(posted_info.get("title") or ""),
+        pr_description=str(posted_info.get("desc") or ""),
+        source_branch=str(posted_info.get("src") or ""),
+        target_branch=str(posted_info.get("tgt") or ""),
+        pr_url=str(posted_info.get("web") or ""),
+        thread_id=str(posted_info.get("thread_id") or ""),
+        webhook_event="schedule",
+        raw={
+            "model": (rec.get("model") or "").strip(),
+            "backend": (rec.get("backend") or "").strip(),
+        },
+    )
+    enqueue = getattr(processor, "enqueue_azure_comment", None)
+    if not callable(enqueue):
+        return {"ok": False, "error": "Processor cannot enqueue Azure PR jobs."}
+    outcome = await enqueue(event)
+    if not isinstance(outcome, dict) or not outcome.get("ok"):
+        msg = (
+            (outcome or {}).get("reason")
+            if isinstance(outcome, dict)
+            else None
+        ) or "enqueue_azure_comment failed"
+        return {"ok": False, "error": str(msg)}
+    return {"ok": True, "outcome": outcome, "issue_key": issue_key}
+
+
 async def _dispatch_claimed_schedule(
     *,
     processor: "JobProcessor",
@@ -1467,7 +1814,8 @@ async def _dispatch_claimed_schedule(
                 f"({live.get('status')}); not starting work"
             )
             return
-        if (live.get("source") or "").strip().lower() == "gitlab_mr":
+        source = (live.get("source") or "").strip().lower()
+        if source == "gitlab_mr":
             outcome = await _dispatch_mr_followup(processor, live)
             if not isinstance(outcome, dict) or not outcome.get("ok"):
                 msg = (
@@ -1486,6 +1834,28 @@ async def _dispatch_claimed_schedule(
             logger.info(
                 f"Schedule {schedule_id} dispatched MR follow-up "
                 f"{live.get('gitlab_project')}!{live.get('mr_iid')}"
+            )
+            return
+        if source == "azure_pr":
+            outcome = await _dispatch_pr_followup(processor, live)
+            if not isinstance(outcome, dict) or not outcome.get("ok"):
+                msg = (
+                    (outcome or {}).get("error")
+                    if isinstance(outcome, dict)
+                    else None
+                ) or "PR follow-up dispatch failed"
+                _finish_schedule_dispatch(
+                    store, schedule_id, status="error", error_message=str(msg)[:1000]
+                )
+                logger.warning(
+                    f"Schedule {schedule_id} PR follow-up failed: {msg}"
+                )
+                return
+            _finish_schedule_dispatch(store, schedule_id, status="dispatched")
+            logger.info(
+                f"Schedule {schedule_id} dispatched PR follow-up "
+                f"{live.get('azure_project')}/{live.get('azure_repository')}"
+                f"!{live.get('pr_id')}"
             )
             return
         inflight = _issue_in_flight_reason(processor, issue_key)

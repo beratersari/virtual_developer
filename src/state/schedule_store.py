@@ -81,12 +81,18 @@ class ScheduleStore:
         gitlab_host: str = "",
         gitlab_project: str = "",
         merge_request_url: str = "",
+        pr_id: int = 0,
+        azure_host: str = "",
+        azure_collection_url: str = "",
+        azure_project: str = "",
+        azure_repository: str = "",
+        azure_repository_id: str = "",
     ) -> Dict[str, Any]:
         """Persist a schedule after the Jira issue is known (created or existing)."""
         schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
         now = _now_iso()
         src = (source or "new").strip().lower()
-        if src not in ("new", "existing", "gitlab_mr"):
+        if src not in ("new", "existing", "gitlab_mr", "azure_pr"):
             src = "new"
         rec: Dict[str, Any] = {
             "schedule_id": schedule_id,
@@ -107,11 +113,18 @@ class ScheduleStore:
             "label": SCHEDULE_LABEL,
             # new = we created the Jira issue; existing = existing Jira;
             # gitlab_mr = follow-up prompt on an existing merge request
+            # azure_pr = follow-up prompt on an existing Azure DevOps PR
             "source": src,
             "mr_iid": int(mr_iid or 0),
             "gitlab_host": (gitlab_host or "").strip(),
             "gitlab_project": (gitlab_project or "").strip(),
             "merge_request_url": (merge_request_url or "").strip(),
+            "pr_id": int(pr_id or 0),
+            "azure_host": (azure_host or "").strip(),
+            "azure_collection_url": (azure_collection_url or "").strip(),
+            "azure_project": (azure_project or "").strip(),
+            "azure_repository": (azure_repository or "").strip(),
+            "azure_repository_id": (azure_repository_id or "").strip(),
             "created_at": now,
             "updated_at": now,
             "dispatched_at": None,

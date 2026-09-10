@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -178,9 +179,56 @@ def _mr_state_scan_loop() -> None:
             logger.warning(f"Storage MR status scan failed: {e}")
 
 
-def _scan_mr_states_once() -> None:
+def _azure_pr_state_from_status(status: str) -> str:
+    raw = (status or "").strip().lower()
+    if raw in {"active", "opened", "open"}:
+        return "open"
+    if raw in {"completed", "merged"}:
+        return "completed"
+    if raw in {"abandoned", "closed"}:
+        return "abandoned"
+    return raw or "unknown"
+
+
+def _lookup_review_state(url: str) -> str:
+    """Live GitLab MR or Azure PR status for a Storage review URL."""
     from src.gitlab.client import GitlabClient, parse_merge_request_url
 
+    parsed_gl = parse_merge_request_url(url)
+    if parsed_gl:
+        host, project, iid = parsed_gl
+        info = GitlabClient(host=host).get_merge_request(project, iid)
+        if not info:
+            return "unknown"
+        return str(info.get("state") or "").strip().lower() or "unknown"
+
+    from src.azure.client import AzureDevOpsClient
+    from src.azure.webhook import parse_azure_git_url, parse_pull_request_url
+
+    parsed_az = parse_pull_request_url(url)
+    if not parsed_az:
+        return "unknown"
+    _host, _path, pr_id = parsed_az
+    git_url = re.sub(
+        r"/(?:pullrequest|pullRequest)/\d+/?$", "", url, flags=re.IGNORECASE
+    )
+    parsed = parse_azure_git_url(git_url)
+    if not parsed:
+        return "unknown"
+    info = AzureDevOpsClient(
+        host=str(parsed.get("host") or ""),
+        collection_url=str(parsed.get("collection_url") or ""),
+    ).get_pull_request(
+        str(parsed.get("project") or ""),
+        str(parsed.get("repository") or ""),
+        pr_id,
+    )
+    if not info:
+        return "unknown"
+    return _azure_pr_state_from_status(str(info.get("status") or ""))
+
+
+def _scan_mr_states_once() -> None:
     urls: List[str] = []
     seen: Set[str] = set()
     try:
@@ -197,18 +245,14 @@ def _scan_mr_states_once() -> None:
     for url in urls:
         if _cached_mr_state(url):
             continue
-        parsed = parse_merge_request_url(url)
-        if not parsed:
-            remember_mr_state(url, "unknown")
-            continue
-        host, project, iid = parsed
-        info = GitlabClient(host=host).get_merge_request(project, iid)
-        if not info:
-            remember_mr_state(url, "unknown")
-            continue
-        state = str(info.get("state") or "").strip().lower() or "unknown"
+        try:
+            state = _lookup_review_state(url)
+        except Exception as e:
+            logger.debug(f"Storage review status {url!r} failed: {e}")
+            state = "unknown"
         remember_mr_state(url, state)
-        _persist_job_mr_state(url, state)
+        if state != "unknown":
+            _persist_job_mr_state(url, state)
 
 
 def _persist_job_mr_state(url: str, state: str) -> None:
@@ -889,6 +933,43 @@ def _norm_mr_url(url: str) -> str:
     return (url or "").strip().rstrip("/").lower()
 
 
+def _existing_temp_names() -> Set[str]:
+    base = resolve_temp_base()
+    if not base.is_dir():
+        return set()
+    try:
+        return {p.name for p in base.iterdir() if p.is_dir()}
+    except OSError:
+        return set()
+
+
+def _same_review_url(left: str, right: str) -> bool:
+    """True when two URLs are the same GitLab MR or Azure PR."""
+    a = _norm_mr_url(left)
+    b = _norm_mr_url(right)
+    if a and b and a == b:
+        return True
+    if not a or not b:
+        return False
+    from src.gitlab.client import parse_merge_request_url
+
+    ga = parse_merge_request_url(left)
+    gb = parse_merge_request_url(right)
+    if ga and gb:
+        return (
+            ga[0] == gb[0]
+            and str(ga[1] or "").lower() == str(gb[1] or "").lower()
+            and int(ga[2]) == int(gb[2])
+        )
+    from src.azure.webhook import parse_pull_request_url
+
+    aa = parse_pull_request_url(left)
+    ab = parse_pull_request_url(right)
+    if aa and ab:
+        return aa[0] == ab[0] and int(aa[2]) == int(ab[2])
+    return False
+
+
 def clone_folder_names_for_mr(
     *,
     mr_url: str = "",
@@ -921,17 +1002,19 @@ def clone_folder_names_for_mr(
 
         n = job_store.count_jobs()
         for job in job_store.list_jobs(limit=max(int(n or 0), 1)):
-            job_url = _norm_mr_url(str(job.get("merge_request_url") or ""))
-            same_url = bool(want_url and job_url == want_url)
-            same_iid = (
-                int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
-                and int(mr_iid or 0) > 0
-                and (
-                    not want_path
-                    or str(job.get("gitlab_project") or "").strip().lower()
-                    == want_path
+            job_url = str(job.get("merge_request_url") or "")
+            same_url = _same_review_url(want_url, job_url)
+            same_iid = False
+            if want_url and "/merge_requests/" in want_url.lower():
+                same_iid = (
+                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
+                    and int(mr_iid or 0) > 0
+                    and (
+                        not want_path
+                        or str(job.get("gitlab_project") or "").strip().lower()
+                        == want_path
+                    )
                 )
-            )
             same_issue = bool(want_key) and str(job.get("issue_key") or "").upper() == want_key
             # Issue key is enough. A webhook always has an MR URL; requiring
             # same_url here dropped every Jira job that only stored the key
@@ -973,18 +1056,27 @@ def clone_folder_names_for_mr(
             parsed = parse_merge_request_url(want_url)
             if parsed:
                 want_iid = int(parsed[2])
+        exist = _existing_temp_names()
         for lookup, rec in _clone_issue_index().items():
-            rec_url = _norm_mr_url(str(rec.get("merge_request_url") or ""))
+            rec_url = str(rec.get("merge_request_url") or "")
             rec_key = str(rec.get("issue_key") or "").upper()
             rec_iid = 0
             parsed = parse_merge_request_url(rec_url) if rec_url else None
             if parsed:
                 rec_iid = int(parsed[2])
-            same_url = bool(want_url and rec_url == want_url)
-            same_iid = bool(want_iid and rec_iid and want_iid == rec_iid)
+            same_url = _same_review_url(want_url, rec_url)
+            same_iid = bool(
+                want_iid
+                and rec_iid
+                and want_iid == rec_iid
+                and want_url
+                and "/merge_requests/" in want_url.lower()
+            )
             same_issue = bool(want_key and rec_key == want_key)
             if same_url or same_iid or same_issue:
-                _add(lookup)
+                name = Path(str(lookup).replace("\\", "/")).name
+                if name in exist or lookup in exist:
+                    _add(lookup)
     except Exception as e:
         logger.debug(f"MR clone lookup from storage index failed: {e}")
     return names
@@ -1011,13 +1103,17 @@ def delete_clones_for_merge_request(
         issue_key=issue_key,
         source_branch=source_branch,
     )
+    exist = _existing_temp_names()
     deleted: List[str] = []
     live = _live_git_paths()
     for name in names:
+        if name not in exist:
+            logger.debug(f"Skip MR-merge delete of {name}: already gone")
+            continue
         try:
             target = _validate_delete_target(name, area="temp")
         except TempStorageError as e:
-            logger.info(f"Skip MR-merge delete of {name}: {e}")
+            logger.debug(f"Skip MR-merge delete of {name}: {e}")
             continue
         try:
             resolved = target.resolve()
@@ -1036,54 +1132,66 @@ def delete_clones_for_merge_request(
 
 
 def sweep_merged_storage_clones() -> List[str]:
-    """Delete temp clones whose Storage MR is merged or closed on GitLab.
+    """Delete temp clones whose GitLab MR or Azure PR is done.
 
-    GitLab.com cannot POST to a LAN daemon, so merge webhooks often never
-    arrive. Storage already shows the MR; this asks GitLab for that same
-    !N and deletes the folder when the MR is gone.
+    Walks folders that exist on disk (not stale job-store names). GitLab.com
+    cannot POST to a LAN daemon, so merge webhooks often never arrive.
     """
-    from src.gitlab.client import GitlabClient, parse_merge_request_url
-
-    seen: Set[str] = set()
     deleted: List[str] = []
+    base = resolve_temp_base()
+    if not base.is_dir():
+        return deleted
     try:
-        # Fresh map — a short GET /api/storage cache must not hide a just-merged MR.
         index = _build_clone_issue_index()
     except Exception as e:
         logger.debug(f"MR sweep index failed: {e}")
         return deleted
-    for rec in index.values():
-        url = str(rec.get("merge_request_url") or "").strip()
-        parsed = parse_merge_request_url(url) if url else None
-        if not parsed:
+    live = _live_git_paths()
+    seen_urls: Set[str] = set()
+    try:
+        children = list(base.iterdir())
+    except OSError:
+        return deleted
+    for child in children:
+        if not child.is_dir():
             continue
-        host, project, iid = parsed
-        key = f"{host}/{project}!{iid}"
-        if key in seen:
+        fields = _issue_fields_for(child, child.name, index)
+        url = str(fields.get("merge_request_url") or "").strip()
+        if not url:
             continue
-        seen.add(key)
+        norm = _norm_mr_url(url)
+        if norm in seen_urls:
+            state = _cached_mr_state(url) or ""
+        else:
+            seen_urls.add(norm)
+            state = _cached_mr_state(url) or ""
+            if not state:
+                try:
+                    state = _lookup_review_state(url)
+                except Exception as e:
+                    logger.debug(f"Storage sweep status {url!r} failed: {e}")
+                    state = "unknown"
+                remember_mr_state(url, state)
+                if state != "unknown":
+                    _persist_job_mr_state(url, state)
+        if state not in {"merged", "closed", "completed", "abandoned"}:
+            continue
         try:
-            info = GitlabClient(host=host).get_merge_request(project, iid)
-        except Exception as e:
-            logger.debug(f"MR sweep {key} failed: {e}")
+            resolved = child.resolve()
+        except OSError:
+            resolved = child
+        if resolved in live:
+            logger.debug(f"Skip MR-merge delete of {child.name}: clone is in flight")
             continue
-        if not info:
-            continue
-        state = str(info.get("state") or "").strip().lower()
-        remember_mr_state(url, state)
-        if state not in {"merged", "closed"}:
-            continue
-        names = delete_clones_for_merge_request(
-            mr_url=url,
-            project_path=project,
-            mr_iid=iid,
-            issue_key=str(rec.get("issue_key") or ""),
-        )
-        if names:
+        _forget_binds_for_clone(resolved)
+        try:
+            queue_delete_temp_folder(child.name, area="temp")
+            deleted.append(child.name)
             logger.info(
-                f"Storage MR {key} is {state} — deleted clones {names}"
+                f"Storage review {url} is {state} — deleted clone {child.name}"
             )
-            deleted.extend(names)
+        except TempStorageError as e:
+            logger.debug(f"Could not queue MR-merge delete of {child.name}: {e}")
     return deleted
 
 

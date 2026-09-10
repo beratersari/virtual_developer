@@ -8,6 +8,26 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-09-10
+
+Azure PR follow-up on Schedule. TFS PR create, commit links, and Storage status.
+
+### Added
+
+- Scheduled tab can follow up on an existing Azure DevOps PR the same way as a GitLab MR.
+
+### Changed
+
+- Usage notes, OpenCode results, and error replies stay in the triggering GitLab or Azure thread.
+
+### Fixed
+
+- Azure job-detail commit links use `/commit/{sha}?refName=refs/heads/{branch}`.
+- Azure PR create no longer double-encodes project names with spaces (`Tank Projeleri`).
+- Storage shows Azure PR status and only deletes clone folders that still exist.
+
+[0.9.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.1
+
 ## [0.9.0] — 2026-09-10
 
 GitLab and Azure comment jobs start only on `@mention /execute`.

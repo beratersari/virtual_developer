@@ -205,6 +205,56 @@ def test_webhook_token_same_as_gitlab():
     assert not validate_webhook_token("nope", "secret")
 
 
+def test_azure_repo_url_does_not_double_encode_spaces():
+    from src.azure.client import AzureDevOpsClient
+
+    c = AzureDevOpsClient(
+        host="tfs02.company.com.tr",
+        collection_url="https://tfs02.company.com.tr/tfs/SSTYMMCollection",
+    )
+    url = c._repo_url("Tank Projeleri", "project")
+    assert "Tank%20Projeleri" in url
+    assert "Tank%2520Projeleri" not in url
+    url2 = c._repo_url("Tank%20Projeleri", "project")
+    assert "Tank%20Projeleri" in url2
+    assert "Tank%2520Projeleri" not in url2
+    parsed = parse_azure_git_url(
+        "https://tfs02.company.com.tr/tfs/SSTYMMCollection/"
+        "Tank%20Projeleri/_git/project"
+    )
+    assert parsed is not None
+    assert parsed["project"] == "Tank Projeleri"
+    assert parsed["repository"] == "project"
+    assert parsed["collection_url"].endswith("/tfs/SSTYMMCollection")
+
+
+def test_azure_commit_url_includes_ref_name():
+    from src.git_manager import GitManager
+
+    git = GitManager(
+        remote_url="https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo",
+        source_branch="feature/login",
+        target_branch="develop",
+    )
+    git.work_branch = "feature/login"
+    url = git.build_commit_url("bbb222newhead")
+    assert url == (
+        "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
+        "/commit/bbb222newhead?refName=refs/heads/feature/login"
+    )
+    git.work_branch = "refs/heads/feature/login"
+    url2 = git.build_commit_url("bbb222newhead")
+    assert url2.endswith("?refName=refs/heads/feature/login")
+    gitlab = GitManager(
+        remote_url="https://gitlab.example.com/acme/demo.git",
+        source_branch="feature/login",
+        target_branch="develop",
+    )
+    assert gitlab.build_commit_url("abc") == (
+        "https://gitlab.example.com/acme/demo/-/commit/abc"
+    )
+
+
 def test_parse_azure_git_and_pr_urls():
     parsed = parse_azure_git_url(
         "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
@@ -637,6 +687,8 @@ async def test_processor_azure_posts_reply_and_pushes(
     body = posted.get("body") or ""
     assert "*Yaver*" in body
     assert "Fixed the login bug." in body
+    assert posted.get("thread_id") == "8"
+    assert posted.get("allow_new_thread") is False
     assert "Pushed new commits" in body
     assert (st.metadata or {}).get("source") == "azure"
     assert (st.metadata or {}).get("delivery_status") == "delivered"
@@ -1150,6 +1202,8 @@ def test_fail_issue_posts_azure_reply_not_jira(
             "azure_project": "Demo",
             "azure_repository_id": "demo",
             "azure_pr_id": 4,
+            "azure_thread_id": "8",
+            "azure_comment_id": "77",
         },
     )
     posted = {}
@@ -1162,6 +1216,8 @@ def test_fail_issue_posts_azure_reply_not_jira(
     with patch("src.azure.client.AzureDevOpsClient.post_pr_comment", fake_post):
         proc._fail_issue("AZ-DEMO-4", "clone failed", suggestion="check PAT")
     assert posted.get("pr_id") == 4
+    assert posted.get("thread_id") == "8"
+    assert posted.get("allow_new_thread") is False
     assert "clone failed" in (posted.get("body") or "")
     assert len(fake_jira.comments) == before
 

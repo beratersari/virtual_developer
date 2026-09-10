@@ -15,6 +15,8 @@ import type {
   ScheduleItem,
   ScheduleMrBody,
   ScheduleMrPreview,
+  SchedulePrBody,
+  SchedulePrPreview,
   SchedulePreview,
   SchedulesPayload,
   SettingsPatch,
@@ -467,6 +469,34 @@ export function scheduleMrFollowup(body: ScheduleMrBody) {
     dispatched?: boolean
     dispatch_error?: string
   }>('/api/schedules/mr', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function previewSchedulePr(repositoryUrl: string, prId: number) {
+  const params = new URLSearchParams({
+    repository_url: repositoryUrl.trim(),
+    pr_id: String(prId || 0),
+  })
+  return request<SchedulePrPreview>(`/api/schedules/pr-preview?${params.toString()}`)
+}
+
+export function schedulePrFollowup(body: SchedulePrBody) {
+  const payload: Record<string, unknown> = {
+    repository_url: body.repository_url,
+    pr_id: body.pr_id,
+    prompt: body.prompt,
+    scheduled_at: body.scheduled_at,
+  }
+  if (body.dispatch_now) payload.dispatch_now = true
+  if (body.model) payload.model = body.model
+  if (body.backend) payload.backend = body.backend
+  return request<{
+    ok: boolean
+    schedule: ScheduleItem
+    issue_key?: string
+    message?: string
+    dispatched?: boolean
+    dispatch_error?: string
+  }>('/api/schedules/pr', { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export function previewScheduleIssue(issueKey: string) {

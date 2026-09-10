@@ -144,6 +144,87 @@ def test_storage_view_shows_live_mr_state(tmp_path: Path, monkeypatch: pytest.Mo
     assert view2["mr_states_pending"] is False
 
 
+def test_storage_view_resolves_azure_pr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        _lookup_review_state,
+        build_storage_view,
+        remember_mr_state,
+        reset_mr_state_cache,
+    )
+    from src.state.job_store import job_store
+
+    reset_mr_state_cache()
+    base = tmp_path / "tmpclones"
+    clone = base / "repo_azpr"
+    clone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    pr_url = (
+        "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo/pullrequest/4"
+    )
+    job = job_store.create_job(issue_key="KAN-2", summary="az")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(clone.resolve()),
+        merge_request_url=pr_url,
+    )
+    view = build_storage_view()
+    assert view["mr_states_pending"] is True
+    remember_mr_state(pr_url, "open")
+    view2 = build_storage_view()
+    assert view2["folders"][0]["merge_request_state"] == "open"
+    assert view2["mr_states_pending"] is False
+
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.get_pull_request",
+        lambda self, project, repository, pr_id: {"status": "completed"},
+    )
+    reset_mr_state_cache()
+    assert _lookup_review_state(pr_url) == "completed"
+
+
+def test_sweep_merged_skips_missing_names_and_deletes_existing_azure_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        reset_delete_jobs,
+        reset_mr_state_cache,
+        sweep_merged_storage_clones,
+    )
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    reset_mr_state_cache()
+    base = tmp_path / "t"
+    live = base / "project_livefolder1"
+    live.mkdir(parents=True)
+    (live / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    pr_url = (
+        "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo/pullrequest/4"
+    )
+    stale = job_store.create_job(issue_key="KAN-9", summary="gone")
+    job_store.update_job(
+        stale["job_id"],
+        working_directory=str((base / "project_c83e441a3ad2").resolve()),
+        merge_request_url=pr_url,
+    )
+    current = job_store.create_job(issue_key="KAN-9", summary="live")
+    job_store.update_job(
+        current["job_id"],
+        working_directory=str(live.resolve()),
+        merge_request_url=pr_url,
+    )
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.get_pull_request",
+        lambda self, project, repository, pr_id: {"status": "completed"},
+    )
+    deleted = sweep_merged_storage_clones()
+    assert "project_livefolder1" in deleted
+    assert "project_c83e441a3ad2" not in deleted
+
+
 def test_resolve_temp_base_and_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from src.config import settings
 
