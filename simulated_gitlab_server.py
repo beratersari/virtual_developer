@@ -214,17 +214,80 @@ def api_list_notes(pid: str, iid: int):
     return jsonify([n.to_api() for n in p.mrs[iid].notes])
 
 
-def _add_note(project: Project, mr: MergeRequest, body: str, author: str) -> Note:
+def _add_note(
+    project: Project,
+    mr: MergeRequest,
+    body: str,
+    author: str,
+    discussion_id: str = "",
+) -> Note:
     note = Note(
         id=mr.next_note_id,
         body=body,
         author=author,
         created_at=_now(),
-        discussion_id=f"disc-{uuid.uuid4().hex[:8]}",
+        discussion_id=discussion_id or f"disc-{uuid.uuid4().hex[:8]}",
     )
     mr.next_note_id += 1
     mr.notes.append(note)
     return note
+
+
+@app.get("/api/v4/projects/<pid>/merge_requests/<int:iid>/notes/<int:nid>")
+def api_get_note(pid: str, iid: int, nid: int):
+    p = _project(pid)
+    if not p or iid not in p.mrs:
+        return jsonify({"message": "404 Not found"}), 404
+    for note in p.mrs[iid].notes:
+        if note.id == nid:
+            return jsonify(note.to_api())
+    return jsonify({"message": "404 Not found"}), 404
+
+
+@app.get("/api/v4/projects/<pid>/merge_requests/<int:iid>/discussions")
+def api_list_discussions(pid: str, iid: int):
+    p = _project(pid)
+    if not p or iid not in p.mrs:
+        return jsonify({"message": "404 Not found"}), 404
+    groups: Dict[str, list] = {}
+    order: list[str] = []
+    for note in p.mrs[iid].notes:
+        did = note.discussion_id or f"disc-{note.id}"
+        if did not in groups:
+            groups[did] = []
+            order.append(did)
+        groups[did].append(note.to_api())
+    return jsonify([{"id": did, "notes": groups[did]} for did in order])
+
+
+@app.post("/api/v4/projects/<pid>/merge_requests/<int:iid>/discussions")
+def api_post_discussion(pid: str, iid: int):
+    p = _project(pid)
+    if not p or iid not in p.mrs:
+        return jsonify({"message": "404 Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    if not body:
+        return jsonify({"message": "body is required"}), 400
+    with _lock:
+        note = _add_note(p, p.mrs[iid], body, "virtual-developer")
+    return jsonify({"id": note.discussion_id, "notes": [note.to_api()]}), 201
+
+
+@app.post("/api/v4/projects/<pid>/merge_requests/<int:iid>/discussions/<did>/notes")
+def api_post_discussion_note(pid: str, iid: int, did: str):
+    p = _project(pid)
+    if not p or iid not in p.mrs:
+        return jsonify({"message": "404 Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    if not body:
+        return jsonify({"message": "body is required"}), 400
+    with _lock:
+        note = _add_note(
+            p, p.mrs[iid], body, "virtual-developer", discussion_id=did
+        )
+    return jsonify(note.to_api()), 201
 
 
 @app.post("/api/v4/projects/<pid>/merge_requests/<int:iid>/notes")

@@ -1986,6 +1986,7 @@ class JobProcessor:
                 gitlab_mr_iid=tmeta.get("gitlab_mr_iid"),
                 azure_project=tmeta.get("azure_project") or None,
                 azure_pr_id=tmeta.get("azure_pr_id"),
+                repository_url=tmeta.get("repository_url") or None,
                 model=model_id,
                 backend=self._backend_for_issue(state),
             )
@@ -2034,6 +2035,7 @@ class JobProcessor:
             gitlab_mr_iid=meta0.get("gitlab_mr_iid"),
             azure_project=meta0.get("azure_project") or None,
             azure_pr_id=meta0.get("azure_pr_id"),
+            repository_url=meta0.get("repository_url") or None,
             model=model_id,
             backend=self._backend_for_issue(state),
         )
@@ -3765,7 +3767,10 @@ class JobProcessor:
             f"source={event.source_branch} target={event.target_branch}"
         )
         note_key = azure_comment_key(
-            event.pr_id, event.thread_id, event.comment_id
+            event.pr_id,
+            event.thread_id,
+            event.comment_id,
+            event.comment_body or event.prompt,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
         if existing:
@@ -4007,14 +4012,16 @@ class JobProcessor:
         return n
 
     def _skip_queued_while_in_flight(self) -> int:
-        """Finish leftover ``queued`` rows whose issue is already running.
+        """Drop leftover Jira poller rows whose issue is already running.
 
-        Poller/schedule re-enqueue used to leave a waiting row next to the
-        live job. That row appeared on the Queue tab and would start again
-        when the in-flight run finished.
+        GitLab/Azure comments are new work (different prompt). They stay
+        queued; ``claim_next`` waits on issue key and on repo+source+target.
         """
         n = 0
         for rec in list(self.queue_store.list_items(status="queued", limit=500)):
+            source = (rec.get("source") or "jira").strip().lower()
+            if source != "jira":
+                continue
             ik = (rec.get("issue_key") or "").strip()
             if not ik or not self._issue_is_in_flight(ik):
                 continue
@@ -4231,6 +4238,7 @@ class JobProcessor:
             mr_iid=event.mr_iid,
             issue_key=event.issue_key,
             source_branch=event.source_branch,
+            repository_url=getattr(event, "repository_url", "") or "",
         )
         logger.info(
             f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
@@ -4258,19 +4266,11 @@ class JobProcessor:
         try:
             n = self.job_store.count_jobs()
             for job in self.job_store.list_jobs(limit=max(int(n or 0), 1)):
-                job_url = str(job.get("merge_request_url") or "").strip().rstrip("/")
-                same_url = bool(url and job_url.lower() == url.lower())
-                same_iid = (
-                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
-                    and int(mr_iid or 0) > 0
-                    and (
-                        not path
-                        or str(job.get("gitlab_project") or "").strip().lower()
-                        == path.lower()
-                    )
-                )
-                same_issue = bool(key) and str(job.get("issue_key") or "").upper() == key
-                if not (same_url or same_iid or (same_issue and url)):
+                from src.dashboard.temp_storage import _job_matches_review
+
+                if not _job_matches_review(
+                    job, mr_url=url, project_path=path, mr_iid=mr_iid
+                ):
                     continue
                 patch: Dict[str, Any] = {"merge_request_state": state}
                 if url:
@@ -4817,6 +4817,7 @@ class JobProcessor:
                 repository=repository,
                 pr_id=int(iid),
                 comment_id=comment_id,
+                comment_content=str(state.description or state.issue_summary or ""),
             )
             if thread_id:
                 self.state_manager.update_state(
@@ -4885,6 +4886,7 @@ class JobProcessor:
             mr_iid=event.pr_id,
             issue_key=event.issue_key,
             source_branch=event.source_branch,
+            repository_url=getattr(event, "repository_url", "") or "",
         )
         azure_info(
             f"lifecycle clones issue={event.issue_key} "
@@ -4926,7 +4928,10 @@ class JobProcessor:
         from src.azure.log import azure_info
 
         note_id = azure_comment_key(
-            event.pr_id, event.thread_id, event.comment_id
+            event.pr_id,
+            event.thread_id,
+            event.comment_id,
+            event.comment_body or event.prompt,
         )
         azure_info(
             f"job accept issue={issue_key} pr={event.project_path}!{event.pr_id} "

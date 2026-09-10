@@ -661,31 +661,30 @@ def _build_clone_issue_index() -> Dict[str, Dict[str, Any]]:
 
 
 def _fill_missing_mr(index: Dict[str, Dict[str, Any]]) -> None:
-    """Fill MR url/state from issue metadata when the job row has none."""
-    need: Set[str] = set()
-    for rec in index.values():
-        if rec.get("issue_key") and not rec.get("merge_request_url"):
-            need.add(str(rec["issue_key"]).upper())
-    if not need:
-        return
+    """Copy review *state* onto a folder that already has that review URL.
+
+    Do not copy the issue's merge_request_url onto every clone for that
+    Jira key. A GitLab/Azure comment job for ``feat(KAN-12)`` would
+    otherwise paint the Jira KAN-12 plan folder as that PR and sweep
+    would delete it.
+    """
     try:
         from src.state.manager import JiraStateManager
 
         sm = JiraStateManager()
-        for ik in need:
+        for rec in index.values():
+            url = str(rec.get("merge_request_url") or "").strip()
+            if not url or rec.get("merge_request_state"):
+                continue
+            ik = (rec.get("issue_key") or "").strip().upper()
+            if not ik:
+                continue
             st = sm.get_state(ik)
             meta = (st.metadata or {}) if st else {}
-            url = str(meta.get("merge_request_url") or "").strip()
+            meta_url = str(meta.get("merge_request_url") or "").strip()
             state = str(meta.get("merge_request_state") or "").strip()
-            if not url and not state:
-                continue
-            for rec in index.values():
-                if (rec.get("issue_key") or "").strip().upper() != ik:
-                    continue
-                if url and not rec.get("merge_request_url"):
-                    rec["merge_request_url"] = url
-                if state and not rec.get("merge_request_state"):
-                    rec["merge_request_state"] = state
+            if state and _same_review_url(url, meta_url):
+                rec["merge_request_state"] = state
     except Exception as e:
         logger.debug(f"storage MR fill from state failed: {e}")
 
@@ -944,7 +943,12 @@ def _existing_temp_names() -> Set[str]:
 
 
 def _same_review_url(left: str, right: str) -> bool:
-    """True when two URLs are the same GitLab MR or Azure PR."""
+    """True when two URLs are the same GitLab MR or Azure PR.
+
+    Azure compares host + project/repo path + id. PR numbers restart per
+    repo, so host+id alone would treat ``repoA/pullrequest/4`` as
+    ``repoB/pullrequest/4``.
+    """
     a = _norm_mr_url(left)
     b = _norm_mr_url(right)
     if a and b and a == b:
@@ -966,8 +970,136 @@ def _same_review_url(left: str, right: str) -> bool:
     aa = parse_pull_request_url(left)
     ab = parse_pull_request_url(right)
     if aa and ab:
-        return aa[0] == ab[0] and int(aa[2]) == int(ab[2])
+        return (
+            aa[0] == ab[0]
+            and str(aa[1] or "").lower() == str(ab[1] or "").lower()
+            and int(aa[2]) == int(ab[2])
+        )
     return False
+
+
+def _review_git_url(url: str) -> str:
+    """Clone URL for a review page (PR/MR suffix stripped)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    return re.sub(
+        r"/(?:-/)?(?:pullrequest|pullRequest|merge_requests)/\d+/?$",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+
+
+def _review_project_iid(
+    *,
+    url: str = "",
+    project_path: str = "",
+    mr_iid: int = 0,
+    repository_url: str = "",
+) -> Optional[tuple[str, int]]:
+    """Identity for delete: ``(normalized project/repo, mr/pr iid)``."""
+    from src.azure.webhook import parse_azure_git_url, parse_pull_request_url
+    from src.gitlab.client import parse_merge_request_url, project_from_repo_url
+    from src.state.session_bind_store import normalize_repo_key
+
+    iid = 0
+    try:
+        iid = int(mr_iid or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    parsed_gl = parse_merge_request_url(url) if url else None
+    if parsed_gl:
+        host, project, found = parsed_gl
+        key = normalize_repo_key(f"https://{host}/{project}")
+        if key and int(found) > 0:
+            return key, int(found)
+    parsed_az = parse_pull_request_url(url) if url else None
+    if parsed_az:
+        key = normalize_repo_key(_review_git_url(url))
+        if key and int(parsed_az[2]) > 0:
+            return key, int(parsed_az[2])
+    git = (repository_url or "").strip() or _review_git_url(url)
+    if git and iid > 0:
+        pair = project_from_repo_url(git)
+        if pair:
+            key = normalize_repo_key(f"https://{pair[0]}/{pair[1]}")
+            if key:
+                return key, iid
+        parsed = parse_azure_git_url(git)
+        if parsed:
+            key = normalize_repo_key(git)
+            if key:
+                return key, iid
+        key = normalize_repo_key(git)
+        if key:
+            return key, iid
+    path = (project_path or "").strip().strip("/")
+    if path and iid > 0:
+        key = path.lower()
+        return key, iid
+    return None
+
+
+def _same_project_iid(
+    left: Optional[tuple[str, int]], right: Optional[tuple[str, int]]
+) -> bool:
+    """True when both sides are the same git project and the same MR/PR id."""
+    if not left or not right:
+        return False
+    if int(left[1]) <= 0 or int(left[1]) != int(right[1]):
+        return False
+    a = (left[0] or "").strip().lower().strip("/")
+    b = (right[0] or "").strip().lower().strip("/")
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if "/" in shorter and longer.endswith("/" + shorter):
+        return True
+    return False
+
+
+def _remote_matches_review(remote_url: str, review_url: str) -> bool:
+    """True when *remote_url* is the git remote for *review_url*."""
+    from src.state.session_bind_store import normalize_repo_key
+
+    review = _review_git_url(review_url)
+    left = normalize_repo_key(remote_url or "")
+    right = normalize_repo_key(review)
+    return bool(left and right and left == right)
+
+
+def _job_matches_review(
+    job: Dict[str, Any],
+    *,
+    mr_url: str,
+    project_path: str = "",
+    mr_iid: int = 0,
+    repository_url: str = "",
+) -> bool:
+    """True when *job* is this project URL + MR/PR iid (not merely the Jira key)."""
+    want = _review_project_iid(
+        url=mr_url,
+        project_path=project_path,
+        mr_iid=mr_iid,
+        repository_url=repository_url,
+    )
+    if not want:
+        return False
+    job_iid = int(job.get("gitlab_mr_iid") or job.get("azure_pr_id") or 0)
+    got = _review_project_iid(
+        url=str(job.get("merge_request_url") or ""),
+        project_path=str(
+            job.get("gitlab_project")
+            or job.get("azure_project")
+            or ""
+        ),
+        mr_iid=job_iid,
+        repository_url=str(job.get("repository_url") or ""),
+    )
+    return _same_project_iid(want, got)
 
 
 def clone_folder_names_for_mr(
@@ -977,8 +1109,9 @@ def clone_folder_names_for_mr(
     mr_iid: int = 0,
     issue_key: str = "",
     source_branch: str = "",
+    repository_url: str = "",
 ) -> List[str]:
-    """Temp-clone folder names tied to this merge request."""
+    """Temp-clone folder names for this project URL + MR/PR iid."""
     names: List[str] = []
     seen: Set[str] = set()
 
@@ -994,86 +1127,40 @@ def clone_folder_names_for_mr(
 
     want_url = _norm_mr_url(mr_url)
     want_path = (project_path or "").strip().lower()
-    want_key = (issue_key or "").strip().upper()
-    want_branch = (source_branch or "").strip()
+    want = _review_project_iid(
+        url=want_url,
+        project_path=want_path,
+        mr_iid=mr_iid,
+        repository_url=repository_url,
+    )
 
     try:
         from src.state.job_store import job_store
 
         n = job_store.count_jobs()
         for job in job_store.list_jobs(limit=max(int(n or 0), 1)):
-            job_url = str(job.get("merge_request_url") or "")
-            same_url = _same_review_url(want_url, job_url)
-            same_iid = False
-            if want_url and "/merge_requests/" in want_url.lower():
-                same_iid = (
-                    int(job.get("gitlab_mr_iid") or 0) == int(mr_iid or 0)
-                    and int(mr_iid or 0) > 0
-                    and (
-                        not want_path
-                        or str(job.get("gitlab_project") or "").strip().lower()
-                        == want_path
-                    )
-                )
-            same_issue = bool(want_key) and str(job.get("issue_key") or "").upper() == want_key
-            # Issue key is enough. A webhook always has an MR URL; requiring
-            # same_url here dropped every Jira job that only stored the key
-            # (or a slightly different URL) and never gitlab_mr_iid.
-            if same_url or same_iid or same_issue:
+            if _job_matches_review(
+                job,
+                mr_url=want_url,
+                project_path=want_path,
+                mr_iid=mr_iid,
+                repository_url=repository_url,
+            ):
                 _add(job.get("working_directory"))
     except Exception as e:
         logger.debug(f"MR clone lookup from jobs failed: {e}")
 
     try:
-        from src.state.session_bind_store import session_bind_store
-
-        for rec in session_bind_store.list_binds(limit=500):
-            if want_key and str(rec.get("issue_key") or "").upper() == want_key:
-                _add(rec.get("working_directory"))
-                continue
-            if want_branch and str(rec.get("branch") or "").strip() == want_branch:
-                _add(rec.get("working_directory"))
-    except Exception as e:
-        logger.debug(f"MR clone lookup from binds failed: {e}")
-
-    if want_key:
-        try:
-            from src.git_manager import GitManager
-
-            live = getattr(GitManager, "_live_by_issue", None) or {}
-            gm = live.get(want_key) or live.get(issue_key)
-            if gm is not None:
-                _add(getattr(gm, "temp_dir", None))
-        except Exception as e:
-            logger.debug(f"MR clone lookup from live git failed: {e}")
-
-    # Same map Storage uses so a folder that shows !N is deleted when !N merges.
-    try:
-        from src.gitlab.client import parse_merge_request_url
-
-        want_iid = int(mr_iid or 0) or 0
-        if not want_iid and want_url:
-            parsed = parse_merge_request_url(want_url)
-            if parsed:
-                want_iid = int(parsed[2])
         exist = _existing_temp_names()
         for lookup, rec in _clone_issue_index().items():
             rec_url = str(rec.get("merge_request_url") or "")
-            rec_key = str(rec.get("issue_key") or "").upper()
-            rec_iid = 0
-            parsed = parse_merge_request_url(rec_url) if rec_url else None
-            if parsed:
-                rec_iid = int(parsed[2])
-            same_url = _same_review_url(want_url, rec_url)
-            same_iid = bool(
-                want_iid
-                and rec_iid
-                and want_iid == rec_iid
-                and want_url
-                and "/merge_requests/" in want_url.lower()
-            )
-            same_issue = bool(want_key and rec_key == want_key)
-            if same_url or same_iid or same_issue:
+            rec_ident = _review_project_iid(url=rec_url)
+            if want and rec_ident and _same_project_iid(want, rec_ident):
+                name = Path(str(lookup).replace("\\", "/")).name
+                if name in exist or lookup in exist:
+                    _add(lookup)
+                continue
+            if _same_review_url(want_url, rec_url):
                 name = Path(str(lookup).replace("\\", "/")).name
                 if name in exist or lookup in exist:
                     _add(lookup)
@@ -1089,6 +1176,7 @@ def delete_clones_for_merge_request(
     mr_iid: int = 0,
     issue_key: str = "",
     source_branch: str = "",
+    repository_url: str = "",
 ) -> List[str]:
     """Queue force-delete of temp clones for a merged or closed MR.
 
@@ -1102,6 +1190,7 @@ def delete_clones_for_merge_request(
         mr_iid=mr_iid,
         issue_key=issue_key,
         source_branch=source_branch,
+        repository_url=repository_url,
     )
     exist = _existing_temp_names()
     deleted: List[str] = []

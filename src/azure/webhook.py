@@ -8,6 +8,7 @@ No webhook secret or password — the hook URL is enough.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -50,14 +51,30 @@ AZURE_PR_EVENTS = frozenset(
 )
 
 
-def azure_comment_key(pr_id: Any, thread_id: str = "", comment_id: str = "") -> str:
-    """Stable queue/dedup id. TFS comment ids restart at 1 on every thread."""
+def azure_comment_key(
+    pr_id: Any,
+    thread_id: str = "",
+    comment_id: str = "",
+    body: str = "",
+) -> str:
+    """Stable queue/dedup id. TFS comment ids restart at 1 on every thread.
+
+    With a thread id the key is ``pr:thread:comment``. Without one, two new
+    threads would both be ``pr::1``; include a body hash so they stay
+    distinct. The same webhook retry still matches (same body).
+    """
     pid = str(pr_id or "").strip()
     tid = str(thread_id or "").strip()
     cid = str(comment_id or "").strip()
     if not pid and not tid and not cid:
         return ""
-    return f"{pid}:{tid}:{cid}"
+    if tid:
+        return f"{pid}:{tid}:{cid}"
+    text = (body or "").strip()
+    if text:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+        return f"{pid}:{digest}:{cid}"
+    return f"{pid}::{cid}"
 
 
 @dataclass
@@ -746,6 +763,9 @@ def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> boo
             ),
             pr_id=int(getattr(event, "pr_id", 0) or 0),
             comment_id=str(getattr(event, "comment_id", "") or ""),
+            comment_content=str(
+                getattr(event, "comment_body", "") or getattr(event, "prompt", "") or ""
+            ),
         )
         if thread_id:
             event.thread_id = thread_id

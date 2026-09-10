@@ -24,6 +24,7 @@ from src.azure.mentions import (
     strip_azure_bot_mentions,
 )
 from src.azure.webhook import (
+    azure_comment_key,
     decide_azure_comment_webhook,
     decide_azure_pr_webhook,
     parse_azure_git_url,
@@ -273,6 +274,15 @@ def test_parse_azure_git_and_pr_urls():
     )
     assert parse_pull_request_url("") is None
     assert parse_azure_git_url("") is None
+
+
+def test_azure_comment_key_uses_body_when_thread_missing():
+    assert azure_comment_key(4, "8", "1") == "4:8:1"
+    a = azure_comment_key(4, "", "1", "first thread prompt")
+    b = azure_comment_key(4, "", "1", "second thread prompt")
+    assert a != b
+    assert a == azure_comment_key(4, "", "1", "first thread prompt")
+    assert a.startswith("4:") and a.endswith(":1")
 
 
 def test_decide_accepts_pr_mention():
@@ -1130,6 +1140,104 @@ async def test_enqueue_azure_schedule_comment_id_one_is_not_global_dup(
     assert second.get("duplicate") is not True
     assert first["queue_id"] != second["queue_id"]
     assert proc.queue_store.get(second["queue_id"])["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_azure_missing_thread_two_bodies_are_not_dup(
+    tmp_path, monkeypatch, fake_jira
+):
+    """Webhook often omits threadId. Two new threads both have comment id 1."""
+    from src.azure.webhook import AzurePrCommentEvent
+    from src.processor import JobProcessor
+    from src.state.queue_store import WorkQueueStore
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "q")
+    proc.dispatch_queue = AsyncMock(return_value=0)
+
+    def _ev(body: str) -> AzurePrCommentEvent:
+        return AzurePrCommentEvent(
+            issue_key="AZ-DEMO-4",
+            comment_id="1",
+            comment_body=body,
+            prompt=body,
+            author_username="alice",
+            author_name="Alice",
+            collection_url="https://tfs.example.com/tfs/DefaultCollection",
+            project="Demo",
+            repository_id="demo",
+            repository_name="demo",
+            project_path="Demo/demo",
+            repository_url=(
+                "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
+            ),
+            host="tfs.example.com",
+            pr_id=4,
+            pr_title="login",
+            pr_description="",
+            source_branch="feature/login",
+            target_branch="develop",
+            pr_url="",
+            thread_id="",
+        )
+
+    first = await proc.enqueue_azure_comment(_ev("first thread prompt"))
+    second = await proc.enqueue_azure_comment(_ev("second thread prompt"))
+    assert first["ok"] is True
+    assert second.get("duplicate") is not True, second
+    assert first["queue_id"] != second["queue_id"]
+
+
+@pytest.mark.asyncio
+async def test_azure_followup_stays_queued_while_same_issue_is_live(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    from src.azure.webhook import AzurePrCommentEvent
+    from src.dashboard.service import build_queue
+    from src.processor import JobProcessor
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-12", "feat(KAN-12): login", "running")
+    state_manager.update_state("KAN-12", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-12"] = {"git": None, "runner": None}
+
+    ev = AzurePrCommentEvent(
+        issue_key="KAN-12",
+        comment_id="1",
+        comment_body="also add tests",
+        prompt="also add tests",
+        author_username="alice",
+        author_name="Alice",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        project="Demo",
+        repository_id="demo",
+        repository_name="demo",
+        project_path="Demo/demo",
+        repository_url=(
+            "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
+        ),
+        host="tfs.example.com",
+        pr_id=4,
+        pr_title="feat(KAN-12): login",
+        pr_description="",
+        source_branch="feature/login",
+        target_branch="develop",
+        pr_url="",
+        thread_id="9",
+    )
+    out = await proc.enqueue_azure_comment(ev)
+    assert out["ok"] is True
+    row = proc.queue_store.get(out["queue_id"])
+    assert row["status"] == "queued", row.get("error_message")
+    view = build_queue(store=proc.queue_store, processor=proc)
+    assert any(i.queue_id == out["queue_id"] for i in view.items)
 
 
 def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):

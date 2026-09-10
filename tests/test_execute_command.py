@@ -219,6 +219,64 @@ def test_azure_finds_thread_id_from_comment_list(monkeypatch):
     )
 
 
+def test_azure_find_thread_does_not_pick_first_comment_id_one(monkeypatch):
+    from src.azure.client import AzureDevOpsClient
+
+    payload = {
+        "value": [
+            {"id": 8, "comments": [{"id": 1, "content": "old overview"}]},
+            {
+                "id": 9,
+                "comments": [{"id": 1, "content": "@yaver /execute fix tests"}],
+            },
+        ]
+    }
+
+    class FakeResp:
+        status_code = 200
+        content = b"{}"
+        text = "{}"
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return FakeResp()
+
+    monkeypatch.setattr("src.azure.client.httpx.Client", FakeClient)
+    c = AzureDevOpsClient(
+        host="tfs.example.com",
+        pat="azpat-test",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+    )
+    assert (
+        c.find_thread_id_for_comment(
+            project="Demo",
+            repository="demo",
+            pr_id=4,
+            comment_id="1",
+            comment_content="@yaver /execute fix tests",
+        )
+        == "9"
+    )
+    assert (
+        c.find_thread_id_for_comment(
+            project="Demo", repository="demo", pr_id=4, comment_id="1"
+        )
+        == ""
+    )
+
+
 def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
@@ -353,7 +411,7 @@ def test_gitlab_client_does_not_fallback_to_new_note(monkeypatch):
             return False
 
         def post(self, url, headers=None, json=None):
-            calls.append(json)
+            calls.append({"url": url, "json": json})
             return FakeResp()
 
     monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
@@ -363,7 +421,8 @@ def test_gitlab_client_does_not_fallback_to_new_note(monkeypatch):
     )
     assert out is None
     assert len(calls) == 1
-    assert calls[0]["in_reply_to_discussion_id"] == "d1"
+    assert "/discussions/d1/notes" in calls[0]["url"]
+    assert calls[0]["json"] == {"body": "*Yaver*\n\nhi"}
 
 
 def test_azure_client_does_not_fallback_to_new_thread(monkeypatch):

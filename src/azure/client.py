@@ -192,8 +192,14 @@ class AzureDevOpsClient:
         repository: Any,
         pr_id: int,
         comment_id: str,
+        comment_content: str = "",
     ) -> str:
-        """Find the PR thread that contains *comment_id* (TFS omits threadId)."""
+        """Find the PR thread that contains *comment_id* (TFS omits threadId).
+
+        Comment ids restart at 1 on every thread. If more than one thread
+        has that id, require a unique content match. Never return the
+        first hit.
+        """
         cid = str(comment_id or "").strip()
         if not cid or not self.api_base:
             return ""
@@ -235,6 +241,8 @@ class AzureDevOpsClient:
             rows = data.get("value") if isinstance(data, dict) else data
             if not isinstance(rows, list):
                 return ""
+            hits: list[tuple[str, str]] = []
+            want = (comment_content or "").strip()
             for thread in rows:
                 if not isinstance(thread, dict):
                     continue
@@ -242,14 +250,33 @@ class AzureDevOpsClient:
                 if tid is None or tid == "":
                     continue
                 for item in thread.get("comments") or []:
-                    if isinstance(item, dict) and str(item.get("id") or "") == cid:
-                        azure_info(
-                            f"find_thread ok {project}/{repository}!{iid} "
-                            f"comment={cid} thread={tid}"
-                        )
-                        return str(tid)
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("id") or "") != cid:
+                        continue
+                    hits.append((str(tid), str(item.get("content") or "").strip()))
+            if not hits:
+                azure_warning(
+                    f"find_thread miss {project}/{repository}!{iid} comment={cid}"
+                )
+                return ""
+            if len(hits) == 1:
+                azure_info(
+                    f"find_thread ok {project}/{repository}!{iid} "
+                    f"comment={cid} thread={hits[0][0]}"
+                )
+                return hits[0][0]
+            if want:
+                matched = [tid for tid, text in hits if text == want]
+                if len(matched) == 1:
+                    azure_info(
+                        f"find_thread ok {project}/{repository}!{iid} "
+                        f"comment={cid} thread={matched[0]} (content)"
+                    )
+                    return matched[0]
             azure_warning(
-                f"find_thread miss {project}/{repository}!{iid} comment={cid}"
+                f"find_thread ambiguous {project}/{repository}!{iid} "
+                f"comment={cid} threads={[t for t, _ in hits]}"
             )
             return ""
         except Exception as e:

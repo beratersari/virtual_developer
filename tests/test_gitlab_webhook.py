@@ -282,9 +282,49 @@ def test_gitlab_client_posts_note(monkeypatch):
     c = GitlabClient(host="gitlab.example.com", pat="glpat-test")
     out = c.post_mr_note(project=1, mr_iid=4, body="*Yaver*\n\nhi", discussion_id="d1")
     assert out and out["id"] == 9
-    assert "/projects/1/merge_requests/4/notes" in captured["url"]
+    assert "/projects/1/merge_requests/4/discussions/d1/notes" in captured["url"]
     assert captured["headers"]["PRIVATE-TOKEN"] == "glpat-test"
-    assert captured["json"]["in_reply_to_discussion_id"] == "d1"
+    assert captured["json"] == {"body": "*Yaver*\n\nhi"}
+
+
+def test_gitlab_client_opens_discussion_for_new_thread(monkeypatch):
+    from src.gitlab.client import GitlabClient
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 201
+        content = b"{}"
+        text = "{}"
+
+        def json(self):
+            return {
+                "id": "disc-new",
+                "notes": [{"id": 11, "body": "hi"}],
+            }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
+    c = GitlabClient(host="gitlab.example.com", pat="glpat-test")
+    out = c.post_mr_note(project=1, mr_iid=4, body="*Yaver*\n\nhi")
+    assert "/projects/1/merge_requests/4/discussions" in captured["url"]
+    assert "/notes" not in captured["url"].split("discussions", 1)[-1]
+    assert out["id"] == 11
+    assert out["discussion_id"] == "disc-new"
 
 
 def test_is_gitlab_triggered_uses_source_metadata():

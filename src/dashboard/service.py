@@ -1266,8 +1266,10 @@ def build_queue(
 ) -> QueueResponse:
     """List work-queue items for the dashboard (Jira + GitLab).
 
-    Waiting rows whose issue is already in-flight are omitted so the same
-    ticket is not listed under both In flight and Queue.
+    Waiting *Jira* rows whose issue is already in-flight are omitted so the
+    same ticket is not listed under both In flight and Queue. GitLab/Azure
+    comments are extra work and stay visible while they wait for the
+    same repo + source + target lock.
     """
     from src.state.queue_store import work_queue_store as default_queue
 
@@ -1276,6 +1278,9 @@ def build_queue(
 
     def _waiting_and_live(rec: Dict[str, Any]) -> bool:
         if (rec.get("status") or "") != "queued":
+            return False
+        source = (rec.get("source") or "jira").strip().lower()
+        if source in {"gitlab", "azure"}:
             return False
         ik = (rec.get("issue_key") or "").strip().upper()
         if ik and ik in live_keys:
