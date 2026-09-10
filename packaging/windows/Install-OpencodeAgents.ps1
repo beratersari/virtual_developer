@@ -121,7 +121,7 @@ function Copy-PlanBuildAgents([string]$Src, [string]$Dest) {
     if (-not (Test-Path -LiteralPath $Dest -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $Dest | Out-Null
     }
-    foreach ($name in @("derman-build.md", "derman-plan.md")) {
+    foreach ($name in @("derman-build.md", "derman-plan.md", "derman-test.md")) {
         $srcFile = Join-Path $Src $name
         if (-not (Test-Path -LiteralPath $srcFile -PathType Leaf)) {
             throw "required agent missing: $srcFile"
@@ -142,7 +142,7 @@ Write-Host "Source skills : $($trees.Skills)"
 Copy-PlanBuildAgents $trees.Agents $destAgents
 Copy-Tree $trees.Skills $destSkills
 
-foreach ($name in @("derman-build.md", "derman-plan.md")) {
+foreach ($name in @("derman-build.md", "derman-plan.md", "derman-test.md")) {
     $marker = Join-Path $destAgents $name
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
         throw "Copy finished but missing $marker"

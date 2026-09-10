@@ -772,7 +772,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
   const [source, setSource] = useState('develop')
   const [target, setTarget] = useState('develop')
-  const [mode, setMode] = useState<'plan' | 'build'>('build')
+  const [mode, setMode] = useState<'plan' | 'build' | 'test'>('build')
 
   const needsParams = Boolean(preview && !preview.template_valid)
 
@@ -812,7 +812,7 @@ function Existing({ onDone }: { onDone: () => void }) {
       setSrcMode('issue_key')
     }
     if (p.target_branch) setTarget(p.target_branch)
-    if (p.mode === 'plan' || p.mode === 'build') setMode(p.mode)
+    if (p.mode === 'plan' || p.mode === 'build' || p.mode === 'test') setMode(p.mode)
   }
 
   const get = async () => {
@@ -1034,8 +1034,8 @@ function ProjectBranchFields({
   setSource: (v: string) => void
   target: string
   setTarget: (v: string) => void
-  mode: 'plan' | 'build'
-  setMode: (v: 'plan' | 'build') => void
+  mode: 'plan' | 'build' | 'test'
+  setMode: (v: 'plan' | 'build' | 'test') => void
   showRemember: boolean
   rememberRepo: boolean
   setRememberRepo: (v: boolean) => void
@@ -1120,9 +1120,16 @@ function ProjectBranchFields({
       </label>
       <label className="field">
         <span>Mode</span>
-        <select value={mode} onChange={(e) => setMode(e.target.value === 'plan' ? 'plan' : 'build')}>
+        <select
+          value={mode}
+          onChange={(e) => {
+            const v = e.target.value
+            setMode(v === 'plan' || v === 'test' ? v : 'build')
+          }}
+        >
           <option value="build">build</option>
           <option value="plan">plan</option>
+          <option value="test">test</option>
         </select>
       </label>
     </>
@@ -1142,7 +1149,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
   const [source, setSource] = useState('develop')
   const [target, setTarget] = useState('develop')
-  const [mode, setMode] = useState<'plan' | 'build'>('build')
+  const [mode, setMode] = useState<'plan' | 'build' | 'test'>('build')
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
   const [issueType, setIssueType] = useState('Task')

@@ -175,7 +175,8 @@ class JobProcessor:
         self.jira_client = create_jira_client(simulated=use_simulated)
         logger.debug(
             f"JobProcessor initialized - derman-build={settings.default_agent} "
-            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')}"
+            f"derman-plan={getattr(settings, 'default_plan_agent', 'derman-plan')} "
+            f"derman-test={getattr(settings, 'default_test_agent', 'derman-test')}"
         )
     
     # Statuses where an agent is actively running — never restart these from updates
@@ -209,7 +210,7 @@ class JobProcessor:
     ) -> WorkflowType:
         """Pick plan vs build vs oracle from the issue text.
 
-        * Explicit ``Mode: plan|build`` selects the workflow.
+        * Explicit ``Mode: plan|build|test`` selects the workflow.
         * Otherwise ``WorkflowRouter.route_issue`` (keyword / oracle heuristics).
         * Template validity (Repository, Source, Target, **Mode**) is **not**
           checked here — same path as always: ``require_issue_git_spec`` inside
@@ -220,6 +221,8 @@ class JobProcessor:
             return WorkflowType.PLANNING
         if mode == "build":
             return WorkflowType.EXECUTION
+        if mode == "test":
+            return WorkflowType.TESTING
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
     def _is_gitlab_triggered(
@@ -1223,7 +1226,7 @@ class JobProcessor:
         return repo, branch, target
 
     def _session_kind_for_issue(self, issue_key: str) -> str:
-        """``plan`` or ``build`` map for this issue's current workflow."""
+        """``plan`` / ``build`` / ``test`` map for this issue's current workflow."""
         from src.state.session_bind_store import normalize_session_kind
 
         st = self.state_manager.get_state(issue_key)
@@ -1235,6 +1238,9 @@ class JobProcessor:
             if st.status == TaskStatus.PLANNING:
                 return "plan"
             if st.status == TaskStatus.EXECUTING:
+                wt = str(meta.get("workflow_type") or "").strip().lower()
+                if wt == "testing":
+                    return "test"
                 return "build"
         return ""
 
@@ -3217,6 +3223,8 @@ class JobProcessor:
                 await self._start_planning_workflow(state)
             elif workflow_type == WorkflowType.EXECUTION:
                 await self._start_execution_workflow(state)
+            elif workflow_type == WorkflowType.TESTING:
+                await self._start_execution_workflow(state, kind="test")
             elif workflow_type == WorkflowType.ORACLE_CONSULT:
                 await self._start_oracle_consultation(state)
             return True, None
@@ -5766,11 +5774,22 @@ class JobProcessor:
             self._release_context(state.issue_key, success=False)
 
     async def _start_execution_workflow(
-        self, state: JiraAgentState, *, from_plan_execute: bool = False
+        self,
+        state: JiraAgentState,
+        *,
+        from_plan_execute: bool = False,
+        kind: str = "build",
     ):
+        kind_n = (kind or "build").strip().lower()
+        if kind_n not in {"build", "test"}:
+            kind_n = "build"
+        is_test = kind_n == "test"
+        wf = WorkflowType.TESTING if is_test else WorkflowType.EXECUTION
+        agent = WorkflowRouter.get_agent_for_workflow(wf)
         logger.info(
-            f"Starting execution (build) workflow for {state.issue_key}"
-            + (" (plan_execute)" if from_plan_execute else "")
+            f"Starting {'test' if is_test else 'execution (build)'} workflow "
+            f"for {state.issue_key}"
+            + (" (plan_execute)" if from_plan_execute and not is_test else "")
         )
         workflow_start_time = datetime.now()
 
@@ -5778,15 +5797,25 @@ class JobProcessor:
         plan_for_prompt = self._resolve_plan_for_build(state.issue_key) or ""
 
         # Create task first (rebuild prompt after clone with work_branch)
-        task = AgentTask(
-            description=f"Execute: {state.issue_key}",
-            prompt=PromptBuilder.build_build_prompt(
+        if is_test:
+            first_prompt = PromptBuilder.build_test_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+            )
+            task_label = f"Test: {state.issue_key}"
+        else:
+            first_prompt = PromptBuilder.build_build_prompt(
                 issue_key=state.issue_key,
                 summary=state.issue_summary or "",
                 description=state.description or "",
                 plan_path=plan_for_prompt or None,
-            ),
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+            )
+            task_label = f"Execute: {state.issue_key}"
+        task = AgentTask(
+            description=task_label,
+            prompt=first_prompt,
+            agent=agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -5797,8 +5826,8 @@ class JobProcessor:
             state,
             status=TaskStatus.EXECUTING,
             task=task,
-            workflow_type="execution",
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+            workflow_type=wf.value,
+            agent=agent,
             job_status="executing",
             started_at=workflow_start_time,
         )
@@ -5836,7 +5865,14 @@ class JobProcessor:
         # issue key) and commit policy use the real checked-out source.
         raw_wb = getattr(git, "work_branch", None)
         work_branch = raw_wb.strip() if isinstance(raw_wb, str) and raw_wb.strip() else None
-        if from_plan_execute:
+        if is_test:
+            task.prompt = PromptBuilder.build_test_prompt(
+                issue_key=state.issue_key,
+                summary=state.issue_summary or "",
+                description=state.description or "",
+                work_branch=work_branch,
+            )
+        elif from_plan_execute:
             task.prompt = PromptBuilder.build_plan_execute_prompt(
                 plan_path_for_agent or str(durable_now),
                 issue_key=state.issue_key,

@@ -10,8 +10,9 @@ from src.issue_git_spec import parse_issue_mode
 class WorkflowType(Enum):
     """Types of workflows available."""
 
-    PLANNING = "planning"  # Mode: plan — Prometheus → plan on Jira (no GitLab push)
-    EXECUTION = "execution"  # Mode: build — Atlas execute → push + MR
+    PLANNING = "planning"  # Mode: plan — derman-plan (no GitLab push)
+    EXECUTION = "execution"  # Mode: build — derman-build → push + MR
+    TESTING = "testing"  # Mode: test — derman-test → unit tests, push + MR
     ORACLE_CONSULT = "oracle"  # Architecture consultation (no Mode required)
 
 
@@ -46,6 +47,7 @@ class WorkflowRouter:
         "epic",
         "mode: plan",
         "mode: build",
+        "mode: test",
     ]
 
     @classmethod
@@ -57,7 +59,7 @@ class WorkflowRouter:
     ) -> WorkflowType:
         """Determine workflow type for an issue (board poller intake only).
 
-        Primary signal: ``Mode: plan|build`` inside the Jira ``{params}`` block.
+        Primary signal: ``Mode: plan|build|test`` inside the Jira ``{params}`` block.
         Direct execution is removed — use ``Mode: build`` for implementation.
         """
         del issue_key  # reserved for future per-key rules
@@ -66,6 +68,8 @@ class WorkflowRouter:
             return WorkflowType.PLANNING
         if mode == "build":
             return WorkflowType.EXECUTION
+        if mode == "test":
+            return WorkflowType.TESTING
 
         combined_text = f"{summary} {description}".lower()
         has_implementation = any(
@@ -105,7 +109,7 @@ class WorkflowRouter:
         ``plan_ready``. Same-ticket implement uses label ``plan_execute``;
         a new ``Mode: build`` issue is still a direct build.
         """
-        return workflow_type == WorkflowType.EXECUTION
+        return workflow_type in (WorkflowType.EXECUTION, WorkflowType.TESTING)
 
     @classmethod
     def get_agent_for_workflow(cls, workflow_type: WorkflowType) -> str:
@@ -116,6 +120,11 @@ class WorkflowRouter:
             plan = getattr(settings, "default_plan_agent", None)
             if isinstance(plan, str) and plan.strip():
                 return plan.strip()
+        if workflow_type == WorkflowType.TESTING:
+            test = getattr(settings, "default_test_agent", None)
+            if isinstance(test, str) and test.strip():
+                return test.strip()
+            return "derman-test"
         agent = getattr(settings, "default_agent", None)
         if isinstance(agent, str) and agent.strip():
             return agent.strip()

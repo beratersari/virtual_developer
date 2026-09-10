@@ -23,6 +23,8 @@ def runner(tmp_path):
 def test_resolve_opencode_agent_name_stock_build():
     assert resolve_opencode_agent_name("derman-build") == "derman-build"
     assert resolve_opencode_agent_name("derman-plan") == "derman-plan"
+    assert resolve_opencode_agent_name("derman-test") == "derman-test"
+    assert resolve_opencode_agent_name("tester") == "derman-test"
     assert resolve_opencode_agent_name("forge") == "derman-build"
     assert resolve_opencode_agent_name("blueprint") == "derman-plan"
     assert resolve_opencode_agent_name("implement") == "derman-build"

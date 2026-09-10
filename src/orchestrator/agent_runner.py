@@ -22,6 +22,8 @@ IS_WINDOWS = platform.system() == "Windows"
 OPENCODE_AGENT_ALIASES: Dict[str, str] = {
     "derman-build": "derman-build",
     "derman-plan": "derman-plan",
+    "derman-test": "derman-test",
+    "tester": "derman-test",
     "forge": "derman-build",
     "blueprint": "derman-plan",
     "implement": "derman-build",

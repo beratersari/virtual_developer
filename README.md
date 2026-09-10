@@ -54,7 +54,8 @@ Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCo
 |---------|------|
 | **`DEFAULT_AGENT`** (`derman-build`) | OpenCoderman **derman-build** for `Mode: build` (not stock `build`) |
 | **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
-| **Plan vs build user text** | Short job facts in `agent/PLAN_PROMPT.md` / `agent/BUILD_PROMPT.md`; rules live on the agents |
+| **`DEFAULT_TEST_AGENT`** (`derman-test`) | OpenCoderman **derman-test** for `Mode: test` (unit tests only) |
+| **Plan / build / test user text** | Short job facts in `agent/PLAN_PROMPT.md` / `BUILD_PROMPT.md` / `TEST_PROMPT.md`; rules live on the agents |
 | **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
@@ -556,6 +557,7 @@ python cli.py show PROJ-123
 |-----|---------|
 | [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
 | [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | derman-plan — unattended planner |
+| [opencoderman/agents/derman-test.md](opencoderman/agents/derman-test.md) | derman-test — unattended unit-test writer |
 | [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | derman-build — unattended implementer |
 | [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Short plan-job user stub |
 | [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Short implement-job user stub |

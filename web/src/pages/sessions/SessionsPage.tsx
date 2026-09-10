@@ -10,6 +10,7 @@ function kindLabel(kind?: string | null): string {
   const group = sessionKindGroup(kind)
   if (group === 'plan') return 'plan'
   if (group === 'build') return 'build'
+  if (group === 'test') return 'test'
   return 'legacy'
 }
 
@@ -96,7 +97,7 @@ export function SessionsPage() {
       <PageHeader
         kicker="OpenCode"
         title="Sessions"
-        description="Plan and build keep separate sessions for the same repository + Source + Target. Reset only that map; the other kind is unchanged."
+        description="Plan, build, and test keep separate sessions for the same repository + Source + Target. Reset only that map; the other kinds are unchanged."
       />
       {error && <p className="text-sm text-danger-text">{error}</p>}
 
@@ -122,6 +123,17 @@ export function SessionsPage() {
         />
       </div>
 
+      <div className="space-y-2">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
+          Test
+        </h2>
+        <SessionList
+          rows={groups.test}
+          empty="No test sessions bound yet."
+          onReset={setResetId}
+        />
+      </div>
+
       {groups.other.length > 0 && (
         <div className="space-y-2">
           <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
@@ -140,7 +152,7 @@ export function SessionsPage() {
         title={`Reset this ${targetKind} session?`}
         body={
           target
-            ? `Next ${targetKind} job on ${target.branch}${target.target_branch ? ` → ${target.target_branch}` : ''} (${target.repository_key || target.repository_url}) starts a new ${targetKind} session.\n\nThe other kind (plan vs build) is left alone. Does not delete OpenCode’s own history — only our resume pointer.`
+            ? `Next ${targetKind} job on ${target.branch}${target.target_branch ? ` → ${target.target_branch}` : ''} (${target.repository_key || target.repository_url}) starts a new ${targetKind} session.\n\nThe other kinds (plan / build / test) are left alone. Does not delete OpenCode’s own history — only our resume pointer.`
             : 'Next job on this branch starts a new session.'
         }
         confirmLabel="Reset session"

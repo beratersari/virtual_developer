@@ -39,7 +39,7 @@ _SOURCE_MODES = frozenset({_SOURCE_MODE_CUSTOM, _SOURCE_MODE_ISSUE_KEY})
 if TYPE_CHECKING:
     from src.processor import JobProcessor
 
-# Mirrors issue_git_spec mode aliases (plan | build)
+# Mirrors issue_git_spec mode aliases (plan | build | test)
 _MODE_ALIASES = {
     "plan": "plan",
     "planning": "plan",
@@ -49,6 +49,10 @@ _MODE_ALIASES = {
     "execution": "build",
     "atlas": "build",
     "implement": "build",
+    "test": "test",
+    "testing": "test",
+    "tester": "test",
+    "derman-test": "test",
 }
 
 
@@ -67,7 +71,7 @@ def parse_schedule_at(raw: str) -> datetime:
 def _canonical_mode(mode: str) -> str:
     key = (mode or "").strip().lower()
     if key not in _MODE_ALIASES:
-        raise ValueError("mode must be 'plan' or 'build'")
+        raise ValueError("mode must be 'plan', 'build', or 'test'")
     return _MODE_ALIASES[key]
 
 

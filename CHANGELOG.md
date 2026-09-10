@@ -12,6 +12,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 - GitLab and Azure comment jobs start on `@mention /yaver` (was `/execute`). A mention without `/yaver` still gets a usage note. `/ask` is unchanged.
 
+### Added
+
+- `Mode: test` runs OpenCoderman **derman-test**: unit tests only. The agent must read this clone's `AGENTS.md` files for how the repo tests, then follow the unit-test practices on the agent. Delivery is the same as build (push + MR).
+
 ## [0.9.3] — 2026-09-10
 
 GitLab replies stay in the MR discussion. Azure comments that reuse id 1 are not collapsed. Follow-ups stay on Queue. Storage deletes only the matching clone.

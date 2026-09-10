@@ -100,6 +100,7 @@ Backend: opencode
 Mode is optional (default ``build``):
 * plan  — generate a plan and post it as a Jira comment (no GitLab push)
 * build — implement / execute (push branch + open merge request)
+* test  — write unit tests only (push branch + open merge request)
 Model and Backend are optional (default from .env / dashboard Settings).
 """
 
@@ -113,6 +114,10 @@ _MODE_ALIASES = {
     "execution": "build",
     "atlas": "build",
     "implement": "build",
+    "test": "test",
+    "testing": "test",
+    "tester": "test",
+    "derman-test": "test",
 }
 
 
@@ -123,7 +128,7 @@ class IssueGitSpec:
     repository_url: str
     source_branch: str
     target_branch: str
-    mode: Optional[str] = None  # "plan" | "build" when present
+    mode: Optional[str] = None  # "plan" | "build" | "test" when present
     model: Optional[str] = None  # model id; empty = settings default
     backend: Optional[str] = None  # opencode | codex; empty = settings default
 
@@ -374,7 +379,7 @@ def peek_issue_git_fields(summary: str = "", description: str = "") -> Dict[str,
 
 
 def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
-    """Return canonical mode (``plan`` / ``build``) from ``{params}``, or None.
+    """Return canonical mode (``plan`` / ``build`` / ``test``) from ``{params}``, or None.
 
     Looks for ``Mode:`` / ``Workflow:`` inside the params block only.
     When a ``{params}`` block exists but Mode is omitted, defaults to ``build``.
