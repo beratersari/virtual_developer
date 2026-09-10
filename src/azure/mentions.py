@@ -16,12 +16,18 @@ from typing import Iterable, List
 
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_MISSING_REASON,
+    author_is_configured_bot,
     flatten_comment_text,
+    format_execute_usage_note,
+    identity_key,
     mentioned_usernames,
     normalize_mention,
     note_is_ask_handoff,
+    note_is_execute_command,
     parse_mention_list,
     strip_bot_mentions,
+    strip_slash_command,
 )
 
 _VSS_MENTION = re.compile(
@@ -120,13 +126,19 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 __all__ = [
     "ASK_HANDOFF_REASON",
+    "EXECUTE_MISSING_REASON",
+    "author_is_configured_bot",
     "flatten_comment_text",
+    "format_execute_usage_note",
     "html_mention_names",
+    "identity_key",
     "mention_scan",
     "normalize_mention",
     "note_is_ask_handoff",
+    "note_is_execute_command",
     "note_mentions_bot",
     "parse_mention_list",
     "strip_azure_bot_mentions",
     "strip_bot_mentions",
+    "strip_slash_command",
 ]

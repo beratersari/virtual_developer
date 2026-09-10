@@ -29,7 +29,7 @@ from src.state.models import TaskStatus
 
 def _mr_payload(
     *,
-    note: str = "@berat_ai what does login do?",
+    note: str = "@berat_ai /execute what does login do?",
     username: str = "alice",
     notable: str = "MergeRequest",
     source: str = "feature/login",
@@ -482,7 +482,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
         return {"id": 202}
 
     decision = decide_gitlab_note_webhook(
-        _mr_payload(note="@berat_ai what does login do?"),
+        _mr_payload(note="@berat_ai /execute what does login do?"),
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
         secret="s",
         bot_mentions=["@berat_ai"],
@@ -678,7 +678,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
         return {"id": 101}
 
     decision = decide_gitlab_note_webhook(
-        _mr_payload(note="@berat_ai please fix the login bug"),
+        _mr_payload(note="@berat_ai /execute please fix the login bug"),
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "s"},
         secret="s",
         bot_mentions=["@berat_ai"],

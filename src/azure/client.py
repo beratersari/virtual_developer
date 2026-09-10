@@ -192,8 +192,13 @@ class AzureDevOpsClient:
         pr_id: int,
         body: str,
         thread_id: str = "",
+        allow_new_thread: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """POST a PR thread comment (new thread, or reply when thread_id set)."""
+        """POST a PR thread comment (new thread, or reply when thread_id set).
+
+        When *thread_id* is set, only reply in that thread. A failed reply
+        must not become a new top-level post.
+        """
         if not self.api_base:
             azure_error("post_comment fail api_base missing")
             return None
@@ -233,9 +238,15 @@ class AzureDevOpsClient:
                         )
                         return posted
                     azure_warning(
-                        f"post_comment thread reply failed; trying new thread "
+                        f"post_comment thread reply failed; not creating a new post "
                         f"{project}/{repository}!{iid} thread={tid}"
                     )
+                    return None
+                if not allow_new_thread:
+                    azure_warning(
+                        f"post_comment skip new thread {project}/{repository}!{iid}"
+                    )
+                    return None
                 payload = {
                     "comments": [{"parentCommentId": 0, "content": text, "commentType": 1}],
                     "status": 1,

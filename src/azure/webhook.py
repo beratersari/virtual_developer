@@ -17,12 +17,16 @@ from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
 from src.azure.mentions import (
     ASK_HANDOFF_REASON,
+    EXECUTE_MISSING_REASON,
+    author_is_configured_bot,
+    format_execute_usage_note,
     mention_scan,
-    normalize_mention,
     note_is_ask_handoff,
+    note_is_execute_command,
     note_mentions_bot,
     parse_mention_list,
     strip_azure_bot_mentions,
+    strip_slash_command,
 )
 from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
 from src.gitlab.webhook import WebhookDecision, validate_webhook_token
@@ -180,6 +184,34 @@ def _as_dict(value: Any) -> Dict[str, Any]:
 
 def _s(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def extract_azure_thread_id(
+    comment: Dict[str, Any], resource: Optional[Dict[str, Any]] = None
+) -> str:
+    """Thread id for an in-thread reply. Never use comment.id as the thread."""
+    resource = resource or {}
+    for raw in (
+        comment.get("threadId"),
+        comment.get("thread_id"),
+        _as_dict(resource.get("pullRequestThread")).get("id"),
+        _as_dict(resource.get("thread")).get("id"),
+    ):
+        text = str(raw).strip() if raw is not None and raw != "" else ""
+        if text and text.isdigit():
+            return text
+    hrefs: List[str] = []
+    links = _as_dict(comment.get("_links"))
+    for key in ("self", "threads", "thread"):
+        hrefs.append(_s(_as_dict(links.get(key)).get("href")))
+    hrefs.append(_s(comment.get("url")))
+    resource_self = _as_dict(_as_dict(resource.get("_links")).get("self"))
+    hrefs.append(_s(resource_self.get("href")))
+    for href in hrefs:
+        match = re.search(r"/threads/(\d+)", href or "", re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _header_map(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -536,35 +568,27 @@ def decide_azure_comment_webhook(
             f"preview={clip(note)!r}"
         )
         return WebhookDecision(False, "bot not mentioned")
+
+    author = _as_dict(comment.get("author"))
+    if author_is_configured_bot(
+        [
+            _s(author.get("uniqueName") or author.get("unique_name")),
+            _s(author.get("directoryAlias") or author.get("principalName")),
+            _s(author.get("displayName") or author.get("display_name")),
+        ],
+        bot_usernames or mentions,
+    ):
+        azure_info(
+            f"comment reject reason='ignored comment from bot user' "
+            f"author={_s(author.get('uniqueName') or author.get('displayName'))!r}"
+        )
+        return WebhookDecision(False, "ignored comment from bot user")
     if note_is_ask_handoff(note, bot_mentions or mentions):
         azure_info(
             f"comment reject reason={ASK_HANDOFF_REASON!r} event={event_name!r} "
             f"preview={clip(note)!r}"
         )
         return WebhookDecision(False, ASK_HANDOFF_REASON)
-
-    author = _as_dict(comment.get("author"))
-    author_unique = normalize_mention(
-        _s(author.get("uniqueName") or author.get("unique_name"))
-        or _s(author.get("directoryAlias") or author.get("principalName"))
-        or _s(author.get("displayName") or author.get("display_name"))
-    )
-    bots = set(parse_mention_list(bot_usernames) or mentions)
-    if author_unique and author_unique in bots:
-        azure_info(
-            f"comment reject reason='ignored comment from bot user' "
-            f"author_unique={author_unique!r}"
-        )
-        return WebhookDecision(False, "ignored comment from bot user")
-    author_display = normalize_mention(
-        _s(author.get("displayName") or author.get("display_name"))
-    )
-    if author_display and author_display in bots:
-        azure_info(
-            f"comment reject reason='ignored comment from bot user' "
-            f"author_display={author_display!r}"
-        )
-        return WebhookDecision(False, "ignored comment from bot user")
 
     repo = _as_dict(pr.get("repository") or resource.get("repository"))
     project = _as_dict(repo.get("project") or resource.get("project"))
@@ -606,6 +630,7 @@ def decide_azure_comment_webhook(
         )
 
     prompt = strip_azure_bot_mentions(note, mentions)
+    prompt = strip_slash_command(prompt, "execute")
     if not prompt:
         prompt = note.strip()
 
@@ -623,12 +648,7 @@ def decide_azure_comment_webhook(
     pr_url = _pr_web_url(
         pr, repo, collection_url, project_name, repo_name, pr_id
     )
-    thread_id = _s(
-        comment.get("threadId")
-        or comment.get("thread_id")
-        or comment.get("parentCommentId")
-        and str(comment.get("id") or "")
-    )
+    thread_id = extract_azure_thread_id(comment, resource)
 
     issue_key = resolve_pr_issue_key(
         pr_title=pr_title,
@@ -672,6 +692,14 @@ def decide_azure_comment_webhook(
         set_issue_key(event.issue_key)
     except Exception:
         pass
+    if not note_is_execute_command(note, bot_mentions or mentions):
+        azure_info(
+            f"comment reject reason={EXECUTE_MISSING_REASON!r} event={event_name!r} "
+            f"thread={event.thread_id or '-'} preview={clip(note)!r}"
+        )
+        return WebhookDecision(
+            False, EXECUTE_MISSING_REASON, event=event, usage_note=True
+        )
     azure_info(
         f"comment accepted issue={event.issue_key} "
         f"pr={event.project_path}!{event.pr_id} comment={event.comment_id} "
@@ -684,6 +712,34 @@ def decide_azure_comment_webhook(
         f"preview={clip(prompt)!r}"
     )
     return WebhookDecision(True, "accepted", event=event)
+
+
+def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> bool:
+    """Reply in the PR thread with /execute usage. Never a new thread."""
+    thread_id = (getattr(event, "thread_id", "") or "").strip()
+    if not thread_id:
+        azure_info(
+            "usage note skipped: no thread_id "
+            f"{getattr(event, 'project_path', '')}!{getattr(event, 'pr_id', '')}"
+        )
+        return False
+    from src.azure.client import AzureDevOpsClient
+
+    client = AzureDevOpsClient(
+        host=getattr(event, "host", "") or "",
+        collection_url=getattr(event, "collection_url", "") or "",
+    )
+    posted = client.post_pr_comment(
+        project=str(getattr(event, "project", "") or ""),
+        repository=(
+            getattr(event, "repository_id", "") or getattr(event, "repository_name", "")
+        ),
+        pr_id=int(getattr(event, "pr_id", 0) or 0),
+        body=format_execute_usage_note(bot_name),
+        thread_id=thread_id,
+        allow_new_thread=False,
+    )
+    return posted is not None
 
 
 def decide_azure_pr_webhook(

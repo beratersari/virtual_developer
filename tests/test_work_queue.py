@@ -25,7 +25,7 @@ def _note(note_id: int, prompt: str = "look at this"):
         },
         "object_attributes": {
             "id": note_id,
-            "note": f"@berat_ai {prompt}",
+            "note": f"@berat_ai /execute {prompt}",
             "noteable_type": "MergeRequest",
             "discussion_id": f"d{note_id}",
         },

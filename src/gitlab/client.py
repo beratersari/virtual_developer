@@ -234,8 +234,13 @@ class GitlabClient:
         mr_iid: int,
         body: str,
         discussion_id: str = "",
+        allow_new_thread: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """POST ``/projects/:id/merge_requests/:iid/notes`` (CE + EE)."""
+        """POST ``/projects/:id/merge_requests/:iid/notes`` (CE + EE).
+
+        When *discussion_id* is set, only reply in that discussion. A failed
+        reply must not become a new top-level note.
+        """
         if not self.api_base:
             logger.error("GitLab API base missing; cannot post MR note")
             return None
@@ -245,9 +250,15 @@ class GitlabClient:
         ident = self._project_ident(project)
         url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/notes"
         payload: Dict[str, Any] = {"body": text}
-        # Thread reply — supported on CE and EE when discussion_id is present
-        if (discussion_id or "").strip():
-            payload["in_reply_to_discussion_id"] = discussion_id.strip()
+        did = (discussion_id or "").strip()
+        if did:
+            payload["in_reply_to_discussion_id"] = did
+        elif not allow_new_thread:
+            logger.warning(
+                f"GitLab MR note skip: no discussion_id (thread-only) "
+                f"{project}!{mr_iid}"
+            )
+            return None
         try:
             # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
             with httpx.Client(timeout=30.0, verify=False) as client:
@@ -263,17 +274,6 @@ class GitlabClient:
                     f"GitLab MR note failed ({resp.status_code}): "
                     f"{(resp.text or '')[:400]}"
                 )
-                # Retry without discussion id (older CE / malformed id)
-                if discussion_id and resp.status_code in (400, 404, 422):
-                    payload.pop("in_reply_to_discussion_id", None)
-                    resp2 = client.post(url, headers=self._headers(), json=payload)
-                    if resp2.status_code in (200, 201):
-                        data = resp2.json() if resp2.content else {}
-                        return data if isinstance(data, dict) else {"ok": True}
-                    logger.error(
-                        f"GitLab MR note retry failed ({resp2.status_code}): "
-                        f"{(resp2.text or '')[:400]}"
-                    )
                 return None
         except Exception as e:
             logger.error(f"GitLab MR note error: {e}")
