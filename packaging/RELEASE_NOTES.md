@@ -1,4 +1,15 @@
-# Yaver 0.7.1
+# Yaver 0.8.0
+
+One trigger list per provider: `JIRA_TRIGGER_USER`,
+`GITLAB_TRIGGER_USER`, `AZURE_TRIGGER_USER` (comma-separated names,
+no `@`). Leftover `TRIGGER_ASSIGNEE_NAMES` / `GITLAB_BOT_MENTIONS` /
+`AZURE_BOT_MENTIONS` still load when the new key is empty.
+
+Azure Settings Test matches Creasy 0.9.1: authenticate at
+`https://<server>/tfs/_apis/connectionData`. A collection-scoped
+`connectionData` call is 400 on TFS. Host can be `tfs.example.com`
+or `tfs.example.com/tfs`. Clone still uses the collection on the
+git URL from the webhook.
 
 `@bot /ask …` on a GitLab MR or Azure PR comment is not a Yaver job.
 That command is routed to another agent. The webhook returns
@@ -97,6 +108,8 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- `JIRA_TRIGGER_USER` / `GITLAB_TRIGGER_USER` / `AZURE_TRIGGER_USER`
+- Azure Settings Test uses Creasy 0.9.1 `/tfs` identity (not `/tfs/<Collection>`)
 - `@bot /ask` on GitLab or Azure comments is ignored (another agent)
 - Scheduled follow-up on an existing GitLab MR
 - Azure `[azure]` job trail (webhook reject reasons, REST, git, workflow)
@@ -117,7 +130,7 @@ Copy `.env.example` next to the executable. Minimum:
 JIRA_HOST=https://your-jira.example.com
 JIRA_API_TOKEN=your-api-token-here
 JIRA_BOARD_ID=1
-TRIGGER_ASSIGNEE_NAMES=your-jira-display-name
+JIRA_TRIGGER_USER=your-jira-display-name
 ```
 
 Durable data: `YAVER_DATA_DIR` (`C:\vd\yaver` / `/vd/yaver`). Temp clones: `TEMP_DIR_BASE` (`C:\vd\t` / `/vd/t`).
