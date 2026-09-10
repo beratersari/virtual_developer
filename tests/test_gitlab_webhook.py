@@ -737,7 +737,7 @@ def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira)
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_payload(),
             headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
         )
@@ -760,7 +760,7 @@ def test_dashboard_webhook_rejects_bad_secret(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     client = TestClient(app)
     resp = client.post(
-        "/webhooks/gitlab",
+        "/yaver/webhook/gitlab",
         json=_mr_payload(),
         headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "nope"},
     )
@@ -848,7 +848,7 @@ def test_dashboard_mr_merge_webhook_deletes_clone(
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_lifecycle_payload(),
             headers={
                 "X-Gitlab-Event": "Merge Request Hook",
@@ -898,7 +898,7 @@ def test_dashboard_mr_close_webhook_deletes_clone(
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_lifecycle_payload(action="close", state="closed"),
             headers={
                 "X-Gitlab-Event": "Merge Request Hook",
@@ -1018,7 +1018,7 @@ def test_dashboard_mr_merge_deletes_when_only_issue_key_matches(
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_lifecycle_payload(),
             headers={
                 "X-Gitlab-Event": "Merge Request Hook",
@@ -1073,7 +1073,7 @@ def test_dashboard_mr_merge_deletes_despite_session_bind(
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/gitlab",
+            "/yaver/webhook/gitlab",
             json=_mr_lifecycle_payload(),
             headers={
                 "X-Gitlab-Event": "Merge Request Hook",

@@ -206,7 +206,7 @@ def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     with patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
         with TestClient(app) as client:
             resp = client.post(
-                "/webhooks/gitlab",
+                "/yaver/webhook/gitlab",
                 json=_mr_payload(note="@berat_ai please implement"),
                 headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
             )
@@ -242,7 +242,7 @@ def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     with patch("src.azure.client.AzureDevOpsClient.post_pr_comment", fake_post):
         with TestClient(app) as client:
             resp = client.post(
-                "/webhooks/azure",
+                "/yaver/webhook/azure",
                 json=_pr_comment_payload(note="@yaver please implement"),
             )
     assert resp.status_code == 200

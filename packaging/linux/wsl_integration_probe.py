@@ -192,7 +192,7 @@ def main() -> int:
     p.req(
         "yaver.gitlab_webhook_bad",
         "POST",
-        f"{YAVER}/webhooks/gitlab",
+        f"{YAVER}/yaver/webhook/gitlab",
         body={"object_kind": "note"},
         expect=(401, 403, 400),
     )

@@ -9,6 +9,10 @@ Comments from the bot user are ignored (no usage note).
 
 Example: `@yaver /execute fix the login bug`
 
+Webhook URLs are `POST /yaver/webhook/gitlab` and
+`POST /yaver/webhook/azure`. The previous `/webhooks/gitlab` and
+`/webhooks/azure` paths still work.
+
 # Yaver 0.8.1
 
 Azure webhooks have no secret and no password.

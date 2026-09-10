@@ -631,7 +631,7 @@ def test_operator_gitlab_webhook_binds_description_key(tmp_path, monkeypatch):
     assert decision.event is not None
     assert decision.event.issue_key.startswith("GL-")
 
-    r = http.post("/webhooks/gitlab", json=payload, headers=headers)
+    r = http.post("/yaver/webhook/gitlab", json=payload, headers=headers)
     # No processor on this app → 503 after the key is already bound
     assert r.status_code in (200, 202, 503)
 

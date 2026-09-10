@@ -331,10 +331,10 @@ def test_azure_domain_author_is_not_treated_as_the_bot(monkeypatch):
 
 @pytest.mark.xfail(
     strict=True,
-    reason="POST /webhooks/azure rejects uniqueName bot mentions",
+    reason="POST /yaver/webhook/azure rejects uniqueName bot mentions",
 )
 def test_azure_webhook_http_unique_name_is_accepted(monkeypatch):
-    """Full dashboard POST /webhooks/azure path (real ASGI, real secret header)."""
+    """Full dashboard POST /yaver/webhook/azure path (real ASGI, real secret header)."""
     monkeypatch.setattr(settings, "azure_webhook_enabled", True)
     monkeypatch.setattr(settings, "azure_webhook_secret", "hook-secret")
     monkeypatch.setattr(settings, "azure_bot_mentions", "CORP\\yaver")
@@ -343,7 +343,7 @@ def test_azure_webhook_http_unique_name_is_accepted(monkeypatch):
     app = create_dashboard_app(processor=None)
     client = TestClient(app)
     response = client.post(
-        "/webhooks/azure",
+        "/yaver/webhook/azure",
         headers={"X-Azure-Token": "hook-secret"},
         json=_azure_pr_comment_payload(
             note="@yaver please fix the failing test",

@@ -14,6 +14,7 @@ from src.config import (
     upsert_dotenv_keys,
 )
 from src.dashboard.issue_logs import issue_log_ring
+from src.dashboard.webhook_paths import AZURE_WEBHOOK_PATH, GITLAB_WEBHOOK_PATH
 from src.logger import logger
 from src.dashboard.project_repos import (
     parse_project_repositories,
@@ -295,7 +296,7 @@ def build_settings_view() -> SettingsView:
         gitlab_webhook_secret_configured=bool(
             (getattr(settings, "gitlab_webhook_secret", "") or "").strip()
         ),
-        gitlab_webhook_path="/webhooks/gitlab",
+        gitlab_webhook_path=GITLAB_WEBHOOK_PATH,
         azure_pat_configured=bool(
             settings.azure_has_any_pat()
             if hasattr(settings, "azure_has_any_pat")
@@ -321,7 +322,7 @@ def build_settings_view() -> SettingsView:
             if hasattr(settings, "resolved_azure_trigger_user")
             else (getattr(settings, "azure_bot_mentions", "") or "")
         ).strip(),
-        azure_webhook_path="/webhooks/azure",
+        azure_webhook_path=AZURE_WEBHOOK_PATH,
         jira_trigger_user=(
             settings.resolved_jira_trigger_user()
             if hasattr(settings, "resolved_jira_trigger_user")

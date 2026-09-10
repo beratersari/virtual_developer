@@ -15,6 +15,7 @@ GitLab and Azure comment jobs start only on `@mention /execute`.
 ### Changed
 
 - GitLab and Azure comment jobs start only on `@mention /execute`. A mention without `/execute` gets a usage note in the same thread (not a new post). `@mention /ask` is still a silent handoff to the other agent. Comments from the bot user are ignored (no usage note). Replies stay in the existing MR discussion / PR thread.
+- Webhook URLs are `POST /yaver/webhook/gitlab` and `POST /yaver/webhook/azure`. The old `/webhooks/gitlab` and `/webhooks/azure` paths still work.
 
 [0.9.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.0
 

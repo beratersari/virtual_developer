@@ -12,7 +12,7 @@ import simulated_gitlab_server as sim
 @pytest.fixture
 def sim_client():
     sim.reset_demo_data()
-    sim.DAEMON_WEBHOOK = "http://127.0.0.1:8080/webhooks/gitlab"
+    sim.DAEMON_WEBHOOK = "http://127.0.0.1:8080/yaver/webhook/gitlab"
     sim.WEBHOOK_SECRET = "secret"
     return sim.app.test_client()
 
@@ -72,7 +72,7 @@ def test_sim_comment_fires_note_hook(sim_client):
     assert r.status_code == 200
     body = r.get_json()
     assert body["ok"] is True
-    assert captured["url"].endswith("/webhooks/gitlab")
+    assert captured["url"].endswith("/yaver/webhook/gitlab")
     assert captured["headers"]["X-Gitlab-Event"] == "Note Hook"
     assert captured["headers"]["X-Gitlab-Token"] == "secret"
     assert captured["json"]["object_kind"] == "note"

@@ -2,8 +2,8 @@
 
 Set both ``DASHBOARD_USERNAME`` and ``DASHBOARD_PASSWORD`` in ``.env``.
 Empty pair = no login (LAN default). The Jira poller is in-process and
-never hits this. ``POST /webhooks/gitlab`` and ``POST /webhooks/azure``
-keep their own tokens.
+never hits this. ``POST /yaver/webhook/gitlab`` and
+``POST /yaver/webhook/azure`` keep their own tokens.
 
 Do not send HTTP 401 or ``WWW-Authenticate: Basic``. Edge (especially on
 a machine-name / LAN URL) treats that as a Windows/HTTP popup. That
@@ -22,6 +22,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 from src.config import settings
+from src.dashboard.webhook_paths import ALL_WEBHOOK_PATHS
 
 COOKIE_NAME = "yaver_dash"
 
@@ -101,7 +102,7 @@ def is_exempt_path(method: str, path: str) -> bool:
     # retries Authorization: Basic without our cookie / X-Yaver-Login.
     if verb == "GET" and raw.rstrip("/") == "/api/meta":
         return True
-    if raw.rstrip("/") in {"/webhooks/gitlab", "/webhooks/azure"}:
+    if raw.rstrip("/") in ALL_WEBHOOK_PATHS:
         return True
     if verb == "POST" and raw.rstrip("/") in {"/api/logout", "/api/login"}:
         return True

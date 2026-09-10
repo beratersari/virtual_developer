@@ -665,7 +665,7 @@ def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira)
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/azure",
+            "/yaver/webhook/azure",
             json=_pr_comment_payload(),
             headers={"X-Azure-Token": "tok"},
         )
@@ -697,7 +697,7 @@ def test_dashboard_webhook_has_no_secret(fake_jira, monkeypatch):
     app = create_dashboard_app(processor=proc)
     client = TestClient(app)
     resp = client.post(
-        "/webhooks/azure",
+        "/yaver/webhook/azure",
         json=_pr_comment_payload(),
         headers={"X-Azure-Token": "nope"},
     )
@@ -716,7 +716,7 @@ def test_dashboard_webhook_disabled(fake_jira, monkeypatch):
         proc = JobProcessor()
     client = TestClient(create_dashboard_app(processor=proc))
     resp = client.post(
-        "/webhooks/azure",
+        "/yaver/webhook/azure",
         json=_pr_comment_payload(),
         headers={"X-Azure-Token": "tok"},
     )
@@ -759,7 +759,7 @@ def test_dashboard_pr_completed_deletes_clone(tmp_path, monkeypatch, fake_jira):
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
-            "/webhooks/azure",
+            "/yaver/webhook/azure",
             json=_pr_lifecycle_payload(),
             headers={"X-Azure-Token": "tok"},
         )
