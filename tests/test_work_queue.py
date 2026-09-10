@@ -421,6 +421,39 @@ async def test_second_gitlab_message_waits_on_same_work_branch(
 
 
 @pytest.mark.asyncio
+async def test_gitlab_followup_stays_queued_while_same_repo_is_live(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """Second /execute on the same repo+source+target waits; it is not skipped."""
+    from src.dashboard.service import build_queue
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-12", "feat(KAN-12): login", "running")
+    state_manager.update_state("KAN-12", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-12"] = {"git": None, "runner": None}
+
+    e1 = _note(101, "do A")
+    e1.issue_key = "KAN-12"
+    e2 = _note(102, "do B")
+    e2.issue_key = "KAN-12"
+    first = await proc.enqueue_gitlab_note(e1)
+    second = await proc.enqueue_gitlab_note(e2)
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert second.get("duplicate") is not True
+    row = proc.queue_store.get(second["queue_id"])
+    assert row is not None
+    assert row["status"] == "queued", row.get("error_message")
+    view = build_queue(store=proc.queue_store, processor=proc)
+    assert any(i.queue_id == second["queue_id"] for i in view.items)
+
+
+@pytest.mark.asyncio
 async def test_jira_and_gitlab_share_work_branch_lock(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
 ):

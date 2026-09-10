@@ -1190,6 +1190,56 @@ async def test_enqueue_azure_missing_thread_two_bodies_are_not_dup(
     assert first["queue_id"] != second["queue_id"]
 
 
+@pytest.mark.asyncio
+async def test_azure_followup_stays_queued_while_same_issue_is_live(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    from src.azure.webhook import AzurePrCommentEvent
+    from src.dashboard.service import build_queue
+    from src.processor import JobProcessor
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = state_manager
+    state_manager.create_state("KAN-12", "feat(KAN-12): login", "running")
+    state_manager.update_state("KAN-12", status=TaskStatus.EXECUTING)
+    proc._contexts["KAN-12"] = {"git": None, "runner": None}
+
+    ev = AzurePrCommentEvent(
+        issue_key="KAN-12",
+        comment_id="1",
+        comment_body="also add tests",
+        prompt="also add tests",
+        author_username="alice",
+        author_name="Alice",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        project="Demo",
+        repository_id="demo",
+        repository_name="demo",
+        project_path="Demo/demo",
+        repository_url=(
+            "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
+        ),
+        host="tfs.example.com",
+        pr_id=4,
+        pr_title="feat(KAN-12): login",
+        pr_description="",
+        source_branch="feature/login",
+        target_branch="develop",
+        pr_url="",
+        thread_id="9",
+    )
+    out = await proc.enqueue_azure_comment(ev)
+    assert out["ok"] is True
+    row = proc.queue_store.get(out["queue_id"])
+    assert row["status"] == "queued", row.get("error_message")
+    view = build_queue(store=proc.queue_store, processor=proc)
+    assert any(i.queue_id == out["queue_id"] for i in view.items)
+
+
 def test_gitlab_webhook_unaffected_when_azure_enabled(monkeypatch):
     from src.gitlab.webhook import decide_gitlab_note_webhook
 

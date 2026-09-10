@@ -60,6 +60,8 @@ export function JobsPage() {
       const live = liveIssueKeys ?? new Set<string>()
       const rows = (q.items || []).filter((r) => {
         if (r.status !== 'queued') return false
+        const src = String(r.source || 'jira').toLowerCase()
+        if (src === 'gitlab' || src === 'azure') return true
         const key = (r.issue_key || '').toUpperCase()
         return !key || !live.has(key)
       })

@@ -4010,14 +4010,16 @@ class JobProcessor:
         return n
 
     def _skip_queued_while_in_flight(self) -> int:
-        """Finish leftover ``queued`` rows whose issue is already running.
+        """Drop leftover Jira poller rows whose issue is already running.
 
-        Poller/schedule re-enqueue used to leave a waiting row next to the
-        live job. That row appeared on the Queue tab and would start again
-        when the in-flight run finished.
+        GitLab/Azure comments are new work (different prompt). They stay
+        queued; ``claim_next`` waits on issue key and on repo+source+target.
         """
         n = 0
         for rec in list(self.queue_store.list_items(status="queued", limit=500)):
+            source = (rec.get("source") or "jira").strip().lower()
+            if source != "jira":
+                continue
             ik = (rec.get("issue_key") or "").strip()
             if not ik or not self._issue_is_in_flight(ik):
                 continue
