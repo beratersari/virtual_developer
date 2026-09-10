@@ -59,6 +59,44 @@ def _ref_name(branch: str) -> str:
     return f"refs/heads/{name}"
 
 
+def _identity_names_from_payload(data: Any) -> list:
+    rows: list = []
+    if isinstance(data, dict):
+        if isinstance(data.get("value"), list):
+            rows = [x for x in data["value"] if isinstance(x, dict)]
+        else:
+            rows = [data]
+    elif isinstance(data, list):
+        rows = [x for x in data if isinstance(x, dict)]
+    names: list = []
+    seen: set = set()
+
+    def _add(raw: Any) -> None:
+        text = str(raw or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            names.append(text)
+
+    for row in rows:
+        for key in (
+            "providerDisplayName",
+            "customDisplayName",
+            "displayName",
+            "uniqueName",
+            "mailAddress",
+        ):
+            _add(row.get(key))
+        props = row.get("properties")
+        if isinstance(props, dict):
+            for key in ("Account", "Mail", "DirectoryAlias", "Domain"):
+                item = props.get(key)
+                if isinstance(item, dict):
+                    _add(item.get("$value") or item.get("value"))
+                else:
+                    _add(item)
+    return names
+
+
 class AzureDevOpsClient:
     """Minimal Azure DevOps Server API used by PR comment intake."""
 
@@ -108,6 +146,78 @@ class AzureDevOpsClient:
         if self.pat:
             headers["Authorization"] = azure_basic_auth(self.pat)
         return headers
+
+    def identity_aliases(self, identity_id: str) -> list:
+        """Display / unique names for a TFS mention GUID."""
+        from src.azure.mentions import normalize_guid
+
+        gid = normalize_guid(identity_id)
+        if not gid or not self.api_base:
+            return []
+        cache = getattr(self, "_identity_alias_cache", None)
+        if cache is None:
+            cache = {}
+            self._identity_alias_cache = cache
+        if gid in cache:
+            return list(cache[gid])
+        names = self._fetch_identity_aliases(gid)
+        cache[gid] = names
+        return list(names)
+
+    def _fetch_identity_aliases(self, gid: str) -> list:
+        from src.azure.urls import identity_root, identity_roots
+
+        bases = []
+        for raw in (self.collection_url, self.api_base):
+            if raw:
+                bases.extend(identity_roots(identity_root(raw) or raw))
+        if self.api_base and self.api_base not in bases:
+            bases.append(self.api_base)
+        urls = []
+        for base in bases:
+            root = str(base).rstrip("/")
+            urls.append((f"{root}/_apis/identities/{gid}", {}))
+            urls.append((f"{root}/_apis/identities", {"identityIds": gid}))
+        for url, extra_params in urls:
+            try:
+                with httpx.Client(timeout=20.0, verify=False) as client:
+                    resp = client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"api-version": _API_VERSION, **extra_params},
+                    )
+                    ver = _API_VERSION
+                    if resp.status_code in (400, 404, 415):
+                        resp = client.get(
+                            url,
+                            headers=self._headers(),
+                            params={
+                                "api-version": _API_VERSION_FALLBACK,
+                                **extra_params,
+                            },
+                        )
+                        ver = _API_VERSION_FALLBACK
+                if resp.status_code != 200:
+                    azure_warning(
+                        f"identity lookup fail id={gid} "
+                        + http_detail(
+                            method="GET",
+                            url=url,
+                            status=resp.status_code,
+                            api_version=ver,
+                            body=resp.text,
+                        )
+                    )
+                    continue
+                names = _identity_names_from_payload(
+                    resp.json() if resp.content else {}
+                )
+                if names:
+                    azure_info(f"identity lookup ok id={gid} names={names}")
+                    return names
+            except Exception as exc:
+                azure_warning(f"identity lookup error id={gid} err={exc}")
+        return []
 
     def _repo_url(self, project: str, repository: Any) -> str:
         # Unquote first so "Tank%20Projeleri" is not encoded as Tank%2520…

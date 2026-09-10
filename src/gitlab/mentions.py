@@ -110,11 +110,58 @@ _VSS_CHIP = re.compile(
     r"<a\s[^>]*data-vss-mention[^>]*>(.*?)</a>",
     re.IGNORECASE | re.DOTALL,
 )
+_GUID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_VSS_MENTION_GUID = re.compile(
+    r'data-vss-mention\s*=\s*["\'][^"\']*?(?:version\s*:\s*[\d.]+,\s*)?('
+    + _GUID.pattern
+    + r")",
+    re.IGNORECASE,
+)
+_MD_MENTION_GUID = re.compile(r"@<(" + _GUID.pattern + r")>", re.IGNORECASE)
+_PLAIN_MENTION_GUID = re.compile(
+    r"(?<![A-Za-z0-9_.-])@(" + _GUID.pattern + r")(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+_VSS_INNER = re.compile(
+    r'data-vss-mention\s*=\s*["\'][^"\']*["\'][^>]*>([^<]+)',
+    re.IGNORECASE,
+)
+
+
+def normalize_guid(raw: str) -> str:
+    text = (raw or "").strip().strip("<>").lstrip("@").strip()
+    match = _GUID.fullmatch(text)
+    return match.group(0).lower() if match else ""
+
+
+def extract_mention_guids(note: str) -> List[str]:
+    """Azure user ids from ``data-vss-mention`` chips and ``@<guid>``."""
+    if not note:
+        return []
+    found: List[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        gid = normalize_guid(raw)
+        if gid and gid not in seen:
+            seen.add(gid)
+            found.append(gid)
+
+    for pat in (_VSS_MENTION_GUID, _MD_MENTION_GUID, _PLAIN_MENTION_GUID):
+        for match in pat.finditer(note):
+            _add(match.group(1))
+    for match in _VSS_INNER.finditer(note):
+        _add(match.group(1) or "")
+    return found
 
 
 def flatten_comment_text(note: str) -> str:
     """Plain text for command scans (Azure mention chips, leftover HTML)."""
     text = note or ""
+    # Markdown @<guid> is not HTML — do not strip it as a tag.
+    text = _MD_MENTION_GUID.sub(lambda m: f" @{m.group(1)} ", text)
     text = _VSS_CHIP.sub(lambda m: f" {m.group(1) or ''} ", text)
     text = re.sub(r"<[^>]+>", " ", text)
     return text.replace("\xa0", " ").replace("&nbsp;", " ")
@@ -174,12 +221,17 @@ def note_has_slash_command(
         return False
     raw = note or ""
     cmd_re = rf"/{re.escape(cmd)}(?![A-Za-z0-9_-])"
+    configured_guids = {normalize_guid(n) for n in names}
+    configured_guids.discard("")
     for match in _VSS_CHIP.finditer(raw):
         # TFS often inserts &nbsp; or a wrapper span between the chip
         # and /yaver. Flatten those. Another @mention must stay a miss.
         after = flatten_comment_text(raw[match.end() :])
         if re.match(rf"\s*{cmd_re}", after, flags=re.IGNORECASE):
-            if _name_is_configured_bot(match.group(1) or "", names):
+            chip_guids = set(extract_mention_guids(match.group(0) or ""))
+            if _name_is_configured_bot(match.group(1) or "", names) or (
+                configured_guids and configured_guids.intersection(chip_guids)
+            ):
                 return True
     text = flatten_comment_text(raw)
     if not text:
@@ -193,6 +245,25 @@ def note_has_slash_command(
             flags=re.IGNORECASE,
         ):
             return True
+        # "@Yaver Bot /yaver" when configured as yaver. Extra words must
+        # look like a display-name tail (capitalized). "@bot please /cmd"
+        # and "@bot @alice /cmd" stay misses.
+        tail_hit = re.search(
+            rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}((?:\s+\S+)*)\s*{cmd_re}",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if tail_hit:
+            words = (tail_hit.group(1) or "").split()
+            if words and all(
+                w[:1].isupper() and not w.startswith("@") for w in words
+            ):
+                return True
+        gid = normalize_guid(name)
+        if gid:
+            guid_cmd = "@<?" + re.escape(gid) + r">?\s*" + cmd_re
+            if re.search(guid_cmd, text, flags=re.IGNORECASE):
+                return True
     return False
 
 

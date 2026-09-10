@@ -76,6 +76,7 @@ def _az(note: str, *, unique_name: str = "DOMAIN\\alice", bots=None):
             ["CORP\\Yaver"],
             True,
         ),
+        ("@Yaver Bot /yaver fix", ["yaver"], True),
         ("@yaver @alice /yaver fix", ["yaver"], False),
         (
             '<a href="#" data-vss-mention="version:2.0,g">@yaver</a> '
@@ -87,6 +88,17 @@ def _az(note: str, *, unique_name: str = "DOMAIN\\alice", bots=None):
         ("@berat_ai /executing", ["berat_ai"], False),
         ("@berat_ai /yaver-now", ["berat_ai"], False),
         ("@other /yaver", ["berat_ai"], False),
+        (
+            '<a href="#" data-vss-mention="version:2.0,'
+            'ad96260c-ea80-6eeb-93b0-c942399631d0"></a>&nbsp;/yaver fix',
+            ["ad96260c-ea80-6eeb-93b0-c942399631d0"],
+            True,
+        ),
+        (
+            "@<ad96260c-ea80-6eeb-93b0-c942399631d0> /yaver fix",
+            ["ad96260c-ea80-6eeb-93b0-c942399631d0"],
+            True,
+        ),
         ("", ["berat_ai"], False),
     ],
 )
@@ -139,6 +151,23 @@ def test_azure_accepts_tfs_chip_nbsp_then_execute():
     assert d.usage_note is False
     assert d.event is not None
     assert "fix the tests" in d.event.prompt
+
+
+def test_azure_accepts_guid_chip_when_trigger_is_guid():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    note = (
+        f'<a href="#" data-vss-mention="version:2.0,{bot_id}"></a>'
+        "&nbsp;/yaver fix the tests"
+    )
+    d = _az(note, bots=[bot_id])
+    assert d.accepted is True, d.reason
+    assert d.usage_note is False
+
+
+def test_azure_accepts_markdown_guid_mention():
+    bot_id = "ad96260c-ea80-6eeb-93b0-c942399631d0"
+    d = _az(f"@<{bot_id}> /yaver fix the tests", bots=[bot_id])
+    assert d.accepted is True, d.reason
 
 
 def test_azure_two_mentions_then_execute_is_usage_note():
