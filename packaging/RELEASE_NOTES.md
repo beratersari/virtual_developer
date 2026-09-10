@@ -1,3 +1,14 @@
+# Yaver 0.9.0
+
+GitLab and Azure comment jobs start only on `@mention /execute`.
+
+A mention without `/execute` gets a usage note in that same
+MR discussion or PR thread. Yaver does not open a new post.
+`@mention /ask` is still a silent handoff to the other agent.
+Comments from the bot user are ignored (no usage note).
+
+Example: `@yaver /execute fix the login bug`
+
 # Yaver 0.8.1
 
 Azure webhooks have no secret and no password.

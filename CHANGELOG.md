@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-10
+
+GitLab and Azure comment jobs start only on `@mention /execute`.
+
+### Changed
+
+- GitLab and Azure comment jobs start only on `@mention /execute`. A mention without `/execute` gets a usage note in the same thread (not a new post). `@mention /ask` is still a silent handoff to the other agent. Comments from the bot user are ignored (no usage note). Replies stay in the existing MR discussion / PR thread.
+
+[0.9.0]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.0
+
 ## [0.8.1] — 2026-09-11
 
 Azure webhooks have no secret. Settings Test stays green after TFS identity even if a later page is 404.
