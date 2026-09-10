@@ -296,11 +296,10 @@ def probe_azure_connection(
             for base in _candidate_bases(raw_host or h, extra):
                 conn_url = f"{base}/_apis/connectionData"
                 resp = None
-                for api_ver in ("7.1", "7.0"):
+                for api_ver in ("7.1", "7.0", "6.0", "4.1", "1.0", ""):
                     try:
-                        resp = client.get(
-                            conn_url, params={"api-version": api_ver}
-                        )
+                        params = {"api-version": api_ver} if api_ver else None
+                        resp = client.get(conn_url, params=params)
                     except httpx.HTTPError as e:
                         last_error = str(e)
                         resp = None
@@ -381,12 +380,13 @@ def probe_azure_connection(
                                 }
                             )
                 else:
-                    projects_error = (
-                        f"Could not list projects (HTTP {proj_resp.status_code})"
-                    )
-                    azure_warning(
-                        f"probe projects list failed host={h} "
-                        f"status={proj_resp.status_code}"
+                    # Identity already succeeded. /tfs/_apis/projects is often
+                    # 404 on TFS (projects live under a collection). Not a
+                    # failed PAT.
+                    projects_error = None
+                    azure_info(
+                        f"probe projects skip host={h} "
+                        f"status={proj_resp.status_code} (identity ok)"
                     )
 
                 azure_info(
@@ -408,9 +408,12 @@ def probe_azure_connection(
                     "project_count": len(projects),
                     "projects_error": projects_error,
                     "message": (
-                        f"Connected as {username or 'unknown'} on {h}; "
-                        f"{len(projects)} project(s) listed"
-                        + (f" ({projects_error})" if projects_error else "")
+                        f"Connected as {username or 'unknown'} on {h}"
+                        + (
+                            f"; {len(projects)} project(s) listed"
+                            if projects
+                            else ""
+                        )
                     ),
                 }
 
@@ -445,6 +448,19 @@ def probe_azure_connection(
                 f"probe fail host={h} last_status={last_status} "
                 f"error={last_error!r}"
             )
+            if last_status == 404:
+                return {
+                    "ok": False,
+                    "host": h,
+                    "error": (
+                        "TFS identity URL returned 404 "
+                        "(https://<server>/tfs/_apis/connectionData). "
+                        "The PAT can still clone. Set Host to "
+                        "tfs.example.com/tfs — not a collection and not "
+                        "an auth/login page."
+                    ),
+                    "http_status": 404,
+                }
             return {
                 "ok": False,
                 "host": h,
