@@ -1,3 +1,13 @@
+# Yaver 0.8.1
+
+Azure webhooks have no secret and no password.
+`POST /webhooks/azure` does not check `X-Azure-Token`.
+Leftover `AZURE_WEBHOOK_SECRET` is ignored.
+
+Settings Test is success when
+`https://<server>/tfs/_apis/connectionData` is 200. A 404 on the
+project list or an auth/login page is not a failed PAT.
+
 # Yaver 0.8.0
 
 One trigger list per provider: `JIRA_TRIGGER_USER`,
@@ -108,6 +118,8 @@ Each release also attaches `opencoderman-<sha>.zip`.
 
 ## Highlights
 
+- Azure webhook has no secret or password
+- Settings Test stays OK if TFS identity is 200 and a later page is 404
 - `JIRA_TRIGGER_USER` / `GITLAB_TRIGGER_USER` / `AZURE_TRIGGER_USER`
 - Azure Settings Test uses Creasy 0.9.1 `/tfs` identity (not `/tfs/<Collection>`)
 - `@bot /ask` on GitLab or Azure comments is ignored (another agent)

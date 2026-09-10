@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-11
+
+Azure webhooks have no secret. Settings Test stays green after TFS identity even if a later page is 404.
+
+### Removed
+
+- Azure webhook secret and password. `POST /webhooks/azure` has no token check. Leftover `AZURE_WEBHOOK_SECRET` is ignored.
+
+### Fixed
+
+- Azure Settings Test succeeds when identity (`/tfs/_apis/connectionData`) is 200 even if the project list or an auth page returns 404.
+
+[0.8.1]: https://github.com/beratersari/virtual_developer/releases/tag/v0.8.1
+
 ## [0.8.0] — 2026-09-10
 
 One trigger list per provider. Azure Settings Test uses Creasy 0.9.1 TFS identity (`/tfs`, not `/tfs/<Collection>`).

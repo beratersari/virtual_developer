@@ -234,16 +234,15 @@ def test_azure_display_name_ask_handoff():
     assert d.reason == ASK_HANDOFF_REASON
 
 
-def test_azure_ask_does_not_run_before_auth():
+def test_azure_ask_ignored_without_webhook_secret():
     d = decide_azure_comment_webhook(
         _pr_comment_payload(note="@yaver /ask"),
-        headers={"X-Azure-Token": "bad"},
-        secret="good",
+        headers={},
+        secret="ignored",
         bot_mentions=BOTS_AZ,
     )
     assert d.accepted is False
-    assert d.http_status == 401
-    assert d.reason == "invalid webhook token"
+    assert d.reason == ASK_HANDOFF_REASON
 
 
 def test_azure_ask_after_bot_not_mentioned():

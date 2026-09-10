@@ -151,7 +151,7 @@ def create_dashboard_app(
     sm = state_manager or JiraStateManager()
     # No OpenAPI UI. Optional dashboard Basic: DASHBOARD_USERNAME + PASSWORD.
     # Poller is in-process. POST /webhooks/gitlab uses GITLAB_WEBHOOK_SECRET.
-    # POST /webhooks/azure uses AZURE_WEBHOOK_SECRET.
+    # POST /webhooks/azure has no secret.
     app = FastAPI(
         title="Yaver",
         version="1.0.0",
@@ -315,7 +315,7 @@ def create_dashboard_app(
         """Azure DevOps Server 2022.2 service hook.
 
         Register on the project: Pull request commented + Pull request
-        updated/merged/abandoned. Secret → X-Azure-Token (or Basic password).
+        updated/merged/abandoned. No webhook secret.
         """
         from fastapi.responses import JSONResponse
 
@@ -345,26 +345,25 @@ def create_dashboard_app(
                     event_name = str(val or "").lower()
                     break
         enabled = bool(getattr(settings, "azure_webhook_enabled", False))
-        secret = str(getattr(settings, "azure_webhook_secret", "") or "")
         is_pr = event_name in AZURE_PR_EVENTS
         azure_info(
             f"http webhook received event={event_name!r} kind="
             f"{'pull_request' if is_pr else 'comment'} "
-            f"enabled={enabled} secret_configured={bool(secret)}"
+            f"enabled={enabled}"
         )
         if is_pr:
             decision = decide_azure_pr_webhook(
                 payload,
                 headers=headers,
                 enabled=enabled,
-                secret=secret,
+                secret="",
             )
         else:
             decision = decide_azure_comment_webhook(
                 payload,
                 headers=headers,
                 enabled=enabled,
-                secret=secret,
+                secret="",
                 bot_mentions=list(settings.azure_bot_mentions_list),
                 bot_usernames=list(settings.azure_bot_usernames_list),
             )

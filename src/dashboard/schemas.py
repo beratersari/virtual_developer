@@ -374,7 +374,6 @@ class SettingsView(BaseModel):
     azure_webhook_enabled: bool = False
     azure_trigger_user: str = ""
     azure_bot_mentions: str = ""
-    azure_webhook_secret_configured: bool = False
     azure_webhook_path: str = "/webhooks/azure"
     jira_trigger_user: str = ""
     trigger_mentions: str = ""
@@ -637,11 +636,6 @@ class SettingsUpdate(BaseModel):
     azure_webhook_enabled: Optional[bool] = Field(
         default=None,
         description="Accept Azure DevOps Server service hooks on /webhooks/azure",
-    )
-    azure_webhook_secret: Optional[str] = Field(
-        default=None,
-        max_length=4000,
-        description="Write-only Azure X-Azure-Token secret (omit to keep current)",
     )
 
     @field_validator("agent_backend", mode="before")

@@ -363,7 +363,7 @@ class Settings(BaseSettings):
     )
     azure_webhook_secret: str = Field(
         default="",
-        description="Shared secret; must match service-hook X-Azure-Token (empty = reject)",
+        description="Leftover. Ignored. Azure webhooks have no secret.",
     )
     azure_trigger_user: str = Field(
         default="",

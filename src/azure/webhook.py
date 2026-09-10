@@ -3,8 +3,7 @@
 Project-level **Pull request commented** and **Pull request**
 (created / updated / merged / abandoned) hooks exist on Azure DevOps
 Server 2022.2. Operators register a Web Hooks subscription and send
-the shared secret as ``X-Azure-Token`` (same role as GitLab's
-``X-Gitlab-Token``).
+No webhook secret or password — the hook URL is enough.
 """
 
 from __future__ import annotations
@@ -469,21 +468,7 @@ def _auth_decision(
     if not enabled:
         azure_info(f"webhook reject reason={disabled_reason!r}")
         return WebhookDecision(False, disabled_reason)
-    want = (secret or "").strip()
-    if not want:
-        azure_info("webhook reject reason='webhook secret required' (AZURE_WEBHOOK_SECRET empty)")
-        return WebhookDecision(
-            False, "webhook secret required", http_status=401
-        )
-    token = _provided_token(headers)
-    source = _token_header_name(headers)
-    if not validate_webhook_token(token, secret):
-        azure_info(
-            f"webhook reject reason='invalid webhook token' "
-            f"token_header={source} token_present={bool(token)}"
-        )
-        return WebhookDecision(False, "invalid webhook token", http_status=401)
-    azure_info(f"webhook auth ok token_header={source}")
+    azure_info("webhook auth skipped (no Azure webhook secret)")
     return None
 
 

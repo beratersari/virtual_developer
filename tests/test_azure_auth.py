@@ -199,6 +199,45 @@ def test_probe_uses_remembered_collection(monkeypatch):
     assert out["collection_url"].rstrip("/").endswith("/tfs")
 
 
+def test_probe_identity_ok_when_projects_404(monkeypatch):
+    class FakeResp:
+        def __init__(self, status, payload=None):
+            self.status_code = status
+            self.content = b"{}" if payload is not None else b""
+            self.text = "auth page missing"
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            if "/tfs/_apis/connectionData" in url:
+                return FakeResp(
+                    200,
+                    {"authenticatedUser": {"id": "u1", "uniqueName": "bot@corp"}},
+                )
+            return FakeResp(404)
+
+    monkeypatch.setattr("src.azure_connection.httpx.Client", FakeClient)
+    monkeypatch.setattr("src.config.save_runtime_settings", lambda *_a, **_k: None)
+    monkeypatch.setattr("src.config.load_runtime_settings", lambda: {})
+    out = probe_azure_connection("tfs.example.com", pat="valid-pat")
+    assert out["ok"] is True
+    assert out["user"]["username"] == "bot@corp"
+    assert "404" not in (out.get("message") or "")
+    assert "auth page" not in (out.get("message") or "").lower()
+
+
 def test_probe_azure_all_401_is_unauthorized(monkeypatch):
     class FakeResp:
         status_code = 401
