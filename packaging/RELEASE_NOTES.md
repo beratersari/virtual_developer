@@ -1,3 +1,13 @@
+# Yaver 0.9.5
+
+HTTP Azure DevOps Server remotes clone again.
+`http://tfs:8080/tfs/…/_git/…` stays HTTP when the PAT is
+applied. HTTPS and SSH remotes still use HTTPS + PAT.
+
+A leftover `GITLAB_PAT` (no host map) authenticates MR
+replies, same as clone and push. Settings Test connection
+does not send that leftover token to a newly typed host.
+
 # Yaver 0.9.4
 
 Comment jobs start on `@mention /yaver` (was `/execute`).

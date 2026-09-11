@@ -137,6 +137,19 @@ class GitlabClient:
         self.pat = (pat or "").strip()
         if not self.pat and self.host and hasattr(settings, "gitlab_pat_for_host"):
             self.pat = (settings.gitlab_pat_for_host(self.host) or "").strip()
+        if not self.pat:
+            # Same leftover rule as GitManager clone/push: a lone GITLAB_PAT
+            # authenticates GitLab API when the host map is empty. Do not
+            # put this in gitlab_pat_for_host — Settings Test Connection
+            # must not send the leftover token to a newly typed host.
+            mapping: Dict[str, str] = {}
+            if hasattr(settings, "gitlab_host_pat_map"):
+                try:
+                    mapping = settings.gitlab_host_pat_map() or {}
+                except Exception:
+                    mapping = {}
+            if not mapping:
+                self.pat = (getattr(settings, "gitlab_pat", "") or "").strip()
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}

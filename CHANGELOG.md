@@ -8,6 +8,17 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-09-11
+
+HTTP Azure DevOps Server remotes clone again. Leftover `GITLAB_PAT` authenticates MR replies.
+
+### Fixed
+
+- HTTP TFS / GitLab remotes (`http://host:8080/…`) stay HTTP when applying PAT `insteadOf`. HTTPS and SSH remotes still rewrite to HTTPS + PAT.
+- Leftover `GITLAB_PAT` (no host map) is sent as `PRIVATE-TOKEN` on MR replies. Settings Test connection still does not send that leftover token to a newly typed host.
+
+[0.9.5]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.5
+
 ## [0.9.4] — 2026-09-10
 
 `@mention /yaver` starts comment jobs. `Mode: test` writes unit tests only. TFS identity chips and GUIDs match the bot. Plan/build stay on the work branch.

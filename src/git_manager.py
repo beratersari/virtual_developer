@@ -529,8 +529,10 @@ class GitManager:
     ) -> Dict[str, str]:
         """Unattended git env: settings/``.env`` PAT, no credential-manager prompt.
 
-        Rewrites ``https://host/`` → ``https://oauth2:PAT@host/`` via
-        ``GIT_CONFIG_*`` (PAT is not on the git argv). Disables
+        Rewrites remotes via ``GIT_CONFIG_*`` (PAT is not on the git argv):
+        ``https://host/`` and ``git@host:`` → ``https://oauth2:PAT@host/``
+        (Azure: ``https://pat:PAT@host/``); ``http://host/`` stays HTTP so
+        stock TFS ``http://host:8080/`` is not flipped to TLS. Disables
         ``credential.helper`` for this child so a missing/disabled Windows
         GCM cannot pop a username prompt. Askpass is a backup.
         """
@@ -579,27 +581,32 @@ class GitManager:
             out["VD_GIT_AUTH"] = "azure"
             out["VD_GIT_ASKUSER"] = azure_basic_user()
             extra = f"Authorization: {azure_basic_auth(pat)}"
-            rewrite_user = f"https://pat:{quote(pat, safe='')}@{host}/"
+            userinfo = f"pat:{quote(pat, safe='')}"
         else:
             out["VD_GIT_AUTH"] = "gitlab"
             out["VD_GIT_ASKUSER"] = "oauth2"
             userinfo = f"oauth2:{pat}"
             basic = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
             extra = f"Authorization: Basic {basic}"
-            rewrite_user = f"https://oauth2:{pat}@{host}/"
-        rewrite_from = (
-            f"https://{host}/",
-            f"http://{host}/",
-            f"https://git@{host}/",
-            f"http://git@{host}/",
-            f"git@{host}:",
-            f"ssh://git@{host}/",
-            f"ssh://{host}/",
-        )
-        pairs = [(f"url.{rewrite_user}.insteadOf", src) for src in rewrite_from]
+        # HTTP remotes (stock TFS :8080, HTTP GitLab) must stay HTTP.
+        # A single https://user@host dest used to rewrite http://host:8080/
+        # to TLS on the same port — git then fails with "wrong version number".
+        # SSH / git@ still rewrite to HTTPS + PAT (unchanged).
+        http_dest = f"http://{userinfo}@{host}/"
+        https_dest = f"https://{userinfo}@{host}/"
+        pairs: List[tuple[str, str]] = [
+            (f"url.{http_dest}.insteadOf", f"http://{host}/"),
+            (f"url.{http_dest}.insteadOf", f"http://git@{host}/"),
+            (f"url.{https_dest}.insteadOf", f"https://{host}/"),
+            (f"url.{https_dest}.insteadOf", f"https://git@{host}/"),
+            (f"url.{https_dest}.insteadOf", f"git@{host}:"),
+            (f"url.{https_dest}.insteadOf", f"ssh://git@{host}/"),
+            (f"url.{https_dest}.insteadOf", f"ssh://{host}/"),
+        ]
         # Empty helper resets system GCM / manager-core for this child.
         pairs.append(("credential.helper", ""))
         pairs.append((f"credential.https://{host}.helper", ""))
+        pairs.append((f"credential.http://{host}.helper", ""))
         if askpass is not None:
             pairs.append(("core.askPass", str(askpass)))
         pairs.append(("http.extraHeader", extra))
