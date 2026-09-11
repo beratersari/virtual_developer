@@ -150,6 +150,7 @@ class JiraPoller:
         lookup = getattr(self.client, "sprint_lookup", None)
         sprint_err = getattr(self.client, "last_error", None)
         if sprint:
+            # First active sprint only (see JiraClient.get_active_sprint).
             sprint_id = sprint["id"]
             sprint_name = sprint.get("name", "unknown")
             logger.info(f"Found active sprint: {sprint_name} (id: {sprint_id})")

@@ -793,6 +793,10 @@ def decide_azure_comment_webhook(
         set_issue_key(event.issue_key)
     except Exception:
         pass
+    # Intentional: /yaver must sit next to a configured trigger name
+    # (AZURE_TRIGGER_USER). A GUID-only @<VSID> chip can count as a mention
+    # (usage note) but does not start a job. Do not pass resolved GUID aliases
+    # into this check.
     if not note_is_execute_command(note, bot_mentions or trigger_names):
         azure_info(
             f"comment reject reason={EXECUTE_MISSING_REASON!r} event={event_name!r} "

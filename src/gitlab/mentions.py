@@ -300,7 +300,13 @@ def other_agent_handoff_reason(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 def note_is_execute_command(note: str, bot_mentions: Iterable[str]) -> bool:
-    """True when the comment contains ``@bot /yaver`` for a configured bot."""
+    """True when the comment contains ``@bot /yaver`` for a configured bot.
+
+    *bot_mentions* is the configured trigger list (``AZURE_TRIGGER_USER`` /
+    ``GITLAB_TRIGGER_USER``). A TFS ``@<GUID>`` chip that only resolves to
+    the bot via identity lookup is not enough — that path stays a usage
+    note. Intentional; do not treat resolved GUIDs as ``/yaver``.
+    """
     return note_has_slash_command(note, bot_mentions, EXECUTE_COMMAND)
 
 

@@ -315,6 +315,10 @@ JIRA_API_TOKEN=your-api-token-here
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
 - Poller focuses on board/sprint + To Do + bot assignee. The board poller is the only Jira intake.
+- **First active sprint only (intentional).** Scrum boards use `values[0]`
+  from `/sprint?state=active`. Parallel sprints are not merged. Put bot
+  tickets on that first sprint, or use a Kanban board (no sprints → whole
+  board). Do not “fix” by loading every active sprint.
 
 ### Config checklist (common)
 
@@ -323,7 +327,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_HOST` | Base URL |
 | `JIRA_API_TOKEN` | Bearer token |
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
-| `JIRA_BOARD_ID` | Sprint/board poller board |
+| `JIRA_BOARD_ID` | Sprint/board poller board. Scrum: first active sprint only (not parallel sprints). Kanban: whole board. |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored. |
@@ -337,7 +341,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret) |
-| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment. Comma-separated, no `@`. Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /ask` is ignored (another agent). |
 
 ---
 
