@@ -22,18 +22,9 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _header_for_state(kind: str, state: Optional[JiraAgentState]) -> str:
-    from src.brand import format_reply_header
+    from src.brand import format_reply_header, resolve_reply_ids
 
-    job_id = ""
-    model = ""
-    if state is not None:
-        meta = state.metadata or {}
-        job_id = str(meta.get("current_job_id") or "").strip()
-        if not job_id:
-            ids = meta.get("job_ids") or []
-            if ids:
-                job_id = str(ids[-1] or "").strip()
-        model = str(meta.get("model") or "").strip()
+    model, job_id = resolve_reply_ids(state)
     return format_reply_header(kind, model=model, job_id=job_id)
 
 

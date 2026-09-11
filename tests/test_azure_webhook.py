@@ -975,6 +975,7 @@ async def test_processor_azure_posts_reply_and_pushes(
     body = posted.get("body") or ""
     assert body.startswith("**Yaver ")
     assert "— Answer**" in body
+    assert "`job_" in body.split("\n", 1)[0]
     assert "Fixed the login bug." in body
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False

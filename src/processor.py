@@ -444,6 +444,7 @@ class JobProcessor:
                     f"(not overwriting COMPLETED/CANCELLED)"
                 )
                 return
+            reply_job_id = self._job_id_for_reply(updated)
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
             )
@@ -461,6 +462,7 @@ class JobProcessor:
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
                     kind="Failed",
+                    job_id=reply_job_id,
                 )
                 return
             if azure_job:
@@ -472,6 +474,7 @@ class JobProcessor:
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
                     kind="Failed",
+                    job_id=reply_job_id,
                 )
                 return
             # Default suggestion for config errors if caller did not pass one
@@ -1545,6 +1548,33 @@ class JobProcessor:
             self.job_store.update_job(job_id, working_directory=path)
         except Exception:
             pass
+
+    def _job_id_for_reply(self, state: Any) -> str:
+        """Job id for the Creasy reply header (never omit when a job exists)."""
+        key = str(getattr(state, "issue_key", "") or "").strip()
+        jid = ""
+        if key:
+            jid = str(self._active_jobs.get(key) or "").strip()
+        if not jid:
+            from src.log_context import get_job_id
+
+            jid = (get_job_id() or "").strip()
+        if not jid and state is not None:
+            meta = getattr(state, "metadata", None) or {}
+            if isinstance(meta, dict):
+                jid = str(meta.get("current_job_id") or "").strip()
+                if not jid:
+                    ids = meta.get("job_ids") or []
+                    if isinstance(ids, (list, tuple)) and ids:
+                        jid = str(ids[-1] or "").strip()
+        if not jid and key:
+            try:
+                rows = self.job_store.list_jobs(issue_key=key, limit=1)
+            except Exception:
+                rows = []
+            if rows:
+                jid = str((rows[0] or {}).get("job_id") or "").strip()
+        return jid
 
     def _model_for_issue(self, state: Any) -> str:
         """Per-issue Model: from {params}, else settings default."""
@@ -4219,7 +4249,12 @@ class JobProcessor:
             await self.dispatch_queue()
 
     def _post_gitlab_mr_reply(
-        self, state: JiraAgentState, body: str, *, kind: str = "Answer"
+        self,
+        state: JiraAgentState,
+        body: str,
+        *,
+        kind: str = "Answer",
+        job_id: str = "",
     ) -> bool:
         """Post *body* on the GitLab MR stored in issue metadata (CE + EE)."""
         meta = dict(state.metadata or {})
@@ -4257,6 +4292,7 @@ class JobProcessor:
                 body,
                 state=state,
                 model=self._model_for_issue(state),
+                job_id=(job_id or "").strip() or self._job_id_for_reply(state),
             )
         posted = client.post_mr_note(
             project=project,
@@ -4867,7 +4903,12 @@ class JobProcessor:
             self._release_context(state.issue_key, success=success)
 
     def _post_azure_pr_reply(
-        self, state: JiraAgentState, body: str, *, kind: str = "Answer"
+        self,
+        state: JiraAgentState,
+        body: str,
+        *,
+        kind: str = "Answer",
+        job_id: str = "",
     ) -> bool:
         """Post *body* on the Azure DevOps PR stored in issue metadata."""
         meta = dict(state.metadata or {})
@@ -4925,6 +4966,7 @@ class JobProcessor:
                 body,
                 state=state,
                 model=self._model_for_issue(state),
+                job_id=(job_id or "").strip() or self._job_id_for_reply(state),
             )
         posted = client.post_pr_comment(
             project=str(project),

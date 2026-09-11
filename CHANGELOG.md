@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- MR/PR/Jira reply headers always include ``job_id`` (Creasy: `**Yaver ver — Kind** · \`model\` · \`job_id\``).
+
 ## [0.9.7] — 2026-09-11
 
 Scheduled MR/PR follow-ups post a regular note, then reply with the answer.
