@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-09-11
+
+Scheduled MR/PR follow-ups post a regular note, then reply with the answer.
+
+### Fixed
+
+- Scheduled GitLab MR and Azure PR follow-ups post the prompt as a regular note (not a resolvable review thread). The model answer replies to that note.
+
+[0.9.7]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.7
+
 ## [0.9.6] — 2026-09-11
 
 Optional Jira trigger label. Silent `/ask` and `/review`. Thread follow-ups send a structured prompt. Replies use a Creasy-style header.
