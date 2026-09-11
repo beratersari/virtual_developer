@@ -854,6 +854,7 @@ def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> boo
         body=format_execute_usage_note(bot_name),
         thread_id=thread_id,
         allow_new_thread=False,
+        parent_comment_id=str(getattr(event, "comment_id", "") or ""),
     )
     return posted is not None
 

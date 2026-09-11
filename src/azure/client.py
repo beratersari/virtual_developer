@@ -59,6 +59,16 @@ def _ref_name(branch: str) -> str:
     return f"refs/heads/{name}"
 
 
+def _azure_parent_comment_id(raw: Any) -> str:
+    """Numeric comment id for parentCommentId (strip pr:thread:comment keys)."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1].strip()
+    return text if text.isdigit() else ""
+
+
 def _identity_names_from_payload(data: Any) -> list:
     rows: list = []
     if isinstance(data, dict):
@@ -402,8 +412,13 @@ class AzureDevOpsClient:
         body: str,
         thread_id: str = "",
         allow_new_thread: bool = True,
+        parent_comment_id: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """POST a PR thread comment (new thread, or reply when thread_id set).
+        """POST a PR overview note, or a reply when thread_id is set.
+
+        A new top-level comment is a Closed conversation note (not an
+        Active review thread the operator has to resolve). Replies set
+        ``parentCommentId`` when the prompt comment id is known.
 
         When *thread_id* is set, only reply in that thread. A failed reply
         must not become a new top-level post.
@@ -427,9 +442,11 @@ class AzureDevOpsClient:
             return None
         base = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
         tid = (thread_id or "").strip()
+        parent_id = _azure_parent_comment_id(parent_comment_id)
         azure_info(
             f"post_comment start {project}/{repository}!{iid} "
-            f"thread={tid or 'new'} chars={len(text)} pat={yn(self.pat)}"
+            f"thread={tid or 'new'} parent={parent_id or '-'} "
+            f"chars={len(text)} pat={yn(self.pat)}"
         )
         try:
             with httpx.Client(timeout=30.0, verify=False) as client:
@@ -439,6 +456,8 @@ class AzureDevOpsClient:
                         "content": text,
                         "commentType": 1,
                     }
+                    if parent_id:
+                        payload["parentCommentId"] = int(parent_id)
                     posted = self._post_json(client, url, payload)
                     if posted is not None:
                         azure_info(
@@ -457,14 +476,21 @@ class AzureDevOpsClient:
                     )
                     return None
                 payload = {
-                    "comments": [{"parentCommentId": 0, "content": text, "commentType": 1}],
-                    "status": 1,
+                    "comments": [
+                        {
+                            "parentCommentId": 0,
+                            "content": text,
+                            "commentType": 1,
+                        }
+                    ],
+                    # Closed: overview note, not an Active review thread.
+                    "status": 4,
                 }
                 posted = self._post_json(client, base, payload)
                 if posted is not None:
                     azure_info(
                         f"post_comment ok {project}/{repository}!{iid} "
-                        f"new_thread id={posted.get('id')}"
+                        f"new_note id={posted.get('id')}"
                     )
                     return posted
                 azure_error(

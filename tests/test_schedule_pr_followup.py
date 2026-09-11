@@ -169,6 +169,7 @@ async def test_dispatch_pr_followup_posts_overview_and_enqueues(monkeypatch):
     assert out["ok"] is True
     assert posted.get("allow_new_thread") is True
     assert posted.get("pr_id") == 4
+    assert not posted.get("thread_id")
     assert "*Yaver* — written in the ops dashboard" in (posted.get("body") or "")
     assert "Please add a log line." in (posted.get("body") or "")
     proc.enqueue_azure_comment.assert_awaited_once()
@@ -252,9 +253,9 @@ async def test_azure_schedule_run_now_appears_in_queue_like_gitlab(
     assert len(queued) == 2
     sources = {r.get("source") for r in queued}
     assert sources == {"azure"}
-    keys = {r.get("azure_comment_id") for r in queued}
-    assert "4:8:1" in keys
-    assert "4:9:1" in keys
+    keys = {str(r.get("azure_comment_id") or "") for r in queued}
+    assert any(k == "4:8:1" or k.endswith(":4:8:1") for k in keys), keys
+    assert any(k == "4:9:1" or k.endswith(":4:9:1") for k in keys), keys
     assert "1" not in keys
 
     gl = GitlabMrNoteEvent(

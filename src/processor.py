@@ -4933,6 +4933,7 @@ class JobProcessor:
             body=text,
             thread_id=thread_id,
             allow_new_thread=False,
+            parent_comment_id=comment_id,
         )
         if posted is None:
             azure_warning(f"reply fail {state.issue_key} {project}/{repository}!{iid}")

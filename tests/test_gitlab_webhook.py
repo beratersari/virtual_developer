@@ -297,7 +297,7 @@ def test_gitlab_client_posts_note(monkeypatch):
     assert captured["json"] == {"body": "*Yaver*\n\nhi"}
 
 
-def test_gitlab_client_opens_discussion_for_new_thread(monkeypatch):
+def test_gitlab_client_posts_note_not_discussion_for_new_comment(monkeypatch):
     from src.gitlab.client import GitlabClient
 
     captured = {}
@@ -309,8 +309,9 @@ def test_gitlab_client_opens_discussion_for_new_thread(monkeypatch):
 
         def json(self):
             return {
-                "id": "disc-new",
-                "notes": [{"id": 11, "body": "hi"}],
+                "id": 11,
+                "body": "hi",
+                "discussion_id": "disc-note",
             }
 
     class FakeClient:
@@ -328,13 +329,16 @@ def test_gitlab_client_opens_discussion_for_new_thread(monkeypatch):
             captured["json"] = json
             return FakeResp()
 
+        def get(self, *a, **k):
+            raise AssertionError("discussion lookup should not run when note returns discussion_id")
+
     monkeypatch.setattr("src.gitlab.client.httpx.Client", FakeClient)
     c = GitlabClient(host="gitlab.example.com", pat="glpat-test")
     out = c.post_mr_note(project=1, mr_iid=4, body="*Yaver*\n\nhi")
-    assert "/projects/1/merge_requests/4/discussions" in captured["url"]
-    assert "/notes" not in captured["url"].split("discussions", 1)[-1]
+    assert captured["url"].endswith("/merge_requests/4/notes")
+    assert "/discussions" not in captured["url"]
     assert out["id"] == 11
-    assert out["discussion_id"] == "disc-new"
+    assert out["discussion_id"] == "disc-note"
 
 
 def test_is_gitlab_triggered_uses_source_metadata():

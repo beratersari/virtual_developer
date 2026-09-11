@@ -1,3 +1,9 @@
+# Yaver 0.9.7
+
+Scheduled GitLab MR and Azure PR follow-ups post the
+prompt as a regular note, not a resolvable review thread.
+The model answer is a reply to that note.
+
 # Yaver 0.9.6
 
 Optional `JIRA_TRIGGER_LABEL`: when set, To Do intake

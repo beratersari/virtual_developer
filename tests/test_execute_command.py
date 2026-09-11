@@ -382,6 +382,7 @@ def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
     assert resp.json()["usage_note"] is True
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
+    assert str(posted.get("parent_comment_id") or "") == "77"
 
 
 def test_operator_reply_header_has_version_job_model():
@@ -474,6 +475,7 @@ def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     proc.enqueue_azure_comment.assert_not_awaited()
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
+    assert str(posted.get("parent_comment_id") or "") == "77"
     assert "**Yaver — how to run a command**" in (posted.get("body") or "")
     assert "@" not in (posted.get("body") or "")
 

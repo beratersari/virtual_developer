@@ -194,6 +194,7 @@ class _AnswerProcessor(JobProcessor):
                 "gitlab_mr_iid": event.mr_iid,
                 "merge_request_url": event.mr_url,
                 "gitlab_discussion_id": event.discussion_id,
+                "gitlab_note_id": event.note_id,
                 "workflow_type": "gitlab_mr",
             },
         )
@@ -229,13 +230,21 @@ async def test_dispatch_posts_prompt_then_answer(tmp_path, monkeypatch, sim_gl):
     notes = _list_notes(sim_gl)
     bodies = [str(n.get("body") or "") for n in notes]
     prompt_notes = [
-        b
-        for b in bodies
-        if "Please add a log line" in b and "written in the ops dashboard" in b
+        n
+        for n in notes
+        if "Please add a log line" in str(n.get("body") or "")
+        and "written in the ops dashboard" in str(n.get("body") or "")
+    ]
+    answer_notes = [
+        n for n in notes if "Added the log line" in str(n.get("body") or "")
     ]
     assert prompt_notes, bodies
-    assert prompt_notes[0].lstrip().startswith("*Yaver*"), prompt_notes[0]
-    assert any("Added the log line" in b for b in bodies), bodies
+    assert prompt_notes[0].get("body", "").lstrip().startswith("*Yaver*")
+    assert answer_notes, bodies
+    prompt_did = str(prompt_notes[0].get("discussion_id") or "")
+    answer_did = str(answer_notes[0].get("discussion_id") or "")
+    assert prompt_did
+    assert answer_did == prompt_did
     live = store.get(sid)
     assert live is not None
     assert live.get("status") == "dispatched"
