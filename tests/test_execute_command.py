@@ -384,10 +384,25 @@ def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
     assert posted.get("allow_new_thread") is False
 
 
-def test_usage_note_starts_with_product_prefix():
+def test_operator_reply_header_has_version_job_model():
+    from src import __version__
+    from src.brand import wrap_operator_reply
+
+    body = wrap_operator_reply("Answer", "Fixed login.", model="glm", job_id="job_abc")
+    assert body.startswith(f"**Yaver {__version__} — Answer**")
+    assert "`glm`" in body
+    assert "`job_abc`" in body
+    assert "Fixed login." in body
+
+
+def test_usage_note_matches_creasy_shape_without_at_mention():
     body = format_execute_usage_note("berat_ai")
-    assert body.startswith("*Yaver*")
-    assert "@berat_ai /yaver" in body
+    assert "<!-- yaver-usage -->" in body
+    assert "**Yaver — how to run a command**" in body
+    assert "I only run `/yaver`" in body
+    assert "/yaver <prompt>" in body
+    assert "@" not in body
+    assert "@mention" not in body
 
 
 def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
@@ -423,8 +438,9 @@ def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     proc.enqueue_gitlab_note.assert_not_awaited()
     assert posted.get("discussion_id") == "disc-1"
     assert posted.get("allow_new_thread") is False
-    assert "*Yaver*" in (posted.get("body") or "")
+    assert "**Yaver — how to run a command**" in (posted.get("body") or "")
     assert "/yaver" in (posted.get("body") or "")
+    assert "@" not in (posted.get("body") or "")
 
 
 def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
@@ -458,7 +474,8 @@ def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     proc.enqueue_azure_comment.assert_not_awaited()
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
-    assert "*Yaver*" in (posted.get("body") or "")
+    assert "**Yaver — how to run a command**" in (posted.get("body") or "")
+    assert "@" not in (posted.get("body") or "")
 
 
 def test_gitlab_client_does_not_fallback_to_new_note(monkeypatch):

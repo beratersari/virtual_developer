@@ -438,7 +438,6 @@ def test_gitlab_mr_reply_body_formats_codex_jsonl_as_markdown():
     )
     proc = object.__new__(JobProcessor)
     body = JobProcessor._gitlab_mr_reply_body(proc, jsonl, pushed=False)
-    assert body.startswith("*Yaver*")
     assert "## Login" in body
     assert "The handler uses JWT." in body
     assert "```python" in body
@@ -552,7 +551,8 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
 
     body = posted.get("body") or ""
     assert posted.get("mr_iid") == 4
-    assert "*Yaver*" in body
+    assert body.startswith("**Yaver ")
+    assert "— Answer**" in body
     assert "## Login" in body
     assert "`AuthService` issues a JWT" in body
     assert '{"type"' not in body
@@ -655,7 +655,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     task = runner.run_agent_with_retry.await_args.args[0]
     assert task.session_id == "ses_gl1"
     assert posted.get("mr_iid") == 4
-    assert "*Yaver*" in (posted.get("body") or "")
+    assert (posted.get("body") or "").startswith("**Yaver ")
     assert not any(
         "Login is wired in src/auth.cpp" in (c.get("body") or "")
         for c in fake_jira.comments
@@ -755,7 +755,8 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     git.create_merge_request.assert_not_called()
     jira_progress.assert_not_called()
     body = posted.get("body") or ""
-    assert "*Yaver*" in body
+    assert body.startswith("**Yaver ")
+    assert "— Answer**" in body
     assert "Fixed the login bug." in body
     assert "Pushed new commits" in body
     assert posted.get("discussion_id") == "disc-1"

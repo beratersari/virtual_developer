@@ -197,6 +197,7 @@ def build_poll_status(
                 labels=list(row.get("labels") or []),
                 assignee=row.get("assignee"),
                 matched_assignee=matched_assignee,
+                matched_label=bool(row.get("matched_label")),
                 is_todo=bool(row.get("is_todo")),
                 will_process=bool(row.get("will_process")),
                 local_status=local.status.value if local else row.get("local_status"),
@@ -327,6 +328,16 @@ def build_settings_view() -> SettingsView:
             settings.resolved_jira_trigger_user()
             if hasattr(settings, "resolved_jira_trigger_user")
             else (getattr(settings, "jira_trigger_user", "") or "")
+        ).strip(),
+        jira_trigger_label=(
+            settings.resolved_jira_trigger_label()
+            if hasattr(settings, "resolved_jira_trigger_label")
+            else (getattr(settings, "jira_trigger_label", "") or "")
+        ).strip(),
+        trigger_labels=(
+            settings.resolved_jira_trigger_label()
+            if hasattr(settings, "resolved_jira_trigger_label")
+            else (getattr(settings, "trigger_labels", "") or "")
         ).strip(),
         trigger_assignee_names=(
             settings.resolved_jira_trigger_user()
@@ -640,6 +651,18 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         runtime_persist["trigger_assignee_names"] = jira_trigger
         runtime_persist["trigger_mentions"] = jira_trigger
         dotenv_updates["JIRA_TRIGGER_USER"] = jira_trigger
+    jira_label = None
+    if "jira_trigger_label" in data and data["jira_trigger_label"] is not None:
+        jira_label = str(data["jira_trigger_label"]).strip()
+    elif "trigger_labels" in data and data["trigger_labels"] is not None:
+        jira_label = str(data["trigger_labels"]).strip()
+    if jira_label is not None:
+        jira_label = format_trigger_users(jira_label)
+        settings.jira_trigger_label = jira_label
+        settings.trigger_labels = jira_label
+        runtime_persist["jira_trigger_label"] = jira_label
+        runtime_persist["trigger_labels"] = jira_label
+        dotenv_updates["JIRA_TRIGGER_LABEL"] = jira_label
     gitlab_trigger = None
     if "gitlab_trigger_user" in data and data["gitlab_trigger_user"] is not None:
         gitlab_trigger = str(data["gitlab_trigger_user"]).strip()

@@ -1,4 +1,4 @@
-"""Integration tests for assignee-only Jira intake (TRIGGER_LABELS removed).
+"""Integration tests for Jira intake (assignee, optional trigger labels).
 
 Always-on: dashboard Settings / poll HTTP API.
 Live (opt-in): real Jira Cloud REST — create, assign, GET — then the real
@@ -55,50 +55,50 @@ def _isolate_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-def test_settings_api_has_no_trigger_labels(tmp_path, monkeypatch):
-    """GET /api/settings must not expose the removed TRIGGER_LABELS field."""
+def test_settings_api_exposes_trigger_labels(tmp_path, monkeypatch):
     _isolate_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "jira_trigger_label", "")
+    monkeypatch.setattr(settings, "trigger_labels", "")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     http = TestClient(create_dashboard_app(processor=None, state_manager=sm))
     r = http.get("/api/settings")
     assert r.status_code == 200
     body = r.json()
-    assert "trigger_labels" not in body
+    assert "jira_trigger_label" in body
+    assert "trigger_labels" in body
     assert "jira_trigger_user" in body
-    assert "gitlab_trigger_user" in body
-    assert "azure_trigger_user" in body
-    assert "trigger_assignee_names" in body
-    assert "trigger_mentions" in body
     assert "trigger_on_assignment" not in body
 
 
-def test_settings_api_ignores_trigger_labels_patch(tmp_path, monkeypatch):
-    """Old clients sending trigger_labels must not 422 or persist a label list."""
+def test_settings_api_persists_trigger_labels(tmp_path, monkeypatch):
     _isolate_runtime(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("JIRA_TRIGGER_USER=devbot\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "jira_trigger_user", "devbot")
     monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
+    monkeypatch.setattr(settings, "trigger_mentions", "devbot")
+    monkeypatch.setattr(settings, "jira_trigger_label", "")
+    monkeypatch.setattr(settings, "trigger_labels", "")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     http = TestClient(create_dashboard_app(processor=None, state_manager=sm))
     r = http.patch(
         "/api/settings",
         json={
-            "trigger_labels": "bot,ai-assist",
-            "trigger_on_assignment": False,
-            "trigger_assignee_names": "beratersari,devbot",
+            "jira_trigger_label": "bot, ai-assist",
+            "jira_trigger_user": "beratersari,devbot",
         },
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert "trigger_labels" not in body
-    assert "trigger_on_assignment" not in body
+    assert "bot" in (body.get("jira_trigger_label") or "")
+    assert "ai-assist" in (body.get("trigger_labels") or "")
     assert "beratersari" in (body.get("jira_trigger_user") or "")
-    assert "beratersari" in (body.get("trigger_assignee_names") or "")
     again = http.get("/api/settings")
     assert again.status_code == 200
-    assert "trigger_labels" not in again.json()
+    assert "bot" in (again.json().get("jira_trigger_label") or "")
 
 
-def test_poll_api_has_no_matched_label_fields(tmp_path):
-    """Poll DTO no longer carries trigger-label match flags."""
+def test_poll_api_includes_matched_label(tmp_path):
     from src.dashboard.service import build_poll_status
 
     sm = JiraStateManager(state_dir=tmp_path / "state")
@@ -113,6 +113,7 @@ def test_poll_api_has_no_matched_label_fields(tmp_path):
                 "labels": ["bot"],
                 "assignee": "Beratersari",
                 "matched_assignee": True,
+                "matched_label": True,
                 "is_todo": True,
                 "will_process": True,
             }
@@ -121,8 +122,7 @@ def test_poll_api_has_no_matched_label_fields(tmp_path):
     )
     poll = build_poll_status(store, sm)
     item = poll.issues[0].model_dump()
-    assert "matched_label" not in item
-    assert "matched_labels" not in item
+    assert item["matched_label"] is True
     assert item["matched_assignee"] is True
     http = TestClient(create_dashboard_app(processor=None, state_manager=sm))
     with patch("src.dashboard.api.poll_snapshot_store", store):
@@ -130,8 +130,7 @@ def test_poll_api_has_no_matched_label_fields(tmp_path):
             r = http.get("/api/poll")
     assert r.status_code == 200
     row = r.json()["issues"][0]
-    assert "matched_label" not in row
-    assert "matched_labels" not in row
+    assert row["matched_label"] is True
     assert row["matched_assignee"] is True
 
 
@@ -174,6 +173,8 @@ def test_live_jira_assignee_only_intake_via_rest_api(tmp_path, monkeypatch):
     assert display, "need displayName for TRIGGER_ASSIGNEE_NAMES"
 
     monkeypatch.setattr(settings, "trigger_assignee_names", display.lower())
+    monkeypatch.setattr(settings, "jira_trigger_label", "")
+    monkeypatch.setattr(settings, "trigger_labels", "")
 
     project = ((_dotenv_map().get("JIRA_PROJECTS") or "KAN").split(",")[0] or "KAN").strip()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -235,8 +236,8 @@ def test_live_jira_assignee_only_intake_via_rest_api(tmp_path, monkeypatch):
     assign_bot = poller._is_assigned_to_jira_ai_bot(assign_key, assign_fields)
     assert label_bot is False
     assert assign_bot is True
-    assert poller_triggers_on(assigned_to_bot=label_bot) is False
-    assert poller_triggers_on(assigned_to_bot=assign_bot) is True
+    assert poller_triggers_on(assigned_to_bot=label_bot, required_labels=[]) is False
+    assert poller_triggers_on(assigned_to_bot=assign_bot, required_labels=[]) is True
 
     # Real poller loop on the live REST payloads (board fetch stubbed).
     with patch.object(jira, "get_active_sprint", return_value={"id": 1, "name": "S"}):
@@ -257,7 +258,7 @@ def test_live_jira_assignee_only_intake_via_rest_api(tmp_path, monkeypatch):
     rows = {r.get("key"): r for r in (snap.get("issues") or [])}
     if assign_key in rows:
         assert rows[assign_key].get("matched_assignee") is True
-        assert "matched_label" not in rows[assign_key]
+        assert rows[assign_key].get("matched_label") is False
     if label_key in rows:
         assert rows[label_key].get("matched_assignee") is False
         assert rows[label_key].get("will_process") is False
@@ -317,6 +318,8 @@ async def test_live_jira_mode_plan_does_not_build_until_plan_execute(
     display = str(me.get("displayName") or me.get("emailAddress") or "").strip()
     assert account_id and display
     monkeypatch.setattr(settings, "trigger_assignee_names", display.lower())
+    monkeypatch.setattr(settings, "jira_trigger_label", "")
+    monkeypatch.setattr(settings, "trigger_labels", "")
 
     project = ((_dotenv_map().get("JIRA_PROJECTS") or "KAN").split(",")[0] or "KAN").strip()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

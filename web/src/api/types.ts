@@ -15,6 +15,7 @@ export type PolledIssue = {
   labels: string[]
   assignee?: string | null
   matched_assignee: boolean
+  matched_label?: boolean
   is_todo: boolean
   will_process: boolean
   local_status?: string | null
@@ -99,6 +100,8 @@ export type SettingsPayload = {
   azure_bot_mentions?: string
   azure_webhook_path?: string
   jira_trigger_user?: string
+  jira_trigger_label?: string
+  trigger_labels?: string
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
@@ -575,6 +578,8 @@ export type SettingsPatch = Partial<
     | 'trigger_mentions'
     | 'trigger_assignee_names'
     | 'jira_trigger_user'
+    | 'jira_trigger_label'
+    | 'trigger_labels'
     | 'gitlab_trigger_user'
     | 'azure_trigger_user'
     | 'gitlab_bot_mentions'

@@ -911,7 +911,8 @@ async def test_processor_azure_posts_reply_and_pushes(
     git.create_merge_request.assert_not_called()
     jira_progress.assert_not_called()
     body = posted.get("body") or ""
-    assert "*Yaver*" in body
+    assert body.startswith("**Yaver ")
+    assert "— Answer**" in body
     assert "Fixed the login bug." in body
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False

@@ -563,6 +563,19 @@ class Settings(BaseSettings):
         default="",
         description="Leftover. Used only when JIRA_TRIGGER_USER is empty.",
     )
+    # Optional poller AND: To Do + bot assignee + one of these labels.
+    # Empty = username only (same as before TRIGGER_LABELS was removed).
+    jira_trigger_label: str = Field(
+        default="",
+        description=(
+            "Comma-separated Jira labels. When set, poller intake requires "
+            "bot assignee AND one of these labels. Empty = assignee only."
+        ),
+    )
+    trigger_labels: str = Field(
+        default="",
+        description="Leftover. Used only when JIRA_TRIGGER_LABEL is empty.",
+    )
     
     @property
     def full_plans_dir(self) -> Path:
@@ -623,6 +636,19 @@ class Settings(BaseSettings):
         if not names:
             return list(_FALLBACK_TRIGGER_ASSIGNEE_NAMES)
         return [n.lower() for n in names]
+
+    def resolved_jira_trigger_label(self) -> str:
+        """Jira trigger labels: ``JIRA_TRIGGER_LABEL`` then leftover ``TRIGGER_LABELS``."""
+        for raw in (self.jira_trigger_label, self.trigger_labels):
+            text = format_trigger_users(raw)
+            if text:
+                return text
+        return ""
+
+    @property
+    def jira_trigger_label_list(self) -> List[str]:
+        """Lowercased trigger labels. Empty means assignee-only intake."""
+        return [n.lower() for n in _trigger_user_names(self.resolved_jira_trigger_label())]
 
     @property
     def trigger_assignee_names_list(self) -> List[str]:
@@ -919,6 +945,8 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "trigger_mentions",
         "trigger_assignee_names",
         "jira_trigger_user",
+        "jira_trigger_label",
+        "trigger_labels",
         "gitlab_trigger_user",
         "azure_trigger_user",
         "gitlab_bot_mentions",
@@ -944,6 +972,8 @@ _RUNTIME_ENV_MIRROR = {
     "trigger_mentions": "TRIGGER_MENTIONS",
     "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",
     "jira_trigger_user": "JIRA_TRIGGER_USER",
+    "jira_trigger_label": "JIRA_TRIGGER_LABEL",
+    "trigger_labels": "TRIGGER_LABELS",
     "gitlab_trigger_user": "GITLAB_TRIGGER_USER",
     "azure_trigger_user": "AZURE_TRIGGER_USER",
     "gitlab_bot_mentions": "GITLAB_BOT_MENTIONS",

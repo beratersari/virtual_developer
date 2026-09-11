@@ -12,17 +12,17 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
+from src.brand import is_yaver_reply
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
-    ASK_HANDOFF_REASON,
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
     format_execute_usage_note,
-    note_is_ask_handoff,
     note_is_execute_command,
+    note_is_other_agent_handoff,
     note_mentions_bot,
+    other_agent_handoff_reason,
     parse_mention_list,
     strip_bot_mentions,
     strip_slash_command,
@@ -278,7 +278,7 @@ def decide_gitlab_note_webhook(
     if not isinstance(note, str) or not note.strip():
         return WebhookDecision(False, "empty note")
 
-    if note.lstrip().startswith(_REPLY_PREFIX):
+    if is_yaver_reply(note):
         return WebhookDecision(False, "ignored bot reply")
 
     mentions = parse_mention_list(bot_mentions)
@@ -293,12 +293,13 @@ def decide_gitlab_note_webhook(
         bot_usernames or mentions,
     ):
         return WebhookDecision(False, "ignored comment from bot user")
-    if note_is_ask_handoff(note, bot_mentions or mentions):
+    if note_is_other_agent_handoff(note, bot_mentions or mentions):
+        reason = other_agent_handoff_reason(note, bot_mentions or mentions)
         logger.info(
-            f"GitLab note ignored /ask handoff "
+            f"GitLab note ignored other-agent command ({reason}) "
             f"preview={note.strip()[:80]!r}"
         )
-        return WebhookDecision(False, ASK_HANDOFF_REASON)
+        return WebhookDecision(False, reason)
 
     project = _as_dict(data.get("project"))
     repository = _as_dict(data.get("repository"))

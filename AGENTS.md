@@ -325,6 +325,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_PROJECTS` | Project keys: default for schedule/CLI create; **also** used to parse Jira keys from GitLab MR titles and Azure DevOps PR titles on webhook intake (e.g. `feat(KAN-12): …` → job `KAN-12`). Board still scopes the poller. |
 | `JIRA_BOARD_ID` | Sprint/board poller board |
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
+| `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored. |
 | `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
 | `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
@@ -356,7 +357,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 

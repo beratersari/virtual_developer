@@ -1,3 +1,17 @@
+# Yaver 0.9.6
+
+Optional `JIRA_TRIGGER_LABEL`: when set, To Do intake
+needs the trigger user AND one of those labels.
+Empty still means assignee only.
+
+`@mention /ask` and `/review` are silent (other agent).
+Other invalid mentions get a usage note with no `@`
+tokens.
+
+Thread follow-ups send **Replied message** and **Prompt**
+as separate sections. Replies start with
+`**Yaver {version} — Kind** · model · job`.
+
 # Yaver 0.9.5
 
 HTTP Azure DevOps Server remotes clone again.

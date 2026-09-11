@@ -343,6 +343,71 @@ class PromptBuilder:
         )
 
     @staticmethod
+    def parent_comment_from_webhook_raw(raw: Optional[dict]) -> str:
+        """Parent / replied-to comment body from a GitLab or Azure webhook payload."""
+        if not isinstance(raw, dict):
+            return ""
+        resource = raw.get("resource")
+        comment = resource.get("comment") if isinstance(resource, dict) else None
+        if not isinstance(comment, dict):
+            comment = raw.get("comment") if isinstance(raw.get("comment"), dict) else {}
+        parent = (
+            comment.get("parentComment")
+            or comment.get("parent_comment")
+            or raw.get("parentComment")
+        )
+        if isinstance(parent, dict):
+            text = (
+                parent.get("content")
+                or parent.get("comments")
+                or parent.get("body")
+                or parent.get("note")
+                or ""
+            )
+            if str(text).strip():
+                return str(text).strip()
+        if isinstance(parent, str) and parent.strip():
+            return parent.strip()
+        return ""
+
+    @staticmethod
+    def _thread_request_sections(
+        *,
+        author: str,
+        prompt: str,
+        replied_message: str = "",
+        forge: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> list[str]:
+        """Labeled thread-follow-up blocks (Creasy-style replied + prompt)."""
+        from src.issue_git_spec import strip_params_block
+
+        who = (author or "").strip() or "someone"
+        request = strip_params_block(prompt or "").strip() or "(empty prompt)"
+        replied = strip_params_block(replied_message or "").strip()
+        if not replied:
+            replied = request
+        where = (
+            "GitLab merge request"
+            if forge == "gitlab"
+            else "Azure DevOps pull request"
+        )
+        return [
+            (
+                f"This run is a **thread follow-up** on an existing {where} "
+                "(not a new Jira ticket). The repository is already checked out "
+                f"on `{source_branch}` (into `{target_branch}`). Resume any "
+                "existing OpenCode session for this repo + branch + target.\n\n"
+                "Use **Replied message** as context only. Do what **Prompt** says. "
+                "Do not quote or restate the replied message in the posted answer. "
+                "Do not @mention or ping anyone."
+            ),
+            f"## Replied message\n\nFrom {who}:\n\n{replied}",
+            f"## Prompt\n\n{request}",
+        ]
+
+    @staticmethod
     def build_gitlab_comment_prompt(
         *,
         issue_key: str,
@@ -354,21 +419,20 @@ class PromptBuilder:
         comment: str,
         work_branch: Optional[str] = None,
         plan_path: Optional[str] = None,
+        replied_message: str = "",
+        raw: Optional[dict] = None,
     ) -> str:
-        """Build-mode prompt for a GitLab MR @mention.
+        """Build-mode prompt for a GitLab MR thread comment.
 
-        Same ``BUILD_PROMPT.md`` as Jira execution: the agent may edit, build,
-        test, and commit. The orchestrator pushes onto the **existing** MR
-        source branch and posts the reply as a note.
+        Kit: ``agent/BUILD_PROMPT.md`` (derman-build). Then structured
+        **Replied message** + **Prompt** sections so the model does not
+        mix thread context with the operator request.
         """
         from src.issue_git_spec import strip_params_block
-
-        comment_body = strip_params_block(comment or "").strip()
-        title = strip_params_block(mr_title or "").strip()
-        who = (author or "").strip() or "someone"
-        branch = (work_branch or source_branch or "").strip()
         from src.paths import plans_dir
 
+        title = strip_params_block(mr_title or "").strip()
+        branch = (work_branch or source_branch or "").strip()
         plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
         system = PromptBuilder._load_mode_prompt(
             PromptBuilder.build_prompt_path(),
@@ -376,15 +440,20 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
+        replied = (
+            PromptBuilder.parent_comment_from_webhook_raw(raw)
+            or (replied_message or "").strip()
+        )
         parts = [
             system,
             f"## GitLab merge request: {issue_key}",
-            (
-                "This run is a **build** follow-up on an existing GitLab merge "
-                "request (not a new Jira ticket). The repository is already "
-                f"checked out on `{source_branch}` (MR into `{target_branch}`). "
-                "Resume any existing OpenCode session for this repo + branch + "
-                "target. Treat the MR comment below as the request."
+            *PromptBuilder._thread_request_sections(
+                author=author,
+                prompt=comment,
+                replied_message=replied,
+                forge="gitlab",
+                source_branch=source_branch,
+                target_branch=target_branch,
             ),
             f"## MR title\n\n{title or '(no title)'}",
         ]
@@ -395,10 +464,9 @@ class PromptBuilder:
             f"* Target: `{target_branch}`\n"
             f"* Work branch: `{branch or source_branch}`"
         )
-        parts.append(f"## Comment from {who}\n\n{comment_body or '(empty comment)'}")
         parts.append(
             "## GitLab delivery\n\n"
-            "Implement the comment when it asks for code changes, or when a "
+            "Implement the **Prompt** when it asks for code changes, or when a "
             "code change is the correct answer. Stay on the prepared work "
             "branch. Commit if you change files. Do **not** push and do **not** "
             "open a new merge request — the orchestrator will push onto this "
@@ -419,20 +487,19 @@ class PromptBuilder:
         comment: str,
         work_branch: Optional[str] = None,
         plan_path: Optional[str] = None,
+        replied_message: str = "",
+        raw: Optional[dict] = None,
     ) -> str:
-        """Build-mode prompt for an Azure DevOps PR @mention.
+        """Build-mode prompt for an Azure DevOps PR thread comment.
 
-        Same contract as GitLab MR comments: implement on the existing PR
-        source branch; orchestrator pushes and posts the reply on the PR.
+        Same kit and section layout as GitLab: ``BUILD_PROMPT.md`` plus
+        **Replied message** and **Prompt**.
         """
         from src.issue_git_spec import strip_params_block
-
-        comment_body = strip_params_block(comment or "").strip()
-        title = strip_params_block(pr_title or "").strip()
-        who = (author or "").strip() or "someone"
-        branch = (work_branch or source_branch or "").strip()
         from src.paths import plans_dir
 
+        title = strip_params_block(pr_title or "").strip()
+        branch = (work_branch or source_branch or "").strip()
         plan = (plan_path or "").strip() or str(plans_dir() / f"{issue_key}.md")
         system = PromptBuilder._load_mode_prompt(
             PromptBuilder.build_prompt_path(),
@@ -440,15 +507,20 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
+        replied = (
+            PromptBuilder.parent_comment_from_webhook_raw(raw)
+            or (replied_message or "").strip()
+        )
         parts = [
             system,
             f"## Azure DevOps pull request: {issue_key}",
-            (
-                "This run is a **build** follow-up on an existing Azure DevOps "
-                "pull request (not a new Jira ticket). The repository is already "
-                f"checked out on `{source_branch}` (PR into `{target_branch}`). "
-                "Resume any existing OpenCode session for this repo + branch + "
-                "target. Treat the PR comment below as the request."
+            *PromptBuilder._thread_request_sections(
+                author=author,
+                prompt=comment,
+                replied_message=replied,
+                forge="azure",
+                source_branch=source_branch,
+                target_branch=target_branch,
             ),
             f"## PR title\n\n{title or '(no title)'}",
         ]
@@ -459,10 +531,9 @@ class PromptBuilder:
             f"* Target: `{target_branch}`\n"
             f"* Work branch: `{branch or source_branch}`"
         )
-        parts.append(f"## Comment from {who}\n\n{comment_body or '(empty comment)'}")
         parts.append(
             "## Azure DevOps delivery\n\n"
-            "Implement the comment when it asks for code changes, or when a "
+            "Implement the **Prompt** when it asks for code changes, or when a "
             "code change is the correct answer. Stay on the prepared work "
             "branch. Commit if you change files. Do **not** push and do **not** "
             "open a new pull request — the orchestrator will push onto this "

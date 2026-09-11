@@ -77,6 +77,7 @@ export function PollPage() {
               <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-text-muted">
                 <span>{i.assignee || 'unassigned'}</span>
                 {i.matched_assignee && <span className="text-success-text">bot assignee</span>}
+                {i.matched_label && <span className="text-success-text">trigger label</span>}
                 {i.is_todo && <span>To Do</span>}
                 {i.labels.slice(0, 6).map((l) => (
                   <span key={l} className="rounded-full bg-bg px-2 py-0.5">

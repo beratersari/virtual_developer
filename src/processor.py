@@ -456,20 +456,22 @@ class JobProcessor:
                 self._post_gitlab_mr_reply(
                     state,
                     (
-                        "*Yaver* hit an error on this MR comment:\n\n"
+                        "Hit an error on this MR comment:\n\n"
                         f"```\n{error_text}\n```\n"
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
+                    kind="Failed",
                 )
                 return
             if azure_job:
                 self._post_azure_pr_reply(
                     state,
                     (
-                        "*Yaver* hit an error on this PR comment:\n\n"
+                        "Hit an error on this PR comment:\n\n"
                         f"```\n{error_text}\n```\n"
                         + (f"\n{suggestion}" if suggestion else "")
                     ),
+                    kind="Failed",
                 )
                 return
             # Default suggestion for config errors if caller did not pass one
@@ -4216,7 +4218,9 @@ class JobProcessor:
         finally:
             await self.dispatch_queue()
 
-    def _post_gitlab_mr_reply(self, state: JiraAgentState, body: str) -> bool:
+    def _post_gitlab_mr_reply(
+        self, state: JiraAgentState, body: str, *, kind: str = "Answer"
+    ) -> bool:
         """Post *body* on the GitLab MR stored in issue metadata (CE + EE)."""
         meta = dict(state.metadata or {})
         host = (meta.get("gitlab_host") or "").strip()
@@ -4244,10 +4248,20 @@ class JobProcessor:
                     state.issue_key,
                     metadata={"gitlab_discussion_id": discussion_id},
                 )
+        from src.brand import is_yaver_reply, wrap_operator_reply
+
+        text = body
+        if not is_yaver_reply(body):
+            text = wrap_operator_reply(
+                kind,
+                body,
+                state=state,
+                model=self._model_for_issue(state),
+            )
         posted = client.post_mr_note(
             project=project,
             mr_iid=int(iid),
-            body=body,
+            body=text,
             discussion_id=discussion_id,
             allow_new_thread=False,
         )
@@ -4464,7 +4478,7 @@ class JobProcessor:
 
         # Codex stdout is the exec JSONL stream — post the assistant markdown.
         answer = format_agent_answer_for_comment(stdout, limit=8000)
-        parts = ["*Yaver*", "", answer]
+        parts = [answer]
         if pushed:
             extra = ["", "---", ""]
             br = (branch or "").strip()
@@ -4507,6 +4521,8 @@ class JobProcessor:
                     author=event.author_username or event.author_name,
                     comment=event.prompt,
                     work_branch=event.source_branch,
+                    replied_message=event.note_body,
+                    raw=getattr(event, "raw", None),
                 ),
                 agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=state.issue_key,
@@ -4590,6 +4606,8 @@ class JobProcessor:
                 comment=event.prompt,
                 work_branch=work_branch,
                 plan_path=plan_path_for_agent,
+                replied_message=event.note_body,
+                raw=getattr(event, "raw", None),
             )
             if work_branch:
                 try:
@@ -4848,7 +4866,9 @@ class JobProcessor:
         finally:
             self._release_context(state.issue_key, success=success)
 
-    def _post_azure_pr_reply(self, state: JiraAgentState, body: str) -> bool:
+    def _post_azure_pr_reply(
+        self, state: JiraAgentState, body: str, *, kind: str = "Answer"
+    ) -> bool:
         """Post *body* on the Azure DevOps PR stored in issue metadata."""
         meta = dict(state.metadata or {})
         host = (meta.get("azure_host") or "").strip()
@@ -4896,11 +4916,21 @@ class JobProcessor:
                     state.issue_key,
                     metadata={"azure_thread_id": thread_id},
                 )
+        from src.brand import is_yaver_reply, wrap_operator_reply
+
+        text = body
+        if not is_yaver_reply(body):
+            text = wrap_operator_reply(
+                kind,
+                body,
+                state=state,
+                model=self._model_for_issue(state),
+            )
         posted = client.post_pr_comment(
             project=str(project),
             repository=repository,
             pr_id=int(iid),
-            body=body,
+            body=text,
             thread_id=thread_id,
             allow_new_thread=False,
         )
@@ -5113,6 +5143,8 @@ class JobProcessor:
                     author=event.author_username or event.author_name,
                     comment=event.prompt,
                     work_branch=event.source_branch,
+                    replied_message=getattr(event, "comment_body", "") or "",
+                    raw=getattr(event, "raw", None),
                 ),
                 agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=state.issue_key,
@@ -5208,6 +5240,8 @@ class JobProcessor:
                 comment=event.prompt,
                 work_branch=work_branch,
                 plan_path=plan_path_for_agent,
+                replied_message=getattr(event, "comment_body", "") or "",
+                raw=getattr(event, "raw", None),
             )
             if work_branch:
                 try:
