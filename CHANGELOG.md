@@ -8,10 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-09-11
+
+Reply headers always include ``job_id``. Queue claim scan is 1000.
+
 ### Fixed
 
 - MR/PR/Jira reply headers always include ``job_id`` (Creasy: `**Yaver ver — Kind** · \`model\` · \`job_id\``).
 - Queue claim scans 1000 queued rows (was 300) so a long blocked MR/PR backlog does not hide a free repo.
+
+[0.9.8]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.8
 
 ## [0.9.7] — 2026-09-11
 
