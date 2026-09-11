@@ -387,13 +387,51 @@ def test_azure_usage_note_looks_up_missing_thread(fake_jira, monkeypatch):
 
 def test_operator_reply_header_has_version_job_model():
     from src import __version__
-    from src.brand import wrap_operator_reply
+    from src.brand import format_reply_header, wrap_operator_reply
 
+    line = format_reply_header("Answer", model="glm", job_id="job_abc")
+    assert line == f"**Yaver {__version__} — Answer** · `glm` · `job_abc`"
     body = wrap_operator_reply("Answer", "Fixed login.", model="glm", job_id="job_abc")
-    assert body.startswith(f"**Yaver {__version__} — Answer**")
-    assert "`glm`" in body
-    assert "`job_abc`" in body
+    assert body.startswith(line)
     assert "Fixed login." in body
+
+
+def test_operator_reply_header_keeps_job_id_after_current_cleared():
+    """Creasy always prints job.job_id. Finish clears current_job_id — still use history."""
+    from src import __version__
+    from src.brand import wrap_operator_reply
+    from src.state.models import JiraAgentState, TaskStatus
+
+    st = JiraAgentState(
+        issue_key="KAN-1",
+        issue_summary="s",
+        description="d",
+        status=TaskStatus.COMPLETED,
+        metadata={
+            "current_job_id": None,
+            "job_ids": ["job_old", "job_live"],
+            "model": "mimo",
+        },
+    )
+    body = wrap_operator_reply("Answer", "done", state=st)
+    assert body.startswith(
+        f"**Yaver {__version__} — Answer** · `mimo` · `job_live`"
+    )
+
+
+def test_operator_reply_header_uses_log_context_job_id():
+    from src import __version__
+    from src.brand import wrap_operator_reply
+    from src.log_context import clear_log_context, set_job_id
+
+    set_job_id("job_ctx")
+    try:
+        body = wrap_operator_reply("Failed", "boom", model="glm")
+        assert body.startswith(
+            f"**Yaver {__version__} — Failed** · `glm` · `job_ctx`"
+        )
+    finally:
+        clear_log_context()
 
 
 def test_usage_note_matches_creasy_shape_without_at_mention():

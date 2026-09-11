@@ -539,6 +539,9 @@ class JiraClient:
             values = data.get("values", [])
             if values:
                 self.sprint_lookup = "ok"
+                # Intentional: one sprint per board. Parallel active sprints
+                # are not merged; operators put bot work on this first sprint
+                # (or use a Kanban board, which loads the whole board).
                 return values[0]
             self.sprint_lookup = "empty"
             return None

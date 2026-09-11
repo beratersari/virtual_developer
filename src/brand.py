@@ -26,25 +26,57 @@ def is_yaver_reply(body: str) -> bool:
     return lead.startswith("*Yaver") or lead.startswith("**Yaver")
 
 
+def _ids_from_state(state: Any) -> tuple[str, str]:
+    """``(model, job_id)`` from issue metadata (live pointer, then history)."""
+    if state is None:
+        return "", ""
+    meta = getattr(state, "metadata", None) or {}
+    if not isinstance(meta, dict):
+        return "", ""
+    mid = str(meta.get("model") or "").strip()
+    jid = str(meta.get("current_job_id") or "").strip()
+    if not jid:
+        ids = meta.get("job_ids") or []
+        if isinstance(ids, (list, tuple)) and ids:
+            jid = str(ids[-1] or "").strip()
+    return mid, jid
+
+
+def resolve_reply_ids(
+    state: Any = None,
+    *,
+    model: str = "",
+    job_id: str = "",
+) -> tuple[str, str]:
+    """Same fields Creasy reads off the JobRecord: model + job_id."""
+    mid = (model or "").strip()
+    jid = (job_id or "").strip()
+    if not jid:
+        try:
+            from src.log_context import get_job_id
+
+            jid = (get_job_id() or "").strip()
+        except Exception:
+            jid = ""
+    sm, sj = _ids_from_state(state)
+    if not mid:
+        mid = sm
+    if not jid:
+        jid = sj
+    return (mid or "unknown"), jid
+
+
 def format_reply_header(
     kind: str,
     *,
     model: str = "",
     job_id: str = "",
 ) -> str:
-    """Creasy-style first line: **Yaver {ver} — Kind** · `model` · `job`."""
+    """Creasy ``format_success``: **Yaver {ver} — Kind** · `model` · `job`."""
     title = (kind or "Update").strip() or "Update"
-    line = f"**{PRODUCT_NAME} {product_version()} — {title}**"
-    extras = []
-    mid = (model or "").strip()
-    jid = (job_id or "").strip()
-    if mid:
-        extras.append(f"`{mid}`")
-    if jid:
-        extras.append(f"`{jid}`")
-    if extras:
-        return line + " · " + " · ".join(extras)
-    return line
+    mid = (model or "").strip() or "unknown"
+    jid = (job_id or "").strip() or "-"
+    return f"**{PRODUCT_NAME} {product_version()} — {title}** · `{mid}` · `{jid}`"
 
 
 def wrap_operator_reply(
@@ -55,19 +87,8 @@ def wrap_operator_reply(
     job_id: str = "",
     state: Any = None,
 ) -> str:
-    """Prefix a forge/Jira reply with the Creasy header."""
-    mid = (model or "").strip()
-    jid = (job_id or "").strip()
-    if state is not None:
-        meta = getattr(state, "metadata", None) or {}
-        if not jid:
-            jid = str(meta.get("current_job_id") or "").strip()
-            if not jid:
-                ids = meta.get("job_ids") or []
-                if ids:
-                    jid = str(ids[-1] or "").strip()
-        if not mid:
-            mid = str(meta.get("model") or "").strip()
+    """Prefix a forge/Jira reply with the Creasy header (always includes job_id)."""
+    mid, jid = resolve_reply_ids(state, model=model, job_id=job_id)
     text = (body or "").strip()
     return f"{format_reply_header(kind, model=mid, job_id=jid)}\n\n{text}\n"
 

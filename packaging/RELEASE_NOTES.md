@@ -1,3 +1,15 @@
+# Yaver 0.9.8
+
+Reply headers always include job_id, matching Creasy:
+`**Yaver {version} — Kind** · model · job_id`.
+
+Queue claim scans 1000 queued rows so a long blocked
+MR/PR backlog does not hide a free repo.
+
+`@<GUID> /yaver` without a configured trigger name is
+still a usage note, not a job. Scrum poller still uses
+the first active sprint only.
+
 # Yaver 0.9.7
 
 Scheduled GitLab MR and Azure PR follow-ups post the

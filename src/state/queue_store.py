@@ -229,7 +229,11 @@ class WorkQueueStore:
         blocked_locks: Optional[set] = None,
         max_running: int = 6,
     ) -> Optional[Dict[str, Any]]:
-        """FIFO claim of the next item whose workspace/issue is free."""
+        """FIFO claim of the next item whose workspace/issue is free.
+
+        Scans up to 1000 queued rows (oldest first) so a long blocked
+        backlog on one MR/PR does not hide a free workspace.
+        """
         blocked = {(k or "").strip().upper() for k in (blocked_issue_keys or set()) if k}
         extra_locks = {(k or "").strip() for k in (blocked_locks or set()) if k}
         with self._lock:
@@ -245,7 +249,7 @@ class WorkQueueStore:
             blocked_issues = {
                 (r.get("issue_key") or "").strip().upper() for r in running
             } | blocked
-            for rec in self.list_items(status="queued", limit=300):
+            for rec in self.list_items(status="queued", limit=1000):
                 ik = (rec.get("issue_key") or "").strip().upper()
                 if ik and ik in blocked_issues:
                     continue

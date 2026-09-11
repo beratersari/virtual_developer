@@ -557,6 +557,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert posted.get("mr_iid") == 4
     assert body.startswith("**Yaver ")
     assert "— Answer**" in body
+    assert "`job_" in body.split("\n", 1)[0]
     assert "## Login" in body
     assert "`AuthService` issues a JWT" in body
     assert '{"type"' not in body

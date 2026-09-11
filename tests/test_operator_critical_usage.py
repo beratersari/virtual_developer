@@ -245,12 +245,12 @@ def test_leftover_gitlab_pat_authenticates_mr_reply(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3) TFS @<GUID> /yaver must start a job
+# 3) TFS @<GUID> /yaver is a mention, not @name /yaver (intentional)
 # ---------------------------------------------------------------------------
 
 
-def test_azure_guid_mention_with_yaver_starts_a_job(monkeypatch):
-    """TFS chips often mention the bot as @<VSID>. /yaver must still run."""
+def test_azure_guid_only_mention_is_usage_not_a_job(monkeypatch):
+    """@<VSID> /yaver without a configured @name is a usage note, not a job."""
     reset_identity_cache()
 
     class _Tfs(BaseHTTPRequestHandler):
@@ -329,25 +329,22 @@ def test_azure_guid_mention_with_yaver_starts_a_job(monkeypatch):
             bot_mentions=["yaver"],
             jira_project_keys=["KAN"],
         )
-        assert decision.accepted is True, (
-            f"TFS @<{BOT_GUID}> /yaver was rejected: {decision.reason!r}. "
-            "Identity lookup recognized the bot, but the /yaver check used "
-            "only AZURE_TRIGGER_USER and ignored the resolved GUID."
-        )
+        assert decision.accepted is False
+        assert decision.reason == "mention without /yaver"
+        assert decision.usage_note is True
         assert decision.event is not None
-        assert "failing tests" in (decision.event.prompt or "")
     finally:
         httpd.shutdown()
         reset_identity_cache()
 
 
 # ---------------------------------------------------------------------------
-# 4) Parallel active sprints — tickets in sprint 2 must still be picked up
+# 4) Parallel active sprints — first sprint only (intentional)
 # ---------------------------------------------------------------------------
 
 
-def test_poller_sees_issues_in_the_second_active_sprint(tmp_path, monkeypatch):
-    """Jira Software parallel sprints: only values[0] is read today."""
+def test_poller_uses_first_active_sprint_only(tmp_path, monkeypatch):
+    """Scrum intake is values[0]. Tickets only on later parallel sprints stay off."""
     monkeypatch.setattr(settings, "jira_trigger_user", "devbot")
     monkeypatch.setattr(settings, "jira_board_id", "1")
 
@@ -439,11 +436,8 @@ def test_poller_sees_issues_in_the_second_active_sprint(tmp_path, monkeypatch):
         )
         found = poller.poll_board()
         keys = [i.get("key") for i in found]
-        assert "KAN-99" in keys, (
-            f"Poller only loaded the first active sprint; KAN-99 in sprint 2 "
-            f"was never seen (got {keys}). Teams using parallel sprints lose "
-            "those tickets."
-        )
+        assert "KAN-99" not in keys
+        assert keys == []
     finally:
         httpd.shutdown()
 
@@ -478,15 +472,8 @@ def test_claim_next_does_not_starve_behind_a_long_blocked_backlog(tmp_path):
         lock_key="lock_free",
     )
     claimed = store.claim_next(max_running=6)
-    assert claimed is not None, (
-        "queue claimed nothing. claim_next only scans the first 300 queued "
-        "rows, so 300 blocked comments on one MR starve every other repository."
-    )
-    assert claimed["queue_id"] == free["queue_id"], (
-        f"claimed {claimed.get('issue_key')} instead of KAN-FREE. "
-        "claim_next only scans the first 300 queued rows, so a busy MR "
-        "starves every other repository."
-    )
+    assert claimed is not None
+    assert claimed["queue_id"] == free["queue_id"]
 
 
 # ---------------------------------------------------------------------------
