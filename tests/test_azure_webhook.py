@@ -714,12 +714,74 @@ def test_azure_client_posts_thread(monkeypatch):
     )
     assert out and out["id"] == 9
     assert "/pullrequests/4/threads" in captured["url"]
+    assert not captured["url"].rstrip("/").endswith("/comments")
     assert captured["headers"]["Authorization"].startswith("Basic ")
     decoded = base64.b64decode(captured["headers"]["Authorization"][6:]).decode()
     assert decoded == "pat:azpat-test"
     assert not decoded.startswith(":")
     assert "oauth2" not in decoded
     assert captured["json"]["comments"][0]["content"].startswith("*Yaver*")
+    assert captured["json"]["comments"][0]["parentCommentId"] == 0
+    # Closed overview note — not Active (1), so nobody has to Resolve.
+    assert captured["json"]["status"] == 4
+
+
+def test_azure_parent_comment_id_from_composite_key():
+    from src.azure.client import _azure_parent_comment_id
+
+    assert _azure_parent_comment_id("77") == "77"
+    assert _azure_parent_comment_id("4:8:1") == "1"
+    assert _azure_parent_comment_id("thread-8") == ""
+    assert _azure_parent_comment_id("") == ""
+
+
+def test_azure_client_reply_sets_parent_comment_id(monkeypatch):
+    from src.azure.client import AzureDevOpsClient
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 201
+        content = b'{"id": 12}'
+        text = '{"id": 12}'
+
+        def json(self):
+            return {"id": 12}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, params=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setattr("src.azure.client.httpx.Client", FakeClient)
+    c = AzureDevOpsClient(
+        host="tfs.example.com",
+        pat="azpat-test",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+    )
+    out = c.post_pr_comment(
+        project="Demo",
+        repository="demo",
+        pr_id=4,
+        body="**Yaver 0.9.6 — Answer**\n\ndone",
+        thread_id="8",
+        allow_new_thread=False,
+        parent_comment_id="4:8:77",
+    )
+    assert out and out["id"] == 12
+    assert captured["url"].endswith("/threads/8/comments")
+    assert captured["json"]["parentCommentId"] == 77
+    assert captured["json"]["content"].startswith("**Yaver")
 
 
 def test_is_azure_triggered_uses_source_metadata():
@@ -916,6 +978,7 @@ async def test_processor_azure_posts_reply_and_pushes(
     assert "Fixed the login bug." in body
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
+    assert str(posted.get("parent_comment_id") or "") == "77"
     assert "Pushed new commits" in body
     assert (st.metadata or {}).get("source") == "azure"
     assert (st.metadata or {}).get("delivery_status") == "delivered"
@@ -1593,6 +1656,7 @@ def test_fail_issue_posts_azure_reply_not_jira(
     assert posted.get("pr_id") == 4
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
+    assert str(posted.get("parent_comment_id") or "") == "77"
     assert "clone failed" in (posted.get("body") or "")
     assert len(fake_jira.comments) == before
 

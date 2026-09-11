@@ -334,11 +334,11 @@ class GitlabClient:
         discussion_id: str = "",
         allow_new_thread: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        """Post a thread reply, or open a new discussion.
+        """Post a regular MR note, or a reply on an existing discussion.
 
-        Replies use ``POST .../discussions/:id/notes``. A new overview
-        comment uses ``POST .../discussions`` so the response includes
-        the discussion id. The Notes create API ignores
+        A new overview comment uses ``POST .../notes`` (an individual note,
+        not a resolvable discussion thread). Replies use
+        ``POST .../discussions/:id/notes``. The Notes create API ignores
         ``in_reply_to_discussion_id`` (that field is draft-notes only).
         """
         if not self.api_base:
@@ -359,7 +359,7 @@ class GitlabClient:
             )
             return None
         else:
-            url = f"{base}/discussions"
+            url = f"{base}/notes"
         payload: Dict[str, Any] = {"body": text}
         try:
             # INTENTIONAL: verify=False (on-prem / TLS intercept; no custom-CA path yet).
@@ -370,6 +370,14 @@ class GitlabClient:
                     if not isinstance(data, dict):
                         data = {"ok": True}
                     posted = self._normalize_note_payload(data, did)
+                    if not str(posted.get("discussion_id") or "").strip():
+                        looked = self.find_discussion_id_for_note(
+                            project=project,
+                            mr_iid=int(mr_iid),
+                            note_id=str(posted.get("id") or ""),
+                        )
+                        if looked:
+                            posted["discussion_id"] = looked
                     logger.info(
                         f"Posted GitLab MR note on {project}!{mr_iid} "
                         f"note_id={posted.get('id')} "
