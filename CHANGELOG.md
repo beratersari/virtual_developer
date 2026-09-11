@@ -8,6 +8,23 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-09-11
+
+Optional Jira trigger label. Silent `/ask` and `/review`. Thread follow-ups send a structured prompt. Replies use a Creasy-style header.
+
+### Added
+
+- `JIRA_TRIGGER_LABEL` (Settings and leftover `TRIGGER_LABELS`): when set, To Do intake needs bot assignee **and** one of those labels. Empty = assignee only.
+
+### Changed
+
+- `@mention /ask` and `@mention /review` stay silent (other agent). Other invalid mentions still get a usage note.
+- Usage notes match Creasy’s shape and do not contain `@name` / `@mention`.
+- GitLab, Azure, and Jira replies start with `**Yaver {version} — Kind** · model · job`.
+- MR/PR comment jobs split the user message into **Replied message** and **Prompt**.
+
+[0.9.6]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.6
+
 ## [0.9.5] — 2026-09-11
 
 HTTP Azure DevOps Server remotes clone again. Leftover `GITLAB_PAT` authenticates MR replies.
