@@ -17,7 +17,6 @@ from urllib.parse import unquote, urlparse
 from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
 from src.azure.mentions import (
-    ASK_HANDOFF_REASON,
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
     author_is_configured_bot,
@@ -25,14 +24,15 @@ from src.azure.mentions import (
     extract_mention_guids,
     format_execute_usage_note,
     mention_scan,
-    note_is_ask_handoff,
     note_is_execute_command,
+    note_is_other_agent_handoff,
     note_mentions_bot,
+    other_agent_handoff_reason,
     parse_mention_list,
     strip_azure_bot_mentions,
     strip_slash_command,
 )
-from src.brand import COMMENT_PREFIX as _REPLY_PREFIX
+from src.brand import is_yaver_reply
 from src.gitlab.webhook import WebhookDecision, validate_webhook_token
 
 
@@ -593,7 +593,7 @@ def decide_azure_comment_webhook(
         azure_info(f"comment reject reason='empty comment' event={event_name!r}")
         return WebhookDecision(False, "empty comment")
 
-    if note.lstrip().startswith(_REPLY_PREFIX):
+    if is_yaver_reply(note):
         azure_info(
             f"comment reject reason='ignored bot reply' event={event_name!r} "
             f"preview={clip(note)!r}"
@@ -739,12 +739,13 @@ def decide_azure_comment_webhook(
             f"guids={pending_guids} preview={clip(note)!r}"
         )
         return WebhookDecision(False, "bot not mentioned")
-    if note_is_ask_handoff(note, bot_mentions or trigger_names):
+    if note_is_other_agent_handoff(note, bot_mentions or trigger_names):
+        reason = other_agent_handoff_reason(note, bot_mentions or trigger_names)
         azure_info(
-            f"comment reject reason={ASK_HANDOFF_REASON!r} event={event_name!r} "
+            f"comment reject reason={reason!r} event={event_name!r} "
             f"preview={clip(note)!r}"
         )
-        return WebhookDecision(False, ASK_HANDOFF_REASON)
+        return WebhookDecision(False, reason)
     pr_url = _pr_web_url(
         pr, repo, collection_url, project_name, repo_name, pr_id
     )

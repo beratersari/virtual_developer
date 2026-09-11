@@ -103,6 +103,7 @@ def strip_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 ASK_HANDOFF_REASON = "ignored /ask handoff"
+REVIEW_HANDOFF_REASON = "ignored /review handoff"
 EXECUTE_MISSING_REASON = "mention without /yaver"
 EXECUTE_COMMAND = "yaver"
 
@@ -276,6 +277,28 @@ def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
     return note_has_slash_command(note, bot_mentions, "ask")
 
 
+def note_is_review_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
+    """True when the comment contains ``@bot /review`` for a configured bot.
+
+    Creasy owns ``/review``. Yaver must not start a job or post a usage note.
+    ``/reviewing`` and ``/review-in-detail`` are not this command.
+    """
+    return note_has_slash_command(note, bot_mentions, "review")
+
+
+def note_is_other_agent_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
+    """True for ``@bot /ask`` or ``@bot /review`` (silent; other agent)."""
+    return note_is_ask_handoff(note, bot_mentions) or note_is_review_handoff(
+        note, bot_mentions
+    )
+
+
+def other_agent_handoff_reason(note: str, bot_mentions: Iterable[str]) -> str:
+    if note_is_review_handoff(note, bot_mentions):
+        return REVIEW_HANDOFF_REASON
+    return ASK_HANDOFF_REASON
+
+
 def note_is_execute_command(note: str, bot_mentions: Iterable[str]) -> bool:
     """True when the comment contains ``@bot /yaver`` for a configured bot."""
     return note_has_slash_command(note, bot_mentions, EXECUTE_COMMAND)
@@ -297,12 +320,13 @@ def strip_slash_command(text: str, command: str) -> str:
 
 def format_execute_usage_note(bot_name: str = "yaver") -> str:
     """Thread reply when the bot is mentioned without ``/yaver``."""
-    from src.brand import COMMENT_PREFIX
+    from src.brand import format_execute_usage_note as _format
 
-    name = identity_key(bot_name) or "yaver"
-    return (
-        f"{COMMENT_PREFIX}\n\n"
-        "I only start work when you mention me with `/yaver`.\n\n"
-        f"Example: `@{name} /yaver <what to do>`\n\n"
-        "`/ask` is handled by another agent."
-    )
+    return _format(bot_name)
+
+
+def is_usage_note(body: str) -> bool:
+    """True for a Yaver usage note (so its examples do not start a job)."""
+    from src.brand import is_yaver_reply
+
+    return is_yaver_reply(body)

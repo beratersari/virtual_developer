@@ -9,8 +9,10 @@ from fastapi.testclient import TestClient
 
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
+    REVIEW_HANDOFF_REASON,
     flatten_comment_text,
     note_is_ask_handoff,
+    note_is_review_handoff,
 )
 from src.azure.webhook import decide_azure_comment_webhook, decide_azure_pr_webhook
 from src.gitlab.webhook import decide_gitlab_mr_webhook, decide_gitlab_note_webhook
@@ -281,7 +283,71 @@ def test_gitlab_bot_reply_still_wins_over_ask():
     assert d.reason == "ignored bot reply"
 
 
+def test_gitlab_review_handoff_is_silent():
+    d = _gl("@berat_ai /review")
+    assert d.accepted is False
+    assert d.reason == REVIEW_HANDOFF_REASON
+    assert d.event is None
+    assert d.usage_note is False
+
+
+def test_azure_review_handoff_is_silent():
+    d = _az("@yaver /review the change")
+    assert d.accepted is False
+    assert d.reason == REVIEW_HANDOFF_REASON
+    assert d.event is None
+    assert d.usage_note is False
+
+
+def test_review_handoff_helper():
+    assert note_is_review_handoff("@berat_ai /review", ["berat_ai"]) is True
+    assert note_is_review_handoff("@berat_ai /reviewing", ["berat_ai"]) is False
+    assert note_is_ask_handoff("@berat_ai /review", ["berat_ai"]) is False
+
+
+def test_new_header_is_ignored_as_bot_reply():
+    d = _gl("**Yaver 0.9.5 — Answer** · `m` · `job_1`\n\ndone")
+    assert d.accepted is False
+    assert d.reason == "ignored bot reply"
+    d2 = _gl("<!-- yaver-usage -->\n**Yaver — how to run a command**\n\nI only run `/yaver`.")
+    assert d2.accepted is False
+    assert d2.reason == "ignored bot reply"
+
+
 # --- HTTP: processor must not be called --------------------------------------
+
+def test_gitlab_http_review_does_not_post_usage_note(fake_jira, monkeypatch):
+    from src.dashboard.api import create_dashboard_app
+    from src.processor import JobProcessor
+
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_secret", "tok")
+    monkeypatch.setattr("src.config.settings.gitlab_webhook_enabled", True)
+    monkeypatch.setattr("src.config.settings.gitlab_bot_mentions", "@berat_ai")
+    posted = {}
+
+    def fake_post(self, **kwargs):
+        posted.update(kwargs)
+        return {"id": 3}
+
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.enqueue_gitlab_note = AsyncMock()
+    app = create_dashboard_app(processor=proc)
+    with patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/yaver/webhook/gitlab",
+                json=_mr_payload(note="@berat_ai /review"),
+                headers={"X-Gitlab-Event": "Note Hook", "X-Gitlab-Token": "tok"},
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["reason"] == REVIEW_HANDOFF_REASON
+    assert body.get("usage_note") is not True
+    proc.enqueue_gitlab_note.assert_not_awaited()
+    assert posted == {}
+
 
 def test_gitlab_http_ask_does_not_enqueue(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app

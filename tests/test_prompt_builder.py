@@ -26,7 +26,8 @@ def test_gitlab_comment_prompt_has_mr_context():
         source_branch="feature/login",
         target_branch="develop",
         author="alice",
-        comment="@berat_ai what does login do?",
+        comment="what does login do?",
+        replied_message="The handler uses JWT. Why?",
     )
     assert "GL-ACME-DEMO-4" in p
     assert "feature/login" in p
@@ -34,9 +35,38 @@ def test_gitlab_comment_prompt_has_mr_context():
     assert "what does login do?" in p
     assert "Add login" in p
     assert "derman-build" in p.lower()
-    assert "existing" in p.lower() and "merge request" in p.lower()
+    assert "## Replied message" in p
+    assert "The handler uses JWT. Why?" in p
+    assert "## Prompt" in p
+    assert "thread follow-up" in p.lower()
     assert "Do **not** push" in p or "Do not push" in p
     assert "new merge request" in p.lower()
+
+
+def test_azure_comment_prompt_uses_parent_from_webhook_raw():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_azure_comment_prompt(
+        issue_key="AZ-1",
+        pr_title="Fix lock",
+        pr_url="https://tfs.example.com/tfs/Col/P/_git/R/pullrequest/4",
+        source_branch="feature/x",
+        target_branch="develop",
+        author="alice",
+        comment="rename the helper",
+        raw={
+            "resource": {
+                "comment": {
+                    "content": "@yaver /yaver rename the helper",
+                    "parentComment": {"content": "This lock is racy."},
+                }
+            }
+        },
+    )
+    assert "## Replied message" in p
+    assert "This lock is racy." in p
+    assert "## Prompt" in p
+    assert "rename the helper" in p
+    assert "derman-build" in p.lower()
 
 
 def test_plan_path_includes_title_and_description():
@@ -211,4 +241,4 @@ def test_only_two_prompt_files_exist():
 
     agent = Path("agent")
     names = {p.name for p in agent.iterdir() if p.is_file()}
-    assert names == {"PLAN_PROMPT.md", "BUILD_PROMPT.md"}
+    assert names == {"PLAN_PROMPT.md", "BUILD_PROMPT.md", "TEST_PROMPT.md"}
