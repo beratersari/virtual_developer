@@ -24,6 +24,7 @@ type Draft = {
   jira_board_id: string
   poll_interval_seconds: number
   jira_trigger_user: string
+  jira_trigger_label: string
   gitlab_trigger_user: string
   azure_trigger_user: string
   gitlab_webhook_enabled: boolean
@@ -47,6 +48,7 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_board_id: s.jira_board_id,
     poll_interval_seconds: s.poll_interval_seconds,
     jira_trigger_user: s.jira_trigger_user ?? s.trigger_assignee_names ?? '',
+    jira_trigger_label: s.jira_trigger_label ?? s.trigger_labels ?? '',
     gitlab_trigger_user: s.gitlab_trigger_user ?? s.gitlab_bot_mentions ?? '',
     azure_trigger_user: s.azure_trigger_user ?? s.azure_bot_mentions ?? '',
     gitlab_webhook_enabled: s.gitlab_webhook_enabled !== false,
@@ -162,6 +164,9 @@ export function SettingsPage() {
       }
       if (dirtyKeys.has('jira_trigger_user')) {
         body.jira_trigger_user = draft.jira_trigger_user
+      }
+      if (dirtyKeys.has('jira_trigger_label')) {
+        body.jira_trigger_label = draft.jira_trigger_label
       }
       if (dirtyKeys.has('gitlab_trigger_user')) {
         body.gitlab_trigger_user = draft.gitlab_trigger_user
@@ -388,6 +393,19 @@ export function SettingsPage() {
           Jira display name or username, no @. To Do issues assigned to this
           name are accepted. Comments that mention the same name tag the bot.
           Comma-separated if there is more than one.
+        </span>
+      </label>
+      <label className="field">
+        <span>Trigger label (JIRA_TRIGGER_LABEL)</span>
+        <input
+          value={draft.jira_trigger_label}
+          onChange={(e) => mark('jira_trigger_label', e.target.value)}
+          placeholder="bot, ai-assist"
+        />
+        <span className="text-xs text-text-muted">
+          Optional. When set, To Do intake needs the trigger user AND one of
+          these labels. Leave empty to accept any To Do ticket assigned to the
+          bot. Comma-separated if there is more than one.
         </span>
       </label>
       <p className="text-xs text-text-muted">

@@ -29,7 +29,12 @@ def test_init_without_board():
         assert p.board_id == "" or p.board_id is None or True
 
 
-def test_is_assigned_to_bot_variants(poller, fake_jira):
+def test_is_assigned_to_bot_variants(poller, fake_jira, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_trigger_user", "jira ai bot, jira-ai-bot, devbot")
+    monkeypatch.setattr(settings, "trigger_assignee_names", "")
+    monkeypatch.setattr(settings, "trigger_mentions", "")
     # client is FakeJiraClient which returns None for get_issue by default
     # use MagicMock client
     poller.client = MagicMock()

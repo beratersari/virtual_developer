@@ -16,7 +16,11 @@ from src.jira.plan_labels import (
     infer_plan_handoff,
     labels_from_fields,
 )
-from src.jira.triggers import poller_triggers_on
+from src.jira.triggers import (
+    issue_has_trigger_label,
+    parse_trigger_labels,
+    poller_triggers_on,
+)
 from src.logger import logger
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
@@ -245,7 +249,19 @@ class JiraPoller:
                 assigned_to_bot_count += 1
             is_todo = self._is_todo_status(fields)
             seen = issue_key in self._seen_issues
-            should_process = poller_triggers_on(assigned_to_bot=is_assigned_to_bot)
+            required_labels = parse_trigger_labels(
+                getattr(settings, "jira_trigger_label_list", None)
+            )
+            matched_label = (
+                issue_has_trigger_label(labels, required_labels)
+                if required_labels
+                else False
+            )
+            should_process = poller_triggers_on(
+                assigned_to_bot=is_assigned_to_bot,
+                labels=labels,
+                required_labels=required_labels,
+            )
             # will_process decided after reprocess pass; provisional for new
             provisional_new = should_process and is_todo and not seen
 
@@ -258,6 +274,7 @@ class JiraPoller:
                     "labels": labels,
                     "assignee": assignee_display,
                     "matched_assignee": is_assigned_to_bot,
+                    "matched_label": matched_label,
                     "is_todo": is_todo,
                     "will_process": provisional_new,  # updated after reprocess
                     "local_status": local.status.value if local else None,

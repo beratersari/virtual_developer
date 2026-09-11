@@ -291,6 +291,7 @@ class PolledIssueItem(BaseModel):
     labels: List[str] = Field(default_factory=list)
     assignee: Optional[str] = None
     matched_assignee: bool = False
+    matched_label: bool = False
     is_todo: bool = False
     will_process: bool = False
     local_status: Optional[str] = None
@@ -394,6 +395,8 @@ class SettingsView(BaseModel):
     azure_bot_mentions: str = ""
     azure_webhook_path: str = "/yaver/webhook/azure"
     jira_trigger_user: str = ""
+    jira_trigger_label: str = ""
+    trigger_labels: str = ""
     trigger_mentions: str = ""
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
@@ -594,6 +597,19 @@ class SettingsUpdate(BaseModel):
         description=(
             "Comma-separated Jira names for To Do assignee intake and @mentions"
         ),
+    )
+    jira_trigger_label: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Comma-separated Jira labels. When set, intake needs assignee AND "
+            "one of these labels. Empty = assignee only."
+        ),
+    )
+    trigger_labels: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Leftover; same list as jira_trigger_label",
     )
     trigger_mentions: Optional[str] = Field(
         default=None,

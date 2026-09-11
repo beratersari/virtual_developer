@@ -55,9 +55,58 @@ def identity_matches_bot(
     return False
 
 
-def poller_triggers_on(*, assigned_to_bot: bool) -> bool:
-    """Poller intake: assignee matches ``JIRA_TRIGGER_USER``."""
-    return bool(assigned_to_bot)
+def parse_trigger_labels(raw: Any) -> List[str]:
+    """Lowercased label tokens from a comma list (or an iterable)."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        out: List[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            name = str(item or "").strip().lower()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+    if not isinstance(raw, str):
+        return []
+    return normalize_needles(str(raw).replace(";", ",").split(","))
+
+
+def issue_has_trigger_label(
+    labels: Optional[Iterable[Any]],
+    required: Optional[Iterable[str]] = None,
+) -> bool:
+    """True when the issue has at least one configured trigger label."""
+    need = parse_trigger_labels(required)
+    if not need:
+        return False
+    have = {str(x or "").strip().lower() for x in (labels or []) if str(x or "").strip()}
+    return bool(have.intersection(need))
+
+
+def poller_triggers_on(
+    *,
+    assigned_to_bot: bool,
+    labels: Optional[Iterable[Any]] = None,
+    required_labels: Optional[Iterable[str]] = None,
+) -> bool:
+    """Poller intake: assignee match, plus label AND when labels are configured.
+
+    * No ``JIRA_TRIGGER_LABEL`` / leftover ``TRIGGER_LABELS`` → assignee only.
+    * Labels set → To Do intake needs assignee **and** one of those labels.
+    """
+    if not assigned_to_bot:
+        return False
+    required = required_labels
+    if required is None:
+        from src.config import settings
+
+        required = getattr(settings, "jira_trigger_label_list", None)
+    need = parse_trigger_labels(required)
+    if not need:
+        return True
+    return issue_has_trigger_label(labels, need)
 
 
 def assignee_looks_like_bot(
@@ -128,6 +177,10 @@ def comment_is_bot_output(body: str) -> bool:
     text = (body or "").lstrip()
     if not text:
         return False
+    from src.brand import is_yaver_reply
+
+    if is_yaver_reply(text):
+        return True
     prefix = (COMMENT_PREFIX or "").strip()
     if prefix and text.startswith(prefix):
         return True
