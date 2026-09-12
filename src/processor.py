@@ -4248,6 +4248,56 @@ class JobProcessor:
         finally:
             await self.dispatch_queue()
 
+    def _post_gitlab_plan_ready_wait(self, event: Any, state: JiraAgentState) -> bool:
+        """Tell the MR thread we will not implement until plan_execute.
+
+        Does not start a build. Uses the webhook event coords — plan_ready
+        Jira state often has no gitlab_* metadata yet.
+        """
+        host = str(getattr(event, "host", "") or "").strip()
+        project = getattr(event, "project_id", None) or getattr(
+            event, "project_path", ""
+        )
+        try:
+            iid = int(getattr(event, "mr_iid", 0) or 0)
+        except (TypeError, ValueError):
+            iid = 0
+        if not host or not project or iid <= 0:
+            logger.warning(
+                f"{state.issue_key}: plan_ready wait note skipped "
+                f"(host={host!r} project={project!r} iid={iid})"
+            )
+            return False
+        from src.brand import wrap_operator_reply
+        from src.gitlab.client import GitlabClient
+
+        body = wrap_operator_reply(
+            "Plan ready",
+            "This ticket is waiting at plan_ready. Rename label "
+            "plan_ready → plan_execute while the ticket is In Progress "
+            "to implement. I did not start a build from this comment.",
+            state=state,
+        )
+        discussion_id = str(getattr(event, "discussion_id", "") or "").strip()
+        try:
+            posted = GitlabClient(host=host).post_mr_note(
+                project=project,
+                mr_iid=iid,
+                body=body,
+                discussion_id=discussion_id,
+                allow_new_thread=not bool(discussion_id),
+            )
+        except Exception as e:
+            logger.warning(
+                f"{state.issue_key}: plan_ready wait note failed: {e}"
+            )
+            return False
+        if posted is None:
+            logger.warning(f"{state.issue_key}: plan_ready wait note was not posted")
+            return False
+        logger.info(f"{state.issue_key}: posted plan_ready wait note on MR !{iid}")
+        return True
+
     def _post_gitlab_mr_reply(
         self,
         state: JiraAgentState,
@@ -4441,6 +4491,7 @@ class JobProcessor:
             logger.info(
                 f"{issue_key}: plan_ready; GitLab comment waits for plan_execute"
             )
+            self._post_gitlab_plan_ready_wait(event, st)
             return False
         summary = event.mr_title or f"MR !{event.mr_iid}"
         description = event.prompt
