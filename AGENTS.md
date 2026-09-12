@@ -61,6 +61,8 @@ Yaver is a Python daemon that:
 - Dashboard **Cancel** kills agent children immediately and must **not** wait on the long-held workflow issue lock.
 - `update_state(metadata={...})` **merges** metadata; never wipe unrelated keys.
 - Temp clones are kept. Operators delete them from dashboard Storage. No daemon start, hourly, or job-end auto-purge.
+- Storage Delete is **disabled / refused** while a live job owns the clone (`in_use`). Stop the job first.
+- Dashboard schedule **Cancel** is only for `scheduled` / `error`. **`dispatching` cannot be cancelled** (would abort a live job on the same issue).
 
 ### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
@@ -105,7 +107,7 @@ build on that repo/source/target resumes the build session.
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
 | Local `plan_ready` + label `plan_ready` | **Wait.** Do not implement. |
 | Local `plan_ready` + In Progress + `plan_execute` | **Start** implementation (even if Mode is still plan) |
-| Local `plan_ready` + `plan_refactor` (no `plan_ready` label) + comment @bot | **Revise** the plan on the plan session |
+| Local `plan_ready` + `plan_refactor` (no `plan_ready` label) + comment @bot | **Revise** the plan on the plan session. Re-adding `plan_refactor` without a new `@bot` comment **reuses the latest existing mention** (intentional). |
 | Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
 **Do not “fix”** by starting a build from `Mode: build` on the plan ticket.
@@ -258,6 +260,9 @@ model not to push; if it still does, delivery must remain correct.
   (Turkish `ğüşıöç`, etc.). Windows console code pages otherwise mojibake titles.
 - This is independent of the clarifying-question path but shows up whenever we
   reliably open MRs from the orchestrator.
+- **GitLab REST MR create/list always uses `https://{host}/api/v4/...`**
+  even when the clone URL is `http://`. **Intentional.** Do not follow the
+  clone scheme.
 
 #### Key modules
 
@@ -293,6 +298,10 @@ model not to push; if it still does, delivery must remain correct.
 ---
 
 ## 3. Jira (on-prem)
+
+**Product target is Jira Server/DC (on-prem).** Jira Cloud ADF / smart-link /
+mention-chip shapes are out of scope — do **not** treat Cloud-only description
+or comment flattening gaps as bugs.
 
 ### Auth (only this)
 
