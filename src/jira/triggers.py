@@ -7,6 +7,7 @@ Assignment and mention checks must stay aligned with Server/DC 9.4 (``name`` /
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Iterable, List, Optional
 
 from src.brand import COMMENT_PREFIX
@@ -17,12 +18,27 @@ _WIKI_MENTION = re.compile(r"\[~([^\]]+)\]")
 _AT_TOKEN = re.compile(r"@([A-Za-z0-9._\-]+)")
 
 
+def fold_identity_text(raw: Any) -> str:
+    """Case-fold an assignee/mention fragment, including Turkish İ/ı.
+
+    Default ``İ.lower()`` is i + combining dot, so ASCII ``irem`` would not
+    match displayName ``İrem``. Fold both dotted and dotless I to ``i``.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = text.replace("\u0130", "i").replace("\u0131", "i")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return text.lower()
+
+
 def normalize_needles(raw: Iterable[str]) -> List[str]:
-    """Lowercased, stripped fragments (empty dropped)."""
+    """Folded, stripped fragments (empty dropped)."""
     out: List[str] = []
     seen: set[str] = set()
     for item in raw or []:
-        n = str(item or "").strip().lower()
+        n = fold_identity_text(item)
         if n.startswith("@"):
             n = n[1:].strip()
         if n and n not in seen:
@@ -43,7 +59,7 @@ def identity_matches_bot(
     for c in candidates:
         if c is None:
             continue
-        text = str(c).strip().lower()
+        text = fold_identity_text(c)
         if text and text not in {"none", "null", "unassigned"}:
             values.append(text)
     if not values:
