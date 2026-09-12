@@ -37,7 +37,6 @@ OPENCODE_AGENT_ALIASES: Dict[str, str] = {
     "prometheus": "derman-plan",
     "metis": "derman-plan",
     "momus": "derman-plan",
-    "oracle": "oracle",
     "explore": "explore",
     "librarian": "librarian",
 }

@@ -13,42 +13,10 @@ class WorkflowType(Enum):
     PLANNING = "planning"  # Mode: plan — derman-plan (no GitLab push)
     EXECUTION = "execution"  # Mode: build — derman-build → push + MR
     TESTING = "testing"  # Mode: test — derman-test → unit tests, push + MR
-    ORACLE_CONSULT = "oracle"  # Architecture consultation (no Mode required)
 
 
 class WorkflowRouter:
     """Routes JIRA issues to appropriate workflows via ``Mode:`` in ``{params}``."""
-
-    # Keywords indicating Oracle consultation (pure Q&A, not implementation)
-    ORACLE_KEYWORDS = [
-        "should we",
-        "architecture",
-        "design pattern",
-        "best practice",
-        "how to",
-    ]
-
-    # Words that signal real implementation work (must not route to oracle-only)
-    IMPLEMENTATION_KEYWORDS = [
-        "implement",
-        "create",
-        "build",
-        "fix",
-        "bug",
-        "add",
-        "remove",
-        "delete",
-        "rename",
-        "refactor",
-        "migrate",
-        "update",
-        "change",
-        "feature",
-        "epic",
-        "mode: plan",
-        "mode: build",
-        "mode: test",
-    ]
 
     @classmethod
     def route_issue(
@@ -70,16 +38,6 @@ class WorkflowRouter:
             return WorkflowType.EXECUTION
         if mode == "test":
             return WorkflowType.TESTING
-
-        combined_text = f"{summary} {description}".lower()
-        has_implementation = any(
-            kw in combined_text for kw in cls.IMPLEMENTATION_KEYWORDS
-        )
-        has_oracle_phrase = any(kw in combined_text for kw in cls.ORACLE_KEYWORDS)
-
-        # Oracle only when consultative and not asking for implementation work
-        if has_oracle_phrase and not has_implementation:
-            return WorkflowType.ORACLE_CONSULT
 
         # No {params} Mode (and no params default): prefer planning so git
         # prepare posts the format help. A {params} block without Mode is
@@ -113,9 +71,7 @@ class WorkflowRouter:
 
     @classmethod
     def get_agent_for_workflow(cls, workflow_type: WorkflowType) -> str:
-        """OpenCode agent for this workflow (oracle consult is fixed)."""
-        if workflow_type == WorkflowType.ORACLE_CONSULT:
-            return "oracle"
+        """OpenCode agent for this workflow."""
         if workflow_type == WorkflowType.PLANNING:
             plan = getattr(settings, "default_plan_agent", None)
             if isinstance(plan, str) and plan.strip():

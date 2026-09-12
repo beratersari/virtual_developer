@@ -1261,15 +1261,14 @@ def test_route_issue_with_reason_modes():
         "should we use kafka",
         "architecture best practice question only",
     )
-    assert wt == WorkflowType.ORACLE_CONSULT and err is None
+    assert wt == WorkflowType.PLANNING and err is None
 
     wt, err = WorkflowRouter.route_issue_with_reason(
         "X-4",
         "fix the login bug",
         "users cannot login",
     )
-    assert wt == WorkflowType.PLANNING and err is not None
-    assert "Mode" in err
+    assert wt == WorkflowType.PLANNING and err is None
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,6 @@ def test_resolve_opencode_agent_name_stock_build():
     assert resolve_opencode_agent_name("sisyphus") == "derman-build"
     assert resolve_opencode_agent_name("prometheus") == "derman-plan"
     assert resolve_opencode_agent_name("atlas") == "derman-build"
-    assert resolve_opencode_agent_name("oracle") == "oracle"
 
 
 def test_agent_task_to_dict():

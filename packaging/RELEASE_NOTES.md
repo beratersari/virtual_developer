@@ -1,3 +1,10 @@
+# Yaver 0.9.11
+
+Oracle consult is gone. Tickets no longer route
+on "should we / architecture / how to".
+Only Mode: plan, Mode: build, and Mode: test remain.
+No Mode still goes to plan.
+
 # Yaver 0.9.10
 
 Settings can save JIRA_PROJECTS so feat(KAN-12) binds

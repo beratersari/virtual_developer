@@ -295,33 +295,6 @@ class PromptBuilder:
         return PromptBuilder._join_blocks(system, extra)
 
     @staticmethod
-    def build_oracle_consult_prompt(
-        question: str,
-        context_files: Optional[list] = None,
-        *,
-        issue_key: str = "",
-        summary: str = "",
-    ) -> str:
-        """Consult uses the plan-mode prompt + question as description."""
-        desc = (question or "").strip()
-        if context_files:
-            desc = (
-                desc
-                + "\n\n### Context files\n"
-                + "\n".join(f"- {f}" for f in context_files)
-            ).strip()
-        key = issue_key or "CONSULT"
-        title = (summary or "").strip() or "Oracle consultation"
-        q = desc or "(no question provided)"
-        return (
-            f"## Oracle consultation: {key}\n\n"
-            f"Answer the operator's question. Do **not** write a plan file, "
-            f"do not modify product code, and do not invent a Mode/params template.\n\n"
-            f"## Jira title\n\n{title}\n\n"
-            f"## Question\n\n{q}\n"
-        )
-
-    @staticmethod
     def commit_message_block(
         issue_key: str,
         *,

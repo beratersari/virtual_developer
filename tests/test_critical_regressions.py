@@ -265,14 +265,14 @@ def test_agent_env_passes_all_process_vars(monkeypatch):
     assert path == "/usr/bin" or path.endswith(os.pathsep + "/usr/bin")
 
 
-def test_router_implementation_beats_oracle():
+def test_router_consultative_text_is_planning():
     assert (
         WorkflowRouter.route_issue("X", "how to implement feature", "build auth")
-        != WorkflowType.ORACLE_CONSULT
+        == WorkflowType.PLANNING
     )
     assert (
         WorkflowRouter.route_issue("X", "should we use kafka", "pure architecture question")
-        == WorkflowType.ORACLE_CONSULT
+        == WorkflowType.PLANNING
     )
 
 

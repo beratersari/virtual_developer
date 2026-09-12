@@ -9,7 +9,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 Yaver is a Python daemon that:
 
 1. Discovers issues (board poller: To Do + bot assignee)
-2. Routes work (plan / build / test / oracle)
+2. Routes work (plan / build / test)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
 5. Pushes feature branches and opens merge requests

@@ -233,10 +233,10 @@ def test_reconstruct_prompts_agents(tmp_path):
     p = _reconstruct_prompts(st)
     assert p["workflow_type"] == "planning"
 
-    sm.update_state("RP-1", metadata={"workflow_type": "oracle"})
+    sm.update_state("RP-1", metadata={"workflow_type": "testing"})
     st = sm.get_state("RP-1")
     p = _reconstruct_prompts(st)
-    assert p["agent"] == "oracle"
+    assert p["workflow_type"] == "testing"
 
     sm.update_state(
         "RP-1",

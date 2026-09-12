@@ -418,39 +418,6 @@ h3. AI Agent — Response
             logger.error(f"Error posting comment response for {issue_key}: {e}")
             return None
 
-    def post_oracle_response(
-        self,
-        issue_key: str,
-        question: str,
-        answer: str,
-    ) -> Optional[str]:
-        """Post architecture consultation response."""
-        q = (question or "").strip() or "(no question provided)"
-        a = _human_agent_answer(answer)
-        a = (a or "").strip() or (
-            "_The Oracle agent returned an empty answer. Rephrase the question or check logs._"
-        )
-        a = _clip(a, _MAX_RESPONSE_CHARS)
-        body = f"""{_header_for_state("Answer", None)}
-
-h3. AI Agent — Architecture Consultation
-
-*Question:* {q}
-
-*Answer:*
-{a}
-
-----
-_Consultation provided by the Oracle agent._
-"""
-
-        try:
-            result = self.client.add_comment(issue_key, body)
-            return result.get("id") if result else None
-        except Exception as e:
-            logger.error(f"Error posting oracle response for {issue_key}: {e}")
-            return None
-
     def update_issue_status(
         self,
         issue_key: str,

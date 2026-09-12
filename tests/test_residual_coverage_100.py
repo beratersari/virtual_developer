@@ -228,22 +228,6 @@ async def test_push_reporter_exceptions(processor, state_manager, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_oracle_cas_aborted(processor, state_manager, tmp_path):
-    state = state_manager.create_state("OR-CAS", "how to", "should we")
-    runner = MagicMock()
-
-    async def run_then_abort(task, **kw):
-        state_manager.update_state("OR-CAS", status=TaskStatus.CANCELLED)
-        return {"returncode": 0, "stdout": "ans", "stderr": ""}
-
-    runner.run_agent = AsyncMock(side_effect=run_then_abort)
-    processor.agent_runner = runner
-    processor._contexts["OR-CAS"] = {"git": None, "runner": runner}
-    await processor._start_oracle_consultation(state)
-    assert state_manager.get_state("OR-CAS").status == TaskStatus.CANCELLED
-
-
-@pytest.mark.asyncio
 async def test_plan_ready_label_skips_when_live(processor, state_manager):
     state_manager.create_state("LAB-1", "s", "d")
     state_manager.update_state("LAB-1", status=TaskStatus.PLAN_READY)

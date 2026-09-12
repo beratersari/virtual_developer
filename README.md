@@ -10,7 +10,7 @@
 
 1. **Discovers** work via the **board poller** (To Do + bot assignee).  
 2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`; Mode defaults to build)  
-3. **Runs** OpenCode agents (Prometheus planning, Atlas build, Oracle consult) in temp clones  
+3. **Runs** OpenCode agents (derman-plan / derman-build / derman-test) in temp clones  
 4. **Reports** plans, progress, errors, and completion as Jira comments  
 5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
 6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
@@ -56,7 +56,6 @@ Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCo
 | **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
 | **`DEFAULT_TEST_AGENT`** (`derman-test`) | OpenCoderman **derman-test** for `Mode: test` (unit tests only) |
 | **Plan / build / test user text** | Short job facts in `agent/PLAN_PROMPT.md` / `BUILD_PROMPT.md` / `TEST_PROMPT.md`; rules live on the agents |
-| **Oracle** | Architecture Q&A when routing detects consultative wording |
 
 ---
 
@@ -244,10 +243,6 @@ Dashboard **Start** is disabled.
 2. Atlas (orchestrator) implements the plan when `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (or the sibling plan for the same repo + branches) exists; otherwise the Jira description
 3. On success: push branch, open MR, comment completion → `completed`  
 4. On failure: state `error` **and** Jira error comment (`_fail_issue` / `post_error`)  
-
-### Oracle
-
-Consultative questions without implementation keywords may route to Oracle (read-only style advice). Implementation language forces plan/build paths instead.
 
 ### Task statuses
 

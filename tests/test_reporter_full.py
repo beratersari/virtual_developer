@@ -260,28 +260,6 @@ def test_post_comment_response_formats_codex_jsonl_keeps_opencode():
     assert '{"type":"error","message":"not a stream"}' in oc
 
 
-def test_post_oracle_response():
-    client = FakeJiraClient()
-    r = JiraReporter(client=client)
-    assert r.post_oracle_response("R-1", "q?", "a!") is not None
-    body = client.comments[-1]["body"]
-    assert "a!" in body
-
-
-def test_post_oracle_response_formats_codex_jsonl():
-    client = FakeJiraClient()
-    r = JiraReporter(client=client)
-    jsonl = (
-        "[codex] cwd=/tmp\n"
-        '{"type":"item.completed","item":{"type":"agent_message","text":"Use Postgres."}}'
-    )
-    r.post_oracle_response("R-1", "which db?", jsonl)
-    body = client.comments[-1]["body"]
-    assert "Use Postgres." in body
-    assert '{"type"' not in body
-    assert "[codex]" not in body
-
-
 def test_update_issue_status_and_attach():
     client = MagicMock()
     client.transition_issue.return_value = True

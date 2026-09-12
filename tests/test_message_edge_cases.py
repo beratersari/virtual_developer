@@ -196,14 +196,6 @@ def test_comment_response_exception_returns_none():
 
 
 
-def test_oracle_empty_question_and_answer(reporter, client):
-    reporter.post_oracle_response("MSG-1", "", "")
-    body = client.comments[-1]["body"]
-    assert "Architecture Consultation" in body
-    assert "no question" in body.lower()
-    assert "empty answer" in body.lower()
-
-
 def test_all_message_types_have_h3_heading(reporter, client):
     """Every user-visible template starts with a clear h3 heading."""
     st = _state(
@@ -217,7 +209,6 @@ def test_all_message_types_have_h3_heading(reporter, client):
     reporter.post_completion(st, "done")
     reporter.post_error(st, "fail", suggestion="retry")
     reporter.post_comment_response("MSG-1", "ok")
-    reporter.post_oracle_response("MSG-1", "q?", "a")
 
     headings = []
     for c in client.comments:
@@ -231,7 +222,6 @@ def test_all_message_types_have_h3_heading(reporter, client):
     assert any("Completed" in h for h in headings)
     assert any("Error" in h for h in headings)
     assert any("Response" in h for h in headings)
-    assert any("Consultation" in h for h in headings)
 
 
 def test_fail_issue_posts_error_and_sets_status(state_manager, fake_jira):

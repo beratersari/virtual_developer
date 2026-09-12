@@ -208,10 +208,10 @@ class JobProcessor:
         summary: str,
         description: str,
     ) -> WorkflowType:
-        """Pick plan vs build vs oracle from the issue text.
+        """Pick plan vs build vs test from the issue text.
 
         * Explicit ``Mode: plan|build|test`` selects the workflow.
-        * Otherwise ``WorkflowRouter.route_issue`` (keyword / oracle heuristics).
+        * Otherwise ``WorkflowRouter.route_issue`` (defaults to planning).
         * Template validity (Repository, Source, Target, **Mode**) is **not**
           checked here — same path as always: ``require_issue_git_spec`` inside
           ``_prepare_git_workspace`` after a job is opened.
@@ -854,11 +854,11 @@ class JobProcessor:
         """Return the git manager bound to this issue (isolation-safe).
 
         Never returns another issue's git manager when ``ctx["git"]`` is None
-        (oracle/sandbox paths) or missing under multi-job concurrency.
+        (sandbox / comment paths) or missing under multi-job concurrency.
         """
         ctx = self._contexts.get(issue_key)
         if ctx is not None:
-            # Explicit None means sandbox/oracle — do not fall back to foreign git
+            # Explicit None means sandbox — do not fall back to foreign git
             return ctx.get("git")
         if self.git_manager is not None and (
             not self._contexts or set(self._contexts.keys()) <= {issue_key}
@@ -975,7 +975,7 @@ class JobProcessor:
         self._release_source_branch(issue_key)
         self._freeze_session_binds.discard(issue_key)
         self._kick_queue()
-        # Drop leftover legacy mirrors so oracle/comment cannot adopt a dead clone
+        # Drop leftover legacy mirrors so comment jobs cannot adopt a dead clone
         if self.agent_runner is not None and ctx and ctx.get("runner") is self.agent_runner:
             self.agent_runner = None
         if self.git_manager is not None and git is self.git_manager:
@@ -1474,13 +1474,9 @@ class JobProcessor:
         return chosen
 
     def _should_bind_opencode_session(self, issue_key: str) -> bool:
-        """Oracle/sandbox must not overwrite the plan/build session bind."""
+        """Sandbox / comment jobs must not overwrite the plan/build session bind."""
         ctx = self._contexts.get(issue_key) or {}
         if ctx.get("git") is None and issue_key in self._contexts:
-            return False
-        st = self.state_manager.get_state(issue_key)
-        wf = str(((st.metadata if st else None) or {}).get("workflow_type") or "")
-        if wf.lower() == "oracle":
             return False
         return True
 
@@ -1511,7 +1507,7 @@ class JobProcessor:
             return
         if not self._should_bind_opencode_session(issue_key):
             logger.info(
-                f"{issue_key}: skipping session bind upsert (oracle/sandbox)"
+                f"{issue_key}: skipping session bind upsert (sandbox)"
             )
             return
         if issue_key in self._freeze_session_binds:
@@ -3274,8 +3270,6 @@ class JobProcessor:
                 await self._start_execution_workflow(state)
             elif workflow_type == WorkflowType.TESTING:
                 await self._start_execution_workflow(state, kind="test")
-            elif workflow_type == WorkflowType.ORACLE_CONSULT:
-                await self._start_oracle_consultation(state)
             return True, None
         except Exception as e:
             logger.exception(f"Workflow {workflow_type.value} crashed for {issue_key}: {e}", e)
@@ -7283,7 +7277,7 @@ class JobProcessor:
         return candidates[0] if candidates else None
 
     def _ensure_agent_runner(self, issue_key: str) -> AgentRunner:
-        """Ensure an AgentRunner exists for lightweight paths (oracle/comments).
+        """Ensure an AgentRunner exists for lightweight paths (comments).
 
         Always binds to the given issue_key (never reuses another issue's runner).
         Prefers a full git workspace when possible; falls back to an empty
@@ -7336,102 +7330,6 @@ class JobProcessor:
         self.agent_runner = runner
         return runner
 
-    async def _start_oracle_consultation(self, state: JiraAgentState):
-        """Start Oracle consultation."""
-        logger.info(f"Starting Oracle consultation for {state.issue_key}")
-        success: Optional[bool] = False
-        try:
-            # Clone/init must not block the daemon event loop (cancel/watchdog).
-            runner = await asyncio.to_thread(
-                self._ensure_agent_runner, state.issue_key
-            )
-
-            prompt = PromptBuilder.build_plan_prompt(
-                issue_key=state.issue_key,
-                summary=state.issue_summary or "",
-                description=state.description or state.issue_summary or "",
-            )
-
-            task = AgentTask(
-                description=f"Consult: {state.issue_key}",
-                prompt=prompt,
-                agent="oracle",
-                issue_key=state.issue_key,
-                model=self._model_for_issue(state),
-                backend=self._backend_for_issue(state),
-            )
-
-            job_id = self._begin_workflow_run(
-                state,
-                status=TaskStatus.EXECUTING,
-                task=task,
-                workflow_type="oracle",
-                agent="oracle",
-                job_status="executing",
-            )
-            if job_id is None:
-                logger.info(
-                    f"Oracle not started for {state.issue_key}: begin claim rejected"
-                )
-                return
-            self._mark_jira_in_progress(state.issue_key)
-
-            if self._is_aborted(state.issue_key):
-                logger.info(f"Oracle aborted before agent for {state.issue_key}")
-                self._release_context(state.issue_key, success=False)
-                return
-
-            result = await runner.run_agent(
-                task,
-                on_session_file=lambda sp, pp=None: self._link_job_session_paths(
-                    state.issue_key, sp, pp
-                ),
-                on_session_id=lambda sid: self._link_job_opencode_session(
-                    state.issue_key, sid
-                ),
-            )
-            self._apply_agent_result_session(state.issue_key, result)
-
-            if self._is_aborted(state.issue_key):
-                logger.info(f"Oracle aborted for {state.issue_key}")
-                return
-
-            if result["returncode"] == 0:
-                from src.backends.codex import format_agent_answer_for_comment
-
-                self.reporter.post_oracle_response(
-                    state.issue_key,
-                    question=state.description,
-                    answer=format_agent_answer_for_comment(result.get("stdout") or ""),
-                )
-                updated = self.state_manager.update_state_if(
-                    state.issue_key,
-                    expected_statuses={TaskStatus.EXECUTING},
-                    reject_statuses=self.ABORTED_STATUSES,
-                    status=TaskStatus.COMPLETED,
-                    completed_at=datetime.now(),
-                    progress_percentage=100,
-                    current_task_id=None,
-                )
-                if updated is None:
-                    logger.info(
-                        f"Oracle completion ignored for {state.issue_key} (aborted)"
-                    )
-                    success = False
-                else:
-                    self._finish_job_record(
-                        state.issue_key, status="completed", progress_percentage=100
-                    )
-                    success = True
-            else:
-                self._fail_issue(
-                    state.issue_key,
-                    result.get("stderr") or "Oracle consultation failed",
-                    suggestion="Rephrase the architecture question or check agent logs.",
-                )
-        finally:
-            self._release_context(state.issue_key, success=success)
-    
     async def _handle_direct_request(self, issue_key: str, request: str):
         """Handle a direct request from comment (does not flip whole-issue ERROR)."""
         state = self.state_manager.get_state(issue_key)

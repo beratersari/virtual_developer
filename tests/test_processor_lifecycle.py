@@ -117,15 +117,14 @@ def test_after_orphan_recovery_todo_can_reprocess(processor, state_manager):
     async def run():
         with patch.object(processor, "_start_execution_workflow", side_effect=cap):
             with patch.object(processor, "_start_planning_workflow", side_effect=cap):
-                with patch.object(processor, "_start_oracle_consultation", side_effect=cap):
-                    await processor._handle_issue_updated(
-                        make_issue_event(
-                            key="RQ-1",
-                            summary="fix typo",
-                            event_type="jira:issue_updated",
-                            status="To Do",
-                        )
+                await processor._handle_issue_updated(
+                    make_issue_event(
+                        key="RQ-1",
+                        summary="fix typo",
+                        event_type="jira:issue_updated",
+                        status="To Do",
                     )
+                )
 
     asyncio.run(run())
     assert started == ["RQ-1"]
@@ -214,15 +213,14 @@ def test_not_processing_pending_todo_can_start(processor, state_manager):
     async def run():
         with patch.object(processor, "_start_execution_workflow", side_effect=cap):
             with patch.object(processor, "_start_planning_workflow", side_effect=cap):
-                with patch.object(processor, "_start_oracle_consultation", side_effect=cap):
-                    await processor._handle_issue_updated(
-                        make_issue_event(
-                            key="GO-1",
-                            summary="fix typo",
-                            event_type="jira:issue_updated",
-                            status="To Do",
-                        )
+                await processor._handle_issue_updated(
+                    make_issue_event(
+                        key="GO-1",
+                        summary="fix typo",
+                        event_type="jira:issue_updated",
+                        status="To Do",
                     )
+                )
 
     asyncio.run(run())
     assert started == ["GO-1"]

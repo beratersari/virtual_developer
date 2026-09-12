@@ -16,16 +16,15 @@ def _params(mode: str) -> str:
     )
 
 
-def test_route_oracle_keywords():
-    # Pure consult — no implementation verbs, no Mode
+def test_route_consultative_text_is_planning():
+    """No Mode and no {params} → planning. Consultative wording is not a workflow."""
     wt = WorkflowRouter.route_issue("X-1", "how to structure this", "should we use pattern")
-    assert wt == WorkflowType.ORACLE_CONSULT
+    assert wt == WorkflowType.PLANNING
 
 
-def test_route_implement_not_oracle():
-    """Implementation work must not be stolen by oracle phrases like 'how to'."""
+def test_route_implement_without_mode_is_planning():
     wt = WorkflowRouter.route_issue("X-1", "how to implement auth", "add OAuth login")
-    assert wt != WorkflowType.ORACLE_CONSULT
+    assert wt == WorkflowType.PLANNING
 
 
 def test_route_mode_plan():
@@ -75,7 +74,6 @@ def test_should_auto_start_execution():
 def test_should_auto_start_planning_never():
     """Planning stops at plan_ready; same-ticket build is plan_execute."""
     assert WorkflowRouter.should_auto_start(WorkflowType.PLANNING) is False
-    assert WorkflowRouter.should_auto_start(WorkflowType.ORACLE_CONSULT) is False
 
 
 def test_get_agent_for_workflow_all_types():
@@ -86,7 +84,6 @@ def test_get_agent_for_workflow_all_types():
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "derman-plan"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION) == "derman-build"
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.TESTING) == "derman-test"
-        assert WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT) == "oracle"
         s.default_agent = "sisyphus"
         s.default_plan_agent = None
         assert WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING) == "sisyphus"
@@ -114,5 +111,4 @@ def test_no_comment_workflow_type():
         "planning",
         "execution",
         "testing",
-        "oracle",
     }
