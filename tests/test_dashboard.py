@@ -724,6 +724,17 @@ def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
         issue_key="gitlab.com", page=1, page_size=20, store=jobs, state_manager=sm
     )
     assert by_params.jobs == []
+    jobs.create_job(issue_key="KAN-1", summary="one")
+    jobs.create_job(issue_key="KAN-10", summary="ten")
+    exact = build_jobs(
+        issue_key="KAN-1",
+        page=1,
+        page_size=20,
+        store=jobs,
+        state_manager=sm,
+        exact_issue_key=True,
+    )
+    assert {j.issue_key for j in exact.jobs} == {"KAN-1"}
 
 
 def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):

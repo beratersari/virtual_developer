@@ -1123,6 +1123,7 @@ def create_dashboard_app(
             page_size=100,
             processor=app.state.processor,
             state_manager=app.state.state_manager,
+            exact_issue_key=True,
         )
         detail = build_task_detail(
             issue_key,
