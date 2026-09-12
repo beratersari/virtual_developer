@@ -1,3 +1,18 @@
+# Yaver 0.9.9
+
+Storage Delete is refused while a job owns the clone.
+The dashboard button is disabled and labeled In use.
+
+Schedule Cancel is refused for dispatching, so it cannot
+abort a live job on the same issue.
+
+Assignee İrem matches JIRA_TRIGGER_USER=irem
+(Turkish dotted and dotless I).
+
+Jira Cloud ADF/smart-link/mention chips are out of scope
+(on-prem Server/DC). GitLab REST MR create stays HTTPS.
+Re-adding plan_refactor reuses the latest @bot mention.
+
 # Yaver 0.9.8
 
 Reply headers always include job_id, matching Creasy:

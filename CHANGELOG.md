@@ -8,6 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-09-12
+
+Storage cannot delete a live job's clone. Dispatching schedules cannot be cancelled. Turkish I matches ASCII trigger names.
+
+### Fixed
+
+- Storage Delete is refused (and the button disabled) while a job owns the clone.
+- Dashboard schedule Cancel is refused for `dispatching` so it cannot abort a live job.
+- Assignee `İrem` matches trigger `irem` (Turkish dotted/dotless I).
+
+### Notes
+
+- Jira Cloud ADF / smart-link / mention-chip gaps are out of scope (on-prem Server/DC).
+- GitLab REST MR create/list stays HTTPS even when the clone URL is HTTP.
+- Re-adding `plan_refactor` without a new `@bot` comment reuses the latest mention.
+
+[0.9.9]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.9
+
 ## [0.9.8] — 2026-09-11
 
 Reply headers always include ``job_id``. Queue claim scan is 1000.
