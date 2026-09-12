@@ -595,8 +595,10 @@ class JiraPoller:
             except Exception:
                 return False
         try:
+            if hasattr(ss, "has_open_for_issue"):
+                return bool(ss.has_open_for_issue(key))
             for status in ("scheduled", "dispatching"):
-                for rec in ss.list_schedules(status=status, limit=500):
+                for rec in ss.list_schedules(status=status, limit=None):
                     if (rec.get("issue_key") or "").strip().upper() == key:
                         return True
         except Exception:
