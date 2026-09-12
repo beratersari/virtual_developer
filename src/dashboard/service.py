@@ -574,6 +574,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
         runtime_persist["jira_board_id"] = settings.jira_board_id
+    if "jira_projects" in data and data["jira_projects"] is not None:
+        from src.config import format_jira_projects
+
+        projects = format_jira_projects(data["jira_projects"])
+        settings.jira_projects = projects
+        runtime_persist["jira_projects"] = projects
+        dotenv_updates["JIRA_PROJECTS"] = projects
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
         runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds

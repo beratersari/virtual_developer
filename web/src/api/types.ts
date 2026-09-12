@@ -566,6 +566,7 @@ export type SettingsPatch = Partial<
     SettingsPayload,
     | 'jira_host'
     | 'jira_board_id'
+    | 'jira_projects'
     | 'poll_interval_seconds'
     | 'max_concurrent_jobs'
     | 'agent_task_timeout_seconds'
