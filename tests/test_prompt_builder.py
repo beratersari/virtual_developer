@@ -217,11 +217,6 @@ def test_mode_prompts_include_jira_and_plan_path():
     assert "sum" in build and "desc body" in build
     assert "/p.md" in build
 
-    oracle = PromptBuilder.build_oracle_consult_prompt(
-        "why design X?", issue_key="A-1", summary="Arch"
-    )
-    assert "why design X?" in oracle and "Arch" in oracle
-
 
 def test_plan_and_build_prompts_differ():
     a = PromptBuilder.build_plan_prompt("X-1", "s", "d")

@@ -499,15 +499,15 @@ def test_r9_add_attachment_does_not_send_json_content_type(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# R10 — oracle keyword heuristic: "approach" without Mode
+# R10 — consultative wording without Mode is planning, not a special workflow
 # ---------------------------------------------------------------------------
 
 
-def test_r10_improve_login_approach_is_not_oracle_without_mode():
+def test_r10_improve_login_approach_is_planning_without_mode():
     from src.orchestrator.workflow_router import WorkflowRouter, WorkflowType
 
     wt = WorkflowRouter.route_issue("X-1", "Improve login approach", "")
-    assert wt != WorkflowType.ORACLE_CONSULT
+    assert wt == WorkflowType.PLANNING
 
 
 # ---------------------------------------------------------------------------

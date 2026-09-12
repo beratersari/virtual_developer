@@ -1,7 +1,7 @@
 """Coverage-oriented unit tests for src/processor.py (plan/build modes).
 
 Hits cancel_job, start_plan_execution locks, delivery guards, plan
-persist/materialize, push protection, workflow resolution, oracle abort,
+persist/materialize, push protection, workflow resolution,
 complete_work races, JobSlotLimiter, process_event, and bot commands.
 """
 
@@ -596,11 +596,11 @@ def test_resolve_workflow_mode_and_params_error(processor):
     )
     assert wt == WorkflowType.EXECUTION
 
-    # oracle
+    # consultative wording without Mode → planning
     wt = processor._resolve_workflow(
         "W-3", "how to design architecture", "what approach should we use?"
     )
-    assert wt == WorkflowType.ORACLE_CONSULT
+    assert wt == WorkflowType.PLANNING
 
     # params without mode → still routes; Mode fails later in parse_issue_git_spec
     wt = processor._resolve_workflow(
@@ -1421,51 +1421,6 @@ async def test_complete_work_aborted_and_cas(processor, state_manager):
 
 
 # ---------------------------------------------------------------------------
-# oracle abort / fail / completion race
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_oracle_abort_fail_and_completion_race(processor, state_manager, tmp_path):
-    state = state_manager.create_state("OR-A", "how to design", "architecture question")
-    runner = MagicMock()
-
-    async def abort_mid(*a, **k):
-        state_manager.update_state("OR-A", status=TaskStatus.CANCELLED)
-        return {"returncode": 0, "stdout": "ans", "stderr": ""}
-
-    runner.run_agent = AsyncMock(side_effect=abort_mid)
-    processor.agent_runner = runner
-    await processor._start_oracle_consultation(state)
-    assert state_manager.get_state("OR-A").status == TaskStatus.CANCELLED
-
-    # fail returncode
-    state2 = state_manager.create_state("OR-F", "how to", "architecture?")
-    runner2 = MagicMock()
-    runner2.run_agent = AsyncMock(
-        return_value={"returncode": 1, "stdout": "", "stderr": "oracle fail"}
-    )
-    processor.agent_runner = runner2
-    processor._contexts.clear()
-    await processor._start_oracle_consultation(state2)
-    assert state_manager.get_state("OR-F").status == TaskStatus.ERROR
-
-    # success but CAS fails (status flipped)
-    state3 = state_manager.create_state("OR-C", "how to", "architecture?")
-    runner3 = MagicMock()
-
-    async def ok_then_race(task, **kw):
-        state_manager.update_state("OR-C", status=TaskStatus.CANCELLED)
-        return {"returncode": 0, "stdout": "answer", "stderr": ""}
-
-    runner3.run_agent = AsyncMock(side_effect=ok_then_race)
-    processor.agent_runner = runner3
-    processor._contexts.clear()
-    await processor._start_oracle_consultation(state3)
-    assert state_manager.get_state("OR-C").status == TaskStatus.CANCELLED
-
-
-# ---------------------------------------------------------------------------
 # direct request / ensure runner / kill / cancel_issue_state / shutdown
 # ---------------------------------------------------------------------------
 
@@ -1750,11 +1705,11 @@ async def test_execution_success_full_path(
 async def test_handle_created_workflow_crash(processor, state_manager):
     with patch(
         "src.processor.WorkflowRouter.route_issue",
-        return_value=WorkflowType.ORACLE_CONSULT,
+        return_value=WorkflowType.PLANNING,
     ):
         with patch.object(
             processor,
-            "_start_oracle_consultation",
+            "_start_planning_workflow",
             side_effect=RuntimeError("crash"),
         ):
             await processor._handle_issue_created(

@@ -227,7 +227,7 @@ def test_workflow_router_mode_and_reason_edges():
     wt2, err2 = WorkflowRouter.route_issue_with_reason(
         "X", "how to design", "should we use pattern"
     )
-    assert wt2 == WorkflowType.ORACLE_CONSULT
+    assert wt2 == WorkflowType.PLANNING
     assert err2 is None
 
 

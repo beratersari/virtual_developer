@@ -61,7 +61,7 @@ def start():
 
 @cli.command()
 @click.argument("issue_key")
-@click.option("--agent", "-a", default=None, help="Override agent (build, plan, oracle)")
+@click.option("--agent", "-a", default=None, help="Override agent (build, plan, test)")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running")
 def process(issue_key: str, agent: Optional[str], dry_run: bool):
     """Process a specific JIRA issue manually.
@@ -512,7 +512,7 @@ def init():
     "--agent",
     "-a",
     default=None,
-    help="OpenCode agent (default: derman-build / derman-plan by mode; use oracle for consult)",
+    help="OpenCode agent (default: derman-build / derman-plan / derman-test by mode)",
 )
 @click.option("--plan-only", is_flag=True, help="Only create a plan (Mode: plan path), don't execute")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without running agent")
@@ -606,22 +606,7 @@ def test_issue(
             task = AgentTask(
                 description=f"Plan: {title}",
                 prompt=prompt,
-                agent=agent if agent != "oracle" else settings.default_agent,
-                issue_key=issue_key,
-                model=model,
-            )
-        elif agent == "oracle":
-            # Oracle consultation → plan-shaped prompt (system + title + body)
-            console.print("[blue]Starting Oracle consultation...[/blue]")
-            prompt = PromptBuilder.build_plan_prompt(
-                issue_key=issue_key,
-                summary=title or "",
-                description=description or "",
-            )
-            task = AgentTask(
-                description=f"Consult: {title}",
-                prompt=prompt,
-                agent="oracle",
+                agent=agent,
                 issue_key=issue_key,
                 model=model,
             )

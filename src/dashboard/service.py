@@ -2119,10 +2119,10 @@ def _reconstruct_prompts(state) -> Dict[str, Any]:
     agent. We do not rebuild a live “assembled” prompt for display.
     """
     workflow = (state.metadata or {}).get("workflow_type") or "execution"
-    if workflow == WorkflowType.ORACLE_CONSULT.value or workflow == "oracle":
-        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.ORACLE_CONSULT)
-    elif workflow in ("planning", "plan"):
+    if workflow in ("planning", "plan"):
         agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING)
+    elif workflow in ("testing", "test"):
+        agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.TESTING)
     else:
         agent_name = WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION)
 
