@@ -742,6 +742,10 @@ def test_storage_view_attaches_issue_from_session_bind(
     row = next(f for f in build_storage_view()["folders"] if f["name"] == clone.name)
     assert row["issue_key"] == "STOR-7"
     assert row["job_id"] == "job_bindonly"
+    # Bind is for resume after the job ends — Delete must stay enabled.
+    assert row["in_use"] is False
+    queued = queue_delete_temp_folder(clone.name)
+    assert queued.get("ok") is True
 
 
 def test_storage_api_includes_issue_fields(
