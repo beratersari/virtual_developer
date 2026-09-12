@@ -453,19 +453,12 @@ def _forget_binds_for_clone(clone: Path) -> None:
 
 
 def _in_use_paths() -> Set[Path]:
-    found: Set[Path] = set()
-    try:
-        from src.git_manager import session_bound_workspace_paths
+    """Clone dirs a live job still owns (same rule as Storage Delete).
 
-        for p in session_bound_workspace_paths():
-            try:
-                found.add(Path(p).resolve())
-            except (OSError, TypeError):
-                continue
-    except Exception:
-        pass
-    found.update(_live_git_paths())
-    return found
+    Session binds persist after the job ends so the next run can resume.
+    Those must not mark the folder In use — that left Delete disabled forever.
+    """
+    return _live_git_paths()
 
 
 def _path_lookup_keys(raw: Any) -> List[str]:

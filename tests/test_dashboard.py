@@ -104,6 +104,17 @@ def test_settings_update_rejects_non_numeric_board_id():
     assert SettingsUpdate(jira_board_id=" 42 ").jira_board_id == "42"
 
 
+def test_settings_update_normalizes_jira_projects():
+    from pydantic import ValidationError
+
+    assert SettingsUpdate(jira_projects=" kan , platform ").jira_projects == "KAN,PLATFORM"
+    assert SettingsUpdate(jira_projects="").jira_projects == ""
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_projects="feat(KAN-12)")
+    with pytest.raises(ValidationError):
+        SettingsUpdate(jira_projects="KAN-12")
+
+
 def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     from src.config import settings
 
@@ -134,6 +145,28 @@ def test_apply_settings_update_runtime(tmp_path, monkeypatch):
     persisted = json.loads(runtime_path.read_text(encoding="utf-8"))
     assert persisted["jira_board_id"] == "99"
     assert persisted["poll_interval_seconds"] == 45
+
+
+def test_apply_settings_update_jira_projects(tmp_path, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.chdir(tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("JIRA_PROJECTS=PROJ\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "src.config.runtime_settings_path",
+        lambda: tmp_path / "runtime_settings.json",
+    )
+    monkeypatch.setattr(settings, "jira_projects", "PROJ")
+    view = apply_settings_update(SettingsUpdate(jira_projects="kan, PLATFORM"))
+    assert view.jira_projects == "KAN,PLATFORM"
+    assert settings.jira_projects == "KAN,PLATFORM"
+    assert settings.jira_projects_list == ["KAN", "PLATFORM"]
+    persisted = json.loads(
+        (tmp_path / "runtime_settings.json").read_text(encoding="utf-8")
+    )
+    assert persisted["jira_projects"] == "KAN,PLATFORM"
+    assert "JIRA_PROJECTS=KAN,PLATFORM" in env.read_text(encoding="utf-8")
 
 
 def test_apply_settings_update_jira_bot_name_syncs_mentions(tmp_path, monkeypatch):
@@ -691,6 +724,17 @@ def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
         issue_key="gitlab.com", page=1, page_size=20, store=jobs, state_manager=sm
     )
     assert by_params.jobs == []
+    jobs.create_job(issue_key="KAN-1", summary="one")
+    jobs.create_job(issue_key="KAN-10", summary="ten")
+    exact = build_jobs(
+        issue_key="KAN-1",
+        page=1,
+        page_size=20,
+        store=jobs,
+        state_manager=sm,
+        exact_issue_key=True,
+    )
+    assert {j.issue_key for j in exact.jobs} == {"KAN-1"}
 
 
 def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):

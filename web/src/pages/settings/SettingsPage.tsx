@@ -22,6 +22,7 @@ type Draft = {
   jira_host: string
   jira_api_token: string
   jira_board_id: string
+  jira_projects: string
   poll_interval_seconds: number
   jira_trigger_user: string
   jira_trigger_label: string
@@ -46,6 +47,7 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_host: s.jira_host,
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
+    jira_projects: s.jira_projects ?? '',
     poll_interval_seconds: s.poll_interval_seconds,
     jira_trigger_user: s.jira_trigger_user ?? s.trigger_assignee_names ?? '',
     jira_trigger_label: s.jira_trigger_label ?? s.trigger_labels ?? '',
@@ -159,6 +161,7 @@ export function SettingsPage() {
       const body: Parameters<typeof patchSettings>[0] = {}
       if (dirtyKeys.has('jira_host')) body.jira_host = draft.jira_host.trim()
       if (dirtyKeys.has('jira_board_id')) body.jira_board_id = draft.jira_board_id.trim()
+      if (dirtyKeys.has('jira_projects')) body.jira_projects = draft.jira_projects.trim()
       if (dirtyKeys.has('poll_interval_seconds')) {
         body.poll_interval_seconds = Number(draft.poll_interval_seconds)
       }
@@ -367,6 +370,18 @@ export function SettingsPage() {
         />
         <span className="text-xs text-text-muted">
           Numeric Agile board id from the board URL.
+        </span>
+      </label>
+      <label className="field">
+        <span>Project keys (JIRA_PROJECTS)</span>
+        <input
+          value={draft.jira_projects}
+          onChange={(e) => mark('jira_projects', e.target.value)}
+          placeholder="KAN, PLATFORM"
+        />
+        <span className="text-xs text-text-muted">
+          Comma-separated Jira keys used to bind GitLab MR and Azure PR titles
+          (feat(KAN-12): …) to a ticket. Empty falls back to PROJ.
         </span>
       </label>
       <label className="field">

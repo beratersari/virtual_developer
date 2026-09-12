@@ -277,9 +277,10 @@ class ScheduleStore:
         self,
         *,
         status: Optional[str] = None,
-        limit: int = 200,
+        limit: Optional[int] = 200,
     ) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
+        cap = None if limit is None else max(0, int(limit))
         with self._lock:
             for path in sorted(
                 self.schedules_dir.glob("sched_*.json"),
@@ -294,7 +295,7 @@ class ScheduleStore:
                 if status and (rec.get("status") or "") != status:
                     continue
                 items.append(rec)
-                if len(items) >= limit:
+                if cap is not None and len(items) >= cap:
                     break
         # Sort by scheduled_at then created_at (newest first for list UI)
         items.sort(
@@ -303,11 +304,37 @@ class ScheduleStore:
         )
         return items
 
+    def has_open_for_issue(
+        self,
+        issue_key: str,
+        *,
+        statuses: Iterable[str] = ("scheduled", "dispatching"),
+    ) -> bool:
+        """True when this issue has a non-terminal schedule (any age / file order)."""
+        key = (issue_key or "").strip().upper()
+        if not key:
+            return False
+        want = {str(s or "").strip().lower() for s in statuses if str(s or "").strip()}
+        if not want:
+            return False
+        with self._lock:
+            for path in self.schedules_dir.glob("sched_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if (rec.get("status") or "").strip().lower() not in want:
+                    continue
+                if (rec.get("issue_key") or "").strip().upper() == key:
+                    return True
+        return False
+
     def list_due(self, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Return schedules with status=scheduled and scheduled_at <= now."""
         when = now or datetime.now()
         due: List[Dict[str, Any]] = []
-        for rec in self.list_schedules(status="scheduled", limit=500):
+        for rec in self.list_schedules(status="scheduled", limit=None):
             raw = (rec.get("scheduled_at") or "").strip()
             if not raw:
                 continue

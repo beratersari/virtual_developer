@@ -179,6 +179,29 @@ def format_trigger_users(raw: Any) -> str:
     return ", ".join(_trigger_user_names(raw))
 
 
+def format_jira_projects(raw: Any) -> str:
+    """KAN, platform → ``KAN,PLATFORM``. Empty stays empty.
+
+    Each token must be a Jira project key (letter, then letters/digits).
+    """
+    keys: List[str] = []
+    seen: set[str] = set()
+    for item in str(raw or "").replace(";", ",").split(","):
+        key = item.strip().upper()
+        if not key:
+            continue
+        if not re.fullmatch(r"[A-Z][A-Z0-9]*", key):
+            raise ValueError(
+                f"Invalid Jira project key {item.strip()!r}. "
+                "Use keys like KAN or PLATFORM (letters then digits), "
+                "comma-separated."
+            )
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return ",".join(keys)
+
+
 def _trigger_user_names(raw: Any) -> List[str]:
     """Split a comma list; strip ``@`` and empties. Keep first-seen spelling."""
     out: List[str] = []
@@ -937,6 +960,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "poll_interval_seconds",
         "max_concurrent_jobs",
         "jira_board_id",
+        "jira_projects",
         "jira_host",
         "jira_email",
         "default_model",
@@ -965,6 +989,7 @@ _RUNTIME_ENV_MIRROR = {
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
     "jira_board_id": "JIRA_BOARD_ID",
+    "jira_projects": "JIRA_PROJECTS",
     "jira_host": "JIRA_HOST",
     "jira_email": "JIRA_EMAIL",
     "default_model": "DEFAULT_MODEL",

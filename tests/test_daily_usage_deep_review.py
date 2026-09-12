@@ -282,10 +282,6 @@ def _write_schedule(store, *, issue_key: str, scheduled_at: str, mtime: float):
     return rec
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="list_due only inspects the 500 newest schedule files",
-)
 def test_f3_list_due_must_include_older_due_row_hidden_by_500_newer_files(tmp_path):
     """Daemon dispatch uses ``ScheduleStore.list_due``.
 
@@ -318,10 +314,6 @@ def test_f3_list_due_must_include_older_due_row_hidden_by_500_newer_files(tmp_pa
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_issue_has_pending_schedule only scans 500 newest scheduled files",
-)
 def test_f3_poller_must_honor_pending_schedule_beyond_newest_500(
     poller, tmp_path, monkeypatch
 ):

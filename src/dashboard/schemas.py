@@ -539,6 +539,23 @@ class SettingsUpdate(BaseModel):
         max_length=64,
         description="Jira Agile board id (digits only, e.g. 1)",
     )
+    jira_projects: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Comma-separated Jira project keys used to parse MR/PR titles "
+            "(e.g. KAN, PLATFORM)"
+        ),
+    )
+
+    @field_validator("jira_projects", mode="before")
+    @classmethod
+    def _jira_projects_keys(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        from src.config import format_jira_projects
+
+        return format_jira_projects(value)
 
     @field_validator("jira_board_id", mode="before")
     @classmethod

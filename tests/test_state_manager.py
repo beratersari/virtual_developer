@@ -56,3 +56,32 @@ def test_create_state_defaults_pending(state_manager):
     s = state_manager.create_state("B-1", "sum", "desc")
     assert s.status == TaskStatus.PENDING
     assert state_manager.get_state("B-1").status == TaskStatus.PENDING
+
+
+def test_legacy_hyphen_folded_file_still_loads(tmp_path):
+    """KAN-12 stored as KAN_12.json (old sanitizer) must still be found."""
+    from src.state.manager import JiraStateManager
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("KAN-12", "legacy name")
+    sm.update_state("KAN-12", status=TaskStatus.COMPLETED)
+    primary = sm._get_state_file("KAN-12")
+    legacy = sm._legacy_state_file("KAN-12")
+    if primary.exists() and primary != legacy:
+        legacy.write_text(primary.read_text(encoding="utf-8"), encoding="utf-8")
+        primary.unlink()
+    loaded = sm.get_state("KAN-12")
+    assert loaded is not None
+    assert loaded.issue_key == "KAN-12"
+    assert loaded.status == TaskStatus.COMPLETED
+
+
+def test_create_state_returns_disk_state_when_write_refused(state_manager):
+    state_manager.create_state("B-2", "first")
+    state_manager.update_state("B-2", status=TaskStatus.COMPLETED)
+    returned = state_manager.create_state("B-2", "second")
+    disk = state_manager.get_state("B-2")
+    assert disk is not None
+    assert disk.status == TaskStatus.COMPLETED
+    assert returned.status == TaskStatus.COMPLETED
+    assert returned.issue_summary == disk.issue_summary

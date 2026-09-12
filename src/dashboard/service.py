@@ -574,6 +574,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "jira_board_id" in data and data["jira_board_id"] is not None:
         settings.jira_board_id = str(data["jira_board_id"]).strip()
         runtime_persist["jira_board_id"] = settings.jira_board_id
+    if "jira_projects" in data and data["jira_projects"] is not None:
+        from src.config import format_jira_projects
+
+        projects = format_jira_projects(data["jira_projects"])
+        settings.jira_projects = projects
+        runtime_persist["jira_projects"] = projects
+        dotenv_updates["JIRA_PROJECTS"] = projects
     if "poll_interval_seconds" in data and data["poll_interval_seconds"] is not None:
         settings.poll_interval_seconds = int(data["poll_interval_seconds"])
         runtime_persist["poll_interval_seconds"] = settings.poll_interval_seconds
@@ -1171,6 +1178,14 @@ def _job_matches_search(
     return n in key.casefold() or n in title.casefold() or n in body.casefold()
 
 
+def _job_matches_exact_key(job: Dict[str, Any], issue_key: Optional[str]) -> bool:
+    """True when the job belongs to *issue_key* (case-insensitive, exact)."""
+    want = (issue_key or "").strip().upper()
+    if not want:
+        return True
+    return str(job.get("issue_key") or "").strip().upper() == want
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
@@ -1180,11 +1195,15 @@ def build_jobs(
     processor: Optional["JobProcessor"] = None,
     store: Optional[JobStore] = None,
     state_manager: Optional[JiraStateManager] = None,
+    exact_issue_key: bool = False,
 ) -> JobsResponse:
     """List agent jobs with server-side pagination.
 
     ``page`` / ``page_size`` are preferred. ``limit`` alone is treated as page_size
     on page 1 (backward compatible for callers that only pass limit).
+
+    ``issue_key`` is a Jobs-page search needle unless ``exact_issue_key`` is set
+    (issue document / task detail — KAN-1 must not include KAN-10).
     """
     js = store or default_job_store
     live_keys = set()
@@ -1210,11 +1229,14 @@ def build_jobs(
     fetch_cap = 2000
     raw = js.list_jobs(limit=fetch_cap, offset=0)
     raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
-    raw = [
-        j
-        for j in raw
-        if _job_matches_search(j, issue_key, summaries, descriptions)
-    ]
+    if exact_issue_key:
+        raw = [j for j in raw if _job_matches_exact_key(j, issue_key)]
+    else:
+        raw = [
+            j
+            for j in raw
+            if _job_matches_search(j, issue_key, summaries, descriptions)
+        ]
     inflight: List[Dict[str, Any]] = []
     rest: List[Dict[str, Any]] = []
     for j in raw:

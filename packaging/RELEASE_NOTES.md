@@ -1,3 +1,17 @@
+# Yaver 0.9.10
+
+Settings can save JIRA_PROJECTS so feat(KAN-12) binds
+to the Jira ticket.
+
+Storage Delete works after the job ends. Session binds
+no longer leave the clone marked In use.
+
+KAN-1 no longer lists KAN-10 jobs.
+/yaver on a plan_ready MR posts a wait note.
+Dropped-accept does not overwrite COMPLETED.
+Hyphen and underscore issue keys stay separate.
+Old scheduled tickets still wait after 500 newer rows.
+
 # Yaver 0.9.9
 
 Storage Delete is refused while a job owns the clone.

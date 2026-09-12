@@ -52,17 +52,53 @@ class JiraStateManager:
         # Shared across all instances for this directory (not per-instance)
         self._lock = _lock_for_state_dir(self.state_dir)
 
+    @staticmethod
+    def _sanitize_issue_key(issue_key: str, *, fold_hyphen: bool) -> str:
+        text = issue_key or ""
+        if fold_hyphen:
+            text = text.replace("-", "_")
+        text = text.replace("/", "_").replace("\\", "_")
+        return "".join(c if c.isalnum() or c in "._-" else "_" for c in text)
+
     def _get_state_file(self, issue_key: str) -> Path:
-        """Get path to state file for an issue."""
-        safe_key = issue_key.replace("-", "_").replace("/", "_").replace("\\", "_")
-        safe_key = "".join(c if c.isalnum() or c in "._-" else "_" for c in safe_key)
-        return self.state_dir / f"{safe_key}.json"
+        """Preferred path for this key. Hyphens are kept (KAN-12.json)."""
+        return self.state_dir / f"{self._sanitize_issue_key(issue_key, fold_hyphen=False)}.json"
+
+    def _legacy_state_file(self, issue_key: str) -> Path:
+        """Pre-C5 path that folded '-' to '_' (KAN-12 → KAN_12.json)."""
+        return self.state_dir / f"{self._sanitize_issue_key(issue_key, fold_hyphen=True)}.json"
+
+    def _legacy_file_belongs_to(self, path: Path, issue_key: str) -> bool:
+        want = (issue_key or "").strip()
+        if not want or not path.exists():
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            stored = str(data.get("issue_key") or "").strip()
+        except Exception:
+            return False
+        if not stored:
+            return True
+        return stored.upper() == want.upper()
+
+    def _resolve_state_file(self, issue_key: str) -> Optional[Path]:
+        """Existing file for this key: new name first, then hyphen-folded legacy."""
+        primary = self._get_state_file(issue_key)
+        if primary.exists():
+            return primary
+        legacy = self._legacy_state_file(issue_key)
+        if legacy == primary:
+            return None
+        if self._legacy_file_belongs_to(legacy, issue_key):
+            return legacy
+        return None
 
     def get_state(self, issue_key: str) -> Optional[JiraAgentState]:
         """Load state for an issue from disk."""
-        state_file = self._get_state_file(issue_key)
         with self._lock:
-            if not state_file.exists():
+            state_file = self._resolve_state_file(issue_key)
+            if state_file is None:
                 return None
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
@@ -86,8 +122,10 @@ class JiraStateManager:
 
         with self._lock:
             try:
-                if state_file.exists():
-                    with open(state_file, "r", encoding="utf-8") as f:
+                existing = self._resolve_state_file(state.issue_key)
+                check_file = existing if existing is not None else state_file
+                if check_file.exists():
+                    with open(check_file, "r", encoding="utf-8") as f:
                         old_data = json.load(f)
                     old_status = TaskStatus(old_data.get("status", "pending"))
                     if (
@@ -113,6 +151,15 @@ class JiraStateManager:
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp, state_file)
+                legacy = self._legacy_state_file(state.issue_key)
+                if (
+                    legacy != state_file
+                    and self._legacy_file_belongs_to(legacy, state.issue_key)
+                ):
+                    try:
+                        legacy.unlink()
+                    except Exception:
+                        pass
                 return True
             except Exception as e:
                 logger.error(f"Error saving state for {state.issue_key}: {e}")
@@ -146,6 +193,9 @@ class JiraStateManager:
         )
         if not self.set_state(state):
             logger.error(f"state {issue_key}: create failed to persist to disk")
+            existing = self.get_state(issue_key)
+            if existing is not None:
+                return existing
         return state
 
     def update_state(
@@ -268,20 +318,32 @@ class JiraStateManager:
 
     def get_all_states(self) -> List[JiraAgentState]:
         """Load every persisted issue state (all statuses)."""
-        states: List[JiraAgentState] = []
+        by_key: Dict[str, JiraAgentState] = {}
+        preferred: set[str] = set()
         with self._lock:
             if not self.state_dir.exists():
-                return states
+                return []
             for state_file in self.state_dir.glob("*.json"):
                 if state_file.name.endswith(".tmp"):
                     continue
                 try:
                     with open(state_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    states.append(JiraAgentState.from_dict(data))
+                    state = JiraAgentState.from_dict(data)
                 except Exception as e:
                     logger.error(f"Error loading {state_file}: {e}")
-        return states
+                    continue
+                key = (state.issue_key or "").strip().upper()
+                if not key:
+                    continue
+                is_primary = state_file.name == self._get_state_file(state.issue_key).name
+                if key in preferred:
+                    continue
+                if is_primary or key not in by_key:
+                    by_key[key] = state
+                    if is_primary:
+                        preferred.add(key)
+        return list(by_key.values())
 
     def get_active_issues(self) -> List[JiraAgentState]:
         """Get all issues that are not in a terminal state."""
@@ -290,13 +352,22 @@ class JiraStateManager:
 
     def delete_state(self, issue_key: str) -> bool:
         """Delete state file for an issue."""
-        state_file = self._get_state_file(issue_key)
         with self._lock:
-            if state_file.exists():
+            removed = False
+            failed = False
+            primary = self._get_state_file(issue_key)
+            legacy = self._legacy_state_file(issue_key)
+            for path in (primary, legacy):
+                if not path.exists():
+                    continue
+                if path != primary and not self._legacy_file_belongs_to(path, issue_key):
+                    continue
                 try:
-                    state_file.unlink()
-                    return True
+                    path.unlink()
+                    removed = True
                 except Exception as e:
                     logger.error(f"Error deleting state for {issue_key}: {e}")
-                    return False
-        return False
+                    failed = True
+            if failed:
+                return False
+            return removed
