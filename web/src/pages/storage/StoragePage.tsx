@@ -208,10 +208,18 @@ function StorageList({
               <button
                 type="button"
                 className="vd-btn vd-btn-danger text-xs"
-                disabled={isDeleting}
-                onClick={() => onDelete(folder)}
+                disabled={isDeleting || folder.in_use}
+                title={
+                  folder.in_use
+                    ? 'Clone is in use by a running job; stop the job first'
+                    : undefined
+                }
+                onClick={() => {
+                  if (folder.in_use || isDeleting) return
+                  onDelete(folder)
+                }}
               >
-                {isDeleting ? `${pct}%` : 'Delete'}
+                {isDeleting ? `${pct}%` : folder.in_use ? 'In use' : 'Delete'}
               </button>
             </li>
           )
@@ -283,7 +291,7 @@ export function StoragePage() {
   }, [deleting, sizesPending, mrPending])
 
   const onDelete = () => {
-    if (!pending) return
+    if (!pending || pending.in_use) return
     const name = pending.name
     setPending(null)
     setData((prev) => markDeleting(prev, name))

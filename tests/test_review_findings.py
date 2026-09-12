@@ -395,12 +395,12 @@ def test_r7_parse_progress_ignores_prose_with_one_block_and_spaces():
 
 
 # ---------------------------------------------------------------------------
-# R8 — cancel dispatching schedule must abort in-flight process_event
+# R8 — cancel of a dispatching schedule is refused (does not abort the job)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_r8_cancel_dispatching_schedule_aborts_processor_job(tmp_path):
+async def test_r8_cancel_dispatching_schedule_is_refused(tmp_path):
     import asyncio
 
     from src.scheduler.service import (
@@ -452,15 +452,13 @@ async def test_r8_cancel_dispatching_schedule_aborts_processor_job(tmp_path):
         assert n["launched"] >= 1
         await asyncio.wait_for(started.wait(), timeout=2)
         out = cancel_scheduled_job(sid, store=store, processor=proc)
-        assert out["ok"] is True
-        # Yield once so a correct cancel_job implementation can run
+        assert out["ok"] is False
+        assert "dispatching" in (out.get("error") or "")
         await asyncio.sleep(0.05)
-        assert cancelled_called["n"] >= 1, (
-            "cancel_scheduled_job must abort the in-flight processor job"
-        )
+        assert cancelled_called["n"] == 0
         final = store.get(sid)
         assert final is not None
-        assert final["status"] == "cancelled"
+        assert final["status"] == "dispatching"
     finally:
         release.set()
         await wait_inflight_dispatches()
@@ -555,7 +553,7 @@ async def test_r11_watchdog_does_not_abort_live_clone_within_git_budget(
 
 
 # ---------------------------------------------------------------------------
-# R12 — cancel dispatching is allowed by API (UI currently hides it)
+# R12 — cancel dispatching is refused (same as dispatched)
 # ---------------------------------------------------------------------------
 
 
@@ -589,7 +587,7 @@ def test_r12_cancel_future_schedule_does_not_cancel_issue_job(tmp_path):
     assert called["n"] == 0
 
 
-def test_r12_cancel_dispatching_schedule_is_allowed_by_store(tmp_path):
+def test_r12_cancel_dispatching_schedule_is_refused(tmp_path):
     from src.scheduler.service import cancel_scheduled_job
     from src.state.schedule_store import ScheduleStore
 
@@ -607,5 +605,6 @@ def test_r12_cancel_dispatching_schedule_is_allowed_by_store(tmp_path):
     )
     store.claim_due(rec["schedule_id"])
     out = cancel_scheduled_job(rec["schedule_id"], store=store)
-    assert out["ok"] is True
-    assert store.get(rec["schedule_id"])["status"] == "cancelled"
+    assert out["ok"] is False
+    assert "dispatching" in (out.get("error") or "")
+    assert store.get(rec["schedule_id"])["status"] == "dispatching"

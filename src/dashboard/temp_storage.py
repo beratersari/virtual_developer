@@ -888,6 +888,19 @@ def _validate_delete_target(name: str, *, area: str = "temp") -> Path:
     return target
 
 
+def _raise_if_clone_in_use(target: Path) -> None:
+    """Refuse Storage delete while a live job still owns this clone."""
+    try:
+        resolved = target.resolve()
+    except OSError:
+        resolved = target
+    if resolved in _live_git_paths():
+        raise TempStorageError(
+            "Cannot delete a clone while a job is using it; stop the job first",
+            status_code=409,
+        )
+
+
 def _validate_session_target(name: str) -> Path:
     base = resolve_sessions_dir()
     try:
@@ -910,6 +923,8 @@ def force_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]
     """Synchronous hard-delete (tests / callers that wait)."""
     kind = (area or "temp").strip().lower() or "temp"
     target = _validate_delete_target(name, area=kind)
+    if kind == "temp":
+        _raise_if_clone_in_use(target)
     try:
         if kind == "sessions":
             _delete_session_file(target)
@@ -1288,6 +1303,8 @@ def queue_delete_temp_folder(name: str, *, area: str = "temp") -> Dict[str, Any]
     """Start a background force-delete and return immediately."""
     kind = (area or "temp").strip().lower() or "temp"
     target = _validate_delete_target(name, area=kind)
+    if kind == "temp":
+        _raise_if_clone_in_use(target)
     job_key = name if kind == "temp" else f"sessions:{name}"
     with _jobs_lock:
         existing = _jobs.get(job_key)

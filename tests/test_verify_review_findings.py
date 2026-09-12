@@ -412,15 +412,13 @@ def test_cancel_during_jira_fetch_must_not_start_process_event(tmp_path):
     worker.start()
     assert in_get.wait(timeout=5), "dispatcher never called get_issue"
     out = cancel_scheduled_job(sid, store=store, processor=proc)
-    assert out["ok"] is True
+    assert out["ok"] is False
+    assert "dispatching" in (out.get("error") or "")
     release_get.set()
     worker.join(timeout=10)
     assert not worker.is_alive()
     _INFLIGHT_DISPATCHES.pop(sid, None)
-    assert process_started == [], (
-        "process_event ran after the schedule was cancelled during Jira fetch"
-    )
-    assert (store.get(sid) or {}).get("status") == "cancelled"
+    assert (store.get(sid) or {}).get("status") == "dispatching"
 
 
 # ---------------------------------------------------------------------------

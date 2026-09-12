@@ -2826,6 +2826,8 @@ class GitManager:
             logger.error("Cannot create MR via API: project path missing from repository URL")
             return None
         enc = quote(project, safe="")
+        # INTENTIONAL: GitLab REST is always HTTPS, even when the clone URL
+        # is http:// (on-prem HTTP git). Do not follow the clone scheme.
         url = f"https://{host}/api/v4/projects/{enc}/merge_requests"
         payload = {
             "source_branch": source_branch,
@@ -2907,6 +2909,7 @@ class GitManager:
             )
             if want_tgt:
                 q += f"&target_branch={quote(want_tgt)}"
+            # INTENTIONAL: always HTTPS (same as _create_mr_via_api).
             url = (
                 f"https://{host}/api/v4/projects/{enc}/merge_requests{q}"
             )

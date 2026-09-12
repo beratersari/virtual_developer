@@ -216,7 +216,7 @@ export function SchedulesPage() {
                 </button>
               </>
             )}
-            {(s.status === 'scheduled' || s.status === 'error' || s.status === 'dispatching') && (
+            {(s.status === 'scheduled' || s.status === 'error') && (
               <>
                 {' '}
                 <button

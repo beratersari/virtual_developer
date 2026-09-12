@@ -181,6 +181,8 @@ def latest_comment_tagging_pat_user(
     """Newest non-bot comment that @mentions the PAT user.
 
     Comments are assumed oldest-first (Jira ``/comment`` default).
+    Re-adding ``plan_refactor`` without a new comment **reuses** this
+    latest mention (intentional — not a stuck loop).
     """
     needles = pat_user_needles(myself, extra=extra_needles)
     tokens = [str(t).strip() for t in (mention_tokens or []) if str(t).strip()]

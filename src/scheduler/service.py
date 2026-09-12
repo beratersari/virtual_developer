@@ -1156,15 +1156,16 @@ def cancel_scheduled_job(
 ) -> Dict[str, Any]:
     """Cancel a pending schedule. Does not delete the Jira issue.
 
-    ``dispatching`` may be cancelled (stuck claim after crash, or operator
-    abort before dispatch finishes). ``dispatched`` is terminal.
+    ``scheduled`` and ``error`` may be cancelled. ``dispatching`` and
+    ``dispatched`` cannot — a claimed/running tick must not abort a live
+    job on the same issue via the schedule Cancel button.
     """
     ss = store or schedule_store
     rec = ss.get(schedule_id)
     if not rec:
         return {"ok": False, "error": f"No schedule {schedule_id}"}
     st = (rec.get("status") or "").lower()
-    if st == "dispatched":
+    if st in {"dispatched", "dispatching"}:
         return {
             "ok": False,
             "error": f"Cannot cancel schedule in status {st}",
@@ -1172,41 +1173,8 @@ def cancel_scheduled_job(
         }
     if st == "cancelled":
         return {"ok": True, "schedule": rec, "message": "Already cancelled"}
-    issue_key = (rec.get("issue_key") or "").strip().upper()
-    was_dispatching = st == "dispatching"
+    _ = processor
     updated = ss.update(schedule_id, status="cancelled", error_message=None)
-    task = _INFLIGHT_DISPATCHES.pop(schedule_id, None)
-    if task is not None and not task.done():
-        try:
-            task.cancel()
-        except Exception:
-            pass
-    # Only abort live agent work when this schedule was actually running.
-    # Cancelling a future "scheduled" row must not cancel unrelated issue jobs.
-    if (
-        was_dispatching
-        and processor is not None
-        and issue_key
-        and hasattr(processor, "cancel_job")
-    ):
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                processor.cancel_job(
-                    issue_key, reason="Schedule cancelled from dashboard"
-                )
-            )
-        except RuntimeError:
-            try:
-                asyncio.run(
-                    processor.cancel_job(
-                        issue_key, reason="Schedule cancelled from dashboard"
-                    )
-                )
-            except Exception as e:
-                logger.warning(f"Schedule cancel could not abort job {issue_key}: {e}")
-        except Exception as e:
-            logger.warning(f"Schedule cancel could not abort job {issue_key}: {e}")
     return {"ok": True, "schedule": updated, "message": "Schedule cancelled"}
 
 
