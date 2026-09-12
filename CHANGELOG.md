@@ -8,6 +8,26 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-09-12
+
+Settings can save Jira project keys. Storage Delete works after a job ends. Issue pages, plan_ready MR comments, schedules, and state files no longer mix tickets.
+
+### Added
+
+- Settings **Project keys (JIRA_PROJECTS)** persists comma-separated keys so MR/PR titles like `feat(KAN-12)` bind to that Jira ticket.
+
+### Fixed
+
+- Storage Delete stays enabled after a job ends (session binds no longer mark the clone In use).
+- Opening **KAN-1** no longer lists jobs for **KAN-10**.
+- `@bot /yaver` on a `plan_ready` MR posts a wait note instead of staying silent.
+- A late dropped-accept no longer overwrites **COMPLETED** or **CANCELLED**.
+- `create_state` returns the real disk state when a terminal write is refused.
+- `GL-KAN-12` and `GL_KAN-12` no longer share one state file.
+- A future schedule still blocks To Do intake after 500 newer schedule rows; due rows still fire.
+
+[0.9.10]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.10
+
 ## [0.9.9] — 2026-09-12
 
 Storage cannot delete a live job's clone. Dispatching schedules cannot be cancelled. Turkish I matches ASCII trigger names.
