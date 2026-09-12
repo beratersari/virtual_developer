@@ -528,15 +528,32 @@ class JobProcessor:
         try:
             st = self.state_manager.get_state(key)
             if st is None:
-                self.state_manager.create_state(key, summary or key, "")
-            self.state_manager.update_state(
+                st = self.state_manager.create_state(key, summary or key, "")
+            if st is not None and st.status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.CANCELLED,
+            }:
+                logger.info(
+                    f"{key}: dropped-accept skip; already {st.status.value}"
+                )
+                return
+            updated = self.state_manager.update_state_if(
                 key,
+                reject_statuses={TaskStatus.COMPLETED, TaskStatus.CANCELLED},
                 status=TaskStatus.ERROR,
                 error_message=msg[:2000],
                 metadata={"requeue_eligible": True},
             )
+            if updated is None:
+                cur = self.state_manager.get_state(key)
+                logger.info(
+                    f"{key}: dropped-accept CAS skip "
+                    f"(status={getattr(cur, 'status', None)})"
+                )
+                return
         except Exception as e:
             logger.warning(f"{key}: could not record dropped-accept ERROR: {e}")
+            return
         try:
             self._ensure_job_for_failure(key)
         except Exception:
