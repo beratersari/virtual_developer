@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-09-12
+
+Oracle consult is gone. Only plan, build, and test remain.
+
+### Removed
+
+- Oracle consult path. Tickets no longer route on “should we / architecture / how to” wording. Only `Mode: plan`, `Mode: build`, and `Mode: test` remain. Consultative tickets without a Mode go to plan (same as any other ticket missing Mode).
+
+[0.9.11]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.11
+
 ## [0.9.10] — 2026-09-12
 
 Settings can save Jira project keys. Storage Delete works after a job ends. Issue pages, plan_ready MR comments, schedules, and state files no longer mix tickets.
