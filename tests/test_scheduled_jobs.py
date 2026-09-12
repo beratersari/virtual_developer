@@ -642,7 +642,7 @@ def test_recover_stuck_dispatching_reopens_for_list_due(tmp_path):
     assert due[0]["schedule_id"] == rec["schedule_id"]
 
 
-def test_cancel_dispatching_schedule_allowed(tmp_path):
+def test_cancel_dispatching_schedule_refused(tmp_path):
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     rec = store.create(
         title="c",
@@ -657,8 +657,9 @@ def test_cancel_dispatching_schedule_allowed(tmp_path):
     )
     store.claim_due(rec["schedule_id"])
     out = cancel_scheduled_job(rec["schedule_id"], store=store)
-    assert out["ok"] is True
-    assert store.get(rec["schedule_id"])["status"] == "cancelled"
+    assert out["ok"] is False
+    assert "dispatching" in (out.get("error") or "")
+    assert store.get(rec["schedule_id"])["status"] == "dispatching"
 
 
 def test_preview_existing_issue_valid_template():
