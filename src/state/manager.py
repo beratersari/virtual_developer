@@ -237,12 +237,17 @@ class JiraStateManager:
         *,
         expected_statuses: Optional[set] = None,
         reject_statuses: Optional[set] = None,
+        expected_current_task_id: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
         **kwargs: Any,
     ) -> Optional[JiraAgentState]:
         """Compare-and-swap style update under the RLock.
 
         * If ``expected_statuses`` is set, current status must be in that set.
         * If ``reject_statuses`` is set, current status must *not* be in that set.
+        * If ``expected_current_task_id`` / ``expected_job_id`` are set, the
+          live run must still be that generation (stale complete after a
+          new GitLab/Azure begin must not stamp the new job).
         * On mismatch, returns None without writing (caller treats as aborted/stale).
         * On disk write failure or terminal-clobber refuse, returns None.
 
@@ -266,6 +271,26 @@ class JiraStateManager:
                     f"is rejected"
                 )
                 return None
+            want_task = str(expected_current_task_id or "").strip()
+            if want_task:
+                live_task = str(state.current_task_id or "").strip()
+                if live_task and live_task != want_task:
+                    logger.info(
+                        f"update_state_if skip {issue_key}: "
+                        f"task_id={live_task} != expected {want_task}"
+                    )
+                    return None
+            want_job = str(expected_job_id or "").strip()
+            if want_job:
+                live_job = str(
+                    (state.metadata or {}).get("current_job_id") or ""
+                ).strip()
+                if live_job and live_job != want_job:
+                    logger.info(
+                        f"update_state_if skip {issue_key}: "
+                        f"job_id={live_job} != expected {want_job}"
+                    )
+                    return None
 
             for key, value in kwargs.items():
                 if not hasattr(state, key):

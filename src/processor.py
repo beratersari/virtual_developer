@@ -1283,15 +1283,38 @@ class JobProcessor:
         store = session_binds.session_bind_store
         kind = self._session_kind_for_issue(issue_key)
         other_kind_sids: set[str] = set()
+
+        def _remember_other(rec: Optional[Dict[str, Any]]) -> None:
+            if not rec:
+                return
+            sid = str(rec.get("session_id") or "").strip()
+            if sid:
+                other_kind_sids.add(sid)
+            for raw in rec.get("forgotten_session_ids") or []:
+                fx = str(raw or "").strip()
+                if fx:
+                    other_kind_sids.add(fx)
+
         if repo and branch and target and kind:
             hit = store.get(repo, branch, target, kind=kind)
             if hit:
                 recs.append(hit)
             other = "build" if kind == "plan" else "plan"
-            other_rec = store.get(repo, branch, target, kind=other)
-            other_sid = str((other_rec or {}).get("session_id") or "").strip()
-            if other_sid:
-                other_kind_sids.add(other_sid)
+            _remember_other(store.get(repo, branch, target, kind=other))
+        # Plan binds are keyed by work branch. A GitLab/Azure job on a
+        # different source must still not resume the planner chat.
+        want_issue = (issue_key or "").strip().upper()
+        other_kind = "build" if kind == "plan" else "plan"
+        if kind and want_issue:
+            for rec in store.list_binds(limit=500):
+                rec_kind = session_binds.normalize_session_kind(
+                    str(rec.get("kind") or "")
+                )
+                if rec_kind != other_kind:
+                    continue
+                rec_issue = str(rec.get("issue_key") or "").strip().upper()
+                if rec_issue == want_issue:
+                    _remember_other(rec)
         if kind != "plan":
             if repo and branch and target:
                 hit = store.get(repo, branch, target, issue_key=issue_key)
@@ -1304,6 +1327,8 @@ class JobProcessor:
                 and str(by_issue.get("kind") or "") != "plan"
             ):
                 recs.append(by_issue)
+            elif by_issue and str(by_issue.get("kind") or "") == "plan":
+                _remember_other(by_issue)
         forgotten: List[str] = []
         bind_wd: Optional[str] = None
         sids: List[str] = []
@@ -6307,11 +6332,16 @@ class JobProcessor:
             return
 
         completed_at = datetime.now()
-        # B6: CAS — cancel/watchdog terminal must win over late success
+        # B6: CAS — cancel/watchdog terminal must win over late success.
+        # Also require this run's task/job ids so a cancelled GitLab/Azure
+        # worker cannot COMPLETE a newer begin on the same issue.
+        caller_job = str((state.metadata or {}).get("current_job_id") or "").strip()
         updated = self.state_manager.update_state_if(
             state.issue_key,
             expected_statuses={TaskStatus.EXECUTING},
             reject_statuses=self.ABORTED_STATUSES,
+            expected_current_task_id=state.current_task_id,
+            expected_job_id=caller_job or None,
             status=TaskStatus.COMPLETED,
             completed_at=completed_at,
             progress_percentage=100,
