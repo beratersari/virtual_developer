@@ -1,3 +1,9 @@
+# Yaver 0.9.12
+
+Jobs tab shows Queue (N) from the work queue.
+GitLab and Azure follow-ups still count while
+that ticket is in flight.
+
 # Yaver 0.9.11
 
 Oracle consult is gone. Tickets no longer route
