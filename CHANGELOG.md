@@ -8,6 +8,10 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- Jobs filter tab shows the waiting count as **Queue (6)** (live from the work queue). GitLab/Azure follow-ups still count while the same ticket is in flight.
+
 ## [0.9.11] — 2026-09-12
 
 Oracle consult is gone. Only plan, build, and test remain.

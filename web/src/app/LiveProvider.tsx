@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { dashboardWsUrl, fetchMeta, fetchPoll, fetchSettings } from '../api/client'
+import { dashboardWsUrl, fetchMeta, fetchPoll, fetchQueue, fetchSettings } from '../api/client'
 import type { Meta, PollPayload, SettingsPayload } from '../api/types'
 import { shouldBumpLiveGeneration } from '../util/liveTick'
 import { useNow } from '../util/time'
@@ -62,30 +62,36 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
-    void Promise.allSettled([fetchMeta(), fetchPoll(), fetchSettings()]).then(
-      (results) => {
-        if (cancelled) return
-        const [m, p, s] = results
-        if (m.status === 'fulfilled') setMeta(m.value)
-        if (p.status === 'fulfilled') {
-          setPoll(p.value)
-          if (typeof p.value.seconds_until_next_poll === 'number') {
-            countdownRef.current = {
-              secs: p.value.seconds_until_next_poll,
-              atMs: Date.now(),
-            }
+    void Promise.allSettled([
+      fetchMeta(),
+      fetchPoll(),
+      fetchSettings(),
+      fetchQueue({ status: 'queued', limit: 1 }),
+    ]).then((results) => {
+      if (cancelled) return
+      const [m, p, s, q] = results
+      if (m.status === 'fulfilled') setMeta(m.value)
+      if (p.status === 'fulfilled') {
+        setPoll(p.value)
+        if (typeof p.value.seconds_until_next_poll === 'number') {
+          countdownRef.current = {
+            secs: p.value.seconds_until_next_poll,
+            atMs: Date.now(),
           }
         }
-        if (s.status === 'fulfilled') setSettings(s.value)
-        if (
-          m.status === 'rejected' &&
-          p.status === 'rejected' &&
-          s.status === 'rejected'
-        ) {
-          setError('Dashboard API unreachable')
-        }
-      },
-    )
+      }
+      if (s.status === 'fulfilled') setSettings(s.value)
+      if (q.status === 'fulfilled' && typeof q.value.queued_count === 'number') {
+        setQueueQueued(q.value.queued_count)
+      }
+      if (
+        m.status === 'rejected' &&
+        p.status === 'rejected' &&
+        s.status === 'rejected'
+      ) {
+        setError('Dashboard API unreachable')
+      }
+    })
     return () => {
       cancelled = true
     }

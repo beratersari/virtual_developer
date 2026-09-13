@@ -1302,6 +1302,28 @@ def _queue_live_issue_keys(processor: Any = None) -> set:
     return live
 
 
+def _queued_hidden_while_live(
+    rec: Dict[str, Any],
+    live_keys: set,
+    processor: Any = None,
+) -> bool:
+    """True when a waiting Jira row should not appear (issue already in flight).
+
+    GitLab/Azure follow-ups stay visible — they are extra work on the same
+    ticket, not a duplicate poller row.
+    """
+    if (rec.get("status") or "") != "queued":
+        return False
+    source = (rec.get("source") or "jira").strip().lower()
+    if source in {"gitlab", "azure"}:
+        return False
+    ik = (rec.get("issue_key") or "").strip().upper()
+    if ik and ik in live_keys:
+        return True
+    check = getattr(processor, "_issue_is_in_flight", None) if processor else None
+    return bool(ik and callable(check) and check(ik))
+
+
 def build_queue(
     *,
     status: Optional[str] = None,
@@ -1322,16 +1344,7 @@ def build_queue(
     live_keys = _queue_live_issue_keys(processor)
 
     def _waiting_and_live(rec: Dict[str, Any]) -> bool:
-        if (rec.get("status") or "") != "queued":
-            return False
-        source = (rec.get("source") or "jira").strip().lower()
-        if source in {"gitlab", "azure"}:
-            return False
-        ik = (rec.get("issue_key") or "").strip().upper()
-        if ik and ik in live_keys:
-            return True
-        check = getattr(processor, "_issue_is_in_flight", None) if processor else None
-        return bool(ik and callable(check) and check(ik))
+        return _queued_hidden_while_live(rec, live_keys, processor)
 
     if status:
         raw = qs.list_items(status=status, limit=limit)
@@ -1417,7 +1430,7 @@ def build_live_envelope(
         queued = sum(
             1
             for rec in default_queue.list_items(status="queued", limit=500)
-            if (rec.get("issue_key") or "").strip().upper() not in live
+            if not _queued_hidden_while_live(rec, live, processor)
         )
     except Exception:
         queued = 0
