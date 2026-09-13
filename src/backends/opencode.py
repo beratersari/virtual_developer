@@ -149,10 +149,15 @@ class OpenCodeBackend:
         if client is None or not sid:
             return
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(client.abort(sid))
-            else:
-                loop.run_until_complete(client.abort(sid))
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Worker thread (watchdog ``to_thread``). Abort must run on the
+            # daemon loop via ``_abort_serve_sessions_for_issue``.
+            logger.debug(
+                f"OpenCode abort skipped (no running loop) session={sid}"
+            )
+            return
+        try:
+            loop.create_task(client.abort(sid))
         except Exception as e:
             logger.debug(f"OpenCode abort failed: {e}")
