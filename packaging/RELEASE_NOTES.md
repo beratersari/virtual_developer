@@ -1,3 +1,9 @@
+# Yaver 0.9.14
+
+Stuck-job watchdog aborts the live OpenCode session
+before ERROR. A cancelled GitLab/Azure worker cannot
+COMPLETE a newer run. Builds do not resume the plan chat.
+
 # Yaver 0.9.13
 
 Stop on macOS kills leftover clone tools.

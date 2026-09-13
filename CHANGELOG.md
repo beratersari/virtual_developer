@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-09-13
+
+Stuck-job watchdog aborts the live OpenCode session. A cancelled GitLab/Azure worker cannot complete a newer run. Builds do not resume the plan chat.
+
+### Fixed
+
+- Watchdog POSTs `/session/{id}/abort` on the daemon loop before marking ERROR and dropping the clone (dashboard Stop already did this).
+- `_complete_work` CAS requires the caller's task/job ids so a cancelled GitLab/Azure stack cannot stamp **COMPLETED** on a later run of the same ticket.
+- GitLab/Azure builds no longer resume a `kind=plan` OpenCode session when the MR source is not the plan work branch.
+
+[0.9.14]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.14
+
 ## [0.9.13] — 2026-09-13
 
 Dashboard Stop kills leftover tools on macOS. Cancel no longer takes down shared OpenCode serve. Leftover GitLab PAT still works when Azure hosts are set. Stop during clone stays Cancelled. Stop is refused on plan_ready.

@@ -75,7 +75,15 @@ def normalize_session_kind(kind: str = "") -> str:
     raw = (kind or "").strip().lower()
     if raw in {"planning", "derman-plan"}:
         return SESSION_KIND_PLAN
-    if raw in {"execution", "executing", "derman-build"}:
+    if raw in {
+        "execution",
+        "executing",
+        "derman-build",
+        "gitlab_mr",
+        "azure_pr",
+        "gitlab",
+        "azure",
+    }:
         return SESSION_KIND_BUILD
     if raw in {"testing", "derman-test", "tester"}:
         return SESSION_KIND_TEST
