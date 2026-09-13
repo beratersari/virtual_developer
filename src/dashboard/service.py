@@ -2508,6 +2508,7 @@ def build_task_detail(
         TaskStatus.COMPLETED,
         TaskStatus.ERROR,
         TaskStatus.CANCELLED,
+        TaskStatus.PLAN_READY,
     }
     # Dashboard does not offer a Start button. After a plan, set
     # label plan_execute while In Progress (or open a new Mode: build issue).

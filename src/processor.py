@@ -162,6 +162,8 @@ class JobProcessor:
         self._azure_seen_comments: set[str] = set()
         # Jira intake event ids (comment:… / assignee:… / created:…)
         self._jira_seen_events: set[str] = set()
+        # Keys whose dashboard Stop is in flight (clone may still return None)
+        self._cancelling: set[str] = set()
         
         logger.info("Initializing JobProcessor")
         
@@ -1049,6 +1051,13 @@ class JobProcessor:
     def _finish_after_git_missing(self, issue_key: str) -> None:
         """Close live job + context when git prep returns None after begin."""
         st = self.state_manager.get_state(issue_key)
+        if (
+            issue_key in getattr(self, "_cancelling", ())
+            or self._is_aborted(issue_key)
+            or (st and st.status in self.TERMINAL_STATUSES)
+        ):
+            self._release_context(issue_key, success=False)
+            return
         if st and st.status in self.IN_FLIGHT_STATUSES:
             self._fail_issue(
                 issue_key,
@@ -2232,12 +2241,12 @@ class JobProcessor:
     async def cancel_job(
         self, issue_key: str, *, reason: str = "Cancelled from dashboard"
     ) -> dict:
-        """Cancel a job: kill agent children, set CANCELLED, notify Jira.
+        """Cancel a job: CAS to CANCELLED, kill children, notify Jira.
 
         Does **not** wait on the per-issue workflow lock (which may be held for
-        the entire agent run). Kill children immediately, then CAS to CANCELLED
-        so a late success path cannot overwrite cancel (and fail/watchdog cannot
-        overwrite COMPLETED). Returns a status dict for the dashboard API.
+        the entire agent run). Writes CANCELLED first so a clone that returns
+        None during the kill await cannot stamp ERROR. Then kills children.
+        ``plan_ready`` is refused — there is no running agent to stop.
         """
         state = self.state_manager.get_state(issue_key)
         if not state:
@@ -2254,93 +2263,109 @@ class JobProcessor:
                 "issue_key": issue_key,
                 "status": state.status.value,
             }
+        if state.status == TaskStatus.PLAN_READY:
+            return {
+                "ok": False,
+                "error": (
+                    "Plan is waiting at plan_ready. Set label plan_execute "
+                    "while In Progress to implement; Stop would discard the plan."
+                ),
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
 
-        # Kill first — never block behind process_event's long-held issue lock.
-        # Stage does not matter: clone, checkout, serve/Codex, push, MR.
+        # CAS first so a clone that returns None during the await below
+        # cannot stamp ERROR via _finish_after_git_missing. Kill still
+        # does not wait on process_event's long-held issue lock.
+        self._cancelling.add(issue_key)
         killed = False
+        cancelled = False
         try:
-            await self._abort_serve_sessions_for_issue(issue_key)
-            runner = self._runner_for(issue_key)
-            if runner and state.current_task_id:
-                killed = bool(runner.cancel_task(state.current_task_id))
-            if runner and hasattr(runner, "cancel_all_tasks"):
-                n = runner.cancel_all_tasks()
-                if n:
+            cancelled = self._cancel_issue_state(
+                issue_key,
+                message=reason,
+                status=TaskStatus.CANCELLED,
+            )
+
+            try:
+                await self._abort_serve_sessions_for_issue(issue_key)
+                runner = self._runner_for(issue_key)
+                if runner and state.current_task_id:
+                    killed = bool(runner.cancel_task(state.current_task_id))
+                if runner and hasattr(runner, "cancel_all_tasks"):
+                    n = runner.cancel_all_tasks()
+                    if n:
+                        killed = True
+                self._kill_children_for_issue(issue_key)
+                if self._kill_git_for_issue(issue_key):
                     killed = True
-            self._kill_children_for_issue(issue_key)
-            if self._kill_git_for_issue(issue_key):
-                killed = True
-        except Exception as e:
-            logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
+            except Exception as e:
+                logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
-        live_job_id = self._active_jobs.get(issue_key)
-        cancelled = self._cancel_issue_state(
-            issue_key,
-            message=reason,
-            status=TaskStatus.CANCELLED,
-        )
-        # Close the running claim and leftover Jira poller rows. GitLab/Azure
-        # follow-ups still queued for this key are extra work — leave them.
-        try:
-            nq = self.queue_store.finish_open_for_issue(
-                issue_key,
-                status="cancelled",
-                error_message=reason,
-                job_id=live_job_id,
-                include_queued=False,
-                include_running=True,
-            )
-            nq += self.queue_store.finish_open_for_issue(
-                issue_key,
-                status="cancelled",
-                error_message=reason,
-                job_id=live_job_id,
-                sources={"jira"},
-                include_queued=True,
-                include_running=False,
-            )
-            if nq:
-                logger.info(
-                    f"Job cancelled via API: {issue_key} closed {nq} queue row(s)"
+            live_job_id = self._active_jobs.get(issue_key)
+            # Close the running claim and leftover Jira poller rows. GitLab/Azure
+            # follow-ups still queued for this key are extra work — leave them.
+            try:
+                nq = self.queue_store.finish_open_for_issue(
+                    issue_key,
+                    status="cancelled",
+                    error_message=reason,
+                    job_id=live_job_id,
+                    include_queued=False,
+                    include_running=True,
                 )
-        except Exception as e:
-            logger.warning(f"cancel_job queue finish failed for {issue_key}: {e}")
-        try:
-            self._release_context(issue_key, success=False)
-        except Exception as e:
-            logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
+                nq += self.queue_store.finish_open_for_issue(
+                    issue_key,
+                    status="cancelled",
+                    error_message=reason,
+                    job_id=live_job_id,
+                    sources={"jira"},
+                    include_queued=True,
+                    include_running=False,
+                )
+                if nq:
+                    logger.info(
+                        f"Job cancelled via API: {issue_key} closed {nq} queue row(s)"
+                    )
+            except Exception as e:
+                logger.warning(f"cancel_job queue finish failed for {issue_key}: {e}")
+            try:
+                self._release_context(issue_key, success=False)
+            except Exception as e:
+                logger.warning(f"cancel_job context release failed for {issue_key}: {e}")
 
-        refreshed = self.state_manager.get_state(issue_key)
-        if not cancelled and refreshed and refreshed.status in self.TERMINAL_STATUSES:
-            # CAS lost to COMPLETED (or already terminal) — report honestly
-            if refreshed.status == TaskStatus.COMPLETED:
+            refreshed = self.state_manager.get_state(issue_key)
+            if not cancelled and refreshed and refreshed.status in self.TERMINAL_STATUSES:
+                if refreshed.status == TaskStatus.COMPLETED:
+                    return {
+                        "ok": False,
+                        "error": "Issue completed before cancel could apply",
+                        "issue_key": issue_key,
+                        "status": refreshed.status.value,
+                        "process_signalled": killed,
+                    }
                 return {
                     "ok": False,
-                    "error": "Issue completed before cancel could apply",
+                    "error": f"Issue is already terminal ({refreshed.status.value})",
                     "issue_key": issue_key,
                     "status": refreshed.status.value,
                     "process_signalled": killed,
                 }
-            return {
-                "ok": False,
-                "error": f"Issue is already terminal ({refreshed.status.value})",
-                "issue_key": issue_key,
-                "status": refreshed.status.value,
-                "process_signalled": killed,
-            }
 
-        jid = (refreshed.metadata or {}).get("current_job_id") if refreshed else None
-        logger.info(
-            f"Job cancelled via API: {issue_key} killed={killed} "
-            f"job_id={jid or '-'}"
-        )
-        return {
-            "ok": True,
-            "issue_key": issue_key,
-            "status": refreshed.status.value if refreshed else "cancelled",
-            "process_signalled": killed,
-            "message": reason,
-        }
+            jid = (refreshed.metadata or {}).get("current_job_id") if refreshed else None
+            logger.info(
+                f"Job cancelled via API: {issue_key} killed={killed} "
+                f"job_id={jid or '-'}"
+            )
+            return {
+                "ok": True,
+                "issue_key": issue_key,
+                "status": refreshed.status.value if refreshed else "cancelled",
+                "process_signalled": killed,
+                "message": reason,
+            }
+        finally:
+            self._cancelling.discard(issue_key)
 
     async def start_plan_execution(
         self, issue_key: str, *, reason: str = "Started from ops dashboard"

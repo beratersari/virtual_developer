@@ -1021,14 +1021,10 @@ class GitManager:
                 mapping = settings.gitlab_host_pat_map() or {}
             except Exception:
                 mapping = {}
-        azure_map = {}
-        if hasattr(settings, "azure_host_pat_map"):
-            try:
-                azure_map = settings.azure_host_pat_map() or {}
-            except Exception:
-                azure_map = {}
-        if mapping or azure_map:
+        if mapping:
             return ""
+        # Azure host map must not hide leftover GITLAB_PAT on a GitLab remote.
+        # Mixed shops keep AZURE_HOST_PATS for TFS and GITLAB_PAT for GitLab.
         return (getattr(settings, "gitlab_pat", "") or "").strip()
 
     def _assert_remote_host_allowed(self, url: str) -> None:

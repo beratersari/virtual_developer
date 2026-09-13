@@ -64,9 +64,13 @@ def kill_pid(pid: int, *, force: bool = True) -> None:
         return
     except (ProcessLookupError, PermissionError, OSError):
         pass
+    # Only killpg when this pid is the group leader. killpg(getpgid(pid))
+    # on a child that shares opencode serve's session takes down serve
+    # and every other job on :4096.
     try:
-        os.killpg(os.getpgid(pid), sig)
-        return
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+            return
     except (ProcessLookupError, PermissionError, OSError):
         pass
     try:
@@ -79,26 +83,45 @@ def _direct_child_pids(pid: int) -> List[int]:
     """Read ``/proc/<pid>/task/*/children`` only — never scan all of /proc.
 
     A full ``/proc`` walk can hang uninterruptibly on WSL/9p. This is a
-    handful of files for one process tree.
+    handful of files for one process tree. macOS has no /proc; use
+    ``pgrep -P``.
     """
     task_dir = Path(f"/proc/{int(pid)}/task")
-    if not task_dir.is_dir():
-        return []
-    found: List[int] = []
-    try:
-        tasks = list(task_dir.iterdir())
-    except OSError:
-        return []
-    for task in tasks:
+    if task_dir.is_dir():
+        found: List[int] = []
         try:
-            raw = (task / "children").read_text(encoding="ascii", errors="ignore")
+            tasks = list(task_dir.iterdir())
         except OSError:
-            continue
-        for part in raw.split():
+            return []
+        for task in tasks:
             try:
-                found.append(int(part))
-            except ValueError:
+                raw = (task / "children").read_text(encoding="ascii", errors="ignore")
+            except OSError:
                 continue
+            for part in raw.split():
+                try:
+                    found.append(int(part))
+                except ValueError:
+                    continue
+        return found
+    try:
+        r = subprocess.run(
+            ["pgrep", "-P", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return []
+    found = []
+    for tok in (r.stdout or "").split():
+        try:
+            child = int(tok)
+        except ValueError:
+            continue
+        if child > 0:
+            found.append(child)
     return found
 
 
@@ -129,7 +152,25 @@ def pid_cwd(pid: int) -> Optional[Path]:
     try:
         return Path(os.readlink(f"/proc/{int(pid)}/cwd"))
     except OSError:
+        pass
+    # macOS / BSD have no /proc. lsof -Fn prints ``n/path``.
+    try:
+        r = subprocess.run(
+            ["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
         return None
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("n") and len(line) > 1:
+            try:
+                return Path(line[1:])
+            except OSError:
+                return None
+    return None
 
 
 def pid_cmdline(pid: int) -> str:
@@ -140,9 +181,21 @@ def pid_cmdline(pid: int) -> str:
         return ""
     try:
         raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
     except OSError:
+        pass
+    # macOS / BSD: no /proc. ``ps`` is the supported fallback.
+    try:
+        r = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
         return ""
-    return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    return (r.stdout or "").strip()
 
 
 def pid_exe(pid: int) -> str:
@@ -199,14 +252,14 @@ def _cmdline_mentions_workspace(cmd: str, root: Path) -> bool:
         resolved = root
     if resolved in _GENERIC_WORKSPACE_ROOTS:
         return False
-    needle = str(resolved)
-    if len(needle) < 12:
-        return False
     lowered = cmd.lower()
-    if needle.lower() in lowered:
-        return True
-    alt = needle.replace("\\", "/")
-    return bool(alt) and alt.lower() in lowered
+    for needle in _workspace_pgrep_needles(resolved):
+        if needle.lower() in lowered:
+            return True
+        alt = needle.replace("\\", "/")
+        if alt.lower() in lowered:
+            return True
+    return False
 
 
 def _pid_cwd_windows(pid: int) -> Optional[Path]:
@@ -458,32 +511,49 @@ def _pid_belongs_to_workspace(pid: int, root: Path) -> bool:
     return _cmdline_mentions_workspace(pid_exe(pid), root)
 
 
+def _workspace_pgrep_needles(root: Path) -> List[str]:
+    """Path spellings ``pgrep -f`` must see (macOS /var → /private/var)."""
+    raw = [str(root)]
+    try:
+        raw.append(str(root.resolve()))
+    except OSError:
+        pass
+    extra: List[str] = []
+    for needle in raw:
+        if needle.startswith("/private/"):
+            extra.append(needle[len("/private") :])
+        elif needle.startswith("/var/") or needle.startswith("/tmp/"):
+            extra.append("/private" + needle)
+    seen: List[str] = []
+    for needle in raw + extra:
+        if len(needle) >= 12 and needle not in seen:
+            seen.append(needle)
+    return seen
+
+
 def _pgrep_workspace_pids(root: Path) -> List[int]:
     """PIDs whose argv names this clone. One ``pgrep`` — not a /proc walk."""
-    try:
-        needle = str(root.resolve())
-    except OSError:
-        needle = str(root)
-    if len(needle) < 12:
-        return []
-    try:
-        r = subprocess.run(
-            ["pgrep", "-f", needle],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except Exception:
-        return []
     found: List[int] = []
-    for tok in (r.stdout or "").split():
+    seen: Set[int] = set()
+    for needle in _workspace_pgrep_needles(root):
         try:
-            pid = int(tok)
-        except ValueError:
+            r = subprocess.run(
+                ["pgrep", "-f", needle],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
             continue
-        if pid > 0:
-            found.append(pid)
+        for tok in (r.stdout or "").split():
+            try:
+                pid = int(tok)
+            except ValueError:
+                continue
+            if pid > 0 and pid not in seen:
+                seen.add(pid)
+                found.append(pid)
     return found
 
 
@@ -522,12 +592,11 @@ def _kill_workspace_unix(
         if pid in protected:
             continue
         cmd = pid_cmdline(pid).lower()
-        if "pgrep" in cmd:
+        if cmd and "pgrep" in cmd:
             continue
-        if _pid_belongs_to_workspace(pid, root) or _cmdline_mentions_workspace(
-            cmd, root
-        ):
-            _take(pid)
+        # pgrep -f already matched the full clone path (macOS ps truncates
+        # so a second cmdline check would drop the hit).
+        _take(pid)
 
     killed = 0
     for pid in reversed(targets):
