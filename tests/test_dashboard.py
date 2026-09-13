@@ -42,6 +42,36 @@ def test_live_envelope_skips_tasks_and_jobs(tmp_path):
     assert "poll" in env and "meta" in env
 
 
+def test_live_envelope_counts_gitlab_queued_while_issue_is_live(tmp_path):
+    """Jobs Queue (N) reads WS queued_count. A waiting GitLab follow-up on a
+    live MR key must still increment the badge (same rule as GET /api/queue).
+    """
+    from src.state.queue_store import WorkQueueStore
+
+    qdir = tmp_path / "queue"
+    store = WorkQueueStore(queue_dir=qdir)
+    store.enqueue(
+        source="gitlab",
+        issue_key="GL-PROJ-71",
+        summary="MR !71",
+        message="follow-up 2",
+        lock_key="lock-71",
+    )
+    store.enqueue(
+        source="jira",
+        issue_key="GL-PROJ-71",
+        summary="hidden jira dup",
+        message="poll",
+        lock_key="lock-71-jira",
+    )
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    proc = MagicMock()
+    proc.list_live_processing_keys.return_value = ["GL-PROJ-71"]
+    with patch("src.state.queue_store.work_queue_store", store):
+        env = build_live_envelope(state_manager=sm, processor=proc)
+    assert env["queue"]["queued_count"] == 1
+
+
 def test_snapshot_countdown(store):
     store.begin_poll(board_id="1", interval_seconds=30)
     store.end_poll(

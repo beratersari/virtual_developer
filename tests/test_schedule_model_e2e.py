@@ -32,7 +32,9 @@ from src.scheduler.service import (
 )
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
+from src.state.queue_store import WorkQueueStore
 from src.state.schedule_store import ScheduleStore
+from tests.test_scheduled_jobs_e2e import _wait_queue_idle
 
 
 def _params(*, model: str = "", extra: str = "") -> str:
@@ -564,6 +566,7 @@ async def test_e2e_dispatch_job_uses_issue_model(tmp_path, monkeypatch):
         proc = JobProcessor()
     proc.state_manager = sm
     proc.job_store = js
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "queue")
     proc.jira_client = jira
     seen: dict = {}
 
@@ -586,6 +589,7 @@ async def test_e2e_dispatch_job_uses_issue_model(tmp_path, monkeypatch):
         processor=proc, store=store, jira_client=jira
     )
     await wait_inflight_dispatches()
+    await _wait_queue_idle(proc)
     assert result["launched"] == 1, result
     assert seen["model"] == "opencode/mimo-v2.5-free"
 

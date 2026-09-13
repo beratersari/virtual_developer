@@ -54,17 +54,10 @@ export function JobsPage() {
     return () => window.clearTimeout(t)
   }, [issueFilter])
 
-  const loadQueue = useCallback(async (liveIssueKeys?: Set<string>) => {
+  const loadQueue = useCallback(async () => {
     try {
       const q = await fetchQueue({ status: 'queued', limit: 200 })
-      const live = liveIssueKeys ?? new Set<string>()
-      const rows = (q.items || []).filter((r) => {
-        if (r.status !== 'queued') return false
-        const src = String(r.source || 'jira').toLowerCase()
-        if (src === 'gitlab' || src === 'azure') return true
-        const key = (r.issue_key || '').toUpperCase()
-        return !key || !live.has(key)
-      })
+      const rows = (q.items || []).filter((r) => r.status === 'queued')
       rows.sort((a, b) =>
         String(b.created_at || '').localeCompare(String(a.created_at || '')),
       )
@@ -91,13 +84,7 @@ export function JobsPage() {
         rememberJobsPayload(data)
         setPayload(data)
         setError(null)
-        const liveKeys = new Set(
-          (data.jobs || [])
-            .filter((j) => j.live)
-            .map((j) => (j.issue_key || '').toUpperCase())
-            .filter(Boolean),
-        )
-        void loadQueue(liveKeys)
+        void loadQueue()
         return
       } catch (e) {
         if (req !== reqId.current) return
@@ -210,7 +197,7 @@ export function JobsPage() {
   const to = Math.min(currentPage * size, total)
   const selectedCount = selectedIds.size
   const liveJobs = sortJobsByCreatedAt((payload?.jobs ?? []).filter((j) => j.live))
-  const badgeQueued = live.queueQueued ?? queueQueued
+  const badgeQueued = Math.max(live.queueQueued, queueQueued, queueItems.length)
 
   return (
     <section className="space-y-5">
@@ -264,12 +251,7 @@ export function JobsPage() {
                   : 'text-text-muted hover:text-text'
               }`}
             >
-              {f.label}
-              {f.id === 'queue' && badgeQueued > 0 ? (
-                <span className="ml-1.5 font-mono tabular-nums opacity-90">
-                  {badgeQueued}
-                </span>
-              ) : null}
+              {f.id === 'queue' ? `Queue (${badgeQueued})` : f.label}
             </button>
           ))}
         </div>
@@ -477,16 +459,7 @@ export function JobsPage() {
           setCancelQueueId(null)
           if (!id) return
           void cancelQueueItem(id)
-            .then(() =>
-              loadQueue(
-                new Set(
-                  (payload?.jobs || [])
-                    .filter((j) => j.live)
-                    .map((j) => (j.issue_key || '').toUpperCase())
-                    .filter(Boolean),
-                ),
-              ),
-            )
+            .then(() => loadQueue())
             .catch((e) => {
               setError(e instanceof Error ? e.message : 'Cancel queue item failed')
             })

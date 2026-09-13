@@ -8,6 +8,7 @@ Covers hard-fail vs soft-fail rules:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,7 +29,32 @@ from src.scheduler.service import (
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
+from src.state.queue_store import WorkQueueStore
 from src.state.schedule_store import SCHEDULE_LABEL, ScheduleStore
+
+
+async def _wait_queue_idle(processor, *, timeout: float = 3.0) -> None:
+    """Schedule dispatch only enqueues. Wait until the queue worker finishes."""
+    qs = getattr(processor, "queue_store", None)
+    if qs is None:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last: list = []
+    while loop.time() < deadline:
+        last = [
+            r
+            for r in qs.list_items(limit=200)
+            if (r.get("status") or "") in {"queued", "running"}
+        ]
+        if not last:
+            await asyncio.sleep(0)
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(
+        "queue still open: "
+        + ", ".join(f"{r.get('queue_id')}={r.get('status')}" for r in last)
+    )
 
 
 def _valid_params(
@@ -329,7 +355,7 @@ async def test_e2e_dispatch_uses_local_snapshot_when_jira_get_fails(tmp_path):
 async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
     tmp_path, monkeypatch
 ):
-    """CRITICAL #6: schedule fire on plan_ready must start work, not false-dispatch."""
+    """Schedule fire is not plan_execute — plan_ready stays waiting."""
     monkeypatch.chdir(tmp_path)
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     sm = JiraStateManager(state_dir=tmp_path / "state")
@@ -361,6 +387,7 @@ async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
     with patch("src.processor.create_jira_client"):
         proc = JobProcessor()
     proc.state_manager = sm
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "queue")
     proc.reporter = MagicMock()
     proc._start_execution_workflow = AsyncMock()
     proc._start_planning_workflow = AsyncMock()
@@ -371,14 +398,19 @@ async def test_e2e_dispatch_plan_ready_scheduled_job_starts_execution(
     )
     assert result["launched"] == 1
     await wait_inflight_dispatches()
+    await _wait_queue_idle(proc)
 
     assert store.get(rec["schedule_id"])["status"] == "dispatched"
-    proc._start_execution_workflow.assert_awaited_once()
+    proc._start_execution_workflow.assert_not_awaited()
     proc._start_planning_workflow.assert_not_awaited()
-    # Workflow begin would set EXECUTING; we mocked it, so still plan_ready
-    # unless _begin_workflow_run ran — mock means status may stay plan_ready,
-    # but the execution entrypoint was invoked (the real success signal).
-    assert proc._start_execution_workflow.await_count == 1
+    assert sm.get_state("KAN-PR").status == TaskStatus.PLAN_READY
+    skipped = [
+        r
+        for r in proc.queue_store.list_items(status="skipped", limit=20)
+        if (r.get("issue_key") or "") == "KAN-PR"
+    ]
+    assert skipped, "plan_ready schedule should skip, not start a build"
+    assert "plan_ready" in (skipped[0].get("error_message") or "").lower()
 
 
 @pytest.mark.asyncio
@@ -552,6 +584,7 @@ async def test_e2e_full_pipeline_comments_fail_local_state_still_updates(
         proc = JobProcessor()
     proc.state_manager = sm
     proc.job_store = js
+    proc.queue_store = WorkQueueStore(queue_dir=tmp_path / "queue")
     proc.jira_client = jira
     # Reporter that talks to flaky client (comments raise → soft return None)
     proc.reporter = JiraReporter(client=jira)
@@ -581,6 +614,7 @@ async def test_e2e_full_pipeline_comments_fail_local_state_still_updates(
     )
     assert result["launched"] == 1, result
     await wait_inflight_dispatches()
+    await _wait_queue_idle(proc)
     assert store.get(sid)["status"] == "dispatched"
 
     # 4) Local state exists and is completed despite Jira comment failures
