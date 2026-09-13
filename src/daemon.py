@@ -340,8 +340,30 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.warning(f"{key}: dropped-accept notify failed: {e}")
 
+    async def _fail_stuck_issue(self, state, message: str) -> None:
+        """Abort the live OpenCode session on this loop, then fail off-loop.
+
+        ``OpenCodeBackend.cancel`` uses the current event loop. The monitor
+        used to run the whole abort on a worker thread, so
+        ``POST /session/{id}/abort`` never left the process and
+        ``_release_context`` still dropped ``in_use``.
+        """
+        issue_key = getattr(state, "issue_key", "") or ""
+        try:
+            await self.processor._abort_serve_sessions_for_issue(issue_key)
+        except Exception as e:
+            logger.warning(
+                f"Could not abort OpenCode session for stuck {issue_key}: {e}"
+            )
+        await asyncio.to_thread(self._abort_stuck_issue, state, message)
+
     def _abort_stuck_issue(self, state, message: str) -> None:
-        """Fail issue, notify Jira, kill agent children, and release live context."""
+        """Fail issue, notify Jira, kill agent children, and release live context.
+
+        Serve abort must already have run on the daemon loop
+        (see :meth:`_fail_stuck_issue`). This method stays sync for tests
+        and for the ``to_thread`` tail after that abort.
+        """
         issue_key = state.issue_key
         try:
             self.processor._kill_children_for_issue(issue_key)
@@ -447,8 +469,7 @@ class JiraAgentDaemon:
                             f"Issue {state.issue_key} in-flight with no started_at; "
                             f"marking ERROR"
                         )
-                        await asyncio.to_thread(
-                            self._abort_stuck_issue,
+                        await self._fail_stuck_issue(
                             state,
                             (
                                 f"Job stuck in '{state.status.value}' with no start timestamp. "
@@ -466,8 +487,7 @@ class JiraAgentDaemon:
                         f"Issue {state.issue_key} stuck in {state.status.value} "
                         f"for {int(age)}s (limit {int(limit_seconds)}s)"
                     )
-                    await asyncio.to_thread(
-                        self._abort_stuck_issue,
+                    await self._fail_stuck_issue(
                         state,
                         (
                             f"Job stuck in '{state.status.value}' for {int(age)}s "
