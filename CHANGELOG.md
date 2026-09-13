@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.13] — 2026-09-13
+
+Dashboard Stop kills leftover tools on macOS. Cancel no longer takes down shared OpenCode serve. Leftover GitLab PAT still works when Azure hosts are set. Stop during clone stays Cancelled. Stop is refused on plan_ready.
+
+### Fixed
+
+- Dashboard Stop on macOS kills clone tools (`pgrep -P`, `ps`/`lsof`, `/var` vs `/private/var`).
+- `killpg(getpgid(child))` no longer kills shared `opencode serve` (only the process-group leader).
+- Leftover `GITLAB_PAT` authenticates a GitLab remote even when `AZURE_HOST_PATS` is set.
+- Stop during clone stays **CANCELLED** (does not stamp ERROR).
+- Stop is refused on `plan_ready` so `plan_execute` is not discarded.
+
+[0.9.13]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.13
+
 ## [0.9.12] — 2026-09-13
 
 Jobs tab shows how many work-queue items are waiting.

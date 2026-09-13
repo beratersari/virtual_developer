@@ -1,3 +1,11 @@
+# Yaver 0.9.13
+
+Stop on macOS kills leftover clone tools.
+Cancel does not take down shared OpenCode serve.
+Leftover GITLAB_PAT still works when Azure hosts
+are set. Stop during clone stays Cancelled.
+Stop is refused on plan_ready.
+
 # Yaver 0.9.12
 
 Jobs tab shows Queue (N) from the work queue.
