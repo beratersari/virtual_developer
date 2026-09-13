@@ -424,7 +424,7 @@ def test_build_task_detail_full(tmp_path, isolate_jira_agent_artifacts):
     assert detail["summary"] == "live sum"
     assert detail["description"] == "live desc"
     assert detail["can_start"] is False  # start only via plan_execute + In Progress
-    assert detail["can_cancel"] is True
+    assert detail["can_cancel"] is False  # plan_ready has no running agent to stop
     assert "ses_file" in detail["opencode_session_ids"] or "ses_db" in detail[
         "opencode_session_ids"
     ]
