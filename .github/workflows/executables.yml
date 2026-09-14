@@ -195,10 +195,14 @@ jobs:
           set -euo pipefail
           asset="${{ steps.versions.outputs.PYTHON_STANDALONE_ASSET }}"
           sha="${{ steps.versions.outputs.PYTHON_STANDALONE_SHA256 }}"
-          url="https://github.com/astral-sh/python-build-standalone/releases/download/${{ steps.versions.outputs.PYTHON_STANDALONE_RELEASE }}/${asset}"
+          rel="${{ steps.versions.outputs.PYTHON_STANDALONE_RELEASE }}"
+          enc_asset="${asset//+/%2B}"
+          url="https://github.com/astral-sh/python-build-standalone/releases/download/${rel}/${enc_asset}"
           mkdir -p "$HOME/.cache/yaver-python"
           dest="$HOME/.cache/yaver-python/python.tar.gz"
-          curl -fsSL -o "$dest" "$url"
+          echo "GET $url"
+          curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url"
+          sha256sum "$dest"
           echo "${sha}  ${dest}" | sha256sum -c -
 
       - name: Freeze executable (Linux Ubuntu container)

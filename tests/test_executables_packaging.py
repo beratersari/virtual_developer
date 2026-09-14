@@ -53,6 +53,10 @@ def test_versions_env_pins():
     assert "PYINSTALLER_MODE=onefile" not in text
     assert "cpython-3.12" in text
     assert "x86_64-unknown-linux-gnu-install_only.tar.gz" in text
+    sha_line = next(l for l in text.splitlines() if l.startswith("PYTHON_STANDALONE_SHA256="))
+    sha = sha_line.split("=", 1)[1].strip()
+    assert len(sha) == 64
+    assert sha == "936c246dfdbbfa7cb22dd01814a21f582a892689fae96b06071a5e433baffa22"
 
 
 def test_spec_is_onedir_and_bundles_runtime_files():
@@ -111,6 +115,7 @@ def test_workflow_builds_both_platforms():
     assert "glibc_max: \"2.39\"" in text
     assert "--max-glibc" in text
     assert "--require-glibc-check" in text
+    assert "${asset//+/%2B}" in text
     assert "packaging/pyinstaller/versions.env" in text
     assert "packaging/pyinstaller/build.py" in text
     assert "packaging/pyinstaller/assert_payload.py" in text
