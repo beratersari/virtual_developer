@@ -73,7 +73,7 @@ Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCo
 CI workflow **Standalone Executables** (`.github/workflows/executables.yml`) freezes the daemon + CLI with PyInstaller:
 
 - Windows x64 → `yaver.exe` (onedir folder + zip)
-- Linux x64 → `yaver` (onedir folder + zip / tar.gz)
+- Linux x64 → one freeze per Ubuntu: `yaver-linux-x64-ubuntu-18.04`, `20.04`, `22.04`, `24.04` (onedir folder + zip / tar.gz). Download the one that matches the host. A 24.04 freeze will not start on older glibc (`GLIBC_2.38 not found`).
 
 Config: [`packaging/pyinstaller/`](packaging/pyinstaller/README.md) (`versions.env`, `yaver.spec`). Extract the artifact, copy `.env.example` → `.env`, run `yaver start`. OpenCode / Codex are **not** inside the binary — install those separately. This does **not** replace the full offline zips (wheels + OpenCode vendor).  
 

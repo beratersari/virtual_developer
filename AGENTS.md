@@ -824,7 +824,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
 | Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` and `skills/`; no gitlab-reviewer), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
-| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env` |
+| CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |
 | OpenCoderman | Each tag writes `opencoderman.pin` (gitlink SHA) and attaches `opencoderman-<sha>.zip`. Do not rely on `develop`'s submodule after a release. |
 

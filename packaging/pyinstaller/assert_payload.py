@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+# Per-Ubuntu glibc floors. A freeze must not need newer than its target.
+UBUNTU_GLIBC_MAX = {
+    "18.04": (2, 27),
+    "20.04": (2, 31),
+    "22.04": (2, 35),
+    "24.04": (2, 39),
+}
 
 REQUIRED_FILES = (
     ".env.example",
@@ -38,7 +49,108 @@ def exe_name() -> str:
     return "yaver.exe" if os.name == "nt" else "yaver"
 
 
-def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
+def parse_glibc_tuple(text: str) -> tuple[int, ...]:
+    parts = text.split(".")
+    return tuple(int(p) for p in parts if p.isdigit())
+
+
+def parse_glibc_versions(text: str) -> list[tuple[int, ...]]:
+    found: set[tuple[int, ...]] = set()
+    for match in re.finditer(r"GLIBC_(\d+(?:\.\d+)*)", text):
+        parsed = parse_glibc_tuple(match.group(1))
+        if parsed:
+            found.add(parsed)
+    return sorted(found)
+
+
+def _is_elf(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def _glibc_dump(path: Path) -> str | None:
+    objdump = shutil.which("objdump")
+    if objdump:
+        proc = subprocess.run(
+            [objdump, "-T", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+    readelf = shutil.which("readelf")
+    if readelf:
+        proc = subprocess.run(
+            [readelf, "-V", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        if proc.returncode == 0:
+            return (proc.stdout or "") + (proc.stderr or "")
+    return None
+
+
+def assert_linux_glibc(
+    root: Path,
+    *,
+    max_ver: tuple[int, ...] | None,
+    require: bool = False,
+) -> list[str]:
+    """Fail if any ELF needs a newer GLIBC than *max_ver*."""
+    errors: list[str] = []
+    if max_ver is None:
+        return errors
+    elves = [p for p in root.rglob("*") if p.is_file() and _is_elf(p)]
+    if not elves:
+        if require:
+            errors.append("no ELF files found for glibc check")
+        return errors
+    if not (shutil.which("objdump") or shutil.which("readelf")):
+        if require:
+            errors.append("objdump/readelf missing; cannot check glibc symbols")
+        return errors
+    worst: tuple[int, ...] = (0,)
+    worst_path = ""
+    scanned = 0
+    for path in elves:
+        dump = _glibc_dump(path)
+        if dump is None:
+            continue
+        scanned += 1
+        versions = parse_glibc_versions(dump)
+        if not versions:
+            continue
+        newest = versions[-1]
+        if newest > worst:
+            worst = newest
+            worst_path = str(path.relative_to(root))
+    if require and scanned == 0:
+        errors.append("could not read glibc symbols from any ELF")
+        return errors
+    if worst > max_ver:
+        pretty = ".".join(str(p) for p in worst)
+        ceiling = ".".join(str(p) for p in max_ver)
+        errors.append(
+            f"{worst_path} needs GLIBC_{pretty} (max {ceiling}). "
+            "Freeze this Ubuntu target inside matching ubuntu:X.YY."
+        )
+    return errors
+
+
+def assert_payload(
+    root: Path,
+    *,
+    platform: str | None = None,
+    max_glibc: tuple[int, ...] | None = None,
+    require_glibc_check: bool = False,
+) -> list[str]:
     """Return a list of error strings (empty = ok)."""
     errors: list[str] = []
     if not root.is_dir():
@@ -99,6 +211,12 @@ def assert_payload(root: Path, *, platform: str | None = None) -> list[str]:
             errors.append("missing install-opencode-agents.sh")
         if (root / "install-opencode-agents.bat").is_file():
             errors.append("Linux zip must not include install-opencode-agents.bat")
+        if max_glibc is not None or require_glibc_check:
+            errors.extend(
+                assert_linux_glibc(
+                    root, max_ver=max_glibc, require=require_glibc_check
+                )
+            )
     return errors
 
 
@@ -106,8 +224,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Assert frozen Yaver payload layout")
     parser.add_argument("payload", type=Path)
     parser.add_argument("--platform", default="")
+    parser.add_argument(
+        "--max-glibc",
+        default="",
+        help="Highest GLIBC the Linux freeze may need (e.g. 2.27 for Ubuntu 18.04)",
+    )
+    parser.add_argument(
+        "--require-glibc-check",
+        action="store_true",
+        help="Fail if Linux ELFs cannot be scanned for GLIBC symbols",
+    )
     args = parser.parse_args(argv)
-    errors = assert_payload(args.payload, platform=args.platform or None)
+    max_glibc = parse_glibc_tuple(args.max_glibc) if args.max_glibc else None
+    errors = assert_payload(
+        args.payload,
+        platform=args.platform or None,
+        max_glibc=max_glibc,
+        require_glibc_check=args.require_glibc_check,
+    )
     if errors:
         for err in errors:
             print(f"FAIL {err}", file=sys.stderr)

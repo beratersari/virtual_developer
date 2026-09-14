@@ -30,6 +30,7 @@ def test_freeze_config_files_exist():
         "runtime_hook.py",
         "build.py",
         "assert_payload.py",
+        "freeze-in-ubuntu.sh",
         "START_HERE.txt",
         "README.md",
     ):
@@ -41,12 +42,17 @@ def test_versions_env_pins():
     text = (PKG / "versions.env").read_text(encoding="utf-8")
     for key in (
         "PYTHON_VERSION=",
+        "PYTHON_STANDALONE_RELEASE=",
+        "PYTHON_STANDALONE_ASSET=",
+        "PYTHON_STANDALONE_SHA256=",
         "NODE_VERSION=",
         "PYINSTALLER_VERSION=",
         "PYINSTALLER_MODE=onedir",
     ):
         assert key in text, key
     assert "PYINSTALLER_MODE=onefile" not in text
+    assert "cpython-3.12" in text
+    assert "x86_64-unknown-linux-gnu-install_only.tar.gz" in text
 
 
 def test_spec_is_onedir_and_bundles_runtime_files():
@@ -89,7 +95,22 @@ def test_runtime_hook_chdirs_when_frozen():
 def test_workflow_builds_both_platforms():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "windows-latest" in text
-    assert "ubuntu-latest" in text
+    assert "os: ubuntu-latest" not in text
+    assert "freeze-in-ubuntu.sh" in text
+    assert "yaver-linux-x64-ubuntu-18.04" in text
+    assert "yaver-linux-x64-ubuntu-20.04" in text
+    assert "yaver-linux-x64-ubuntu-22.04" in text
+    assert "yaver-linux-x64-ubuntu-24.04" in text
+    assert 'ubuntu: "18.04"' in text
+    assert 'ubuntu: "20.04"' in text
+    assert 'ubuntu: "22.04"' in text
+    assert 'ubuntu: "24.04"' in text
+    assert "glibc_max: \"2.27\"" in text
+    assert "glibc_max: \"2.31\"" in text
+    assert "glibc_max: \"2.35\"" in text
+    assert "glibc_max: \"2.39\"" in text
+    assert "--max-glibc" in text
+    assert "--require-glibc-check" in text
     assert "packaging/pyinstaller/versions.env" in text
     assert "packaging/pyinstaller/build.py" in text
     assert "packaging/pyinstaller/assert_payload.py" in text
@@ -104,6 +125,23 @@ def test_workflow_builds_both_platforms():
     assert "windows-dist.yml" in text or "does not replace" in text.lower() or "Additive" in text
     assert "Upload zip archive" in text
     assert "Upload tar.gz archive (Linux)" in text
+
+
+def test_parse_glibc_versions_flags_per_ubuntu():
+    ap = _load("yaver_assert_glibc", PKG / "assert_payload.py")
+    dump_1804 = "0000000000000000 DF *UND* 0000000000000000  GLIBC_2.27 pow\n"
+    dump_2404 = (
+        "0000000000000000 DF *UND* 0000000000000000  GLIBC_2.2.5 memcpy\n"
+        "0000000000000000 DF *UND* 0000000000000000  GLIBC_2.38 exp2\n"
+    )
+    assert ap.parse_glibc_versions(dump_1804)[-1] == (2, 27)
+    assert ap.parse_glibc_versions(dump_2404)[-1] == (2, 38)
+    assert ap.UBUNTU_GLIBC_MAX["18.04"] == (2, 27)
+    assert ap.UBUNTU_GLIBC_MAX["20.04"] == (2, 31)
+    assert ap.UBUNTU_GLIBC_MAX["22.04"] == (2, 35)
+    assert ap.UBUNTU_GLIBC_MAX["24.04"] == (2, 39)
+    assert ap.parse_glibc_versions(dump_2404)[-1] > ap.UBUNTU_GLIBC_MAX["22.04"]
+    assert ap.parse_glibc_versions(dump_2404)[-1] <= ap.UBUNTU_GLIBC_MAX["24.04"]
 
 
 def test_assert_payload_accepts_onedir(tmp_path: Path):

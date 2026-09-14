@@ -13,6 +13,9 @@ the full Windows/Linux offline zip, or your own OpenCode/Codex install).
    Windows:  yaver.exe
    Linux:    ./yaver
    # same as: yaver start
+   # Linux: use the archive that matches this Ubuntu
+   # (18.04 / 20.04 / 22.04 / 24.04). A newer freeze will not
+   # start on an older glibc (GLIBC_2.38 not found).
 
 4. Open http://127.0.0.1:8080
 
