@@ -8,6 +8,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.15] — 2026-09-14
+
+Linux standalone `yaver` is one freeze per Ubuntu. The 0.9.14 binary was built on Ubuntu 24.04 and failed on older glibc (`GLIBC_2.38 not found`).
+
+### Fixed
+
+- Standalone Executables ships `yaver-linux-x64-ubuntu-18.04`, `20.04`, `22.04`, and `24.04`. Each is frozen inside that Ubuntu image. Download the archive that matches the host.
+
+[0.9.15]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.15
+
 ## [0.9.14] — 2026-09-13
 
 Stuck-job watchdog aborts the live OpenCode session. A cancelled GitLab/Azure worker cannot complete a newer run. Builds do not resume the plan chat.

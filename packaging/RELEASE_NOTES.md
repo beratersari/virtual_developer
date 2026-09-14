@@ -1,3 +1,11 @@
+# Yaver 0.9.15
+
+Linux standalone yaver is one freeze per Ubuntu
+(18.04, 20.04, 22.04, 24.04). The 0.9.14 binary
+was built on Ubuntu 24.04 and failed on older
+glibc (GLIBC_2.38 not found). Download the
+archive that matches the host.
+
 # Yaver 0.9.14
 
 Stuck-job watchdog aborts the live OpenCode session
@@ -239,7 +247,10 @@ Changelog: see `CHANGELOG.md` in the source tree.
 | File | Platform |
 |------|----------|
 | `yaver-windows-x64-*.zip` | Windows x64 |
-| `yaver-linux-x64-*.zip` or `.tar.gz` | Linux x64 |
+| `yaver-linux-x64-ubuntu-18.04-*.zip` or `.tar.gz` | Ubuntu 18.04 (glibc 2.27) |
+| `yaver-linux-x64-ubuntu-20.04-*.zip` or `.tar.gz` | Ubuntu 20.04 (glibc 2.31) |
+| `yaver-linux-x64-ubuntu-22.04-*.zip` or `.tar.gz` | Ubuntu 22.04 (glibc 2.35) |
+| `yaver-linux-x64-ubuntu-24.04-*.zip` or `.tar.gz` | Ubuntu 24.04 (glibc 2.39) |
 
 Each archive is an **onedir** folder:
 
