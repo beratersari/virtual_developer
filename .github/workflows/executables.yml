@@ -250,15 +250,19 @@ jobs:
         run: |
           set -euo pipefail
           payload="${{ github.workspace }}/dist/stage/${{ steps.meta.outputs.dist_name }}"
-          chmod +x "$payload/yaver"
+          ls -la "$payload"
           docker run --rm \
-            -v "${payload}:/app:ro" \
+            --entrypoint /bin/bash \
+            -v "${payload}:/app" \
+            -w /app \
             "ubuntu:${{ matrix.ubuntu }}" \
-            /app/yaver --version
-          docker run --rm \
-            -v "${payload}:/app:ro" \
-            "ubuntu:${{ matrix.ubuntu }}" \
-            /app/yaver --help
+            -lc 'set -e
+              ls -la /app
+              chmod +x /app/yaver
+              if command -v ldd >/dev/null; then ldd /app/yaver || true; fi
+              /app/yaver --version
+              /app/yaver --help
+            '
 
       - name: Upload folder artifact
         uses: actions/upload-artifact@v4
