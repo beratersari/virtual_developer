@@ -7,7 +7,10 @@ offline zips (`install-dashboard` + `install-backends`).
 | Platform | Binary | CI workflow |
 |----------|--------|-------------|
 | Windows x64 | `yaver.exe` | `.github/workflows/executables.yml` |
-| Linux x64 | `yaver` | same workflow, `ubuntu-latest` |
+| Ubuntu 18.04 | `yaver` | same workflow, Docker `ubuntu:18.04` (glibc 2.27) |
+| Ubuntu 20.04 | `yaver` | same workflow, Docker `ubuntu:20.04` (glibc 2.31) |
+| Ubuntu 22.04 | `yaver` | same workflow, Docker `ubuntu:22.04` (glibc 2.35) |
+| Ubuntu 24.04 | `yaver` | same workflow, Docker `ubuntu:24.04` (glibc 2.39) |
 
 OpenCode and Codex are **not** inside this binary. Install them separately.
 
@@ -30,7 +33,7 @@ and `C:\vd\t` on Windows). Plans are `{YAVER_DATA_DIR}/plans/`.
 
 ## User flow
 
-1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-*`).
+1. Download the Actions artifact (`yaver-windows-x64-*` or `yaver-linux-x64-ubuntu-22.04-*` — pick the Ubuntu that matches the host).
 2. Extract. You should see `yaver.exe` / `yaver`, `_internal/`, `.env.example`, `START_HERE.txt`, `opencoderman/` (`agents/` + `skills/` only), and one copy script (`install-opencode-agents.bat` on Windows, `install-opencode-agents.sh` on Linux).
 3. Copy `.env.example` to `.env` and set Jira (and GitLab if you need MRs).
 4. If OpenCode is already installed, run that copy script to put `opencoderman/agents` and `opencoderman/skills` into the OpenCode home.
@@ -66,6 +69,9 @@ Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Li
 - Bundle `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman.pin`, `opencoderman/agents` + `opencoderman/skills` only, and one copy script (`install-opencode-agents.bat` or `.sh`).
 - Resolve `.env` from the folder next to the exe (`install_root`), not `_MEIPASS`.
 - Re-run **Standalone Executables** after changing `yaver.spec` or `versions.env`.
+- Freeze each Linux target **inside** `ubuntu:18.04` / `20.04` / `22.04` /
+  `24.04` via `freeze-in-ubuntu.sh`. PyInstaller ships that image's libs.
+  A 24.04 freeze needs `GLIBC_2.38` and will not start on 22.04 or older.
 
 **Don’t**
 
@@ -73,3 +79,5 @@ Output: `dist/stage/yaver-<platform>-<version>/` plus a zip (and `.tar.gz` on Li
 - Ship secrets inside the spec or binary.
 - Switch to onefile without a product decision (slow start, temp extract).
 - Expect OpenCode/Codex to appear inside `_internal`.
+- Freeze Linux on the GitHub runner (`ubuntu-latest` / 24.04) and ship one
+  generic `yaver-linux-x64`. That is how 0.9.14 failed on older glibc.
