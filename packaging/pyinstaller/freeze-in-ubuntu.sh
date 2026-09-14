@@ -50,3 +50,11 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 python3 -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
 python3 packaging/pyinstaller/build.py --clean --out-dir dist --dist-name "${VD_DIST_NAME}"
+
+payload="dist/stage/${VD_DIST_NAME}"
+if [ ! -x "${payload}/yaver" ]; then
+  chmod +x "${payload}/yaver"
+fi
+"${payload}/yaver" --version
+"${payload}/yaver" --help
+chmod -R a+rX dist

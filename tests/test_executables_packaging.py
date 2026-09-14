@@ -116,6 +116,9 @@ def test_workflow_builds_both_platforms():
     assert "--max-glibc" in text
     assert "--require-glibc-check" in text
     assert "${asset//+/%2B}" in text
+    freeze_sh = (PKG / "freeze-in-ubuntu.sh").read_text(encoding="utf-8")
+    assert "--version" in freeze_sh
+    assert "chmod -R a+rX dist" in freeze_sh
     assert "packaging/pyinstaller/versions.env" in text
     assert "packaging/pyinstaller/build.py" in text
     assert "packaging/pyinstaller/assert_payload.py" in text
