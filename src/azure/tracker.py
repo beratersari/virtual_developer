@@ -28,6 +28,127 @@ _IN_PROGRESS_NAMES = (
 )
 
 
+def _usable_assign_name(raw: Any) -> str:
+    """Drop TFS descriptors / empty values — those 400 AssignedTo."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    lower = text.lower()
+    if lower.startswith("microsoft.teamfoundation."):
+        return ""
+    if ";" in text and " " not in text:
+        return ""
+    return text
+
+
+def fetch_pat_myself(
+    *,
+    host: str = "",
+    collection_url: str = "",
+    pat: str = "",
+    client: Optional[AzureDevOpsClient] = None,
+) -> Optional[Dict[str, Any]]:
+    """PAT identity in a Jira-shaped dict (connectionData, not Settings probe)."""
+    from src.azure.identity import fetch_bot_identity
+
+    ident = fetch_bot_identity(
+        host=host,
+        collection_url=collection_url,
+        pat=pat or (client.pat if client is not None else ""),
+    )
+    if not ident:
+        return None
+    names: List[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        text = _usable_assign_name(raw)
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            names.append(text)
+
+    for item in ident.get("names") or []:
+        _add(item)
+    uid = str(ident.get("id") or "").strip()
+    if uid and client is not None:
+        try:
+            for extra in client.identity_aliases(uid) or []:
+                _add(extra)
+        except Exception:
+            pass
+    unique = ""
+    for item in names:
+        if "\\" in item or "@" in item:
+            unique = item
+            break
+    display = names[0] if names else ""
+    primary = unique or display or uid
+    if not primary:
+        return None
+    email = next((n for n in names if "@" in n), "")
+    return {
+        "displayName": display or primary,
+        "name": primary,
+        "key": uid,
+        "accountId": uid,
+        "emailAddress": email,
+        "uniqueName": unique or primary,
+        "names": names,
+    }
+
+
+def pat_assign_candidates(me: Optional[Dict[str, Any]]) -> List[Any]:
+    """AssignedTo values TFS 2022 accepts, uniqueName first then GUID / IdentityRef."""
+    if not isinstance(me, dict):
+        return []
+    seen: set[str] = set()
+    out: List[Any] = []
+
+    def add(raw: Any) -> None:
+        if isinstance(raw, dict):
+            key = f"obj:{raw.get('id') or ''}:{raw.get('uniqueName') or ''}"
+            if key in seen or not (raw.get("id") or raw.get("uniqueName")):
+                return
+            seen.add(key)
+            out.append(raw)
+            return
+        text = _usable_assign_name(raw)
+        if not text:
+            return
+        key = f"s:{text.lower()}"
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(text)
+
+    names = [str(n).strip() for n in (me.get("names") or []) if str(n).strip()]
+    unique = _usable_assign_name(me.get("uniqueName"))
+    display = _usable_assign_name(me.get("displayName"))
+    name = _usable_assign_name(me.get("name"))
+    email = _usable_assign_name(me.get("emailAddress"))
+    uid = str(me.get("key") or me.get("accountId") or "").strip()
+    for item in (unique, email, name, *names):
+        if "\\" in item or "@" in item:
+            add(item)
+    add(display)
+    add(name)
+    for item in names:
+        add(item)
+    if display and (unique or email):
+        add(f"{display} <{unique or email}>")
+    add(uid)
+    if uid:
+        add({"id": uid})
+        ref: Dict[str, Any] = {"id": uid}
+        if display:
+            ref["displayName"] = display
+        if unique:
+            ref["uniqueName"] = unique
+        add(ref)
+    return out
+
+
 def azure_tracker_for(
     issue_key: str,
     state: Any = None,
@@ -170,39 +291,30 @@ class AzureWorkItemTracker:
         return out
 
     def get_myself(self) -> Optional[Dict[str, Any]]:
-        from src.azure_connection import probe_azure_connection
-
-        host = self.host or self.collection_url
-        if not host:
-            return None
-        try:
-            probe = probe_azure_connection(host, pat=self.client.pat)
-        except Exception:
-            return None
-        user = probe.get("user") if isinstance(probe, dict) else None
-        if not isinstance(user, dict):
-            return None
-        name = str(user.get("name") or user.get("username") or "").strip()
-        if not name and not user.get("id"):
-            return None
-        username = str(user.get("username") or name)
-        return {
-            "displayName": name or username,
-            "name": username,
-            "key": user.get("id"),
-            "emailAddress": username if "@" in username else "",
-        }
+        return fetch_pat_myself(
+            host=self.host,
+            collection_url=self.collection_url,
+            pat=self.client.pat,
+            client=self.client,
+        )
 
     def assign_issue(
         self,
         issue_key: str,
+        name: Any = "",
         *,
-        name: str = "",
         account_id: str = "",
         **_kwargs: Any,
     ) -> bool:
-        value = (name or account_id or "").strip()
-        if not value:
+        value: Any = name if name not in (None, "") else account_id
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return False
+        elif isinstance(value, dict):
+            if not (value.get("id") or value.get("uniqueName") or value.get("displayName")):
+                return False
+        else:
             return False
         posted = self.client.update_work_item_fields(
             self.project,
@@ -214,12 +326,8 @@ class AzureWorkItemTracker:
     def assign_to_pat_user(self, issue_key: str) -> bool:
         """Assign the work item to the identity behind the collection PAT."""
         me = self.get_myself()
-        ident = ""
-        if isinstance(me, dict):
-            ident = str(
-                me.get("name") or me.get("emailAddress") or me.get("displayName") or ""
-            ).strip()
-        if not ident:
+        candidates = pat_assign_candidates(me)
+        if not candidates:
             azure_warning(f"{self.issue_key}: cannot assign PAT user (identity empty)")
             return False
         raw = self._load()
@@ -228,21 +336,43 @@ class AzureWorkItemTracker:
             fields.get("System.AssignedTo") if isinstance(fields, dict) else None
         )
         if current:
-            for cand in (
-                current.get("uniqueName"),
-                current.get("name"),
-                current.get("displayName"),
-                current.get("emailAddress"),
-            ):
-                if str(cand or "").strip().lower() == ident.lower():
+            current_vals = {
+                str(x or "").strip().lower()
+                for x in (
+                    current.get("uniqueName"),
+                    current.get("name"),
+                    current.get("displayName"),
+                    current.get("emailAddress"),
+                    current.get("key"),
+                    current.get("accountId"),
+                )
+                if str(x or "").strip()
+            }
+            for cand in candidates:
+                if isinstance(cand, dict):
+                    cid = str(cand.get("id") or "").strip().lower()
+                    if cid and cid in current_vals:
+                        azure_info(f"{self.issue_key}: already assigned to PAT user")
+                        return True
+                    continue
+                if str(cand).strip().lower() in current_vals:
                     azure_info(f"{self.issue_key}: already assigned to PAT user")
                     return True
-        ok = self.assign_issue(issue_key, name=ident)
-        if ok:
-            azure_info(f"{self.issue_key}: assigned to PAT user {ident}")
-        else:
-            azure_warning(f"{self.issue_key}: could not assign PAT user {ident}")
-        return ok
+        last_label = ""
+        for cand in candidates:
+            last_label = (
+                str(cand.get("uniqueName") or cand.get("id") or cand)
+                if isinstance(cand, dict)
+                else str(cand)
+            )
+            if self.assign_issue(issue_key, cand):
+                azure_info(f"{self.issue_key}: assigned to PAT user {last_label}")
+                return True
+        azure_warning(
+            f"{self.issue_key}: could not assign PAT user "
+            f"(tried {len(candidates)} identities, last={last_label or '-'})"
+        )
+        return False
 
     def _current_tags(self) -> Optional[List[str]]:
         raw = self._load()

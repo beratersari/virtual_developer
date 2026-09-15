@@ -136,16 +136,28 @@ def test_host_from_url_edges():
 def test_normalize_remote_url_strips_ssh_and_userinfo():
     assert GitManager.normalize_remote_url(
         "git@gitlab.example.com:group/repo.git"
-    ) == "https://gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo"
     assert GitManager.normalize_remote_url(
         "https://git@gitlab.example.com/group/repo.git"
-    ) == "https://gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo"
     assert GitManager.normalize_remote_url(
         "https://gitlab.example.com:443/group/repo.git"
-    ) == "https://gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo"
     assert GitManager.normalize_remote_url(
         "ssh://git@gitlab.example.com/group/repo.git"
-    ) == "https://gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo"
+
+
+def test_normalize_remote_url_strips_dot_git_for_all_forges():
+    assert GitManager.normalize_remote_url(
+        "https://gitlab.example.com/group/repo.git"
+    ) == "https://gitlab.example.com/group/repo"
+    assert GitManager.normalize_remote_url(
+        "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/app.git"
+    ) == "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/app"
+    assert GitManager.normalize_remote_url(
+        "https://gitlab.example.com/group/repo"
+    ) == "https://gitlab.example.com/group/repo"
 
 
 # --- Setup / temp dir ---

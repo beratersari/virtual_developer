@@ -324,7 +324,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
 - Poller focuses on board/sprint + To Do + bot assignee. The board poller is the only Jira intake.
-- Azure Boards work items use the same `/yaver/webhook/azure` URL as PR comments (always on when `AZURE_WEBHOOK_ENABLED` is true). New work is first assignment on a New item. Active → New while still assigned does **not** re-queue. Plan revise/implement is **comment-only**: `@mention /planRefactor <prompt>` or `@mention /planExecute`. Mention without those commands gets a work-item usage note. Do **not** use Jira plan tags on Azure work items. Do **not** use these commands on Jira, GitLab, or Azure PR comments.
+- Azure Boards work items use the same `/yaver/webhook/azure` URL as PR comments (always on when `AZURE_WEBHOOK_ENABLED` is true). New work is assignment while the item is **not Done** (New, Active, Doing, …). Done/Closed is ignored. Active → New while still assigned does **not** re-queue. Plan revise/implement is **comment-only**: `@mention /planRefactor <prompt>` or `@mention /planExecute`. Mention without those commands gets a work-item usage note. Do **not** use Jira plan tags on Azure work items. Do **not** use these commands on Jira, GitLab, or Azure PR comments.
 - **First active sprint only (intentional).** Scrum boards use `values[0]`
   from `/sprint?state=active`. Parallel sprints are not merged. Put bot
   tickets on that first sprint, or use a Kanban board (no sprints → whole
@@ -351,7 +351,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `AZURE_COLLECTION_URLS` | JSON list of TFS collection URLs (`https://host/tfs/<Collection>`). Settings refuses host-only or `/tfs` without a collection name. |
 | `AZURE_PAT` | Leftover single Azure PAT (used only when `AZURE_COLLECTION_PATS` is empty) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret). PR comments **and** work-item created/updated. |
-| `AZURE_TRIGGER_LABEL` | Optional work-item tags. When set, New/To Do intake needs bot assignee **and** one of these tags (same AND as `JIRA_TRIGGER_LABEL`). Empty = assignee only. |
+| `AZURE_TRIGGER_LABEL` | Optional work-item tags. When set, open (not Done) intake needs bot assignee **and** one of these tags (same AND as `JIRA_TRIGGER_LABEL`). Empty = assignee only. |
 | `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment **or** when Assigned To matches on a work item. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /ask` is ignored (another agent). |
 
 ---

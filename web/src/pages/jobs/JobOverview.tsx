@@ -27,21 +27,13 @@ export function JobOverview({
     <div className="space-y-6 text-sm">
       <div className="rounded border border-border bg-bg px-4 py-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-          {(job.source || 'jira') === 'gitlab'
-            ? 'GitLab MR comment'
-            : (job.source || 'jira') === 'azure'
-              ? 'Azure PR comment'
-              : 'Jira description'}
+          Description
         </div>
         {job.description?.trim() ? (
           <p className="whitespace-pre-wrap text-sm text-text-secondary">{job.description}</p>
         ) : (
           <p className="text-sm italic text-text-muted">
-            {(job.source || 'jira') === 'gitlab'
-              ? 'No MR comment body was stored when this job started.'
-              : (job.source || 'jira') === 'azure'
-                ? 'No PR comment body was stored when this job started.'
-                : 'No Jira description was stored when this job started.'}
+            No description was stored when this job started.
           </p>
         )}
       </div>
