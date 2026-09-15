@@ -23,6 +23,7 @@ from src.dashboard.schemas import IssueReportRequest
 from src.dashboard.service import (
     _job_prompt_paths,
     _job_session_log_paths,
+    build_jobs,
     build_meta,
     build_one_job,
     build_poll_status,
@@ -39,15 +40,37 @@ if TYPE_CHECKING:
     from src.state.job_store import JobStore
     from src.state.manager import JiraStateManager
 
-_MAX_FILE_BYTES = 2 * 1024 * 1024
-_MAX_OPENCODE_LOG_BYTES = 1 * 1024 * 1024
-_MAX_SYSTEM_LINES = 4000
-_MAX_LOG_DIR_FILES = 20
-_MAX_OPENCODE_LOG_FILES = 5
+_MAX_FILE_BYTES = 4 * 1024 * 1024
+_MAX_OPENCODE_LOG_BYTES = 2 * 1024 * 1024
+_MAX_SYSTEM_LINES = 8000
+_MAX_LOG_DIR_FILES = 40
+_MAX_OPENCODE_LOG_FILES = 20
 _MAX_CHAT_JSON_CHARS = 8 * 1024 * 1024
+_SERVE_TIMEOUT = httpx.Timeout(1.2, connect=0.35)
+_serve_cache: Dict[str, Dict[str, Any]] = {}
 _GLPAT = re.compile(r"glpat-[A-Za-z0-9_\-]{8,}")
 _BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _BASIC = re.compile(r"(?i)(basic\s+)[A-Za-z0-9+/=]{8,}")
+
+
+def _resolved_job_ids(body: IssueReportRequest) -> List[str]:
+    ids: List[str] = []
+    seen = set()
+    for raw in list(body.job_ids or []) + [body.job_id]:
+        jid = (raw or "").strip()
+        if not jid or jid in seen:
+            continue
+        seen.add(jid)
+        ids.append(jid)
+    return ids[:20]
+
+
+def _job_raw_record(job_id: str, store: Optional["JobStore"]) -> Optional[Dict[str, Any]]:
+    if store is not None:
+        return store.get_job(job_id)
+    import src.state.job_store as job_store_mod
+
+    return job_store_mod.job_store.get_job(job_id)
 
 
 def build_issue_report_zip(
@@ -59,40 +82,40 @@ def build_issue_report_zip(
 ) -> Tuple[bytes, str]:
     """Return ``(zip_bytes, filename)`` for a general or job report."""
     kind = body.kind
-    job_id = (body.job_id or "").strip()
-    if kind == "job" and not job_id:
-        raise ValueError("job_id is required when kind is 'job'")
+    job_ids = _resolved_job_ids(body)
+    if kind == "job" and not job_ids:
+        raise ValueError("job_id or job_ids is required when kind is 'job'")
 
-    job_raw: Optional[Dict[str, Any]] = None
-    job_item = None
-    if kind == "job":
-        job_item = build_one_job(
-            job_id,
+    selected: List[Tuple[Any, Dict[str, Any]]] = []
+    for jid in job_ids:
+        item = build_one_job(
+            jid,
             processor=processor,
             store=store,
             state_manager=state_manager,
         )
-        if job_item is None:
-            raise FileNotFoundError(f"No job {job_id}")
-        if store is not None:
-            job_raw = store.get_job(job_id)
-        else:
-            import src.state.job_store as job_store_mod
+        if item is None:
+            raise FileNotFoundError(f"No job {jid}")
+        raw = _job_raw_record(jid, store)
+        selected.append((item, raw or {}))
 
-            job_raw = job_store_mod.job_store.get_job(job_id)
+    job_item = selected[0][0] if selected else None
+    job_id = job_ids[0] if job_ids else ""
 
+    _serve_cache.clear()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    if kind == "job" and job_item is not None:
+    if len(selected) == 1 and job_item is not None:
         issue = _safe_name(job_item.issue_key or "issue")
-        jid = _safe_name(job_item.job_id)
-        filename = f"yaver-report-{issue}-{jid}-{stamp}.zip"
+        filename = f"yaver-report-{issue}-{_safe_name(job_item.job_id)}-{stamp}.zip"
+    elif len(selected) > 1:
+        filename = f"yaver-report-jobs-{len(selected)}-{stamp}.zip"
     else:
         filename = f"yaver-report-general-{stamp}.zip"
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         _write_text(zf, "NOTE.txt", body.note + "\n")
-        _write_text(zf, "README.txt", _readme(kind, job_item))
+        _write_text(zf, "README.txt", _readme(kind, [item for item, _raw in selected]))
         _write_json(
             zf,
             "meta.json",
@@ -101,26 +124,49 @@ def build_issue_report_zip(
                 "created_at": datetime.now().isoformat(timespec="seconds"),
                 "app": build_meta().model_dump(),
                 "job_id": job_item.job_id if job_item is not None else None,
+                "job_ids": [item.job_id for item, _raw in selected],
                 "issue_key": job_item.issue_key if job_item is not None else None,
+                "issue_keys": list(
+                    dict.fromkeys(
+                        item.issue_key
+                        for item, _raw in selected
+                        if getattr(item, "issue_key", None)
+                    )
+                ),
                 "summary": job_item.summary if job_item is not None else None,
             },
         )
         _add_runtime(zf, processor=processor)
+        _add_serve(zf, job_items=[item for item, _raw in selected])
         _add_settings(zf)
         _add_poll(zf, state_manager=state_manager)
         _add_queue(zf)
         _add_schedules(zf)
         _add_session_binds(zf)
-        _add_issue_states(zf, state_manager=state_manager, job_item=job_item)
+        _add_issue_states(
+            zf,
+            state_manager=state_manager,
+            job_items=[item for item, _raw in selected],
+        )
+        _add_storage(zf)
+        _add_recent_jobs(zf, processor=processor, store=store, state_manager=state_manager)
+        _add_safe_environ(zf)
+        _add_opencode_home(zf)
         _add_system_logs(zf)
 
-        if kind == "job" and job_item is not None:
+        for item, raw in selected:
+            prefix = (
+                f"jobs/{_safe_name(item.job_id)}"
+                if len(selected) > 1
+                else "job"
+            )
             _add_job_bundle(
                 zf,
-                job_item,
-                job_raw or {},
+                item,
+                raw,
                 processor=processor,
                 state_manager=state_manager,
+                prefix=prefix,
             )
 
     payload = buf.getvalue()
@@ -131,7 +177,9 @@ def build_issue_report_zip(
     return payload, filename
 
 
-def _readme(kind: str, job_item: Any) -> str:
+def _readme(kind: str, job_items: Any) -> str:
+    items = [j for j in (job_items or []) if j is not None]
+    job_item = items[0] if items else None
     lines = [
         "Yaver issue report",
         "",
@@ -139,38 +187,46 @@ def _readme(kind: str, job_item: Any) -> str:
         "",
         "NOTE.txt                 Operator note",
         "meta.json                App version and report metadata",
-        "runtime.json             Host, Python, CLI versions, serve health, live jobs",
+        "runtime.json             Host, Python, CLI versions, live jobs, paths",
+        "serve.json               OpenCode serve health, session status, models",
         "settings.json            Safe dashboard settings (no tokens)",
         "poll.json                Last board poll (matched issues + raw snapshot)",
         "queue.json               Work queue (queued + running)",
         "schedules.json           Scheduled jobs",
         "sessions.json            OpenCode session binds (repo + branch)",
         "states.json              Local issue state machine",
+        "storage.json             Temp clone folders + disk use",
+        "jobs.json                Recent job list (no chat transcripts)",
+        "environ.json             Safe process env (no tokens)",
+        "opencode-home.json       Detected OpenCode home + config (no keys)",
         "system/daemon.log        In-process daemon log ring",
         "system/daemon-file.log   Durable YAVER_DATA_DIR/logs/daemon.log (if any)",
         "system/logs/             Files from YAVER_DATA_DIR/logs and cwd/logs",
         "system/job-logs/         Per-job durable system logs",
-        "system/opencode-logs/    Recent OpenCode CLI log files (if present)",
+        "system/opencode-logs/    Recent OpenCode serve/CLI log files",
     ]
-    if kind == "job" and job_item is not None:
+    if kind == "job" and items:
+        lines.extend(["", "Selected jobs:"])
+        for item in items:
+            lines.append(f"  - {item.job_id}  {item.issue_key} — {item.summary}")
+        folder = "jobs/<job_id>/" if len(items) > 1 else "job/"
         lines.extend(
             [
                 "",
-                f"Selected job: {job_item.job_id}",
-                f"Issue: {job_item.issue_key} — {job_item.summary}",
-                "",
-                "job/record.json           Job record (safe fields)",
-                "job/parameters.json       Issue {{params}} and run parameters",
-                "job/description.txt       Frozen issue / MR description",
-                "job/retry_attempts.json   Retry bookkeeping",
-                "job/system.log            Daemon lines for this job",
-                "job/prompts/              Initial + retry prompt files",
-                "job/session_logs/         OpenCode / Codex session logs",
-                "job/chat.json             Session transcript (tool calls, model text)",
-                "job/chat.md               Same transcript, readable",
-                "job/issue.json            Local + live Jira/GitLab issue snapshot",
-                "job/plan.md               Durable plan file from YAVER_DATA_DIR/plans",
-                "job/git.txt               git status / log in the working clone",
+                f"Job files live under {folder}",
+                "record.json               Job record (safe fields)",
+                "parameters.json           Issue {{params}} and run parameters",
+                "description.txt           Frozen issue / MR description",
+                "retry_attempts.json       Retry bookkeeping",
+                "system.log                Daemon lines for this job",
+                "prompts/                  Initial + retry prompt files",
+                "session_logs/             OpenCode / Codex session logs",
+                "chat.json                 Session transcript (tool calls, model text)",
+                "chat.md                   Same transcript, readable",
+                "issue.json                Local + live Jira/GitLab issue snapshot",
+                "plan.md                   Durable plan file from YAVER_DATA_DIR/plans",
+                "git.txt                   git status / log / diff --stat in the clone",
+                "serve.json                Serve status, todos, last messages for this session",
             ]
         )
     return "\n".join(lines) + "\n"
@@ -221,11 +277,170 @@ def _add_runtime(
         "codex_cli": codex,
         "opencode_serve_url": serve_url,
         "opencode_serve_health": _probe_serve(serve_url),
+        "product_version": _product_version(),
         "live_issue_keys": live_keys,
         "active_jobs": active_jobs,
         "paths": _runtime_paths(),
     }
     _write_json(zf, "runtime.json", payload)
+
+
+def _add_serve(zf: zipfile.ZipFile, *, job_items: Optional[List[Any]] = None) -> None:
+    serve_url = (
+        getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
+    ).rstrip("/")
+    payload: Dict[str, Any] = {
+        "base_url": serve_url,
+        "health": _serve_get(serve_url, "/global/health"),
+        "session_status": _serve_get(serve_url, "/session/status"),
+        "sessions": _serve_get(serve_url, "/session"),
+        "providers": _serve_provider_ids(serve_url),
+        "config": _serve_safe_config(serve_url),
+    }
+    sids: List[str] = []
+    for job_item in job_items or []:
+        for sid in list(getattr(job_item, "opencode_session_ids", None) or []):
+            one = str(sid or "").strip()
+            if one and one not in sids:
+                sids.append(one)
+        sid = str(getattr(job_item, "opencode_session_id", "") or "").strip()
+        if sid and sid not in sids:
+            sids.append(sid)
+    if sids:
+        sessions: Dict[str, Any] = {}
+        for one in sids[:16]:
+            sessions[one] = {
+                "todos": _serve_get(serve_url, f"/session/{one}/todo"),
+                "messages_tail": _serve_get(
+                    serve_url, f"/session/{one}/message", params={"limit": "30"}
+                ),
+            }
+        payload["job_sessions"] = sessions
+    _write_json(zf, "serve.json", payload)
+
+
+def _add_storage(zf: zipfile.ZipFile) -> None:
+    def _collect() -> Dict[str, Any]:
+        from src.dashboard.temp_storage import build_storage_view
+
+        return build_storage_view()
+
+    _write_json(zf, "storage.json", _safe_call("storage", _collect))
+
+
+def _add_recent_jobs(
+    zf: zipfile.ZipFile,
+    *,
+    processor: Optional["JobProcessor"],
+    store: Optional["JobStore"],
+    state_manager: Optional["JiraStateManager"],
+) -> None:
+    def _collect() -> Dict[str, Any]:
+        resp = build_jobs(
+            page=1,
+            page_size=50,
+            processor=processor,
+            store=store,
+            state_manager=state_manager,
+        )
+        dumped = resp.model_dump() if hasattr(resp, "model_dump") else resp
+        rows = []
+        for job in dumped.get("jobs") or []:
+            if not isinstance(job, dict):
+                continue
+            rows.append(
+                {
+                    "job_id": job.get("job_id"),
+                    "issue_key": job.get("issue_key"),
+                    "summary": job.get("summary"),
+                    "status": job.get("status"),
+                    "backend": job.get("backend"),
+                    "model": job.get("model"),
+                    "workflow_type": job.get("workflow_type"),
+                    "live": job.get("live"),
+                    "error_message": job.get("error_message"),
+                    "started_at": job.get("started_at"),
+                    "completed_at": job.get("completed_at"),
+                    "opencode_session_id": job.get("opencode_session_id"),
+                    "working_directory": job.get("working_directory"),
+                    "delivery_status": job.get("delivery_status"),
+                }
+            )
+        return {"total": dumped.get("total"), "jobs": rows}
+
+    _write_json(zf, "jobs.json", _safe_call("jobs", _collect))
+
+
+def _add_safe_environ(zf: zipfile.ZipFile) -> None:
+    allow_prefixes = (
+        "YAVER_",
+        "VD_",
+        "DASHBOARD_",
+        "JIRA_",
+        "GITLAB_",
+        "AZURE_",
+        "POLL_",
+        "TEMP_DIR",
+        "OPENCODE_",
+        "CODEX_",
+    )
+    deny_keys = {
+        "JIRA_API_TOKEN",
+        "GITLAB_PAT",
+        "GITLAB_WEBHOOK_SECRET",
+        "AZURE_PAT",
+        "AZURE_WEBHOOK_SECRET",
+        "AZURE_HOST_PATS",
+        "DASHBOARD_PASSWORD",
+    }
+    out: Dict[str, str] = {}
+    for key, val in sorted(os.environ.items()):
+        upper = key.upper()
+        if upper in deny_keys:
+            out[key] = "***"
+            continue
+        if any(upper.startswith(p) for p in allow_prefixes):
+            text = str(val)
+            if any(
+                token in upper
+                for token in ("TOKEN", "PAT", "SECRET", "PASSWORD", "PASS")
+            ):
+                out[key] = "***"
+            else:
+                out[key] = text[:500]
+    _write_json(zf, "environ.json", out)
+
+
+def _add_opencode_home(zf: zipfile.ZipFile) -> None:
+    homes = _opencode_home_candidates()
+    found: List[Dict[str, Any]] = []
+    for home in homes:
+        if not home.is_dir():
+            continue
+        cfg = home / "opencode.json"
+        entry: Dict[str, Any] = {
+            "path": str(home),
+            "exists": True,
+            "opencode_json": str(cfg) if cfg.is_file() else None,
+        }
+        if cfg.is_file():
+            try:
+                raw = json.loads(cfg.read_text(encoding="utf-8"))
+            except Exception as e:
+                entry["opencode_json_error"] = str(e)
+            else:
+                if isinstance(raw, dict):
+                    entry["autoupdate"] = raw.get("autoupdate")
+                    entry["plugin"] = raw.get("plugin")
+                    entry["model"] = raw.get("model")
+                    keys = [k for k in raw.keys() if k not in {"provider", "mcp"}]
+                    entry["top_level_keys"] = keys
+        found.append(entry)
+    _write_json(
+        zf,
+        "opencode-home.json",
+        {"homes": found, "searched": [str(p) for p in homes]},
+    )
 
 
 def _add_settings(zf: zipfile.ZipFile) -> None:
@@ -287,7 +502,7 @@ def _add_issue_states(
     zf: zipfile.ZipFile,
     *,
     state_manager: Optional["JiraStateManager"],
-    job_item: Any,
+    job_items: Optional[List[Any]] = None,
 ) -> None:
     def _collect() -> Dict[str, Any]:
         if state_manager is None:
@@ -319,16 +534,26 @@ def _add_issue_states(
                     ),
                 }
             )
-        selected = None
-        key = ""
-        if job_item is not None:
+        selected_rows = []
+        keys: List[str] = []
+        for job_item in job_items or []:
             key = str(getattr(job_item, "issue_key", "") or "").strip()
-            if key:
-                st = sm.get_state(key)
-                if st is not None:
-                    selected = st.to_dict()
-        return {"issues": rows, "total": len(rows), "selected_issue_key": key or None,
-                "selected": selected}
+            if not key or key in keys:
+                continue
+            keys.append(key)
+            st = sm.get_state(key)
+            if st is not None:
+                selected_rows.append(st.to_dict())
+        first = keys[0] if keys else ""
+        first_selected = selected_rows[0] if selected_rows else None
+        return {
+            "issues": rows,
+            "total": len(rows),
+            "selected_issue_key": first or None,
+            "selected_issue_keys": keys,
+            "selected": first_selected,
+            "selected_issues": selected_rows,
+        }
 
     _write_json(zf, "states.json", _safe_call("states", _collect))
 
@@ -416,11 +641,42 @@ def _add_job_system_log_files(zf: zipfile.ZipFile) -> None:
             break
 
 
-def _add_opencode_cli_logs(zf: zipfile.ZipFile) -> None:
+def _opencode_home_candidates() -> List[Path]:
+    homes = [
+        Path.home() / ".opencode",
+        Path.home() / ".config" / "opencode",
+    ]
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if local:
+        homes.append(Path(local) / "opencode")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or ""
+    if xdg:
+        homes.append(Path(xdg) / "opencode")
+    return homes
+
+
+def _opencode_log_roots() -> List[Path]:
     roots = [
         Path.home() / ".local" / "share" / "opencode" / "log",
         Path.home() / ".opencode" / "log",
+        Path.home() / ".local" / "share" / "opencode" / "logs",
+        Path.home() / ".opencode" / "logs",
     ]
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if local:
+        roots.append(Path(local) / "opencode" / "log")
+        roots.append(Path(local) / "opencode" / "logs")
+    roaming = os.environ.get("APPDATA") or ""
+    if roaming:
+        roots.append(Path(roaming) / "opencode" / "log")
+    xdg_data = os.environ.get("XDG_DATA_HOME") or ""
+    if xdg_data:
+        roots.append(Path(xdg_data) / "opencode" / "log")
+    return roots
+
+
+def _add_opencode_cli_logs(zf: zipfile.ZipFile) -> None:
+    roots = _opencode_log_roots()
     added = 0
     seen: set[str] = set()
     for root in roots:
@@ -459,13 +715,14 @@ def _add_job_bundle(
     *,
     processor: Optional["JobProcessor"] = None,
     state_manager: Optional["JiraStateManager"] = None,
+    prefix: str = "job",
 ) -> None:
     dumped = job_item.model_dump() if hasattr(job_item, "model_dump") else dict(job_item)
-    _write_json(zf, "job/record.json", dumped)
-    _write_json(zf, "job/parameters.json", _job_parameters(dumped, job_raw))
+    _write_json(zf, f"{prefix}/record.json", dumped)
+    _write_json(zf, f"{prefix}/parameters.json", _job_parameters(dumped, job_raw))
     desc = str(dumped.get("description") or job_raw.get("description") or "")
-    _write_text(zf, "job/description.txt", desc + ("\n" if desc else ""))
-    _write_json(zf, "job/retry_attempts.json", dumped.get("retry_attempts") or [])
+    _write_text(zf, f"{prefix}/description.txt", desc + ("\n" if desc else ""))
+    _write_json(zf, f"{prefix}/retry_attempts.json", dumped.get("retry_attempts") or [])
 
     job_id = str(dumped.get("job_id") or "")
     job_lines = issue_log_ring.for_job(job_id, limit=_MAX_SYSTEM_LINES)
@@ -474,17 +731,17 @@ def _add_job_bundle(
             f"{r.get('timestamp') or ''}  {r.get('message') or ''}".rstrip()
             for r in job_lines
         )
-        _write_text(zf, "job/system.log", body + "\n")
+        _write_text(zf, f"{prefix}/system.log", body + "\n")
     else:
         disk = job_system_log_path(job_id)
         if disk is not None:
             raw = _read_capped_file(disk)
             if raw:
-                _write_text(zf, "job/system.log", raw)
+                _write_text(zf, f"{prefix}/system.log", raw)
 
     artifacts = collect_job_text_artifacts(dumped)
-    _write_artifact_dir(zf, "job/prompts", artifacts.get("prompts") or [])
-    _write_artifact_dir(zf, "job/session_logs", artifacts.get("session_logs") or [])
+    _write_artifact_dir(zf, f"{prefix}/prompts", artifacts.get("prompts") or [])
+    _write_artifact_dir(zf, f"{prefix}/session_logs", artifacts.get("session_logs") or [])
 
     seen = {
         str(a.get("path") or "")
@@ -498,7 +755,7 @@ def _add_job_bundle(
             continue
         _write_text(
             zf,
-            f"job/prompts/extra-{i:02d}-{_safe_name(Path(path_s).name)}",
+            f"{prefix}/prompts/extra-{i:02d}-{_safe_name(Path(path_s).name)}",
             raw,
         )
     for i, path_s in enumerate(extra_logs, start=1):
@@ -507,7 +764,7 @@ def _add_job_bundle(
             continue
         _write_text(
             zf,
-            f"job/session_logs/extra-{i:02d}-{_safe_name(Path(path_s).name)}",
+            f"{prefix}/session_logs/extra-{i:02d}-{_safe_name(Path(path_s).name)}",
             raw,
         )
 
@@ -522,8 +779,8 @@ def _add_job_bundle(
             "sessions": (chat or {}).get("sessions") or [],
             "messages": ((chat or {}).get("messages") or [])[:80],
         }
-    _write_json(zf, "job/chat.json", chat)
-    _write_text(zf, "job/chat.md", _chat_markdown(chat))
+    _write_json(zf, f"{prefix}/chat.json", chat)
+    _write_text(zf, f"{prefix}/chat.md", _chat_markdown(chat))
 
     def _issue() -> Any:
         key = str(dumped.get("issue_key") or "").strip()
@@ -538,8 +795,9 @@ def _add_job_bundle(
             jobs=[job_item],
         )
 
-    _write_json(zf, "job/issue.json", _safe_call("issue_detail", _issue))
-    _add_job_plan(zf, dumped, state_manager=state_manager)
+    _write_json(zf, f"{prefix}/issue.json", _safe_call("issue_detail", _issue))
+    _add_job_plan(zf, dumped, state_manager=state_manager, prefix=prefix)
+    _add_job_serve(zf, dumped, prefix=prefix)
     wd = dumped.get("working_directory") or ""
     if not str(wd).strip():
         try:
@@ -548,7 +806,7 @@ def _add_job_bundle(
             wd = _job_working_directory({**job_raw, **dumped})
         except Exception:
             wd = ""
-    _write_text(zf, "job/git.txt", _git_snapshot(wd, job=dumped, raw=job_raw))
+    _write_text(zf, f"{prefix}/git.txt", _git_snapshot(wd, job=dumped, raw=job_raw))
 
 
 def _job_parameters(job: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -670,9 +928,13 @@ def _git_snapshot(
     chunks: List[str] = [f"directory: {wd}", ""]
     commands = (
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        ["git", "rev-parse", "HEAD"],
         ["git", "status", "--short", "--branch"],
-        ["git", "log", "-8", "--oneline", "--decorate"],
+        ["git", "log", "-15", "--oneline", "--decorate"],
+        ["git", "log", "-5", "--format=%H %s"],
         ["git", "remote", "-v"],
+        ["git", "diff", "--stat", "HEAD"],
+        ["git", "branch", "-vv"],
     )
     for cmd in commands:
         chunks.append("$ " + " ".join(cmd))
@@ -774,6 +1036,7 @@ def _add_job_plan(
     dumped: Dict[str, Any],
     *,
     state_manager: Optional["JiraStateManager"] = None,
+    prefix: str = "job",
 ) -> None:
     """Attach the durable plan markdown (YAVER_DATA_DIR/plans)."""
     from src.paths import plans_dir
@@ -801,7 +1064,7 @@ def _add_job_plan(
         seen.add(resolved)
         raw = _read_capped_file(path)
         if raw:
-            _write_text(zf, "job/plan.md", raw)
+            _write_text(zf, f"{prefix}/plan.md", raw)
             return
 
 
@@ -828,21 +1091,128 @@ def _cli_version(binary: str) -> Dict[str, Any]:
 
 
 def _probe_serve(base_url: str) -> Dict[str, Any]:
-    url = f"{base_url.rstrip('/')}/global/health"
+    return _serve_get(base_url, "/global/health")
+
+
+def _serve_get(
+    base_url: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    url = f"{base_url.rstrip('/')}{path}"
+    cache_key = url
+    if params:
+        cache_key += "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    cached = _serve_cache.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         import urllib3
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        with httpx.Client(verify=False, timeout=2.0) as client:
-            resp = client.get(url)
+        with httpx.Client(verify=False, timeout=_SERVE_TIMEOUT) as client:
+            resp = client.get(url, params=params)
         body: Any
         try:
             body = resp.json()
         except Exception:
-            body = (resp.text or "")[:500]
-        return {"url": url, "http_status": resp.status_code, "body": body}
+            body = (resp.text or "")[:2000]
+        if isinstance(body, (list, dict)) and _json_size(body) > 400_000:
+            if isinstance(body, list):
+                body = body[:40]
+            elif isinstance(body, dict) and "messages" in body:
+                body = {**body, "messages": (body.get("messages") or [])[:30]}
+        result = {"url": url, "http_status": resp.status_code, "body": body}
+        _serve_cache[cache_key] = result
+        return result
     except Exception as e:
-        return {"url": url, "error": str(e)}
+        result = {"url": url, "error": str(e)}
+        _serve_cache[cache_key] = result
+        return result
+
+
+def _json_size(payload: Any) -> int:
+    try:
+        return len(json.dumps(payload, default=str))
+    except Exception:
+        return 0
+
+
+def _serve_provider_ids(base_url: str) -> Dict[str, Any]:
+    from src.opencode_serve import known_model_ids_from_payload
+
+    out: Dict[str, Any] = {"models": []}
+    for path in ("/config/providers", "/provider"):
+        hit = _serve_get(base_url, path)
+        out[path] = {"http_status": hit.get("http_status"), "error": hit.get("error")}
+        body = hit.get("body")
+        if isinstance(body, (dict, list)):
+            try:
+                ids = known_model_ids_from_payload(body)
+            except Exception:
+                ids = []
+            if ids:
+                out["models"] = ids
+                break
+    return out
+
+
+def _serve_safe_config(base_url: str) -> Dict[str, Any]:
+    hit = _serve_get(base_url, "/config")
+    body = hit.get("body")
+    if not isinstance(body, dict):
+        return hit
+    safe = {
+        "url": hit.get("url"),
+        "http_status": hit.get("http_status"),
+        "autoupdate": body.get("autoupdate"),
+        "plugin": body.get("plugin"),
+        "model": body.get("model"),
+        "keys": [k for k in body.keys() if k not in {"provider", "mcp", "token"}],
+    }
+    return safe
+
+
+def _product_version() -> str:
+    try:
+        from src.install_paths import resource_root
+
+        path = resource_root() / "VERSION"
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    try:
+        return Path("VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _add_job_serve(
+    zf: zipfile.ZipFile, dumped: Dict[str, Any], *, prefix: str = "job"
+) -> None:
+    serve_url = (
+        getattr(settings, "opencode_serve_url", None) or "http://127.0.0.1:4096"
+    ).rstrip("/")
+    sids = list(dumped.get("opencode_session_ids") or [])
+    sid = str(dumped.get("opencode_session_id") or "").strip()
+    if sid and sid not in sids:
+        sids.insert(0, sid)
+    payload: Dict[str, Any] = {
+        "base_url": serve_url,
+        "health": _serve_get(serve_url, "/global/health"),
+        "session_status": _serve_get(serve_url, "/session/status"),
+        "sessions": {},
+    }
+    for one in sids[:8]:
+        payload["sessions"][one] = {
+            "todos": _serve_get(serve_url, f"/session/{one}/todo"),
+            "messages_tail": _serve_get(
+                serve_url, f"/session/{one}/message", params={"limit": "40"}
+            ),
+        }
+    _write_json(zf, f"{prefix}/serve.json", payload)
 
 
 def _safe_call(name: str, fn: Callable[[], Any]) -> Any:

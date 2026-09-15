@@ -105,6 +105,9 @@ class WorkQueueStore:
             "issue_key": (issue_key or "").strip(),
             "summary": (summary or "")[:500],
             "message": (message or "")[:8000],
+            # Intentional: store the inbound URL as received. Clone/push
+            # strip userinfo in GitManager.normalize_remote_url and auth
+            # with the settings PAT. Do not rewrite here.
             "repository_url": repository_url or "",
             "source_branch": source_branch or "",
             "work_branch": work_branch or "",

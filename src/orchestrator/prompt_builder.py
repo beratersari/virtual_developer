@@ -394,6 +394,7 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         replied_message: str = "",
         raw: Optional[dict] = None,
+        review_context: Optional[dict] = None,
     ) -> str:
         """Build-mode prompt for a GitLab MR thread comment.
 
@@ -403,6 +404,7 @@ class PromptBuilder:
         """
         from src.issue_git_spec import strip_params_block
         from src.paths import plans_dir
+        from src.review_thread import extract_review_context, format_review_context
 
         title = strip_params_block(mr_title or "").strip()
         branch = (work_branch or source_branch or "").strip()
@@ -417,6 +419,10 @@ class PromptBuilder:
             PromptBuilder.parent_comment_from_webhook_raw(raw)
             or (replied_message or "").strip()
         )
+        ctx = review_context if isinstance(review_context, dict) else None
+        if not ctx:
+            ctx = extract_review_context(raw, current_body=comment)
+        review_md = format_review_context(ctx)
         parts = [
             system,
             f"## GitLab merge request: {issue_key}",
@@ -428,8 +434,12 @@ class PromptBuilder:
                 source_branch=source_branch,
                 target_branch=target_branch,
             ),
-            f"## MR title\n\n{title or '(no title)'}",
         ]
+        if review_md:
+            parts.append(review_md)
+        parts.extend([
+            f"## MR title\n\n{title or '(no title)'}",
+        ])
         if mr_url:
             parts.append(f"## MR URL\n\n{mr_url}")
         parts.append(
@@ -462,6 +472,7 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         replied_message: str = "",
         raw: Optional[dict] = None,
+        review_context: Optional[dict] = None,
     ) -> str:
         """Build-mode prompt for an Azure DevOps PR thread comment.
 
@@ -470,6 +481,7 @@ class PromptBuilder:
         """
         from src.issue_git_spec import strip_params_block
         from src.paths import plans_dir
+        from src.review_thread import extract_review_context, format_review_context
 
         title = strip_params_block(pr_title or "").strip()
         branch = (work_branch or source_branch or "").strip()
@@ -484,6 +496,10 @@ class PromptBuilder:
             PromptBuilder.parent_comment_from_webhook_raw(raw)
             or (replied_message or "").strip()
         )
+        ctx = review_context if isinstance(review_context, dict) else None
+        if not ctx:
+            ctx = extract_review_context(raw, current_body=comment)
+        review_md = format_review_context(ctx)
         parts = [
             system,
             f"## Azure DevOps pull request: {issue_key}",
@@ -495,8 +511,10 @@ class PromptBuilder:
                 source_branch=source_branch,
                 target_branch=target_branch,
             ),
-            f"## PR title\n\n{title or '(no title)'}",
         ]
+        if review_md:
+            parts.append(review_md)
+        parts.append(f"## PR title\n\n{title or '(no title)'}")
         if pr_url:
             parts.append(f"## PR URL\n\n{pr_url}")
         parts.append(

@@ -1,3 +1,10 @@
+# Yaver 0.9.16
+
+Issue reports can include several jobs plus serve
+status and OpenCode logs. GitLab/Azure review
+comments now include the selected file range
+in the agent prompt.
+
 # Yaver 0.9.15
 
 Linux standalone yaver is one freeze per Ubuntu

@@ -201,7 +201,7 @@ def create_dashboard_app(
 
     @app.post("/api/reports")
     def create_issue_report(body: IssueReportRequest) -> Response:
-        """Download a diagnostic zip (general daemon logs, or one job + logs)."""
+        """Download a diagnostic zip (general logs, or one/more jobs + logs)."""
         from src.dashboard.issue_report import build_issue_report_zip
 
         try:
