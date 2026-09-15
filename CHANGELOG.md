@@ -8,6 +8,22 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.20] — 2026-09-15
+
+### Added
+
+- Scheduled → New issue can create an Azure work item (collection + team
+  project + type), same picker as Jira.
+
+### Fixed
+
+- Scheduled Azure work-item lookup loads the PAT from the collection URL
+  (empty host no longer 401s).
+- Azure credentials are a single collection URL → PAT map
+  (`AZURE_COLLECTION_PATS`), like GitLab host PATs.
+
+[0.9.20]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.20
+
 ## [0.9.19] — 2026-09-15
 
 Azure Boards work-item intake and Scheduled lookup, aligned with Jira.

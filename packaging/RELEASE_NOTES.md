@@ -1,3 +1,8 @@
+# Yaver 0.9.20
+
+Fix Scheduled Azure lookup PAT. New Azure work
+item on Scheduled. One collection URL → PAT map.
+
 # Yaver 0.9.19
 
 Azure work items: Scheduled lookup like Jira,
