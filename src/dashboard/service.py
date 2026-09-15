@@ -306,10 +306,12 @@ def build_settings_view() -> SettingsView:
         azure_allowed_hosts=",".join(
             getattr(settings, "azure_allowed_hosts_list", None) or []
         ),
-        azure_credentials=[
-            AzureHostCredentialView(host=h, pat_configured=True)
-            for h in (getattr(settings, "azure_allowed_hosts_list", None) or [])
-        ],
+        azure_credentials=_azure_credential_views(settings),
+        azure_collection_urls=(
+            settings.azure_collection_url_list()
+            if hasattr(settings, "azure_collection_url_list")
+            else []
+        ),
         azure_webhook_enabled=bool(
             getattr(settings, "azure_webhook_enabled", False)
         ),
@@ -317,6 +319,11 @@ def build_settings_view() -> SettingsView:
             settings.resolved_azure_trigger_user()
             if hasattr(settings, "resolved_azure_trigger_user")
             else (getattr(settings, "azure_trigger_user", "") or "")
+        ).strip(),
+        azure_trigger_label=(
+            settings.resolved_azure_trigger_label()
+            if hasattr(settings, "resolved_azure_trigger_label")
+            else (getattr(settings, "azure_trigger_label", "") or "")
         ).strip(),
         azure_bot_mentions=(
             settings.resolved_azure_trigger_user()
@@ -421,6 +428,28 @@ def build_models_response(*, refresh: bool = False, backend: str = "") -> Models
         error=models_err,
         server_time=datetime.now().isoformat(timespec="seconds"),
     )
+
+
+def _azure_credential_views(settings: Any) -> List[AzureHostCredentialView]:
+    urls: List[str] = []
+    if hasattr(settings, "azure_collection_url_list"):
+        urls = list(settings.azure_collection_url_list() or [])
+    if not urls:
+        urls = list(getattr(settings, "azure_allowed_hosts_list", None) or [])
+    views: List[AzureHostCredentialView] = []
+    for url in urls:
+        host = _normalize_gitlab_host(url)
+        views.append(
+            AzureHostCredentialView(
+                host=url,
+                collection_url=url if url.lower().startswith("http") else "",
+                pat_configured=bool(
+                    hasattr(settings, "azure_pat_for_host")
+                    and settings.azure_pat_for_host(host)
+                ),
+            )
+        )
+    return views
 
 
 def _normalize_gitlab_host(raw: Any) -> str:
@@ -694,25 +723,45 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             dotenv_updates["GITLAB_WEBHOOK_SECRET"] = settings.gitlab_webhook_secret
 
     if "azure_credentials" in data and data["azure_credentials"] is not None:
+        from src.azure.urls import parse_tfs_collection_url, require_tfs_collection_url
+        from src.azure_connection import save_azure_collection_urls
+
         current = (
             settings.azure_host_pat_map()
             if hasattr(settings, "azure_host_pat_map")
             else {}
         )
         new_map: Dict[str, str] = {}
+        collections: List[str] = []
         for item in data["azure_credentials"] or []:
             if isinstance(item, dict):
-                host = _normalize_gitlab_host(item.get("host"))
+                raw = str(
+                    item.get("collection_url") or item.get("host") or ""
+                ).strip()
                 pat_raw = item.get("pat")
-                previous_host = _normalize_gitlab_host(item.get("previous_host"))
+                previous_raw = str(item.get("previous_host") or "")
             else:
-                host = _normalize_gitlab_host(getattr(item, "host", None))
+                raw = str(
+                    getattr(item, "collection_url", None)
+                    or getattr(item, "host", None)
+                    or ""
+                ).strip()
                 pat_raw = getattr(item, "pat", None)
-                previous_host = _normalize_gitlab_host(
-                    getattr(item, "previous_host", None)
-                )
-            if not host:
+                previous_raw = str(getattr(item, "previous_host", None) or "")
+            if not raw:
                 continue
+            try:
+                collection = require_tfs_collection_url(raw)
+            except ValueError as exc:
+                from src.azure.log import azure_warning
+
+                azure_warning(f"settings reject collection url={raw!r} err={exc}")
+                raise ValueError(str(exc)) from exc
+            collections.append(collection)
+            host = _normalize_gitlab_host(collection)
+            previous_host = _normalize_gitlab_host(
+                parse_tfs_collection_url(previous_raw) or previous_raw
+            )
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[host] = pat
@@ -720,6 +769,16 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 new_map[host] = current[host]
             elif previous_host and previous_host in current:
                 new_map[host] = current[previous_host]
+        save_azure_collection_urls(collections)
+        runtime_persist["azure_collection_urls"] = getattr(
+            settings, "azure_collection_urls", ""
+        ) or "[]"
+        from src.azure.log import azure_info
+
+        azure_info(
+            f"settings save collections={len(collections)} "
+            f"urls={collections} pat_hosts={list(new_map)}"
+        )
         clearing_hosts = bool(current) and not new_map
         keep_legacy_pat = (not new_map) and (not current) and bool(
             (getattr(settings, "azure_pat", "") or "").strip()
@@ -771,6 +830,11 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.azure_webhook_enabled = enabled
         runtime_persist["azure_webhook_enabled"] = enabled
         dotenv_updates["AZURE_WEBHOOK_ENABLED"] = "true" if enabled else "false"
+    if "azure_trigger_label" in data and data["azure_trigger_label"] is not None:
+        labels = format_trigger_users(str(data["azure_trigger_label"]))
+        settings.azure_trigger_label = labels
+        runtime_persist["azure_trigger_label"] = labels
+        dotenv_updates["AZURE_TRIGGER_LABEL"] = labels
 
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.

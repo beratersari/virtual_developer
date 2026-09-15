@@ -10,7 +10,7 @@ import httpx
 
 from src.azure.auth import azure_basic_auth
 from src.azure.log import azure_info, azure_warning, yn
-from src.azure.urls import identity_root, identity_roots
+from src.azure.urls import identity_root, identity_roots, parse_tfs_collection_url
 from src.config import settings
 
 # TFS redirects anonymous/Negotiate probes to a login page unless suppressed.
@@ -166,54 +166,91 @@ def _discover_collection_bases(client: httpx.Client, origins: List[str]) -> List
     return _dedupe_bases(found)
 
 
-def remembered_azure_collection(host: str) -> str:
-    """Last collection URL learned from a webhook or a successful Test."""
-    h = _normalize_host(host)
-    if not h:
-        return ""
+def _load_collection_url_list() -> List[str]:
     try:
-        from src.config import load_runtime_settings
+        from src.config import load_runtime_settings, settings as live
 
-        raw = load_runtime_settings().get("azure_collection_urls")
+        raw = getattr(live, "azure_collection_urls", "") or ""
+        if not raw:
+            raw = load_runtime_settings().get("azure_collection_urls") or ""
     except Exception:
-        return ""
+        return []
     data: Any = raw
     if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
         try:
-            data = json.loads(raw)
+            data = json.loads(text)
         except json.JSONDecodeError:
-            return ""
-    if not isinstance(data, dict):
-        return ""
-    return str(data.get(h) or "").strip()
+            parsed = parse_tfs_collection_url(text)
+            return [parsed] if parsed else []
+    out: List[str] = []
+    seen: set[str] = set()
+    if isinstance(data, dict):
+        rows = list(data.values())
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+    for item in rows:
+        url = parse_tfs_collection_url(str(item or ""))
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def remembered_azure_collections(host: str = "") -> List[str]:
+    """Configured / remembered TFS collection URLs (never host-only)."""
+    rows = _load_collection_url_list()
+    h = _normalize_host(host)
+    if not h:
+        return list(rows)
+    return [u for u in rows if _normalize_host(u) == h]
+
+
+def remembered_azure_collection(host: str) -> str:
+    """First collection URL for ``host``, or empty."""
+    rows = remembered_azure_collections(host)
+    return rows[0] if rows else ""
+
+
+def save_azure_collection_urls(urls: Iterable[str]) -> List[str]:
+    """Replace the saved collection list. Drops anything without a collection."""
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw in urls or []:
+        url = parse_tfs_collection_url(str(raw or ""))
+        if url and url not in seen:
+            seen.add(url)
+            cleaned.append(url)
+    payload = json.dumps(cleaned)
+    try:
+        from src.config import save_runtime_settings, settings as live
+
+        if hasattr(live, "azure_collection_urls"):
+            live.azure_collection_urls = payload
+        save_runtime_settings({"azure_collection_urls": payload})
+    except Exception as e:
+        azure_warning(f"save collection urls failed: {e}")
+    return cleaned
 
 
 def remember_azure_collection(host: str, collection_url: str) -> None:
-    """Keep /tfs/<Collection> so the next hostname-only Test does not 401."""
-    h = _normalize_host(host)
-    url = (collection_url or "").rstrip("/")
-    if not h or not url or "/_apis/" in url.lower():
+    """Append a real ``/tfs/<Collection>`` URL (webhooks). Host-only is ignored."""
+    url = parse_tfs_collection_url(collection_url)
+    if not url:
         return
-    url = identity_root(url) or url
-    try:
-        from src.config import load_runtime_settings, save_runtime_settings
-
-        raw = load_runtime_settings().get("azure_collection_urls")
-        data: Any = raw
-        if isinstance(raw, str):
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                data = {}
-        if not isinstance(data, dict):
-            data = {}
-        if str(data.get(h) or "").rstrip("/") == url:
-            return
-        data[h] = url
-        save_runtime_settings({"azure_collection_urls": json.dumps(data, sort_keys=True)})
-        azure_info(f"probe remember collection host={h} collection={url}")
-    except Exception as e:
-        azure_warning(f"probe remember collection failed host={h}: {e}")
+    current = _load_collection_url_list()
+    if url in current:
+        return
+    current.append(url)
+    save_azure_collection_urls(current)
+    azure_info(
+        f"probe remember collection host={_normalize_host(host) or '-'} "
+        f"collection={url}"
+    )
 
 
 def probe_azure_connection(

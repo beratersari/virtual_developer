@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+import re
+from typing import Optional, Sequence, Tuple
 
 from src.gitlab.keys import (
     jira_key_from_closes_line,
@@ -27,7 +28,41 @@ def azure_issue_key(project_path: str, pr_id: int) -> str:
 
 
 def is_azure_issue_key(issue_key: str) -> bool:
-    return (issue_key or "").strip().upper().startswith("AZ-")
+    """True for PR fallback keys ``AZ-…`` only (not work-item ``WIT-…``)."""
+    text = (issue_key or "").strip().upper()
+    return text.startswith("AZ-") and not text.startswith("AZWI-")
+
+
+def azure_work_item_key(project: str, work_item_id: int) -> str:
+    """Filesystem-safe work-item key: ``WIT-{PROJECT}-{id}``.
+
+    Example: ``Demo`` + 12 → ``WIT-DEMO-12``. Must not use the ``AZ-`` PR
+    prefix (``_is_azure_triggered`` would treat it as a PR comment job).
+    """
+    parts = project_path_slug(project or "project")
+    try:
+        iid = int(work_item_id)
+    except (TypeError, ValueError):
+        iid = 0
+    return f"WIT-{parts}-{iid}"
+
+
+def is_azure_work_item_key(issue_key: str) -> bool:
+    """True for Azure Boards keys ``WIT-{slug}-{id}`` (never bare ``WIT-12``)."""
+    text = (issue_key or "").strip().upper()
+    return bool(re.match(r"^WIT-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d+$", text))
+
+
+def parse_azure_work_item_key(issue_key: str) -> Tuple[str, int]:
+    """Return ``(project_slug, id)`` or ``("", 0)``."""
+    text = (issue_key or "").strip().upper()
+    match = re.match(r"^WIT-([A-Z0-9]+(?:-[A-Z0-9]+)*)-(\d+)$", text)
+    if not match:
+        return "", 0
+    try:
+        return match.group(1), int(match.group(2))
+    except (TypeError, ValueError):
+        return "", 0
 
 
 def resolve_pr_issue_key(
@@ -66,9 +101,12 @@ def resolve_pr_issue_key(
 
 __all__ = [
     "azure_issue_key",
+    "azure_work_item_key",
     "is_azure_issue_key",
+    "is_azure_work_item_key",
     "jira_key_from_closes_line",
     "jira_key_from_mr_title",
     "jira_key_from_text",
+    "parse_azure_work_item_key",
     "resolve_pr_issue_key",
 ]

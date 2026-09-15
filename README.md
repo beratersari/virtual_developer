@@ -274,6 +274,18 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
    - No webhook secret or password.
 4. Comment `@yaver /yaver what does login do?` on a PR. Mention without `/yaver` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
 
+### Azure Boards work items (webhook)
+
+New work is first assignment on a New item. Moving Active → New while still assigned to the bot does **not** re-queue (unlike Jira To Do return). After a plan, use work-item comments.
+
+1. PAT needs **Work Items (Read & Write)** as well as Code.
+2. `.env`: `AZURE_WEBHOOK_ENABLED=true`. Work-item created/updated is always accepted on that URL. Optional `AZURE_TRIGGER_LABEL` is the same AND as `JIRA_TRIGGER_LABEL`.
+3. On the project: Service hooks → Work item created + Work item updated.
+   Field filters: **Assigned To**, **Description**. **State** is optional (not used as a rework signal).
+   Same URL: `http://<yaver-host>:8080/yaver/webhook/azure`.
+4. Assign a New work item to `AZURE_TRIGGER_USER`. Put `{params}` (repo + branches + Mode) in the description. After a plan, comment `@yaver /planRefactor <prompt>` or `@yaver /planExecute`. Mention without those commands gets a usage note on the work item (not on PRs). A new `Mode: build` item is a direct build.
+5. Settings → Azure → Work item lookup fetches one ID and shows whether Yaver would process it.
+
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
 
 ---
@@ -300,7 +312,8 @@ Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
 | DELETE | `/api/jobs/{id}` | Delete job record |
 | GET | `/api/tasks/{key}` | Task detail for issue |
 | POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
-| POST | `/yaver/webhook/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle (`/webhooks/azure` still works) |
+| POST | `/yaver/webhook/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle, and work-item created/updated when enabled (`/webhooks/azure` still works) |
+| POST | `/api/azure/work-item` | Look up one Azure work item (Settings) |
 | POST | `/api/tasks/{key}/cancel` | Cancel live work (preferred over CLI when daemon runs) |
 | GET | `/api/poll` | Last poll snapshot + countdown |
 | GET/PATCH | `/api/settings` | Safe settings (no token values) |
@@ -371,7 +384,8 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 | Variable | Description |
 |----------|-------------|
 | `AZURE_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / PR) |
-| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment, or when Assigned To matches on a work item (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `AZURE_TRIGGER_LABEL` | Optional work-item tags required for New/To Do intake (AND with assignee) |
 
 Repo URL and branches always come from the issue `{params}` block.
 

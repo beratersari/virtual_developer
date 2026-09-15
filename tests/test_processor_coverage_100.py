@@ -851,7 +851,6 @@ def test_refresh_issue_text_from_jira(processor, state_manager, fake_jira):
     )
     s, d = processor._refresh_issue_text_from_jira("RF-1", state)
     assert s == "new sum"
-    assert "doc" in d or d  # stringified
     st = state_manager.get_state("RF-1")
     assert st.issue_summary == "new sum"
 

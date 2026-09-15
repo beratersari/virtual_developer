@@ -412,8 +412,10 @@ class SettingsView(BaseModel):
     azure_pat_configured: bool = False
     azure_allowed_hosts: str = ""
     azure_credentials: List["AzureHostCredentialView"] = Field(default_factory=list)
+    azure_collection_urls: List[str] = Field(default_factory=list)
     azure_webhook_enabled: bool = False
     azure_trigger_user: str = ""
+    azure_trigger_label: str = ""
     azure_bot_mentions: str = ""
     azure_webhook_path: str = "/yaver/webhook/azure"
     jira_trigger_user: str = ""
@@ -484,26 +486,37 @@ class GitlabConnectionTestRequest(BaseModel):
 
 
 class AzureHostCredentialView(BaseModel):
-    """Safe projection of one Azure DevOps host credential (no PAT value)."""
+    """Safe projection of one TFS collection credential (no PAT value)."""
 
     host: str
+    collection_url: str = ""
     pat_configured: bool = False
 
 
 class AzureHostCredentialUpdate(BaseModel):
-    """One Azure host row from the Settings UI (PAT-only, no username)."""
+    """One TFS collection row from Settings. ``host`` is the collection URL."""
 
-    host: str = Field(..., min_length=1, max_length=253)
+    host: str = Field(..., min_length=1, max_length=500)
+    collection_url: Optional[str] = Field(default=None, max_length=500)
     pat: Optional[str] = Field(default=None, max_length=4000)
-    previous_host: Optional[str] = Field(default=None, max_length=253)
+    previous_host: Optional[str] = Field(default=None, max_length=500)
 
 
 class AzureConnectionTestRequest(BaseModel):
     """Body for POST /api/settings/azure/test."""
 
-    host: str = Field(..., min_length=1, max_length=253)
+    host: str = Field(..., min_length=1, max_length=500)
     pat: Optional[str] = Field(default=None, max_length=4000)
     max_projects: int = Field(default=25, ge=1, le=50)
+
+
+class AzureWorkItemLookupRequest(BaseModel):
+    """Body for POST /api/azure/work-item (Settings lookup)."""
+
+    collection_url: str = Field(..., min_length=8, max_length=500)
+    work_item_id: int = Field(..., ge=1, le=2_147_483_647)
+    project: Optional[str] = Field(default="", max_length=255)
+    host: Optional[str] = Field(default=None, max_length=500)
 
 
 class JiraConnectionTestRequest(BaseModel):
@@ -709,6 +722,14 @@ class SettingsUpdate(BaseModel):
     azure_webhook_enabled: Optional[bool] = Field(
         default=None,
         description="Accept Azure DevOps Server service hooks on /yaver/webhook/azure",
+    )
+    azure_trigger_label: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Comma-separated Azure work-item tags required for New/To Do intake "
+            "when set (AND with assignee, same as JIRA_TRIGGER_LABEL)"
+        ),
     )
 
     @field_validator("agent_backend", mode="before")

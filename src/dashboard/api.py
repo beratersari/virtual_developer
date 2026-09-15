@@ -22,6 +22,7 @@ from src.dashboard.auth import (
 )
 from src.dashboard.schemas import (
     AzureConnectionTestRequest,
+    AzureWorkItemLookupRequest,
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
     IssueReportRequest,
@@ -353,6 +354,13 @@ def create_dashboard_app(
             decide_azure_comment_webhook,
             decide_azure_pr_webhook,
         )
+        from src.azure.workitems import (
+            AZURE_WORKITEM_EVENTS,
+            decide_azure_workitem_comment_webhook,
+            decide_azure_workitem_webhook,
+            is_azure_workitem_comment_event,
+            post_azure_workitem_usage_note,
+        )
 
         headers = {k: v for k, v in request.headers.items()}
         try:
@@ -374,11 +382,154 @@ def create_dashboard_app(
                     break
         enabled = bool(getattr(settings, "azure_webhook_enabled", False))
         is_pr = event_name in AZURE_PR_EVENTS
+        is_workitem = event_name in AZURE_WORKITEM_EVENTS
+        kind = (
+            "work_item"
+            if is_workitem
+            else ("pull_request" if is_pr else "comment")
+        )
         azure_info(
-            f"http webhook received event={event_name!r} kind="
-            f"{'pull_request' if is_pr else 'comment'} "
+            f"http webhook received event={event_name!r} kind={kind} "
             f"enabled={enabled}"
         )
+        if is_workitem:
+            if is_azure_workitem_comment_event(payload, headers):
+                decision = decide_azure_workitem_comment_webhook(
+                    payload,
+                    headers=headers,
+                    enabled=enabled,
+                    bot_mentions=list(settings.azure_bot_mentions_list),
+                )
+                if decision.usage_note:
+                    posted = False
+                    if decision.event is not None:
+                        try:
+                            names = list(settings.azure_bot_mentions_list or [])
+                            posted = bool(
+                                post_azure_workitem_usage_note(
+                                    decision.event,
+                                    bot_name=names[0] if names else "",
+                                )
+                            )
+                        except Exception:
+                            posted = False
+                    azure_info(
+                        f"http webhook workitem usage note "
+                        f"reason={decision.reason!r} posted={posted}"
+                    )
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "reason": decision.reason,
+                            "kind": "work_item_comment",
+                            "usage_note": True,
+                            "usage_note_posted": posted,
+                        },
+                        status_code=int(decision.http_status or 200),
+                    )
+                if not decision.accepted:
+                    status = int(decision.http_status or 200)
+                    azure_info(
+                        f"http webhook workitem comment rejected "
+                        f"reason={decision.reason!r} http={status}"
+                    )
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "reason": decision.reason,
+                            "kind": "work_item_comment",
+                        },
+                        status_code=status,
+                    )
+                try:
+                    from src.azure_connection import remember_azure_collection
+
+                    ev = decision.event
+                    if ev is not None:
+                        remember_azure_collection(
+                            getattr(ev, "host", "") or "",
+                            getattr(ev, "collection_url", "") or "",
+                        )
+                except Exception:
+                    pass
+                proc = app.state.processor
+                if proc is None or decision.event is None:
+                    azure_error(
+                        "http webhook workitem comment accepted "
+                        "but processor not bound"
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="processor not bound; start the daemon",
+                    )
+                result = await proc.ingest_azure_work_item(decision.event)
+                azure_info(
+                    f"http webhook workitem comment done issue="
+                    f"{getattr(decision.event, 'issue_key', '')} "
+                    f"reason={result.get('reason')} status={result.get('status')}"
+                )
+                return {
+                    "ok": True,
+                    "kind": "work_item_comment",
+                    "issue_key": result.get("issue_key")
+                    or getattr(decision.event, "issue_key", ""),
+                    "queue_id": result.get("queue_id"),
+                    "queued": result.get("queued"),
+                    "started": result.get("started"),
+                    "status": result.get("status"),
+                    "reason": result.get("reason") or "accepted",
+                    "server_time": build_meta().server_time,
+                }
+            decision = decide_azure_workitem_webhook(
+                payload,
+                headers=headers,
+                enabled=enabled,
+            )
+            if not decision.accepted:
+                status = int(decision.http_status or 200)
+                azure_info(
+                    f"http webhook workitem rejected reason={decision.reason!r} "
+                    f"http={status}"
+                )
+                return JSONResponse(
+                    {"ok": False, "reason": decision.reason, "kind": "work_item"},
+                    status_code=status,
+                )
+            try:
+                from src.azure_connection import remember_azure_collection
+
+                ev = decision.event
+                if ev is not None:
+                    remember_azure_collection(
+                        getattr(ev, "host", "") or "",
+                        getattr(ev, "collection_url", "") or "",
+                    )
+            except Exception:
+                pass
+            proc = app.state.processor
+            if proc is None or decision.event is None:
+                azure_error("http webhook workitem accepted but processor not bound")
+                raise HTTPException(
+                    status_code=503, detail="processor not bound; start the daemon"
+                )
+            result = await proc.ingest_azure_work_item(decision.event)
+            azure_info(
+                f"http webhook workitem done issue="
+                f"{getattr(decision.event, 'issue_key', '')} "
+                f"reason={result.get('reason')} status={result.get('status')}"
+            )
+            return {
+                "ok": True,
+                "kind": "work_item",
+                "issue_key": result.get("issue_key")
+                or getattr(decision.event, "issue_key", ""),
+                "queue_id": result.get("queue_id"),
+                "queued": result.get("queued"),
+                "started": result.get("started"),
+                "status": result.get("status"),
+                "reason": result.get("reason") or "accepted",
+                "server_time": build_meta().server_time,
+            }
         if is_pr:
             decision = decide_azure_pr_webhook(
                 payload,
@@ -1190,6 +1341,47 @@ def create_dashboard_app(
         )
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
+    @app.post("/api/azure/work-item")
+    def azure_work_item_lookup(body: AzureWorkItemLookupRequest) -> dict:
+        """Look up one Azure Boards work item (Settings). Never echoes the PAT."""
+        from src.azure.urls import parse_tfs_collection_url
+        from src.azure.workitems import lookup_azure_work_item
+
+        collection = parse_tfs_collection_url(body.collection_url)
+        if not collection:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Azure URL must include a TFS collection, e.g. "
+                    "https://tfs.example.com/tfs/DefaultCollection"
+                ),
+            )
+        project = (body.project or "").strip()
+        st = None
+        try:
+            from src.azure.keys import azure_work_item_key
+
+            key = azure_work_item_key(project or "project", body.work_item_id)
+            sm = getattr(app.state, "state_manager", None)
+            if sm is None:
+                sm = JiraStateManager()
+            st = sm.get_state(key)
+        except Exception:
+            st = None
+        result = lookup_azure_work_item(
+            host=body.host or collection,
+            project=project,
+            work_item_id=int(body.work_item_id),
+            collection_url=collection,
+            state=st,
+            required_labels=getattr(settings, "azure_trigger_label_list", None),
+            trigger_needles=list(
+                getattr(settings, "azure_trigger_user_list", None) or []
+            ),
+        )
+        result["server_time"] = build_meta().server_time
         return result
 
     @app.post("/api/settings/azure/test")

@@ -94,9 +94,11 @@ export type SettingsPayload = {
   gitlab_webhook_path?: string
   azure_pat_configured?: boolean
   azure_allowed_hosts?: string
-  azure_credentials?: GitlabHostCredential[]
+  azure_credentials?: (GitlabHostCredential & { collection_url?: string })[]
+  azure_collection_urls?: string[]
   azure_webhook_enabled?: boolean
   azure_trigger_user?: string
+  azure_trigger_label?: string
   azure_bot_mentions?: string
   azure_webhook_path?: string
   jira_trigger_user?: string
@@ -587,6 +589,7 @@ export type SettingsPatch = Partial<
     | 'azure_bot_mentions'
     | 'gitlab_webhook_enabled'
     | 'azure_webhook_enabled'
+    | 'azure_trigger_label'
   >
 > & {
   jira_api_token?: string
