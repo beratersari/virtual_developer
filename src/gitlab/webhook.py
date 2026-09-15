@@ -358,6 +358,9 @@ def decide_gitlab_note_webhook(
         project_path=path or f"project-{project_id}",
         mr_iid=mr_iid,
         project_keys=proj_keys,
+        repository_url=repo_url,
+        source_branch=source,
+        target_branch=target,
     )
 
     event = GitlabMrNoteEvent(
@@ -512,6 +515,9 @@ def decide_gitlab_mr_webhook(
         project_path=path or f"project-{project_id}",
         mr_iid=mr_iid,
         project_keys=_jira_project_keys(jira_project_keys),
+        repository_url=repo_url,
+        source_branch=source,
+        target_branch=target,
     )
     event = GitlabMrLifecycleEvent(
         issue_key=issue_key,
