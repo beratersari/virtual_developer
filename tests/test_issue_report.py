@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+
+import pytest
 from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
@@ -13,6 +15,28 @@ from src.dashboard.issue_report import build_issue_report_zip
 from src.dashboard.schemas import IssueReportRequest
 from src.state.job_store import JobStore
 from src.state.manager import JiraStateManager
+
+
+@pytest.fixture(autouse=True)
+def _fast_serve_probes(monkeypatch):
+    """Do not wait on a real :4096 during report unit tests."""
+
+    def fake_get(base_url, path, *, params=None):
+        return {
+            "url": f"{base_url}{path}",
+            "http_status": 200,
+            "body": {"ok": True, "path": path, "params": params or {}},
+        }
+
+    monkeypatch.setattr("src.dashboard.issue_report._serve_get", fake_get)
+    monkeypatch.setattr(
+        "src.dashboard.issue_report._serve_provider_ids",
+        lambda _url: {"models": ["opencode/test"]},
+    )
+    monkeypatch.setattr(
+        "src.dashboard.issue_report._serve_safe_config",
+        lambda _url: {"plugin": [], "autoupdate": False},
+    )
 
 
 def _zip_names(payload: bytes) -> set[str]:
@@ -48,6 +72,11 @@ def test_general_report_includes_note_and_system_logs(tmp_path, monkeypatch):
     assert "schedules.json" in names
     assert "sessions.json" in names
     assert "states.json" in names
+    assert "serve.json" in names
+    assert "storage.json" in names
+    assert "jobs.json" in names
+    assert "environ.json" in names
+    assert "opencode-home.json" in names
     assert "job/record.json" not in names
     assert "UI froze after poll" in _zip_text(payload, "NOTE.txt")
     daemon = _zip_text(payload, "system/daemon.log")
@@ -58,6 +87,14 @@ def test_general_report_includes_note_and_system_logs(tmp_path, monkeypatch):
     runtime = json.loads(_zip_text(payload, "runtime.json"))
     assert "python" in runtime
     assert "opencode_serve_health" in runtime
+    serve = json.loads(_zip_text(payload, "serve.json"))
+    assert "health" in serve
+    assert "session_status" in serve
+    assert "providers" in serve
+    jobs = json.loads(_zip_text(payload, "jobs.json"))
+    assert "jobs" in jobs or "error" in jobs
+    environ = json.loads(_zip_text(payload, "environ.json"))
+    assert isinstance(environ, dict)
 
 
 def test_job_report_includes_prompts_retries_and_logs(tmp_path, monkeypatch):
@@ -129,6 +166,7 @@ def test_job_report_includes_prompts_retries_and_logs(tmp_path, monkeypatch):
     assert "job/description.txt" in names
     assert "job/issue.json" in names
     assert "job/git.txt" in names
+    assert "job/serve.json" in names
     assert "runtime.json" in names
     assert "settings.json" in names
     assert "poll.json" in names
@@ -163,6 +201,31 @@ def test_job_report_includes_prompts_retries_and_logs(tmp_path, monkeypatch):
     assert "sample_project" in git_txt
     assert "gitlab.example.com/g/r.git" in git_txt
     assert "no working_directory on job" not in git_txt
+    job_serve = json.loads(_zip_text(payload, "job/serve.json"))
+    assert "health" in job_serve
+    assert "session_status" in job_serve
+
+
+def test_report_includes_opencode_serve_logs(tmp_path, monkeypatch):
+    log_dir = tmp_path / "oc-log"
+    log_dir.mkdir()
+    (log_dir / "serve-2026.log").write_text(
+        "opencode serve listening :4096\nbusy session ses_1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.dashboard.issue_report._opencode_log_roots",
+        lambda: [log_dir],
+    )
+    payload, _ = build_issue_report_zip(
+        IssueReportRequest(kind="general", note="need serve logs"),
+        store=JobStore(jobs_dir=tmp_path / "jobs"),
+    )
+    names = _zip_names(payload)
+    assert "system/opencode-logs/serve-2026.log" in names
+    body = _zip_text(payload, "system/opencode-logs/serve-2026.log")
+    assert "opencode serve listening" in body
+    assert "busy session ses_1" in body
 
 
 def test_report_reads_base_logs_and_plan_file(tmp_path, monkeypatch):
@@ -220,6 +283,43 @@ def test_job_kind_requires_job_id():
         assert "job_id" in str(e).lower()
     else:
         raise AssertionError("expected ValidationError for missing job_id")
+
+
+def test_job_ids_alone_is_enough():
+    body = IssueReportRequest(kind="job", note="two runs", job_ids=["job_a", "job_b"])
+    assert body.job_ids == ["job_a", "job_b"]
+    assert body.job_id == "job_a"
+    assert body.kind == "job"
+
+
+def test_multi_job_report_writes_per_job_folders(tmp_path, monkeypatch):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    a = store.create_job(issue_key="KAN-1", summary="first", workflow_type="execution")
+    b = store.create_job(issue_key="KAN-2", summary="second", workflow_type="planning")
+    payload, filename = build_issue_report_zip(
+        IssueReportRequest(
+            kind="job",
+            note="compare these two",
+            job_ids=[a["job_id"], b["job_id"]],
+        ),
+        store=store,
+    )
+    names = _zip_names(payload)
+    assert filename.startswith("yaver-report-jobs-2-")
+    assert f"jobs/{a['job_id']}/record.json" in names
+    assert f"jobs/{b['job_id']}/record.json" in names
+    assert "job/record.json" not in names
+    rec_a = json.loads(_zip_text(payload, f"jobs/{a['job_id']}/record.json"))
+    rec_b = json.loads(_zip_text(payload, f"jobs/{b['job_id']}/record.json"))
+    assert rec_a["issue_key"] == "KAN-1"
+    assert rec_b["issue_key"] == "KAN-2"
+    meta = json.loads(_zip_text(payload, "meta.json"))
+    assert meta["job_ids"] == [a["job_id"], b["job_id"]]
+    assert "KAN-1" in meta["issue_keys"]
+    assert "KAN-2" in meta["issue_keys"]
+    readme = _zip_text(payload, "README.txt")
+    assert a["job_id"] in readme
+    assert b["job_id"] in readme
 
 
 def test_report_redacts_tokens(tmp_path, monkeypatch):

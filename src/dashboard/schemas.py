@@ -57,6 +57,7 @@ class IssueReportRequest(BaseModel):
     kind: str = Field(default="general", description="general | job")
     note: str = Field(..., min_length=1, max_length=8000)
     job_id: Optional[str] = None
+    job_ids: List[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("kind")
     @classmethod
@@ -82,10 +83,31 @@ class IssueReportRequest(BaseModel):
         jid = v.strip()
         return jid or None
 
+    @field_validator("job_ids")
+    @classmethod
+    def _job_ids_ok(cls, v: List[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for raw in v or []:
+            jid = (raw or "").strip()
+            if not jid or jid in seen:
+                continue
+            seen.add(jid)
+            out.append(jid)
+        return out
+
     @model_validator(mode="after")
     def _job_requires_id(self) -> "IssueReportRequest":
-        if self.kind == "job" and not self.job_id:
-            raise ValueError("job_id is required when kind is 'job'")
+        ids = list(self.job_ids)
+        if self.job_id and self.job_id not in ids:
+            ids.insert(0, self.job_id)
+        self.job_ids = ids
+        if self.job_ids and not self.job_id:
+            self.job_id = self.job_ids[0]
+        if self.kind == "job" and not self.job_ids:
+            raise ValueError("job_id or job_ids is required when kind is 'job'")
+        if self.job_ids:
+            self.kind = "job"
         return self
 
 

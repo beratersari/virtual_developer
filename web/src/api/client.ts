@@ -508,9 +508,11 @@ export async function downloadIssueReport(body: {
   kind: 'general' | 'job'
   note: string
   job_id?: string
+  job_ids?: string[]
 }): Promise<string> {
   const { notifyUnauthorized } = await import('../auth/dashboardAuth')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const jobIds = (body.job_ids || []).filter(Boolean)
   const res = await fetch('/api/reports', {
     method: 'POST',
     headers,
@@ -518,7 +520,8 @@ export async function downloadIssueReport(body: {
     body: JSON.stringify({
       kind: body.kind,
       note: body.note,
-      job_id: body.kind === 'job' ? body.job_id : undefined,
+      job_id: body.kind === 'job' ? body.job_id || jobIds[0] : undefined,
+      job_ids: body.kind === 'job' ? jobIds : [],
     }),
   })
   if (!res.ok) {
@@ -537,7 +540,7 @@ export async function downloadIssueReport(body: {
   const filename = filenameFromDisposition(
     res.headers.get('Content-Disposition'),
     body.kind === 'job'
-      ? `yaver-report-${body.job_id || 'job'}.zip`
+      ? `yaver-report-${(body.job_ids && body.job_ids.length > 1) ? `jobs-${body.job_ids.length}` : (body.job_id || 'job')}.zip`
       : 'yaver-report-general.zip',
   )
   const url = URL.createObjectURL(blob)

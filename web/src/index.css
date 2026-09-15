@@ -435,6 +435,14 @@ body {
   background: var(--accent-muted);
 }
 
+.vd-report-check {
+  flex: 0 0 0.9rem;
+  width: 0.9rem;
+  color: var(--accent);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
 .vd-modal-title { margin: 0; font-size: 1.05rem; font-weight: 650; color: var(--text); }
 .vd-modal-body { margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.55; }
 .vd-modal-actions { margin-top: 1.2rem; display: flex; justify-content: flex-end; gap: 0.5rem; }

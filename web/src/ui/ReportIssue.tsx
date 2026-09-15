@@ -4,8 +4,6 @@ import { ApiError, downloadIssueReport, fetchJobs } from '../api/client'
 import type { JobItem } from '../api/types'
 import { Spinner } from './Spinner'
 
-type Target = { kind: 'general' } | { kind: 'job'; job: JobItem }
-
 function jobLabel(job: JobItem): string {
   const title = (job.summary || '').trim() || '(no title)'
   const key = (job.issue_key || '').trim()
@@ -24,11 +22,13 @@ export function ReportIssue() {
   const [jobs, setJobs] = useState<JobItem[]>([])
   const [loadingJobs, setLoadingJobs] = useState(false)
   const [query, setQuery] = useState('')
-  const [target, setTarget] = useState<Target | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
+
+  const generalOnly = selectedIds.length === 0
 
   useEffect(() => {
     if (!open) return
@@ -59,12 +59,12 @@ export function ReportIssue() {
         setJobs(list)
         const fromPath = jobIdFromPath(location.pathname)
         const match = fromPath ? list.find((j) => j.job_id === fromPath) : null
-        setTarget(match ? { kind: 'job', job: match } : { kind: 'general' })
+        setSelectedIds(match ? [match.job_id] : [])
       })
       .catch((err: unknown) => {
         if (cancelled) return
         setJobs([])
-        setTarget({ kind: 'general' })
+        setSelectedIds([])
         setError(err instanceof Error ? err.message : 'Could not load jobs')
       })
       .finally(() => {
@@ -81,18 +81,26 @@ export function ReportIssue() {
     return jobs.filter((j) => jobLabel(j).toLowerCase().includes(q))
   }, [jobs, query])
 
-  const canSubmit = Boolean(target && note.trim() && !busy)
+  const canSubmit = Boolean(note.trim() && !busy)
+
+  function toggleJob(id: string) {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
+  }
 
   async function submit() {
-    if (!target || !note.trim()) return
+    if (!note.trim()) return
     setBusy(true)
     setError(null)
     setDone(null)
     try {
+      const ids = selectedIds
       const filename = await downloadIssueReport({
-        kind: target.kind,
+        kind: ids.length ? 'job' : 'general',
         note: note.trim(),
-        job_id: target.kind === 'job' ? target.job.job_id : undefined,
+        job_id: ids[0],
+        job_ids: ids,
       })
       setDone(filename)
       setNote('')
@@ -131,6 +139,9 @@ export function ReportIssue() {
           <div className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
             What is this about?
           </div>
+          <p className="mb-2 text-[11px] text-text-muted">
+            Click jobs to include several. General is used when none are selected.
+          </p>
           <input
             className="vd-input mb-2 py-1.5 text-xs"
             type="search"
@@ -139,21 +150,24 @@ export function ReportIssue() {
             onChange={(e) => setQuery(e.target.value)}
             disabled={loadingJobs}
           />
-          <div className="vd-report-list" role="listbox" aria-label="Issue target">
+          <div
+            className="vd-report-list"
+            role="listbox"
+            aria-multiselectable="true"
+            aria-label="Issue targets"
+          >
             <button
               type="button"
               role="option"
-              aria-selected={target?.kind === 'general'}
+              aria-selected={generalOnly}
               className={
-                target?.kind === 'general'
-                  ? 'vd-report-option is-selected'
-                  : 'vd-report-option'
+                generalOnly ? 'vd-report-option is-selected' : 'vd-report-option'
               }
-              onClick={() => setTarget({ kind: 'general' })}
+              onClick={() => setSelectedIds([])}
             >
               <span className="font-medium text-text">General issue</span>
               <span className="block text-[11px] text-text-muted">
-                Settings, poll, queue, logs, and your note
+                Settings, poll, queue, serve logs, and your note
               </span>
             </button>
             {loadingJobs && (
@@ -163,8 +177,7 @@ export function ReportIssue() {
             )}
             {!loadingJobs &&
               filtered.map((job) => {
-                const selected =
-                  target?.kind === 'job' && target.job.job_id === job.job_id
+                const selected = selectedIds.includes(job.job_id)
                 return (
                   <button
                     key={job.job_id}
@@ -172,14 +185,21 @@ export function ReportIssue() {
                     role="option"
                     aria-selected={selected}
                     className={selected ? 'vd-report-option is-selected' : 'vd-report-option'}
-                    onClick={() => setTarget({ kind: 'job', job })}
+                    onClick={() => toggleJob(job.job_id)}
                     title={jobLabel(job)}
                   >
-                    <span className="font-mono text-[11px] text-text-secondary">
-                      {job.job_id}
-                    </span>
-                    <span className="block truncate text-xs text-text">
-                      {(job.issue_key || '—') + ': ' + (job.summary || '(no title)')}
+                    <span className="flex items-start gap-2">
+                      <span className="vd-report-check" aria-hidden>
+                        {selected ? '✓' : ''}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-mono text-[11px] text-text-secondary">
+                          {job.job_id}
+                        </span>
+                        <span className="block truncate text-xs text-text">
+                          {(job.issue_key || '—') + ': ' + (job.summary || '(no title)')}
+                        </span>
+                      </span>
                     </span>
                   </button>
                 )
@@ -191,6 +211,11 @@ export function ReportIssue() {
               <div className="px-2 py-2 text-[11px] text-text-muted">No matching jobs.</div>
             )}
           </div>
+          {!generalOnly && (
+            <div className="mt-1.5 text-[11px] text-text-muted">
+              {selectedIds.length} job{selectedIds.length === 1 ? '' : 's'} selected
+            </div>
+          )}
 
           <label className="mt-3 block text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
             Note
