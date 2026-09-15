@@ -4965,7 +4965,7 @@ class JobProcessor:
                     author=event.author_username or event.author_name,
                     comment=event.prompt,
                     work_branch=event.source_branch,
-                    replied_message=event.note_body,
+                    replied_message="",
                     raw=getattr(event, "raw", None),
                     review_context=self._review_context_for_event(event),
                 ),
@@ -5051,7 +5051,7 @@ class JobProcessor:
                 comment=event.prompt,
                 work_branch=work_branch,
                 plan_path=plan_path_for_agent,
-                replied_message=event.note_body,
+                replied_message="",
                 raw=getattr(event, "raw", None),
                 review_context=self._review_context_for_event(
                     event, git.get_working_directory()
@@ -5610,7 +5610,7 @@ class JobProcessor:
                     author=event.author_username or event.author_name,
                     comment=event.prompt,
                     work_branch=event.source_branch,
-                    replied_message=getattr(event, "comment_body", "") or "",
+                    replied_message="",
                     raw=getattr(event, "raw", None),
                     review_context=self._review_context_for_event(event),
                 ),
@@ -5708,7 +5708,7 @@ class JobProcessor:
                 comment=event.prompt,
                 work_branch=work_branch,
                 plan_path=plan_path_for_agent,
-                replied_message=getattr(event, "comment_body", "") or "",
+                replied_message="",
                 raw=getattr(event, "raw", None),
                 review_context=self._review_context_for_event(
                     event, git.get_working_directory()

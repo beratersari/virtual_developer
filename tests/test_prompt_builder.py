@@ -17,6 +17,39 @@ def test_substitute_plan_path():
     assert out == "Write to .sisyphus/plans/K-1.md"
 
 
+def test_overview_comment_does_not_reuse_note_as_replied():
+    """Standalone MR/PR overview notes are Prompt only, not a fake reply."""
+    PromptBuilder.clear_prompt_file_cache()
+    note = "@yaver /yaver add logging to the handler"
+    for builder in (
+        PromptBuilder.build_gitlab_comment_prompt,
+        PromptBuilder.build_azure_comment_prompt,
+    ):
+        kwargs = dict(
+            issue_key="KAN-9",
+            source_branch="feature/x",
+            target_branch="develop",
+            author="alice",
+            comment="add logging to the handler",
+            replied_message=note,
+        )
+        if builder is PromptBuilder.build_gitlab_comment_prompt:
+            p = builder(
+                mr_title="Logs",
+                mr_url="https://gitlab.example.com/g/r/-/merge_requests/1",
+                **kwargs,
+            )
+        else:
+            p = builder(
+                pr_title="Logs",
+                pr_url="https://tfs.example.com/pr/1",
+                **kwargs,
+            )
+        assert "## Prompt" in p
+        assert "add logging to the handler" in p
+        assert "## Replied message" not in p
+
+
 def test_gitlab_comment_prompt_has_mr_context():
     PromptBuilder.clear_prompt_file_cache()
     p = PromptBuilder.build_gitlab_comment_prompt(

@@ -7,6 +7,7 @@ key, branch, plan path, and Jira text.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -344,6 +345,33 @@ class PromptBuilder:
         return ""
 
     @staticmethod
+    def _operator_request_core(text: str) -> str:
+        """Compare operator notes after stripping @mentions and /yaver."""
+        from src.issue_git_spec import strip_params_block
+
+        t = strip_params_block(text or "")
+        t = re.sub(r"(?i)(?:@[\w.\\-]+\s+)+", "", t)
+        t = re.sub(r"(?i)^\s*/(?:yaver|ask|review)\b", "", t)
+        return " ".join(t.split()).casefold()
+
+    @staticmethod
+    def _distinct_replied_message(replied: str, request: str) -> str:
+        """Keep a parent note only when it is not the current operator request."""
+        from src.issue_git_spec import strip_params_block
+
+        parent = strip_params_block(replied or "").strip()
+        if not parent:
+            return ""
+        req = strip_params_block(request or "").strip()
+        if not req:
+            return parent
+        if PromptBuilder._operator_request_core(parent) == PromptBuilder._operator_request_core(
+            req
+        ):
+            return ""
+        return parent
+
+    @staticmethod
     def _thread_request_sections(
         *,
         author: str,
@@ -353,21 +381,26 @@ class PromptBuilder:
         source_branch: str,
         target_branch: str,
     ) -> list[str]:
-        """Labeled thread-follow-up blocks (Creasy-style replied + prompt)."""
+        """Labeled MR/PR blocks. Replied message only when a real parent exists."""
         from src.issue_git_spec import strip_params_block
 
         who = (author or "").strip() or "someone"
         request = strip_params_block(prompt or "").strip() or "(empty prompt)"
-        replied = strip_params_block(replied_message or "").strip()
-        if not replied:
-            replied = request
+        replied = PromptBuilder._distinct_replied_message(replied_message, request)
         where = (
             "GitLab merge request"
             if forge == "gitlab"
             else "Azure DevOps pull request"
         )
-        return [
-            (
+        intro = (
+            f"This run is on an existing {where} "
+            "(not a new Jira ticket). The repository is already checked out "
+            f"on `{source_branch}` (into `{target_branch}`). Resume any "
+            "existing OpenCode session for this repo + branch + target.\n\n"
+            "Do what **Prompt** says. Do not @mention or ping anyone."
+        )
+        if replied:
+            intro = (
                 f"This run is a **thread follow-up** on an existing {where} "
                 "(not a new Jira ticket). The repository is already checked out "
                 f"on `{source_branch}` (into `{target_branch}`). Resume any "
@@ -375,10 +408,12 @@ class PromptBuilder:
                 "Use **Replied message** as context only. Do what **Prompt** says. "
                 "Do not quote or restate the replied message in the posted answer. "
                 "Do not @mention or ping anyone."
-            ),
-            f"## Replied message\n\nFrom {who}:\n\n{replied}",
-            f"## Prompt\n\n{request}",
-        ]
+            )
+        blocks = [intro]
+        if replied:
+            blocks.append(f"## Replied message\n\nFrom {who}:\n\n{replied}")
+        blocks.append(f"## Prompt\n\n{request}")
+        return blocks
 
     @staticmethod
     def build_gitlab_comment_prompt(
@@ -415,9 +450,10 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
-        replied = (
+        replied = PromptBuilder._distinct_replied_message(
             PromptBuilder.parent_comment_from_webhook_raw(raw)
-            or (replied_message or "").strip()
+            or (replied_message or ""),
+            comment,
         )
         ctx = review_context if isinstance(review_context, dict) else None
         if not ctx:
@@ -492,9 +528,10 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
-        replied = (
+        replied = PromptBuilder._distinct_replied_message(
             PromptBuilder.parent_comment_from_webhook_raw(raw)
-            or (replied_message or "").strip()
+            or (replied_message or ""),
+            comment,
         )
         ctx = review_context if isinstance(review_context, dict) else None
         if not ctx:
