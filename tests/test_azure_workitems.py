@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.azure.keys import (
@@ -23,10 +24,18 @@ from src.azure.workitems import (
     lookup_work_item_view,
     normalize_work_item,
     parse_azure_tags,
+    clear_workitem_comment_claims,
     parse_workitem_payload,
     workitem_plan_command,
 )
 from src.state.models import TaskStatus
+
+
+@pytest.fixture(autouse=True)
+def _clear_azure_comment_claims():
+    clear_workitem_comment_claims()
+    yield
+    clear_workitem_comment_claims()
 
 
 def _wi_payload(
@@ -918,6 +927,25 @@ def test_comment_event_plan_refactor_prompt():
     assert decision.accepted is True
     assert decision.event.plan_handoff == "refactor"
     assert "drop the cache" in decision.event.plan_comment
+
+
+def test_comment_and_history_update_post_usage_once():
+    payload_comment = _wi_comment_payload(
+        note="@yaver please", event="workitem.commented", rev=8
+    )
+    payload_hist = _wi_comment_payload(
+        note="@yaver please", event="workitem.updated", rev=8
+    )
+    first = decide_azure_workitem_comment_webhook(
+        payload_comment, enabled=True, bot_mentions=["yaver"]
+    )
+    second = decide_azure_workitem_comment_webhook(
+        payload_hist, enabled=True, bot_mentions=["yaver"]
+    )
+    assert first.usage_note is True
+    assert second.accepted is False
+    assert second.usage_note is False
+    assert "duplicate" in second.reason
 
 
 def test_comment_mention_without_command_usage_note():

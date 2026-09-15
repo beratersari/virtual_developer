@@ -9,8 +9,10 @@ Work-item REST uses the same 7.1 / 7.0 fallback as ``AzureDevOpsClient``.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
@@ -66,6 +68,9 @@ _TODO_CATEGORIES = frozenset({"proposed", "new"})
 _IN_PROGRESS_CATEGORIES = frozenset({"inprogress", "in progress"})
 
 _COORDS: Dict[str, Dict[str, Any]] = {}
+# TFS often sends workitem.commented *and* a History workitem.updated.
+_SEEN_COMMENTS: Dict[str, float] = {}
+_SEEN_COMMENT_TTL_SEC = 180.0
 
 _HTML_BREAK = re.compile(r"(?i)<br\s*/?>")
 _HTML_BLOCK = re.compile(r"(?i)</(p|div|li|h[1-6]|tr)>")
@@ -732,6 +737,29 @@ def format_workitem_plan_usage_note(bot_name: str = "yaver") -> str:
     )
 
 
+def clear_workitem_comment_claims() -> None:
+    _SEEN_COMMENTS.clear()
+
+
+def _workitem_comment_claim_key(event: AzureWorkItemEvent) -> str:
+    note = re.sub(r"\s+", " ", (event.comment_body or "").strip().lower())
+    digest = hashlib.sha256(note.encode("utf-8", "replace")).hexdigest()[:20]
+    return f"{event.collection_url}|{event.work_item_id}|{digest}"
+
+
+def claim_workitem_comment(event: AzureWorkItemEvent) -> bool:
+    """True the first time we see this comment; False on the TFS twin hook."""
+    now = time.monotonic()
+    stale = [k for k, ts in _SEEN_COMMENTS.items() if now - ts > _SEEN_COMMENT_TTL_SEC]
+    for key in stale:
+        _SEEN_COMMENTS.pop(key, None)
+    key = _workitem_comment_claim_key(event)
+    if key in _SEEN_COMMENTS:
+        return False
+    _SEEN_COMMENTS[key] = now
+    return True
+
+
 def workitem_plan_command(note: str, bot_mentions: Iterable[str]) -> str:
     """Return ``execute`` / ``refactor`` when ``@bot /planExecute|planRefactor``."""
     from src.gitlab.mentions import note_has_slash_command
@@ -878,6 +906,12 @@ def decide_azure_workitem_comment_webhook(
     parsed.plan_comment = strip_workitem_plan_command(note, mentions)
     parsed.plan_handoff = command
     parsed.change_kinds = ["comment"]
+    if not claim_workitem_comment(parsed):
+        azure_info(
+            f"workitem comment reject reason='duplicate comment event' "
+            f"id={parsed.work_item_id} rev={parsed.rev}"
+        )
+        return WebhookDecision(False, "duplicate comment event")
     if not command:
         azure_info(
             f"workitem comment reject reason={PLAN_COMMAND_MISSING_REASON!r} "
@@ -902,6 +936,7 @@ def post_azure_workitem_usage_note(
 ) -> bool:
     """Post the work-item plan-command usage note. Never used on a PR."""
     from src.azure.client import AzureDevOpsClient
+    from src.brand import USAGE_HEADING, USAGE_MARKER
 
     project = (event.project or "").strip()
     if event.work_item_id <= 0:
@@ -910,6 +945,21 @@ def post_azure_workitem_usage_note(
         host=event.host or "",
         collection_url=event.collection_url or "",
     )
+    try:
+        existing = client.get_work_item_comments(project, event.work_item_id)
+    except Exception:
+        existing = []
+    for row in existing[-8:]:
+        raw = ""
+        if isinstance(row, dict):
+            raw = str(row.get("text") or row.get("renderedText") or "")
+        flat = azure_html_to_text(raw)
+        if USAGE_MARKER in raw or USAGE_HEADING in raw or USAGE_HEADING in flat:
+            azure_info(
+                f"workitem usage note skipped already posted "
+                f"id={event.work_item_id}"
+            )
+            return True
     posted = client.add_work_item_comment(
         project,
         event.work_item_id,
@@ -1230,6 +1280,8 @@ __all__ = [
     "assignee_matches_azure_bot",
     "azure_html_to_text",
     "changelog_from_resource",
+    "claim_workitem_comment",
+    "clear_workitem_comment_claims",
     "classify_workitem_changes",
     "decide_azure_workitem_comment_webhook",
     "decide_azure_workitem_webhook",
