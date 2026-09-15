@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-09-15
+
+Issue reports can include several jobs and much more serve/log context.
+GitLab/Azure review comments now put the selected file range in the agent prompt.
+
+### Added
+
+- Report issue: multi-job select; zip includes `serve.json`, OpenCode serve logs,
+  storage, recent jobs, and safe env. Several jobs land under `jobs/<id>/`.
+- GitLab DiffNote and Azure file-thread comments include file, lines, thread,
+  and a snippet from the clone.
+
+[0.9.16]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.16
+
 ## [0.9.15] — 2026-09-14
 
 Linux standalone `yaver` is one freeze per Ubuntu. The 0.9.14 binary was built on Ubuntu 24.04 and failed on older glibc (`GLIBC_2.38 not found`).
