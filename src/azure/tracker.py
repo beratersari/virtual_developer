@@ -193,6 +193,57 @@ class AzureWorkItemTracker:
             "emailAddress": username if "@" in username else "",
         }
 
+    def assign_issue(
+        self,
+        issue_key: str,
+        *,
+        name: str = "",
+        account_id: str = "",
+        **_kwargs: Any,
+    ) -> bool:
+        value = (name or account_id or "").strip()
+        if not value:
+            return False
+        posted = self.client.update_work_item_fields(
+            self.project,
+            self.work_item_id,
+            {"System.AssignedTo": value},
+        )
+        return posted is not None
+
+    def assign_to_pat_user(self, issue_key: str) -> bool:
+        """Assign the work item to the identity behind the collection PAT."""
+        me = self.get_myself()
+        ident = ""
+        if isinstance(me, dict):
+            ident = str(
+                me.get("name") or me.get("emailAddress") or me.get("displayName") or ""
+            ).strip()
+        if not ident:
+            azure_warning(f"{self.issue_key}: cannot assign PAT user (identity empty)")
+            return False
+        raw = self._load()
+        fields = raw.get("fields") if isinstance(raw, dict) else {}
+        current = identity_as_assignee(
+            fields.get("System.AssignedTo") if isinstance(fields, dict) else None
+        )
+        if current:
+            for cand in (
+                current.get("uniqueName"),
+                current.get("name"),
+                current.get("displayName"),
+                current.get("emailAddress"),
+            ):
+                if str(cand or "").strip().lower() == ident.lower():
+                    azure_info(f"{self.issue_key}: already assigned to PAT user")
+                    return True
+        ok = self.assign_issue(issue_key, name=ident)
+        if ok:
+            azure_info(f"{self.issue_key}: assigned to PAT user {ident}")
+        else:
+            azure_warning(f"{self.issue_key}: could not assign PAT user {ident}")
+        return ok
+
     def _current_tags(self) -> Optional[List[str]]:
         raw = self._load()
         if not raw or not isinstance(raw.get("fields"), dict):
