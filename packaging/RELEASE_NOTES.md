@@ -1,3 +1,9 @@
+# Yaver 0.9.19
+
+Azure work items: Scheduled lookup like Jira,
+ticket name is the id, HTML comments, PAT
+collection URLs, ignore our own webhook PATCHes.
+
 # Yaver 0.9.18
 
 Scheduled → Existing issue can look up an Azure
