@@ -1,16 +1,18 @@
-"""Build short per-job user prompts: job facts + Jira title/description.
+"""Build short per-job user prompts: job facts + ticket title/description.
 
 Stable unattended rules live on the OpenCoderman ``derman-plan`` /
 ``derman-build`` / ``derman-test`` agents. These files only pass issue
-key, branch, plan path, and Jira text.
+key, branch, plan path, and ticket text (Jira or Azure work item).
 """
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from src.azure.keys import prompt_ticket_label
 from src.config import settings
 from src.issue_git_spec import strip_params_block
 from src.logger import logger
@@ -24,8 +26,8 @@ class PromptBuilder:
 
     1. Job facts from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
        (placeholders ``{ISSUE_KEY}``, ``{WORK_BRANCH}``, ``{PLAN_PATH}``)
-    2. Jira title (summary)
-    3. Jira description
+    2. Ticket title (summary)
+    3. Ticket description
     """
 
     @staticmethod
@@ -86,19 +88,19 @@ class PromptBuilder:
         return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
 
     @staticmethod
-    def _jira_title_and_description(
+    def _ticket_title_and_description(
         issue_key: str,
         summary: str = "",
         description: str = "",
     ) -> str:
-        """Jira title + description only (params stripped)."""
+        """Ticket title + description only (params stripped). Jira or Azure."""
         title = strip_params_block(summary or "").strip()
         body = strip_params_block(description or "").strip()
-        parts = [f"## Jira issue: {issue_key}"]
+        parts = [f"## Ticket: {prompt_ticket_label(issue_key)}"]
         if title:
-            parts.append(f"## Jira title\n\n{title}")
+            parts.append(f"## Title\n\n{title}")
         if body:
-            parts.append(f"## Jira description\n\n{body}")
+            parts.append(f"## Description\n\n{body}")
         if not title and not body:
             parts.append("(no summary or description provided)")
         return "\n\n".join(parts)
@@ -142,8 +144,8 @@ class PromptBuilder:
 
         out = substitute_placeholders(
             text,
-            issue_key=issue_key,
-            work_branch=work_branch,
+            issue_key=prompt_ticket_label(issue_key),
+            work_branch=work_branch or (f"feature/{issue_key}" if issue_key else None),
             plan_path=plan_path,
         )
         return out.strip()
@@ -157,7 +159,7 @@ class PromptBuilder:
         acceptance_criteria: Optional[str] = None,
         plan_path: Optional[str] = None,
     ) -> str:
-        """Plan mode: ``PLAN_PROMPT.md`` + Jira title + description."""
+        """Plan mode: ``PLAN_PROMPT.md`` + ticket title + description."""
         from src.paths import plans_dir
 
         plan_abs = (plan_path or "").strip() or str(
@@ -168,7 +170,7 @@ class PromptBuilder:
             issue_key=issue_key,
             plan_path=plan_abs,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         if acceptance_criteria and str(acceptance_criteria).strip():
@@ -187,11 +189,11 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Build mode: implement the plan when it exists, else Jira text.
+        """Build mode: implement the plan when it exists, else ticket text.
 
         ``Mode: build`` is not ``plan_execute``. When a durable plan file
         is present (this ticket or a sibling plan for the same repo /
-        branches), that file is the spec. Jira is context only.
+        branches), that file is the spec. Title/description are context only.
         """
         from src.paths import plans_dir
 
@@ -202,7 +204,7 @@ class PromptBuilder:
             work_branch=work_branch,
             plan_path=plan,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         plan_exists = False
@@ -215,7 +217,7 @@ class PromptBuilder:
                 plan, issue_key=issue_key
             )
             context = (
-                "## Jira context (do not replace the plan)\n\n"
+                "## Ticket context (do not replace the plan)\n\n"
                 "Implement the plan above. Title and description are "
                 "background only unless the plan is missing a detail.\n\n"
                 + jira
@@ -237,7 +239,7 @@ class PromptBuilder:
             issue_key=issue_key,
             work_branch=work_branch,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         return PromptBuilder._join_blocks(system, jira)
@@ -312,7 +314,7 @@ class PromptBuilder:
         return (
             f"## Git policy\n\n"
             f"Match this repo's AGENTS.md and git log. "
-            f"If no pattern exists, commit as `[{issue_key}] <type>: <short description>`."
+            f"If no pattern exists, commit as `[{prompt_ticket_label(issue_key)}] <type>: <short description>`."
         )
 
     @staticmethod
@@ -344,6 +346,33 @@ class PromptBuilder:
         return ""
 
     @staticmethod
+    def _operator_request_core(text: str) -> str:
+        """Compare operator notes after stripping @mentions and /yaver."""
+        from src.issue_git_spec import strip_params_block
+
+        t = strip_params_block(text or "")
+        t = re.sub(r"(?i)(?:@[\w.\\-]+\s+)+", "", t)
+        t = re.sub(r"(?i)^\s*/(?:yaver|ask|review)\b", "", t)
+        return " ".join(t.split()).casefold()
+
+    @staticmethod
+    def _distinct_replied_message(replied: str, request: str) -> str:
+        """Keep a parent note only when it is not the current operator request."""
+        from src.issue_git_spec import strip_params_block
+
+        parent = strip_params_block(replied or "").strip()
+        if not parent:
+            return ""
+        req = strip_params_block(request or "").strip()
+        if not req:
+            return parent
+        if PromptBuilder._operator_request_core(parent) == PromptBuilder._operator_request_core(
+            req
+        ):
+            return ""
+        return parent
+
+    @staticmethod
     def _thread_request_sections(
         *,
         author: str,
@@ -353,32 +382,39 @@ class PromptBuilder:
         source_branch: str,
         target_branch: str,
     ) -> list[str]:
-        """Labeled thread-follow-up blocks (Creasy-style replied + prompt)."""
+        """Labeled MR/PR blocks. Replied message only when a real parent exists."""
         from src.issue_git_spec import strip_params_block
 
         who = (author or "").strip() or "someone"
         request = strip_params_block(prompt or "").strip() or "(empty prompt)"
-        replied = strip_params_block(replied_message or "").strip()
-        if not replied:
-            replied = request
+        replied = PromptBuilder._distinct_replied_message(replied_message, request)
         where = (
             "GitLab merge request"
             if forge == "gitlab"
             else "Azure DevOps pull request"
         )
-        return [
-            (
+        intro = (
+            f"This run is on an existing {where} "
+            "(not a new ticket). The repository is already checked out "
+            f"on `{source_branch}` (into `{target_branch}`). Resume any "
+            "existing OpenCode session for this repo + branch + target.\n\n"
+            "Do what **Prompt** says. Do not @mention or ping anyone."
+        )
+        if replied:
+            intro = (
                 f"This run is a **thread follow-up** on an existing {where} "
-                "(not a new Jira ticket). The repository is already checked out "
+                "(not a new ticket). The repository is already checked out "
                 f"on `{source_branch}` (into `{target_branch}`). Resume any "
                 "existing OpenCode session for this repo + branch + target.\n\n"
                 "Use **Replied message** as context only. Do what **Prompt** says. "
                 "Do not quote or restate the replied message in the posted answer. "
                 "Do not @mention or ping anyone."
-            ),
-            f"## Replied message\n\nFrom {who}:\n\n{replied}",
-            f"## Prompt\n\n{request}",
-        ]
+            )
+        blocks = [intro]
+        if replied:
+            blocks.append(f"## Replied message\n\nFrom {who}:\n\n{replied}")
+        blocks.append(f"## Prompt\n\n{request}")
+        return blocks
 
     @staticmethod
     def build_gitlab_comment_prompt(
@@ -415,9 +451,10 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
-        replied = (
+        replied = PromptBuilder._distinct_replied_message(
             PromptBuilder.parent_comment_from_webhook_raw(raw)
-            or (replied_message or "").strip()
+            or (replied_message or ""),
+            comment,
         )
         ctx = review_context if isinstance(review_context, dict) else None
         if not ctx:
@@ -425,7 +462,7 @@ class PromptBuilder:
         review_md = format_review_context(ctx)
         parts = [
             system,
-            f"## GitLab merge request: {issue_key}",
+            f"## GitLab merge request: {prompt_ticket_label(issue_key)}",
             *PromptBuilder._thread_request_sections(
                 author=author,
                 prompt=comment,
@@ -492,9 +529,10 @@ class PromptBuilder:
             work_branch=branch or source_branch,
             plan_path=plan,
         )
-        replied = (
+        replied = PromptBuilder._distinct_replied_message(
             PromptBuilder.parent_comment_from_webhook_raw(raw)
-            or (replied_message or "").strip()
+            or (replied_message or ""),
+            comment,
         )
         ctx = review_context if isinstance(review_context, dict) else None
         if not ctx:
@@ -502,7 +540,7 @@ class PromptBuilder:
         review_md = format_review_context(ctx)
         parts = [
             system,
-            f"## Azure DevOps pull request: {issue_key}",
+            f"## Azure DevOps pull request: {prompt_ticket_label(issue_key)}",
             *PromptBuilder._thread_request_sections(
                 author=author,
                 prompt=comment,

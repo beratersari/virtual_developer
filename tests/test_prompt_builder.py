@@ -17,6 +17,64 @@ def test_substitute_plan_path():
     assert out == "Write to .sisyphus/plans/K-1.md"
 
 
+def test_work_item_prompt_shows_numeric_ticket_only():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_build_prompt(
+        "WIT-BETA-42",
+        "Do the thing",
+        "Implement login",
+        work_branch="feature/WIT-BETA-42",
+    )
+    assert "## Ticket: 42" in p
+    assert "- Ticket: 42" in p or "Ticket: 42" in p
+    assert "WIT-BETA-42" in p  # work branch / plan path stay local
+    assert "## Ticket: WIT-BETA-42" not in p
+
+
+def test_jira_prompt_keeps_full_issue_key():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_build_prompt(
+        "KAN-12",
+        "Do the thing",
+        "Implement login",
+        work_branch="feature/KAN-12",
+    )
+    assert "## Ticket: KAN-12" in p
+
+
+def test_overview_comment_does_not_reuse_note_as_replied():
+    """Standalone MR/PR overview notes are Prompt only, not a fake reply."""
+    PromptBuilder.clear_prompt_file_cache()
+    note = "@yaver /yaver add logging to the handler"
+    for builder in (
+        PromptBuilder.build_gitlab_comment_prompt,
+        PromptBuilder.build_azure_comment_prompt,
+    ):
+        kwargs = dict(
+            issue_key="KAN-9",
+            source_branch="feature/x",
+            target_branch="develop",
+            author="alice",
+            comment="add logging to the handler",
+            replied_message=note,
+        )
+        if builder is PromptBuilder.build_gitlab_comment_prompt:
+            p = builder(
+                mr_title="Logs",
+                mr_url="https://gitlab.example.com/g/r/-/merge_requests/1",
+                **kwargs,
+            )
+        else:
+            p = builder(
+                pr_title="Logs",
+                pr_url="https://tfs.example.com/pr/1",
+                **kwargs,
+            )
+        assert "## Prompt" in p
+        assert "add logging to the handler" in p
+        assert "## Replied message" not in p
+
+
 def test_gitlab_comment_prompt_has_mr_context():
     PromptBuilder.clear_prompt_file_cache()
     p = PromptBuilder.build_gitlab_comment_prompt(
@@ -73,8 +131,8 @@ def test_plan_path_includes_title_and_description():
     PromptBuilder.clear_prompt_file_cache()
     p = PromptBuilder.build_plan_prompt("A-1", "sum title", "full description body")
     assert "A-1" in p
-    assert "Jira title" in p and "sum title" in p
-    assert "Jira description" in p and "full description body" in p
+    assert "## Title" in p and "sum title" in p
+    assert "## Description" in p and "full description body" in p
     assert "derman-plan" in p.lower()
     assert "plans/A-1.md" in p.replace("\\", "/")
 
@@ -97,8 +155,8 @@ def test_build_path_includes_title_description_and_plan():
         work_branch="feature/A-1",
     )
     assert "derman-build" in p.lower()
-    assert "Jira title" in p and "Build the feature" in p
-    assert "Jira description" in p and "Do the work carefully" in p
+    assert "## Title" in p and "Build the feature" in p
+    assert "## Description" in p and "Do the work carefully" in p
     assert "/plans/A-1.md" in p
     assert "feature/A-1" in p
     assert "A-1" in p
@@ -131,7 +189,7 @@ def test_build_without_plan_still_has_description():
     )
     assert "Fix login" in p
     assert "Users cannot login after password reset" in p
-    assert "Jira description" in p
+    assert "## Description" in p
     assert not p.startswith("implement the plan")
 
 
@@ -199,7 +257,7 @@ def test_commit_message_block_filled_issue_key():
 def test_only_two_primary_paths():
     plan = PromptBuilder.build_plan_prompt("K-1", "s", "d")
     build = PromptBuilder.build_build_prompt("K-1", "s", "d")
-    assert "Jira title" in plan and "Jira title" in build
+    assert "## Title" in plan and "## Title" in build
     assert plan != build
 
 
@@ -224,7 +282,7 @@ def test_plan_and_build_prompts_differ():
         "X-1", "s", "d", work_branch="feature/x"
     )
     assert a != b
-    assert "Jira title" in a and "Jira title" in b
+    assert "## Title" in a and "## Title" in b
 
 
 def test_no_comment_response_builder():

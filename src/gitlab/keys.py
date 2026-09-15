@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 
 def project_path_slug(project_path: str, *, max_len: int = 48) -> str:
@@ -150,16 +150,63 @@ def resolve_mr_issue_key(
     project_path: str = "",
     mr_iid: int = 0,
     project_keys: Optional[Sequence[str]] = None,
+    repository_url: str = "",
+    source_branch: str = "",
+    target_branch: str = "",
+    collection_url: str = "",
+    state_manager: Any = None,
 ) -> str:
-    """Prefer Jira key from MR title; description only via Closes/Fixes.
+    """Bind an MR comment to a ticket, then fall back to ``GL-…``.
 
-    Title is primary (e.g. ``feat(KAN-12): …`` → ``KAN-12``). A free-text
-    mention in the description is ignored so ``See also PLATFORM-9`` cannot
-    steal the job. Without a match, fall back to the stable ``GL-…`` key.
+    Same order as Azure PRs, with Jira always first:
+    1. Jira key in the title when ``JIRA_PROJECTS`` matches
+    2. ``WIT-{PROJECT}-{id}`` in the title
+    3. Azure ``#42`` in the title (scoped by collection when known)
+    4. Closes/Fixes Jira key in the description
+    5. ``WIT-…`` in the description
+    6. ``#42`` / ``Fixes #42`` in the description
+    7. Local work item with the same repo + source + target
+    8. Stable ``GL-{project}-{iid}`` key
     """
+    from src.azure.keys import work_item_id_from_hash_mention, work_item_key_from_text
+    from src.azure.workitems import find_work_item_key_by_id
+
     found = jira_key_from_mr_title(mr_title, project_keys)
-    if not found and (mr_description or "").strip():
-        found = jira_key_from_closes_line(mr_description, project_keys)
     if found:
         return found
+    found = work_item_key_from_text(mr_title)
+    if found:
+        return found
+    hid = work_item_id_from_hash_mention(mr_title)
+    if hid:
+        found = find_work_item_key_by_id(
+            hid, collection_url=collection_url, state_manager=state_manager
+        )
+        if found:
+            return found
+    if (mr_description or "").strip():
+        found = jira_key_from_closes_line(mr_description, project_keys)
+        if found:
+            return found
+        found = work_item_key_from_text(mr_description)
+        if found:
+            return found
+        hid = work_item_id_from_hash_mention(mr_description)
+        if hid:
+            found = find_work_item_key_by_id(
+                hid, collection_url=collection_url, state_manager=state_manager
+            )
+            if found:
+                return found
+    if repository_url and source_branch and target_branch:
+        from src.azure.workitems import find_work_item_key_by_git
+
+        found = find_work_item_key_by_git(
+            repository_url,
+            source_branch,
+            target_branch,
+            state_manager=state_manager,
+        )
+        if found:
+            return found
     return gitlab_issue_key(project_path or "project", mr_iid)

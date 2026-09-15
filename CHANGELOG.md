@@ -8,6 +8,26 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-09-16
+
+Azure/GitLab review comments bind to work items more reliably. The agent
+sees ticket **42**; the dashboard still shows ``WIT-BETA-42``.
+
+### Added
+
+- Work-item keys are ``WIT-{PROJECT}-{id}``. PR/MR comments resolve Jira,
+  ``WIT-…``, Azure ``#42`` (collection-scoped), then repo/source/target,
+  then ``AZ-…`` / ``GL-…``.
+- GitLab MRs use the same bind order (Jira first).
+- Storage warns when a clone has no linked MR/PR (will not auto-delete).
+
+### Changed
+
+- Agent Ticket / ``{ISSUE_KEY}`` for work items is the numeric TFS id.
+  Local state and the dashboard stay ``WIT-…``.
+
+[0.9.22]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.22
+
 ## [0.9.21] — 2026-09-15
 
 Azure work-item jobs start on any open column, assign the PAT user, and

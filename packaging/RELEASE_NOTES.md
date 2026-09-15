@@ -1,3 +1,10 @@
+# Yaver 0.9.22
+
+Work-item keys are WIT-{project}-{id}. PR/MR comments
+bind Jira, WIT, #42 (this collection), then git match,
+then AZ-/GL-. Agent Ticket line is 42; dashboard stays
+WIT-BETA-42. Storage warns when a clone has no MR/PR.
+
 # Yaver 0.9.21
 
 Azure work items start on any open column (not

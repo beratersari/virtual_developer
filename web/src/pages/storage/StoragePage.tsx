@@ -28,6 +28,10 @@ function mrShortLabel(url: string): string {
   return 'MR'
 }
 
+function hasLinkedReview(folder: StorageFolder): boolean {
+  return Boolean((folder.merge_request_url || '').trim())
+}
+
 function folderLabel(folder: StorageFolder): string {
   const key = folder.issue_key?.trim()
   const title = folder.summary?.trim()
@@ -185,6 +189,13 @@ function StorageList({
                   {folder.modified_at ? ` · ${folder.modified_at}` : ''}
                   {folder.in_use ? ' · in use' : ''}
                 </div>
+                {!hasLinkedReview(folder) && !isDeleting && (
+                  <div className="mt-1.5 max-w-xl text-xs text-danger-text">
+                    No linked GitLab MR or Azure PR. Yaver will not delete this
+                    folder when the review is merged. Delete it yourself when
+                    you are done with the MR/PR.
+                  </div>
+                )}
                 {isDeleting && (
                   <div className="mt-2 max-w-sm">
                     <div className="flex items-center justify-between text-xs text-text-secondary">
@@ -313,7 +324,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Each folder shows the Jira issue and live GitLab MR status when an MR exists. Refresh reloads sizes and MR status. Merged MRs delete the clone automatically."
+        description="Temp clones under TEMP_DIR_BASE. Linked GitLab MRs and Azure PRs show live status; those clones are removed when the review is merged or abandoned. Folders with no MR/PR must be deleted by hand when you are done."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh

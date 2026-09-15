@@ -200,6 +200,76 @@ def test_resolve_pr_issue_key_prefers_jira_then_closes_then_az():
     )
 
 
+def test_resolve_pr_issue_key_reads_wit_key_from_title():
+    assert (
+        resolve_pr_issue_key(
+            pr_title="feat(WIT-DEMO-42): follow-up",
+            project_path="DefaultCollection/Demo/demo",
+            pr_id=9,
+            project_keys=["KAN"],
+        )
+        == "WIT-DEMO-42"
+    )
+
+
+def test_resolve_pr_issue_key_matches_local_work_item_by_git(tmp_path):
+    from src.state.manager import JiraStateManager
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("WIT-DEMO-42", "Do the thing", "x")
+    sm.update_state(
+        "WIT-DEMO-42",
+        metadata={
+            "source": "azure_workitem",
+            "repository_url": "https://tfs.example.com/tfs/Col/Demo/_git/app.git",
+            "source_branch": "feature/login",
+            "target_branch": "develop",
+        },
+    )
+    assert (
+        resolve_pr_issue_key(
+            pr_title="Add login",
+            project_path="DefaultCollection/Demo/app",
+            pr_id=9,
+            project_keys=["KAN"],
+            repository_url="https://tfs.example.com/tfs/Col/Demo/_git/app",
+            source_branch="feature/login",
+            target_branch="develop",
+            state_manager=sm,
+        )
+        == "WIT-DEMO-42"
+    )
+
+
+def test_resolve_pr_issue_key_git_mismatch_stays_az_fallback(tmp_path):
+    from src.state.manager import JiraStateManager
+
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    sm.create_state("WIT-DEMO-42", "Do the thing", "x")
+    sm.update_state(
+        "WIT-DEMO-42",
+        metadata={
+            "source": "azure_workitem",
+            "repository_url": "https://tfs.example.com/tfs/Col/Demo/_git/app",
+            "source_branch": "feature/other",
+            "target_branch": "develop",
+        },
+    )
+    assert (
+        resolve_pr_issue_key(
+            pr_title="Add login",
+            project_path="DefaultCollection/Demo/app",
+            pr_id=9,
+            project_keys=["KAN"],
+            repository_url="https://tfs.example.com/tfs/Col/Demo/_git/app",
+            source_branch="feature/login",
+            target_branch="develop",
+            state_manager=sm,
+        )
+        == "AZ-DEFAULTCOLLECTION-DEMO-APP-9"
+    )
+
+
 def test_mention_plain_and_html():
     assert parse_mention_list("@yaver, DevBot") == ["yaver", "devbot"]
     assert parse_mention_list("CORP\\Yaver") == ["yaver"]
