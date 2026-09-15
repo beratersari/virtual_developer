@@ -1,3 +1,11 @@
+# Yaver 0.9.17
+
+Azure Boards work items start from service hooks
+(assign a New item to the bot). After a plan, use
+@mention /planRefactor or /planExecute on the work
+item. Settings require a TFS collection URL
+(https://host/tfs/Collection), not a hostname.
+
 # Yaver 0.9.16
 
 Issue reports can include several jobs plus serve

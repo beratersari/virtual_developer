@@ -8,6 +8,25 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.17] — 2026-09-15
+
+Azure Boards work items can start jobs via service hooks. Settings only
+accept a TFS collection URL (`/tfs/<Collection>`), not a hostname.
+
+### Added
+
+- Azure DevOps Server 2022.2 work-item intake on `POST /yaver/webhook/azure`
+  (`workitem.created` / `workitem.updated` / `workitem.commented`) whenever the
+  Azure webhook is enabled. New work is first assignment on a New item.
+  Active → New while still assigned does not re-queue. After a plan, revise or
+  implement with `@mention /planRefactor <prompt>` or `@mention /planExecute`
+  (not tags). Mention without those commands gets a work-item usage note.
+  Jira / GitLab / Azure PR comments are unchanged.
+- Settings → Azure: collection URLs (hostname-only is rejected), optional
+  trigger tags, and a work-item lookup (collection + id).
+
+[0.9.17]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.17
+
 ## [0.9.16] — 2026-09-15
 
 Issue reports can include several jobs and much more serve/log context.
