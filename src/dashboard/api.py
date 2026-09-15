@@ -831,16 +831,32 @@ def create_dashboard_app(
 
     @app.get("/api/schedules/preview")
     def schedules_preview(
-        issue_key: str = Query(..., description="Existing Jira issue key"),
+        issue_key: str = Query(default="", description="Existing Jira issue key"),
+        collection_url: str = Query(
+            default="",
+            description="TFS collection URL for an Azure work item",
+        ),
+        work_item_id: int = Query(
+            default=0,
+            ge=0,
+            description="Azure Boards work item id",
+        ),
     ) -> dict:
-        """Load an existing issue and validate the ``{params}`` template.
+        """Load an existing Jira issue or Azure work item and validate ``{params}``.
 
         Used by the Scheduled tab before showing the run-at picker.
         400 only if the issue cannot be loaded. An invalid ``{params}``
         block is 200 with ``ok=false`` and any partial repo/branch fields
         so the operator can complete the same picker as a new issue.
         """
-        result = preview_existing_issue(issue_key)
+        try:
+            result = preview_existing_issue(
+                issue_key,
+                collection_url=collection_url,
+                work_item_id=work_item_id,
+            )
+        except TypeError:
+            result = preview_existing_issue(issue_key)
         result["server_time"] = build_meta().server_time
         if not result.get("ok"):
             loaded = bool(result.get("title") or result.get("description") is not None)

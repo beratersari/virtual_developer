@@ -541,8 +541,18 @@ export function schedulePrFollowup(body: SchedulePrBody) {
   }>('/api/schedules/pr', { method: 'POST', body: JSON.stringify(payload) })
 }
 
-export function previewScheduleIssue(issueKey: string) {
-  const params = new URLSearchParams({ issue_key: issueKey.trim() })
+export function previewScheduleIssue(
+  issueKey: string,
+  extra?: { collection_url?: string; work_item_id?: number },
+) {
+  const params = new URLSearchParams()
+  if (issueKey.trim()) params.set('issue_key', issueKey.trim())
+  if (extra?.collection_url?.trim()) {
+    params.set('collection_url', extra.collection_url.trim())
+  }
+  if (extra?.work_item_id && extra.work_item_id > 0) {
+    params.set('work_item_id', String(extra.work_item_id))
+  }
   return request<SchedulePreview>(`/api/schedules/preview?${params.toString()}`)
 }
 

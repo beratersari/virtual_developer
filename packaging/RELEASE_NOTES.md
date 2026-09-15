@@ -1,3 +1,8 @@
+# Yaver 0.9.18
+
+Scheduled → Existing issue can look up an Azure
+work item (collection + id), same as Jira.
+
 # Yaver 0.9.17
 
 Azure Boards work items start from service hooks
