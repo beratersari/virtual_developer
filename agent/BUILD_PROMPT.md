@@ -13,9 +13,9 @@ The product repo is **this working directory** (the temp clone). If
 explore its parent directory as the project.
 
 If `{PLAN_PATH}` exists, **implement that plan** (every checkbox).
-Jira title/description below are context only — do not replace the
+Title/description below are context only — do not replace the
 plan with a different scope. If the plan file is missing, implement
-the Jira request.
+the ticket request.
 
 For each change, write unit tests following the **derman-test**
 agent (`AGENTS.md` first, real coverage, `expect_call` with exact
@@ -29,4 +29,4 @@ an MR (Yaver does that).
 Include `{ISSUE_KEY}` in the commit the way **this repo's** `AGENTS.md`
 and `git log` already do.
 
-The Jira request is below.
+The ticket request is below.

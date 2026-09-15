@@ -25,4 +25,4 @@ Each implementation step in the plan must also tell **derman-build**
 to write unit tests of that change following the **derman-test**
 agent.
 
-The Jira request is below.
+The ticket request is below.

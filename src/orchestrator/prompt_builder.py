@@ -1,8 +1,8 @@
-"""Build short per-job user prompts: job facts + Jira title/description.
+"""Build short per-job user prompts: job facts + ticket title/description.
 
 Stable unattended rules live on the OpenCoderman ``derman-plan`` /
 ``derman-build`` / ``derman-test`` agents. These files only pass issue
-key, branch, plan path, and Jira text.
+key, branch, plan path, and ticket text (Jira or Azure work item).
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ class PromptBuilder:
 
     1. Job facts from ``agent/PLAN_PROMPT.md`` or ``agent/BUILD_PROMPT.md``
        (placeholders ``{ISSUE_KEY}``, ``{WORK_BRANCH}``, ``{PLAN_PATH}``)
-    2. Jira title (summary)
-    3. Jira description
+    2. Ticket title (summary)
+    3. Ticket description
     """
 
     @staticmethod
@@ -87,19 +87,19 @@ class PromptBuilder:
         return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
 
     @staticmethod
-    def _jira_title_and_description(
+    def _ticket_title_and_description(
         issue_key: str,
         summary: str = "",
         description: str = "",
     ) -> str:
-        """Jira title + description only (params stripped)."""
+        """Ticket title + description only (params stripped). Jira or Azure."""
         title = strip_params_block(summary or "").strip()
         body = strip_params_block(description or "").strip()
-        parts = [f"## Jira issue: {issue_key}"]
+        parts = [f"## Ticket: {issue_key}"]
         if title:
-            parts.append(f"## Jira title\n\n{title}")
+            parts.append(f"## Title\n\n{title}")
         if body:
-            parts.append(f"## Jira description\n\n{body}")
+            parts.append(f"## Description\n\n{body}")
         if not title and not body:
             parts.append("(no summary or description provided)")
         return "\n\n".join(parts)
@@ -158,7 +158,7 @@ class PromptBuilder:
         acceptance_criteria: Optional[str] = None,
         plan_path: Optional[str] = None,
     ) -> str:
-        """Plan mode: ``PLAN_PROMPT.md`` + Jira title + description."""
+        """Plan mode: ``PLAN_PROMPT.md`` + ticket title + description."""
         from src.paths import plans_dir
 
         plan_abs = (plan_path or "").strip() or str(
@@ -169,7 +169,7 @@ class PromptBuilder:
             issue_key=issue_key,
             plan_path=plan_abs,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         if acceptance_criteria and str(acceptance_criteria).strip():
@@ -188,11 +188,11 @@ class PromptBuilder:
         plan_path: Optional[str] = None,
         work_branch: Optional[str] = None,
     ) -> str:
-        """Build mode: implement the plan when it exists, else Jira text.
+        """Build mode: implement the plan when it exists, else ticket text.
 
         ``Mode: build`` is not ``plan_execute``. When a durable plan file
         is present (this ticket or a sibling plan for the same repo /
-        branches), that file is the spec. Jira is context only.
+        branches), that file is the spec. Title/description are context only.
         """
         from src.paths import plans_dir
 
@@ -203,7 +203,7 @@ class PromptBuilder:
             work_branch=work_branch,
             plan_path=plan,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         plan_exists = False
@@ -216,7 +216,7 @@ class PromptBuilder:
                 plan, issue_key=issue_key
             )
             context = (
-                "## Jira context (do not replace the plan)\n\n"
+                "## Ticket context (do not replace the plan)\n\n"
                 "Implement the plan above. Title and description are "
                 "background only unless the plan is missing a detail.\n\n"
                 + jira
@@ -238,7 +238,7 @@ class PromptBuilder:
             issue_key=issue_key,
             work_branch=work_branch,
         )
-        jira = PromptBuilder._jira_title_and_description(
+        jira = PromptBuilder._ticket_title_and_description(
             issue_key, summary, description
         )
         return PromptBuilder._join_blocks(system, jira)
@@ -394,7 +394,7 @@ class PromptBuilder:
         )
         intro = (
             f"This run is on an existing {where} "
-            "(not a new Jira ticket). The repository is already checked out "
+            "(not a new ticket). The repository is already checked out "
             f"on `{source_branch}` (into `{target_branch}`). Resume any "
             "existing OpenCode session for this repo + branch + target.\n\n"
             "Do what **Prompt** says. Do not @mention or ping anyone."
@@ -402,7 +402,7 @@ class PromptBuilder:
         if replied:
             intro = (
                 f"This run is a **thread follow-up** on an existing {where} "
-                "(not a new Jira ticket). The repository is already checked out "
+                "(not a new ticket). The repository is already checked out "
                 f"on `{source_branch}` (into `{target_branch}`). Resume any "
                 "existing OpenCode session for this repo + branch + target.\n\n"
                 "Use **Replied message** as context only. Do what **Prompt** says. "

@@ -36,4 +36,4 @@ an MR (Yaver does that).
 Include `{ISSUE_KEY}` in the commit the way **this repo's** `AGENTS.md`
 and `git log` already do.
 
-The Jira request is below.
+The ticket request is below.

@@ -1414,7 +1414,7 @@ def test_logger_issue_ring_exception(monkeypatch):
 def test_prompt_builder_empty_and_context():
     from src.orchestrator.prompt_builder import PromptBuilder
 
-    body = PromptBuilder._jira_title_and_description("I-1", "", "")
+    body = PromptBuilder._ticket_title_and_description("I-1", "", "")
     assert "no summary" in body.lower() or "I-1" in body
 
     prompt = PromptBuilder.build_build_prompt(
@@ -1424,7 +1424,7 @@ def test_prompt_builder_empty_and_context():
     )
     assert "task body" in prompt
     assert "sum" in prompt
-    assert "Jira description" in prompt
+    assert "## Description" in prompt
 
     p2 = PromptBuilder.build_build_prompt("I-3", "", "t")
     assert "I-3" in p2
