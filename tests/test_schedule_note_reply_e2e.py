@@ -368,7 +368,7 @@ def azure_http(monkeypatch):
     host, port = httpd.server_address
     collection = f"http://{host}:{port}/tfs/DefaultCollection"
     monkeypatch.setattr(settings, "jira_projects", "KAN")
-    monkeypatch.setattr(settings, "azure_host_pats", "")
+    monkeypatch.setattr(settings, "azure_collection_pats", "")
     monkeypatch.setattr(settings, "azure_allowed_hosts", "")
     monkeypatch.setattr(settings, "azure_pat", "azpat-e2e")
     try:

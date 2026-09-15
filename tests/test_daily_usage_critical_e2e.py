@@ -240,7 +240,7 @@ def test_settings_azure_collection_url_keeps_port_for_clone(
     )
     monkeypatch.setattr(settings, "jira_host", "https://jira.onprem.example")
     monkeypatch.setattr(settings, "jira_email", "")
-    monkeypatch.setattr(settings, "azure_host_pats", "")
+    monkeypatch.setattr(settings, "azure_collection_pats", "")
     monkeypatch.setattr(settings, "azure_pat", "")
     monkeypatch.setattr(settings, "azure_allowed_hosts", "")
     if hasattr(settings, "set_azure_host_pat_map"):

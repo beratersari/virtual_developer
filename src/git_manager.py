@@ -828,7 +828,7 @@ class GitManager:
                     f"*Detail:* {safe_err.strip()[:800] or 'git clone failed'}\n\n"
                     "Check that the URL is correct, the project is reachable, "
                     "and a GitLab or Azure DevOps PAT is configured for this host "
-                    "in dashboard Settings (`GITLAB_HOST_PATS` / `AZURE_HOST_PATS`). "
+                    "in dashboard Settings (`GITLAB_HOST_PATS` / Azure collection URL). "
                     "Then move the issue back to *To Do*."
                 ),
                 technical=safe_err,
@@ -964,35 +964,43 @@ class GitManager:
         if not host:
             _once("git PAT lookup fail no host on remote URL")
             return ""
+        if hasattr(settings, "azure_pat_for_collection"):
+            from src.azure.urls import parse_tfs_collection_url
+
+            col = parse_tfs_collection_url(
+                self.normalize_remote_url(url or self.remote_url or "")
+                or (url or self.remote_url or "")
+            )
+            if col:
+                mapped_col = (settings.azure_pat_for_collection(col) or "").strip()
+                if mapped_col:
+                    _once(f"git PAT lookup collection={col} source=collection-map")
+                    return mapped_col
         if hasattr(settings, "azure_pat_for_host"):
             mapped = (settings.azure_pat_for_host(host) or "").strip()
             if mapped:
-                _once(f"git PAT lookup host={host} source=host-map")
+                _once(f"git PAT lookup host={host} source=collection-host")
                 return mapped
-        azure_map = {}
-        if hasattr(settings, "azure_host_pat_map"):
-            try:
-                azure_map = settings.azure_host_pat_map() or {}
-            except Exception:
-                azure_map = {}
         leftover = (getattr(settings, "azure_pat", "") or "").strip()
-        if azure_map:
-            _once(
-                f"git PAT lookup miss host={host} "
-                f"mapped_hosts={sorted(azure_map.keys())}"
-            )
-            return ""
-        if leftover:
+        if leftover and not (
+            hasattr(settings, "azure_collection_pat_map")
+            and settings.azure_collection_pat_map()
+        ):
             _once(f"git PAT lookup host={host} source=leftover-AZURE_PAT")
             return leftover
-        _once(f"git PAT lookup miss host={host} (no map, no leftover)")
+        cols = []
+        if hasattr(settings, "azure_collection_url_list"):
+            cols = list(settings.azure_collection_url_list() or [])
+        _once(
+            f"git PAT lookup miss host={host} collections={cols or '(none)'}"
+        )
         return ""
 
     def _pat_for_remote(self, url: str = "") -> str:
         """Resolve GitLab or Azure PAT for this remote URL (per-host maps).
 
-        Azure ``/_git/`` remotes use only Azure credentials: ``AZURE_HOST_PATS``
-        or leftover ``AZURE_PAT`` / ``AZURE_ALLOWED_HOSTS``. A leftover
+        Azure ``/_git/`` remotes use only Azure credentials:
+        ``AZURE_COLLECTION_PATS`` or leftover ``AZURE_PAT``. A leftover
         ``GITLAB_PAT`` is never sent to TFS.
 
         A lone ``GITLAB_PAT`` / Settings PAT with no host map still
@@ -1024,7 +1032,7 @@ class GitManager:
         if mapping:
             return ""
         # Azure host map must not hide leftover GITLAB_PAT on a GitLab remote.
-        # Mixed shops keep AZURE_HOST_PATS for TFS and GITLAB_PAT for GitLab.
+        # Mixed shops keep AZURE_COLLECTION_PATS for TFS and GITLAB_PAT for GitLab.
         return (getattr(settings, "gitlab_pat", "") or "").strip()
 
     def _assert_remote_host_allowed(self, url: str) -> None:
@@ -1068,18 +1076,20 @@ class GitManager:
                 raise GitCloneError(
                     "*Yaver* refused to authenticate: "
                     "no Azure host→PAT mapping is configured while a PAT is set.\n\n"
-                    "Add this host with a PAT in dashboard Settings (Azure), or set "
-                    "`AZURE_HOST_PATS={\"tfs.example.com\":\"…\"}` "
-                    "(or leftover `AZURE_PAT` + `AZURE_ALLOWED_HOSTS`)."
+                    "Add this collection with a PAT in dashboard Settings (Azure), "
+                    "or set `AZURE_COLLECTION_PATS="
+                    "{\"https://tfs.example.com/tfs/DefaultCollection\":\"…\"}` "
+                    "(or leftover `AZURE_PAT`)."
                 )
             allowed_az = sorted(azure_map.keys()) if azure_map else []
             raise GitCloneError(
                 (
                     f"*Yaver* refused to clone Azure DevOps host `{host}` "
                     "without an Azure PAT.\n\n"
-                    f"Configured Azure hosts: `{', '.join(allowed_az) or '(none)'}`.\n"
-                    "Add this host with a PAT in dashboard Settings (Azure), or set "
-                    "`AZURE_HOST_PATS={\"tfs.example.com\":\"…\"}`. "
+                    f"Configured Azure collections/hosts: "
+                    f"`{', '.join(allowed_az) or '(none)'}`.\n"
+                    "Add the collection URL with a PAT in dashboard Settings "
+                    "(Azure), or set `AZURE_COLLECTION_PATS`. "
                     "A GitLab PAT is never used for TFS."
                 )
             )

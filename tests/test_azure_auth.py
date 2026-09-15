@@ -331,7 +331,9 @@ def test_git_manager_create_mr_routes_azure_to_rest(monkeypatch, tmp_path):
     from src.git_manager import GitManager
 
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "AZURE-SECRET-PAT"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "AZURE-SECRET-PAT"}
+    )
     monkeypatch.setattr("src.git_manager.settings", s)
     gm = GitManager.__new__(GitManager)
     gm.remote_url = "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
@@ -364,7 +366,9 @@ def test_https_url_with_settings_pat_uses_pat_user(monkeypatch):
     from src.git_manager import GitManager
 
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "ab+c/d="})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "ab+c/d="}
+    )
     monkeypatch.setattr("src.git_manager.settings", s)
     gm = GitManager.__new__(GitManager)
     gm.remote_url = "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"

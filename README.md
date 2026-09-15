@@ -383,7 +383,7 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 
 | Variable | Description |
 |----------|-------------|
-| `AZURE_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / PR) |
+| `AZURE_COLLECTION_PATS` | JSON collection URL → PAT (`https://tfs/tfs/DefaultCollection`). Clone / push / PR |
 | `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment, or when Assigned To matches on a work item (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
 | `AZURE_TRIGGER_LABEL` | Optional work-item tags required for New/To Do intake (AND with assignee) |
 

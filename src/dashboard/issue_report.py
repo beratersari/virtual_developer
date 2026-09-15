@@ -391,6 +391,7 @@ def _add_safe_environ(zf: zipfile.ZipFile) -> None:
         "AZURE_PAT",
         "AZURE_WEBHOOK_SECRET",
         "AZURE_HOST_PATS",
+        "AZURE_COLLECTION_PATS",
         "DASHBOARD_PASSWORD",
     }
     out: Dict[str, str] = {}
