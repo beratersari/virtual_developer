@@ -179,9 +179,16 @@ def test_create_scheduled_azure_work_item(tmp_path, monkeypatch):
     from src.state.schedule_store import ScheduleStore
 
     created = {"id": 99, "rev": 1, "fields": {"System.Title": "New WI"}}
+    captured: dict = {}
+    assign_calls: list = []
+
+    def _create(self, project, wtype, fields):
+        captured["fields"] = dict(fields)
+        return created
+
     monkeypatch.setattr(
         "src.azure.client.AzureDevOpsClient.create_work_item",
-        lambda self, project, wtype, fields: created,
+        _create,
     )
     monkeypatch.setattr(
         "src.azure.client.AzureDevOpsClient.update_work_item_fields",
@@ -193,7 +200,17 @@ def test_create_scheduled_azure_work_item(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
-        lambda *a, **k: True,
+        lambda *a, **k: assign_calls.append(a) or True,
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.fetch_pat_myself",
+        lambda **_k: {
+            "name": "CORP\\Yaver",
+            "uniqueName": "CORP\\Yaver",
+            "displayName": "Yaver Bot",
+            "key": "guid-1",
+            "names": ["Yaver Bot", "CORP\\Yaver"],
+        },
     )
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     out = create_scheduled_job(
@@ -211,6 +228,8 @@ def test_create_scheduled_azure_work_item(tmp_path, monkeypatch):
     )
     assert out["ok"] is True
     assert out["issue_key"] == "99"
+    assert captured["fields"]["System.AssignedTo"] == "CORP\\Yaver"
+    assert assign_calls
 
 
 def test_parse_tfs_collection_url():
@@ -355,6 +374,91 @@ def test_schedule_existing_azure_moves_and_assigns(tmp_path):
     tracker.add_labels.assert_not_called()
 
 
+def test_azure_assign_to_pat_user_writes_unique_name():
+    from src.azure.tracker import AzureWorkItemTracker
+
+    client = MagicMock()
+    client.pat = "tok"
+    client.get_work_item.return_value = {"id": 42, "fields": {}}
+    client.update_work_item_fields.return_value = {"id": 42}
+    client.identity_aliases.return_value = []
+    tracker = AzureWorkItemTracker(
+        issue_key="42",
+        host="tfs.example.com",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        project="Demo",
+        work_item_id=42,
+        client=client,
+    )
+    with patch(
+        "src.azure.identity.fetch_bot_identity",
+        return_value={"id": "guid-1", "names": ["Yaver Bot", "CORP\\Yaver"]},
+    ):
+        assert tracker.assign_to_pat_user("42") is True
+    client.update_work_item_fields.assert_called_once()
+    fields = client.update_work_item_fields.call_args.args[2]
+    assert fields["System.AssignedTo"] == "CORP\\Yaver"
+
+
+def test_azure_assign_to_pat_user_falls_back_to_identity_id():
+    from src.azure.tracker import AzureWorkItemTracker
+
+    client = MagicMock()
+    client.pat = "tok"
+    client.get_work_item.return_value = {"id": 42, "fields": {}}
+    client.update_work_item_fields.side_effect = [None, None, {"id": 42}]
+    client.identity_aliases.return_value = []
+    tracker = AzureWorkItemTracker(
+        issue_key="42",
+        host="tfs.example.com",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        project="Demo",
+        work_item_id=42,
+        client=client,
+    )
+    with patch(
+        "src.azure.identity.fetch_bot_identity",
+        return_value={"id": "guid-1", "names": ["Yaver Bot"]},
+    ):
+        assert tracker.assign_to_pat_user("42") is True
+    values = [
+        call.args[2]["System.AssignedTo"]
+        for call in client.update_work_item_fields.call_args_list
+    ]
+    assert "Yaver Bot" in values
+    assert "guid-1" in values
+
+
+def test_azure_assign_to_pat_user_skips_when_already_pat():
+    from src.azure.tracker import AzureWorkItemTracker
+
+    client = MagicMock()
+    client.pat = "tok"
+    client.get_work_item.return_value = {
+        "id": 42,
+        "fields": {
+            "System.AssignedTo": {
+                "displayName": "Yaver Bot",
+                "uniqueName": "CORP\\Yaver",
+            }
+        },
+    }
+    tracker = AzureWorkItemTracker(
+        issue_key="42",
+        host="tfs.example.com",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        project="Demo",
+        work_item_id=42,
+        client=client,
+    )
+    with patch(
+        "src.azure.identity.fetch_bot_identity",
+        return_value={"id": "guid-1", "names": ["Yaver Bot", "CORP\\Yaver"]},
+    ):
+        assert tracker.assign_to_pat_user("42") is True
+    client.update_work_item_fields.assert_not_called()
+
+
 def test_work_item_key_not_pr_key():
     key = azure_work_item_key("Demo", 42)
     assert key == "42"
@@ -468,6 +572,116 @@ def test_operator_assign_still_accepted():
     assert decision.accepted is True
 
 
+def test_fetch_bot_identity_is_per_collection_pat(monkeypatch):
+    from src.azure.identity import fetch_bot_identity, reset_identity_cache
+    from src.config import Settings
+
+    reset_identity_cache()
+    s = Settings()
+    s.set_azure_host_pat_map({})
+    s.azure_collection_pats = (
+        '{"https://tfs.example.com/tfs/CollA":"pat-a",'
+        '"https://tfs.example.com/tfs/CollB":"pat-b"}'
+    )
+    monkeypatch.setattr("src.config.settings", s)
+    seen: list[str] = []
+
+    class _Resp:
+        def __init__(self, uid: str):
+            self.status_code = 200
+            self.content = b"{}"
+            self._uid = uid
+
+        def json(self):
+            return {
+                "authenticatedUser": {
+                    "id": self._uid,
+                    "providerDisplayName": self._uid,
+                    "uniqueName": self._uid,
+                }
+            }
+
+    class _Client:
+        def __init__(self, *a, **k):
+            headers = k.get("headers") or {}
+            self.auth = headers.get("Authorization") or ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, params=None):
+            from src.azure.auth import azure_basic_auth
+
+            if self.auth == azure_basic_auth("pat-a"):
+                seen.append("a")
+                return _Resp("user-a")
+            if self.auth == azure_basic_auth("pat-b"):
+                seen.append("b")
+                return _Resp("user-b")
+            seen.append("other")
+            return _Resp("other")
+
+    monkeypatch.setattr("src.azure.identity.httpx.Client", _Client)
+    a = fetch_bot_identity(
+        collection_url="https://tfs.example.com/tfs/CollA",
+        host="tfs.example.com",
+    )
+    b = fetch_bot_identity(
+        collection_url="https://tfs.example.com/tfs/CollB",
+        host="tfs.example.com",
+    )
+    a2 = fetch_bot_identity(
+        collection_url="https://tfs.example.com/tfs/CollA",
+        host="tfs.example.com",
+    )
+    reset_identity_cache()
+    assert a and a["id"] == "user-a"
+    assert b and b["id"] == "user-b"
+    assert a2 and a2["id"] == "user-a"
+    assert seen == ["a", "b"]
+
+
+def test_pat_ignore_uses_that_collection_identity(monkeypatch):
+    from src.azure.workitems import actor_is_pat_user
+
+    def _ident(*, host="", collection_url="", pat=None):
+        if "CollB" in (collection_url or ""):
+            return {
+                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "names": ["CollB Bot", r"DOMAIN\collb"],
+            }
+        return {
+            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "names": ["CollA Bot", r"DOMAIN\colla"],
+        }
+
+    monkeypatch.setattr("src.azure.workitems.fetch_bot_identity", _ident)
+    actor_b = {
+        "key": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "displayName": "CollB Bot",
+        "uniqueName": r"DOMAIN\collb",
+    }
+    assert (
+        actor_is_pat_user(
+            actor_b,
+            host="tfs.example.com",
+            collection_url="https://tfs.example.com/tfs/CollB",
+        )
+        is True
+    )
+    assert (
+        actor_is_pat_user(
+            actor_b,
+            host="tfs.example.com",
+            collection_url="https://tfs.example.com/tfs/CollA",
+        )
+        is False
+    )
+
+
 def test_ignore_watermark_only_update():
     payload = _wi_payload(
         changed={"System.Watermark": {"oldValue": 1, "newValue": 2}}
@@ -531,6 +745,45 @@ def test_intake_new_assigned_todo():
     assert decision.will_process is True
     assert decision.matched_assignee is True
     assert decision.is_todo is True
+
+
+def test_intake_accepts_active_assigned():
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=12,
+        fields={
+            "System.Title": "X",
+            "System.Description": (
+                "{params}\nRepository: https://x/r.git\n"
+                "Source branch: a\nTarget branch: develop\nMode: build\n{params}"
+            ),
+            "System.State": "Active",
+            "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
+            "System.WorkItemType": "Bug",
+        },
+    )
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "accept"
+    assert decision.will_process is True
+    assert decision.is_todo is False
+    assert decision.is_done is False
+
+
+def test_intake_skips_done_assigned():
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=13,
+        fields={
+            "System.Title": "X",
+            "System.State": "Done",
+            "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
+            "System.WorkItemType": "Bug",
+        },
+    )
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "skip"
+    assert decision.is_done is True
+    assert decision.reason == "done"
 
 
 def test_intake_skips_in_flight_and_plan_ready():
@@ -791,17 +1044,23 @@ def test_ingest_uses_jira_event_path():
         ), patch(
             "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
             return_value=True,
-        ), patch(
+        ) as moved, patch(
+            "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+            return_value=True,
+        ) as assigned, patch(
             "src.config.settings.azure_trigger_user",
             "yaver",
         ):
-            return await proc.ingest_azure_work_item(parsed)
+            out = await proc.ingest_azure_work_item(parsed)
+            return out, moved, assigned
 
     import asyncio
 
-    result = asyncio.run(_run())
+    result, moved, assigned = asyncio.run(_run())
     assert result["ok"] is True
     assert result["kind"] == "work_item"
+    moved.assert_called()
+    assigned.assert_called()
     proc.enqueue_jira_event.assert_awaited_once()
     event = proc.enqueue_jira_event.await_args.args[0]
     assert event["webhookEvent"] == "jira:issue_created"
@@ -917,6 +1176,52 @@ def test_comment_event_plan_execute():
     )
     assert decision.accepted is True
     assert decision.event.plan_handoff == "execute"
+
+
+def test_ingest_plan_execute_assigns_pat_user():
+    from src.azure.workitems import parse_workitem_payload
+    from src.processor import JobProcessor
+    from src.state.models import TaskStatus
+
+    parsed = parse_workitem_payload(_wi_comment_payload())
+    assert parsed is not None
+    parsed.plan_handoff = "execute"
+    proc = JobProcessor.__new__(JobProcessor)
+    proc.state_manager = MagicMock()
+    ready = MagicMock()
+    ready.status = TaskStatus.PLAN_READY
+    ready.metadata = {}
+    proc.state_manager.get_state.return_value = ready
+    proc.enqueue_jira_event = AsyncMock(
+        return_value={
+            "ok": True,
+            "queued": True,
+            "started": False,
+            "issue_key": "42",
+            "status": "queued",
+        }
+    )
+
+    async def _run():
+        with patch(
+            "src.azure.workitems.fetch_work_item_issue",
+            return_value=parsed.issue,
+        ), patch(
+            "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
+            return_value=True,
+        ) as moved, patch(
+            "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+            return_value=True,
+        ) as assigned:
+            out = await proc.ingest_azure_work_item(parsed)
+            return out, moved, assigned
+
+    import asyncio
+
+    result, moved, assigned = asyncio.run(_run())
+    assert result["ok"] is True
+    moved.assert_called()
+    assigned.assert_called()
 
 
 def test_comment_event_plan_refactor_prompt():

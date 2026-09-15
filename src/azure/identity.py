@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
@@ -12,10 +13,16 @@ import httpx
 
 from src.azure.auth import azure_basic_auth
 from src.azure.log import azure_info, azure_warning
-from src.azure.urls import identity_root, identity_roots
+from src.azure.urls import identity_root, identity_roots, parse_tfs_collection_url
 from src.gitlab.mentions import identity_key, normalize_guid, normalize_mention
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _token_fingerprint(token: str) -> str:
+    if not token:
+        return "none"
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
 def identity_name_values(user: Dict[str, Any]) -> List[str]:
@@ -137,11 +144,17 @@ def fetch_bot_identity(
     collection_url: str = "",
     pat: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Cached ``connectionData`` user at the TFS identity root (not collection)."""
+    """Cached ``connectionData`` user for this collection's PAT.
+
+    TFS serves ``connectionData`` at ``/tfs`` (not collection-scoped). The
+    authenticated user is still a function of the PAT, and PATs are per
+    collection — cache by collection URL + token fingerprint, not host root.
+    """
     from src.config import settings
 
+    collection = parse_tfs_collection_url(collection_url)
     roots: List[str] = []
-    for raw in (collection_url, host):
+    for raw in (collection or collection_url, host):
         text = str(raw or "").strip()
         if not text:
             continue
@@ -152,17 +165,18 @@ def fetch_bot_identity(
             text = f"{'http' if local else 'https'}://{text}"
         roots.extend(identity_roots(identity_root(text) or text))
     token = (pat or "").strip()
-    if not token and collection_url and hasattr(settings, "azure_pat_for_collection"):
-        token = (settings.azure_pat_for_collection(collection_url) or "").strip()
-    if not token and host and hasattr(settings, "azure_pat_for_host"):
+    if not token and collection and hasattr(settings, "azure_pat_for_collection"):
+        token = (settings.azure_pat_for_collection(collection) or "").strip()
+    # Host fallback only when we have no collection (PR mention / Settings test).
+    # A known collection must not inherit a sibling collection's PAT.
+    if not token and not collection and host and hasattr(settings, "azure_pat_for_host"):
         parsed = urlparse(host if "://" in host else f"https://{host}")
         h = (parsed.hostname or host).lower()
         token = (settings.azure_pat_for_host(h) or "").strip()
-    cache_key = f"{'|'.join(roots)}|{bool(token)}"
+    cache_key = f"{collection or '|'.join(roots)}|{_token_fingerprint(token)}"
     if cache_key in _CACHE:
         return _CACHE[cache_key] or None
     if not roots or not token:
-        _CACHE[cache_key] = {}
         return None
     headers = {
         "Accept": "application/json",
@@ -189,13 +203,13 @@ def fetch_bot_identity(
                     if user:
                         azure_info(
                             f"mention identity id={user.get('id')} "
-                            f"names={user.get('names')} root={base}"
+                            f"names={user.get('names')} "
+                            f"collection={collection or '-'} root={base}"
                         )
                         _CACHE[cache_key] = user
                         return user
     except Exception as exc:
         azure_warning(f"mention identity lookup failed: {exc}")
-    _CACHE[cache_key] = {}
     return None
 
 

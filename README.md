@@ -145,7 +145,7 @@ Every issue the bot should work on needs a **`{params}` … `{params}`** block i
 
 ```text
 {params}
-Repository: https://gitlab.example.com/group/your-repo.git
+Repository: https://gitlab.example.com/group/your-repo
 Source branch: feature/PROJ-123
 Target branch: develop
 Mode: plan
@@ -276,14 +276,14 @@ Mention the bot on a pull-request comment. Yaver clones with the host PAT (no us
 
 ### Azure Boards work items (webhook)
 
-New work is first assignment on a New item. Moving Active → New while still assigned to the bot does **not** re-queue (unlike Jira To Do return). After a plan, use work-item comments.
+New work is assignment while the item is not Done (New, Active, Doing, …). Done/Closed is ignored. Moving Active → New while still assigned to the bot does **not** re-queue (unlike Jira To Do return). After a plan, use work-item comments.
 
 1. PAT needs **Work Items (Read & Write)** as well as Code.
 2. `.env`: `AZURE_WEBHOOK_ENABLED=true`. Work-item created/updated is always accepted on that URL. Optional `AZURE_TRIGGER_LABEL` is the same AND as `JIRA_TRIGGER_LABEL`.
 3. On the project: Service hooks → Work item created + Work item updated.
    Field filters: **Assigned To**, **Description**. **State** is optional (not used as a rework signal).
    Same URL: `http://<yaver-host>:8080/yaver/webhook/azure`.
-4. Assign a New work item to `AZURE_TRIGGER_USER`. Put `{params}` (repo + branches + Mode) in the description. After a plan, comment `@yaver /planRefactor <prompt>` or `@yaver /planExecute`. Mention without those commands gets a usage note on the work item (not on PRs). A new `Mode: build` item is a direct build.
+4. Assign an open (not Done) work item to `AZURE_TRIGGER_USER`. Put `{params}` (repo + branches + Mode) in the description. After a plan, comment `@yaver /planRefactor <prompt>` or `@yaver /planExecute`. Mention without those commands gets a usage note on the work item (not on PRs). A new `Mode: build` item is a direct build.
 5. Settings → Azure → Work item lookup fetches one ID and shows whether Yaver would process it.
 
 Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
@@ -385,7 +385,7 @@ TLS verify is currently off for typical on-prem certs; do not “fix” that wit
 |----------|-------------|
 | `AZURE_COLLECTION_PATS` | JSON collection URL → PAT (`https://tfs/tfs/DefaultCollection`). Clone / push / PR |
 | `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment, or when Assigned To matches on a work item (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
-| `AZURE_TRIGGER_LABEL` | Optional work-item tags required for New/To Do intake (AND with assignee) |
+| `AZURE_TRIGGER_LABEL` | Optional work-item tags required for open (not Done) intake (AND with assignee) |
 
 Repo URL and branches always come from the issue `{params}` block.
 

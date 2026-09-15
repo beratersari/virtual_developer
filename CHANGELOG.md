@@ -8,6 +8,12 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Changed
+
+- Azure work-item webhooks accept any open board column (Active, Doing,
+  New, …), not only New/To Do. Done/Closed is still ignored. Active → New
+  while assigned still does not re-queue.
+
 ## [0.9.20] — 2026-09-15
 
 ### Added

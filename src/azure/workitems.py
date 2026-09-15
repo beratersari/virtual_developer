@@ -1,7 +1,8 @@
 """Azure DevOps Server 2022.2 work-item intake (webhook, not poll).
 
-Work-item intake is webhook-driven. New work is first assignment on a
-New item. Active → New while still assigned does **not** re-queue.
+Work-item intake is webhook-driven. New work is assignment while the
+item is not Done (New, Active, Doing, …). Done/Closed is ignored.
+Active → New while still assigned does **not** re-queue.
 Plan revise/implement is comment-only (``/planRefactor`` / ``/planExecute``).
 
 Work-item REST uses the same 7.1 / 7.0 fallback as ``AzureDevOpsClient``.
@@ -20,6 +21,7 @@ from urllib.parse import urlparse
 from src.azure.identity import fetch_bot_identity
 from src.azure.keys import azure_work_item_key
 from src.azure.log import azure_info, azure_warning, clip
+from src.azure.urls import parse_tfs_collection_url
 from src.gitlab.mentions import identity_key, normalize_guid, normalize_mention
 from src.azure.webhook import WebhookDecision, _as_dict, _event_type, _header_map, _s
 from src.jira.plan_labels import HANDOFF_EXECUTE, HANDOFF_REFACTOR
@@ -66,6 +68,20 @@ _COMMENT_FIELDS = frozenset({"system.history", "history"})
 # Process-template categories on GET workitemtypes/{type}/states (7.1 / 7.0).
 _TODO_CATEGORIES = frozenset({"proposed", "new"})
 _IN_PROGRESS_CATEGORIES = frozenset({"inprogress", "in progress"})
+_DONE_STATE_NAMES = frozenset(
+    {
+        "done",
+        "closed",
+        "completed",
+        "removed",
+        "cut",
+        "kapatıldı",
+        "kapatildi",
+        "tamamlandı",
+        "tamamlandi",
+        "bitti",
+    }
+)
 
 _COORDS: Dict[str, Dict[str, Any]] = {}
 # TFS often sends workitem.commented *and* a History workitem.updated.
@@ -286,14 +302,14 @@ def _collection_from_payload(payload: Dict[str, Any], resource: Dict[str, Any]) 
     collection = _as_dict(containers.get("collection"))
     base = _s(collection.get("baseUrl") or collection.get("base_url"))
     if base:
-        return base.rstrip("/")
+        return parse_tfs_collection_url(base) or base.rstrip("/")
     url = _s(
         resource.get("url")
         or _as_dict(_as_dict(resource.get("_links")).get("self")).get("href")
         or _as_dict(_as_dict(resource.get("revision")).get("_links")).get("html")
     )
     if "/_apis/" in url:
-        return url.split("/_apis/", 1)[0].rstrip("/")
+        return parse_tfs_collection_url(url) or url.split("/_apis/", 1)[0].rstrip("/")
     return ""
 
 
@@ -373,6 +389,22 @@ def _status_category(state_name: str, category: str = "") -> str:
     if name in {"active", "in progress", "doing", "committed", "wip"}:
         return "indeterminate"
     return ""
+
+
+def work_item_is_done(fields: Optional[Dict[str, Any]]) -> bool:
+    """True for Done/Closed/Completed. Resolved and Active stay eligible."""
+    if not fields or not isinstance(fields, dict):
+        return False
+    status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    name = str((status or {}).get("name") or "").strip().lower()
+    if name in _DONE_STATE_NAMES:
+        return True
+    category = str(
+        ((status or {}).get("statusCategory") or {}).get("key") or ""
+    ).strip().lower()
+    if category == "done" and name not in {"resolved", "resolve"}:
+        return True
+    return False
 
 
 def work_item_fields_to_jira(
@@ -539,6 +571,7 @@ class WorkItemIntakeDecision:
     matched_assignee: bool = False
     matched_label: bool = False
     is_todo: bool = False
+    is_done: bool = False
     will_process: bool = False
 
 
@@ -565,6 +598,8 @@ def evaluate_work_item_intake(
         required_labels=required,
     )
     is_todo = JiraPoller._is_todo_status(fields)
+    is_done = work_item_is_done(fields)
+    board_ok = not is_done
     local_st = getattr(state, "status", None) if state is not None else None
     in_flight = local_st in {
         TaskStatus.PENDING,
@@ -580,6 +615,7 @@ def evaluate_work_item_intake(
             matched_assignee=matched_assignee,
             matched_label=matched_label,
             is_todo=is_todo,
+            is_done=is_done,
         )
 
     # Azure work items never hand off from tags. plan_ready waits for a
@@ -592,24 +628,26 @@ def evaluate_work_item_intake(
             matched_assignee=matched_assignee,
             matched_label=matched_label,
             is_todo=is_todo,
+            is_done=is_done,
         )
 
-    # First sighting only. Do **not** re-queue because the item went
-    # Active → New while still assigned to the bot (Jira To Do return
-    # does not apply on Azure Boards).
-    if should_process and is_todo and state is None:
+    # First sighting: any open column (not Done). Do **not** re-queue
+    # because the item went Active → New while still assigned (Jira To Do
+    # return does not apply on Azure Boards).
+    if should_process and board_ok and state is None:
         return WorkItemIntakeDecision(
             action="accept",
             reason="new",
             matched_assignee=matched_assignee,
             matched_label=matched_label,
             is_todo=is_todo,
+            is_done=is_done,
             will_process=True,
         )
 
     if (
         should_process
-        and is_todo
+        and board_ok
         and local_st == TaskStatus.ERROR
         and bool((getattr(state, "metadata", None) or {}).get("requeue_eligible"))
     ):
@@ -624,15 +662,17 @@ def evaluate_work_item_intake(
                 matched_assignee=matched_assignee,
                 matched_label=matched_label,
                 is_todo=is_todo,
+                is_done=is_done,
                 will_process=True,
             )
 
     return WorkItemIntakeDecision(
         action="skip",
-        reason="not eligible",
+        reason="not eligible" if board_ok else "done",
         matched_assignee=matched_assignee,
         matched_label=matched_label,
         is_todo=is_todo,
+        is_done=is_done,
     )
 
 
@@ -732,8 +772,8 @@ def format_workitem_plan_usage_note(bot_name: str = "yaver") -> str:
         "of these in the same comment.\n\n"
         "- `/planRefactor <prompt>` — revise the waiting plan\n"
         "- `/planExecute` — implement the waiting plan\n\n"
-        "New work still starts by assigning this item to me while it is New "
-        "(or open a new Mode: build item)."
+        "New work still starts by assigning this item to me while it is "
+        "not Done (or open a new Mode: build item)."
     )
 
 
@@ -1259,6 +1299,7 @@ def lookup_work_item_view(
         "matched_assignee": decision.matched_assignee,
         "matched_label": decision.matched_label,
         "is_todo": decision.is_todo,
+        "is_done": decision.is_done,
         "will_process": decision.will_process,
         "action": decision.action,
         "reason": decision.reason,
@@ -1286,6 +1327,7 @@ __all__ = [
     "decide_azure_workitem_comment_webhook",
     "decide_azure_workitem_webhook",
     "evaluate_work_item_intake",
+    "work_item_is_done",
     "extract_workitem_comment_text",
     "format_workitem_plan_usage_note",
     "is_azure_workitem_comment_event",

@@ -1057,7 +1057,11 @@ def _create_scheduled_azure_work_item(
     """Create a TFS work item + local schedule (same picker as Jira New)."""
     from src.azure.client import AzureDevOpsClient
     from src.azure.keys import azure_work_item_key
-    from src.azure.tracker import AzureWorkItemTracker
+    from src.azure.tracker import (
+        AzureWorkItemTracker,
+        fetch_pat_myself,
+        pat_assign_candidates,
+    )
     from src.azure.workitems import remember_work_item
 
     project = (azure_project or "").strip()
@@ -1077,14 +1081,31 @@ def _create_scheduled_azure_work_item(
         backend=backend,
     )
     ado = AzureDevOpsClient(collection_url=collection_url)
-    created = ado.create_work_item(
-        project,
-        wtype,
-        {
-            "System.Title": title,
-            "System.Description": issue_description,
-        },
+    fields: Dict[str, Any] = {
+        "System.Title": title,
+        "System.Description": issue_description,
+    }
+    me = fetch_pat_myself(
+        host=ado.host,
+        collection_url=collection_url,
+        pat=ado.pat,
+        client=ado,
     )
+    assign_values = pat_assign_candidates(me)
+    first_assign = next(
+        (v for v in assign_values if isinstance(v, str) and v.strip()),
+        None,
+    )
+    if first_assign:
+        fields["System.AssignedTo"] = first_assign
+    created = ado.create_work_item(project, wtype, fields)
+    if (not created or not created.get("id")) and "System.AssignedTo" in fields:
+        logger.warning(
+            f"Azure create with AssignedTo={first_assign!r} failed; "
+            "retrying without assignee"
+        )
+        fields.pop("System.AssignedTo", None)
+        created = ado.create_work_item(project, wtype, fields)
     if not created or not created.get("id"):
         return {
             "ok": False,

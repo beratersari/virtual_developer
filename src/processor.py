@@ -3472,14 +3472,22 @@ class JobProcessor:
         from src.jira.poller import JiraPoller
 
         is_todo = JiraPoller._is_todo_status(fields)
+        azure_wi = self._is_azure_workitem_triggered(issue_key)
+        if azure_wi:
+            from src.azure.workitems import work_item_is_done
+
+            board_ok = not work_item_is_done(fields)
+        else:
+            board_ok = is_todo
 
         # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
         # (poller already required a trigger) resets and runs again.
+        # Azure work items: any non-Done column (Active included).
         # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
-        # Do NOT auto-reprocess while the board is still In Progress (that
+        # Do NOT auto-reprocess Jira while the board is still In Progress (that
         # caused infinite "no new commits" loops). plan_ready is not rework.
         if state.status in self.TERMINAL_STATUSES:
-            if is_todo:
+            if board_ok:
                 meta = state.metadata or {}
                 if state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED):
                     if not meta.get("requeue_eligible"):
@@ -3490,19 +3498,19 @@ class JobProcessor:
                         return False, f"{state.status.value} without requeue_eligible"
                 logger.info(
                     f"Reprocessing {issue_key} from terminal state {state.status.value} "
-                    f"(Jira status '{status_name}' is To Do, requeue_eligible="
+                    f"(board '{status_name}' eligible, requeue_eligible="
                     f"{bool(meta.get('requeue_eligible'))})"
                 )
                 self._reset_for_reprocess(issue_key)
                 return await self._handle_issue_created(event)
             logger.debug(
-                f"{issue_key} is {state.status.value}; Jira status "
-                f"'{status_name}' is not To Do — not reprocessing"
+                f"{issue_key} is {state.status.value}; board status "
+                f"'{status_name}' is not eligible — not reprocessing"
             )
-            return False, f"terminal {state.status.value}; Jira not To Do"
+            return False, f"terminal {state.status.value}; board not eligible"
 
-        # Non-terminal waiting: re-kick PENDING if still To Do
-        if is_todo and state.status == TaskStatus.PENDING:
+        # Non-terminal waiting: re-kick PENDING if the board is still open
+        if board_ok and state.status == TaskStatus.PENDING:
             logger.info(f"{issue_key} is PENDING and still To Do, starting work...")
             return await self._handle_issue_created(event)
 
@@ -4156,23 +4164,26 @@ class JobProcessor:
             if state is not None and coords:
                 self.state_manager.update_state(key, metadata=tracker_metadata(coords))
             if cmd == HANDOFF_EXECUTE and coords:
+                exe_tracker = AzureWorkItemTracker(
+                    issue_key=key,
+                    host=str(coords.get("host") or event.host or ""),
+                    collection_url=str(
+                        coords.get("collection_url") or event.collection_url or ""
+                    ),
+                    project=str(coords.get("project") or event.project or ""),
+                    work_item_id=int(
+                        coords.get("work_item_id") or event.work_item_id
+                    ),
+                )
                 try:
-                    from src.azure.tracker import AzureWorkItemTracker
-
-                    AzureWorkItemTracker(
-                        issue_key=key,
-                        host=str(coords.get("host") or event.host or ""),
-                        collection_url=str(
-                            coords.get("collection_url") or event.collection_url or ""
-                        ),
-                        project=str(coords.get("project") or event.project or ""),
-                        work_item_id=int(
-                            coords.get("work_item_id") or event.work_item_id
-                        ),
-                    ).transition_to_in_progress(key)
+                    exe_tracker.transition_to_in_progress(key)
                     self._record_workitem_board_status(key, "in progress")
                 except Exception as exc:
                     azure_warning(f"{key}: planExecute In Progress failed: {exc}")
+                try:
+                    exe_tracker.assign_to_pat_user(key)
+                except Exception as exc:
+                    azure_warning(f"{key}: PAT assign soft-failed: {exc}")
             payload = event.to_jira_event(
                 is_update=True, plan_handoff=cmd or HANDOFF_REFACTOR
             )
@@ -4196,7 +4207,8 @@ class JobProcessor:
         azure_info(
             f"workitem ingest key={key} action={decision.action} "
             f"reason={decision.reason!r} todo={decision.is_todo} "
-            f"assignee={decision.matched_assignee} kinds={event.change_kinds}"
+            f"done={decision.is_done} assignee={decision.matched_assignee} "
+            f"kinds={event.change_kinds}"
         )
         if decision.action == "skip":
             return {
@@ -4227,6 +4239,11 @@ class JobProcessor:
                     self._record_workitem_board_status(key, "in progress")
             except Exception as exc:
                 azure_warning(f"{key}: work item In Progress failed: {exc}")
+            # Same as JiraPoller.process_issue: assign at accept, not only at start.
+            try:
+                tracker.assign_to_pat_user(key)
+            except Exception as exc:
+                azure_warning(f"{key}: PAT assign soft-failed: {exc}")
 
         if state is not None and coords:
             self.state_manager.update_state(key, metadata=tracker_metadata(coords))

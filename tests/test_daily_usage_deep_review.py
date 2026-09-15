@@ -370,10 +370,6 @@ def test_f3_poller_must_honor_pending_schedule_beyond_newest_500(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="fetch_bot_identity caches empty {} on failure keyed only by bool(token)",
-)
 def test_f4_failed_azure_identity_lookup_must_retry_on_next_comment(monkeypatch):
     """TFS down / bad PAT caches ``{}`` under ``roots|True``.
 
