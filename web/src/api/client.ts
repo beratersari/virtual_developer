@@ -454,6 +454,8 @@ export function createSchedule(body: ScheduleCreateBody) {
   if (body.dispatch_now) payload.dispatch_now = true
   if (body.model) payload.model = body.model
   if (body.backend) payload.backend = body.backend
+  if (body.collection_url) payload.collection_url = body.collection_url
+  if (body.azure_project) payload.azure_project = body.azure_project
   return request<{
     ok: boolean
     schedule: ScheduleItem
@@ -539,6 +541,15 @@ export function schedulePrFollowup(body: SchedulePrBody) {
     dispatched?: boolean
     dispatch_error?: string
   }>('/api/schedules/pr', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function fetchAzureProjects(collectionUrl: string) {
+  const params = new URLSearchParams({
+    collection_url: collectionUrl.trim(),
+  })
+  return request<{ ok: boolean; projects: string[]; collection_url?: string }>(
+    `/api/azure/projects?${params.toString()}`,
+  )
 }
 
 export function previewScheduleIssue(

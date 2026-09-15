@@ -803,36 +803,8 @@ class Settings(BaseSettings):
         return out
 
     def azure_collection_url_list(self) -> List[str]:
-        """Saved TFS collection URLs (never host-only or ``/tfs`` without a name)."""
-        from src.azure.urls import parse_tfs_collection_url
-
-        out: List[str] = []
-        seen: set[str] = set()
-        for url in self.azure_collection_pat_map():
-            if url not in seen:
-                seen.add(url)
-                out.append(url)
-        raw = (self.azure_collection_urls or "").strip()
-        data: Any = raw
-        if raw:
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = parse_tfs_collection_url(raw)
-                data = [parsed] if parsed else []
-        rows: List[Any]
-        if isinstance(data, dict):
-            rows = list(data.values())
-        elif isinstance(data, list):
-            rows = data
-        else:
-            rows = []
-        for item in rows:
-            url = parse_tfs_collection_url(str(item or ""))
-            if url and url not in seen:
-                seen.add(url)
-                out.append(url)
-        return out
+        """Collection URLs from ``AZURE_COLLECTION_PATS`` keys only (like GitLab)."""
+        return list(self.azure_collection_pat_map().keys())
 
     def azure_host_pat_map(self) -> Dict[str, str]:
         """Hostname → PAT derived from collection URLs (not AZURE_HOST_PATS)."""

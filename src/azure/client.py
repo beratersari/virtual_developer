@@ -118,8 +118,8 @@ class AzureDevOpsClient:
         collection_url: Optional[str] = None,
         api_base: Optional[str] = None,
     ) -> None:
-        self.host = _normalize_host(host or "")
         self.collection_url = (collection_url or "").rstrip("/")
+        self.host = _normalize_host(host or self.collection_url or "")
         if api_base:
             self.api_base = api_base.rstrip("/")
         elif self.collection_url:
@@ -131,6 +131,14 @@ class AzureDevOpsClient:
         else:
             self.api_base = ""
         self.pat = (pat or "").strip()
+        if (
+            not self.pat
+            and self.collection_url
+            and hasattr(settings, "azure_pat_for_collection")
+        ):
+            self.pat = (
+                settings.azure_pat_for_collection(self.collection_url) or ""
+            ).strip()
         if not self.pat and self.host and hasattr(settings, "azure_pat_for_host"):
             self.pat = (settings.azure_pat_for_host(self.host) or "").strip()
         if not self.pat and self.host:
@@ -841,6 +849,96 @@ class AzureDevOpsClient:
                 return None
         except Exception as exc:
             azure_warning(f"http PATCH error url={url} err={exc}")
+            return None
+
+    def list_projects(self) -> List[str]:
+        """Team project names in this collection (7.1 then 7.0)."""
+        if not self.api_base:
+            return []
+        data = self._get_json(f"{self.api_base}/_apis/projects", params={"$top": 200})
+        rows: List[Any] = []
+        if isinstance(data, dict):
+            raw = data.get("value")
+            if isinstance(raw, list):
+                rows = raw
+        names: List[str] = []
+        for row in rows:
+            if isinstance(row, dict):
+                name = str(row.get("name") or "").strip()
+                if name:
+                    names.append(name)
+        azure_info(f"list_projects count={len(names)} collection={self.api_base}")
+        return names
+
+    def create_work_item(
+        self,
+        project: str,
+        work_item_type: str,
+        fields: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """POST a work item (JSON Patch). Returns the created item dict."""
+        if not self.api_base or not fields:
+            return None
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        wtype = quote(unquote(str(work_item_type or "Task").strip()), safe="")
+        if not proj or not wtype:
+            return None
+        ops = []
+        for path, value in fields.items():
+            name = str(path or "").strip()
+            if not name:
+                continue
+            if not name.startswith("/"):
+                name = f"/fields/{name}"
+            ops.append({"op": "add", "path": name, "value": value})
+        if not ops:
+            return None
+        url = f"{self.api_base}/{proj}/_apis/wit/workitems/${wtype}"
+        vers = [_API_VERSION, _API_VERSION_FALLBACK]
+        headers = dict(self._headers())
+        headers["Content-Type"] = "application/json-patch+json"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                last_status = 0
+                last_ver = vers[0]
+                last_body = ""
+                for ver in vers:
+                    resp = client.post(
+                        url,
+                        headers=headers,
+                        params={"api-version": ver},
+                        json=ops,
+                    )
+                    last_status = resp.status_code
+                    last_ver = ver
+                    last_body = resp.text
+                    if resp.status_code in (200, 201):
+                        azure_info(
+                            "http "
+                            + http_detail(
+                                method="POST",
+                                url=url,
+                                status=resp.status_code,
+                                api_version=ver,
+                            )
+                        )
+                        data = resp.json() if resp.content else {}
+                        return data if isinstance(data, dict) else None
+                    if resp.status_code not in (400, 404, 415):
+                        break
+                azure_warning(
+                    "http "
+                    + http_detail(
+                        method="POST",
+                        url=url,
+                        status=last_status,
+                        api_version=last_ver,
+                        body=last_body,
+                    )
+                )
+                return None
+        except Exception as exc:
+            azure_warning(f"create_work_item error {project}/{wtype}: {exc}")
             return None
 
     def get_work_item(

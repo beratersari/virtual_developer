@@ -1077,7 +1077,7 @@ def fetch_work_item_issue(
         f"collection={collection or host or '-'}"
     )
     ado = client or AzureDevOpsClient(
-        host=host or None,
+        host=host or collection or None,
         collection_url=collection or None,
     )
     raw = ado.get_work_item(project, iid)

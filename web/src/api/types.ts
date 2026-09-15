@@ -390,6 +390,8 @@ export type ScheduleCreateBody = {
   dispatch_now?: boolean
   model?: string
   backend?: string
+  collection_url?: string
+  azure_project?: string
 }
 
 export type JiraIssueType = {

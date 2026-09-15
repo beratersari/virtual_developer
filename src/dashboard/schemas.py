@@ -133,6 +133,16 @@ class ScheduleCreateRequest(BaseModel):
     model: str = Field(default="", max_length=200)
     # Optional worker: opencode | codex (empty = settings.agent_backend)
     backend: str = Field(default="", max_length=40)
+    collection_url: str = Field(
+        default="",
+        max_length=500,
+        description="TFS collection URL — when set, create an Azure work item",
+    )
+    azure_project: str = Field(
+        default="",
+        max_length=255,
+        description="Azure team project for the new work item",
+    )
 
 
 class ScheduleMrRequest(BaseModel):
