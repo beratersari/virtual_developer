@@ -235,17 +235,166 @@ def _plain_template_error(jira_wiki_msg: str) -> str:
     return lines[0][:400]
 
 
+def _preview_from_loaded_issue(
+    issue: Dict[str, Any],
+    *,
+    key: str,
+) -> Dict[str, Any]:
+    fields = issue.get("fields") or {}
+    summary = (fields.get("summary") or "").strip()
+    description = _description_to_text(fields.get("description"))
+    status_name = ""
+    st = fields.get("status") or {}
+    if isinstance(st, dict):
+        status_name = (st.get("name") or "").strip()
+    itype_name = ""
+    it = fields.get("issuetype") or {}
+    if isinstance(it, dict):
+        itype_name = (it.get("name") or "").strip()
+    labels = fields.get("labels") or []
+    if not isinstance(labels, list):
+        labels = []
+
+    peek = peek_issue_git_fields(summary, description)
+    spec, err = parse_issue_git_spec(summary, description)
+    base = {
+        "issue_key": str(issue.get("key") or key).upper(),
+        "title": summary,
+        "description": description,
+        "prompt": strip_params_block(description),
+        "jira_status": status_name,
+        "issue_type": itype_name,
+        "labels": [str(x) for x in labels],
+        "repository_url": peek.get("repository_url") or "",
+        "source_branch": peek.get("source_branch") or "",
+        "target_branch": peek.get("target_branch") or "",
+        "mode": peek.get("mode") or "",
+        "model": peek.get("model") or "",
+        "backend": peek.get("backend") or "",
+    }
+    azure = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
+    if azure:
+        base["collection_url"] = azure.get("collection_url") or ""
+        base["work_item_id"] = azure.get("work_item_id") or 0
+        base["azure"] = True
+    if err or spec is None:
+        return {
+            **base,
+            "ok": False,
+            "error": _plain_template_error(err or "Invalid {params} template"),
+            "template_valid": False,
+            "message": (
+                "Issue loaded. {params} is missing or invalid — "
+                "pick project and branches, then Schedule or Run now."
+            ),
+        }
+
+    return {
+        **base,
+        "ok": True,
+        "template_valid": True,
+        "repository_url": spec.repository_url,
+        "source_branch": spec.source_branch,
+        "target_branch": spec.target_branch,
+        "mode": spec.mode or "",
+        "model": spec.model or "",
+        "backend": spec.backend or "",
+        "message": "Issue found and template is valid. Choose a run time to schedule.",
+    }
+
+
+def preview_azure_work_item(
+    *,
+    issue_key: str = "",
+    collection_url: str = "",
+    work_item_id: int = 0,
+) -> Dict[str, Any]:
+    """Load an Azure Boards work item for Scheduled → Existing issue."""
+    from src.azure.keys import is_azure_work_item_key, parse_azure_work_item_key
+    from src.azure.urls import parse_tfs_collection_url
+    from src.azure.workitems import fetch_work_item_issue, work_item_coords
+
+    key = (issue_key or "").strip().upper()
+    collection = parse_tfs_collection_url(collection_url or "")
+    iid = 0
+    try:
+        iid = int(work_item_id or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    if iid <= 0 and is_azure_work_item_key(key):
+        _slug, iid = parse_azure_work_item_key(key)
+    if not collection and is_azure_work_item_key(key):
+        coords = work_item_coords(key)
+        if coords:
+            collection = parse_tfs_collection_url(
+                str(coords.get("collection_url") or "")
+            )
+            if iid <= 0:
+                iid = int(coords.get("work_item_id") or 0)
+    if not collection:
+        return {
+            "ok": False,
+            "error": (
+                "TFS collection URL is required "
+                "(https://host/tfs/<Collection>)"
+            ),
+            "issue_key": key,
+        }
+    if iid <= 0:
+        return {
+            "ok": False,
+            "error": "work item id is required",
+            "issue_key": key,
+        }
+    project = ""
+    if is_azure_work_item_key(key):
+        coords = work_item_coords(key) or {}
+        project = str(coords.get("project") or "")
+    issue = fetch_work_item_issue(
+        host="",
+        project=project,
+        work_item_id=iid,
+        collection_url=collection,
+    )
+    if not issue or not issue.get("key"):
+        return {
+            "ok": False,
+            "error": (
+                f"Could not load work item {iid} on {collection}. "
+                "Check the collection URL, id, and Work Items (Read) on the PAT."
+            ),
+            "issue_key": key,
+            "collection_url": collection,
+            "work_item_id": iid,
+        }
+    return _preview_from_loaded_issue(issue, key=str(issue.get("key") or key))
+
+
 def preview_existing_issue(
     issue_key: str,
     *,
     jira_client: Any = None,
+    collection_url: str = "",
+    work_item_id: int = 0,
 ) -> Dict[str, Any]:
-    """Fetch an existing Jira issue and validate the ``{params}`` template.
+    """Fetch an existing Jira issue or Azure work item and validate ``{params}``.
 
     Hard-fails if the issue cannot be loaded or the template is invalid.
     Does not write a schedule record.
     """
+    from src.azure.keys import is_azure_work_item_key
+
     key = (issue_key or "").strip().upper()
+    if (
+        (collection_url or "").strip()
+        or int(work_item_id or 0) > 0
+        or is_azure_work_item_key(key)
+    ):
+        return preview_azure_work_item(
+            issue_key=key,
+            collection_url=collection_url,
+            work_item_id=work_item_id,
+        )
     if not key:
         return {"ok": False, "error": "issue_key is required"}
 
@@ -266,62 +415,7 @@ def preview_existing_issue(
                 "error": f"Could not load issue {key}: {detail}",
                 "issue_key": key,
             }
-        fields = issue.get("fields") or {}
-        summary = (fields.get("summary") or "").strip()
-        description = _description_to_text(fields.get("description"))
-        status_name = ""
-        st = fields.get("status") or {}
-        if isinstance(st, dict):
-            status_name = (st.get("name") or "").strip()
-        itype_name = ""
-        it = fields.get("issuetype") or {}
-        if isinstance(it, dict):
-            itype_name = (it.get("name") or "").strip()
-        labels = fields.get("labels") or []
-        if not isinstance(labels, list):
-            labels = []
-
-        peek = peek_issue_git_fields(summary, description)
-        spec, err = parse_issue_git_spec(summary, description)
-        base = {
-            "issue_key": str(issue.get("key") or key).upper(),
-            "title": summary,
-            "description": description,
-            "prompt": strip_params_block(description),
-            "jira_status": status_name,
-            "issue_type": itype_name,
-            "labels": [str(x) for x in labels],
-            "repository_url": peek.get("repository_url") or "",
-            "source_branch": peek.get("source_branch") or "",
-            "target_branch": peek.get("target_branch") or "",
-            "mode": peek.get("mode") or "",
-            "model": peek.get("model") or "",
-            "backend": peek.get("backend") or "",
-        }
-        if err or spec is None:
-            return {
-                **base,
-                "ok": False,
-                "error": _plain_template_error(err or "Invalid {params} template"),
-                "template_valid": False,
-                "message": (
-                    "Issue loaded. {params} is missing or invalid — "
-                    "pick project and branches, then Schedule or Run now."
-                ),
-            }
-
-        return {
-            **base,
-            "ok": True,
-            "template_valid": True,
-            "repository_url": spec.repository_url,
-            "source_branch": spec.source_branch,
-            "target_branch": spec.target_branch,
-            "mode": spec.mode or "",
-            "model": spec.model or "",
-            "backend": spec.backend or "",
-            "message": "Issue found and template is valid. Choose a run time to schedule.",
-        }
+        return _preview_from_loaded_issue(issue, key=key)
     finally:
         if close_client and hasattr(client, "close"):
             try:
@@ -365,9 +459,15 @@ def schedule_existing_issue(
         return {"ok": False, "error": f"invalid scheduled_at: {e}"}
     scheduled_iso = at_dt.isoformat(timespec="seconds")
 
+    from src.azure.keys import is_azure_work_item_key
+    from src.azure.tracker import azure_tracker_for
+
+    azure_wi = is_azure_work_item_key(key)
     client = jira_client
     close_client = False
-    if client is None:
+    if client is None and azure_wi:
+        client = azure_tracker_for(key)
+    if client is None and not azure_wi:
         from src.jira.client import create_jira_client
 
         client = create_jira_client()
@@ -485,19 +585,21 @@ def schedule_existing_issue(
             logger.warning(f"{key}: In Progress soft-failed: {e}")
 
         # Soft: assign to the PAT user so the board shows who is handling it
-        try:
-            from src.jira.client import assign_to_pat_user
+        if not azure_wi:
+            try:
+                from src.jira.client import assign_to_pat_user
 
-            assign_to_pat_user(client, key)
-        except Exception as e:
-            logger.warning(f"{key}: PAT assign soft-failed: {e}")
+                assign_to_pat_user(client, key)
+            except Exception as e:
+                logger.warning(f"{key}: PAT assign soft-failed: {e}")
 
-        # Soft: ensure schedule label
-        try:
-            if hasattr(client, "add_labels"):
-                client.add_labels(key, [SCHEDULE_LABEL])
-        except Exception as e:
-            logger.warning(f"{key}: add_labels soft-failed: {e}")
+        # Soft: ensure schedule label (Jira only; Azure work items do not use tags)
+        if not azure_wi:
+            try:
+                if hasattr(client, "add_labels"):
+                    client.add_labels(key, [SCHEDULE_LABEL])
+            except Exception as e:
+                logger.warning(f"{key}: add_labels soft-failed: {e}")
 
         ss = store or schedule_store
         # Avoid duplicate pending schedules for the same issue
@@ -1846,8 +1948,13 @@ async def _dispatch_claimed_schedule(
             )
             return
         if event is None:
+            from src.azure.keys import is_azure_work_item_key
+            from src.azure.tracker import azure_tracker_for
+
             client = jira_client
-            if client is None:
+            if client is None and is_azure_work_item_key(issue_key):
+                client = azure_tracker_for(issue_key)
+            if client is None and not is_azure_work_item_key(issue_key):
                 client = getattr(processor, "jira_client", None)
             issue = await asyncio.to_thread(
                 _issue_payload_for_dispatch,

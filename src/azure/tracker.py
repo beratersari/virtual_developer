@@ -125,6 +125,23 @@ class AzureWorkItemTracker:
             issue["fields"] = slim
         return issue
 
+    def update_issue(
+        self,
+        issue_key: str,
+        fields: Optional[Dict[str, Any]] = None,
+        **_kwargs: Any,
+    ) -> bool:
+        payload = dict(fields or {})
+        desc = payload.get("description")
+        if desc is None:
+            return True
+        posted = self.client.update_work_item_fields(
+            self.project,
+            self.work_item_id,
+            {"System.Description": desc},
+        )
+        return posted is not None
+
     def add_comment(self, issue_key: str, body: str) -> Optional[Dict[str, Any]]:
         posted = self.client.add_work_item_comment(
             self.project, self.work_item_id, body

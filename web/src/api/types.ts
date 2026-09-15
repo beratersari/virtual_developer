@@ -294,6 +294,9 @@ export type SchedulePreview = {
   backend?: string
   message?: string
   error?: string
+  collection_url?: string
+  work_item_id?: number
+  azure?: boolean
 }
 
 export type SchedulesPayload = {

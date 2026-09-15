@@ -198,6 +198,93 @@ def test_settings_reject_hostname_only_azure(monkeypatch):
         assert "collection" in str(exc).lower()
 
 
+def test_schedule_preview_azure_work_item():
+    from src.scheduler.service import preview_existing_issue
+
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=42,
+        fields={
+            "System.Title": "Do the thing",
+            "System.Description": (
+                "{params}\nRepository: https://tfs.example.com/tfs/DefaultCollection/Demo/_git/app\n"
+                "Source branch: feature/a\nTarget branch: develop\nMode: build\n{params}"
+            ),
+            "System.State": "New",
+            "System.AssignedTo": {"displayName": "Yaver"},
+            "System.WorkItemType": "User Story",
+        },
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        host="tfs.example.com",
+    )
+    with patch(
+        "src.azure.workitems.fetch_work_item_issue",
+        return_value=issue,
+    ):
+        out = preview_existing_issue(
+            "",
+            collection_url="https://tfs.example.com/tfs/DefaultCollection",
+            work_item_id=42,
+        )
+    assert out["ok"] is True
+    assert out["issue_key"] == "WIT-DEMO-42"
+    assert out["template_valid"] is True
+    assert out["mode"] == "build"
+
+
+def test_schedule_preview_azure_requires_collection():
+    from src.azure import workitems as wit
+    from src.scheduler.service import preview_existing_issue
+
+    wit._COORDS.pop("WIT-NOCOORDS-1", None)
+    out = preview_existing_issue("WIT-NOCOORDS-1")
+    assert out["ok"] is False
+    assert "collection" in (out.get("error") or "").lower()
+
+
+def test_schedule_existing_azure_skips_jira_assign(tmp_path):
+    from src.scheduler.service import schedule_existing_issue
+    from src.state.schedule_store import ScheduleStore
+
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=42,
+        fields={
+            "System.Title": "Do the thing",
+            "System.Description": (
+                "{params}\nRepository: https://x/r.git\n"
+                "Source branch: a\nTarget branch: develop\nMode: build\n{params}"
+            ),
+            "System.State": "New",
+            "System.WorkItemType": "Bug",
+        },
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+    )
+    tracker = MagicMock()
+    tracker.get_issue.return_value = issue
+    tracker.transition_to_in_progress.return_value = True
+    tracker.update_issue.return_value = True
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    with patch(
+        "src.azure.workitems.fetch_work_item_issue",
+        return_value=issue,
+    ), patch(
+        "src.azure.tracker.azure_tracker_for",
+        return_value=tracker,
+    ), patch(
+        "src.jira.client.assign_to_pat_user",
+    ) as assign:
+        out = schedule_existing_issue(
+            "WIT-DEMO-42",
+            scheduled_at="2099-01-01T10:00:00",
+            store=store,
+        )
+    assert out["ok"] is True
+    assert out["issue_key"] == "WIT-DEMO-42"
+    assign.assert_not_called()
+    tracker.add_labels.assert_not_called()
+
+
 def test_work_item_key_not_pr_key():
     key = azure_work_item_key("Demo", 42)
     assert key == "WIT-DEMO-42"
@@ -616,6 +703,39 @@ def test_lookup_endpoint(monkeypatch):
     resp = client.post(
         "/api/azure/work-item",
         json={
+            "collection_url": "https://tfs.example.com/tfs/DefaultCollection",
+            "work_item_id": 12,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["issue_key"] == "WIT-DEMO-12"
+
+
+def test_http_schedule_preview_azure_work_item(monkeypatch):
+    from src.dashboard.api import create_dashboard_app
+
+    monkeypatch.setattr(
+        "src.dashboard.api.preview_existing_issue",
+        lambda issue_key="", collection_url="", work_item_id=0, **_k: {
+            "ok": True,
+            "issue_key": "WIT-DEMO-12",
+            "title": "Looked up",
+            "template_valid": True,
+            "repository_url": "https://x/r.git",
+            "source_branch": "a",
+            "target_branch": "develop",
+            "mode": "build",
+            "azure": True,
+        },
+    )
+    app = create_dashboard_app()
+    app.state.processor = MagicMock()
+    client = TestClient(app)
+    resp = client.get(
+        "/api/schedules/preview",
+        params={
             "collection_url": "https://tfs.example.com/tfs/DefaultCollection",
             "work_item_id": 12,
         },

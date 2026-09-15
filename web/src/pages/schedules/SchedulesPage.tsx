@@ -259,7 +259,9 @@ export function SchedulesPage() {
             ? 'Does not close the merge request or delete posted notes.'
             : rows.find((s) => s.schedule_id === cancelId)?.source === 'azure_pr'
               ? 'Does not close the pull request or delete posted comments.'
-              : 'Does not delete the Jira issue.'
+              : rows.find((s) => s.schedule_id === cancelId)?.issue_key?.startsWith('WIT-')
+                ? 'Does not delete the Azure work item.'
+                : 'Does not delete the Jira issue.'
         }
         confirmLabel="Cancel it"
         danger
@@ -754,6 +756,10 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
 
 function Existing({ onDone }: { onDone: () => void }) {
   const live = useLive()
+  const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
+  const collections = live.settings?.azure_collection_urls || []
+  const [collection, setCollection] = useState('')
+  const [witId, setWitId] = useState('')
   const [key, setKey] = useState('')
   const [preview, setPreview] = useState<SchedulePreview | null>(null)
   const [prompt, setPrompt] = useState('')
@@ -815,11 +821,22 @@ function Existing({ onDone }: { onDone: () => void }) {
     if (p.mode === 'plan' || p.mode === 'build' || p.mode === 'test') setMode(p.mode)
   }
 
+  useEffect(() => {
+    if (collection || !collections.length) return
+    setCollection(collections[0] || '')
+  }, [collections, collection])
+
   const get = async () => {
     setErr(null)
     setLooking(true)
     try {
-      const p = await previewScheduleIssue(key.trim().toUpperCase())
+      const p =
+        tracker === 'azure'
+          ? await previewScheduleIssue('', {
+              collection_url: collection.trim(),
+              work_item_id: Number(witId.trim()),
+            })
+          : await previewScheduleIssue(key.trim().toUpperCase())
       setPreview(p)
       setModelsLoading(true)
       setKey(p.issue_key || key)
@@ -882,14 +899,95 @@ function Existing({ onDone }: { onDone: () => void }) {
 
   const loaded = Boolean(preview && (preview.ok || preview.title || prompt))
 
+  const canLookUp =
+    tracker === 'azure'
+      ? Boolean(collection.trim() && Number(witId.trim()) > 0)
+      : Boolean(key.trim())
+
   return (
     <form onSubmit={(e) => void submit(e)}>
-      <label className="field">
-        <span>Issue key</span>
-        <input value={key} onChange={(e) => setKey(e.target.value.toUpperCase())} />
-      </label>
+      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+        <button
+          type="button"
+          className={`rounded-full px-3 py-1 text-sm font-medium ${
+            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
+          }`}
+          onClick={() => {
+            setTracker('jira')
+            setPreview(null)
+          }}
+        >
+          Jira
+        </button>
+        <button
+          type="button"
+          className={`rounded-full px-3 py-1 text-sm font-medium ${
+            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
+          }`}
+          onClick={() => {
+            setTracker('azure')
+            setPreview(null)
+          }}
+        >
+          Azure work item
+        </button>
+      </div>
+      {tracker === 'jira' ? (
+        <label className="field">
+          <span>Issue key</span>
+          <input value={key} onChange={(e) => setKey(e.target.value.toUpperCase())} />
+        </label>
+      ) : (
+        <>
+          <label className="field">
+            <span>Collection</span>
+            {collections.length > 0 ? (
+              <select
+                value={collection}
+                onChange={(e) => {
+                  setCollection(e.target.value)
+                  setPreview(null)
+                }}
+              >
+                {collections.map((url) => (
+                  <option key={url} value={url}>
+                    {url}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={collection}
+                onChange={(e) => {
+                  setCollection(e.target.value)
+                  setPreview(null)
+                }}
+                placeholder="https://tfs.example.com/tfs/DefaultCollection"
+              />
+            )}
+          </label>
+          {collections.length === 0 ? (
+            <p className="quiet text-xs">
+              Save a collection URL under Settings → Azure first, or paste one
+              here.
+            </p>
+          ) : null}
+          <label className="field">
+            <span>Work item ID</span>
+            <input
+              value={witId}
+              onChange={(e) => {
+                setWitId(e.target.value.replace(/[^\d]/g, ''))
+                setPreview(null)
+              }}
+              inputMode="numeric"
+              placeholder="12345"
+            />
+          </label>
+        </>
+      )}
       <p className="actions">
-        <button type="button" disabled={looking || !key.trim()} onClick={() => void get()}>
+        <button type="button" disabled={looking || !canLookUp} onClick={() => void get()}>
           {looking ? 'Looking up…' : 'Look up'}
         </button>
       </p>
@@ -906,7 +1004,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             <p className="quiet text-xs">{preview.message}</p>
           ) : null}
           <label className="field">
-            <span>Jira prompt</span>
+            <span>{tracker === 'azure' ? 'Work item prompt' : 'Jira prompt'}</span>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}

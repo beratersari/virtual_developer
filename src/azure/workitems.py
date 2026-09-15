@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
 from src.azure.keys import azure_work_item_key
-from src.azure.log import azure_info, clip
+from src.azure.log import azure_info, azure_warning, clip
 from src.azure.webhook import WebhookDecision, _as_dict, _event_type, _header_map, _s
 from src.jira.plan_labels import HANDOFF_EXECUTE, HANDOFF_REFACTOR
 from src.jira.poller import JiraPoller
