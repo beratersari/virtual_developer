@@ -227,7 +227,7 @@ def test_create_scheduled_azure_work_item(tmp_path, monkeypatch):
         store=store,
     )
     assert out["ok"] is True
-    assert out["issue_key"] == "99"
+    assert out["issue_key"] == "WIT-DEMO-99"
     assert captured["fields"]["System.AssignedTo"] == "CORP\\Yaver"
     assert assign_calls
 
@@ -313,7 +313,7 @@ def test_schedule_preview_azure_work_item():
             work_item_id=42,
         )
     assert out["ok"] is True
-    assert out["issue_key"] == "42"
+    assert out["issue_key"] == "WIT-DEMO-42"
     assert out["template_valid"] is True
     assert out["mode"] == "build"
 
@@ -362,12 +362,12 @@ def test_schedule_existing_azure_moves_and_assigns(tmp_path):
         "src.jira.client.assign_to_pat_user",
     ) as assign:
         out = schedule_existing_issue(
-            "42",
+            "WIT-DEMO-42",
             scheduled_at="2099-01-01T10:00:00",
             store=store,
         )
     assert out["ok"] is True
-    assert out["issue_key"] == "42"
+    assert out["issue_key"] == "WIT-DEMO-42"
     tracker.transition_to_in_progress.assert_called()
     tracker.assign_to_pat_user.assert_called()
     assign.assert_not_called()
@@ -461,12 +461,14 @@ def test_azure_assign_to_pat_user_skips_when_already_pat():
 
 def test_work_item_key_not_pr_key():
     key = azure_work_item_key("Demo", 42)
-    assert key == "42"
+    assert key == "WIT-DEMO-42"
     assert is_azure_work_item_key(key)
     assert is_azure_work_item_key("WIT-DEMO-42")
+    assert is_azure_work_item_key("42")
     assert not is_azure_issue_key(key)
-    assert parse_azure_work_item_key(key) == ("", 42)
+    assert parse_azure_work_item_key(key) == ("DEMO", 42)
     assert parse_azure_work_item_key("WIT-DEMO-42") == ("DEMO", 42)
+    assert parse_azure_work_item_key("42") == ("", 42)
     assert not is_azure_work_item_key("AZ-DEMO-42")
     assert not is_azure_work_item_key("0")
 
@@ -517,7 +519,7 @@ def test_parse_assignee_change_payload():
     assert parsed is not None
     assert parsed.work_item_id == 42
     assert parsed.project == "Demo"
-    assert parsed.issue_key == "42"
+    assert parsed.issue_key == "WIT-DEMO-42"
     assert "assignee" in parsed.change_kinds
     fields = parsed.issue["fields"]
     assert fields["summary"] == "Do the thing"
@@ -924,7 +926,7 @@ def test_lookup_view_flags():
     )
     view = lookup_work_item_view(issue, trigger_needles=["yaver"])
     assert view["ok"] is True
-    assert view["issue_key"] == "11"
+    assert view["issue_key"] == "WIT-DEMO-11"
     assert view["will_process"] is True
     assert view["matched_assignee"] is True
 
@@ -1064,7 +1066,7 @@ def test_ingest_uses_jira_event_path():
     proc.enqueue_jira_event.assert_awaited_once()
     event = proc.enqueue_jira_event.await_args.args[0]
     assert event["webhookEvent"] == "jira:issue_created"
-    assert event["issue"]["key"] == "42"
+    assert event["issue"]["key"] == "WIT-DEMO-42"
 
 
 def test_settings_save_workitem_intake(monkeypatch):

@@ -2,6 +2,7 @@
 
 Work-item intake is webhook-driven. New work is assignment while the
 item is not Done (New, Active, Doing, …). Done/Closed is ignored.
+Local issue key is ``WIT-{PROJECT}-{id}`` (bare numeric ids still load).
 Active → New while still assigned does **not** re-queue.
 Plan revise/implement is comment-only (``/planRefactor`` / ``/planExecute``).
 
@@ -388,6 +389,152 @@ def _status_category(state_name: str, category: str = "") -> str:
         return "new"
     if name in {"active", "in progress", "doing", "committed", "wip"}:
         return "indeterminate"
+    return ""
+
+
+def _collection_norm(url: str) -> str:
+    from src.azure.urls import parse_tfs_collection_url
+
+    raw = parse_tfs_collection_url(url or "") or (url or "").strip()
+    return raw.rstrip("/").lower()
+
+
+def find_work_item_key_by_id(
+    work_item_id: int,
+    *,
+    collection_url: str = "",
+    state_manager: Any = None,
+) -> str:
+    """Local ``WIT-…`` key for this TFS id, scoped by collection when given.
+
+    ``#42`` is not unique across collections. If *collection_url* is set,
+    only that collection matches. If it is empty, return a key only when
+    exactly one local work item has that id.
+    """
+    from src.azure.keys import is_azure_work_item_key, parse_azure_work_item_key
+
+    try:
+        want = int(work_item_id)
+    except (TypeError, ValueError):
+        return ""
+    if want <= 0:
+        return ""
+    want_col = _collection_norm(collection_url)
+    sm = state_manager
+    if sm is None:
+        try:
+            from src.state.manager import JiraStateManager
+
+            sm = JiraStateManager()
+        except Exception:
+            sm = None
+    if sm is None or not hasattr(sm, "get_all_states"):
+        return ""
+    hits: list[str] = []
+    seen: set[str] = set()
+    for state in sm.get_all_states() or []:
+        key = str(getattr(state, "issue_key", "") or "").strip()
+        if not key or not is_azure_work_item_key(key):
+            continue
+        meta = getattr(state, "metadata", None) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        source = str(meta.get("source") or "").strip().lower()
+        if source and source not in {"azure_workitem", "azure"}:
+            continue
+        wid = 0
+        try:
+            wid = int(meta.get("azure_work_item_id") or 0)
+        except (TypeError, ValueError):
+            wid = 0
+        if wid <= 0:
+            _slug, wid = parse_azure_work_item_key(key)
+        if wid != want:
+            continue
+        if want_col:
+            have = _collection_norm(
+                str(meta.get("azure_collection_url") or "")
+            ) or _collection_norm(str((work_item_coords(key) or {}).get("collection_url") or ""))
+            if have and have != want_col:
+                continue
+        if key not in seen:
+            seen.add(key)
+            hits.append(key)
+    if len(hits) == 1:
+        return hits[0]
+    return ""
+
+
+def find_work_item_key_by_git(
+    repository_url: str,
+    source_branch: str,
+    target_branch: str,
+    *,
+    state_manager: Any = None,
+) -> str:
+    """Local work-item key whose {params} match repo + source + target.
+
+    Used when an Azure PR title has no Jira/WIT key. Returns "" when none
+    or more than one distinct key matches (do not guess).
+    """
+    from src.azure.keys import is_azure_work_item_key
+    from src.issue_git_spec import parse_issue_git_spec
+    from src.state.session_bind_store import normalize_branch, normalize_repo_key
+
+    want_repo = normalize_repo_key(repository_url)
+    want_src = normalize_branch(source_branch)
+    want_tgt = normalize_branch(target_branch)
+    if not want_repo or not want_src or not want_tgt:
+        return ""
+
+    def _spec_of(state: Any) -> tuple[str, str, str]:
+        meta = getattr(state, "metadata", None) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        repo = str(meta.get("repository_url") or "")
+        src = str(meta.get("source_branch") or "")
+        tgt = str(meta.get("target_branch") or "")
+        if repo and src and tgt:
+            return repo, src, tgt
+        parsed, err = parse_issue_git_spec(
+            getattr(state, "issue_summary", "") or "",
+            getattr(state, "description", "") or "",
+        )
+        if err or parsed is None:
+            return "", "", ""
+        return parsed.repository_url, parsed.source_branch, parsed.target_branch
+
+    hits: list[str] = []
+    seen: set[str] = set()
+    sm = state_manager
+    if sm is None:
+        try:
+            from src.state.manager import JiraStateManager
+
+            sm = JiraStateManager()
+        except Exception:
+            sm = None
+    if sm is not None and hasattr(sm, "get_all_states"):
+        for state in sm.get_all_states() or []:
+            key = str(getattr(state, "issue_key", "") or "").strip()
+            if not key or not is_azure_work_item_key(key):
+                continue
+            meta = getattr(state, "metadata", None) or {}
+            source = str(meta.get("source") or "").strip().lower()
+            if source and source not in {"azure_workitem", "azure"}:
+                continue
+            repo, src, tgt = _spec_of(state)
+            if normalize_repo_key(repo) != want_repo:
+                continue
+            if normalize_branch(src) != want_src:
+                continue
+            if normalize_branch(tgt) != want_tgt:
+                continue
+            if key not in seen:
+                seen.add(key)
+                hits.append(key)
+    if len(hits) == 1:
+        return hits[0]
     return ""
 
 
@@ -1327,6 +1474,8 @@ __all__ = [
     "decide_azure_workitem_comment_webhook",
     "decide_azure_workitem_webhook",
     "evaluate_work_item_intake",
+    "find_work_item_key_by_git",
+    "find_work_item_key_by_id",
     "work_item_is_done",
     "extract_workitem_comment_text",
     "format_workitem_plan_usage_note",

@@ -757,6 +757,10 @@ def decide_azure_comment_webhook(
         project_path=project_path or f"project-{repo_id}",
         pr_id=pr_id,
         project_keys=_jira_project_keys(jira_project_keys),
+        repository_url=repo_url,
+        source_branch=source,
+        target_branch=target,
+        collection_url=collection_url,
     )
 
     event = AzurePrCommentEvent(
@@ -956,6 +960,10 @@ def decide_azure_pr_webhook(
         project_path=project_path or f"project-{repo_id}",
         pr_id=pr_id,
         project_keys=_jira_project_keys(jira_project_keys),
+        repository_url=repo_url,
+        source_branch=source,
+        target_branch=target,
+        collection_url=collection_url,
     )
     event = AzurePrLifecycleEvent(
         issue_key=issue_key,
