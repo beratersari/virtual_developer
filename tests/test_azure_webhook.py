@@ -1322,12 +1322,21 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None)
     monkeypatch.setattr("src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None)
     body = SettingsUpdate(
-        azure_credentials=[{"host": "tfs.example.com", "pat": "az-pat-1"}],
+        azure_credentials=[
+            {
+                "host": "https://tfs.example.com/tfs/DefaultCollection",
+                "pat": "az-pat-1",
+            }
+        ],
         azure_bot_mentions="@yaver",
     )
     view = apply_settings_update(body)
     assert view.azure_pat_configured is True
     assert "tfs.example.com" in view.azure_allowed_hosts
+    assert any(
+        "DefaultCollection" in (c.collection_url or c.host)
+        for c in view.azure_credentials
+    )
     assert view.azure_bot_mentions == "yaver"
     assert view.azure_trigger_user == "yaver"
     assert s.azure_pat_for_host("tfs.example.com") == "az-pat-1"
@@ -1572,7 +1581,14 @@ def test_settings_keep_azure_pat_when_row_blank(monkeypatch):
     monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None)
     monkeypatch.setattr("src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None)
     apply_settings_update(
-        SettingsUpdate(azure_credentials=[{"host": "tfs.example.com", "pat": ""}])
+        SettingsUpdate(
+            azure_credentials=[
+                {
+                    "host": "https://tfs.example.com/tfs/DefaultCollection",
+                    "pat": "",
+                }
+            ]
+        )
     )
     assert s.azure_pat_for_host("tfs.example.com") == "keep-me"
 

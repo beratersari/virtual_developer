@@ -384,6 +384,17 @@ class Settings(BaseSettings):
         default=False,
         description="Accept Azure DevOps Server service hooks on /yaver/webhook/azure",
     )
+    azure_trigger_label: str = Field(
+        default="",
+        description=(
+            "Comma-separated Azure work-item tags. When set, New/To Do intake "
+            "needs bot assignee and one of these tags (same AND as JIRA_TRIGGER_LABEL)."
+        ),
+    )
+    azure_collection_urls: str = Field(
+        default="",
+        description="JSON list of TFS collection URLs (must include /tfs/<Collection>)",
+    )
     azure_webhook_secret: str = Field(
         default="",
         description="Leftover. Ignored. Azure webhooks have no secret.",
@@ -770,6 +781,34 @@ class Settings(BaseSettings):
         """Hosts that have an Azure PAT (lowercase). A host with a PAT is allowed."""
         return sorted(self.azure_host_pat_map().keys())
 
+    def azure_collection_url_list(self) -> List[str]:
+        """Saved TFS collection URLs (never host-only or ``/tfs`` without a name)."""
+        from src.azure.urls import parse_tfs_collection_url
+
+        raw = (self.azure_collection_urls or "").strip()
+        data: Any = raw
+        if raw:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = parse_tfs_collection_url(raw)
+                return [parsed] if parsed else []
+        out: List[str] = []
+        seen: set[str] = set()
+        rows: List[Any]
+        if isinstance(data, dict):
+            rows = list(data.values())
+        elif isinstance(data, list):
+            rows = data
+        else:
+            rows = []
+        for item in rows:
+            url = parse_tfs_collection_url(str(item or ""))
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+        return out
+
     def azure_host_pat_map(self) -> Dict[str, str]:
         """Resolved hostname → Azure PAT map (prefer ``azure_host_pats`` JSON).
 
@@ -917,6 +956,16 @@ class Settings(BaseSettings):
     @property
     def azure_bot_usernames_list(self) -> List[str]:
         return list(self.azure_trigger_user_list)
+
+    def resolved_azure_trigger_label(self) -> str:
+        """Azure work-item tags. Empty = assignee only (same as empty Jira labels)."""
+        return format_trigger_users(getattr(self, "azure_trigger_label", "") or "")
+
+    @property
+    def azure_trigger_label_list(self) -> List[str]:
+        from src.jira.triggers import parse_trigger_labels
+
+        return parse_trigger_labels(self.resolved_azure_trigger_label())
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -977,6 +1026,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "azure_bot_mentions",
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
+        "azure_trigger_label",
         "azure_collection_urls",
     }
 )
@@ -1005,6 +1055,8 @@ _RUNTIME_ENV_MIRROR = {
     "azure_bot_mentions": "AZURE_BOT_MENTIONS",
     "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",
     "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
+    "azure_trigger_label": "AZURE_TRIGGER_LABEL",
+    "azure_collection_urls": "AZURE_COLLECTION_URLS",
 }
 
 

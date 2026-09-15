@@ -260,9 +260,59 @@ class JobProcessor:
             return True
         st = state or self.state_manager.get_state(issue_key)
         meta = (getattr(st, "metadata", None) if st is not None else None) or {}
-        if str(meta.get("source") or "").strip().lower() == "azure":
+        source = str(meta.get("source") or "").strip().lower()
+        if source == "azure_workitem":
+            return False
+        if source == "azure":
             return True
         return str(meta.get("workflow_type") or "").strip().lower() == "azure_pr"
+
+    def _is_azure_workitem_triggered(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """True when this run was started from an Azure Boards work item."""
+        from src.azure.keys import is_azure_work_item_key
+
+        if is_azure_work_item_key(issue_key):
+            return True
+        st = state or self.state_manager.get_state(issue_key)
+        meta = (getattr(st, "metadata", None) if st is not None else None) or {}
+        return str(meta.get("source") or "").strip().lower() == "azure_workitem"
+
+    def _azure_workitem_meta_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        issue = (event or {}).get("issue") or {}
+        coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
+        if not coords:
+            return {}
+        from src.azure.workitems import remember_work_item, tracker_metadata
+
+        key = str(issue.get("key") or "").strip()
+        if key:
+            remember_work_item(key, coords)
+        return tracker_metadata(coords)
+
+    def _remember_azure_workitem_event(self, event: Dict[str, Any]) -> None:
+        meta = self._azure_workitem_meta_from_event(event)
+        key = str((event.get("issue") or {}).get("key") or "").strip()
+        if not meta or not key:
+            return
+        try:
+            if self.state_manager.get_state(key) is not None:
+                self.state_manager.update_state(key, metadata=meta)
+        except Exception:
+            pass
+
+    def _record_workitem_board_status(self, issue_key: str, status_name: str) -> None:
+        name = (status_name or "").strip().lower()
+        if not name:
+            return
+        try:
+            if self.state_manager.get_state(issue_key) is not None:
+                self.state_manager.update_state(
+                    issue_key, metadata={"last_board_status": name}
+                )
+        except Exception:
+            pass
 
     def _is_git_comment_triggered(
         self, issue_key: str, state: Optional[JiraAgentState] = None
@@ -286,7 +336,7 @@ class JobProcessor:
             return False
         moved = False
         try:
-            client = self.jira_client
+            client = self._tracker_for(issue_key)
             if client is None:
                 return False
             if hasattr(client, "transition_to_in_progress"):
@@ -296,6 +346,8 @@ class JobProcessor:
                     poller = getattr(self, "_poller", None)
                     if poller is not None and hasattr(poller, "_last_jira_status"):
                         poller._last_jira_status[issue_key] = "in progress"
+                    if self._is_azure_workitem_triggered(issue_key):
+                        self._record_workitem_board_status(issue_key, "in progress")
                     moved = True
                 else:
                     logger.warning(
@@ -312,6 +364,8 @@ class JobProcessor:
     def _assign_jira_to_pat_user(self, issue_key: str) -> bool:
         """Set the Jira assignee to the PAT user. Never used for GitLab jobs."""
         if self._is_git_comment_triggered(issue_key):
+            return False
+        if self._is_azure_workitem_triggered(issue_key):
             return False
         try:
             from src.jira.client import assign_to_pat_user
@@ -2459,7 +2513,19 @@ class JobProcessor:
                         "issue_key": issue_key,
                     }
 
-    def _jira_for_labels(self) -> Any:
+    def _tracker_for(self, issue_key: str) -> Any:
+        from src.azure.tracker import azure_tracker_for
+
+        tracker = azure_tracker_for(
+            issue_key, self.state_manager.get_state(issue_key)
+        )
+        if tracker is not None:
+            return tracker
+        return self.jira_client or getattr(self.reporter, "client", None)
+
+    def _jira_for_labels(self, issue_key: str = "") -> Any:
+        if issue_key:
+            return self._tracker_for(issue_key)
         return self.jira_client or getattr(self.reporter, "client", None)
 
     def _apply_plan_labels(
@@ -2470,7 +2536,9 @@ class JobProcessor:
         remove: Optional[List[str]] = None,
         replace: Optional[tuple[str, str]] = None,
     ) -> None:
-        client = self._jira_for_labels()
+        if self._is_azure_workitem_triggered(issue_key):
+            return
+        client = self._jira_for_labels(issue_key)
         if client is None:
             return
         try:
@@ -2494,6 +2562,11 @@ class JobProcessor:
         raw = str(event.get("plan_handoff") or "").strip().lower()
         if raw in {HANDOFF_EXECUTE, HANDOFF_REFACTOR}:
             return raw
+        issue_key = str((event.get("issue") or {}).get("key") or "").strip()
+        if event.get("azure_workitem") or self._is_azure_workitem_triggered(
+            issue_key
+        ):
+            return None
         via_cl = handoff_from_changelog(event.get("changelog"))
         if via_cl:
             return via_cl
@@ -2504,7 +2577,7 @@ class JobProcessor:
         from src.config import get_settings
         from src.jira.plan_labels import latest_comment_tagging_pat_user
 
-        client = self._jira_for_labels()
+        client = self._jira_for_labels(issue_key)
         if client is None or not hasattr(client, "get_comments"):
             return None
         try:
@@ -2519,11 +2592,17 @@ class JobProcessor:
             except Exception:
                 myself = None
         live = get_settings()
+        extra = list(getattr(live, "trigger_assignee_names_list", None) or [])
+        if self._is_azure_workitem_triggered(issue_key):
+            extra.extend(getattr(live, "azure_trigger_user_list", None) or [])
+            mentions = list(getattr(live, "azure_trigger_user_list", None) or [])
+        else:
+            mentions = list(getattr(live, "trigger_mentions_list", None) or [])
         return latest_comment_tagging_pat_user(
             comments,
             myself=myself,
-            mention_tokens=getattr(live, "trigger_mentions_list", None) or [],
-            extra_needles=getattr(live, "trigger_assignee_names_list", None) or [],
+            mention_tokens=mentions,
+            extra_needles=extra,
         )
 
     def _release_plan_execute_latch(self, issue_key: str) -> None:
@@ -2621,7 +2700,10 @@ class JobProcessor:
         if handoff == HANDOFF_EXECUTE:
             from src.jira.plan_labels import is_in_progress_status
 
-            if not is_in_progress_status(fields):
+            azure_wi = bool(event.get("azure_workitem")) or (
+                self._is_azure_workitem_triggered(issue_key)
+            )
+            if not azure_wi and not is_in_progress_status(fields):
                 return False, "plan_execute; ticket is not In Progress"
             has_plan = self._durable_plan_path(issue_key).exists()
             raw_path = (state.plan_path or "").strip()
@@ -2671,7 +2753,15 @@ class JobProcessor:
                 return True, None
 
         if handoff == HANDOFF_REFACTOR:
-            comment = self._latest_plan_refactor_comment(issue_key)
+            comment = str(event.get("plan_comment") or "").strip()
+            if not comment:
+                comment = self._latest_plan_refactor_comment(issue_key) or ""
+            if not comment:
+                azure_wi = bool(event.get("azure_workitem")) or (
+                    self._is_azure_workitem_triggered(issue_key)
+                )
+                if azure_wi:
+                    comment = "Revise the plan based on the work item."
             if not comment:
                 logger.info(
                     f"{issue_key} plan_refactor: no comment tagging the PAT user yet"
@@ -3163,6 +3253,7 @@ class JobProcessor:
 
         logger.info(f"Processing event: {event_type} for issue: {issue_key}")
         logger.debug(f"Event data keys: {list(event.keys())}")
+        self._remember_azure_workitem_event(event)
 
         if self._job_semaphore is None:
             limit = max(1, int(settings.max_concurrent_jobs or 1))
@@ -3268,11 +3359,13 @@ class JobProcessor:
             workflow_type = self._resolve_workflow(
                 issue_key, state.issue_summary, state.description
             )
+            meta = {"workflow_type": workflow_type.value}
+            meta.update(self._azure_workitem_meta_from_event(event))
             self.state_manager.update_state(
                 issue_key,
                 issue_summary=state.issue_summary,
                 description=state.description,
-                metadata={"workflow_type": workflow_type.value},
+                metadata=meta,
             )
             state = self.state_manager.get_state(issue_key) or state
             logger.info(
@@ -3294,9 +3387,11 @@ class JobProcessor:
                 triggered_by=("scheduled" if scheduled_job else "poller"),
                 jira_assignee=assignee,
             )
+            meta = {"workflow_type": workflow_type.value}
+            meta.update(self._azure_workitem_meta_from_event(event))
             self.state_manager.update_state(
                 issue_key,
-                metadata={"workflow_type": workflow_type.value},
+                metadata=meta,
             )
             state = self.state_manager.get_state(issue_key) or state
             logger.info(
@@ -3523,11 +3618,15 @@ class JobProcessor:
         summary = (st.issue_summary if st else "") or ""
         description = (st.description if st else "") or ""
         try:
-            issue = self.jira_client.get_issue(
-                issue_key, fields=["summary", "description"]
-            )
+            client = self._tracker_for(issue_key)
+            if client is None or not hasattr(client, "get_issue"):
+                issue = None
+            else:
+                issue = client.get_issue(
+                    issue_key, fields=["summary", "description"]
+                )
         except Exception as e:
-            logger.warning(f"{issue_key}: live Jira refresh failed: {e}")
+            logger.warning(f"{issue_key}: live issue refresh failed: {e}")
             issue = None
         if issue:
             fields = issue.get("fields") or {}
@@ -3965,6 +4064,176 @@ class JobProcessor:
             "issue_key": live.get("issue_key"),
             "status": live.get("status"),
         }
+
+    async def ingest_azure_work_item(self, event: Any) -> Dict[str, Any]:
+        """Apply Jira poller rules to one Azure work-item webhook, then enqueue."""
+        from src.azure.log import azure_info, azure_warning
+        from src.azure.tracker import AzureWorkItemTracker
+        from src.azure.workitems import (
+            AzureWorkItemEvent,
+            evaluate_work_item_intake,
+            fetch_work_item_issue,
+            remember_work_item,
+            tracker_metadata,
+        )
+        from src.config import settings as live_settings
+
+        if not isinstance(event, AzureWorkItemEvent):
+            azure_warning("workitem ingest fail invalid event")
+            return {"ok": False, "reason": "invalid event"}
+
+        issue = event.issue if isinstance(event.issue, dict) else {}
+        coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
+        if event.project and event.work_item_id:
+            fetched = fetch_work_item_issue(
+                host=event.host,
+                project=event.project,
+                work_item_id=event.work_item_id,
+                collection_url=event.collection_url,
+            )
+            if fetched:
+                issue = fetched
+                coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else coords
+                event.issue = issue
+        key = str(issue.get("key") or event.issue_key or "").strip()
+        if not key:
+            return {"ok": False, "reason": "missing work item key"}
+        if coords:
+            remember_work_item(key, coords)
+        state = self.state_manager.get_state(key)
+        if (event.plan_handoff or "").strip():
+            from src.jira.plan_labels import HANDOFF_EXECUTE, HANDOFF_REFACTOR
+            from src.state.models import TaskStatus as _TS
+
+            cmd = (event.plan_handoff or "").strip().lower()
+            azure_info(
+                f"workitem comment ingest key={key} cmd={cmd} "
+                f"local={state.status.value if state else 'none'}"
+            )
+            if state is None or state.status != _TS.PLAN_READY:
+                try:
+                    from src.azure.tracker import AzureWorkItemTracker
+
+                    if coords and int(coords.get("work_item_id") or 0) > 0:
+                        AzureWorkItemTracker(
+                            issue_key=key,
+                            host=str(coords.get("host") or event.host or ""),
+                            collection_url=str(
+                                coords.get("collection_url")
+                                or event.collection_url
+                                or ""
+                            ),
+                            project=str(
+                                coords.get("project") or event.project or ""
+                            ),
+                            work_item_id=int(
+                                coords.get("work_item_id") or event.work_item_id
+                            ),
+                        ).add_comment(
+                            key,
+                            "There is no plan waiting on this work item. "
+                            "`/planRefactor` and `/planExecute` only run after "
+                            "a Mode: plan job reaches plan_ready. Assign a New "
+                            "item to me, or open a new Mode: build item.",
+                        )
+                except Exception as exc:
+                    azure_warning(f"{key}: plan-command wait comment failed: {exc}")
+                return {
+                    "ok": True,
+                    "kind": "work_item_comment",
+                    "queued": False,
+                    "started": False,
+                    "issue_key": key,
+                    "status": "skipped",
+                    "reason": "plan_ready required for /planExecute or /planRefactor",
+                }
+            if state is not None and coords:
+                self.state_manager.update_state(key, metadata=tracker_metadata(coords))
+            if cmd == HANDOFF_EXECUTE and coords:
+                try:
+                    from src.azure.tracker import AzureWorkItemTracker
+
+                    AzureWorkItemTracker(
+                        issue_key=key,
+                        host=str(coords.get("host") or event.host or ""),
+                        collection_url=str(
+                            coords.get("collection_url") or event.collection_url or ""
+                        ),
+                        project=str(coords.get("project") or event.project or ""),
+                        work_item_id=int(
+                            coords.get("work_item_id") or event.work_item_id
+                        ),
+                    ).transition_to_in_progress(key)
+                    self._record_workitem_board_status(key, "in progress")
+                except Exception as exc:
+                    azure_warning(f"{key}: planExecute In Progress failed: {exc}")
+            payload = event.to_jira_event(
+                is_update=True, plan_handoff=cmd or HANDOFF_REFACTOR
+            )
+            result = await self.enqueue_jira_event(payload)
+            result["kind"] = "work_item_comment"
+            result["action"] = cmd
+            result["reason"] = result.get("reason") or cmd
+            return result
+        prev = ""
+        if state is not None:
+            prev = str((state.metadata or {}).get("last_board_status") or "")
+        required = getattr(live_settings, "azure_trigger_label_list", None)
+        needles = list(getattr(live_settings, "azure_trigger_user_list", None) or [])
+        decision = evaluate_work_item_intake(
+            issue,
+            state=state,
+            prev_status=prev,
+            required_labels=required,
+            trigger_needles=needles,
+        )
+        azure_info(
+            f"workitem ingest key={key} action={decision.action} "
+            f"reason={decision.reason!r} todo={decision.is_todo} "
+            f"assignee={decision.matched_assignee} kinds={event.change_kinds}"
+        )
+        if decision.action == "skip":
+            return {
+                "ok": True,
+                "kind": "work_item",
+                "queued": False,
+                "started": False,
+                "issue_key": key,
+                "status": "skipped",
+                "reason": decision.reason,
+            }
+
+        # Same as JiraPoller.process_issue: move off New/To Do before the worker.
+        tracker = None
+        if coords and int(coords.get("work_item_id") or 0) > 0:
+            tracker = AzureWorkItemTracker(
+                issue_key=key,
+                host=str(coords.get("host") or event.host or ""),
+                collection_url=str(
+                    coords.get("collection_url") or event.collection_url or ""
+                ),
+                project=str(coords.get("project") or event.project or ""),
+                work_item_id=int(coords.get("work_item_id") or event.work_item_id),
+                work_item_type=str(coords.get("work_item_type") or ""),
+            )
+            try:
+                if tracker.transition_to_in_progress(key):
+                    self._record_workitem_board_status(key, "in progress")
+            except Exception as exc:
+                azure_warning(f"{key}: work item In Progress failed: {exc}")
+
+        if state is not None and coords:
+            self.state_manager.update_state(key, metadata=tracker_metadata(coords))
+
+        payload = event.to_jira_event(
+            is_update=decision.is_update,
+            plan_handoff=decision.plan_handoff,
+        )
+        result = await self.enqueue_jira_event(payload)
+        result["kind"] = "work_item"
+        result["action"] = decision.action
+        result["reason"] = result.get("reason") or decision.reason
+        return result
 
     async def enqueue_jira_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Persist a Jira intake event and try to start it (or leave it queued)."""

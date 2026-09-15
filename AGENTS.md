@@ -8,7 +8,7 @@ Instructions for humans and AI agents working on **this** repository (`virtual_d
 
 Yaver is a Python daemon that:
 
-1. Discovers issues (board poller: To Do + bot assignee)
+1. Discovers issues (Jira board poller: To Do + bot assignee; optional Azure Boards work-item webhooks)
 2. Routes work (plan / build / test)
 3. Runs Oh My OpenAgent / OpenCode in isolated temp git clones
 4. Posts progress, plans, errors, reviews, and completion back to Jira
@@ -324,6 +324,7 @@ JIRA_API_TOKEN=your-api-token-here
 - Comments use plain string bodies (Server/DC style); ADF is fallback only on 400.
 - Report **errors**, **stuck states**, **retries**, and **completion** via Jira comments.
 - Poller focuses on board/sprint + To Do + bot assignee. The board poller is the only Jira intake.
+- Azure Boards work items use the same `/yaver/webhook/azure` URL as PR comments (always on when `AZURE_WEBHOOK_ENABLED` is true). New work is first assignment on a New item. Active → New while still assigned does **not** re-queue. Plan revise/implement is **comment-only**: `@mention /planRefactor <prompt>` or `@mention /planExecute`. Mention without those commands gets a work-item usage note. Do **not** use Jira plan tags on Azure work items. Do **not** use these commands on Jira, GitLab, or Azure PR comments.
 - **First active sprint only (intentional).** Scrum boards use `values[0]`
   from `/sprint?state=active`. Parallel sprints are not merged. Put bot
   tickets on that first sprint, or use a Kanban board (no sprints → whole
@@ -346,11 +347,13 @@ JIRA_API_TOKEN=your-api-token-here
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
-| `AZURE_HOST_PATS` | JSON hostname → Azure PAT. Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user) |
+| `AZURE_HOST_PATS` | JSON hostname → Azure PAT (derived from saved collection URLs). Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user) |
+| `AZURE_COLLECTION_URLS` | JSON list of TFS collection URLs (`https://host/tfs/<Collection>`). Settings refuses host-only or `/tfs` without a collection name. |
 | `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
 | `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
-| `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret) |
-| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /ask` is ignored (another agent). |
+| `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret). PR comments **and** work-item created/updated. |
+| `AZURE_TRIGGER_LABEL` | Optional work-item tags. When set, New/To Do intake needs bot assignee **and** one of these tags (same AND as `JIRA_TRIGGER_LABEL`). Empty = assignee only. |
+| `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment **or** when Assigned To matches on a work item. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /ask` is ignored (another agent). |
 
 ---
 
@@ -370,7 +373,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
-- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2).
+- Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, azure_trigger_label, max_concurrent_jobs, default_model (shared by OpenCode and Codex; provider/auth stay in each tool's config), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on New, then `/planRefactor` or `/planExecute` in a work-item comment.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
 
@@ -394,7 +397,8 @@ Open: `http://127.0.0.1:8080` after daemon start.
 | GET/PATCH | `/api/settings` | Safe settings |
 | GET | `/api/dashboard` | Full envelope |
 | POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
-| POST | `/yaver/webhook/azure` | Azure PR comment + lifecycle (`/webhooks/azure` still works) |
+| POST | `/yaver/webhook/azure` | Azure PR comment + lifecycle, and work-item created/updated/commented (`/webhooks/azure` still works) |
+| POST | `/api/azure/work-item` | Settings lookup: one work item by host + project + id |
 | GET | `/api/schedules/pr-preview` | Look up an Azure PR before scheduling a follow-up |
 | POST | `/api/schedules/pr` | Schedule a follow-up prompt on an existing Azure PR |
 | WS | `/ws` | Live dashboard pushes |

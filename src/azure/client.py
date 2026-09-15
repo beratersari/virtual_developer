@@ -7,7 +7,7 @@ the product TLS policy (on-prem / intercept; no custom-CA path yet).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
@@ -724,3 +724,308 @@ class AzureDevOpsClient:
         if proj and repo:
             return f"{self.api_base}/{proj}/_git/{repo}/pullrequest/{pr_id}"
         return None
+
+    def _wit_item_url(self, project: str, work_item_id: int) -> str:
+        ident = int(work_item_id)
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        if proj:
+            return f"{self.api_base}/{proj}/_apis/wit/workitems/{ident}"
+        return f"{self.api_base}/_apis/wit/workitems/{ident}"
+
+    def _get_json(
+        self,
+        url: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        versions: Optional[List[str]] = None,
+        accept: str = "application/json",
+    ) -> Optional[Any]:
+        extra = dict(params or {})
+        vers = list(versions or [_API_VERSION, _API_VERSION_FALLBACK])
+        headers = dict(self._headers())
+        headers["Accept"] = accept
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                last_status = 0
+                last_ver = vers[0] if vers else _API_VERSION
+                last_body = ""
+                for ver in vers:
+                    query = {**extra, "api-version": ver}
+                    resp = client.get(url, headers=headers, params=query)
+                    last_status = resp.status_code
+                    last_ver = ver
+                    last_body = resp.text
+                    if resp.status_code == 200:
+                        azure_info(
+                            "http "
+                            + http_detail(
+                                method="GET",
+                                url=url,
+                                status=200,
+                                api_version=ver,
+                            )
+                        )
+                        if not resp.content:
+                            return {}
+                        try:
+                            return resp.json()
+                        except Exception:
+                            return None
+                    if resp.status_code not in (400, 404, 415):
+                        break
+                azure_warning(
+                    "http "
+                    + http_detail(
+                        method="GET",
+                        url=url,
+                        status=last_status,
+                        api_version=last_ver,
+                        body=last_body,
+                    )
+                )
+                return None
+        except Exception as exc:
+            azure_warning(f"http GET error url={url} err={exc}")
+            return None
+
+    def _patch_json(
+        self,
+        url: str,
+        payload: Any,
+        *,
+        versions: Optional[List[str]] = None,
+        content_type: str = "application/json-patch+json",
+    ) -> Optional[Dict[str, Any]]:
+        vers = list(versions or [_API_VERSION, _API_VERSION_FALLBACK])
+        headers = dict(self._headers())
+        headers["Content-Type"] = content_type
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                last_status = 0
+                last_ver = vers[0] if vers else _API_VERSION
+                last_body = ""
+                for ver in vers:
+                    resp = client.patch(
+                        url,
+                        headers=headers,
+                        params={"api-version": ver},
+                        json=payload,
+                    )
+                    last_status = resp.status_code
+                    last_ver = ver
+                    last_body = resp.text
+                    if resp.status_code in (200, 201):
+                        azure_info(
+                            "http "
+                            + http_detail(
+                                method="PATCH",
+                                url=url,
+                                status=resp.status_code,
+                                api_version=ver,
+                            )
+                        )
+                        data = resp.json() if resp.content else {}
+                        return data if isinstance(data, dict) else {"ok": True}
+                    if resp.status_code not in (400, 404, 415):
+                        break
+                azure_warning(
+                    "http "
+                    + http_detail(
+                        method="PATCH",
+                        url=url,
+                        status=last_status,
+                        api_version=last_ver,
+                        body=last_body,
+                    )
+                )
+                return None
+        except Exception as exc:
+            azure_warning(f"http PATCH error url={url} err={exc}")
+            return None
+
+    def get_work_item(
+        self, project: str, work_item_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """GET work item (expand=all). Azure DevOps Server 2022.2: 7.1 then 7.0."""
+        if not self.api_base:
+            return None
+        try:
+            iid = int(work_item_id)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        url = self._wit_item_url(project, iid)
+        data = self._get_json(url, params={"$expand": "all"})
+        if isinstance(data, dict) and data.get("id"):
+            azure_info(
+                f"get_work_item ok {project or '-'}/{iid} "
+                f"rev={data.get('rev') or '-'}"
+            )
+            return data
+        azure_warning(f"get_work_item fail {project or '-'}/{iid}")
+        return None
+
+    def get_work_item_type_states(
+        self, project: str, work_item_type: str
+    ) -> List[Dict[str, Any]]:
+        """GET work item type states (Proposed / InProgress / Completed)."""
+        if not self.api_base or not (work_item_type or "").strip():
+            return []
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        wtype = quote(unquote(str(work_item_type).strip()), safe="")
+        if proj:
+            url = f"{self.api_base}/{proj}/_apis/wit/workitemtypes/{wtype}/states"
+        else:
+            url = f"{self.api_base}/_apis/wit/workitemtypes/{wtype}/states"
+        data = self._get_json(url)
+        rows = []
+        if isinstance(data, dict):
+            raw = data.get("value")
+            if isinstance(raw, list):
+                rows = [x for x in raw if isinstance(x, dict)]
+        azure_info(
+            f"wit states {project or '-'}/{work_item_type} count={len(rows)}"
+        )
+        return rows
+
+    def update_work_item_fields(
+        self,
+        project: str,
+        work_item_id: int,
+        fields: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """JSON-Patch work item fields (System.State, System.Tags, …)."""
+        if not self.api_base or not fields:
+            return None
+        try:
+            iid = int(work_item_id)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        ops = []
+        for path, value in fields.items():
+            name = str(path or "").strip()
+            if not name:
+                continue
+            if not name.startswith("/"):
+                name = f"/fields/{name}"
+            ops.append({"op": "add", "path": name, "value": value})
+        if not ops:
+            return None
+        url = self._wit_item_url(project, iid)
+        posted = self._patch_json(url, ops)
+        if posted:
+            azure_info(
+                f"update_work_item ok {project or '-'}/{iid} fields={list(fields)}"
+            )
+        else:
+            azure_warning(f"update_work_item fail {project or '-'}/{iid}")
+        return posted
+
+    def add_work_item_comment(
+        self, project: str, work_item_id: int, body: str
+    ) -> Optional[Dict[str, Any]]:
+        """Post a work-item comment (comments API, then System.History)."""
+        text = (body or "").strip()
+        if not text or not self.api_base:
+            return None
+        try:
+            iid = int(work_item_id)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        if proj:
+            url = f"{self.api_base}/{proj}/_apis/wit/workItems/{iid}/comments"
+        else:
+            url = f"{self.api_base}/_apis/wit/workItems/{iid}/comments"
+        versions = [
+            "7.1-preview.4",
+            "7.0-preview.3",
+            "6.0-preview.3",
+            _API_VERSION,
+            _API_VERSION_FALLBACK,
+        ]
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                headers = dict(self._headers())
+                for ver in versions:
+                    resp = client.post(
+                        url,
+                        headers=headers,
+                        params={"api-version": ver},
+                        json={"text": text},
+                    )
+                    if resp.status_code in (200, 201):
+                        azure_info(
+                            "http "
+                            + http_detail(
+                                method="POST",
+                                url=url,
+                                status=resp.status_code,
+                                api_version=ver,
+                            )
+                        )
+                        data = resp.json() if resp.content else {}
+                        return data if isinstance(data, dict) else {"id": "1"}
+                    if resp.status_code not in (400, 404, 415):
+                        azure_warning(
+                            "http "
+                            + http_detail(
+                                method="POST",
+                                url=url,
+                                status=resp.status_code,
+                                api_version=ver,
+                                body=resp.text,
+                            )
+                        )
+                        break
+        except Exception as exc:
+            azure_warning(f"workitem comment error {project}/{iid}: {exc}")
+        posted = self.update_work_item_fields(
+            project, iid, {"System.History": text}
+        )
+        if posted:
+            azure_info(f"workitem comment via System.History {project or '-'}/{iid}")
+            return {"id": str(posted.get("rev") or "history"), "rev": posted.get("rev")}
+        azure_warning(f"workitem comment fail {project or '-'}/{iid}")
+        return None
+
+    def get_work_item_comments(
+        self, project: str, work_item_id: int
+    ) -> List[Dict[str, Any]]:
+        """List work-item comments (oldest first). Empty if the API is missing."""
+        try:
+            iid = int(work_item_id)
+        except (TypeError, ValueError):
+            return []
+        if iid <= 0 or not self.api_base:
+            return []
+        proj = quote(unquote(str(project or "").strip().strip("/")), safe="")
+        if proj:
+            url = f"{self.api_base}/{proj}/_apis/wit/workItems/{iid}/comments"
+        else:
+            url = f"{self.api_base}/_apis/wit/workItems/{iid}/comments"
+        data = self._get_json(
+            url,
+            versions=[
+                "7.1-preview.4",
+                "7.0-preview.3",
+                "6.0-preview.3",
+                _API_VERSION,
+                _API_VERSION_FALLBACK,
+            ],
+        )
+        rows: List[Any] = []
+        if isinstance(data, dict):
+            raw = data.get("comments") or data.get("value") or []
+            if isinstance(raw, list):
+                rows = raw
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(row)
+        return out
