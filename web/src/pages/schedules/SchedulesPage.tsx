@@ -259,9 +259,12 @@ export function SchedulesPage() {
             ? 'Does not close the merge request or delete posted notes.'
             : rows.find((s) => s.schedule_id === cancelId)?.source === 'azure_pr'
               ? 'Does not close the pull request or delete posted comments.'
-              : rows.find((s) => s.schedule_id === cancelId)?.issue_key?.startsWith('WIT-')
-                ? 'Does not delete the Azure work item.'
-                : 'Does not delete the Jira issue.'
+              : (() => {
+                  const k = rows.find((s) => s.schedule_id === cancelId)?.issue_key || ''
+                  return /^\d+$/.test(k) || k.startsWith('WIT-')
+                    ? 'Does not delete the Azure work item.'
+                    : 'Does not delete the Jira issue.'
+                })()
         }
         confirmLabel="Cancel it"
         danger

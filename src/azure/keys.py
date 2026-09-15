@@ -34,29 +34,35 @@ def is_azure_issue_key(issue_key: str) -> bool:
 
 
 def azure_work_item_key(project: str, work_item_id: int) -> str:
-    """Filesystem-safe work-item key: ``WIT-{PROJECT}-{id}``.
+    """Work-item ticket name is the TFS id only (``42``).
 
-    Example: ``Demo`` + 12 → ``WIT-DEMO-12``. Must not use the ``AZ-`` PR
-    prefix (``_is_azure_triggered`` would treat it as a PR comment job).
+    Collection/project stay in metadata. Legacy ``WIT-{PROJECT}-{id}``
+    keys are still recognized. Must not use the ``AZ-`` PR prefix.
     """
-    parts = project_path_slug(project or "project")
+    _ = project
     try:
         iid = int(work_item_id)
     except (TypeError, ValueError):
         iid = 0
-    return f"WIT-{parts}-{iid}"
+    return str(iid) if iid > 0 else "0"
 
 
 def is_azure_work_item_key(issue_key: str) -> bool:
-    """True for Azure Boards keys ``WIT-{slug}-{id}`` (never bare ``WIT-12``)."""
-    text = (issue_key or "").strip().upper()
-    return bool(re.match(r"^WIT-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d+$", text))
+    """True for a bare work-item id or a legacy ``WIT-…-{id}`` key."""
+    text = (issue_key or "").strip()
+    if re.fullmatch(r"[1-9]\d*", text):
+        return True
+    return bool(
+        re.match(r"^WIT-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d+$", text.upper())
+    )
 
 
 def parse_azure_work_item_key(issue_key: str) -> Tuple[str, int]:
     """Return ``(project_slug, id)`` or ``("", 0)``."""
-    text = (issue_key or "").strip().upper()
-    match = re.match(r"^WIT-([A-Z0-9]+(?:-[A-Z0-9]+)*)-(\d+)$", text)
+    text = (issue_key or "").strip()
+    if re.fullmatch(r"[1-9]\d*", text):
+        return "", int(text)
+    match = re.match(r"^WIT-([A-Z0-9]+(?:-[A-Z0-9]+)*)-(\d+)$", text.upper())
     if not match:
         return "", 0
     try:
