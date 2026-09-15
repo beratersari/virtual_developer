@@ -8,6 +8,30 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.19] — 2026-09-15
+
+Azure Boards work-item intake and Scheduled lookup, aligned with Jira.
+
+### Added
+
+- Scheduled → Existing issue → Azure work item (collection + id). Look up
+  works without `{params}`. Schedule / Run now moves to Active and assigns
+  the PAT user. Ticket name is the work item id (`42`).
+
+### Changed
+
+- Azure PATs are `AZURE_COLLECTION_PATS` (collection URL → PAT).
+  `AZURE_HOST_PATS` is removed.
+- Work-item lookup lives on Scheduled only (not Settings).
+- Work-item comments are HTML (Jira wiki / PR markdown unchanged).
+
+### Fixed
+
+- Ignore `workitem.updated` from the collection PAT so Schedule/Run now
+  cannot start a second job.
+
+[0.9.19]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.19
+
 ## [0.9.18] — 2026-09-15
 
 ### Added

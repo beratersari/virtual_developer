@@ -585,13 +585,16 @@ def schedule_existing_issue(
             logger.warning(f"{key}: In Progress soft-failed: {e}")
 
         # Soft: assign to the PAT user so the board shows who is handling it
-        if not azure_wi:
-            try:
+        try:
+            if azure_wi:
+                if hasattr(client, "assign_to_pat_user"):
+                    client.assign_to_pat_user(key)
+            else:
                 from src.jira.client import assign_to_pat_user
 
                 assign_to_pat_user(client, key)
-            except Exception as e:
-                logger.warning(f"{key}: PAT assign soft-failed: {e}")
+        except Exception as e:
+            logger.warning(f"{key}: PAT assign soft-failed: {e}")
 
         # Soft: ensure schedule label (Jira only; Azure work items do not use tags)
         if not azure_wi:

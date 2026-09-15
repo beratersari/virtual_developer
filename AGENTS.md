@@ -347,10 +347,9 @@ JIRA_API_TOKEN=your-api-token-here
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
-| `AZURE_HOST_PATS` | JSON hostname → Azure PAT (derived from saved collection URLs). Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user) |
+| `AZURE_COLLECTION_PATS` | JSON TFS collection URL → Azure PAT. Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user). Host-only maps are not used. |
 | `AZURE_COLLECTION_URLS` | JSON list of TFS collection URLs (`https://host/tfs/<Collection>`). Settings refuses host-only or `/tfs` without a collection name. |
-| `AZURE_PAT` | Leftover single Azure PAT (expanded onto `AZURE_ALLOWED_HOSTS` when the map is empty) |
-| `AZURE_ALLOWED_HOSTS` | Leftover hosts for a lone `AZURE_PAT` (same leftover rule as GitLab) |
+| `AZURE_PAT` | Leftover single Azure PAT (used only when `AZURE_COLLECTION_PATS` is empty) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret). PR comments **and** work-item created/updated. |
 | `AZURE_TRIGGER_LABEL` | Optional work-item tags. When set, New/To Do intake needs bot assignee **and** one of these tags (same AND as `JIRA_TRIGGER_LABEL`). Empty = assignee only. |
 | `AZURE_TRIGGER_USER` | Display/unique names that start a job on `@name /yaver` in a PR comment **or** when Assigned To matches on a work item. Comma-separated, no `@`. Mention without `/yaver` gets a usage note. A TFS `@<GUID>` chip that only resolves to the bot via identity lookup is a mention (usage note), not `@name /yaver` — **intentional**. `@name /ask` is ignored (another agent). |

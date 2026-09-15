@@ -152,6 +152,8 @@ def fetch_bot_identity(
             text = f"{'http' if local else 'https'}://{text}"
         roots.extend(identity_roots(identity_root(text) or text))
     token = (pat or "").strip()
+    if not token and collection_url and hasattr(settings, "azure_pat_for_collection"):
+        token = (settings.azure_pat_for_collection(collection_url) or "").strip()
     if not token and host and hasattr(settings, "azure_pat_for_host"):
         parsed = urlparse(host if "://" in host else f"https://{host}")
         h = (parsed.hostname or host).lower()

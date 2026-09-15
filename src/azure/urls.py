@@ -88,6 +88,23 @@ def parse_tfs_collection_url(raw: str) -> str:
     ).rstrip("/")
 
 
+def tfs_collection_host(url: str) -> str:
+    """Hostname[:port] from a collection or git URL."""
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        parsed = urlparse(f"https://{url}")
+    name = (parsed.hostname or "").lower()
+    if not name:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port and port not in (80, 443):
+        return f"{name}:{port}"
+    return name
+
+
 def require_tfs_collection_url(raw: str) -> str:
     """Like ``parse_tfs_collection_url`` but raises ``ValueError`` if invalid."""
     url = parse_tfs_collection_url(raw)

@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   fetchSettings,
-  lookupAzureWorkItem,
   patchSettings,
   testAzureConnection,
   testGitlabConnection,
   testJiraConnection,
-  type AzureWorkItemLookup,
 } from '../../api/client'
 import type {
   GitlabConnectionTestResult,
@@ -111,10 +109,6 @@ export function SettingsPage() {
     {},
   )
   const [azureTestingIdx, setAzureTestingIdx] = useState<number | null>(null)
-  const [witHost, setWitHost] = useState('')
-  const [witId, setWitId] = useState('')
-  const [witLoading, setWitLoading] = useState(false)
-  const [witResult, setWitResult] = useState<AzureWorkItemLookup | null>(null)
   const [saved, setSaved] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Draft>>(new Set())
@@ -140,12 +134,6 @@ export function SettingsPage() {
     setSettings(live.settings)
     setDraft(fromSettings(live.settings))
   }, [live.settings, settings])
-
-  useEffect(() => {
-    if (witHost || !draft) return
-    const first = draft.azure_cred_rows.map((r) => r.host.trim()).find(Boolean)
-    if (first) setWitHost(first)
-  }, [draft, witHost])
 
   useEffect(() => {
     void fetchSettings()
@@ -796,114 +784,6 @@ export function SettingsPage() {
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
           {settings?.azure_webhook_path || '/yaver/webhook/azure'}
         </p>
-      </div>
-
-      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
-        <div className="text-sm font-semibold text-text">Work item lookup</div>
-        <p className="mt-1 text-xs text-text-muted">
-          Pick a saved collection, then the work item ID. Uses the stored
-          PAT (API 7.1, then 7.0).
-        </p>
-        <label className="field mt-2">
-          <span>Collection</span>
-          <select
-            value={witHost}
-            onChange={(e) => setWitHost(e.target.value)}
-          >
-            <option value="">Select collection</option>
-            {(settings?.azure_collection_urls?.length
-              ? settings.azure_collection_urls
-              : draft.azure_cred_rows.map((r) => r.host.trim()).filter(Boolean)
-            ).map((url) => (
-              <option key={url} value={url}>
-                {url}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>Work item ID</span>
-          <input
-            value={witId}
-            onChange={(e) => setWitId(e.target.value)}
-            placeholder="12345"
-            inputMode="numeric"
-          />
-        </label>
-        <p className="actions">
-          <button
-            type="button"
-            disabled={witLoading || !witHost.trim() || !witId.trim()}
-            onClick={() => {
-              const id = Number(witId.trim())
-              if (!Number.isFinite(id) || id < 1) {
-                setWitResult({ ok: false, error: 'Work item ID must be a positive number' })
-                return
-              }
-              setWitLoading(true)
-              void (async () => {
-                try {
-                  const r = await lookupAzureWorkItem({
-                    collection_url: witHost.trim(),
-                    work_item_id: id,
-                  })
-                  setWitResult(r)
-                } catch (e) {
-                  setWitResult({
-                    ok: false,
-                    error: e instanceof Error ? e.message : 'Lookup failed',
-                  })
-                } finally {
-                  setWitLoading(false)
-                }
-              })()
-            }}
-          >
-            {witLoading ? 'Looking up…' : 'Look up'}
-          </button>
-        </p>
-        {witResult && (
-          <div className={witResult.ok ? 'quiet mt-2 space-y-1' : 'err mt-2'}>
-            {!witResult.ok ? (
-              <p>{witResult.error || 'Lookup failed'}</p>
-            ) : (
-              <>
-                <p>
-                  <span className="font-mono">{witResult.issue_key}</span>
-                  {witResult.work_item_type ? ` · ${witResult.work_item_type}` : ''}
-                  {witResult.web_url ? (
-                    <>
-                      {' · '}
-                      <a href={witResult.web_url} target="_blank" rel="noreferrer">
-                        open
-                      </a>
-                    </>
-                  ) : null}
-                </p>
-                <p>{witResult.summary || '(no title)'}</p>
-                <p>
-                  State {witResult.state || '—'}
-                  {witResult.state_category ? ` (${witResult.state_category})` : ''}
-                  {' · '}
-                  Assignee {witResult.assignee || 'unassigned'}
-                  {witResult.matched_assignee ? ' (bot)' : ''}
-                </p>
-                <p>
-                  Tags {(witResult.labels || []).join('; ') || '—'}
-                  {witResult.matched_label ? ' (trigger tag)' : ''}
-                </p>
-                <p>
-                  To Do-like {witResult.is_todo ? 'yes' : 'no'}
-                  {' · '}
-                  would process {witResult.will_process ? 'yes' : 'no'}
-                  {witResult.reason ? ` · ${witResult.reason}` : ''}
-                  {witResult.local_status ? ` · local ${witResult.local_status}` : ''}
-                  {witResult.plan_handoff ? ` · plan ${witResult.plan_handoff}` : ''}
-                </p>
-              </>
-            )}
-          </div>
-        )}
       </div>
       </div>
       )}

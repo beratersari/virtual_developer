@@ -34,9 +34,28 @@ def _decode_basic(header: str) -> str:
     return base64.b64decode(token).decode("utf-8")
 
 
+def _azure_collection_map(azure_map):
+    """Tests used hostname keys; persist them as DefaultCollection URLs."""
+    out = {}
+    for key, pat in (azure_map or {}).items():
+        text = str(key or "").strip()
+        if not text:
+            continue
+        if "/tfs/" in text.replace("\\", "/").lower():
+            if "://" not in text:
+                text = f"https://{text}"
+            out[text] = pat
+            continue
+        host = text
+        if "://" not in host:
+            host = f"https://{host}"
+        out[f"{host.rstrip('/')}/tfs/DefaultCollection"] = pat
+    return out
+
+
 def _gm(monkeypatch, *, remote: str, azure_map=None, gitlab_map=None, **extra):
     s = Settings()
-    s.set_azure_host_pat_map(azure_map or {})
+    s.set_azure_collection_pat_map(_azure_collection_map(azure_map))
     s.set_gitlab_host_pat_map(gitlab_map or {})
     for key, value in extra.items():
         setattr(s, key, value)
@@ -495,7 +514,9 @@ def test_37_normalize_host_port_and_scheme():
 
 def test_38_probe_uses_stored_host_pat(monkeypatch):
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "STORED-PAT"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "STORED-PAT"}
+    )
     monkeypatch.setattr("src.azure_connection.settings", s)
     captured = {}
 

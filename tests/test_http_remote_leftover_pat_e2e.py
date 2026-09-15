@@ -77,7 +77,9 @@ def _init_repo(path: Path) -> None:
 def test_http_tfs_insteadOf_keeps_http_https_ssh_stay_https(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "temp_dir_base", tmp_path / "t")
     monkeypatch.setattr(
-        settings, "azure_host_pats", '{"tfs.corp.local:8080":"tfs-pat"}'
+        settings,
+        "azure_collection_pats",
+        '{"https://tfs.corp.local:8080/tfs/DefaultCollection":"tfs-pat"}',
     )
 
     git = GitManager(
@@ -164,7 +166,9 @@ def test_http_tfs_clone_against_real_git_http(tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "temp_dir_base", tmp_path / "clones")
         monkeypatch.setattr(settings, "git_clone_timeout_seconds", 20)
         monkeypatch.setattr(
-            settings, "azure_host_pats", json.dumps({f"{host}:{port}": "tfs-pat"})
+            settings,
+            "azure_collection_pats",
+            json.dumps({f"http://{host}:{port}/tfs/DefaultCollection": "tfs-pat"}),
         )
         monkeypatch.setattr(settings, "gitlab_pat", "")
         monkeypatch.setattr(settings, "gitlab_host_pats", "")

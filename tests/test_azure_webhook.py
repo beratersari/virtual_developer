@@ -1135,9 +1135,11 @@ def test_tfs_never_uses_leftover_gitlab_pat(monkeypatch):
     assert gm._remote_uses_azure_pat() is False
     with pytest.raises(GitCloneError) as exc:
         gm._assert_remote_host_allowed(tfs)
-    assert "AZURE_HOST_PATS" in str(exc.value) or "Azure PAT" in str(exc.value)
+    assert "Azure PAT" in str(exc.value) or "AZURE_COLLECTION_PATS" in str(exc.value)
 
-    s.set_azure_host_pat_map({"tfs.example.com": "AZURE-ENV-PAT"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "AZURE-ENV-PAT"}
+    )
     assert gm._pat_for_remote() == "AZURE-ENV-PAT"
     assert gm._remote_uses_azure_pat() is True
     gm._assert_remote_host_allowed(tfs)
@@ -1146,20 +1148,19 @@ def test_tfs_never_uses_leftover_gitlab_pat(monkeypatch):
 def test_azure_leftover_pat_expands_like_gitlab():
     from src.config import Settings
 
-    s = Settings(
-        azure_host_pats="",
-        azure_pat="legacy-az-pat",
-        azure_allowed_hosts="tfs.example.com,tfs.internal:8080",
-    )
+    s = Settings()
+    s.azure_collection_pats = ""
+    s.azure_collection_urls = ""
+    s.azure_pat = "legacy-az-pat"
     assert s.azure_pat_for_host("tfs.example.com") == "legacy-az-pat"
     assert s.azure_pat_for_host("tfs.internal:8080") == "legacy-az-pat"
-    assert s.azure_pat_for_host("other.example") == ""
     assert s.azure_has_any_pat() is True
 
     mapped = Settings(
-        azure_host_pats='{"tfs.example.com":"map-pat"}',
+        azure_collection_pats=(
+            '{"https://tfs.example.com/tfs/DefaultCollection":"map-pat"}'
+        ),
         azure_pat="legacy-should-not-win",
-        azure_allowed_hosts="tfs.example.com",
     )
     assert mapped.azure_pat_for_host("tfs.example.com") == "map-pat"
 
@@ -1240,7 +1241,9 @@ def test_azure_pat_not_sent_to_gitlab_host(monkeypatch):
     from src.git_manager import GitManager
 
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "AZURE-ONLY-PAT"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "AZURE-ONLY-PAT"}
+    )
     s.set_gitlab_host_pat_map({"gitlab.example.com": "GITLAB-ONLY-PAT"})
     monkeypatch.setattr("src.git_manager.settings", s)
     gm = GitManager.__new__(GitManager)
@@ -1264,7 +1267,9 @@ def test_azure_git_env_uses_pat_user_basic(monkeypatch, tmp_path):
     monkeypatch.setenv("YAVER_DATA_DIR", str(tmp_path / "yaver-data"))
     monkeypatch.setenv("VD_DATA_DIR", str(tmp_path / "yaver-data"))
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "AZURE-SECRET-PAT"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "AZURE-SECRET-PAT"}
+    )
     monkeypatch.setattr("src.git_manager.settings", s)
     gm = GitManager.__new__(GitManager)
     gm.remote_url = "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo"
@@ -1575,7 +1580,9 @@ def test_settings_keep_azure_pat_when_row_blank(monkeypatch):
     from src.dashboard.service import apply_settings_update
 
     s = Settings()
-    s.set_azure_host_pat_map({"tfs.example.com": "keep-me"})
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "keep-me"}
+    )
     monkeypatch.setattr("src.dashboard.service.settings", s)
     monkeypatch.setattr("src.config.settings", s)
     monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None)

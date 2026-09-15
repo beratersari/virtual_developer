@@ -173,7 +173,9 @@ def test_leftover_gitlab_pat_survives_azure_host_map(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
     monkeypatch.setattr(settings, "gitlab_pat", "glpat-leftover-mixed")
     monkeypatch.setattr(
-        settings, "azure_host_pats", '{"tfs.corp.local:8080":"tfs-pat"}'
+        settings,
+        "azure_collection_pats",
+        '{"https://tfs.corp.local:8080/tfs/DefaultCollection":"tfs-pat"}',
     )
 
     url = "https://gitlab.example.com/acme/app.git"
@@ -244,7 +246,9 @@ def test_leftover_gitlab_pat_clones_http_git_while_azure_map_set(tmp_path, monke
         monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
         monkeypatch.setattr(settings, "gitlab_pat", "glpat-leftover-mixed")
         monkeypatch.setattr(
-            settings, "azure_host_pats", '{"tfs.corp.local:8080":"tfs-pat"}'
+            settings,
+            "azure_collection_pats",
+            '{"https://tfs.corp.local:8080/tfs/DefaultCollection":"tfs-pat"}',
         )
         url = f"http://{host}:{port}/acme/app.git"
         git = GitManager(

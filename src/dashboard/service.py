@@ -727,8 +727,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         from src.azure_connection import save_azure_collection_urls
 
         current = (
-            settings.azure_host_pat_map()
-            if hasattr(settings, "azure_host_pat_map")
+            settings.azure_collection_pat_map()
+            if hasattr(settings, "azure_collection_pat_map")
             else {}
         )
         new_map: Dict[str, str] = {}
@@ -758,17 +758,14 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 azure_warning(f"settings reject collection url={raw!r} err={exc}")
                 raise ValueError(str(exc)) from exc
             collections.append(collection)
-            host = _normalize_gitlab_host(collection)
-            previous_host = _normalize_gitlab_host(
-                parse_tfs_collection_url(previous_raw) or previous_raw
-            )
+            previous = parse_tfs_collection_url(previous_raw)
             pat = str(pat_raw or "").strip()
             if pat:
-                new_map[host] = pat
-            elif host in current:
-                new_map[host] = current[host]
-            elif previous_host and previous_host in current:
-                new_map[host] = current[previous_host]
+                new_map[collection] = pat
+            elif collection in current:
+                new_map[collection] = current[collection]
+            elif previous and previous in current:
+                new_map[collection] = current[previous]
         save_azure_collection_urls(collections)
         runtime_persist["azure_collection_urls"] = getattr(
             settings, "azure_collection_urls", ""
@@ -777,42 +774,31 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
 
         azure_info(
             f"settings save collections={len(collections)} "
-            f"urls={collections} pat_hosts={list(new_map)}"
+            f"urls={collections} pats={len(new_map)}"
         )
-        clearing_hosts = bool(current) and not new_map
+        clearing = bool(current) and not new_map
         keep_legacy_pat = (not new_map) and (not current) and bool(
             (getattr(settings, "azure_pat", "") or "").strip()
         )
-        if hasattr(settings, "set_azure_host_pat_map"):
-            if new_map or clearing_hosts:
-                settings.set_azure_host_pat_map(new_map)
+        if hasattr(settings, "set_azure_collection_pat_map"):
+            if new_map or clearing:
+                settings.set_azure_collection_pat_map(new_map)
+        save_azure_collection_urls(collections)
         if not keep_legacy_pat:
-            dotenv_updates["AZURE_HOST_PATS"] = getattr(
-                settings, "azure_host_pats", ""
+            dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
+                settings, "azure_collection_pats", ""
             ) or ""
+            dotenv_updates["AZURE_COLLECTION_URLS"] = getattr(
+                settings, "azure_collection_urls", ""
+            ) or ""
+            dotenv_updates["AZURE_HOST_PATS"] = ""
             dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
     else:
         if "azure_pat" in data and data["azure_pat"] is not None:
             pat = str(data["azure_pat"])
             if pat.strip():
                 settings.azure_pat = pat.strip()
-        if "azure_allowed_hosts" in data and data["azure_allowed_hosts"] is not None:
-            raw = str(data["azure_allowed_hosts"])
-            hosts = [h.strip().lower() for h in raw.split(",") if h.strip()]
-            settings.azure_allowed_hosts = ",".join(hosts)
-            if (
-                hasattr(settings, "set_azure_host_pat_map")
-                and (getattr(settings, "azure_pat", "") or "").strip()
-                and hosts
-            ):
-                settings.set_azure_host_pat_map(
-                    {h: settings.azure_pat.strip() for h in hosts}
-                )
-        if "azure_pat" in data or "azure_allowed_hosts" in data:
-            dotenv_updates["AZURE_HOST_PATS"] = getattr(
-                settings, "azure_host_pats", ""
-            ) or ""
-            dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
+                dotenv_updates["AZURE_PAT"] = settings.azure_pat
     azure_trigger = None
     if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
         azure_trigger = str(data["azure_trigger_user"]).strip()

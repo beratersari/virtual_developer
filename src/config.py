@@ -362,23 +362,25 @@ class Settings(BaseSettings):
             "GITLAB_BOT_MENTIONS are empty."
         ),
     )
-    # Azure DevOps Server 2022.2 (on-prem TFS) — same PAT shape as GitLab.
-    # First-class: per-host PATs as JSON. A host with a PAT is allowed.
-    #   AZURE_HOST_PATS={"tfs.example.com":"…","tfs.internal:8080":"…"}
-    # Leftover (only when the JSON map is empty): one AZURE_PAT expanded onto
-    # each host in AZURE_ALLOWED_HOSTS. Not a second allowlist.
+    # Azure DevOps Server 2022.2 (on-prem TFS).
+    # First-class: collection URL → PAT. Host-only maps are not used.
+    #   AZURE_COLLECTION_PATS={"https://tfs.example.com/tfs/DefaultCollection":"…"}
+    # Leftover AZURE_PAT is used only when that map is empty.
     # Clone/push/MR use this PAT as Basic pat:<PAT> (IIS rejects empty user).
-    azure_host_pats: str = Field(
+    azure_collection_pats: str = Field(
         default="",
-        description='JSON object mapping hostname → Azure PAT, e.g. {"tfs.example.com":"…"}',
+        description=(
+            "JSON object mapping TFS collection URL → Azure PAT, "
+            'e.g. {"https://tfs.example.com/tfs/DefaultCollection":"…"}'
+        ),
     )
     azure_pat: str = Field(
         default="",
-        description="Leftover single Azure PAT (expanded onto AZURE_ALLOWED_HOSTS when map empty)",
+        description="Leftover single Azure PAT (used when AZURE_COLLECTION_PATS is empty)",
     )
     azure_allowed_hosts: str = Field(
         default="",
-        description="Leftover comma-separated hosts for a lone AZURE_PAT (not a separate allowlist)",
+        description="Leftover. Ignored. Collections come from AZURE_COLLECTION_PATS.",
     )
     azure_webhook_enabled: bool = Field(
         default=False,
@@ -778,13 +780,38 @@ class Settings(BaseSettings):
 
     @property
     def azure_allowed_hosts_list(self) -> List[str]:
-        """Hosts that have an Azure PAT (lowercase). A host with a PAT is allowed."""
+        """Hosts derived from saved collection URLs (lowercase)."""
         return sorted(self.azure_host_pat_map().keys())
+
+    def azure_collection_pat_map(self) -> Dict[str, str]:
+        """Resolved TFS collection URL → Azure PAT."""
+        from src.azure.urls import parse_tfs_collection_url
+
+        out: Dict[str, str] = {}
+        raw = (self.azure_collection_pats or "").strip()
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        url = parse_tfs_collection_url(str(k or ""))
+                        pat = str(v or "").strip()
+                        if url and pat:
+                            out[url] = pat
+            except json.JSONDecodeError:
+                logger.warning("AZURE_COLLECTION_PATS is not valid JSON; ignoring map")
+        return out
 
     def azure_collection_url_list(self) -> List[str]:
         """Saved TFS collection URLs (never host-only or ``/tfs`` without a name)."""
         from src.azure.urls import parse_tfs_collection_url
 
+        out: List[str] = []
+        seen: set[str] = set()
+        for url in self.azure_collection_pat_map():
+            if url not in seen:
+                seen.add(url)
+                out.append(url)
         raw = (self.azure_collection_urls or "").strip()
         data: Any = raw
         if raw:
@@ -792,9 +819,7 @@ class Settings(BaseSettings):
                 data = json.loads(raw)
             except json.JSONDecodeError:
                 parsed = parse_tfs_collection_url(raw)
-                return [parsed] if parsed else []
-        out: List[str] = []
-        seen: set[str] = set()
+                data = [parsed] if parsed else []
         rows: List[Any]
         if isinstance(data, dict):
             rows = list(data.values())
@@ -810,78 +835,82 @@ class Settings(BaseSettings):
         return out
 
     def azure_host_pat_map(self) -> Dict[str, str]:
-        """Resolved hostname → Azure PAT map (prefer ``azure_host_pats`` JSON).
+        """Hostname → PAT derived from collection URLs (not AZURE_HOST_PATS)."""
+        from src.azure.urls import tfs_collection_host
 
-        Same leftover rule as GitLab: if the JSON map is empty and
-        ``azure_pat`` is set, each host in leftover ``azure_allowed_hosts``
-        gets that same PAT.
-        """
         out: Dict[str, str] = {}
-        raw = (self.azure_host_pats or "").strip()
-        if raw:
-            try:
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        host = str(k or "").strip().lower()
-                        pat = str(v or "").strip()
-                        if host and pat:
-                            out[host] = pat
-            except json.JSONDecodeError:
-                logger.warning("AZURE_HOST_PATS is not valid JSON; ignoring map")
-
+        for url, pat in self.azure_collection_pat_map().items():
+            host = tfs_collection_host(url)
+            if host and pat and host not in out:
+                out[host] = pat
         if out:
             return out
+        leftover = (self.azure_pat or "").strip()
+        if leftover:
+            for url in self.azure_collection_url_list():
+                host = tfs_collection_host(url)
+                if host and host not in out:
+                    out[host] = leftover
+        return out
 
-        pat = (self.azure_pat or "").strip()
-        if not pat:
-            return {}
-        hosts = [
-            h.strip().lower()
-            for h in (self.azure_allowed_hosts or "").split(",")
-            if h.strip()
-        ]
-        return {h: pat for h in hosts}
+    def azure_pat_for_collection(self, collection_url: str) -> str:
+        from src.azure.urls import parse_tfs_collection_url
+
+        url = parse_tfs_collection_url(collection_url)
+        if url:
+            mapped = self.azure_collection_pat_map().get(url) or ""
+            if mapped:
+                return mapped
+        if self.azure_collection_pat_map():
+            return ""
+        return (self.azure_pat or "").strip()
 
     def azure_pat_for_host(self, host: str) -> str:
-        """Return the Azure PAT for ``host`` (exact hostname[:port] only)."""
+        """PAT for any saved collection on this hostname[:port]."""
         h = (host or "").strip().lower()
         if not h:
             return ""
         mapping = self.azure_host_pat_map()
-        if not mapping:
-            return ""
         if h in mapping:
             return mapping[h]
-        # Settings used to persist hostname without :port. Same host.
         if ":" in h:
             name = h.rsplit(":", 1)[0]
             if name in mapping:
                 return mapping[name]
+        if not mapping:
+            return (self.azure_pat or "").strip()
         return ""
 
     def azure_has_any_pat(self) -> bool:
-        return bool(self.azure_host_pat_map()) or bool((self.azure_pat or "").strip())
+        return bool(self.azure_collection_pat_map()) or bool(
+            (self.azure_pat or "").strip()
+        )
 
-    def set_azure_host_pat_map(self, mapping: Dict[str, str]) -> None:
-        """Persist host→PAT map. Allowed hosts are the keys (a PAT allows the host)."""
+    def set_azure_collection_pat_map(self, mapping: Dict[str, str]) -> None:
+        """Persist collection URL → PAT. Host-only keys are dropped."""
+        from src.azure.urls import parse_tfs_collection_url
+
         cleaned: Dict[str, str] = {}
         for k, v in (mapping or {}).items():
-            host = str(k or "").strip().lower()
+            url = parse_tfs_collection_url(str(k or ""))
             pat = str(v or "").strip()
-            if host and pat:
-                cleaned[host] = pat
-        self.azure_host_pats = (
+            if url and pat:
+                cleaned[url] = pat
+        self.azure_collection_pats = (
             json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
         )
-        self.azure_allowed_hosts = ",".join(sorted(cleaned.keys()))
+        self.azure_collection_urls = json.dumps(list(cleaned.keys()))
         if len(cleaned) == 1:
             self.azure_pat = next(iter(cleaned.values()))
         else:
             self.azure_pat = ""
 
+    def set_azure_host_pat_map(self, mapping: Dict[str, str]) -> None:
+        """Accept collection URLs only. Host-only keys are ignored."""
+        self.set_azure_collection_pat_map(mapping)
+
     def all_azure_pats(self) -> List[str]:
-        pats = list(dict.fromkeys(self.azure_host_pat_map().values()))
+        pats = list(dict.fromkeys(self.azure_collection_pat_map().values()))
         leftover = (self.azure_pat or "").strip()
         if leftover and leftover not in pats:
             pats.append(leftover)
@@ -1057,6 +1086,7 @@ _RUNTIME_ENV_MIRROR = {
     "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
     "azure_trigger_label": "AZURE_TRIGGER_LABEL",
     "azure_collection_urls": "AZURE_COLLECTION_URLS",
+    "azure_collection_pats": "AZURE_COLLECTION_PATS",
 }
 
 

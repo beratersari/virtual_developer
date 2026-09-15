@@ -92,9 +92,9 @@ def test_tfs_guid_only_mention_stays_a_usage_note(monkeypatch):
     try:
         host, port = httpd.server_address
         origin = f"http://{host}:{port}"
-        if hasattr(settings, "set_azure_host_pat_map"):
-            settings.set_azure_host_pat_map(
-                {f"{host}:{port}": "tfs-pat", str(host): "tfs-pat"}
+        if hasattr(settings, "set_azure_collection_pat_map"):
+            settings.set_azure_collection_pat_map(
+                {f"http://{host}:{port}/tfs/DefaultCollection": "tfs-pat"}
             )
         monkeypatch.setattr(settings, "azure_pat", "tfs-pat")
         payload = {

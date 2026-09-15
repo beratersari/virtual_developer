@@ -366,6 +366,12 @@ class JobProcessor:
         if self._is_git_comment_triggered(issue_key):
             return False
         if self._is_azure_workitem_triggered(issue_key):
+            try:
+                tracker = self._tracker_for(issue_key)
+                if tracker is not None and hasattr(tracker, "assign_to_pat_user"):
+                    return bool(tracker.assign_to_pat_user(issue_key))
+            except Exception as e:
+                logger.warning(f"{issue_key}: Azure PAT assign failed: {e}")
             return False
         try:
             from src.jira.client import assign_to_pat_user

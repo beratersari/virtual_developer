@@ -23,7 +23,12 @@ def is_yaver_reply(body: str) -> bool:
     if USAGE_MARKER in text or USAGE_HEADING in text:
         return True
     lead = text.lstrip()
-    return lead.startswith("*Yaver") or lead.startswith("**Yaver")
+    return (
+        lead.startswith("*Yaver")
+        or lead.startswith("**Yaver")
+        or lead.startswith("<strong>Yaver")
+        or "<strong>Yaver" in lead[:120]
+    )
 
 
 def _ids_from_state(state: Any) -> tuple[str, str]:
