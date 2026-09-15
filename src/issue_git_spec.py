@@ -169,6 +169,9 @@ def _expand_links(text: str) -> str:
 
 
 def _normalize_repo_url(raw: str) -> str:
+    # Intentional: keep the parsed {params} Repository text as written
+    # (including userinfo if the operator pasted it). Clone/push strip
+    # userinfo in GitManager.normalize_remote_url and use the settings PAT.
     url = (raw or "").strip().strip("<>").strip("`").strip()
     url = url.rstrip(").,;\"'")
     if url and not _looks_like_git_url(url):
