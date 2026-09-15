@@ -8,11 +8,30 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-09-15
+
+Azure work-item jobs start on any open column, assign the PAT user, and
+clone without a trailing ``.git``.
+
 ### Changed
 
 - Azure work-item webhooks accept any open board column (Active, Doing,
   New, …), not only New/To Do. Done/Closed is still ignored. Active → New
   while assigned still does not re-queue.
+- New Azure work items, webhook accept, and ``/planExecute`` assign the
+  collection PAT user (same as Jira).
+- Job detail uses a generic **Description** label for Jira, Azure, MR,
+  and PR.
+
+### Fixed
+
+- Work-item comment + History twin hook posts one usage note (180s claim).
+- PAT identity is cached per collection URL and token, not shared across
+  collections on the same TFS host.
+- Clone and ``{params}`` help drop a trailing ``.git`` (TFS ``/_git/``
+  rejects it; GitLab still clones).
+
+[0.9.21]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.21
 
 ## [0.9.20] — 2026-09-15
 

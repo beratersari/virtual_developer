@@ -1,3 +1,10 @@
+# Yaver 0.9.21
+
+Azure work items start on any open column (not
+only New). Create, webhook accept, and
+/planExecute assign the PAT user. One usage note
+per comment. Clone URLs drop a trailing .git.
+
 # Yaver 0.9.20
 
 Fix Scheduled Azure lookup PAT. New Azure work
