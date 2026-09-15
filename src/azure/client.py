@@ -928,7 +928,9 @@ class AzureDevOpsClient:
         self, project: str, work_item_id: int, body: str
     ) -> Optional[Dict[str, Any]]:
         """Post a work-item comment (comments API, then System.History)."""
-        text = (body or "").strip()
+        from src.azure.comment_html import work_item_comment_html
+
+        text = work_item_comment_html(body or "")
         if not text or not self.api_base:
             return None
         try:
