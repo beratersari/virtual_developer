@@ -314,6 +314,48 @@ export function testGitlabConnection(body: {
   })
 }
 
+export type AzureWorkItemLookup = {
+  ok: boolean
+  error?: string
+  issue_key?: string
+  work_item_id?: number
+  project?: string
+  host?: string
+  collection_url?: string
+  web_url?: string
+  summary?: string
+  description?: string
+  state?: string
+  state_category?: string
+  assignee?: string | null
+  labels?: string[]
+  work_item_type?: string
+  matched_assignee?: boolean
+  matched_label?: boolean
+  is_todo?: boolean
+  will_process?: boolean
+  action?: string
+  reason?: string
+  plan_handoff?: string | null
+  local_status?: string | null
+  server_time?: string
+}
+
+export function lookupAzureWorkItem(body: {
+  collection_url: string
+  work_item_id: number
+  project?: string
+}) {
+  return request<AzureWorkItemLookup>('/api/azure/work-item', {
+    method: 'POST',
+    body: JSON.stringify({
+      collection_url: body.collection_url.trim(),
+      work_item_id: body.work_item_id,
+      project: body.project?.trim() || undefined,
+    }),
+  })
+}
+
 export function testAzureConnection(body: {
   host: string
   pat?: string
