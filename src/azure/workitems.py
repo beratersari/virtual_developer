@@ -15,8 +15,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
+from src.azure.identity import fetch_bot_identity
 from src.azure.keys import azure_work_item_key
 from src.azure.log import azure_info, azure_warning, clip
+from src.gitlab.mentions import identity_key, normalize_guid, normalize_mention
 from src.azure.webhook import WebhookDecision, _as_dict, _event_type, _header_map, _s
 from src.jira.plan_labels import HANDOFF_EXECUTE, HANDOFF_REFACTOR
 from src.jira.poller import JiraPoller
@@ -821,7 +823,11 @@ def decide_azure_workitem_comment_webhook(
         resource.get("revisedBy")
         or _as_dict(resource.get("comment")).get("author")
     )
-    if author_is_configured_bot(author, mentions):
+    if author_is_configured_bot(author, mentions) or actor_is_pat_user(
+        identity_as_assignee(author) or author,
+        host=parsed.host,
+        collection_url=parsed.collection_url,
+    ):
         azure_info(
             f"workitem comment reject reason='ignored bot author' "
             f"id={parsed.work_item_id}"
@@ -916,6 +922,64 @@ def post_azure_workitem_usage_note(
     return posted is not None
 
 
+def workitem_revised_by(payload: Any) -> Optional[Dict[str, Any]]:
+    """Actor on a 2022.2 work-item hook (``revisedBy`` / ``System.ChangedBy``)."""
+    data = payload if isinstance(payload, dict) else {}
+    resource = _as_dict(data.get("resource"))
+    revision = _as_dict(resource.get("revision") or resource.get("workItem"))
+    fields = _as_dict(revision.get("fields"))
+    for raw in (
+        resource.get("revisedBy"),
+        revision.get("revisedBy"),
+        fields.get("System.ChangedBy"),
+        fields.get("System.AuthorizedAs"),
+        _as_dict(resource.get("comment")).get("revisedBy"),
+        _as_dict(resource.get("comment")).get("author"),
+    ):
+        ident = identity_as_assignee(raw)
+        if ident:
+            return ident
+    return None
+
+
+def actor_is_pat_user(
+    actor: Optional[Dict[str, Any]],
+    *,
+    host: str = "",
+    collection_url: str = "",
+) -> bool:
+    """True when the hook actor is the collection PAT identity (our own writes)."""
+    if not actor:
+        return False
+    ident = fetch_bot_identity(host=host, collection_url=collection_url)
+    if not ident:
+        return False
+    actor_id = normalize_guid(
+        str(actor.get("key") or actor.get("accountId") or actor.get("id") or "")
+    )
+    pat_id = normalize_guid(str(ident.get("id") or ""))
+    if actor_id and pat_id and actor_id == pat_id:
+        return True
+    actor_keys = {
+        identity_key(x) or normalize_mention(str(x))
+        for x in (
+            actor.get("uniqueName"),
+            actor.get("name"),
+            actor.get("displayName"),
+            actor.get("emailAddress"),
+        )
+        if x
+    }
+    actor_keys.discard("")
+    pat_keys = {
+        identity_key(n) or normalize_mention(str(n))
+        for n in (ident.get("names") or [])
+        if n
+    }
+    pat_keys.discard("")
+    return bool(actor_keys and pat_keys and actor_keys.intersection(pat_keys))
+
+
 def decide_azure_workitem_webhook(
     payload: Any,
     *,
@@ -938,6 +1002,17 @@ def decide_azure_workitem_webhook(
     if parsed is None:
         azure_info("workitem reject reason='missing work item id'")
         return WebhookDecision(False, "missing work item id")
+
+    actor = workitem_revised_by(data)
+    if actor_is_pat_user(
+        actor, host=parsed.host, collection_url=parsed.collection_url
+    ):
+        azure_info(
+            f"workitem reject reason='ignored PAT update' "
+            f"id={parsed.work_item_id} rev={parsed.rev} "
+            f"actor={actor.get('displayName') or actor.get('name') or '-'}"
+        )
+        return WebhookDecision(False, "ignored PAT update")
 
     if event_name == "workitem.updated" and not parsed.change_kinds:
         azure_info(
@@ -1151,6 +1226,7 @@ __all__ = [
     "PLAN_REFACTOR_COMMAND",
     "AzureWorkItemEvent",
     "WorkItemIntakeDecision",
+    "actor_is_pat_user",
     "assignee_matches_azure_bot",
     "azure_html_to_text",
     "changelog_from_resource",

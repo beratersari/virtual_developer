@@ -242,7 +242,7 @@ def test_schedule_preview_azure_requires_collection():
     assert "collection" in (out.get("error") or "").lower()
 
 
-def test_schedule_existing_azure_skips_jira_assign(tmp_path):
+def test_schedule_existing_azure_moves_and_assigns(tmp_path):
     from src.scheduler.service import schedule_existing_issue
     from src.state.schedule_store import ScheduleStore
 
@@ -263,6 +263,7 @@ def test_schedule_existing_azure_skips_jira_assign(tmp_path):
     tracker = MagicMock()
     tracker.get_issue.return_value = issue
     tracker.transition_to_in_progress.return_value = True
+    tracker.assign_to_pat_user.return_value = True
     tracker.update_issue.return_value = True
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     with patch(
@@ -281,6 +282,8 @@ def test_schedule_existing_azure_skips_jira_assign(tmp_path):
         )
     assert out["ok"] is True
     assert out["issue_key"] == "WIT-DEMO-42"
+    tracker.transition_to_in_progress.assert_called()
+    tracker.assign_to_pat_user.assert_called()
     assign.assert_not_called()
     tracker.add_labels.assert_not_called()
 
@@ -317,6 +320,52 @@ def test_parse_assignee_change_payload():
     assert "{params}" in fields["description"]
     assert fields["assignee"]["displayName"] == "Yaver"
     assert fields["status"]["name"] == "New"
+
+
+def test_ignore_pat_user_state_and_assign_updates():
+    payload = _wi_payload(
+        changed={
+            "System.State": {"oldValue": "New", "newValue": "Active"},
+            "System.AssignedTo": {
+                "oldValue": None,
+                "newValue": {
+                    "displayName": "Yaver Bot",
+                    "uniqueName": "DOMAIN\\yaver",
+                    "id": "pat-guid",
+                },
+            },
+        },
+        state="Active",
+        assignee="Yaver Bot",
+        unique="DOMAIN\\yaver",
+    )
+    payload["resource"]["revisedBy"] = {
+        "displayName": "Yaver Bot",
+        "uniqueName": "DOMAIN\\yaver",
+        "id": "pat-guid",
+    }
+    with patch(
+        "src.azure.workitems.fetch_bot_identity",
+        return_value={"id": "pat-guid", "names": ["Yaver Bot", r"DOMAIN\yaver"]},
+    ):
+        decision = decide_azure_workitem_webhook(payload, enabled=True)
+    assert decision.accepted is False
+    assert "PAT" in decision.reason
+
+
+def test_operator_assign_still_accepted():
+    payload = _wi_payload()
+    payload["resource"]["revisedBy"] = {
+        "displayName": "Alice",
+        "uniqueName": "DOMAIN\\alice",
+        "id": "user-alice",
+    }
+    with patch(
+        "src.azure.workitems.fetch_bot_identity",
+        return_value={"id": "pat-guid", "names": ["Yaver Bot", r"DOMAIN\yaver"]},
+    ):
+        decision = decide_azure_workitem_webhook(payload, enabled=True)
+    assert decision.accepted is True
 
 
 def test_ignore_watermark_only_update():
