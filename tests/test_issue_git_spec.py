@@ -300,6 +300,20 @@ def test_parse_issue_mode_helper():
     )
 
 
+def test_template_help_has_no_dot_git_suffix():
+    from src.issue_git_spec import TEMPLATE_HELP
+
+    assert ".git" not in TEMPLATE_HELP
+    assert "Repository: https://gitlab.example.com/group/your-repo" in TEMPLATE_HELP
+    spec, err = parse_issue_git_spec(
+        "x",
+        "{params}\nRepository: not-a-url\nSource branch: develop\nMode: plan\n{params}\n",
+    )
+    assert spec is None
+    assert err is not None
+    assert ".git" not in err
+
+
 def test_invalid_url():
     desc = (
         "{params}\nRepository: not-a-url\nSource branch: develop\nMode: plan\n{params}\n"

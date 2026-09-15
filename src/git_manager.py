@@ -170,7 +170,7 @@ class GitManager:
         if not gitlab_url:
             raise GitCloneError(
                 "*Yaver* could not clone: no repository URL was provided on the issue.\n\n"
-                "Add `Repository: https://gitlab.example.com/group/repo.git` to the description."
+                "Add `Repository: https://gitlab.example.com/group/your-repo` to the description."
             )
         if not self.target_branch:
             raise GitTargetBranchError(
@@ -852,12 +852,23 @@ class GitManager:
         self._clone_in_progress = False
 
     @staticmethod
+    def _strip_dot_git(path: str) -> str:
+        """Drop a trailing ``.git`` (TFS rejects it; GitLab/git still clone)."""
+        text = (path or "").rstrip("/")
+        if text.lower().endswith(".git"):
+            return text[:-4]
+        return text
+
+    @staticmethod
     def normalize_remote_url(url: str) -> str:
         """HTTPS clone URL: SSH → https, strip userinfo, drop default ports.
 
         GitLab MR hooks sometimes send ``git@host:group/repo.git`` or
         ``https://git@host/...``. Userinfo breaks ``url.*.insteadOf`` matching
         and Windows GCM then pops a username/password dialog.
+
+        A trailing ``.git`` is always removed. TFS ``/_git/repo.git`` 404s;
+        GitLab and git remotes clone the same repo without the suffix.
         """
         raw = (url or "").strip()
         if not raw:
@@ -866,7 +877,10 @@ class GitManager:
             rest = raw[4:]
             if ":" in rest:
                 host, path = rest.split(":", 1)
-                return f"https://{host}/{path.lstrip('/')}"
+                return (
+                    f"https://{host}/"
+                    f"{GitManager._strip_dot_git(path.lstrip('/'))}"
+                )
             return raw
         if raw.startswith("ssh://"):
             rest = raw[6:]
@@ -874,7 +888,10 @@ class GitManager:
                 rest = rest[4:]
             if "/" in rest:
                 host, path = rest.split("/", 1)
-                return f"https://{host}/{path.lstrip('/')}"
+                return (
+                    f"https://{host}/"
+                    f"{GitManager._strip_dot_git(path.lstrip('/'))}"
+                )
             return raw
         if "://" not in raw:
             raw = "https://" + raw
@@ -888,7 +905,14 @@ class GitManager:
             port = None
         netloc = f"{host}:{port}" if port and port not in (80, 443) else host
         return urlunparse(
-            (parsed.scheme, netloc, parsed.path or "", "", parsed.query, parsed.fragment)
+            (
+                parsed.scheme,
+                netloc,
+                GitManager._strip_dot_git(parsed.path or ""),
+                "",
+                parsed.query,
+                parsed.fragment,
+            )
         )
 
     @staticmethod
@@ -1064,7 +1088,7 @@ class GitManager:
         if not host:
             raise GitCloneError(
                 "*Yaver* could not clone: repository URL has no host.\n\n"
-                "Set `Repository: https://gitlab.example.com/group/repo.git` "
+                "Set `Repository: https://gitlab.example.com/group/your-repo` "
                 "or an Azure DevOps `_git` URL in `{params}`."
             )
         pat = self._pat_for_remote(url)

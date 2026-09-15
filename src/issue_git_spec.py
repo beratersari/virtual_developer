@@ -4,7 +4,7 @@ Put git settings **between** matching ``{params}`` markers (anywhere in the
 description). Example::
 
     {params}
-    Repository: https://gitlab.example.com/group/repo.git
+    Repository: https://gitlab.example.com/group/your-repo
     Source branch: feature/PROJ-123
     Target branch: develop
     {params}
@@ -89,7 +89,7 @@ _URL_TOKEN = re.compile(
 
 TEMPLATE_HELP = """\
 {params}
-Repository: https://gitlab.example.com/group/your-repo.git
+Repository: https://gitlab.example.com/group/your-repo
 Source branch: feature/PROJ-123
 Target branch: develop
 Mode: plan
@@ -486,7 +486,7 @@ def parse_issue_git_spec(
     missing = []
     if not repo:
         missing.append(
-            "Repository (e.g. `Repository: https://gitlab.example.com/group/repo.git`)"
+            "Repository (e.g. `Repository: https://gitlab.example.com/group/your-repo`)"
         )
     if not source:
         missing.append(
@@ -516,8 +516,8 @@ def parse_issue_git_spec(
         return None, (
             "*Yaver* could not start: the repository URL looks invalid.\n\n"
             f"Parsed value: `{repo}`\n\n"
-            "Use a full HTTPS (or SSH) GitLab URL inside ``{params}``, for example:\n"
-            "`Repository: https://gitlab.example.com/group/repo.git`"
+            "Use a full HTTPS (or SSH) git URL inside ``{params}``, for example:\n"
+            "`Repository: https://gitlab.example.com/group/your-repo`"
         )
 
     if not _looks_like_branch(source):

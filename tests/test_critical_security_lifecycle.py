@@ -106,7 +106,7 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
     # PAT must not appear in argv (insteadOf + askpass in env)
     assert "oauth2:super-secret-pat-xyz@" not in clone_url
     env = captured.get("env") or {}
-    assert clone_url == "https://gitlab.example.com/group/repo.git"
+    assert clone_url == "https://gitlab.example.com/group/repo"
     rewrite = [
         env.get(k)
         for k in env
@@ -213,7 +213,7 @@ def test_https_url_with_settings_pat_builds_oauth2_url(tmp_path, monkeypatch):
         gm = GitManager(issue_key="SEC-URL")
     gm.remote_url = "https://gitlab.example.com/g/r.git"
     out = gm._https_url_with_settings_pat()
-    assert out == "https://oauth2:glpat-abc@gitlab.example.com/g/r.git"
+    assert out == "https://oauth2:glpat-abc@gitlab.example.com/g/r"
 
 
 def test_build_clone_url_does_not_embed_pat():
