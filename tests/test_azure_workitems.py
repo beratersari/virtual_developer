@@ -146,6 +146,64 @@ def _wi_comment_payload(
     }
 
 
+def test_client_loads_pat_from_collection_url_only(monkeypatch):
+    from src.azure.client import AzureDevOpsClient
+    from src.config import Settings
+
+    s = Settings()
+    s.azure_collection_pats = ""
+    s.azure_pat = ""
+    s.set_azure_collection_pat_map(
+        {"https://tfs.example.com/tfs/DefaultCollection": "COL-PAT"}
+    )
+    monkeypatch.setattr("src.azure.client.settings", s)
+    ado = AzureDevOpsClient(
+        collection_url="https://tfs.example.com/tfs/DefaultCollection"
+    )
+    assert ado.host == "tfs.example.com"
+    assert ado.pat == "COL-PAT"
+    assert ado.api_base == "https://tfs.example.com/tfs/DefaultCollection"
+
+
+def test_create_scheduled_azure_work_item(tmp_path, monkeypatch):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    created = {"id": 99, "rev": 1, "fields": {"System.Title": "New WI"}}
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.create_work_item",
+        lambda self, project, wtype, fields: created,
+    )
+    monkeypatch.setattr(
+        "src.azure.client.AzureDevOpsClient.update_work_item_fields",
+        lambda *a, **k: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
+        lambda *a, **k: True,
+    )
+    monkeypatch.setattr(
+        "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+        lambda *a, **k: True,
+    )
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    out = create_scheduled_job(
+        title="New WI",
+        description="do it",
+        repository_url="https://tfs.example.com/tfs/DefaultCollection/Demo/_git/app",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at="2099-01-01T10:00:00",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        azure_project="Demo",
+        issue_type="Task",
+        store=store,
+    )
+    assert out["ok"] is True
+    assert out["issue_key"] == "99"
+
+
 def test_parse_tfs_collection_url():
     from src.azure.urls import parse_tfs_collection_url, require_tfs_collection_url
 

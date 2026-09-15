@@ -1037,6 +1037,138 @@ def schedule_pr_followup(
     }
 
 
+def _create_scheduled_azure_work_item(
+    *,
+    title: str,
+    description: str,
+    repository_url: str,
+    source_branch: str,
+    target_branch: str,
+    mode: str,
+    scheduled_iso: str,
+    collection_url: str,
+    azure_project: str,
+    work_item_type: str,
+    source_branch_mode: str,
+    model: str,
+    backend: str,
+    store: Optional[ScheduleStore],
+) -> Dict[str, Any]:
+    """Create a TFS work item + local schedule (same picker as Jira New)."""
+    from src.azure.client import AzureDevOpsClient
+    from src.azure.keys import azure_work_item_key
+    from src.azure.tracker import AzureWorkItemTracker
+    from src.azure.workitems import remember_work_item
+
+    project = (azure_project or "").strip()
+    if not project:
+        return {"ok": False, "error": "Azure team project is required"}
+    wtype = (work_item_type or "Task").strip() or "Task"
+    src = source_branch
+    if source_branch_mode == _SOURCE_MODE_ISSUE_KEY:
+        src = "feature/__pending__"
+    issue_description = build_issue_description(
+        description=description,
+        repository_url=repository_url,
+        source_branch=src,
+        target_branch=target_branch,
+        mode=mode,
+        model=model,
+        backend=backend,
+    )
+    ado = AzureDevOpsClient(collection_url=collection_url)
+    created = ado.create_work_item(
+        project,
+        wtype,
+        {
+            "System.Title": title,
+            "System.Description": issue_description,
+        },
+    )
+    if not created or not created.get("id"):
+        return {
+            "ok": False,
+            "error": (
+                f"Failed to create work item in {project} ({wtype}). "
+                "Check collection, project, type, and Work Items (Write)."
+            ),
+        }
+    try:
+        iid = int(created["id"])
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Azure created a work item without a numeric id"}
+    issue_key = azure_work_item_key(project, iid)
+    if source_branch_mode == _SOURCE_MODE_ISSUE_KEY:
+        src = work_branch_for_issue_key(issue_key)
+        issue_description = build_issue_description(
+            description=description,
+            repository_url=repository_url,
+            source_branch=src,
+            target_branch=target_branch,
+            mode=mode,
+            model=model,
+            backend=backend,
+        )
+        ado.update_work_item_fields(
+            project, iid, {"System.Description": issue_description}
+        )
+    coords = {
+        "host": ado.host,
+        "collection_url": collection_url,
+        "project": project,
+        "work_item_id": iid,
+        "work_item_type": wtype,
+    }
+    remember_work_item(issue_key, coords)
+    tracker = AzureWorkItemTracker(
+        issue_key=issue_key,
+        host=ado.host,
+        collection_url=collection_url,
+        project=project,
+        work_item_id=iid,
+        work_item_type=wtype,
+        client=ado,
+    )
+    try:
+        tracker.transition_to_in_progress(issue_key)
+    except Exception as e:
+        logger.warning(f"{issue_key}: Active transition soft-failed: {e}")
+    try:
+        tracker.assign_to_pat_user(issue_key)
+    except Exception as e:
+        logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
+    rec = (store or schedule_store).create(
+        title=title,
+        description=(description or "").strip(),
+        repository_url=repository_url,
+        source_branch=src,
+        target_branch=target_branch,
+        mode=mode,
+        model=model,
+        backend=backend,
+        scheduled_at=scheduled_iso,
+        issue_key=issue_key,
+        issue_description=issue_description,
+        project_key=project,
+        issue_type=wtype,
+        source="new",
+        azure_host=str(coords.get("host") or ""),
+        azure_collection_url=collection_url,
+        azure_project=project,
+    )
+    logger.info(
+        f"Created Azure work item {issue_key} project={project} "
+        f"schedule_id={rec.get('schedule_id')}"
+    )
+    return {
+        "ok": True,
+        "schedule": rec,
+        "issue_key": issue_key,
+        "source_branch": src,
+        "source_branch_mode": source_branch_mode,
+    }
+
+
 def create_scheduled_job(
     *,
     title: str,
@@ -1051,10 +1183,14 @@ def create_scheduled_job(
     source_branch_mode: str = _SOURCE_MODE_CUSTOM,
     model: str = "",
     backend: str = "",
+    collection_url: str = "",
+    azure_project: str = "",
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
-    """Create Jira issue + local schedule. Hard-fails only on issue creation.
+    """Create Jira issue or Azure work item + local schedule.
+
+    Hard-fails only on issue / work-item creation.
 
     ``source_branch_mode``:
       * ``custom`` — use ``source_branch`` as given (required).
@@ -1107,14 +1243,35 @@ def create_scheduled_job(
     # Store as ISO without forcing timezone if naive
     scheduled_iso = at_dt.isoformat(timespec="seconds")
 
+    mid = _normalize_model_id(model)
+    bid = _normalize_backend_id(backend)
+
+    from src.azure.urls import parse_tfs_collection_url
+
+    collection = parse_tfs_collection_url(collection_url or "")
+    if collection:
+        return _create_scheduled_azure_work_item(
+            title=title,
+            description=description,
+            repository_url=repo,
+            source_branch=src if src_mode == _SOURCE_MODE_CUSTOM else "",
+            target_branch=tgt,
+            mode=mode_c,
+            scheduled_iso=scheduled_iso,
+            collection_url=collection,
+            azure_project=(azure_project or project_key or "").strip(),
+            work_item_type=itype,
+            source_branch_mode=src_mode,
+            model=mid,
+            backend=bid,
+            store=store,
+        )
+
     project = (project_key or "").strip() or (
         settings.jira_projects_list[0] if settings.jira_projects_list else ""
     )
     if not project:
         return {"ok": False, "error": "JIRA project key is not configured"}
-
-    mid = _normalize_model_id(model)
-    bid = _normalize_backend_id(backend)
     issue_description = build_issue_description(
         description=description,
         repository_url=repo,

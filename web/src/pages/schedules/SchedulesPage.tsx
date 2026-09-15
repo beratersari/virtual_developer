@@ -4,6 +4,7 @@ import {
   cancelSchedule,
   createSchedule,
   dispatchSchedule,
+  fetchAzureProjects,
   fetchIssueTypes,
   fetchSchedules,
   fetchSettings,
@@ -1239,6 +1240,11 @@ function ProjectBranchFields({
 
 function CreateNew({ onDone }: { onDone: () => void }) {
   const live = useLive()
+  const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
+  const collections = live.settings?.azure_collection_urls || []
+  const [collection, setCollection] = useState('')
+  const [azureProject, setAzureProject] = useState('')
+  const [azureProjects, setAzureProjects] = useState<string[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [repo, setRepo] = useState('')
@@ -1260,6 +1266,25 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(true)
   const seeded = useRef(false)
+
+  useEffect(() => {
+    if (collection || !collections.length) return
+    setCollection(collections[0] || '')
+  }, [collections, collection])
+
+  useEffect(() => {
+    if (tracker !== 'azure' || !collection.trim()) {
+      setAzureProjects([])
+      return
+    }
+    void fetchAzureProjects(collection.trim())
+      .then((p) => {
+        const names = p.projects || []
+        setAzureProjects(names)
+        setAzureProject((cur) => cur || names[0] || '')
+      })
+      .catch(() => setAzureProjects([]))
+  }, [tracker, collection])
 
   useEffect(() => {
     void fetchIssueTypes()
@@ -1318,6 +1343,8 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         dispatch_now: dispatchNow,
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
+        collection_url: tracker === 'azure' ? collection.trim() : undefined,
+        azure_project: tracker === 'azure' ? azureProject.trim() : undefined,
       })
       try {
         window.localStorage.setItem(LAST_REPO_KEY, url)
@@ -1354,6 +1381,78 @@ function CreateNew({ onDone }: { onDone: () => void }) {
 
   return (
     <form onSubmit={(e) => void submit(e)}>
+      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1 mb-3">
+        <button
+          type="button"
+          className={`rounded-full px-3 py-1 text-sm font-medium ${
+            tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
+          }`}
+          onClick={() => setTracker('jira')}
+        >
+          Jira
+        </button>
+        <button
+          type="button"
+          className={`rounded-full px-3 py-1 text-sm font-medium ${
+            tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
+          }`}
+          onClick={() => setTracker('azure')}
+        >
+          Azure work item
+        </button>
+      </div>
+      {tracker === 'azure' ? (
+        <>
+          <label className="field">
+            <span>Collection</span>
+            {collections.length > 0 ? (
+              <select
+                value={collection}
+                onChange={(e) => {
+                  setCollection(e.target.value)
+                  setAzureProject('')
+                }}
+              >
+                {collections.map((url) => (
+                  <option key={url} value={url}>
+                    {url}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={collection}
+                onChange={(e) => setCollection(e.target.value)}
+                placeholder="https://tfs.example.com/tfs/DefaultCollection"
+                required
+              />
+            )}
+          </label>
+          <label className="field">
+            <span>Team project</span>
+            {azureProjects.length > 0 ? (
+              <select
+                value={azureProject}
+                onChange={(e) => setAzureProject(e.target.value)}
+                required
+              >
+                {azureProjects.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={azureProject}
+                onChange={(e) => setAzureProject(e.target.value)}
+                placeholder="Demo"
+                required
+              />
+            )}
+          </label>
+        </>
+      ) : null}
       <label className="field">
         <span>Title</span>
         <input value={title} onChange={(e) => setTitle(e.target.value)} required />
@@ -1381,8 +1480,16 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         setRememberRepo={setRememberRepo}
       />
       <label className="field">
-        <span>Issue type</span>
-        {selectable.length ? (
+        <span>{tracker === 'azure' ? 'Work item type' : 'Issue type'}</span>
+        {tracker === 'azure' ? (
+          <select value={issueType} onChange={(e) => setIssueType(e.target.value)}>
+            {['Task', 'User Story', 'Bug'].map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        ) : selectable.length ? (
           <select value={issueType} onChange={(e) => setIssueType(e.target.value)}>
             {selectable.map((t) => (
               <option key={t.id || t.name} value={t.name}>

@@ -813,6 +813,8 @@ def create_dashboard_app(
             source_branch_mode=body.source_branch_mode or "custom",
             model=body.model or "",
             backend=body.backend or "",
+            collection_url=getattr(body, "collection_url", "") or "",
+            azure_project=getattr(body, "azure_project", "") or "",
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -1358,6 +1360,31 @@ def create_dashboard_app(
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
         return result
+
+    @app.get("/api/azure/projects")
+    def azure_projects(
+        collection_url: str = Query(..., min_length=8, max_length=500),
+    ) -> dict:
+        """Team projects in a saved TFS collection (Settings / New issue)."""
+        from src.azure.client import AzureDevOpsClient
+        from src.azure.urls import parse_tfs_collection_url
+
+        collection = parse_tfs_collection_url(collection_url)
+        if not collection:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Azure URL must include a TFS collection, e.g. "
+                    "https://tfs.example.com/tfs/DefaultCollection"
+                ),
+            )
+        names = AzureDevOpsClient(collection_url=collection).list_projects()
+        return {
+            "ok": True,
+            "collection_url": collection,
+            "projects": names,
+            "server_time": build_meta().server_time,
+        }
 
     @app.post("/api/azure/work-item")
     def azure_work_item_lookup(body: AzureWorkItemLookupRequest) -> dict:
