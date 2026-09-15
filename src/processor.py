@@ -419,7 +419,11 @@ class JobProcessor:
                         st0.issue_summary, st0.description
                     )
                 )
-            # CAS: never clobber success or operator cancel
+            # Intentional: fail is issue-keyed, not generation-keyed.
+            # Watchdog / dashboard Stop / validation errors must ERROR the
+            # live in-flight ticket (see test_fail_issue_still_errors_in_flight).
+            # Only COMPLETED / CANCELLED are rejected. Do not add
+            # expected_job_id here — that would disable the stuck watchdog.
             updated = self.state_manager.update_state_if(
                 issue_key,
                 reject_statuses={TaskStatus.COMPLETED, TaskStatus.CANCELLED},
@@ -4671,6 +4675,7 @@ class JobProcessor:
                     work_branch=event.source_branch,
                     replied_message=event.note_body,
                     raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(event),
                 ),
                 agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=state.issue_key,
@@ -4756,6 +4761,9 @@ class JobProcessor:
                 plan_path=plan_path_for_agent,
                 replied_message=event.note_body,
                 raw=getattr(event, "raw", None),
+                review_context=self._review_context_for_event(
+                    event, git.get_working_directory()
+                ),
             )
             if work_branch:
                 try:
@@ -4908,6 +4916,12 @@ class JobProcessor:
                     logger.error(
                         f"{state.issue_key}: agent succeeded but MR note failed"
                     )
+                # Intentional: no expected_job_id. This stamp runs while the
+                # per-issue lock is held, so a newer begin cannot exist yet.
+                # Cancel already wrote CANCELLED (ABORTED), which this CAS
+                # rejects. Generation ids belong on `_complete_work` (0.9.14)
+                # for the Jira path that can be invoked with a stale snapshot
+                # after lock release — see test_c_ar_1_old_complete_work_*.
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
                     expected_statuses={TaskStatus.EXECUTING},
@@ -4964,6 +4978,12 @@ class JobProcessor:
                             delivery_note=note,
                         ),
                     )
+                    # Intentional: no expected_job_id. This stamp runs while the
+                    # per-issue lock is held, so a newer begin cannot exist yet.
+                    # Cancel already wrote CANCELLED (ABORTED), which this CAS
+                    # rejects. Generation ids belong on `_complete_work` (0.9.14)
+                    # for the Jira path that can be invoked with a stale snapshot
+                    # after lock release — see test_c_ar_1_old_complete_work_*.
                     updated = self.state_manager.update_state_if(
                         state.issue_key,
                         expected_statuses={TaskStatus.EXECUTING},
@@ -5300,6 +5320,7 @@ class JobProcessor:
                     work_branch=event.source_branch,
                     replied_message=getattr(event, "comment_body", "") or "",
                     raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(event),
                 ),
                 agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
                 issue_key=state.issue_key,
@@ -5397,6 +5418,9 @@ class JobProcessor:
                 plan_path=plan_path_for_agent,
                 replied_message=getattr(event, "comment_body", "") or "",
                 raw=getattr(event, "raw", None),
+                review_context=self._review_context_for_event(
+                    event, git.get_working_directory()
+                ),
             )
             if work_branch:
                 try:
@@ -5567,6 +5591,12 @@ class JobProcessor:
                         f"workflow agent ok but PR comment failed "
                         f"issue={state.issue_key}"
                     )
+                # Intentional: no expected_job_id. This stamp runs while the
+                # per-issue lock is held, so a newer begin cannot exist yet.
+                # Cancel already wrote CANCELLED (ABORTED), which this CAS
+                # rejects. Generation ids belong on `_complete_work` (0.9.14)
+                # for the Jira path that can be invoked with a stale snapshot
+                # after lock release — see test_c_ar_1_old_complete_work_*.
                 updated = self.state_manager.update_state_if(
                     state.issue_key,
                     expected_statuses={TaskStatus.EXECUTING},
@@ -5634,6 +5664,12 @@ class JobProcessor:
                             delivery_note=note,
                         ),
                     )
+                    # Intentional: no expected_job_id. This stamp runs while the
+                    # per-issue lock is held, so a newer begin cannot exist yet.
+                    # Cancel already wrote CANCELLED (ABORTED), which this CAS
+                    # rejects. Generation ids belong on `_complete_work` (0.9.14)
+                    # for the Jira path that can be invoked with a stale snapshot
+                    # after lock release — see test_c_ar_1_old_complete_work_*.
                     updated = self.state_manager.update_state_if(
                         state.issue_key,
                         expected_statuses={TaskStatus.EXECUTING},
@@ -6360,6 +6396,9 @@ class JobProcessor:
         # B6: CAS — cancel/watchdog terminal must win over late success.
         # Also require this run's task/job ids so a cancelled GitLab/Azure
         # worker cannot COMPLETE a newer begin on the same issue.
+        # Intentional split: GitLab/Azure in-lock stamps omit job ids (lock
+        # + CANCELLED reject is enough). This Jira path can be invoked with
+        # a stale snapshot after lock release (0.9.14 / test_c_ar_1_*).
         caller_job = str((state.metadata or {}).get("current_job_id") or "").strip()
         updated = self.state_manager.update_state_if(
             state.issue_key,
@@ -6645,6 +6684,35 @@ class JobProcessor:
         if has_work:
             return "delivered" if push_ok else "push_failed"
         return "none"
+
+    def _review_context_for_event(
+        self, event: Any, workdir: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """File/line/thread context for a GitLab or Azure review comment."""
+        from src.review_thread import attach_workdir_snippet, extract_review_context
+
+        raw = getattr(event, "raw", None)
+        current = (
+            getattr(event, "prompt", None)
+            or getattr(event, "note_body", None)
+            or getattr(event, "comment_body", None)
+            or ""
+        )
+        ctx = extract_review_context(
+            raw if isinstance(raw, dict) else {},
+            current_body=str(current),
+        )
+        wd = workdir
+        if not wd:
+            try:
+                git = (self._contexts.get(getattr(event, "issue_key", ""), {}) or {}).get(
+                    "git"
+                )
+                if git is not None and hasattr(git, "get_working_directory"):
+                    wd = git.get_working_directory()
+            except Exception:
+                wd = None
+        return attach_workdir_snippet(ctx, wd)
 
     def _durable_plan_path(self, issue_key: str) -> Path:
         """Host-side plan path under ``{YAVER_DATA_DIR}/plans``."""
