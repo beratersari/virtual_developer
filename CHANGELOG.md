@@ -8,6 +8,15 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.18] — 2026-09-15
+
+### Added
+
+- Scheduled → Existing issue can look up an Azure work item (collection +
+  id), same picker as Jira.
+
+[0.9.18]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.18
+
 ## [0.9.17] — 2026-09-15
 
 Azure Boards work items can start jobs via service hooks. Settings only
