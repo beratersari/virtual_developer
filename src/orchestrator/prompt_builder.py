@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from src.azure.keys import prompt_ticket_label
 from src.config import settings
 from src.issue_git_spec import strip_params_block
 from src.logger import logger
@@ -95,7 +96,7 @@ class PromptBuilder:
         """Ticket title + description only (params stripped). Jira or Azure."""
         title = strip_params_block(summary or "").strip()
         body = strip_params_block(description or "").strip()
-        parts = [f"## Ticket: {issue_key}"]
+        parts = [f"## Ticket: {prompt_ticket_label(issue_key)}"]
         if title:
             parts.append(f"## Title\n\n{title}")
         if body:
@@ -143,8 +144,8 @@ class PromptBuilder:
 
         out = substitute_placeholders(
             text,
-            issue_key=issue_key,
-            work_branch=work_branch,
+            issue_key=prompt_ticket_label(issue_key),
+            work_branch=work_branch or (f"feature/{issue_key}" if issue_key else None),
             plan_path=plan_path,
         )
         return out.strip()
@@ -313,7 +314,7 @@ class PromptBuilder:
         return (
             f"## Git policy\n\n"
             f"Match this repo's AGENTS.md and git log. "
-            f"If no pattern exists, commit as `[{issue_key}] <type>: <short description>`."
+            f"If no pattern exists, commit as `[{prompt_ticket_label(issue_key)}] <type>: <short description>`."
         )
 
     @staticmethod
@@ -461,7 +462,7 @@ class PromptBuilder:
         review_md = format_review_context(ctx)
         parts = [
             system,
-            f"## GitLab merge request: {issue_key}",
+            f"## GitLab merge request: {prompt_ticket_label(issue_key)}",
             *PromptBuilder._thread_request_sections(
                 author=author,
                 prompt=comment,
@@ -539,7 +540,7 @@ class PromptBuilder:
         review_md = format_review_context(ctx)
         parts = [
             system,
-            f"## Azure DevOps pull request: {issue_key}",
+            f"## Azure DevOps pull request: {prompt_ticket_label(issue_key)}",
             *PromptBuilder._thread_request_sections(
                 author=author,
                 prompt=comment,

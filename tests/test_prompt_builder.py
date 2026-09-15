@@ -17,6 +17,31 @@ def test_substitute_plan_path():
     assert out == "Write to .sisyphus/plans/K-1.md"
 
 
+def test_work_item_prompt_shows_numeric_ticket_only():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_build_prompt(
+        "WIT-BETA-42",
+        "Do the thing",
+        "Implement login",
+        work_branch="feature/WIT-BETA-42",
+    )
+    assert "## Ticket: 42" in p
+    assert "- Ticket: 42" in p or "Ticket: 42" in p
+    assert "WIT-BETA-42" in p  # work branch / plan path stay local
+    assert "## Ticket: WIT-BETA-42" not in p
+
+
+def test_jira_prompt_keeps_full_issue_key():
+    PromptBuilder.clear_prompt_file_cache()
+    p = PromptBuilder.build_build_prompt(
+        "KAN-12",
+        "Do the thing",
+        "Implement login",
+        work_branch="feature/KAN-12",
+    )
+    assert "## Ticket: KAN-12" in p
+
+
 def test_overview_comment_does_not_reuse_note_as_replied():
     """Standalone MR/PR overview notes are Prompt only, not a fake reply."""
     PromptBuilder.clear_prompt_file_cache()
