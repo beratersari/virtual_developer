@@ -140,14 +140,17 @@ def _cached_mr_state(url: str) -> Optional[str]:
     if not key:
         return None
     with _mr_state_lock:
-        return _mr_state_cache.get(key)
+        st = _mr_state_cache.get(key)
+    if not st or st == "unknown":
+        return None
+    return st
 
 
 def remember_mr_state(url: str, state: str) -> None:
-    """Record a live GitLab MR state for Storage rows that share this URL."""
+    """Record a live GitLab MR / Azure PR state. Do not cache lookup misses."""
     key = _norm_mr_url(url)
     st = (state or "").strip().lower()
-    if not key or not st:
+    if not key or not st or st == "unknown":
         return
     with _mr_state_lock:
         _mr_state_cache[key] = st
@@ -250,8 +253,8 @@ def _scan_mr_states_once() -> None:
         except Exception as e:
             logger.debug(f"Storage review status {url!r} failed: {e}")
             state = "unknown"
-        remember_mr_state(url, state)
-        if state != "unknown":
+        if state and state != "unknown":
+            remember_mr_state(url, state)
             _persist_job_mr_state(url, state)
 
 
