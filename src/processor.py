@@ -1343,9 +1343,10 @@ class JobProcessor:
     ) -> tuple[List[str], List[str], Optional[str]]:
         """Session ids to try for this issue, plus forgotten ids and bind wd.
 
-        Plan and build keep separate maps for the same repo+source+target so
-        a derman-plan chat is never reused to implement. Same Jira issue
-        re-queued from the schedule tab must resume even when the
+        Plan, build, and test keep separate maps for the same
+        repo+source+target so derman-plan / derman-build / derman-test
+        never continue each other's chat. Same Jira issue re-queued from
+        the schedule tab must resume the *same* kind even when the
         repo/work/target bind key differs from the first upsert.
         """
         import src.state.session_bind_store as session_binds
@@ -1371,18 +1372,17 @@ class JobProcessor:
             hit = store.get(repo, branch, target, kind=kind)
             if hit:
                 recs.append(hit)
-            other = "build" if kind == "plan" else "plan"
-            _remember_other(store.get(repo, branch, target, kind=other))
-        # Plan binds are keyed by work branch. A GitLab/Azure job on a
-        # different source must still not resume the planner chat.
+            for other in session_binds.other_session_kinds(kind):
+                _remember_other(store.get(repo, branch, target, kind=other))
+        # Kind binds are keyed by work branch. A GitLab/Azure job on a
+        # different source must still not resume the planner or tester chat.
         want_issue = (issue_key or "").strip().upper()
-        other_kind = "build" if kind == "plan" else "plan"
         if kind and want_issue:
             for rec in store.list_binds(limit=500):
                 rec_kind = session_binds.normalize_session_kind(
                     str(rec.get("kind") or "")
                 )
-                if rec_kind != other_kind:
+                if not rec_kind or rec_kind == kind:
                     continue
                 rec_issue = str(rec.get("issue_key") or "").strip().upper()
                 if rec_issue == want_issue:
@@ -1390,17 +1390,16 @@ class JobProcessor:
         if kind != "plan":
             if repo and branch and target:
                 hit = store.get(repo, branch, target, issue_key=issue_key)
-                if hit and str(hit.get("kind") or "") != "plan":
+                if hit and session_binds.bind_compatible_with_kind(hit, kind):
                     recs.append(hit)
+                elif hit:
+                    _remember_other(hit)
             by_issue = store.find_by_issue_key(issue_key)
-            if (
-                by_issue
-                and by_issue not in recs
-                and str(by_issue.get("kind") or "") != "plan"
-            ):
-                recs.append(by_issue)
-            elif by_issue and str(by_issue.get("kind") or "") == "plan":
-                _remember_other(by_issue)
+            if by_issue and by_issue not in recs:
+                if session_binds.bind_compatible_with_kind(by_issue, kind):
+                    recs.append(by_issue)
+                else:
+                    _remember_other(by_issue)
         forgotten: List[str] = []
         bind_wd: Optional[str] = None
         sids: List[str] = []
@@ -1430,7 +1429,7 @@ class JobProcessor:
             ):
                 if fx not in forgotten:
                     forgotten.append(fx)
-        # Plan chats must not pick up a leftover build ses_* from state.
+        # Plan chats must not pick up a leftover build/test ses_* from state.
         if kind != "plan":
             st = self.state_manager.get_state(issue_key)
             if st is not None:
@@ -1447,7 +1446,7 @@ class JobProcessor:
         """Reuse the OpenCode session or Codex thread for this issue / bind.
 
         If the bind map already has a live ``ses_*`` or Codex thread UUID for
-        (repo, work, target), continue that session. Cancel, a missing SQLite
+        (repo, work, target, kind), continue that session. Cancel, a missing SQLite
         row, a locked DB, or a new clone path must not start a cold session.
         Dashboard Reset is the only forget. Relocate OpenCode
         ``session.directory`` onto the live clone so serve resume stays aligned.
@@ -2012,6 +2011,7 @@ class JobProcessor:
         agent: str,
         job_status: str,
         started_at: Optional[datetime] = None,
+        allow_from_failed: bool = False,
     ) -> Optional[str]:
         """Archive previous run ids, claim in-flight fields, create a new job.
 
@@ -2022,6 +2022,9 @@ class JobProcessor:
         Uses CAS so a concurrent cancel/fail/complete (which does **not** take
         the issue lock) cannot be overwritten by a late begin. Returns the new
         job_id, or ``None`` when the claim was rejected (caller must abort).
+
+        ``allow_from_failed`` is only for same-ticket ``plan_execute`` retry
+        after ERROR/CANCELLED. COMPLETED still cannot be claimed.
         """
         archive = self._archive_run_identifiers(state.issue_key)
         archive["requeue_eligible"] = False
@@ -2039,9 +2042,15 @@ class JobProcessor:
             getattr(live, "agent_task_max_incomplete_retries", None), 0
         )
         archive["max_incomplete_retries"] = max_incomplete
+        reject = (
+            {TaskStatus.COMPLETED}
+            if allow_from_failed
+            else set(self.TERMINAL_STATUSES)
+        )
         claimed = self.state_manager.update_state_if(
             state.issue_key,
-            reject_statuses=self.TERMINAL_STATUSES,
+            reject_statuses=reject,
+            force=allow_from_failed,
             status=status,
             started_at=started_at or datetime.now(),
             current_task_id=task.task_id,
@@ -3338,6 +3347,7 @@ class JobProcessor:
         # PLAN_READY: never re-plan or build from a create event.
         # Same-ticket implement / refactor is label-driven (plan_execute /
         # plan_refactor). A new Mode: build issue still starts below.
+        # ERROR/CANCELLED + plan_execute is the same-ticket implement retry.
         if existing and existing.status == TaskStatus.PLAN_READY:
             handoff = await self._maybe_handle_plan_handoff(event, existing)
             if handoff is not None:
@@ -3346,6 +3356,14 @@ class JobProcessor:
                 f"Issue {issue_key} has plan ready; waiting for plan_execute"
             )
             return False, "plan_ready; waiting for plan_execute"
+        if (
+            existing
+            and existing.status in (TaskStatus.ERROR, TaskStatus.CANCELLED)
+            and self._infer_plan_handoff(event) == "execute"
+        ):
+            handoff = await self._maybe_handle_plan_handoff(event, existing)
+            if handoff is not None:
+                return handoff
         
         if existing:
             logger.info(f"Found existing state for {issue_key} with status: {existing.status.value}")
@@ -3504,7 +3522,16 @@ class JobProcessor:
         # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
         # Do NOT auto-reprocess Jira while the board is still In Progress (that
         # caused infinite "no new commits" loops). plan_ready is not rework.
+        # Same-ticket implement retry: In Progress + plan_execute after
+        # ERROR/CANCELLED. COMPLETED is not a retry.
         if state.status in self.TERMINAL_STATUSES:
+            if (
+                state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED)
+                and self._infer_plan_handoff(event) == "execute"
+            ):
+                handoff = await self._maybe_handle_plan_handoff(event, state)
+                if handoff is not None:
+                    return handoff
             if board_ok:
                 meta = state.metadata or {}
                 if state.status in (TaskStatus.ERROR, TaskStatus.CANCELLED):
@@ -4143,7 +4170,14 @@ class JobProcessor:
                 f"workitem comment ingest key={key} cmd={cmd} "
                 f"local={state.status.value if state else 'none'}"
             )
-            if state is None or state.status != _TS.PLAN_READY:
+            execute_ok = state is not None and state.status in {
+                _TS.PLAN_READY,
+                _TS.ERROR,
+                _TS.CANCELLED,
+            }
+            refactor_ok = state is not None and state.status == _TS.PLAN_READY
+            allowed = execute_ok if cmd == HANDOFF_EXECUTE else refactor_ok
+            if not allowed:
                 try:
                     from src.azure.tracker import AzureWorkItemTracker
 
@@ -4179,7 +4213,10 @@ class JobProcessor:
                     "started": False,
                     "issue_key": key,
                     "status": "skipped",
-                    "reason": "plan_ready required for /planExecute or /planRefactor",
+                    "reason": (
+                        "plan_ready required for /planRefactor; "
+                        "plan_ready/error/cancelled required for /planExecute"
+                    ),
                 }
             if state is not None and coords:
                 self.state_manager.update_state(key, metadata=tracker_metadata(coords))
@@ -4459,7 +4496,14 @@ class JobProcessor:
             if not ik or ik.upper() in live:
                 continue
             st = self.state_manager.get_state(ik)
-            if st and st.status in self.IN_FLIGHT_STATUSES:
+            # PENDING is the accept/ack window (Jira In Progress + first
+            # comment) before _contexts or PLANNING/EXECUTING exist.
+            # Reaping it frees claim_next for a GitLab/Azure /yaver on the
+            # same issue and starts a second worker on the same clone.
+            if st and st.status in {
+                TaskStatus.PENDING,
+                *self.IN_FLIGHT_STATUSES,
+            }:
                 continue
             # First-run / scheduled claim: process_event has not created
             # local state yet. A second dispatch (``_release_context``
@@ -6407,6 +6451,7 @@ class JobProcessor:
             agent=agent,
             job_status="executing",
             started_at=workflow_start_time,
+            allow_from_failed=from_plan_execute,
         )
         if job_id is None:
             logger.info(

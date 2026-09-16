@@ -333,12 +333,22 @@ class JiraPoller:
                 TaskStatus.EXECUTING,
             }
             handoff = infer_plan_handoff(fields)
-            if (
-                handoff
-                and local
+            execute_retry = (
+                handoff == HANDOFF_EXECUTE
+                and local is not None
+                and local.status
+                in {
+                    TaskStatus.PLAN_READY,
+                    TaskStatus.ERROR,
+                    TaskStatus.CANCELLED,
+                }
+            )
+            refactor_ok = (
+                handoff == HANDOFF_REFACTOR
+                and local is not None
                 and local.status == TaskStatus.PLAN_READY
-                and not in_flight
-            ):
+            )
+            if (execute_retry or refactor_ok) and not in_flight:
                 latch = (
                     self._plan_start_emitted
                     if handoff == HANDOFF_EXECUTE

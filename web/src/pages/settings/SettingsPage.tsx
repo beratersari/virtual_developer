@@ -78,7 +78,6 @@ function fromSettings(s: SettingsPayload): Draft {
       label: p.label || '',
       url: p.url || '',
       target_branch: p.target_branch || '',
-      source_branch: p.source_branch || '',
     })),
   }
 }
@@ -238,7 +237,7 @@ export function SettingsPage() {
             label: p.label.trim(),
             url: p.url.trim(),
             target_branch: (p.target_branch || '').trim(),
-            source_branch: (p.source_branch || '').trim(),
+            source_branch: '',
           }))
           .filter((p) => p.url)
       }
@@ -818,42 +817,23 @@ export function SettingsPage() {
                 }}
               />
             </label>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="field">
-                <span>Default target</span>
-                <input
-                  value={row.target_branch || ''}
-                  placeholder="develop"
-                  onChange={(e) => {
-                    const target_branch = e.target.value
-                    touch('project_repositories')
-                    setDraft((d) => {
-                      if (!d) return d
-                      const next = d.project_repositories.slice()
-                      next[idx] = { ...next[idx], target_branch }
-                      return { ...d, project_repositories: next }
-                    })
-                  }}
-                />
-              </label>
-              <label className="field">
-                <span>Default source</span>
-                <input
-                  value={row.source_branch || ''}
-                  placeholder="optional"
-                  onChange={(e) => {
-                    const source_branch = e.target.value
-                    touch('project_repositories')
-                    setDraft((d) => {
-                      if (!d) return d
-                      const next = d.project_repositories.slice()
-                      next[idx] = { ...next[idx], source_branch }
-                      return { ...d, project_repositories: next }
-                    })
-                  }}
-                />
-              </label>
-            </div>
+            <label className="field">
+              <span>Default target</span>
+              <input
+                value={row.target_branch || ''}
+                placeholder="develop"
+                onChange={(e) => {
+                  const target_branch = e.target.value
+                  touch('project_repositories')
+                  setDraft((d) => {
+                    if (!d) return d
+                    const next = d.project_repositories.slice()
+                    next[idx] = { ...next[idx], target_branch }
+                    return { ...d, project_repositories: next }
+                  })
+                }}
+              />
+            </label>
             <p className="actions">
               <button
                 type="button"
@@ -888,7 +868,7 @@ export function SettingsPage() {
                       ...d,
                       project_repositories: [
                         ...d.project_repositories,
-                        { label: '', url: '', target_branch: 'develop', source_branch: '' },
+                        { label: '', url: '', target_branch: 'develop' },
                       ],
                     }
                   : d,

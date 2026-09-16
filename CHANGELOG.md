@@ -8,6 +8,36 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.30] — 2026-09-16
+
+Plan, build, and test keep three OpenCode sessions. A failed
+implement can be retried with ``plan_execute``. Queue reap no longer
+starts a second job during accept. Settings Projects has no default
+source.
+
+### Fixed
+
+- Plan, build, and test keep three separate OpenCode sessions for the
+  same repo + source + target. ``Mode: test`` no longer continues a
+  ``derman-build`` chat (and the reverse). Dashboard Reset still
+  forgets the bind.
+- After a failed implement, In Progress + ``plan_execute`` retries
+  the same ticket. ``ERROR`` / ``CANCELLED`` no longer ignore that
+  label; ``COMPLETED`` still does. To Do + ``Mode: plan`` is still
+  re-plan.
+- Queue reap no longer treats a live ``PENDING`` accept as a leftover
+  after Stop. A finishing job cannot free the same issue for a
+  GitLab/Azure ``/yaver`` while the board accept is still talking to
+  Jira.
+
+### Changed
+
+- Settings → Projects no longer has a Default source field. New-issue
+  source stays ``feature/{KEY}`` unless the operator sets a named
+  branch on the schedule form.
+
+[0.9.30]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.30
+
 ## [0.9.29] — 2026-09-16
 
 Operator comments drop the “Yapay zekâ” banners. Ticket params stay

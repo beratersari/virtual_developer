@@ -234,6 +234,86 @@ def test_poller_mode_build_does_not_start(poller, state_manager, monkeypatch):
     assert "PS-M" not in keys
 
 
+def _poller_issue(key: str, *, labels, assignee=None):
+    return {
+        "key": key,
+        "fields": _ip_fields(
+            labels=labels,
+            assignee=assignee or {"displayName": "DevBot"},
+        ),
+    }
+
+
+def test_poller_plan_execute_after_error_emits(
+    poller, state_manager, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
+    state_manager.create_state("PS-ERR", "plan me", "{params}\nMode: plan\n{params}")
+    state_manager.update_state("PS-ERR", status=TaskStatus.ERROR)
+    poller._seen_issues.add("PS-ERR")
+    issue = _poller_issue("PS-ERR", labels=[PLAN_EXECUTE_LABEL])
+    poller.client.get_active_sprint = MagicMock(return_value=None)
+    poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
+    rows = poller.poll_board()
+    tagged = next(i for i in rows if i["key"] == "PS-ERR")
+    assert tagged.get("_plan_handoff") == HANDOFF_EXECUTE
+
+
+def test_poller_plan_execute_after_cancelled_emits(
+    poller, state_manager, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
+    state_manager.create_state("PS-CAN", "plan me", "d")
+    state_manager.update_state("PS-CAN", status=TaskStatus.CANCELLED)
+    poller._seen_issues.add("PS-CAN")
+    issue = _poller_issue("PS-CAN", labels=[PLAN_EXECUTE_LABEL])
+    poller.client.get_active_sprint = MagicMock(return_value=None)
+    poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
+    rows = poller.poll_board()
+    tagged = next(i for i in rows if i["key"] == "PS-CAN")
+    assert tagged.get("_plan_handoff") == HANDOFF_EXECUTE
+
+
+def test_poller_plan_execute_after_completed_does_not_emit(
+    poller, state_manager, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
+    state_manager.create_state("PS-DONE", "plan me", "d")
+    state_manager.update_state("PS-DONE", status=TaskStatus.COMPLETED)
+    poller._seen_issues.add("PS-DONE")
+    issue = _poller_issue("PS-DONE", labels=[PLAN_EXECUTE_LABEL])
+    poller.client.get_active_sprint = MagicMock(return_value=None)
+    poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
+    keys = [i["key"] for i in poller.poll_board()]
+    assert "PS-DONE" not in keys
+
+
+def test_poller_plan_refactor_after_error_does_not_emit(
+    poller, state_manager, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trigger_assignee_names", "devbot")
+    state_manager.create_state("PS-RF", "plan me", "d")
+    state_manager.update_state("PS-RF", status=TaskStatus.ERROR)
+    poller._seen_issues.add("PS-RF")
+    issue = _poller_issue("PS-RF", labels=[PLAN_REFACTOR_LABEL])
+    poller.client.get_active_sprint = MagicMock(return_value=None)
+    poller.client.get_board_issues = MagicMock(return_value=[issue])
+    poller.client.get_issue = MagicMock(return_value=issue)
+    keys = [i["key"] for i in poller.poll_board()]
+    assert "PS-RF" not in keys
+
+
 def test_poller_plan_execute_in_progress_emits_once(
     poller, state_manager, monkeypatch
 ):
@@ -292,6 +372,130 @@ async def test_processor_plan_execute_starts_even_if_mode_plan(
     assert started["ok"] is True
     assert started["flag"] is True
     assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_processor_plan_execute_after_error_starts(
+    processor, state_manager, tmp_path
+):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-ERR", "s", desc)
+    plan = tmp_path / "PR-ERR.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-ERR",
+        status=TaskStatus.ERROR,
+        plan_path=str(plan),
+        metadata={"requeue_eligible": True, "workflow_type": "execution"},
+    )
+    started = {"ok": False, "flag": None}
+
+    async def fake_exec(st, *, from_plan_execute=False, kind="build"):
+        started["ok"] = True
+        started["flag"] = from_plan_execute
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "plan_handoff": HANDOFF_EXECUTE,
+        "issue": {
+            "key": "PR-ERR",
+            "fields": _ip_fields(labels=[PLAN_EXECUTE_LABEL], description=desc),
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        started_flag, reason = await processor._handle_issue_updated(event)
+    assert started_flag is True, reason
+    assert started["ok"] is True
+    assert started["flag"] is True
+
+
+@pytest.mark.asyncio
+async def test_processor_plan_execute_after_completed_does_not_start(
+    processor, state_manager, tmp_path
+):
+    desc = "{params}\nMode: plan\n{params}"
+    state_manager.create_state("PR-DONE", "s", desc)
+    plan = tmp_path / "PR-DONE.md"
+    plan.write_text("# plan\n", encoding="utf-8")
+    state_manager.update_state(
+        "PR-DONE", status=TaskStatus.COMPLETED, plan_path=str(plan)
+    )
+    started = {"ok": False}
+
+    async def fake_exec(st, **kwargs):
+        started["ok"] = True
+
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "plan_handoff": HANDOFF_EXECUTE,
+        "issue": {
+            "key": "PR-DONE",
+            "fields": _ip_fields(labels=[PLAN_EXECUTE_LABEL], description=desc),
+        },
+    }
+    with patch.object(processor, "_start_execution_workflow", side_effect=fake_exec):
+        started_flag, reason = await processor._handle_issue_updated(event)
+    assert started["ok"] is False
+    assert started_flag is False
+    assert "terminal" in (reason or "")
+
+
+def test_begin_workflow_run_allows_error_on_plan_execute_retry(
+    processor, state_manager
+):
+    from src.orchestrator.agent_runner import AgentTask
+
+    state_manager.create_state("PR-BEG", "s", "d")
+    st = state_manager.update_state("PR-BEG", status=TaskStatus.ERROR)
+    assert st is not None
+    task = AgentTask(
+        description="retry",
+        prompt="implement",
+        agent="derman-build",
+        issue_key="PR-BEG",
+    )
+    job_id = processor._begin_workflow_run(
+        st,
+        status=TaskStatus.EXECUTING,
+        task=task,
+        workflow_type="execution",
+        agent="derman-build",
+        job_status="executing",
+        allow_from_failed=True,
+    )
+    assert job_id
+    live = state_manager.get_state("PR-BEG")
+    assert live is not None
+    assert live.status == TaskStatus.EXECUTING
+
+
+def test_begin_workflow_run_rejects_completed_on_plan_execute_retry(
+    processor, state_manager
+):
+    from src.orchestrator.agent_runner import AgentTask
+
+    state_manager.create_state("PR-BEG2", "s", "d")
+    st = state_manager.update_state("PR-BEG2", status=TaskStatus.COMPLETED)
+    assert st is not None
+    task = AgentTask(
+        description="retry",
+        prompt="implement",
+        agent="derman-build",
+        issue_key="PR-BEG2",
+    )
+    job_id = processor._begin_workflow_run(
+        st,
+        status=TaskStatus.EXECUTING,
+        task=task,
+        workflow_type="execution",
+        agent="derman-build",
+        job_status="executing",
+        allow_from_failed=True,
+    )
+    assert job_id is None
+    live = state_manager.get_state("PR-BEG2")
+    assert live is not None
+    assert live.status == TaskStatus.COMPLETED
 
 
 @pytest.mark.asyncio

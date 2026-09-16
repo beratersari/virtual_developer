@@ -1,9 +1,10 @@
 """Persist OpenCode session ids keyed by repository + work branch + target.
 
 A later issue (or re-run) with the same remote, work/Source branch, **and**
-Target can resume the same OpenCode serve session. A different Target is a
-different MR base — new clone folder + new session so the model is not mixed
-with work aimed at another branch. Dashboard Reset drops the bind.
+Target can resume the same OpenCode serve session *of that kind* (plan,
+build, or test). A different Target is a different MR base — new clone
+folder + new session so the model is not mixed with work aimed at another
+branch. Dashboard Reset drops the bind.
 """
 
 from __future__ import annotations
@@ -90,6 +91,29 @@ def normalize_session_kind(kind: str = "") -> str:
     return raw if raw in _SESSION_KINDS else ""
 
 
+def other_session_kinds(kind: str = "") -> tuple[str, ...]:
+    """Every session map except ``kind`` (empty kind → all three)."""
+    kind_n = normalize_session_kind(kind)
+    return tuple(sorted(k for k in _SESSION_KINDS if k != kind_n))
+
+
+def bind_compatible_with_kind(rec: Optional[Dict[str, Any]], kind: str) -> bool:
+    """Whether ``rec`` may be resumed for this workflow kind.
+
+    Plan and test never adopt another map. Build may adopt a legacy
+    empty-kind bind from before the three maps existed.
+    """
+    if not rec:
+        return False
+    want = normalize_session_kind(kind)
+    rec_kind = normalize_session_kind(str(rec.get("kind") or ""))
+    if not want:
+        return True
+    if want == SESSION_KIND_BUILD:
+        return rec_kind in {"", SESSION_KIND_BUILD}
+    return rec_kind == want
+
+
 def bind_id_for(
     repository_url: str,
     branch: str,
@@ -103,7 +127,8 @@ def bind_id_for(
     issue = (issue_key or "").strip().upper()
     kind_n = normalize_session_kind(kind)
     # Kind-specific maps are (repo, source/work, target, kind) — no issue
-    # in the key so plan refactor / later builds resume the same chat.
+    # in the key so a later same-kind job resumes that chat. Plan, build,
+    # and test stay on three different ses_* until Dashboard Reset.
     if kind_n:
         material = f"{repo_key}\0{br}\0{tgt}\0{kind_n}"
     else:
@@ -145,8 +170,8 @@ class SessionBindStore:
             return None
         kind_n = normalize_session_kind(kind)
         if kind_n:
-            # Plan and build maps are separate. A miss must not fall back
-            # to the other kind (derman-plan cannot implement).
+            # Plan, build, and test maps are separate. A miss must not
+            # fall back to another kind (derman-plan cannot implement).
             return self.get_by_id(
                 bind_id_for(
                     repository_url,
