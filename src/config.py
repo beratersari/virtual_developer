@@ -388,10 +388,7 @@ class Settings(BaseSettings):
     )
     azure_trigger_label: str = Field(
         default="",
-        description=(
-            "Comma-separated Azure work-item tags. When set, To Do / In Progress "
-            "intake needs bot assignee and one of these tags (same AND as JIRA_TRIGGER_LABEL)."
-        ),
+        description="Unused. Work-item intake is assignee-only (always empty).",
     )
     azure_collection_urls: str = Field(
         default="",
@@ -959,14 +956,12 @@ class Settings(BaseSettings):
         return list(self.azure_trigger_user_list)
 
     def resolved_azure_trigger_label(self) -> str:
-        """Azure work-item tags. Empty = assignee only (same as empty Jira labels)."""
-        return format_trigger_users(getattr(self, "azure_trigger_label", "") or "")
+        """Always empty. Not exposed in Settings or .env.example."""
+        return ""
 
     @property
     def azure_trigger_label_list(self) -> List[str]:
-        from src.jira.triggers import parse_trigger_labels
-
-        return parse_trigger_labels(self.resolved_azure_trigger_label())
+        return []
     
     def is_configured(self) -> bool:
         """Check if required JIRA settings are configured."""
@@ -1027,7 +1022,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "azure_bot_mentions",
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
-        "azure_trigger_label",
         "azure_collection_urls",
     }
 )
@@ -1056,7 +1050,6 @@ _RUNTIME_ENV_MIRROR = {
     "azure_bot_mentions": "AZURE_BOT_MENTIONS",
     "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",
     "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
-    "azure_trigger_label": "AZURE_TRIGGER_LABEL",
     "azure_collection_urls": "AZURE_COLLECTION_URLS",
     "azure_collection_pats": "AZURE_COLLECTION_PATS",
 }
