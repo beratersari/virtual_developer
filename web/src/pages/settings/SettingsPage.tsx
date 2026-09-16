@@ -85,6 +85,7 @@ function fromSettings(s: SettingsPayload): Draft {
 
 export function SettingsPage() {
   const live = useLive()
+  const pushSettings = live.setSettings
   const [settings, setSettings] = useState<SettingsPayload | null>(
     () => live.settings,
   )
@@ -246,6 +247,7 @@ export function SettingsPage() {
       }
       const updated = await patchSettings(body)
       setSettings(updated)
+      pushSettings(updated)
       setDraft(fromSettings(updated))
       setDirty(false)
       setDirtyKeys(new Set())

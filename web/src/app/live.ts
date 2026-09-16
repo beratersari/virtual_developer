@@ -10,6 +10,7 @@ export type LiveValue = {
   pollCountdown: number | null
   error: string | null
   queueQueued: number
+  setSettings: (next: SettingsPayload) => void
 }
 
 export const LiveContext = createContext<LiveValue | null>(null)

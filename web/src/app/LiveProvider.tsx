@@ -171,6 +171,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       pollCountdown,
       error,
       queueQueued,
+      setSettings,
     }),
     [connected, meta, poll, settings, generation, pollCountdown, error, queueQueued],
   )

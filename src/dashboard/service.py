@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -774,6 +775,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
             settings, "azure_collection_pats", ""
         ) or ""
+        # URL list for Schedule dropdowns (runtime JSON, not extra .env keys).
+        runtime_persist["azure_collection_urls"] = getattr(
+            settings, "azure_collection_urls", ""
+        ) or json.dumps(list(new_map.keys()))
     azure_trigger = None
     if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
         azure_trigger = str(data["azure_trigger_user"]).strip()
