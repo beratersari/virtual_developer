@@ -321,7 +321,7 @@ def test_invalid_url():
     spec, err = parse_issue_git_spec("", desc)
     assert spec is None
     assert err is not None
-    assert "invalid" in err.lower()
+    assert "geçersiz" in err.lower()
 
 
 def test_invalid_branch():

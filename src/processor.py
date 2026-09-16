@@ -547,16 +547,15 @@ class JobProcessor:
             effective_suggestion = suggestion
             if not effective_suggestion:
                 if moved_ip or already_tracked_ip:
-                    effective_suggestion = (
-                        "Fix the issue description, then move the issue back to "
-                        "*To Do* to re-queue."
+                    from src.operator_copy import (
+                        SUGGEST_FIX_DESC_NO_IP,
+                        SUGGEST_FIX_DESC_TODO,
                     )
-                else:
+
                     effective_suggestion = (
-                        "Fix the issue description (and ensure a transition to "
-                        "*In Progress* exists on this workflow). Edit the "
-                        "description while still on *To Do*, or move the issue "
-                        "away and back to *To Do*, to re-queue."
+                        SUGGEST_FIX_DESC_TODO
+                        if (moved_ip or already_tracked_ip)
+                        else SUGGEST_FIX_DESC_NO_IP
                     )
             comment_id = self.reporter.post_error(
                 state,
@@ -3410,6 +3409,24 @@ class JobProcessor:
         # Off the event loop: a slow/dead Jira host used to freeze /api/meta
         # (full-page dashboard "Loading…") for the HTTP timeout.
         await asyncio.to_thread(self._mark_jira_in_progress, issue_key)
+        if self._is_azure_workitem_triggered(issue_key):
+            assigned = await asyncio.to_thread(
+                self._assign_jira_to_pat_user, issue_key
+            )
+            if not assigned:
+                from src.operator_copy import (
+                    ASSIGN_PAT_FAILED,
+                    ASSIGN_PAT_FAILED_SUGGEST,
+                )
+
+                self._fail_issue(
+                    issue_key,
+                    ASSIGN_PAT_FAILED,
+                    suggestion=ASSIGN_PAT_FAILED_SUGGEST,
+                    category="config",
+                )
+                self._release_context(issue_key, success=False)
+                return True, "azure PAT assign failed"
 
         try:
             logger.debug(f"Posting initial acknowledgment for {issue_key}")
@@ -4146,14 +4163,12 @@ class JobProcessor:
                                 coords.get("work_item_id") or event.work_item_id
                             ),
                         )
+                        from src.operator_copy import NO_PLAN_WAITING
+
                         await asyncio.to_thread(
                             tracker.add_comment,
                             key,
-                            "There is no plan waiting on this work item. "
-                            "`/planRefactor` and `/planExecute` only run after "
-                            "a Mode: plan job reaches plan_ready. Assign a "
-                            "To Do or In Progress item to me (or New / "
-                            "Active / Doing), or open a new Mode: build item.",
+                            NO_PLAN_WAITING,
                         )
                 except Exception as exc:
                     azure_warning(f"{key}: plan-command wait comment failed: {exc}")
@@ -4188,9 +4203,30 @@ class JobProcessor:
                 except Exception as exc:
                     azure_warning(f"{key}: planExecute In Progress failed: {exc}")
                 try:
-                    await asyncio.to_thread(exe_tracker.assign_to_pat_user, key)
+                    exe_assigned = await asyncio.to_thread(
+                        exe_tracker.assign_to_pat_user, key
+                    )
                 except Exception as exc:
-                    azure_warning(f"{key}: PAT assign soft-failed: {exc}")
+                    azure_warning(f"{key}: PAT assign failed: {exc}")
+                    exe_assigned = False
+                if not exe_assigned:
+                    from src.operator_copy import ASSIGN_PAT_FAILED
+
+                    try:
+                        await asyncio.to_thread(
+                            exe_tracker.add_comment, key, ASSIGN_PAT_FAILED
+                        )
+                    except Exception as exc:
+                        azure_warning(f"{key}: PAT assign error comment failed: {exc}")
+                    return {
+                        "ok": False,
+                        "kind": "work_item_comment",
+                        "queued": False,
+                        "started": False,
+                        "issue_key": key,
+                        "status": "error",
+                        "reason": "pat assign failed",
+                    }
             payload = event.to_jira_event(
                 is_update=True, plan_handoff=cmd or HANDOFF_REFACTOR
             )
@@ -4248,9 +4284,26 @@ class JobProcessor:
                 azure_warning(f"{key}: work item In Progress failed: {exc}")
             # Same as JiraPoller.process_issue: assign at accept, not only at start.
             try:
-                await asyncio.to_thread(tracker.assign_to_pat_user, key)
+                assigned = await asyncio.to_thread(tracker.assign_to_pat_user, key)
             except Exception as exc:
-                azure_warning(f"{key}: PAT assign soft-failed: {exc}")
+                azure_warning(f"{key}: PAT assign failed: {exc}")
+                assigned = False
+            if not assigned:
+                from src.operator_copy import ASSIGN_PAT_FAILED
+
+                try:
+                    await asyncio.to_thread(tracker.add_comment, key, ASSIGN_PAT_FAILED)
+                except Exception as exc:
+                    azure_warning(f"{key}: PAT assign error comment failed: {exc}")
+                return {
+                    "ok": False,
+                    "kind": "work_item",
+                    "queued": False,
+                    "started": False,
+                    "issue_key": key,
+                    "status": "error",
+                    "reason": "pat assign failed",
+                }
 
         if state is not None and coords:
             self.state_manager.update_state(key, metadata=tracker_metadata(coords))
@@ -4635,11 +4688,11 @@ class JobProcessor:
         from src.brand import wrap_operator_reply
         from src.gitlab.client import GitlabClient
 
+        from src.operator_copy import PLAN_READY_WAIT_MR
+
         body = wrap_operator_reply(
             "Plan ready",
-            "This ticket is waiting at plan_ready. Rename label "
-            "plan_ready → plan_execute while the ticket is In Progress "
-            "to implement. I did not start a build from this comment.",
+            PLAN_READY_WAIT_MR,
             state=state,
         )
         discussion_id = str(getattr(event, "discussion_id", "") or "").strip()

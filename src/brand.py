@@ -7,7 +7,10 @@ PRODUCT_TAGLINE = "the aide"
 # Jira / GitLab comment lead-in (italic markdown).
 COMMENT_PREFIX = f"*{PRODUCT_NAME}*"
 # Creasy-style usage note. Marker must not contain @mentions.
-USAGE_HEADING = f"**{PRODUCT_NAME} — how to run a command**"
+from src.operator_copy import USAGE_HEADING_EN, USAGE_HEADING_TR
+
+USAGE_HEADING = USAGE_HEADING_TR
+USAGE_HEADING_LEGACY = USAGE_HEADING_EN
 USAGE_MARKER = "<!-- yaver-usage -->"
 
 
@@ -20,7 +23,11 @@ def product_version() -> str:
 def is_yaver_reply(body: str) -> bool:
     """True for notes we posted (usage, job reply, leftover *Yaver* prefix)."""
     text = body or ""
-    if USAGE_MARKER in text or USAGE_HEADING in text:
+    if (
+        USAGE_MARKER in text
+        or USAGE_HEADING in text
+        or USAGE_HEADING_LEGACY in text
+    ):
         return True
     lead = text.lstrip()
     return (
@@ -68,7 +75,11 @@ def resolve_reply_ids(
         mid = sm
     if not jid:
         jid = sj
-    return (mid or "unknown"), jid
+    if mid.lower() in {"unknown", "-"}:
+        mid = ""
+    if jid.lower() in {"unknown", "-"}:
+        jid = ""
+    return mid, jid
 
 
 def format_reply_header(
@@ -77,11 +88,22 @@ def format_reply_header(
     model: str = "",
     job_id: str = "",
 ) -> str:
-    """Creasy ``format_success``: **Yaver {ver} — Kind** · `model` · `job`."""
-    title = (kind or "Update").strip() or "Update"
-    mid = (model or "").strip() or "unknown"
-    jid = (job_id or "").strip() or "-"
-    return f"**{PRODUCT_NAME} {product_version()} — {title}** · `{mid}` · `{jid}`"
+    """``**Yaver {ver} — Kind**`` plus model/job only when they are real."""
+    from src.operator_copy import header_kind
+
+    title = header_kind(kind)
+    mid = (model or "").strip()
+    jid = (job_id or "").strip()
+    if mid.lower() in {"unknown", "-"}:
+        mid = ""
+    if jid.lower() in {"unknown", "-"}:
+        jid = ""
+    line = f"**{PRODUCT_NAME} {product_version()} — {title}**"
+    if mid:
+        line += f" · `{mid}`"
+    if jid:
+        line += f" · `{jid}`"
+    return line
 
 
 def wrap_operator_reply(
@@ -104,10 +126,7 @@ def format_execute_usage_note(bot_name: str = "yaver") -> str:
     Do not put ``@name`` / ``@mention`` in this text — those tokens start
     the other agent (Creasy). Same shape as Creasy's usage note.
     """
+    from src.operator_copy import USAGE_MR_PR
+
     _ = bot_name
-    return (
-        f"{USAGE_MARKER}\n"
-        f"{USAGE_HEADING}\n\n"
-        "I only run `/yaver`. Mention me and put `/yaver` in the same comment.\n\n"
-        "- `/yaver <prompt>` — start a job on this thread\n"
-    )
+    return f"{USAGE_MARKER}\n{USAGE_HEADING}\n\n{USAGE_MR_PR}"

@@ -403,7 +403,7 @@ async def test_complete_work_jira_gets_cleaned_answer_gitlab_source_skips(
         agent_answer=raw,
     )
     bodies = [c.get("body") or "" for c in fake_jira.comments]
-    assert any("Work Completed" in b for b in bodies)
+    assert any("tamamlandı" in b.lower() for b in bodies)
     assert any("Login uses JWT" in b for b in bodies)
     assert not any("[serve]" in b for b in bodies)
     assert not any("ses_abc" in b for b in bodies)
@@ -556,7 +556,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     body = posted.get("body") or ""
     assert posted.get("mr_iid") == 4
     assert body.startswith("**Yaver ")
-    assert "— Answer**" in body
+    assert "— Yanıt**" in body
     assert "`job_" in body.split("\n", 1)[0]
     assert "## Login" in body
     assert "`AuthService` issues a JWT" in body
@@ -564,7 +564,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert "thread.started" not in body
     assert "command_execution" not in body
     assert "[codex] cwd" not in body
-    assert not any("Work Completed" in (c.get("body") or "") for c in fake_jira.comments)
+    assert not any("tamamlandı" in (c.get("body") or "").lower() for c in fake_jira.comments)
     assert not any("AuthService" in (c.get("body") or "") for c in fake_jira.comments)
     git.push.assert_called()
     git.create_merge_request.assert_not_called()
@@ -761,7 +761,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     jira_progress.assert_not_called()
     body = posted.get("body") or ""
     assert body.startswith("**Yaver ")
-    assert "— Answer**" in body
+    assert "— Yanıt**" in body
     assert "Fixed the login bug." in body
     assert "Pushed new commits" in body
     assert posted.get("discussion_id") == "disc-1"
