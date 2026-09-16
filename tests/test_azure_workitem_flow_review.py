@@ -187,3 +187,26 @@ def test_new_assigned_item_is_accepted():
     decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
     assert decision.action == "accept"
     assert decision.will_process is True
+    assert decision.is_todo is True
+
+
+def test_todo_assigned_item_is_accepted():
+    issue = parse_workitem_payload(_wi_payload(state="To Do")).issue
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "accept"
+    assert decision.will_process is True
+
+
+def test_active_assigned_item_is_accepted():
+    issue = parse_workitem_payload(_wi_payload(state="Active")).issue
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "accept"
+    assert decision.will_process is True
+    assert decision.is_todo is False
+
+
+def test_resolved_assigned_item_is_not_accepted():
+    issue = parse_workitem_payload(_wi_payload(state="Resolved")).issue
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "skip"
+    assert decision.reason == "not todo or in progress"

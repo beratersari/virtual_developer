@@ -755,8 +755,8 @@ export function SettingsPage() {
           placeholder="optional, e.g. bot"
         />
         <span className="text-xs text-text-muted">
-          Empty = assignee only (same as Jira). When set, New / To Do intake
-          also needs one of these tags.
+          Empty = assignee only (same as Jira). When set, To Do / In Progress
+          intake also needs one of these tags.
         </span>
       </label>
 
@@ -767,10 +767,12 @@ export function SettingsPage() {
           pull-request updated / merged / abandoned, and work item
           created / updated / commented. Completed or abandoned pull
           requests delete the matching temp clone. New work starts when a
-          New item is assigned to the bot. Moving Active back to New does
-          not re-queue. After a plan, mention the bot with /planRefactor
-          or /planExecute — not tags. Mention without those commands gets
-          a usage note on the work item. No webhook secret.
+          To Do or In Progress item is assigned to the bot (or New,
+          Active, Doing). Resolved and Done are ignored. Moving In
+          Progress back to To Do does not re-queue. After a plan, mention
+          the bot with /planRefactor or /planExecute — not tags. Mention
+          without those commands gets a usage note on the work item. No
+          webhook secret.
         </p>
         <label className="field mt-2">
           <span>Enabled</span>
