@@ -1,3 +1,9 @@
+# Yaver 0.9.27
+
+Storage no longer sticks Azure PR status
+on Unknown after a restart. The no-linked
+review warning is clearer.
+
 # Yaver 0.9.26
 
 Work-item jobs start only on Assigned To

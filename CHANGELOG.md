@@ -8,6 +8,23 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.27] — 2026-09-16
+
+Storage retries Azure PR status after restart instead of sticking on
+Unknown.
+
+### Fixed
+
+- Failed live MR/PR lookups are no longer cached as ``unknown``.
+  Refresh can load Azure PR status after a daemon restart.
+
+### Changed
+
+- Storage warning when a folder has no GitLab MR or Azure PR URL is
+  clearer (Yaver will not auto-delete that clone).
+
+[0.9.27]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.27
+
 ## [0.9.26] — 2026-09-16
 
 Azure work items start only on Assigned To and comments.
