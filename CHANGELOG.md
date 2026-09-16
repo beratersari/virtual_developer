@@ -8,6 +8,13 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.30] — 2026-09-16
+
+Plan, build, and test keep three OpenCode sessions. A failed
+implement can be retried with ``plan_execute``. Queue reap no longer
+starts a second job during accept. Settings Projects has no default
+source.
+
 ### Fixed
 
 - Plan, build, and test keep three separate OpenCode sessions for the
@@ -28,6 +35,8 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 - Settings → Projects no longer has a Default source field. New-issue
   source stays ``feature/{KEY}`` unless the operator sets a named
   branch on the schedule form.
+
+[0.9.30]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.30
 
 ## [0.9.29] — 2026-09-16
 

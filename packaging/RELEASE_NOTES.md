@@ -1,3 +1,11 @@
+# Yaver 0.9.30
+
+Plan, build, and test keep three OpenCode
+sessions. Failed implement retries with
+plan_execute. Queue reap no longer starts
+a second job during accept. Settings
+Projects has no default source.
+
 # Yaver 0.9.29
 
 Operator comments no longer use
