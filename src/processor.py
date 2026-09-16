@@ -4100,7 +4100,8 @@ class JobProcessor:
         issue = event.issue if isinstance(event.issue, dict) else {}
         coords = issue.get("azure") if isinstance(issue.get("azure"), dict) else {}
         if event.project and event.work_item_id:
-            fetched = fetch_work_item_issue(
+            fetched = await asyncio.to_thread(
+                fetch_work_item_issue,
                 host=event.host,
                 project=event.project,
                 work_item_id=event.work_item_id,
@@ -4130,7 +4131,7 @@ class JobProcessor:
                     from src.azure.tracker import AzureWorkItemTracker
 
                     if coords and int(coords.get("work_item_id") or 0) > 0:
-                        AzureWorkItemTracker(
+                        tracker = AzureWorkItemTracker(
                             issue_key=key,
                             host=str(coords.get("host") or event.host or ""),
                             collection_url=str(
@@ -4144,7 +4145,9 @@ class JobProcessor:
                             work_item_id=int(
                                 coords.get("work_item_id") or event.work_item_id
                             ),
-                        ).add_comment(
+                        )
+                        await asyncio.to_thread(
+                            tracker.add_comment,
                             key,
                             "There is no plan waiting on this work item. "
                             "`/planRefactor` and `/planExecute` only run after "
@@ -4178,12 +4181,14 @@ class JobProcessor:
                     ),
                 )
                 try:
-                    exe_tracker.transition_to_in_progress(key)
-                    self._record_workitem_board_status(key, "in progress")
+                    if await asyncio.to_thread(
+                        exe_tracker.transition_to_in_progress, key
+                    ):
+                        self._record_workitem_board_status(key, "in progress")
                 except Exception as exc:
                     azure_warning(f"{key}: planExecute In Progress failed: {exc}")
                 try:
-                    exe_tracker.assign_to_pat_user(key)
+                    await asyncio.to_thread(exe_tracker.assign_to_pat_user, key)
                 except Exception as exc:
                     azure_warning(f"{key}: PAT assign soft-failed: {exc}")
             payload = event.to_jira_event(
@@ -4237,13 +4242,13 @@ class JobProcessor:
                 work_item_type=str(coords.get("work_item_type") or ""),
             )
             try:
-                if tracker.transition_to_in_progress(key):
+                if await asyncio.to_thread(tracker.transition_to_in_progress, key):
                     self._record_workitem_board_status(key, "in progress")
             except Exception as exc:
                 azure_warning(f"{key}: work item In Progress failed: {exc}")
             # Same as JiraPoller.process_issue: assign at accept, not only at start.
             try:
-                tracker.assign_to_pat_user(key)
+                await asyncio.to_thread(tracker.assign_to_pat_user, key)
             except Exception as exc:
                 azure_warning(f"{key}: PAT assign soft-failed: {exc}")
 

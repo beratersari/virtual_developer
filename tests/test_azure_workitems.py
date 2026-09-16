@@ -420,7 +420,7 @@ def test_resolve_tracker_collection_uses_single_saved_url(monkeypatch):
     )
 
 
-def test_fetch_pat_myself_uses_settings_probe_when_connectiondata_empty():
+def test_fetch_pat_myself_does_not_run_settings_probe():
     from src.azure.tracker import fetch_pat_myself
 
     client = MagicMock()
@@ -428,24 +428,16 @@ def test_fetch_pat_myself_uses_settings_probe_when_connectiondata_empty():
     client.connection_user.return_value = None
     client.identity_aliases.return_value = []
     with patch("src.azure.identity.fetch_bot_identity", return_value=None), patch(
-        "src.azure_connection.probe_azure_connection",
-        return_value={
-            "ok": True,
-            "user": {
-                "id": "guid-9",
-                "username": r"DOMAIN\yaver",
-                "name": "Yaver Bot",
-            },
-        },
-    ):
+        "src.azure_connection.probe_azure_connection"
+    ) as probe:
         me = fetch_pat_myself(
             host="tfs.example.com",
             collection_url="https://tfs.example.com/tfs/DefaultCollection",
             pat="tok",
             client=client,
         )
-    assert me is not None
-    assert me["uniqueName"] == r"DOMAIN\yaver"
+    assert me is None
+    probe.assert_not_called()
 
 
 def test_azure_client_sends_tfs_fedauth_suppress():

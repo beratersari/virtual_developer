@@ -89,29 +89,6 @@ def fetch_pat_myself(
         except Exception:
             ident = None
     if not ident:
-        # Same HTTP path as Settings → Test (FedAuthRedirect + /tfs).
-        try:
-            from src.azure_connection import probe_azure_connection
-
-            probe = probe_azure_connection(
-                collection or host, pat=token or None
-            )
-        except Exception as exc:
-            azure_warning(f"PAT identity probe failed: {exc}")
-            probe = {}
-        user = probe.get("user") if isinstance(probe, dict) and probe.get("ok") else None
-        if isinstance(user, dict):
-            names = [
-                str(user.get("username") or "").strip(),
-                str(user.get("name") or "").strip(),
-            ]
-            ident = {
-                "id": str(user.get("id") or "").strip(),
-                "names": [n for n in names if n],
-            }
-            if not ident["id"] and not ident["names"]:
-                ident = None
-    if not ident:
         azure_warning(
             f"PAT identity empty collection={collection or collection_url or '-'} "
             f"host={host or '-'} pat={bool(token)}"

@@ -211,10 +211,10 @@ def fetch_bot_identity(
         "Authorization": azure_basic_auth(token),
     }
     try:
-        with httpx.Client(timeout=20.0, verify=False, headers=headers) as client:
+        with httpx.Client(timeout=8.0, verify=False, headers=headers) as client:
             for base in roots:
                 url = f"{base.rstrip('/')}/_apis/connectionData"
-                for ver in ("7.1", "7.0", "6.0", "4.1", "1.0", ""):
+                for ver in ("7.1", "7.0", ""):
                     try:
                         params = {"api-version": ver} if ver else None
                         resp = client.get(url, params=params)
