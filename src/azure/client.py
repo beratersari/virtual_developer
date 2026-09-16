@@ -912,21 +912,36 @@ class AzureDevOpsClient:
             return None
 
     def list_projects(self) -> List[str]:
-        """Team project names in this collection (7.1 then 7.0)."""
+        """All team project names in this collection (paged)."""
         if not self.api_base:
             return []
-        data = self._get_json(f"{self.api_base}/_apis/projects", params={"$top": 200})
-        rows: List[Any] = []
-        if isinstance(data, dict):
-            raw = data.get("value")
-            if isinstance(raw, list):
-                rows = raw
+        url = f"{self.api_base}/_apis/projects"
         names: List[str] = []
-        for row in rows:
-            if isinstance(row, dict):
+        seen: set[str] = set()
+        page = 200
+        skip = 0
+        while skip < 5000:
+            data = self._get_json(
+                url,
+                params={"$top": page, "$skip": skip, "stateFilter": "wellFormed"},
+            )
+            if data is None and skip == 0:
+                data = self._get_json(url, params={"$top": page, "$skip": skip})
+            rows: List[Any] = []
+            if isinstance(data, dict):
+                raw = data.get("value")
+                if isinstance(raw, list):
+                    rows = raw
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
                 name = str(row.get("name") or "").strip()
-                if name:
+                if name and name not in seen:
+                    seen.add(name)
                     names.append(name)
+            if len(rows) < page:
+                break
+            skip += page
         azure_info(f"list_projects count={len(names)} collection={self.api_base}")
         return names
 
