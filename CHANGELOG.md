@@ -8,6 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.29] — 2026-09-16
+
+Operator comments drop the “Yapay zekâ” banners. Ticket params stay
+multiline. Sidebar footer is one clock, Connected, then stacked buttons.
+
+### Changed
+
+- Jira, Azure, and GitLab operator comments no longer start with
+  ``Yapay zekâ — …`` headings.
+- New and updated issue descriptions wrap ``{params}`` in ``{code}`` so
+  Jira Server/DC shows each field on its own line.
+- Azure work-item descriptions post as HTML so TFS keeps those line
+  breaks.
+- Dashboard sidebar: one local clock, Connected, then stacked
+  Report issue and Sign out.
+
+[0.9.29]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.29
+
 ## [0.9.28] — 2026-09-16
 
 Azure PAT assign no longer continues unassigned. Schedule collections

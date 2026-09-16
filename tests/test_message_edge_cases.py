@@ -64,7 +64,7 @@ def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     st = _state(plan_path="/tmp/missing.md", status=TaskStatus.PLAN_READY)
     reporter.post_plan_summary(st, "")
     body = client.comments[-1]["body"]
-    assert "Plan hazır" in body
+    assert "— Plan**" in body
     assert "plan içeriği" in body.lower() or "bulunamadı" in body.lower()
     assert "Mode: build" in body
     assert "yorumda" in body.lower()
@@ -74,7 +74,7 @@ def test_plan_summary_whitespace_only(reporter, client):
     st = _state(status=TaskStatus.PLAN_READY)
     reporter.post_plan_summary(st, "   \n\n  ")
     body = client.comments[-1]["body"]
-    assert "Plan hazır" in body
+    assert "— Plan**" in body
 
 
 def test_progress_empty_message_and_clamps_pct(reporter, client):
@@ -148,7 +148,7 @@ def test_error_empty_message_and_default_suggestion(reporter, client):
     st = _state(status=TaskStatus.ERROR, error_message=None)
     reporter.post_error(st, "")
     body = client.comments[-1]["body"]
-    assert "Hata" in body
+    assert "Başarısız" in body
     assert "Bilinmeyen hata" in body
     assert "Öneri" in body
     assert "Yapılacaklar" in body
@@ -195,8 +195,8 @@ def test_comment_response_exception_returns_none():
 
 
 
-def test_all_message_types_have_h3_heading(reporter, client):
-    """Every user-visible template starts with a clear h3 heading."""
+def test_all_message_types_have_yaver_header(reporter, client):
+    """Every user-visible template starts with the Yaver header, not a second title."""
     st = _state(
         status=TaskStatus.COMPLETED,
         completed_at=datetime.now(),
@@ -209,18 +209,15 @@ def test_all_message_types_have_h3_heading(reporter, client):
     reporter.post_error(st, "fail", suggestion="retry")
     reporter.post_comment_response("MSG-1", "ok")
 
-    headings = []
-    for c in client.comments:
-        headings.extend(
-            line for line in c["body"].splitlines() if line.startswith("h3.")
-        )
-
-    assert any("İş başladı" in h for h in headings)
-    assert any("Plan hazır" in h for h in headings)
-    assert any("İlerleme" in h for h in headings)
-    assert any("tamamlandı" in h.lower() for h in headings)
-    assert any("Hata" in h for h in headings)
-    assert any("Yanıt" in h for h in headings)
+    bodies = [c["body"] for c in client.comments]
+    assert any("İş başladı" in b for b in bodies)
+    assert any("— Plan**" in b for b in bodies)
+    assert any("İlerleme" in b for b in bodies)
+    assert any("Tamamlandı" in b for b in bodies)
+    assert any("Başarısız" in b for b in bodies)
+    assert any("Yanıt" in b for b in bodies)
+    assert not any("Yapay zekâ —" in b for b in bodies)
+    assert not any(line.startswith("h3.") for b in bodies for line in b.splitlines())
 
 
 def test_fail_issue_posts_error_and_sets_status(state_manager, fake_jira):
@@ -243,7 +240,7 @@ def test_fail_issue_posts_error_and_sets_status(state_manager, fake_jira):
     assert loaded.status == TaskStatus.ERROR
     assert fake_jira.comments, "expected a Jira error comment"
     body = fake_jira.comments[-1]["body"]
-    assert "Hata" in body
+    assert "Başarısız" in body
     assert "Bilinmeyen hata" in body or "hata" in body.lower()
 
 

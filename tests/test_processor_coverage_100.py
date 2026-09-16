@@ -273,7 +273,7 @@ def test_fail_from_agent_result_incomplete_is_not_crash(processor, state_manager
         fallback="agent failed",
     )
     bodies = [c["body"] for c in fake_jira.comments]
-    assert any("Incomplete session (context compaction)" in b for b in bodies)
+    assert any("bağlam sıkıştır" in b.lower() for b in bodies)
     assert not any(
         "h3. AI Agent — Error" in b and "compact-then-stop" in b for b in bodies
     )
@@ -296,9 +296,9 @@ def test_fail_from_agent_result_clarifying_question_heading(
         fallback="agent failed",
     )
     bodies = [c["body"] for c in fake_jira.comments]
-    assert any("Clarifying question" in b for b in bodies)
-    assert any("unattended" in b.lower() for b in bodies)
-    assert not any("context compaction" in b.lower() for b in bodies)
+    assert any("gözetimsiz" in b.lower() for b in bodies)
+    assert any("netleştirme" in b.lower() for b in bodies)
+    assert not any("bağlam sıkıştır" in b.lower() for b in bodies)
 
 
 def test_fail_from_agent_result_post_nudge_todos_is_not_compaction(
@@ -346,8 +346,8 @@ def test_fail_from_agent_result_thread_lock_heading(
         fallback="agent failed",
     )
     bodies = [c["body"] for c in fake_jira.comments]
-    assert any("Codex thread locked" in b for b in bodies)
-    assert not any("Incomplete session" in b for b in bodies)
+    assert any("Codex" in b and "yazıcı" in b.lower() for b in bodies)
+    assert not any("bağlam sıkıştır" in b.lower() for b in bodies)
 
 
 def test_fail_from_agent_result_compact_loop_heading(

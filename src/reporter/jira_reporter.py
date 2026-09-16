@@ -14,6 +14,11 @@ _MAX_RESPONSE_CHARS = 8000
 _MAX_ANSWER_CHARS = 8000
 
 
+def _optional_h3(title: str) -> str:
+    text = (title or "").strip()
+    return f"h3. {text}\n\n" if text else ""
+
+
 def _clip(text: str, limit: int) -> str:
     text = text or ""
     if len(text) <= limit:
@@ -85,9 +90,7 @@ class JiraReporter:
 
         body = f"""{_header_for_state("Work started", state)}
 
-h3. {ACK_HEADING}
-
-{ACK_INTRO}
+{_optional_h3(ACK_HEADING)}{ACK_INTRO}
 
 *{ACK_ISSUE}:* {state.issue_key} — {summary}{workflow_line}
 *{ACK_STATUS}:* {ACK_ANALYZING}
@@ -144,9 +147,7 @@ h3. {ACK_HEADING}
 
         body = f"""{_header_for_state("Plan", state)}
 
-h3. {PLAN_HEADING}
-
-{PLAN_INTRO}
+{_optional_h3(PLAN_HEADING)}{PLAN_INTRO}
 
 *{PLAN_LABEL}:*
 {plan_block}
@@ -155,9 +156,6 @@ h3. {PLAN_HEADING}
 
 *{PLAN_NEXT}:*
 {next_steps}
-
-----
-{PLAN_FOOTER}
 """
 
         client = self._issue_client(state.issue_key, state)
@@ -205,9 +203,7 @@ h3. {PLAN_HEADING}
 
         body = f"""{_header_for_state("Progress", state)}
 
-h3. {PROGRESS_HEADING}
-
-{msg}{progress_line}
+{_optional_h3(PROGRESS_HEADING)}{msg}{progress_line}
 *{ACK_STATUS}:* {state.status.value}
 """
 
@@ -322,13 +318,10 @@ h3. {PROGRESS_HEADING}
 
         body = f"""{_header_for_state("Done", state)}
 
-h3. {DONE_HEADING}
-
-{summary_text}{changes_section}
+{_optional_h3(DONE_HEADING)}{summary_text}{changes_section}
 {delivery_section}{duration_line}*{DONE_SESSION}:* {session_id}
 *{DONE_AT}:* {completed_time}
 
-----
 {DONE_FOOTER}
 """
 
@@ -390,9 +383,7 @@ h3. {DONE_HEADING}
 
         body = f"""{_header_for_state("Failed", state)}
 
-h3. {heading}
-
-{lead}
+{_optional_h3(heading)}{lead}
 
 {{code}}
 {err}
@@ -427,9 +418,7 @@ h3. {heading}
         text = _clip(text, _MAX_RESPONSE_CHARS)
         body = f"""{_header_for_state("Answer", None)}
 
-h3. {ANSWER_HEADING}
-
-{text}
+{_optional_h3(ANSWER_HEADING)}{text}
 """
 
         try:

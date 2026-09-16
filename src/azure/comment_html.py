@@ -121,4 +121,37 @@ def _lists_and_breaks(text: str) -> str:
     return "".join(out)
 
 
-__all__ = ["looks_like_html", "work_item_comment_html"]
+_WIKI_CODE = re.compile(r"\{code\}\s*(.*?)\s*\{code\}", re.DOTALL | re.IGNORECASE)
+
+
+def work_item_description_html(text: str) -> str:
+    """HTML description so TFS keeps {params} line breaks (plain \\n collapses)."""
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    if looks_like_html(raw):
+        return raw
+    match = _WIKI_CODE.search(raw)
+    if match:
+        before = raw[: match.start()].strip()
+        inner = (match.group(1) or "").strip("\n")
+        after = raw[match.end() :].strip()
+        parts: List[str] = []
+        if before:
+            parts.append(
+                "<p>" + html.escape(before).replace("\n", "<br/>") + "</p>"
+            )
+        parts.append(f"<pre>{html.escape(inner)}</pre>")
+        if after:
+            parts.append(
+                "<p>" + html.escape(after).replace("\n", "<br/>") + "</p>"
+            )
+        return "".join(parts)
+    return "<p>" + html.escape(raw).replace("\n", "<br/>") + "</p>"
+
+
+__all__ = [
+    "looks_like_html",
+    "work_item_comment_html",
+    "work_item_description_html",
+]

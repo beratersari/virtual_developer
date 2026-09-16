@@ -154,7 +154,7 @@ def test_post_incomplete_compaction_is_not_generic_error(state):
     body = client.comments[-1]["body"]
     assert "bağlam sıkıştırma" in body.lower()
     assert "çökme" in body.lower()
-    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
+    assert "Yapay zekâ —" not in body
 
 
 def test_post_unfinished_work_is_not_compaction(state):
@@ -167,9 +167,9 @@ def test_post_unfinished_work_is_not_compaction(state):
         category="unfinished",
     )
     body = client.comments[-1]["body"]
-    assert "bitmeyen iş" in body.lower()
+    assert "bitirmeden durdu" in body.lower()
     assert "bağlam sıkıştırma" not in body.lower()
-    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
+    assert "Yapay zekâ —" not in body
 
 
 def test_post_compact_loop_is_not_question_or_timeout(state):
@@ -182,10 +182,10 @@ def test_post_compact_loop_is_not_question_or_timeout(state):
         category="compact_loop",
     )
     body = client.comments[-1]["body"]
-    assert "sıkıştırma döngüsü" in body.lower()
+    assert "otomatik sıkıştır" in body.lower()
     assert "Continue gönderilmedi" in body
     assert "Netleştirme" not in body
-    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
+    assert "Yapay zekâ —" not in body
 
 
 def test_post_error_not_timed_out_not_exhausted(state):
@@ -226,7 +226,8 @@ def test_post_comment_response():
     assert r.post_comment_response("R-1", "hello") is not None
     body = client.comments[-1]["body"]
     assert "hello" in body
-    assert "Yapay zekâ — Yanıt" in body
+    assert "Yanıt" in body
+    assert "Yapay zekâ —" not in body
 
 
 def test_post_comment_response_formats_codex_jsonl_keeps_opencode():

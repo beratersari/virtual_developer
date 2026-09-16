@@ -93,7 +93,11 @@ def build_issue_description(
     bid = _normalize_backend_id(backend)
     model_line = f"Model: {mid}\n" if mid else ""
     backend_line = f"Backend: {bid}\n" if bid else ""
+    # Jira wiki treats {params} as a macro and collapses the block to one
+    # line. Wrap in {code} so Server/DC shows each field on its own line.
+    # The agent parser still finds the inner {params} markers.
     params = (
+        "{code}\n"
         "{params}\n"
         f"Repository: {repository_url}\n"
         f"Source branch: {source_branch}\n"
@@ -101,7 +105,8 @@ def build_issue_description(
         f"Mode: {mode}\n"
         f"{model_line}"
         f"{backend_line}"
-        "{params}"
+        "{params}\n"
+        "{code}"
     )
     if body:
         return f"{body}\n\n{params}"
@@ -1080,10 +1085,12 @@ def _create_scheduled_azure_work_item(
         model=model,
         backend=backend,
     )
+    from src.azure.comment_html import work_item_description_html
+
     ado = AzureDevOpsClient(collection_url=collection_url)
     fields: Dict[str, Any] = {
         "System.Title": title,
-        "System.Description": issue_description,
+        "System.Description": work_item_description_html(issue_description),
     }
     me = fetch_pat_myself(
         host=ado.host,
@@ -1131,7 +1138,9 @@ def _create_scheduled_azure_work_item(
             backend=backend,
         )
         ado.update_work_item_fields(
-            project, iid, {"System.Description": issue_description}
+            project,
+            iid,
+            {"System.Description": work_item_description_html(issue_description)},
         )
     coords = {
         "host": ado.host,
