@@ -214,7 +214,7 @@ Completed or abandoned PRs delete the matching temp clone. Storage warns when a 
 
 ## 4. Azure Boards work items (webhook)
 
-Same Azure URL as PR comments. Add service hooks for **Work item created**, **updated**, and **commented**. Updated is only used for **Assigned To** and board position (**State** / Kanban column). Description and tag edits do not start a job.
+Same Azure URL as PR comments. Add service hooks for **Work item created**, **updated**, and **commented**. Updated is only used for **Assigned To**. Comments use the commented hook. State, description, and tag edits do not start a job.
 
 ### Accept
 
@@ -233,7 +233,7 @@ After accept Yaver:
 2. Assigns the collection PAT user
 3. Starts the job from `{params}`
 
-**Unlike Jira**, moving Active → New (or In Progress → To Do) while still assigned does **not** re-queue. First sighting only. After `error`, assign the item again or move its board column. Description and tag edits do not retry. After a plan, use comments (below).
+**Unlike Jira**, moving Active → New (or In Progress → To Do) while still assigned does **not** re-queue. First sighting only. After `error`, assign the item again. Board moves, description, and tag edits do not retry. After a plan, use comments (below).
 
 Yaver **never** moves a work item to Resolved or Done.
 

@@ -720,7 +720,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
 
     if "azure_credentials" in data and data["azure_credentials"] is not None:
         from src.azure.urls import parse_tfs_collection_url, require_tfs_collection_url
-        from src.azure_connection import save_azure_collection_urls
 
         current = (
             settings.azure_collection_pat_map()
@@ -762,10 +761,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
                 new_map[collection] = current[collection]
             elif previous and previous in current:
                 new_map[collection] = current[previous]
-        save_azure_collection_urls(collections)
-        runtime_persist["azure_collection_urls"] = getattr(
-            settings, "azure_collection_urls", ""
-        ) or "[]"
         from src.azure.log import azure_info
 
         azure_info(
@@ -773,28 +768,12 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             f"urls={collections} pats={len(new_map)}"
         )
         clearing = bool(current) and not new_map
-        keep_legacy_pat = (not new_map) and (not current) and bool(
-            (getattr(settings, "azure_pat", "") or "").strip()
-        )
         if hasattr(settings, "set_azure_collection_pat_map"):
             if new_map or clearing:
                 settings.set_azure_collection_pat_map(new_map)
-        save_azure_collection_urls(collections)
-        if not keep_legacy_pat:
-            dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
-                settings, "azure_collection_pats", ""
-            ) or ""
-            dotenv_updates["AZURE_COLLECTION_URLS"] = getattr(
-                settings, "azure_collection_urls", ""
-            ) or ""
-            dotenv_updates["AZURE_HOST_PATS"] = ""
-            dotenv_updates["AZURE_PAT"] = getattr(settings, "azure_pat", "") or ""
-    else:
-        if "azure_pat" in data and data["azure_pat"] is not None:
-            pat = str(data["azure_pat"])
-            if pat.strip():
-                settings.azure_pat = pat.strip()
-                dotenv_updates["AZURE_PAT"] = settings.azure_pat
+        dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
+            settings, "azure_collection_pats", ""
+        ) or ""
     azure_trigger = None
     if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
         azure_trigger = str(data["azure_trigger_user"]).strip()

@@ -805,7 +805,7 @@ def test_description_and_tag_changes_do_not_start_a_job():
         enabled=True,
     )
     assert desc.accepted is False
-    assert "assignee/state" in desc.reason
+    assert "assignee" in desc.reason
     tags = decide_azure_workitem_webhook(
         _wi_payload(
             tags="plan_execute",
@@ -829,7 +829,7 @@ def test_description_and_tag_changes_do_not_start_a_job():
     assert title.accepted is False
 
 
-def test_accept_state_and_kanban_column_changes():
+def test_state_and_kanban_column_changes_do_not_start_a_job():
     state = decide_azure_workitem_webhook(
         _wi_payload(
             state="Active",
@@ -837,8 +837,8 @@ def test_accept_state_and_kanban_column_changes():
         ),
         enabled=True,
     )
-    assert state.accepted is True
-    assert "state" in state.event.change_kinds
+    assert state.accepted is False
+    assert "assignee" in state.reason
     column = decide_azure_workitem_webhook(
         _wi_payload(
             changed={
@@ -850,8 +850,7 @@ def test_accept_state_and_kanban_column_changes():
         ),
         enabled=True,
     )
-    assert column.accepted is True
-    assert "state" in column.event.change_kinds
+    assert column.accepted is False
 
 
 def test_intake_new_assigned_todo():

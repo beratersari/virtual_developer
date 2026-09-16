@@ -8,6 +8,23 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-09-16
+
+Azure work items start only on Assigned To and comments.
+Settings writes only the collection PAT map.
+
+### Changed
+
+- Azure work-item **updated** hooks start a job only on Assigned To.
+  State / Kanban column moves, description, and tags are ignored.
+  Comments stay on the comment path.
+- Saving Azure credentials writes only ``AZURE_COLLECTION_PATS``
+  (same idea as ``GITLAB_HOST_PATS``). It no longer writes
+  ``AZURE_COLLECTION_URLS``, ``AZURE_HOST_PATS``, or leftover
+  ``AZURE_PAT``.
+
+[0.9.26]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.26
+
 ## [0.9.25] — 2026-09-16
 
 Azure work-item webhooks no longer freeze the ops dashboard.

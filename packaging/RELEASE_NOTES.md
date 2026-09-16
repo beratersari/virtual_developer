@@ -1,3 +1,9 @@
+# Yaver 0.9.26
+
+Work-item jobs start only on Assigned To
+and comments, not board moves. Settings
+saves only AZURE_COLLECTION_PATS.
+
 # Yaver 0.9.25
 
 Azure work-item webhooks no longer freeze

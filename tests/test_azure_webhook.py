@@ -1286,23 +1286,10 @@ def test_settings_save_azure_webhook_enable_and_secret(monkeypatch):
 
 def test_settings_leftover_azure_pat_and_hosts(monkeypatch):
     from src.config import Settings
-    from src.dashboard.schemas import SettingsUpdate
-    from src.dashboard.service import apply_settings_update
 
     s = Settings()
-    s.set_azure_host_pat_map({})
-    s.azure_pat = ""
-    s.azure_allowed_hosts = ""
-    monkeypatch.setattr("src.dashboard.service.settings", s)
-    monkeypatch.setattr("src.config.settings", s)
-    monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None)
-    monkeypatch.setattr("src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None)
-    apply_settings_update(
-        SettingsUpdate(
-            azure_pat="legacy-az",
-            azure_allowed_hosts="tfs.example.com",
-        )
-    )
+    s.set_azure_collection_pat_map({})
+    s.azure_pat = "legacy-az"
     assert s.azure_pat_for_host("tfs.example.com") == "legacy-az"
 
 
@@ -1394,7 +1381,12 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     s.set_azure_host_pat_map({})
     monkeypatch.setattr("src.dashboard.service.settings", s)
     monkeypatch.setattr("src.config.settings", s)
-    monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None)
+    written: dict = {}
+
+    def _capture(updates, *_a, **_k):
+        written.update(updates or {})
+
+    monkeypatch.setattr("src.dashboard.service.upsert_dotenv_keys", _capture)
     monkeypatch.setattr("src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None)
     body = SettingsUpdate(
         azure_credentials=[
@@ -1420,6 +1412,12 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     assert not hasattr(shown.azure_credentials[0], "pat") or getattr(
         shown.azure_credentials[0], "pat", None
     ) in (None, "")
+    azure_env = {k: v for k, v in written.items() if k.startswith("AZURE_")}
+    assert set(azure_env) == {"AZURE_COLLECTION_PATS", "AZURE_TRIGGER_USER"}
+    assert "AZURE_COLLECTION_URLS" not in written
+    assert "AZURE_HOST_PATS" not in written
+    assert "AZURE_PAT" not in written
+    assert "DefaultCollection" in (written.get("AZURE_COLLECTION_PATS") or "")
 
 
 def test_probe_azure_requires_pat(monkeypatch):
