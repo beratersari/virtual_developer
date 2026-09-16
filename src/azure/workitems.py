@@ -66,8 +66,17 @@ _DESCRIPTION_FIELDS = frozenset(
     }
 )
 _LABEL_FIELDS = frozenset({"system.tags", "tags", "label", "labels"})
-_STATE_FIELDS = frozenset({"system.state", "state"})
+_STATE_FIELDS = frozenset(
+    {
+        "system.state",
+        "state",
+        "system.boardcolumn",
+        "system.boardcolumndone",
+        "system.boardlane",
+    }
+)
 _COMMENT_FIELDS = frozenset({"system.history", "history"})
+_INTAKE_CHANGE_KINDS = frozenset({"assignee", "state"})
 
 # Process-template categories on GET workitemtypes/{type}/states (7.1 / 7.0).
 _TODO_CATEGORIES = frozenset({"proposed", "new"})
@@ -308,7 +317,7 @@ def classify_workitem_changes(changed: Iterable[str]) -> Set[str]:
             kinds.add("description")
         elif n in _LABEL_FIELDS:
             kinds.add("label")
-        elif n in _STATE_FIELDS:
+        elif n in _STATE_FIELDS or "kanban.column" in n:
             kinds.add("state")
         elif n in _COMMENT_FIELDS:
             kinds.add("comment")
@@ -1316,7 +1325,7 @@ def decide_azure_workitem_webhook(
     headers: Optional[Dict[str, str]] = None,
     enabled: bool = True,
 ) -> WebhookDecision:
-    """Accept work-item created/updated when assignee, description, or tags changed."""
+    """Accept created/updated only for assignee or board-position (state) changes."""
     header_map = _header_map(headers)
     data = payload if isinstance(payload, dict) else {}
     event_name = _event_type(data, header_map)
@@ -1362,15 +1371,13 @@ def decide_azure_workitem_webhook(
 
     interesting = set(parsed.change_kinds)
     if event_name == "workitem.updated" and not interesting.intersection(
-        {"assignee", "description", "label", "state"}
+        _INTAKE_CHANGE_KINDS
     ):
         azure_info(
-            f"workitem reject reason='no assignee/description/label/state change' "
+            f"workitem reject reason='no assignee/state change' "
             f"id={parsed.work_item_id} kinds={parsed.change_kinds}"
         )
-        return WebhookDecision(
-            False, "no assignee/description/label/state change"
-        )
+        return WebhookDecision(False, "no assignee/state change")
 
     azure_info(
         f"workitem accept key={parsed.issue_key} id={parsed.work_item_id} "

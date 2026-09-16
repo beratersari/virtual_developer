@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from src.azure.auth import azure_basic_auth
+from src.azure.auth import TFS_API_HEADERS, azure_basic_auth
 from src.azure.log import azure_info, azure_warning
 from src.azure.urls import identity_root, identity_roots, parse_tfs_collection_url
 from src.gitlab.mentions import identity_key, normalize_guid, normalize_mention
@@ -61,17 +61,39 @@ def identity_name_values(user: Dict[str, Any]) -> List[str]:
     return names
 
 
+def _user_id(user: Dict[str, Any]) -> str:
+    uid = str(user.get("id") or user.get("localId") or "").strip()
+    if uid:
+        return uid
+    props = user.get("properties")
+    if isinstance(props, dict):
+        for key in ("Id", "VSID", "TeamFoundationId"):
+            raw = props.get(key)
+            if isinstance(raw, dict):
+                raw = raw.get("$value") or raw.get("value")
+            text = str(raw or "").strip()
+            if text:
+                return text
+    url = str(user.get("url") or "").strip()
+    if "/identities/" in url.lower():
+        return url.rstrip("/").rsplit("/", 1)[-1].strip()
+    return ""
+
+
 def parse_authenticated_user(data: Any) -> Optional[Dict[str, Any]]:
     blob = data if isinstance(data, dict) else {}
     user = blob.get("authenticatedUser")
     if not isinstance(user, dict):
-        user = blob if blob.get("id") else None
-    if not isinstance(user, dict) or not user.get("id"):
+        user = blob.get("authorizedUser")
+    if not isinstance(user, dict):
+        user = blob if blob.get("id") or blob.get("uniqueName") else None
+    if not isinstance(user, dict):
         return None
-    uid = str(user.get("id") or "").strip()
-    if not uid:
+    uid = _user_id(user)
+    names = identity_name_values(user)
+    if not uid and not names:
         return None
-    return {"id": uid, "names": identity_name_values(user)}
+    return {"id": uid, "names": names}
 
 
 def seed_identity_aliases(
@@ -167,28 +189,35 @@ def fetch_bot_identity(
     token = (pat or "").strip()
     if not token and collection and hasattr(settings, "azure_pat_for_collection"):
         token = (settings.azure_pat_for_collection(collection) or "").strip()
-    # Host fallback only when we have no collection (PR mention / Settings test).
-    # A known collection must not inherit a sibling collection's PAT.
-    if not token and not collection and host and hasattr(settings, "azure_pat_for_host"):
+    if not token and host and hasattr(settings, "azure_pat_for_host"):
         parsed = urlparse(host if "://" in host else f"https://{host}")
         h = (parsed.hostname or host).lower()
         token = (settings.azure_pat_for_host(h) or "").strip()
+    if not token and hasattr(settings, "azure_collection_pat_map"):
+        mapping = settings.azure_collection_pat_map() or {}
+        if len(mapping) == 1:
+            token = str(next(iter(mapping.values())) or "").strip()
     cache_key = f"{collection or '|'.join(roots)}|{_token_fingerprint(token)}"
     if cache_key in _CACHE:
         return _CACHE[cache_key] or None
     if not roots or not token:
+        azure_warning(
+            f"mention identity skip collection={collection or collection_url or '-'} "
+            f"host={host or '-'} roots={len(roots)} pat={bool(token)}"
+        )
         return None
     headers = {
-        "Accept": "application/json",
+        **TFS_API_HEADERS,
         "Authorization": azure_basic_auth(token),
     }
     try:
         with httpx.Client(timeout=20.0, verify=False, headers=headers) as client:
             for base in roots:
                 url = f"{base.rstrip('/')}/_apis/connectionData"
-                for ver in ("7.1", "7.0", "6.0", "1.0"):
+                for ver in ("7.1", "7.0", "6.0", "4.1", "1.0", ""):
                     try:
-                        resp = client.get(url, params={"api-version": ver})
+                        params = {"api-version": ver} if ver else None
+                        resp = client.get(url, params=params)
                     except httpx.HTTPError:
                         resp = None
                     if resp is None:
@@ -196,10 +225,20 @@ def fetch_bot_identity(
                     if resp.status_code in (400, 404):
                         continue
                     if resp.status_code != 200:
+                        azure_warning(
+                            f"mention identity status={resp.status_code} "
+                            f"root={base} ver={ver or '-'}"
+                        )
                         break
-                    user = parse_authenticated_user(
-                        resp.json() if resp.content else {}
-                    )
+                    try:
+                        payload = resp.json() if resp.content else {}
+                    except Exception:
+                        azure_warning(
+                            f"mention identity non-json root={base} "
+                            f"ctype={resp.headers.get('content-type')}"
+                        )
+                        break
+                    user = parse_authenticated_user(payload)
                     if user:
                         azure_info(
                             f"mention identity id={user.get('id')} "
@@ -208,8 +247,16 @@ def fetch_bot_identity(
                         )
                         _CACHE[cache_key] = user
                         return user
+                    azure_warning(
+                        f"mention identity empty body status={resp.status_code} "
+                        f"root={base} ver={ver}"
+                    )
     except Exception as exc:
         azure_warning(f"mention identity lookup failed: {exc}")
+    azure_warning(
+        f"mention identity miss collection={collection or collection_url or '-'} "
+        f"host={host or '-'}"
+    )
     return None
 
 

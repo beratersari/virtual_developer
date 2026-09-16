@@ -214,12 +214,11 @@ Tamamlanan veya vazgeçilen PR eşleşen geçici kopyayı siler. Bağlı MR/PR�
 
 ## 4. Azure Boards iş öğeleri (webhook)
 
-PR ile aynı Azure adresi. **Work item created**, **updated**, **commented** kancalarını ekleyin. Alan süzgeçleri: **Assigned To**, **Description**. State isteğe bağlıdır (yeniden iş sinyali değildir).
+PR ile aynı Azure adresi. **Work item created**, **updated**, **commented** kancalarını ekleyin. Updated yalnızca **Assigned To** ve tahta konumu (**State** / Kanban sütunu) için kullanılır. Açıklama ve etiket değişiklikleri iş başlatmaz.
 
 ### Kabul
 
 - Assigned To `AZURE_TRIGGER_USER` ile eşleşir
-- `AZURE_TRIGGER_LABEL` doluysa öğede o etiketlerden biri de gerekir
 - Durum **To Do** veya **In Progress**, ya da aynı süreç şablonu sütunu:
 
 | Sütun türü | İşi başlatan adlar |
@@ -234,7 +233,7 @@ Kabulden sonra Yaver:
 2. Koleksiyon PAT kullanıcısına atar
 3. `{params}` ile işi başlatır
 
-**Jira’dan farklı:** Hâlâ atalıyken Active → New (veya In Progress → To Do) **yeniden kuyruğa almaz**. Yalnızca ilk görülme. `error` sonrası başlık veya açıklamayı düzenleyin. Plandan sonra aşağıdaki yorumları kullanın.
+**Jira’dan farklı:** Hâlâ atalıyken Active → New (veya In Progress → To Do) **yeniden kuyruğa almaz**. Yalnızca ilk görülme. `error` sonrası öğeyi yeniden atayın veya tahta sütununu değiştirin. Açıklama ve etiket düzenlemek yeniden denemez. Plandan sonra aşağıdaki yorumları kullanın.
 
 Yaver iş öğesini **asla** Resolved veya Done yapmaz.
 
@@ -428,7 +427,6 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 | `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` → PAT |
 | `AZURE_WEBHOOK_ENABLED` | `/yaver/webhook/azure` üzerinde PR + iş öğesi (sır yok) |
 | `AZURE_TRIGGER_USER` | PR `@ad /yaver` ve iş öğesi Assigned To |
-| `AZURE_TRIGGER_LABEL` | İsteğe bağlı iş öğesi etiketleri (atanan ile VE) |
 
 ### Ajan / yollar
 
