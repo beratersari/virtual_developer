@@ -183,6 +183,21 @@ def test_storage_view_resolves_azure_pr_state(tmp_path: Path, monkeypatch: pytes
     assert _lookup_review_state(pr_url) == "completed"
 
 
+def test_storage_does_not_cache_unknown_review_state():
+    from src.dashboard.temp_storage import (
+        _cached_mr_state,
+        remember_mr_state,
+        reset_mr_state_cache,
+    )
+
+    reset_mr_state_cache()
+    url = "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo/pullrequest/4"
+    remember_mr_state(url, "unknown")
+    assert _cached_mr_state(url) is None
+    remember_mr_state(url, "open")
+    assert _cached_mr_state(url) == "open"
+
+
 def test_same_review_url_requires_azure_repo_not_just_pr_number():
     from src.dashboard.temp_storage import _same_review_url
 

@@ -191,9 +191,10 @@ function StorageList({
                 </div>
                 {!hasLinkedReview(folder) && !isDeleting && (
                   <div className="mt-1.5 max-w-xl text-xs text-danger-text">
-                    No linked GitLab MR or Azure PR. Yaver will not delete this
-                    folder when the review is merged. Delete it yourself when
-                    you are done with the MR/PR.
+                    No GitLab MR or Azure PR is linked to this folder. Yaver
+                    only auto-deletes a clone after a linked review is merged,
+                    completed, or abandoned. Delete this folder yourself when
+                    you no longer need it.
                   </div>
                 )}
                 {isDeleting && (
@@ -324,7 +325,7 @@ export function StoragePage() {
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Linked GitLab MRs and Azure PRs show live status; those clones are removed when the review is merged or abandoned. Folders with no MR/PR must be deleted by hand when you are done."
+        description="Temp clones under TEMP_DIR_BASE. Linked GitLab MRs and Azure PRs show live status. Yaver deletes that clone after the linked review is merged, completed, or abandoned. Folders with no MR/PR must be deleted by hand."
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh
