@@ -22,7 +22,7 @@ def header_kind(kind: str) -> str:
 
 NO_SUMMARY = "(özet yok)"
 
-ACK_HEADING = "Yapay zekâ — İş başladı"
+ACK_HEADING = ""
 ACK_INTRO = "Bu kayıt kabul edildi ve otomatik işlenecek."
 ACK_ISSUE = "Kayıt"
 ACK_WORKFLOW = "İş akışı"
@@ -33,14 +33,14 @@ ACK_BOARD = (
     "İlerleme bu kayda yorum olarak yazılır."
 )
 
-PLAN_HEADING = "Yapay zekâ — Plan hazır"
+PLAN_HEADING = ""
 PLAN_INTRO = (
     "Bu kayıt için bir iş planı üretildi (plan kipi — *uzak depoya gönderim yok*)."
 )
 PLAN_LABEL = "Plan"
 PLAN_FILE = "Plan dosyası"
 PLAN_NEXT = "Sonraki adımlar"
-PLAN_FOOTER = "_Planı planlama ajanı üretti._"
+PLAN_FOOTER = ""
 PLAN_EMPTY = (
     "_Diskte plan içeriği bulunamadı. Planlama ajanı dosyayı yazmamış "
     "olabilir veya plan yolu çalışma alanıyla eşleşmiyor. İşe başlamadan "
@@ -68,11 +68,11 @@ PLAN_NEXT_JIRA = (
     "* Gösterge panelinde Başlat düğmesi yok"
 )
 
-PROGRESS_HEADING = "Yapay zekâ — İlerleme"
+PROGRESS_HEADING = ""
 PROGRESS_EMPTY = "İlerleme güncellemesi (ayrıntı yok)."
 PROGRESS_PCT = "İlerleme"
 
-DONE_HEADING = "Yapay zekâ — İş tamamlandı"
+DONE_HEADING = ""
 DONE_GENERIC = "İş bitti. Ayrıntılar için birleştirme isteğine / dala bakın."
 DONE_CHANGES = "Yapılan değişiklikler"
 DONE_DELIVERY = "Teslim"
@@ -95,36 +95,34 @@ DONE_DURATION = "Süre"
 DONE_SECONDS = "saniye"
 DONE_SESSION = "Oturum"
 DONE_AT = "Tamamlanma"
-DONE_FOOTER = (
-    "_Yapay zekâ ajanı tamamladı. Birleştirmeden veya kapatmadan önce gözden geçirin._"
-)
+DONE_FOOTER = "Birleştirmeden veya kapatmadan önce gözden geçirin."
 
-FAILED_HEADING = "Yapay zekâ — Hata"
+FAILED_HEADING = ""
 FAILED_LEAD = "Bu kayıt işlenirken bir hata oluştu:"
-FAILED_QUESTION_H = "Yapay zekâ — Netleştirme sorusu (gözetimsiz)"
+FAILED_QUESTION_H = ""
 FAILED_QUESTION = (
     "Ajan netleştirme sormak için durdu. Bu hizmet *gözetimsiz* çalışır "
     "(tek geçişli istem) — insan yanıt yolu yok. Mümkünse tek bir "
     "gözetimsiz devam denendi; oturum hâlâ eksik. Bu bir *çökme* değil."
 )
-FAILED_COMPACT_H = "Yapay zekâ — Eksik oturum (otomatik sıkıştırma döngüsü)"
+FAILED_COMPACT_H = ""
 FAILED_COMPACT = (
     "OpenCode oturumu yeni iş üretmeden otomatik sıkıştırmaya devam etti "
     "('Session auto-compacted' yineleniyor). Bu bir *çökme* veya "
     "*netleştirme sorusu* değil. Continue gönderilmedi — sıkıştırma ile "
     "yarışır ve bağlamı şişirir. İş zaman aşımını artırmak döngüyü kırmaz."
 )
-FAILED_INCOMPLETE_H = "Yapay zekâ — Eksik oturum (bağlam sıkıştırma)"
+FAILED_INCOMPLETE_H = ""
 FAILED_INCOMPLETE = (
     "OpenCode oturumu bağlam sıkıştırması veya tur ortası boşta kalınca durdu. "
     "Bu bir *çökme* değil — ajan bitirmeden sıkıştırma-devam bütçesini tüketti."
 )
-FAILED_TODOS_H = "Yapay zekâ — Eksik oturum (bitmeyen iş)"
+FAILED_TODOS_H = ""
 FAILED_TODOS = (
     "Ajan kalan işi bitirmeden durdu (çoğu zaman gözetimsiz dürtmeden sonra "
     "açık yapılacaklar). Bu bir sıkıştırma bütçesi hatası veya çökme değil."
 )
-FAILED_LOCK_H = "Yapay zekâ — Codex iş parçacığı kilitli"
+FAILED_LOCK_H = ""
 FAILED_LOCK = (
     "Codex iş parçacığını sürdüremedi: başka bir süreç hâlâ yazıcıyı tutuyordu "
     "(`already has an active writer`). Bu eksik bir OpenCode oturumu değil. "
@@ -148,7 +146,7 @@ FAILED_DEFAULT_SUGGEST = (
     "YAVER_DATA_DIR/sessions/ altındaki oturum günlüklerine bakın."
 )
 
-ANSWER_HEADING = "Yapay zekâ — Yanıt"
+ANSWER_HEADING = ""
 ANSWER_EMPTY = (
     "_Ajan boş yanıt döndü. @bahsetmeyi yineleyin veya günlüklere bakın._"
 )

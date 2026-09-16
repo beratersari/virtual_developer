@@ -1522,6 +1522,24 @@ def test_http_workitem_plan_execute_enqueues(monkeypatch):
     proc.ingest_azure_work_item.assert_awaited_once()
 
 
+def test_work_item_description_html_keeps_params_newlines():
+    from src.azure.comment_html import work_item_description_html
+    from src.scheduler.service import build_issue_description
+
+    text = build_issue_description(
+        description="Do it",
+        repository_url="https://gitlab.com/a/b",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+    )
+    html = work_item_description_html(text)
+    assert "<pre>" in html
+    assert "{params}" in html
+    assert "Repository:" in html
+    assert "<br/>" in html or "\n" in html
+
+
 def test_list_projects_pages_until_exhausted():
     from src.azure.client import AzureDevOpsClient
 

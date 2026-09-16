@@ -316,10 +316,12 @@ class AzureWorkItemTracker:
         desc = payload.get("description")
         if desc is None:
             return True
+        from src.azure.comment_html import work_item_description_html
+
         posted = self.client.update_work_item_fields(
             self.project,
             self.work_item_id,
-            {"System.Description": desc},
+            {"System.Description": work_item_description_html(str(desc))},
         )
         return posted is not None
 

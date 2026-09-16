@@ -34,6 +34,8 @@ def test_build_issue_description_includes_params():
     )
     assert "Do the thing" in text
     assert "{params}" in text
+    assert "{code}" in text
+    assert "\nRepository:" in text
     assert "Repository: https://gitlab.com/a/b.git" in text
     assert "Source branch: feature/x" in text
     assert "Target branch: develop" in text
