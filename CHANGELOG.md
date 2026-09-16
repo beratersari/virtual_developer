@@ -8,6 +8,23 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.23] — 2026-09-16
+
+Operator docs cover every intake path. Azure work items start on To Do /
+In Progress and the same process-template columns.
+
+### Changed
+
+- Azure work-item intake is **To Do** or **In Progress** and the same
+  process-template columns (New, Proposed, Approved, Active, Doing,
+  Committed). Jira is unchanged. Resolved and Done still do not start a job.
+  After accept the item moves to that type’s In Progress name (Active /
+  Doing / Committed / In Progress). After the job finishes it stays there.
+- English and Turkish READMEs document Jira, GitLab MR, Azure PR, and
+  Azure work-item flows with usage examples.
+
+[0.9.23]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.23
+
 ## [0.9.22] — 2026-09-16
 
 Azure/GitLab review comments bind to work items more reliably. The agent
