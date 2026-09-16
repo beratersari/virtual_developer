@@ -8,6 +8,27 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.24] — 2026-09-16
+
+Azure work-item assign uses the Settings Test identity path.
+Updated hooks only listen for assignee, comments, and board position.
+
+### Changed
+
+- Azure work-item **updated** hooks only start a job on Assigned To or
+  board position (State / Kanban column). Description, title, and tag
+  edits are ignored. Comments stay on the comment path.
+- `AZURE_TRIGGER_LABEL` is no longer on Settings or `.env.example`.
+  Intake stays assignee-only (the field remains in code, always empty).
+
+### Fixed
+
+- Assign to the PAT user no longer fails with ``identity empty`` when
+  Settings Test works. Lookup uses ``X-TFS-FedAuthRedirect: Suppress``
+  and the same connectionData probe as Test.
+
+[0.9.24]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.24
+
 ## [0.9.23] — 2026-09-16
 
 Operator docs cover every intake path. Azure work items start on To Do /

@@ -1,3 +1,11 @@
+# Yaver 0.9.24
+
+Work-item assign uses the Settings Test
+identity path (TFS FedAuthRedirect). Updated
+hooks only listen for Assigned To, comments,
+and board position. Trigger label is gone
+from Settings.
+
 # Yaver 0.9.23
 
 Azure work items start on To Do / In Progress
