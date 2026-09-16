@@ -45,45 +45,45 @@ def test_ack_includes_issue_and_workflow(reporter, client):
     st = _state(metadata={"workflow_type": "planning"})
     reporter.post_initial_acknowledgment(st)
     body = client.comments[-1]["body"]
-    assert "Work Started" in body
+    assert "İş başladı" in body
     assert "MSG-1" in body
-    assert "Planning" in body
-    assert "In Progress" in body
+    assert "planning" in body.lower()
+    assert "Devam Ediyor" in body
 
 
 def test_ack_unknown_workflow_and_empty_summary(reporter, client):
     st = _state(issue_summary="", metadata={})
     reporter.post_initial_acknowledgment(st)
     body = client.comments[-1]["body"]
-    assert "Unknown" in body or "unknown" in body.lower()
-    assert "no summary" in body.lower()
+    assert "özet yok" in body.lower()
+    assert "unknown" not in body.lower()
+    assert "*İş akışı:*" not in body
 
 
 def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     st = _state(plan_path="/tmp/missing.md", status=TaskStatus.PLAN_READY)
     reporter.post_plan_summary(st, "")
     body = client.comments[-1]["body"]
-    assert "Plan Ready" in body
-    assert "No plan content" in body or "not found" in body.lower()
+    assert "Plan hazır" in body
+    assert "plan içeriği" in body.lower() or "bulunamadı" in body.lower()
     assert "Mode: build" in body
-    assert "this comment" in body.lower()
-    assert "appended to this issue's description" not in body.lower()
+    assert "yorumda" in body.lower()
 
 
 def test_plan_summary_whitespace_only(reporter, client):
     st = _state(status=TaskStatus.PLAN_READY)
     reporter.post_plan_summary(st, "   \n\n  ")
     body = client.comments[-1]["body"]
-    assert "Plan Ready" in body
+    assert "Plan hazır" in body
 
 
 def test_progress_empty_message_and_clamps_pct(reporter, client):
     st = _state()
     reporter.post_progress_update(st, "", progress_percentage=150)
     body = client.comments[-1]["body"]
-    assert "Progress Update" in body
+    assert "İlerleme" in body
     assert "100%" in body
-    assert "no details" in body.lower() or "Progress update" in body
+    assert "ayrıntı yok" in body.lower()
 
 
 def test_progress_negative_pct_clamped(reporter, client):
@@ -96,7 +96,7 @@ def test_progress_invalid_pct_omitted(reporter, client):
     st = _state()
     reporter.post_progress_update(st, "ok", progress_percentage="not-a-number")  # type: ignore[arg-type]
     body = client.comments[-1]["body"]
-    assert "Progress Update" in body
+    assert "İlerleme" in body
     assert "not-a-number" not in body
 
 
@@ -118,7 +118,7 @@ def test_completion_with_mr_and_branch(reporter, client):
     )
     reporter.post_completion(st, "Implemented main.cpp")
     body = client.comments[-1]["body"]
-    assert "Work Completed" in body
+    assert "tamamlandı" in body.lower()
     assert "https://gitlab.example/mr/1" in body
     assert "feature/MSG-1" in body
     assert "12.5" in body
@@ -131,28 +131,27 @@ def test_completion_without_mr_mentions_branch_or_manual(reporter, client):
     )
     reporter.post_completion(st, "")
     body = client.comments[-1]["body"]
-    assert "Work Completed" in body
+    assert "tamamlandı" in body.lower()
     assert "feature/MSG-1" in body
-    assert "merge request" in body.lower()
-    # empty summary gets a sensible default
-    assert "finished" in body.lower() or "details" in body.lower()
+    assert "birleştirme" in body.lower()
+    assert "bitti" in body.lower() or "dal" in body.lower()
 
 
 def test_completion_no_delivery_metadata(reporter, client):
     st = _state(status=TaskStatus.COMPLETED, metadata={})
     reporter.post_completion(st, "done")
     body = client.comments[-1]["body"]
-    assert "No merge request URL" in body or "feature/" in body
+    assert "Birleştirme isteği adresi" in body or "feature/" in body
 
 
 def test_error_empty_message_and_default_suggestion(reporter, client):
     st = _state(status=TaskStatus.ERROR, error_message=None)
     reporter.post_error(st, "")
     body = client.comments[-1]["body"]
-    assert "Error" in body
-    assert "Unknown error" in body
-    assert "Suggestion" in body
-    assert "To Do" in body
+    assert "Hata" in body
+    assert "Bilinmeyen hata" in body
+    assert "Öneri" in body
+    assert "Yapılacaklar" in body
 
 
 def test_error_truncates_huge_message(reporter, client):
@@ -175,16 +174,16 @@ def test_error_timeout_and_retries(reporter, client):
     )
     reporter.post_error(st, "hung")
     body = client.comments[-1]["body"]
-    assert "Timed out" in body
-    assert "Retries exhausted" in body
+    assert "Zaman aşımı" in body
+    assert "Denemeler tükendi" in body
     assert "ses_x" in body
 
 
 def test_comment_response_empty(reporter, client):
     reporter.post_comment_response("MSG-1", "")
     body = client.comments[-1]["body"]
-    assert "Response" in body
-    assert "empty" in body.lower()
+    assert "Yanıt" in body
+    assert "boş" in body.lower()
 
 
 def test_comment_response_exception_returns_none():
@@ -212,16 +211,16 @@ def test_all_message_types_have_h3_heading(reporter, client):
 
     headings = []
     for c in client.comments:
-        first = c["body"].splitlines()[0]
-        assert first.startswith("h3. AI Agent"), first
-        headings.append(first)
+        headings.extend(
+            line for line in c["body"].splitlines() if line.startswith("h3.")
+        )
 
-    assert any("Work Started" in h for h in headings)
-    assert any("Plan Ready" in h for h in headings)
-    assert any("Progress" in h for h in headings)
-    assert any("Completed" in h for h in headings)
-    assert any("Error" in h for h in headings)
-    assert any("Response" in h for h in headings)
+    assert any("İş başladı" in h for h in headings)
+    assert any("Plan hazır" in h for h in headings)
+    assert any("İlerleme" in h for h in headings)
+    assert any("tamamlandı" in h.lower() for h in headings)
+    assert any("Hata" in h for h in headings)
+    assert any("Yanıt" in h for h in headings)
 
 
 def test_fail_issue_posts_error_and_sets_status(state_manager, fake_jira):
@@ -244,8 +243,8 @@ def test_fail_issue_posts_error_and_sets_status(state_manager, fake_jira):
     assert loaded.status == TaskStatus.ERROR
     assert fake_jira.comments, "expected a Jira error comment"
     body = fake_jira.comments[-1]["body"]
-    assert "Error" in body
-    assert "Unknown error" in body or "error" in body.lower()
+    assert "Hata" in body
+    assert "Bilinmeyen hata" in body or "hata" in body.lower()
 
 
 def test_fail_issue_missing_state_still_comments(state_manager, fake_jira):

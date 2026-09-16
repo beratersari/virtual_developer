@@ -531,6 +531,39 @@ def _processor():
     return proc
 
 
+def test_ingest_stops_when_pat_assign_fails():
+    parsed = parse_workitem_payload(
+        _wi_payload(state="In Progress", work_item_id=20)
+    )
+    assert parsed is not None
+    proc = _processor()
+
+    async def _run():
+        with patch(
+            "src.azure.workitems.fetch_work_item_issue",
+            return_value=parsed.issue,
+        ), patch(
+            "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
+            return_value=True,
+        ), patch(
+            "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+            return_value=False,
+        ), patch(
+            "src.azure.tracker.AzureWorkItemTracker.add_comment",
+            return_value={"id": "1"},
+        ) as commented, patch(
+            "src.config.settings.azure_trigger_user",
+            "yaver",
+        ):
+            return await proc.ingest_azure_work_item(parsed), commented
+
+    result, commented = asyncio.run(_run())
+    assert result["ok"] is False
+    assert result["reason"] == "pat assign failed"
+    commented.assert_called()
+    proc.enqueue_jira_event.assert_not_awaited()
+
+
 def test_ingest_in_progress_assigned_enqueues_and_assigns():
     parsed = parse_workitem_payload(
         _wi_payload(state="In Progress", work_item_id=20)

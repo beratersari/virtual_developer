@@ -1418,6 +1418,9 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     assert "AZURE_HOST_PATS" not in written
     assert "AZURE_PAT" not in written
     assert "DefaultCollection" in (written.get("AZURE_COLLECTION_PATS") or "")
+    assert any(
+        "DefaultCollection" in (u or "") for u in (view.azure_collection_urls or [])
+    )
 
 
 def test_probe_azure_requires_pat(monkeypatch):

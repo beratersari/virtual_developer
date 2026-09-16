@@ -1,3 +1,10 @@
+# Yaver 0.9.28
+
+PAT assign failure stops the job instead of
+leaving the work item unassigned. Schedule
+shows saved collections and all team
+projects. Operator comments are Turkish.
+
 # Yaver 0.9.27
 
 Storage no longer sticks Azure PR status

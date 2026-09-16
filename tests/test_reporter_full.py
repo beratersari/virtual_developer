@@ -61,7 +61,7 @@ def test_post_initial_ack_success(state):
     r = JiraReporter(client=client)
     cid = r.post_initial_acknowledgment(state)
     assert cid == "1"
-    assert "Work Started" in client.comments[0]["body"]
+    assert "İş başladı" in client.comments[0]["body"]
 
 
 def test_post_initial_ack_exception(state):
@@ -82,8 +82,7 @@ def test_post_plan_summary(state):
     body = client.comments[-1]["body"]
     assert "line 0" in body
     assert "line 29" in body
-    assert "this comment" in body.lower()
-    assert "appended to this issue's description" not in body.lower()
+    assert "yorumda" in body.lower()
 
 
 def test_post_plan_summary_empty_lines(state):
@@ -107,11 +106,11 @@ def test_post_completion_with_changes_no_cost_or_tokens(state):
     cid = r.post_completion(state, "done", changes_made=["a", "b"])
     assert cid is not None
     body = client.comments[-1]["body"]
-    assert "Changes made" in body
+    assert "Yapılan değişiklikler" in body
     assert "Cost Summary" not in body
     assert "token" not in body.lower()
     assert "ses_r1" in body
-    assert "Work Completed" in body
+    assert "tamamlandı" in body.lower()
 
 
 def test_post_completion_omits_token_cost_even_when_estimated(state):
@@ -140,7 +139,7 @@ def test_post_error_with_suggestion(state):
     client = FakeJiraClient()
     r = JiraReporter(client=client)
     r.post_error(state, "fail", suggestion="try again")
-    assert "Suggestion" in client.comments[-1]["body"]
+    assert "Öneri" in client.comments[-1]["body"]
 
 
 def test_post_incomplete_compaction_is_not_generic_error(state):
@@ -153,9 +152,9 @@ def test_post_incomplete_compaction_is_not_generic_error(state):
         category="incomplete",
     )
     body = client.comments[-1]["body"]
-    assert "Incomplete session (context compaction)" in body
-    assert "not* a crash" in body or "not a crash" in body.lower()
-    assert "AI Agent — Error" not in body
+    assert "bağlam sıkıştırma" in body.lower()
+    assert "çökme" in body.lower()
+    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
 
 
 def test_post_unfinished_work_is_not_compaction(state):
@@ -168,9 +167,9 @@ def test_post_unfinished_work_is_not_compaction(state):
         category="unfinished",
     )
     body = client.comments[-1]["body"]
-    assert "unfinished work" in body.lower()
-    assert "context compaction" not in body.lower()
-    assert "AI Agent — Error" not in body
+    assert "bitmeyen iş" in body.lower()
+    assert "bağlam sıkıştırma" not in body.lower()
+    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
 
 
 def test_post_compact_loop_is_not_question_or_timeout(state):
@@ -183,10 +182,10 @@ def test_post_compact_loop_is_not_question_or_timeout(state):
         category="compact_loop",
     )
     body = client.comments[-1]["body"]
-    assert "auto-compact loop" in body.lower()
-    assert "Continue was not sent" in body or "continue was not sent" in body.lower()
-    assert "Clarifying question" not in body
-    assert "AI Agent — Error" not in body
+    assert "sıkıştırma döngüsü" in body.lower()
+    assert "Continue gönderilmedi" in body
+    assert "Netleştirme" not in body
+    assert "Yapay zekâ — Hata" not in body.split("{code}")[0]
 
 
 def test_post_error_not_timed_out_not_exhausted(state):
@@ -197,8 +196,8 @@ def test_post_error_not_timed_out_not_exhausted(state):
     r = JiraReporter(client=client)
     r.post_error(state, "fail")
     body = client.comments[-1]["body"]
-    assert "Timed out" not in body
-    assert "Retries exhausted" not in body
+    assert "Zaman aşımı" not in body
+    assert "Denemeler tükendi" not in body
 
 
 def test_post_completion_prefers_cleaned_agent_answer(state):
@@ -215,7 +214,7 @@ def test_post_completion_prefers_cleaned_agent_answer(state):
     cid = r.post_completion(state, "All tasks completed successfully.", agent_answer=raw)
     assert cid is not None
     body = client.comments[-1]["body"]
-    assert "Work Completed" in body
+    assert "tamamlandı" in body.lower()
     assert "a = 4, b = 2" in body
     assert "[serve]" not in body
     assert "ses_xyz" not in body
@@ -227,7 +226,7 @@ def test_post_comment_response():
     assert r.post_comment_response("R-1", "hello") is not None
     body = client.comments[-1]["body"]
     assert "hello" in body
-    assert "AI Agent — Response" in body
+    assert "Yapay zekâ — Yanıt" in body
 
 
 def test_post_comment_response_formats_codex_jsonl_keeps_opencode():

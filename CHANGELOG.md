@@ -8,6 +8,27 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.28] — 2026-09-16
+
+Azure PAT assign no longer continues unassigned. Schedule collections
+and team projects are restored.
+
+### Fixed
+
+- If the collection PAT user cannot be resolved or Assigned To cannot
+  be written, Yaver posts an error and does **not** start or schedule
+  the job. Identity lookup retries the Settings Test probe last.
+- Schedule Existing/New collection dropdowns use saved
+  ``AZURE_COLLECTION_PATS`` keys again (no extra Azure keys in ``.env``).
+- Team project list for New issue pages past the first 200 projects.
+
+### Changed
+
+- Operator comments on Jira, Azure, and GitLab are Turkish (commands
+  such as ``/yaver`` stay English).
+
+[0.9.28]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.28
+
 ## [0.9.27] — 2026-09-16
 
 Storage retries Azure PR status after restart instead of sticking on

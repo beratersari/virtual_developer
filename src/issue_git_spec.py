@@ -87,22 +87,9 @@ _URL_TOKEN = re.compile(
     r"(?i)\b((?:https?://|git@)[^\s\[\]<>\"']+)"
 )
 
-TEMPLATE_HELP = """\
-{params}
-Repository: https://gitlab.example.com/group/your-repo
-Source branch: feature/PROJ-123
-Target branch: develop
-Mode: plan
-Model: opencode/hy3-free
-Backend: opencode
-{params}
+from src.operator_copy import TEMPLATE_HELP_TR
 
-Mode is optional (default ``build``):
-* plan  — generate a plan and post it as a Jira comment (no GitLab push)
-* build — implement / execute (push branch + open merge request)
-* test  — write unit tests only (push branch + open merge request)
-Model and Backend are optional (default from .env / dashboard Settings).
-"""
+TEMPLATE_HELP = TEMPLATE_HELP_TR
 
 # Valid mode tokens (aliases → canonical)
 _MODE_ALIASES = {
@@ -458,14 +445,9 @@ def parse_issue_git_spec(
         block = _expand_links(block)
 
     if block is None:
-        return None, (
-            "*Yaver* could not start: no ``{params}`` block found on the issue.\n\n"
-            "Wrap the git settings between ``{params}`` markers in the *description* "
-            "(or summary), then move the issue back to *To Do*:\n\n"
-            "{code}\n"
-            f"{TEMPLATE_HELP.strip()}\n"
-            "{code}"
-        )
+        from src.operator_copy import params_missing_block
+
+        return None, params_missing_block(TEMPLATE_HELP)
 
     text = _strip_wiki_field_bold(block)
     repo = _extract_repo(text)
@@ -499,39 +481,30 @@ def parse_issue_git_spec(
         )
 
     if missing:
-        return None, (
-            "*Yaver* could not start: the issue description format is incomplete.\n\n"
-            f"*Missing / invalid:* {', '.join(missing)}.\n\n"
-            "Add a ``{params}`` block to the *description* with *all* of these fields, "
-            "then move the issue back to *To Do*:\n\n"
-            "{code}\n"
-            f"{TEMPLATE_HELP.strip()}\n"
-            "{code}"
-        )
+        from src.operator_copy import params_incomplete_block
+
+        return None, params_incomplete_block(", ".join(missing), TEMPLATE_HELP)
 
     if not target:
         target = source
 
     if not _looks_like_git_url(repo):
-        return None, (
-            "*Yaver* could not start: the repository URL looks invalid.\n\n"
-            f"Parsed value: `{repo}`\n\n"
-            "Use a full HTTPS (or SSH) git URL inside ``{params}``, for example:\n"
-            "`Repository: https://gitlab.example.com/group/your-repo`"
-        )
+        from src.operator_copy import params_bad_url_block
+
+        return None, params_bad_url_block(repo)
 
     if not _looks_like_branch(source):
         return None, (
-            "*Yaver* could not start: the source branch name looks invalid.\n\n"
-            f"Parsed value: `{source}`\n\n"
-            "Example: `Source branch: feature/PROJ-123`"
+            "*Yaver* başlayamadı: kaynak dal adı geçersiz görünüyor.\n\n"
+            f"Okunan değer: `{source}`\n\n"
+            "Örnek: `Source branch: feature/PROJ-123`"
         )
 
     if not _looks_like_branch(target):
         return None, (
-            "*Yaver* could not start: the target branch name looks invalid.\n\n"
-            f"Parsed value: `{target}`\n\n"
-            "Example: `Target branch: develop` (must already exist on GitLab)"
+            "*Yaver* başlayamadı: hedef dal adı geçersiz görünüyor.\n\n"
+            f"Okunan değer: `{target}`\n\n"
+            "Örnek: `Target branch: develop` (uzakta zaten olmalı)"
         )
 
     return (

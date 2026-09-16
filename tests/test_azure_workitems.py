@@ -420,7 +420,7 @@ def test_resolve_tracker_collection_uses_single_saved_url(monkeypatch):
     )
 
 
-def test_fetch_pat_myself_does_not_run_settings_probe():
+def test_fetch_pat_myself_uses_settings_probe_as_last_resort():
     from src.azure.tracker import fetch_pat_myself
 
     client = MagicMock()
@@ -428,7 +428,15 @@ def test_fetch_pat_myself_does_not_run_settings_probe():
     client.connection_user.return_value = None
     client.identity_aliases.return_value = []
     with patch("src.azure.identity.fetch_bot_identity", return_value=None), patch(
-        "src.azure_connection.probe_azure_connection"
+        "src.azure_connection.probe_azure_connection",
+        return_value={
+            "ok": True,
+            "user": {
+                "id": "guid-9",
+                "username": r"DOMAIN\yaver",
+                "name": "Yaver Bot",
+            },
+        },
     ) as probe:
         me = fetch_pat_myself(
             host="tfs.example.com",
@@ -436,8 +444,9 @@ def test_fetch_pat_myself_does_not_run_settings_probe():
             pat="tok",
             client=client,
         )
-    assert me is None
-    probe.assert_not_called()
+    assert me is not None
+    assert me["uniqueName"] == r"DOMAIN\yaver"
+    probe.assert_called_once()
 
 
 def test_azure_client_sends_tfs_fedauth_suppress():
@@ -1511,3 +1520,24 @@ def test_http_workitem_plan_execute_enqueues(monkeypatch):
     assert body["ok"] is True
     assert body["kind"] == "work_item_comment"
     proc.ingest_azure_work_item.assert_awaited_once()
+
+
+def test_list_projects_pages_until_exhausted():
+    from src.azure.client import AzureDevOpsClient
+
+    first = [{"name": f"P{i}"} for i in range(200)]
+    second = [{"name": "Last"}]
+
+    def _get(self, url, params=None, **_k):
+        skip = int((params or {}).get("$skip") or 0)
+        return {"value": first} if skip == 0 else {"value": second}
+
+    client = AzureDevOpsClient(
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        pat="tok",
+    )
+    with patch.object(AzureDevOpsClient, "_get_json", _get):
+        names = client.list_projects()
+    assert names[0] == "P0"
+    assert names[-1] == "Last"
+    assert len(names) == 201

@@ -170,6 +170,10 @@ def _load_collection_url_list() -> List[str]:
     try:
         from src.config import load_runtime_settings, settings as live
 
+        if hasattr(live, "azure_collection_url_list"):
+            rows = list(live.azure_collection_url_list() or [])
+            if rows:
+                return rows
         raw = getattr(live, "azure_collection_urls", "") or ""
         if not raw:
             raw = load_runtime_settings().get("azure_collection_urls") or ""

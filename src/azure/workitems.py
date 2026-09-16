@@ -1011,19 +1011,10 @@ def extract_workitem_comment_text(payload: Any) -> str:
 def format_workitem_plan_usage_note(bot_name: str = "yaver") -> str:
     """Work-item-only usage. Do not use on Jira, GitLab, or Azure PR comments."""
     from src.brand import USAGE_HEADING, USAGE_MARKER
+    from src.operator_copy import USAGE_WORK_ITEM
 
     _ = bot_name
-    return (
-        f"{USAGE_MARKER}\n"
-        f"{USAGE_HEADING}\n\n"
-        "On a work item I only run plan commands. Mention me and put one "
-        "of these in the same comment.\n\n"
-        "- `/planRefactor <prompt>` — revise the waiting plan\n"
-        "- `/planExecute` — implement the waiting plan\n\n"
-        "New work still starts by assigning this item to me while it is "
-        "To Do or In Progress (or New / Active / Doing), or open a new "
-        "Mode: build item."
-    )
+    return f"{USAGE_MARKER}\n{USAGE_HEADING}\n\n{USAGE_WORK_ITEM}"
 
 
 def clear_workitem_comment_claims() -> None:
@@ -1225,7 +1216,7 @@ def post_azure_workitem_usage_note(
 ) -> bool:
     """Post the work-item plan-command usage note. Never used on a PR."""
     from src.azure.client import AzureDevOpsClient
-    from src.brand import USAGE_HEADING, USAGE_MARKER
+    from src.brand import USAGE_HEADING, USAGE_HEADING_LEGACY, USAGE_MARKER
 
     project = (event.project or "").strip()
     if event.work_item_id <= 0:
@@ -1243,7 +1234,13 @@ def post_azure_workitem_usage_note(
         if isinstance(row, dict):
             raw = str(row.get("text") or row.get("renderedText") or "")
         flat = azure_html_to_text(raw)
-        if USAGE_MARKER in raw or USAGE_HEADING in raw or USAGE_HEADING in flat:
+        if (
+            USAGE_MARKER in raw
+            or USAGE_HEADING in raw
+            or USAGE_HEADING_LEGACY in raw
+            or USAGE_HEADING in flat
+            or USAGE_HEADING_LEGACY in flat
+        ):
             azure_info(
                 f"workitem usage note skipped already posted "
                 f"id={event.work_item_id}"

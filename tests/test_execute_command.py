@@ -390,7 +390,11 @@ def test_operator_reply_header_has_version_job_model():
     from src.brand import format_reply_header, wrap_operator_reply
 
     line = format_reply_header("Answer", model="glm", job_id="job_abc")
-    assert line == f"**Yaver {__version__} — Answer** · `glm` · `job_abc`"
+    assert line == f"**Yaver {__version__} — Yanıt** · `glm` · `job_abc`"
+    bare = format_reply_header("Work started")
+    assert bare == f"**Yaver {__version__} — İş başladı**"
+    assert "unknown" not in bare.lower()
+    assert " · " not in bare
     body = wrap_operator_reply("Answer", "Fixed login.", model="glm", job_id="job_abc")
     assert body.startswith(line)
     assert "Fixed login." in body
@@ -415,7 +419,7 @@ def test_operator_reply_header_keeps_job_id_after_current_cleared():
     )
     body = wrap_operator_reply("Answer", "done", state=st)
     assert body.startswith(
-        f"**Yaver {__version__} — Answer** · `mimo` · `job_live`"
+        f"**Yaver {__version__} — Yanıt** · `mimo` · `job_live`"
     )
 
 
@@ -428,7 +432,7 @@ def test_operator_reply_header_uses_log_context_job_id():
     try:
         body = wrap_operator_reply("Failed", "boom", model="glm")
         assert body.startswith(
-            f"**Yaver {__version__} — Failed** · `glm` · `job_ctx`"
+            f"**Yaver {__version__} — Başarısız** · `glm` · `job_ctx`"
         )
     finally:
         clear_log_context()
@@ -437,9 +441,9 @@ def test_operator_reply_header_uses_log_context_job_id():
 def test_usage_note_matches_creasy_shape_without_at_mention():
     body = format_execute_usage_note("berat_ai")
     assert "<!-- yaver-usage -->" in body
-    assert "**Yaver — how to run a command**" in body
-    assert "I only run `/yaver`" in body
-    assert "/yaver <prompt>" in body
+    assert "**Yaver — komut nasıl çalıştırılır**" in body
+    assert "Yalnızca `/yaver`" in body
+    assert "/yaver <istek>" in body
     assert "@" not in body
     assert "@mention" not in body
 
@@ -477,7 +481,7 @@ def test_gitlab_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     proc.enqueue_gitlab_note.assert_not_awaited()
     assert posted.get("discussion_id") == "disc-1"
     assert posted.get("allow_new_thread") is False
-    assert "**Yaver — how to run a command**" in (posted.get("body") or "")
+    assert "**Yaver — komut nasıl çalıştırılır**" in (posted.get("body") or "")
     assert "/yaver" in (posted.get("body") or "")
     assert "@" not in (posted.get("body") or "")
 
@@ -514,7 +518,7 @@ def test_azure_http_usage_note_posts_in_thread(fake_jira, monkeypatch):
     assert posted.get("thread_id") == "8"
     assert posted.get("allow_new_thread") is False
     assert str(posted.get("parent_comment_id") or "") == "77"
-    assert "**Yaver — how to run a command**" in (posted.get("body") or "")
+    assert "**Yaver — komut nasıl çalıştırılır**" in (posted.get("body") or "")
     assert "@" not in (posted.get("body") or "")
 
 

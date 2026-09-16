@@ -1155,9 +1155,22 @@ def _create_scheduled_azure_work_item(
     except Exception as e:
         logger.warning(f"{issue_key}: Active transition soft-failed: {e}")
     try:
-        tracker.assign_to_pat_user(issue_key)
+        assigned = tracker.assign_to_pat_user(issue_key)
     except Exception as e:
-        logger.warning(f"{issue_key}: PAT assign soft-failed: {e}")
+        logger.warning(f"{issue_key}: PAT assign failed: {e}")
+        assigned = False
+    if not assigned:
+        from src.operator_copy import ASSIGN_PAT_FAILED
+
+        try:
+            tracker.add_comment(issue_key, ASSIGN_PAT_FAILED)
+        except Exception as e:
+            logger.warning(f"{issue_key}: PAT assign error comment failed: {e}")
+        return {
+            "ok": False,
+            "error": ASSIGN_PAT_FAILED,
+            "issue_key": issue_key,
+        }
     rec = (store or schedule_store).create(
         title=title,
         description=(description or "").strip(),

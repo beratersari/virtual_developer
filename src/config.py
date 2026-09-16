@@ -800,8 +800,33 @@ class Settings(BaseSettings):
         return out
 
     def azure_collection_url_list(self) -> List[str]:
-        """Collection URLs from ``AZURE_COLLECTION_PATS`` keys only (like GitLab)."""
-        return list(self.azure_collection_pat_map().keys())
+        """Saved collection URLs: PAT map keys, then remembered runtime list."""
+        from src.azure.urls import parse_tfs_collection_url
+
+        out: List[str] = []
+        seen: set[str] = set()
+        for url in self.azure_collection_pat_map().keys():
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+        raw = (getattr(self, "azure_collection_urls", "") or "").strip()
+        extra: List[Any] = []
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    extra = data
+                elif isinstance(data, dict):
+                    extra = list(data.keys())
+            except json.JSONDecodeError:
+                parsed = parse_tfs_collection_url(raw)
+                extra = [parsed] if parsed else []
+        for item in extra:
+            url = parse_tfs_collection_url(str(item or ""))
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+        return out
 
     def azure_host_pat_map(self) -> Dict[str, str]:
         """Hostname → PAT derived from collection URLs (not AZURE_HOST_PATS)."""
@@ -868,6 +893,7 @@ class Settings(BaseSettings):
         self.azure_collection_pats = (
             json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
         )
+        self.azure_collection_urls = json.dumps(list(cleaned.keys()))
 
     def set_azure_host_pat_map(self, mapping: Dict[str, str]) -> None:
         """Accept collection URLs only. Host-only keys are ignored."""
@@ -1017,6 +1043,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "azure_bot_mentions",
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
+        "azure_collection_urls",
     }
 )
 

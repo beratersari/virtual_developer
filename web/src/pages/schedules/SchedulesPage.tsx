@@ -758,10 +758,24 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
   )
 }
 
+function azureCollectionsFromSettings(
+  settings: { azure_collection_urls?: string[]; azure_credentials?: { collection_url?: string; host?: string }[] } | null | undefined,
+): string[] {
+  const fromList = settings?.azure_collection_urls || []
+  const fromCreds = (settings?.azure_credentials || [])
+    .map((c) => (c.collection_url || c.host || '').trim())
+    .filter((u) => /^https?:\/\//i.test(u))
+  const out: string[] = []
+  for (const url of [...fromList, ...fromCreds]) {
+    if (url && !out.includes(url)) out.push(url)
+  }
+  return out
+}
+
 function Existing({ onDone }: { onDone: () => void }) {
   const live = useLive()
   const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
-  const collections = live.settings?.azure_collection_urls || []
+  const collections = azureCollectionsFromSettings(live.settings)
   const [collection, setCollection] = useState('')
   const [witId, setWitId] = useState('')
   const [key, setKey] = useState('')
@@ -1241,7 +1255,7 @@ function ProjectBranchFields({
 function CreateNew({ onDone }: { onDone: () => void }) {
   const live = useLive()
   const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
-  const collections = live.settings?.azure_collection_urls || []
+  const collections = azureCollectionsFromSettings(live.settings)
   const [collection, setCollection] = useState('')
   const [azureProject, setAzureProject] = useState('')
   const [azureProjects, setAzureProjects] = useState<string[]>([])
