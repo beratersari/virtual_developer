@@ -214,7 +214,7 @@ Tamamlanan veya vazgeçilen PR eşleşen geçici kopyayı siler. Bağlı MR/PR�
 
 ## 4. Azure Boards iş öğeleri (webhook)
 
-PR ile aynı Azure adresi. **Work item created**, **updated**, **commented** kancalarını ekleyin. Updated yalnızca **Assigned To** ve tahta konumu (**State** / Kanban sütunu) için kullanılır. Açıklama ve etiket değişiklikleri iş başlatmaz.
+PR ile aynı Azure adresi. **Work item created**, **updated**, **commented** kancalarını ekleyin. Updated yalnızca **Assigned To** için kullanılır. Yorumlar commented kancasındadır. Durum, açıklama ve etiket değişiklikleri iş başlatmaz.
 
 ### Kabul
 
@@ -233,7 +233,7 @@ Kabulden sonra Yaver:
 2. Koleksiyon PAT kullanıcısına atar
 3. `{params}` ile işi başlatır
 
-**Jira’dan farklı:** Hâlâ atalıyken Active → New (veya In Progress → To Do) **yeniden kuyruğa almaz**. Yalnızca ilk görülme. `error` sonrası öğeyi yeniden atayın veya tahta sütununu değiştirin. Açıklama ve etiket düzenlemek yeniden denemez. Plandan sonra aşağıdaki yorumları kullanın.
+**Jira’dan farklı:** Hâlâ atalıyken Active → New (veya In Progress → To Do) **yeniden kuyruğa almaz**. Yalnızca ilk görülme. `error` sonrası öğeyi yeniden atayın. Tahta taşıma, açıklama ve etiket düzenlemek yeniden denemez. Plandan sonra aşağıdaki yorumları kullanın.
 
 Yaver iş öğesini **asla** Resolved veya Done yapmaz.
 

@@ -76,7 +76,7 @@ _STATE_FIELDS = frozenset(
     }
 )
 _COMMENT_FIELDS = frozenset({"system.history", "history"})
-_INTAKE_CHANGE_KINDS = frozenset({"assignee", "state"})
+_INTAKE_CHANGE_KINDS = frozenset({"assignee"})
 
 # Process-template categories on GET workitemtypes/{type}/states (7.1 / 7.0).
 _TODO_CATEGORIES = frozenset({"proposed", "new"})
@@ -1325,7 +1325,7 @@ def decide_azure_workitem_webhook(
     headers: Optional[Dict[str, str]] = None,
     enabled: bool = True,
 ) -> WebhookDecision:
-    """Accept created/updated only for assignee or board-position (state) changes."""
+    """Accept created/updated only for Assigned To. Comments use the comment path."""
     header_map = _header_map(headers)
     data = payload if isinstance(payload, dict) else {}
     event_name = _event_type(data, header_map)
@@ -1374,10 +1374,10 @@ def decide_azure_workitem_webhook(
         _INTAKE_CHANGE_KINDS
     ):
         azure_info(
-            f"workitem reject reason='no assignee/state change' "
+            f"workitem reject reason='no assignee change' "
             f"id={parsed.work_item_id} kinds={parsed.change_kinds}"
         )
-        return WebhookDecision(False, "no assignee/state change")
+        return WebhookDecision(False, "no assignee change")
 
     azure_info(
         f"workitem accept key={parsed.issue_key} id={parsed.work_item_id} "
