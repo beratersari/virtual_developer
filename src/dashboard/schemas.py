@@ -733,15 +733,6 @@ class SettingsUpdate(BaseModel):
         default=None,
         description="Accept Azure DevOps Server service hooks on /yaver/webhook/azure",
     )
-    azure_trigger_label: Optional[str] = Field(
-        default=None,
-        max_length=500,
-        description=(
-            "Comma-separated Azure work-item tags required for To Do / In Progress "
-            "intake when set (AND with assignee, same as JIRA_TRIGGER_LABEL)"
-        ),
-    )
-
     @field_validator("agent_backend", mode="before")
     @classmethod
     def _agent_backend_known(cls, value: Any) -> Optional[str]:

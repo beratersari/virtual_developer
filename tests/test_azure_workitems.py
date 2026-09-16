@@ -374,6 +374,109 @@ def test_schedule_existing_azure_moves_and_assigns(tmp_path):
     tracker.add_labels.assert_not_called()
 
 
+def test_parse_authenticated_user_without_id_uses_unique_name():
+    from src.azure.identity import parse_authenticated_user
+
+    ident = parse_authenticated_user(
+        {
+            "authenticatedUser": {
+                "providerDisplayName": "Yaver Bot",
+                "uniqueName": r"DOMAIN\yaver",
+            }
+        }
+    )
+    assert ident is not None
+    assert ident["id"] == ""
+    assert r"DOMAIN\yaver" in ident["names"]
+
+
+def test_parse_authenticated_user_authorized_user():
+    from src.azure.identity import parse_authenticated_user
+
+    ident = parse_authenticated_user(
+        {
+            "authorizedUser": {
+                "id": "guid-2",
+                "providerDisplayName": "Yaver Bot",
+            }
+        }
+    )
+    assert ident is not None
+    assert ident["id"] == "guid-2"
+
+
+def test_resolve_tracker_collection_uses_single_saved_url(monkeypatch):
+    from src.azure.tracker import resolve_tracker_collection
+    from src.config import Settings
+
+    s = Settings()
+    s.azure_collection_pats = (
+        '{"https://tfs.example.com/tfs/DefaultCollection":"tok"}'
+    )
+    monkeypatch.setattr("src.config.settings", s)
+    assert (
+        resolve_tracker_collection(host="tfs.example.com", collection_url="")
+        == "https://tfs.example.com/tfs/DefaultCollection"
+    )
+
+
+def test_fetch_pat_myself_uses_settings_probe_when_connectiondata_empty():
+    from src.azure.tracker import fetch_pat_myself
+
+    client = MagicMock()
+    client.pat = "tok"
+    client.connection_user.return_value = None
+    client.identity_aliases.return_value = []
+    with patch("src.azure.identity.fetch_bot_identity", return_value=None), patch(
+        "src.azure_connection.probe_azure_connection",
+        return_value={
+            "ok": True,
+            "user": {
+                "id": "guid-9",
+                "username": r"DOMAIN\yaver",
+                "name": "Yaver Bot",
+            },
+        },
+    ):
+        me = fetch_pat_myself(
+            host="tfs.example.com",
+            collection_url="https://tfs.example.com/tfs/DefaultCollection",
+            pat="tok",
+            client=client,
+        )
+    assert me is not None
+    assert me["uniqueName"] == r"DOMAIN\yaver"
+
+
+def test_azure_client_sends_tfs_fedauth_suppress():
+    from src.azure.client import AzureDevOpsClient
+
+    headers = AzureDevOpsClient(host="tfs.example.com", pat="tok")._headers()
+    assert headers.get("X-TFS-FedAuthRedirect") == "Suppress"
+
+
+def test_fetch_pat_myself_falls_back_to_client_connection_user():
+    from src.azure.tracker import fetch_pat_myself
+
+    client = MagicMock()
+    client.pat = "tok"
+    client.connection_user.return_value = {
+        "id": "guid-1",
+        "names": ["Yaver Bot", r"DOMAIN\yaver"],
+    }
+    client.identity_aliases.return_value = []
+    with patch("src.azure.identity.fetch_bot_identity", return_value=None):
+        me = fetch_pat_myself(
+            host="tfs.example.com",
+            collection_url="https://tfs.example.com/tfs/DefaultCollection",
+            pat="tok",
+            client=client,
+        )
+    assert me is not None
+    assert me["uniqueName"] == r"DOMAIN\yaver"
+    client.connection_user.assert_called_once()
+
+
 def test_azure_assign_to_pat_user_writes_unique_name():
     from src.azure.tracker import AzureWorkItemTracker
 
@@ -700,7 +803,7 @@ def test_disabled_flags():
     assert "disabled" in off.reason
 
 
-def test_accept_description_and_tag_changes():
+def test_description_and_tag_changes_do_not_start_a_job():
     desc = decide_azure_workitem_webhook(
         _wi_payload(
             changed={
@@ -709,7 +812,8 @@ def test_accept_description_and_tag_changes():
         ),
         enabled=True,
     )
-    assert desc.accepted is True
+    assert desc.accepted is False
+    assert "assignee/state" in desc.reason
     tags = decide_azure_workitem_webhook(
         _wi_payload(
             tags="plan_execute",
@@ -723,8 +827,39 @@ def test_accept_description_and_tag_changes():
         ),
         enabled=True,
     )
-    assert tags.accepted is True
-    assert "label" in tags.event.change_kinds
+    assert tags.accepted is False
+    title = decide_azure_workitem_webhook(
+        _wi_payload(
+            changed={"System.Title": {"oldValue": "a", "newValue": "b"}}
+        ),
+        enabled=True,
+    )
+    assert title.accepted is False
+
+
+def test_accept_state_and_kanban_column_changes():
+    state = decide_azure_workitem_webhook(
+        _wi_payload(
+            state="Active",
+            changed={"System.State": {"oldValue": "New", "newValue": "Active"}},
+        ),
+        enabled=True,
+    )
+    assert state.accepted is True
+    assert "state" in state.event.change_kinds
+    column = decide_azure_workitem_webhook(
+        _wi_payload(
+            changed={
+                "WEF_ABC_Kanban.Column": {
+                    "oldValue": "New",
+                    "newValue": "Active",
+                }
+            }
+        ),
+        enabled=True,
+    )
+    assert column.accepted is True
+    assert "state" in column.event.change_kinds
 
 
 def test_intake_new_assigned_todo():
@@ -1121,13 +1256,13 @@ def test_ingest_uses_jira_event_path():
     assert event["issue"]["key"] == "WIT-DEMO-42"
 
 
-def test_settings_save_workitem_intake(monkeypatch):
+def test_settings_save_ignores_azure_trigger_label(monkeypatch):
     from src.config import Settings
     from src.dashboard.schemas import SettingsUpdate
     from src.dashboard.service import apply_settings_update
 
     s = Settings()
-    s.azure_trigger_label = ""
+    s.azure_trigger_label = "leftover"
     monkeypatch.setattr("src.dashboard.service.settings", s)
     monkeypatch.setattr("src.config.settings", s)
     monkeypatch.setattr(
@@ -1136,13 +1271,9 @@ def test_settings_save_workitem_intake(monkeypatch):
     monkeypatch.setattr(
         "src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None
     )
-    view = apply_settings_update(
-        SettingsUpdate(
-            azure_trigger_label="bot",
-        )
-    )
-    assert s.azure_trigger_label == "bot"
-    assert view.azure_trigger_label == "bot"
+    view = apply_settings_update(SettingsUpdate(azure_trigger_user="yaver"))
+    assert s.azure_trigger_label_list == []
+    assert view.azure_trigger_label == ""
 
 
 def test_lookup_endpoint(monkeypatch):

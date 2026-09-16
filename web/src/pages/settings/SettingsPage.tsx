@@ -28,7 +28,6 @@ type Draft = {
   jira_trigger_label: string
   gitlab_trigger_user: string
   azure_trigger_user: string
-  azure_trigger_label: string
   gitlab_webhook_enabled: boolean
   gitlab_webhook_secret: string
   azure_webhook_enabled: boolean
@@ -54,7 +53,6 @@ function fromSettings(s: SettingsPayload): Draft {
     jira_trigger_label: s.jira_trigger_label ?? s.trigger_labels ?? '',
     gitlab_trigger_user: s.gitlab_trigger_user ?? s.gitlab_bot_mentions ?? '',
     azure_trigger_user: s.azure_trigger_user ?? s.azure_bot_mentions ?? '',
-    azure_trigger_label: s.azure_trigger_label ?? '',
     gitlab_webhook_enabled: s.gitlab_webhook_enabled !== false,
     gitlab_webhook_secret: '',
     azure_webhook_enabled: s.azure_webhook_enabled === true,
@@ -184,9 +182,6 @@ export function SettingsPage() {
       }
       if (dirtyKeys.has('azure_webhook_enabled')) {
         body.azure_webhook_enabled = draft.azure_webhook_enabled
-      }
-      if (dirtyKeys.has('azure_trigger_label')) {
-        body.azure_trigger_label = draft.azure_trigger_label
       }
       if (dirtyKeys.has('gitlab_webhook_secret') && draft.gitlab_webhook_secret.trim()) {
         body.gitlab_webhook_secret = draft.gitlab_webhook_secret.trim()
@@ -744,19 +739,6 @@ export function SettingsPage() {
           Azure DevOps display name or unique name, no @. PR comments start
           a job with @name /yaver. Work items start when Assigned To matches
           one of these names. Comma-separated if there is more than one.
-        </span>
-      </label>
-
-      <label className="field">
-        <span>Work item trigger tags (AZURE_TRIGGER_LABEL)</span>
-        <input
-          value={draft.azure_trigger_label}
-          onChange={(e) => mark('azure_trigger_label', e.target.value)}
-          placeholder="optional, e.g. bot"
-        />
-        <span className="text-xs text-text-muted">
-          Empty = assignee only (same as Jira). When set, To Do / In Progress
-          intake also needs one of these tags.
         </span>
       </label>
 

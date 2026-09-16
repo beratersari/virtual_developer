@@ -12,7 +12,12 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
-from src.azure.auth import azure_basic_auth, azure_basic_auth_header, azure_basic_user
+from src.azure.auth import (
+    TFS_API_HEADERS,
+    azure_basic_auth,
+    azure_basic_auth_header,
+    azure_basic_user,
+)
 from src.azure.log import azure_error, azure_info, azure_warning, http_detail, yn
 from src.config import settings
 
@@ -158,12 +163,64 @@ class AzureDevOpsClient:
 
     def _headers(self) -> Dict[str, str]:
         headers = {
-            "Accept": "application/json",
+            **TFS_API_HEADERS,
             "Content-Type": "application/json",
         }
         if self.pat:
             headers["Authorization"] = azure_basic_auth(self.pat)
         return headers
+
+    def connection_user(self) -> Optional[Dict[str, Any]]:
+        """PAT user from ``connectionData`` on collection and TFS identity roots."""
+        from src.azure.identity import parse_authenticated_user
+        from src.azure.urls import identity_root, identity_roots
+
+        if not self.pat:
+            azure_warning("connectionData skip pat empty")
+            return None
+        bases: List[str] = []
+        for raw in (self.collection_url, self.api_base):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            bases.extend(identity_roots(identity_root(text) or text))
+            if text not in bases:
+                bases.append(text)
+        if self.host and not bases:
+            local = self.host.startswith("127.") or self.host.startswith("localhost")
+            scheme = "http" if local else "https"
+            bases.extend(identity_roots(f"{scheme}://{self.host}"))
+        headers = self._headers()
+        try:
+            with httpx.Client(timeout=20.0, verify=False, headers=headers) as client:
+                for base in bases:
+                    url = f"{str(base).rstrip('/')}/_apis/connectionData"
+                    for ver in (_API_VERSION, _API_VERSION_FALLBACK, "6.0", "1.0"):
+                        try:
+                            resp = client.get(url, params={"api-version": ver})
+                        except httpx.HTTPError as exc:
+                            azure_warning(f"connectionData error root={base} err={exc}")
+                            break
+                        if resp.status_code in (400, 404):
+                            continue
+                        if resp.status_code != 200:
+                            azure_warning(
+                                f"connectionData fail status={resp.status_code} "
+                                f"root={base} ver={ver}"
+                            )
+                            break
+                        user = parse_authenticated_user(
+                            resp.json() if resp.content else {}
+                        )
+                        if user:
+                            azure_info(
+                                f"connectionData ok id={user.get('id')} "
+                                f"names={user.get('names')} root={base}"
+                            )
+                            return user
+        except Exception as exc:
+            azure_warning(f"connectionData lookup failed: {exc}")
+        return None
 
     def identity_aliases(self, identity_id: str) -> list:
         """Display / unique names for a TFS mention GUID."""

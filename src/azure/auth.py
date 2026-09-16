@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import base64
 
+# Without this, TFS 2022 redirects PAT calls to the negotiate/login page
+# (200 HTML). Settings Test already sends it; assign must too.
+TFS_API_HEADERS = {
+    "Accept": "application/json",
+    "X-TFS-FedAuthRedirect": "Suppress",
+}
+
 
 def azure_basic_user(username: str = "") -> str:
     """Username sent with a PAT. Empty becomes ``pat`` (IIS rejects blank)."""

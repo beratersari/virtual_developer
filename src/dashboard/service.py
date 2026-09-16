@@ -320,11 +320,7 @@ def build_settings_view() -> SettingsView:
             if hasattr(settings, "resolved_azure_trigger_user")
             else (getattr(settings, "azure_trigger_user", "") or "")
         ).strip(),
-        azure_trigger_label=(
-            settings.resolved_azure_trigger_label()
-            if hasattr(settings, "resolved_azure_trigger_label")
-            else (getattr(settings, "azure_trigger_label", "") or "")
-        ).strip(),
+        azure_trigger_label="",
         azure_bot_mentions=(
             settings.resolved_azure_trigger_user()
             if hasattr(settings, "resolved_azure_trigger_user")
@@ -816,12 +812,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         settings.azure_webhook_enabled = enabled
         runtime_persist["azure_webhook_enabled"] = enabled
         dotenv_updates["AZURE_WEBHOOK_ENABLED"] = "true" if enabled else "false"
-    if "azure_trigger_label" in data and data["azure_trigger_label"] is not None:
-        labels = format_trigger_users(str(data["azure_trigger_label"]))
-        settings.azure_trigger_label = labels
-        runtime_persist["azure_trigger_label"] = labels
-        dotenv_updates["AZURE_TRIGGER_LABEL"] = labels
-
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.
     if jira_host_is_cloud(getattr(settings, "jira_host", "")):

@@ -214,12 +214,11 @@ Completed or abandoned PRs delete the matching temp clone. Storage warns when a 
 
 ## 4. Azure Boards work items (webhook)
 
-Same Azure URL as PR comments. Add service hooks for **Work item created**, **updated**, and **commented**. Field filters: **Assigned To**, **Description**. State is optional (not a rework signal).
+Same Azure URL as PR comments. Add service hooks for **Work item created**, **updated**, and **commented**. Updated is only used for **Assigned To** and board position (**State** / Kanban column). Description and tag edits do not start a job.
 
 ### Accept
 
 - Assigned To matches `AZURE_TRIGGER_USER`
-- If `AZURE_TRIGGER_LABEL` is set, the item also needs one of those tags
 - State is **To Do** or **In Progress**, or the same process-template column:
 
 | Column kind | Names that start a job |
@@ -234,7 +233,7 @@ After accept Yaver:
 2. Assigns the collection PAT user
 3. Starts the job from `{params}`
 
-**Unlike Jira**, moving Active → New (or In Progress → To Do) while still assigned does **not** re-queue. First sighting only. After `error`, edit the title or description to retry. After a plan, use comments (below).
+**Unlike Jira**, moving Active → New (or In Progress → To Do) while still assigned does **not** re-queue. First sighting only. After `error`, assign the item again or move its board column. Description and tag edits do not retry. After a plan, use comments (below).
 
 Yaver **never** moves a work item to Resolved or Done.
 
@@ -438,7 +437,6 @@ TLS verify is off for typical on-prem certs.
 | `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` → PAT |
 | `AZURE_WEBHOOK_ENABLED` | Accept PR + work-item hooks on `/yaver/webhook/azure` (no secret) |
 | `AZURE_TRIGGER_USER` | PR `@name /yaver` and work-item Assigned To |
-| `AZURE_TRIGGER_LABEL` | Optional tags required for work-item intake (AND with assignee) |
 
 ### Agent / paths
 

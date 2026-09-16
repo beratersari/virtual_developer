@@ -41,6 +41,31 @@ def _usable_assign_name(raw: Any) -> str:
     return text
 
 
+def resolve_tracker_collection(
+    *,
+    host: str = "",
+    collection_url: str = "",
+) -> str:
+    """Prefer a real /tfs/Collection URL so the PAT map hits."""
+    from src.azure.urls import parse_tfs_collection_url, tfs_collection_host
+    from src.config import settings
+
+    parsed = parse_tfs_collection_url(collection_url)
+    if parsed:
+        return parsed
+    urls = []
+    if hasattr(settings, "azure_collection_url_list"):
+        urls = [str(u).rstrip("/") for u in (settings.azure_collection_url_list() or []) if u]
+    if len(urls) == 1:
+        return urls[0]
+    want = tfs_collection_host(host or collection_url)
+    if want:
+        hits = [u for u in urls if tfs_collection_host(u) == want]
+        if hits:
+            return hits[0]
+    return (collection_url or "").rstrip("/")
+
+
 def fetch_pat_myself(
     *,
     host: str = "",
@@ -51,12 +76,46 @@ def fetch_pat_myself(
     """PAT identity in a Jira-shaped dict (connectionData, not Settings probe)."""
     from src.azure.identity import fetch_bot_identity
 
+    collection = resolve_tracker_collection(host=host, collection_url=collection_url)
+    token = pat or (client.pat if client is not None else "")
     ident = fetch_bot_identity(
         host=host,
-        collection_url=collection_url,
-        pat=pat or (client.pat if client is not None else ""),
+        collection_url=collection,
+        pat=token,
     )
+    if not ident and client is not None and hasattr(client, "connection_user"):
+        try:
+            ident = client.connection_user()
+        except Exception:
+            ident = None
     if not ident:
+        # Same HTTP path as Settings → Test (FedAuthRedirect + /tfs).
+        try:
+            from src.azure_connection import probe_azure_connection
+
+            probe = probe_azure_connection(
+                collection or host, pat=token or None
+            )
+        except Exception as exc:
+            azure_warning(f"PAT identity probe failed: {exc}")
+            probe = {}
+        user = probe.get("user") if isinstance(probe, dict) and probe.get("ok") else None
+        if isinstance(user, dict):
+            names = [
+                str(user.get("username") or "").strip(),
+                str(user.get("name") or "").strip(),
+            ]
+            ident = {
+                "id": str(user.get("id") or "").strip(),
+                "names": [n for n in names if n],
+            }
+            if not ident["id"] and not ident["names"]:
+                ident = None
+    if not ident:
+        azure_warning(
+            f"PAT identity empty collection={collection or collection_url or '-'} "
+            f"host={host or '-'} pat={bool(token)}"
+        )
         return None
     names: List[str] = []
     seen: set[str] = set()
@@ -206,13 +265,15 @@ class AzureWorkItemTracker:
     ) -> None:
         self.issue_key = issue_key
         self.host = host
-        self.collection_url = collection_url
+        self.collection_url = resolve_tracker_collection(
+            host=host, collection_url=collection_url
+        )
         self.project = project
         self.work_item_id = int(work_item_id)
         self.work_item_type = work_item_type
         self.client = client or AzureDevOpsClient(
-            host=host or None,
-            collection_url=collection_url or None,
+            host=host or self.collection_url or None,
+            collection_url=self.collection_url or None,
         )
 
     def _load(self) -> Optional[Dict[str, Any]]:
@@ -328,7 +389,11 @@ class AzureWorkItemTracker:
         me = self.get_myself()
         candidates = pat_assign_candidates(me)
         if not candidates:
-            azure_warning(f"{self.issue_key}: cannot assign PAT user (identity empty)")
+            azure_warning(
+                f"{self.issue_key}: cannot assign PAT user (identity empty) "
+                f"collection={self.collection_url or '-'} host={self.host or '-'} "
+                f"pat={bool(self.client.pat)}"
+            )
             return False
         raw = self._load()
         fields = raw.get("fields") if isinstance(raw, dict) else {}
