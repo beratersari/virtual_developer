@@ -1,9 +1,12 @@
 """Azure DevOps Server 2022.2 work-item intake (webhook, not poll).
 
 Work-item intake is webhook-driven. New work is assignment while the
-item is not Done (New, Active, Doing, …). Done/Closed is ignored.
+item is **To Do** or **In Progress**, or the same process-template
+column (New / Proposed / Approved, Active / Doing / Committed).
+Resolved and Done/Closed are not intake.
 Local issue key is ``WIT-{PROJECT}-{id}`` (bare numeric ids still load).
-Active → New while still assigned does **not** re-queue.
+Moving In Progress → To Do while still assigned does **not** re-queue
+(Jira To Do return does not apply on Azure Boards).
 Plan revise/implement is comment-only (``/planRefactor`` / ``/planExecute``).
 
 Work-item REST uses the same 7.1 / 7.0 fallback as ``AzureDevOpsClient``.
@@ -69,6 +72,38 @@ _COMMENT_FIELDS = frozenset({"system.history", "history"})
 # Process-template categories on GET workitemtypes/{type}/states (7.1 / 7.0).
 _TODO_CATEGORIES = frozenset({"proposed", "new"})
 _IN_PROGRESS_CATEGORIES = frozenset({"inprogress", "in progress"})
+# To Do / In Progress and the official process-template names for those
+# columns. Resolved is not In Progress. Do not treat category "new" as
+# intake — unknown states default to that key in work_item_fields_to_jira.
+_TODO_STATE_NAMES = frozenset(
+    {
+        "to do",
+        "todo",
+        "new",
+        "proposed",
+        "approved",
+        "open",
+        "backlog",
+        "selected for development",
+        "ready for development",
+        "yapılacak",
+        "yapilacak",
+        "yapılacaklar",
+        "yapilacaklar",
+    }
+)
+_IN_PROGRESS_STATE_NAMES = frozenset(
+    {
+        "in progress",
+        "inprogress",
+        "active",
+        "doing",
+        "committed",
+        "wip",
+        "devam ediyor",
+        "devamediyor",
+    }
+)
 _DONE_STATE_NAMES = frozenset(
     {
         "done",
@@ -385,9 +420,9 @@ def _status_category(state_name: str, category: str = "") -> str:
     if cat in {"resolved", "completed", "removed", "done"}:
         return "done"
     name = (state_name or "").strip().lower()
-    if JiraPoller._is_todo_status_name(name):
+    if JiraPoller._is_todo_status_name(name) or name in _TODO_STATE_NAMES:
         return "new"
-    if name in {"active", "in progress", "doing", "committed", "wip"}:
+    if name in _IN_PROGRESS_STATE_NAMES:
         return "indeterminate"
     return ""
 
@@ -538,13 +573,51 @@ def find_work_item_key_by_git(
     return ""
 
 
+def _norm_state_name(name: str) -> str:
+    return re.sub(r"[\s_\-]+", " ", (name or "").strip().lower()).strip()
+
+
+def _fields_state_name(fields: Optional[Dict[str, Any]]) -> str:
+    if not fields or not isinstance(fields, dict):
+        return ""
+    status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+    return _norm_state_name(str((status or {}).get("name") or ""))
+
+
+def work_item_is_todo_column(fields: Optional[Dict[str, Any]]) -> bool:
+    """True for To Do and process-template equivalents (New, Proposed, …)."""
+    name = _fields_state_name(fields)
+    compact = name.replace(" ", "")
+    if name in _TODO_STATE_NAMES or compact in _TODO_STATE_NAMES:
+        return True
+    return compact in {
+        "todo",
+        "yapilacak",
+        "yapilacaklar",
+        "yapılacak",
+        "yapılacaklar",
+    }
+
+
+def work_item_is_in_progress_column(fields: Optional[Dict[str, Any]]) -> bool:
+    """True for In Progress and equivalents (Active, Doing, Committed)."""
+    name = _fields_state_name(fields)
+    compact = name.replace(" ", "")
+    return name in _IN_PROGRESS_STATE_NAMES or compact in _IN_PROGRESS_STATE_NAMES
+
+
+def work_item_is_intake_column(fields: Optional[Dict[str, Any]]) -> bool:
+    """Azure intake: To Do / In Progress and their process-template names."""
+    return work_item_is_todo_column(fields) or work_item_is_in_progress_column(fields)
+
+
 def work_item_is_done(fields: Optional[Dict[str, Any]]) -> bool:
-    """True for Done/Closed/Completed. Resolved and Active stay eligible."""
+    """True for Done/Closed/Completed. Resolved/Active are not Done."""
     if not fields or not isinstance(fields, dict):
         return False
     status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
-    name = str((status or {}).get("name") or "").strip().lower()
-    if name in _DONE_STATE_NAMES:
+    name = _norm_state_name(str((status or {}).get("name") or ""))
+    if name in _DONE_STATE_NAMES or name.replace(" ", "") in _DONE_STATE_NAMES:
         return True
     category = str(
         ((status or {}).get("statusCategory") or {}).get("key") or ""
@@ -744,9 +817,9 @@ def evaluate_work_item_intake(
         labels=labels,
         required_labels=required,
     )
-    is_todo = JiraPoller._is_todo_status(fields)
+    is_todo = work_item_is_todo_column(fields)
     is_done = work_item_is_done(fields)
-    board_ok = not is_done
+    board_ok = work_item_is_intake_column(fields)
     local_st = getattr(state, "status", None) if state is not None else None
     in_flight = local_st in {
         TaskStatus.PENDING,
@@ -778,10 +851,30 @@ def evaluate_work_item_intake(
             is_done=is_done,
         )
 
-    # First sighting: any open column (not Done). Do **not** re-queue
-    # because the item went Active → New while still assigned (Jira To Do
-    # return does not apply on Azure Boards).
-    if should_process and board_ok and state is None:
+    if is_done:
+        return WorkItemIntakeDecision(
+            action="skip",
+            reason="done",
+            matched_assignee=matched_assignee,
+            matched_label=matched_label,
+            is_todo=is_todo,
+            is_done=True,
+        )
+
+    if not board_ok:
+        return WorkItemIntakeDecision(
+            action="skip",
+            reason="not todo or in progress",
+            matched_assignee=matched_assignee,
+            matched_label=matched_label,
+            is_todo=is_todo,
+            is_done=is_done,
+        )
+
+    # First sighting: To Do / In Progress and process-template equivalents.
+    # Do **not** re-queue because the item moved In Progress → To Do while
+    # still assigned (Jira To Do return does not apply on Azure Boards).
+    if should_process and state is None:
         return WorkItemIntakeDecision(
             action="accept",
             reason="new",
@@ -794,7 +887,6 @@ def evaluate_work_item_intake(
 
     if (
         should_process
-        and board_ok
         and local_st == TaskStatus.ERROR
         and bool((getattr(state, "metadata", None) or {}).get("requeue_eligible"))
     ):
@@ -815,7 +907,7 @@ def evaluate_work_item_intake(
 
     return WorkItemIntakeDecision(
         action="skip",
-        reason="not eligible" if board_ok else "done",
+        reason="not eligible",
         matched_assignee=matched_assignee,
         matched_label=matched_label,
         is_todo=is_todo,
@@ -920,7 +1012,8 @@ def format_workitem_plan_usage_note(bot_name: str = "yaver") -> str:
         "- `/planRefactor <prompt>` — revise the waiting plan\n"
         "- `/planExecute` — implement the waiting plan\n\n"
         "New work still starts by assigning this item to me while it is "
-        "not Done (or open a new Mode: build item)."
+        "To Do or In Progress (or New / Active / Doing), or open a new "
+        "Mode: build item."
     )
 
 
@@ -1477,6 +1570,9 @@ __all__ = [
     "find_work_item_key_by_git",
     "find_work_item_key_by_id",
     "work_item_is_done",
+    "work_item_is_in_progress_column",
+    "work_item_is_intake_column",
+    "work_item_is_todo_column",
     "extract_workitem_comment_text",
     "format_workitem_plan_usage_note",
     "is_azure_workitem_comment_event",

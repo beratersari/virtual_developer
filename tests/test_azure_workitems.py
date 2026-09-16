@@ -734,7 +734,7 @@ def test_intake_new_assigned_todo():
         fields={
             "System.Title": "X",
             "System.Description": "{params}\nRepository: https://x/r.git\nSource branch: a\nTarget branch: develop\nMode: build\n{params}",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
             "System.Tags": "",
             "System.WorkItemType": "Bug",
@@ -749,7 +749,24 @@ def test_intake_new_assigned_todo():
     assert decision.is_todo is True
 
 
-def test_intake_accepts_active_assigned():
+def test_intake_accepts_new_assigned():
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=14,
+        fields={
+            "System.Title": "X",
+            "System.State": "New",
+            "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
+            "System.WorkItemType": "Bug",
+        },
+    )
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "accept"
+    assert decision.will_process is True
+    assert decision.is_todo is True
+
+
+def test_intake_accepts_in_progress_assigned():
     issue = normalize_work_item(
         project="Demo",
         work_item_id=12,
@@ -759,6 +776,24 @@ def test_intake_accepts_active_assigned():
                 "{params}\nRepository: https://x/r.git\n"
                 "Source branch: a\nTarget branch: develop\nMode: build\n{params}"
             ),
+            "System.State": "In Progress",
+            "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
+            "System.WorkItemType": "Bug",
+        },
+    )
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "accept"
+    assert decision.will_process is True
+    assert decision.is_todo is False
+    assert decision.is_done is False
+
+
+def test_intake_accepts_active_assigned():
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=15,
+        fields={
+            "System.Title": "X",
             "System.State": "Active",
             "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
             "System.WorkItemType": "Bug",
@@ -768,6 +803,23 @@ def test_intake_accepts_active_assigned():
     assert decision.action == "accept"
     assert decision.will_process is True
     assert decision.is_todo is False
+    assert decision.is_done is False
+
+
+def test_intake_skips_resolved_assigned():
+    issue = normalize_work_item(
+        project="Demo",
+        work_item_id=16,
+        fields={
+            "System.Title": "X",
+            "System.State": "Resolved",
+            "System.AssignedTo": {"displayName": "Yaver", "uniqueName": "yaver"},
+            "System.WorkItemType": "Bug",
+        },
+    )
+    decision = evaluate_work_item_intake(issue, trigger_needles=["yaver"])
+    assert decision.action == "skip"
+    assert decision.reason == "not todo or in progress"
     assert decision.is_done is False
 
 
@@ -794,7 +846,7 @@ def test_intake_skips_in_flight_and_plan_ready():
         work_item_id=8,
         fields={
             "System.Title": "X",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
         },
     )
@@ -821,7 +873,7 @@ def test_intake_skips_in_flight_and_plan_ready():
         work_item_id=8,
         fields={
             "System.Title": "X",
-            "System.State": "Active",
+            "System.State": "In Progress",
             "System.AssignedTo": {"displayName": "Yaver"},
             "System.Tags": "plan_execute",
             "System.WorkItemType": "User Story",
@@ -841,7 +893,7 @@ def test_intake_does_not_requeue_active_to_new():
         work_item_id=9,
         fields={
             "System.Title": "X",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
         },
     )
@@ -871,7 +923,7 @@ def test_intake_does_not_requeue_active_to_new():
         fields={
             "System.Title": "Fixed title",
             "System.Description": "{params}\nMode: build\n{params}",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
         },
     )
@@ -888,7 +940,7 @@ def test_intake_trigger_label_and():
         work_item_id=10,
         fields={
             "System.Title": "X",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
             "System.Tags": "other",
         },
@@ -902,7 +954,7 @@ def test_intake_trigger_label_and():
         work_item_id=10,
         fields={
             "System.Title": "X",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
             "System.Tags": "bot",
         },
@@ -919,7 +971,7 @@ def test_lookup_view_flags():
         work_item_id=11,
         fields={
             "System.Title": "Lookup me",
-            "System.State": "New",
+            "System.State": "To Do",
             "System.AssignedTo": {"displayName": "Yaver"},
             "System.Tags": "",
         },
@@ -1024,7 +1076,7 @@ def test_ingest_uses_jira_event_path():
     from src.azure.workitems import parse_workitem_payload
     from src.processor import JobProcessor
 
-    parsed = parse_workitem_payload(_wi_payload())
+    parsed = parse_workitem_payload(_wi_payload(state="To Do"))
     assert parsed is not None
     proc = JobProcessor.__new__(JobProcessor)
     proc.state_manager = MagicMock()

@@ -737,8 +737,8 @@ class SettingsUpdate(BaseModel):
         default=None,
         max_length=500,
         description=(
-            "Comma-separated Azure work-item tags required for New/To Do intake "
-            "when set (AND with assignee, same as JIRA_TRIGGER_LABEL)"
+            "Comma-separated Azure work-item tags required for To Do / In Progress "
+            "intake when set (AND with assignee, same as JIRA_TRIGGER_LABEL)"
         ),
     )
 

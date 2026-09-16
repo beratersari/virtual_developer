@@ -1,4 +1,4 @@
-"""Azure work-item webhook intake: every open vs Done / resume path."""
+"""Azure work-item webhook intake: To Do / In Progress vs other columns."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from src.azure.workitems import (
     normalize_work_item,
     parse_workitem_payload,
     work_item_is_done,
+    work_item_is_intake_column,
 )
 from src.state.models import TaskStatus
 from tests.conftest import make_issue_event
@@ -24,7 +25,7 @@ from tests.test_azure_workitems import _wi_comment_payload, _wi_payload
 def _issue(
     *,
     work_item_id: int = 20,
-    state: str = "New",
+    state: str = "To Do",
     assignee: str | None = "Yaver",
     unique: str = "DOMAIN\\yaver",
     tags: str = "",
@@ -111,20 +112,27 @@ def test_work_item_is_done_empty_and_missing():
 @pytest.mark.parametrize(
     "state",
     [
-        "New",
         "To Do",
+        "Todo",
+        "to-do",
+        "New",
         "Open",
         "Backlog",
+        "Proposed",
+        "Approved",
+        "In Progress",
+        "InProgress",
+        "in_progress",
         "Active",
         "Doing",
         "Committed",
-        "Approved",
-        "Resolved",
-        "In Progress",
+        "WIP",
         "Yapılacaklar",
+        "Yapilacak",
+        "Devam Ediyor",
     ],
 )
-def test_intake_accepts_open_columns_when_assigned(state):
+def test_intake_accepts_todo_in_progress_and_equivalents_when_assigned(state):
     decision = evaluate_work_item_intake(
         _issue(state=state), trigger_needles=["yaver"]
     )
@@ -132,6 +140,19 @@ def test_intake_accepts_open_columns_when_assigned(state):
     assert decision.will_process is True
     assert decision.is_done is False
     assert decision.matched_assignee is True
+    assert work_item_is_intake_column(_issue(state=state)["fields"]) is True
+
+
+@pytest.mark.parametrize("state", ["Resolved", "Resolve"])
+def test_intake_skips_resolved_even_when_assigned(state):
+    decision = evaluate_work_item_intake(
+        _issue(state=state), trigger_needles=["yaver"]
+    )
+    assert decision.action == "skip", (state, decision.reason)
+    assert decision.will_process is False
+    assert decision.is_done is False
+    assert decision.reason == "not todo or in progress"
+    assert work_item_is_intake_column(_issue(state=state)["fields"]) is False
 
 
 @pytest.mark.parametrize("state", ["Done", "Closed", "Completed", "Removed", "Cut"])
@@ -145,18 +166,18 @@ def test_intake_skips_done_columns_even_when_assigned(state):
     assert decision.will_process is False
 
 
-def test_intake_skips_unassigned_open_item():
+def test_intake_skips_unassigned_todo_item():
     decision = evaluate_work_item_intake(
-        _issue(state="Active", assignee=None), trigger_needles=["yaver"]
+        _issue(state="To Do", assignee=None), trigger_needles=["yaver"]
     )
     assert decision.action == "skip"
     assert decision.matched_assignee is False
     assert decision.reason == "not eligible"
 
 
-def test_intake_skips_wrong_assignee_on_active():
+def test_intake_skips_wrong_assignee_on_in_progress():
     decision = evaluate_work_item_intake(
-        _issue(state="Active", assignee="Alice", unique="DOMAIN\\alice"),
+        _issue(state="In Progress", assignee="Alice", unique="DOMAIN\\alice"),
         trigger_needles=["yaver"],
     )
     assert decision.action == "skip"
@@ -172,9 +193,9 @@ def test_intake_skips_wrong_assignee_on_active():
     "status",
     [TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.EXECUTING],
 )
-def test_intake_skips_in_flight_on_active(status):
+def test_intake_skips_in_flight_on_in_progress(status):
     decision = evaluate_work_item_intake(
-        _issue(state="Active"),
+        _issue(state="In Progress"),
         state=_state(status),
         trigger_needles=["yaver"],
     )
@@ -182,9 +203,9 @@ def test_intake_skips_in_flight_on_active(status):
     assert "in-flight" in decision.reason
 
 
-def test_intake_skips_plan_ready_on_active():
+def test_intake_skips_plan_ready_on_in_progress():
     decision = evaluate_work_item_intake(
-        _issue(state="Active"),
+        _issue(state="In Progress"),
         state=_state(TaskStatus.PLAN_READY),
         trigger_needles=["yaver"],
     )
@@ -193,22 +214,22 @@ def test_intake_skips_plan_ready_on_active():
     assert decision.plan_handoff == ""
 
 
-def test_intake_does_not_requeue_completed_on_new_or_active():
-    completed = _state(TaskStatus.COMPLETED, last_board_status="active")
-    for board in ("New", "Active"):
+def test_intake_does_not_requeue_completed_on_todo_or_in_progress():
+    completed = _state(TaskStatus.COMPLETED, last_board_status="in progress")
+    for board in ("To Do", "In Progress"):
         decision = evaluate_work_item_intake(
             _issue(state=board),
             state=completed,
-            prev_status="active",
+            prev_status="in progress",
             trigger_needles=["yaver"],
         )
         assert decision.action == "skip", board
         assert decision.reason == "not eligible"
 
 
-def test_intake_does_not_requeue_cancelled_on_active():
+def test_intake_does_not_requeue_cancelled_on_in_progress():
     decision = evaluate_work_item_intake(
-        _issue(state="Active"),
+        _issue(state="In Progress"),
         state=_state(TaskStatus.CANCELLED, requeue_eligible=True),
         trigger_needles=["yaver"],
     )
@@ -217,21 +238,21 @@ def test_intake_does_not_requeue_cancelled_on_active():
 
 def test_intake_error_same_text_does_not_retry():
     decision = evaluate_work_item_intake(
-        _issue(state="Active", title="Same"),
+        _issue(state="In Progress", title="Same"),
         state=_state(TaskStatus.ERROR, requeue_eligible=True),
         trigger_needles=["yaver"],
     )
     assert decision.action == "skip"
 
 
-def test_intake_error_text_change_retries_on_active():
+def test_intake_error_text_change_retries_on_in_progress():
     err = _state(
         TaskStatus.ERROR,
         requeue_eligible=True,
         last_intake_fingerprint="old-hash",
     )
     decision = evaluate_work_item_intake(
-        _issue(state="Active", title="Fixed title", description="new body"),
+        _issue(state="In Progress", title="Fixed title", description="new body"),
         state=err,
         trigger_needles=["yaver"],
     )
@@ -255,9 +276,39 @@ def test_intake_error_text_change_does_not_retry_when_done():
     assert decision.reason == "done"
 
 
+def test_intake_error_text_change_retries_on_active():
+    err = _state(
+        TaskStatus.ERROR,
+        requeue_eligible=True,
+        last_intake_fingerprint="old-hash",
+    )
+    decision = evaluate_work_item_intake(
+        _issue(state="Active", title="Fixed title", description="new body"),
+        state=err,
+        trigger_needles=["yaver"],
+    )
+    assert decision.action == "accept"
+    assert decision.reason == "issue text changed"
+
+
+def test_intake_error_text_change_does_not_retry_on_resolved():
+    err = _state(
+        TaskStatus.ERROR,
+        requeue_eligible=True,
+        last_intake_fingerprint="old-hash",
+    )
+    decision = evaluate_work_item_intake(
+        _issue(state="Resolved", title="Fixed title", description="new body"),
+        state=err,
+        trigger_needles=["yaver"],
+    )
+    assert decision.action == "skip"
+    assert decision.reason == "not todo or in progress"
+
+
 def test_intake_error_without_requeue_flag_skips():
     decision = evaluate_work_item_intake(
-        _issue(state="Active", title="Changed"),
+        _issue(state="In Progress", title="Changed"),
         state=_state(
             TaskStatus.ERROR,
             requeue_eligible=False,
@@ -269,19 +320,19 @@ def test_intake_error_without_requeue_flag_skips():
 
 
 # ---------------------------------------------------------------------------
-# Trigger label AND (open columns)
+# Trigger label AND (To Do / In Progress)
 # ---------------------------------------------------------------------------
 
 
-def test_intake_trigger_label_required_on_active():
+def test_intake_trigger_label_required_on_in_progress():
     bare = evaluate_work_item_intake(
-        _issue(state="Active", tags="other"),
+        _issue(state="In Progress", tags="other"),
         trigger_needles=["yaver"],
         required_labels=["bot"],
     )
     assert bare.action == "skip"
     tagged = evaluate_work_item_intake(
-        _issue(state="Active", tags="bot"),
+        _issue(state="In Progress", tags="bot"),
         trigger_needles=["yaver"],
         required_labels=["bot"],
     )
@@ -300,6 +351,17 @@ def test_intake_trigger_label_required_on_active():
 # ---------------------------------------------------------------------------
 
 
+def test_lookup_view_in_progress_would_process():
+    view = lookup_work_item_view(
+        _issue(state="In Progress"), trigger_needles=["yaver"]
+    )
+    assert view["ok"] is True
+    assert view["will_process"] is True
+    assert view["is_done"] is False
+    assert view["is_todo"] is False
+    assert view["state"] == "In Progress"
+
+
 def test_lookup_view_active_would_process():
     view = lookup_work_item_view(_issue(state="Active"), trigger_needles=["yaver"])
     assert view["ok"] is True
@@ -307,6 +369,14 @@ def test_lookup_view_active_would_process():
     assert view["is_done"] is False
     assert view["is_todo"] is False
     assert view["state"] == "Active"
+
+
+def test_lookup_view_resolved_would_not_process():
+    view = lookup_work_item_view(_issue(state="Resolved"), trigger_needles=["yaver"])
+    assert view["ok"] is True
+    assert view["will_process"] is False
+    assert view["is_done"] is False
+    assert view["reason"] == "not todo or in progress"
 
 
 def test_lookup_view_done_would_not_process():
@@ -438,7 +508,7 @@ def test_webhook_ignores_pat_update_on_active():
 
 
 # ---------------------------------------------------------------------------
-# Ingest: Active starts, Done does not
+# Ingest: In Progress starts, Done does not
 # ---------------------------------------------------------------------------
 
 
@@ -461,8 +531,10 @@ def _processor():
     return proc
 
 
-def test_ingest_active_assigned_enqueues_and_assigns():
-    parsed = parse_workitem_payload(_wi_payload(state="Active", work_item_id=20))
+def test_ingest_in_progress_assigned_enqueues_and_assigns():
+    parsed = parse_workitem_payload(
+        _wi_payload(state="In Progress", work_item_id=20)
+    )
     assert parsed is not None
     proc = _processor()
 
@@ -519,9 +591,9 @@ def test_ingest_done_assigned_skips_without_enqueue():
     proc.enqueue_jira_event.assert_not_awaited()
 
 
-def test_ingest_unassigned_active_skips():
+def test_ingest_unassigned_in_progress_skips():
     parsed = parse_workitem_payload(
-        _wi_payload(state="Active", assignee="", work_item_id=22)
+        _wi_payload(state="In Progress", assignee="", work_item_id=22)
     )
     assert parsed is not None
     proc = _processor()
@@ -541,8 +613,10 @@ def test_ingest_unassigned_active_skips():
     proc.enqueue_jira_event.assert_not_awaited()
 
 
-def test_ingest_in_flight_active_skips():
-    parsed = parse_workitem_payload(_wi_payload(state="Active", work_item_id=23))
+def test_ingest_in_flight_in_progress_skips():
+    parsed = parse_workitem_payload(
+        _wi_payload(state="In Progress", work_item_id=23)
+    )
     assert parsed is not None
     proc = _processor()
     flying = MagicMock()
@@ -566,8 +640,10 @@ def test_ingest_in_flight_active_skips():
     proc.enqueue_jira_event.assert_not_awaited()
 
 
-def test_ingest_plan_ready_active_skips_field_update():
-    parsed = parse_workitem_payload(_wi_payload(state="Active", work_item_id=24))
+def test_ingest_plan_ready_in_progress_skips_field_update():
+    parsed = parse_workitem_payload(
+        _wi_payload(state="In Progress", work_item_id=24)
+    )
     assert parsed is not None
     proc = _processor()
     waiting = MagicMock()
@@ -623,7 +699,7 @@ def test_ingest_plan_execute_on_active_plan_ready_assigns():
 
 
 # ---------------------------------------------------------------------------
-# Processor update path: Azure open vs Done vs Jira To Do
+# Processor update path: Azure To Do / In Progress vs Done vs Jira To Do
 # ---------------------------------------------------------------------------
 
 
@@ -655,7 +731,9 @@ def _azure_update_event(key: str, status: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_processor_azure_completed_active_reprocesses(processor, state_manager):
+async def test_processor_azure_completed_in_progress_reprocesses(
+    processor, state_manager
+):
     state_manager.create_state("42", "Work", "x")
     state_manager.update_state(
         "42", status=TaskStatus.COMPLETED, metadata={"source": "azure_workitem"}
@@ -663,9 +741,43 @@ async def test_processor_azure_completed_active_reprocesses(processor, state_man
     with patch.object(
         processor, "_handle_issue_created", new_callable=AsyncMock
     ) as created:
-        await processor._handle_issue_updated(_azure_update_event("42", "Active"))
+        await processor._handle_issue_updated(
+            _azure_update_event("42", "In Progress")
+        )
         created.assert_awaited_once()
     assert state_manager.get_state("42").status == TaskStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_processor_azure_completed_active_reprocesses(
+    processor, state_manager
+):
+    state_manager.create_state("47", "Work", "x")
+    state_manager.update_state(
+        "47", status=TaskStatus.COMPLETED, metadata={"source": "azure_workitem"}
+    )
+    with patch.object(
+        processor, "_handle_issue_created", new_callable=AsyncMock
+    ) as created:
+        await processor._handle_issue_updated(_azure_update_event("47", "Active"))
+        created.assert_awaited_once()
+    assert state_manager.get_state("47").status == TaskStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_processor_azure_completed_resolved_does_not_reprocess(
+    processor, state_manager
+):
+    state_manager.create_state("49", "Work", "x")
+    state_manager.update_state(
+        "49", status=TaskStatus.COMPLETED, metadata={"source": "azure_workitem"}
+    )
+    with patch.object(
+        processor, "_handle_issue_created", new_callable=AsyncMock
+    ) as created:
+        await processor._handle_issue_updated(_azure_update_event("49", "Resolved"))
+        created.assert_not_called()
+    assert state_manager.get_state("49").status == TaskStatus.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -685,7 +797,7 @@ async def test_processor_azure_completed_done_does_not_reprocess(
 
 
 @pytest.mark.asyncio
-async def test_processor_azure_error_active_needs_requeue_flag(
+async def test_processor_azure_error_in_progress_needs_requeue_flag(
     processor, state_manager
 ):
     state_manager.create_state("44", "Work", "x")
@@ -697,14 +809,18 @@ async def test_processor_azure_error_active_needs_requeue_flag(
     with patch.object(
         processor, "_handle_issue_created", new_callable=AsyncMock
     ) as created:
-        await processor._handle_issue_updated(_azure_update_event("44", "Active"))
+        await processor._handle_issue_updated(
+            _azure_update_event("44", "In Progress")
+        )
         created.assert_not_called()
 
     state_manager.update_state("44", metadata={"requeue_eligible": True})
     with patch.object(
         processor, "_handle_issue_created", new_callable=AsyncMock
     ) as created:
-        await processor._handle_issue_updated(_azure_update_event("44", "Active"))
+        await processor._handle_issue_updated(
+            _azure_update_event("44", "In Progress")
+        )
         created.assert_awaited_once()
 
 
@@ -728,7 +844,9 @@ async def test_processor_jira_in_progress_still_does_not_reprocess(
 
 
 @pytest.mark.asyncio
-async def test_processor_azure_pending_active_kicks_created(processor, state_manager):
+async def test_processor_azure_pending_in_progress_kicks_created(
+    processor, state_manager
+):
     state_manager.create_state("45", "Work", "x")
     state_manager.update_state(
         "45", status=TaskStatus.PENDING, metadata={"source": "azure_workitem"}
@@ -736,7 +854,24 @@ async def test_processor_azure_pending_active_kicks_created(processor, state_man
     with patch.object(
         processor, "_handle_issue_created", new_callable=AsyncMock
     ) as created:
-        await processor._handle_issue_updated(_azure_update_event("45", "Active"))
+        await processor._handle_issue_updated(
+            _azure_update_event("45", "In Progress")
+        )
+        created.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_processor_azure_pending_active_kicks_created(
+    processor, state_manager
+):
+    state_manager.create_state("48", "Work", "x")
+    state_manager.update_state(
+        "48", status=TaskStatus.PENDING, metadata={"source": "azure_workitem"}
+    )
+    with patch.object(
+        processor, "_handle_issue_created", new_callable=AsyncMock
+    ) as created:
+        await processor._handle_issue_updated(_azure_update_event("48", "Active"))
         created.assert_awaited_once()
 
 

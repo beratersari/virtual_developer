@@ -276,6 +276,7 @@ $copyItems = @(
     "install-codex.bat",
     "VERSION",
     "README.md",
+    "README.tr.md",
     "AGENTS.md",
     "Agents.md",
     "commitMsgFormat.md",

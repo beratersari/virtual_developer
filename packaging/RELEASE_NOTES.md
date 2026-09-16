@@ -1,3 +1,12 @@
+# Yaver 0.9.23
+
+Azure work items start on To Do / In Progress
+and the same columns (New, Active, Doing).
+After accept they move to Active / Doing /
+In Progress — not Done. English and Turkish
+READMEs document every Jira, GitLab, and
+Azure flow with examples.
+
 # Yaver 0.9.22
 
 Work-item keys are WIT-{project}-{id}. PR/MR comments

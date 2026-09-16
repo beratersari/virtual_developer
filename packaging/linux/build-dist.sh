@@ -84,7 +84,7 @@ echo
 
 echo "Step 1: Staging application files..."
 copy_items=(
-  cli.py requirements.txt .env.example VERSION README.md AGENTS.md
+  cli.py requirements.txt .env.example VERSION README.md README.tr.md AGENTS.md
   commitMsgFormat.md pytest.ini
   install.sh install-dashboard.sh install-backends.sh install-codex.sh
   install-opencode-agents.sh

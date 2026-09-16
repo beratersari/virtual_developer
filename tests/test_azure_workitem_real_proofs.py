@@ -22,6 +22,7 @@ from src.azure.workitems import (
     remember_work_item,
     work_item_coords,
     work_item_is_done,
+    work_item_is_intake_column,
 )
 from src.dashboard.api import create_dashboard_app
 from src.jira.simulated_client import SimulatedJiraClient
@@ -189,9 +190,10 @@ def _real_processor(tmp_path) -> JobProcessor:
 
 
 def test_every_process_template_state_intake():
-    """Official Agile / Scrum / CMMI / Basic names vs Done vs first-accept."""
+    """Official Agile / Scrum / CMMI / Basic names vs To Do / In Progress."""
     seen_done = []
-    seen_open = []
+    seen_intake = []
+    seen_other = []
     for name, expect_done in _PROCESS_STATES:
         issue = _issue(name)
         assert work_item_is_done(issue["fields"]) is expect_done, name
@@ -200,12 +202,20 @@ def test_every_process_template_state_intake():
             assert decision.action == "skip", name
             assert decision.is_done is True, name
             seen_done.append(name)
-        else:
+        elif work_item_is_intake_column(issue["fields"]):
             assert decision.action == "accept", name
             assert decision.will_process is True, name
-            seen_open.append(name)
+            seen_intake.append(name)
+        else:
+            assert decision.action == "skip", name
+            assert decision.reason == "not todo or in progress", name
+            seen_other.append(name)
     assert "Done" in seen_done and "Closed" in seen_done
-    assert "Active" in seen_open and "Resolved" in seen_open and "Doing" in seen_open
+    assert "To Do" in seen_intake and "In Progress" in seen_intake
+    assert "New" in seen_intake and "Active" in seen_intake and "Doing" in seen_intake
+    assert "Approved" in seen_intake and "Committed" in seen_intake
+    assert "Proposed" in seen_intake
+    assert "Resolved" in seen_other
 
 
 def test_two_collections_same_id_share_one_local_key():

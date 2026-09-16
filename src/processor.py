@@ -3474,15 +3474,16 @@ class JobProcessor:
         is_todo = JiraPoller._is_todo_status(fields)
         azure_wi = self._is_azure_workitem_triggered(issue_key)
         if azure_wi:
-            from src.azure.workitems import work_item_is_done
+            from src.azure.workitems import work_item_is_intake_column
 
-            board_ok = not work_item_is_done(fields)
+            board_ok = work_item_is_intake_column(fields)
         else:
             board_ok = is_todo
 
         # INTENTIONAL: Jira To Do = rework. Terminal local state + To Do
         # (poller already required a trigger) resets and runs again.
-        # Azure work items: any non-Done column (Active included).
+        # Azure work items: To Do / In Progress and equivalents
+        # (New, Active, Doing). Not Resolved or Done.
         # ERROR/CANCELLED still need requeue_eligible (set by cancel/fail).
         # Do NOT auto-reprocess Jira while the board is still In Progress (that
         # caused infinite "no new commits" loops). plan_ready is not rework.
@@ -4147,8 +4148,9 @@ class JobProcessor:
                             key,
                             "There is no plan waiting on this work item. "
                             "`/planRefactor` and `/planExecute` only run after "
-                            "a Mode: plan job reaches plan_ready. Assign a New "
-                            "item to me, or open a new Mode: build item.",
+                            "a Mode: plan job reaches plan_ready. Assign a "
+                            "To Do or In Progress item to me (or New / "
+                            "Active / Doing), or open a new Mode: build item.",
                         )
                 except Exception as exc:
                     azure_warning(f"{key}: plan-command wait comment failed: {exc}")
@@ -4221,7 +4223,7 @@ class JobProcessor:
                 "reason": decision.reason,
             }
 
-        # Same as JiraPoller.process_issue: move off New/To Do before the worker.
+        # Same as JiraPoller.process_issue: move toward In Progress before the worker.
         tracker = None
         if coords and int(coords.get("work_item_id") or 0) > 0:
             tracker = AzureWorkItemTracker(

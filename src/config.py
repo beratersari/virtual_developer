@@ -389,8 +389,8 @@ class Settings(BaseSettings):
     azure_trigger_label: str = Field(
         default="",
         description=(
-            "Comma-separated Azure work-item tags. When set, New/To Do intake "
-            "needs bot assignee and one of these tags (same AND as JIRA_TRIGGER_LABEL)."
+            "Comma-separated Azure work-item tags. When set, To Do / In Progress "
+            "intake needs bot assignee and one of these tags (same AND as JIRA_TRIGGER_LABEL)."
         ),
     )
     azure_collection_urls: str = Field(
