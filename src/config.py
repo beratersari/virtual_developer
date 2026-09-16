@@ -868,11 +868,6 @@ class Settings(BaseSettings):
         self.azure_collection_pats = (
             json.dumps(cleaned, separators=(",", ":")) if cleaned else ""
         )
-        self.azure_collection_urls = json.dumps(list(cleaned.keys()))
-        if len(cleaned) == 1:
-            self.azure_pat = next(iter(cleaned.values()))
-        else:
-            self.azure_pat = ""
 
     def set_azure_host_pat_map(self, mapping: Dict[str, str]) -> None:
         """Accept collection URLs only. Host-only keys are ignored."""
@@ -1022,7 +1017,6 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "azure_bot_mentions",
         "gitlab_webhook_enabled",
         "azure_webhook_enabled",
-        "azure_collection_urls",
     }
 )
 
@@ -1050,7 +1044,6 @@ _RUNTIME_ENV_MIRROR = {
     "azure_bot_mentions": "AZURE_BOT_MENTIONS",
     "gitlab_webhook_enabled": "GITLAB_WEBHOOK_ENABLED",
     "azure_webhook_enabled": "AZURE_WEBHOOK_ENABLED",
-    "azure_collection_urls": "AZURE_COLLECTION_URLS",
     "azure_collection_pats": "AZURE_COLLECTION_PATS",
 }
 
