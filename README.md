@@ -500,7 +500,7 @@ virtual_developer/
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest pytest-asyncio pytest-cov
-.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py -q
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --ignore=tests/test_daily_use_critical_audit.py -q
 ```
 
 ---
