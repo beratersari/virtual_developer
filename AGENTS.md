@@ -413,8 +413,8 @@ Open: `http://127.0.0.1:8080` after daemon start.
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest pytest-asyncio pytest-cov
-.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --ignore=tests/test_daily_use_critical_audit.py -q
-.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --ignore=tests/test_daily_use_critical_audit.py --cov=src --cov-branch
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py -q
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --cov=src --cov-branch
 ```
 
 ### Rules

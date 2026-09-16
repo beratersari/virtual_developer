@@ -4496,7 +4496,14 @@ class JobProcessor:
             if not ik or ik.upper() in live:
                 continue
             st = self.state_manager.get_state(ik)
-            if st and st.status in self.IN_FLIGHT_STATUSES:
+            # PENDING is the accept/ack window (Jira In Progress + first
+            # comment) before _contexts or PLANNING/EXECUTING exist.
+            # Reaping it frees claim_next for a GitLab/Azure /yaver on the
+            # same issue and starts a second worker on the same clone.
+            if st and st.status in {
+                TaskStatus.PENDING,
+                *self.IN_FLIGHT_STATUSES,
+            }:
                 continue
             # First-run / scheduled claim: process_event has not created
             # local state yet. A second dispatch (``_release_context``
