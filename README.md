@@ -1,147 +1,307 @@
 # Yaver
 
-**Version:** see root [`VERSION`](VERSION) (currently `0.5.0`)
+**English** · [Türkçe](README.tr.md)
 
-**Yaver** (*the aide*) is a Python daemon that connects **Jira** (Server/DC or Cloud) to **OpenCode / Oh My OpenAgent**. It discovers work from a board poll, runs AI agents in isolated temporary Git clones, posts progress back to Jira, and can push feature branches and open GitLab merge requests.
+**Version:** see root [`VERSION`](VERSION)
+
+**Yaver** (*the aide*) is a Python daemon that runs **OpenCode** agents (OpenCoderman **derman-plan** / **derman-build** / **derman-test**) for work that arrives from **Jira**, **GitLab**, or **Azure DevOps Server**. It clones the repo into an isolated temp folder, posts progress back on the ticket or review thread, and can push a work branch and open a merge/pull request.
+
+Four ways work starts:
+
+| Intake | How it starts | After accept | After the job finishes |
+|--------|---------------|--------------|------------------------|
+| **Jira board** | Poller: To Do-like + bot assignee | Board → **In Progress** | Stays In Progress. Move it back to **To Do** to run again. |
+| **GitLab MR comment** | `@bot /yaver …` on a merge request | No board move | Reply on the same thread. Merged/closed MR deletes the temp clone. |
+| **Azure PR comment** | `@bot /yaver …` on a pull request | No board move | Reply on the same thread. Completed/abandoned PR deletes the temp clone. |
+| **Azure Boards work item** | Assign the bot on **To Do** / **In Progress** (or New / Active / Doing, …) | State → **In Progress** category (**Active** / **Doing** / **Committed** / **In Progress**) | Stays there. Yaver does **not** move it to Resolved or Done. |
+
+Same `Repository` + `Source branch` + `Target branch` + kind (`plan` vs `build`) resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`.
 
 ---
 
 ## What it does
 
-1. **Discovers** work via the **board poller** (To Do + bot assignee).  
-2. **Routes** work from a per-issue `{params}` block (`Mode: plan` or `Mode: build`; Mode defaults to build)  
-3. **Runs** OpenCode agents (derman-plan / derman-build / derman-test) in temp clones  
-4. **Reports** plans, progress, errors, and completion as Jira comments  
-5. **Pushes** work branches and opens merge requests when build mode finishes successfully  
-6. **Serves** a localhost ops dashboard (tasks, poll monitor, safe settings) in the same process  
-
-Same `Repository` + `Source branch` + `Target branch` resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`. GitLab project webhooks (`POST /yaver/webhook/gitlab`) and Azure DevOps Server 2022.2 service hooks (`POST /yaver/webhook/azure`) are separate and still supported.
+1. **Discovers** work (Jira poller, GitLab webhook, Azure webhook).
+2. **Routes** from a per-issue `{params}` block (`Mode: plan`, `Mode: build`, or `Mode: test`; default is build).
+3. **Runs** OpenCode in a temp clone.
+4. **Reports** plans, progress, errors, and completion on the ticket or review thread.
+5. **Pushes** the work branch and opens an MR/PR when a build succeeds (orchestrator owns push + MR; the model should not push).
+6. **Serves** an ops dashboard (tasks, poll monitor, storage, safe settings) in the same process.
 
 ---
 
 ## Architecture
 
 ```text
-┌─────────────────────────── Jira (REST v2 + Agile) ───────────────────────────┐
-│  Board / sprint  →  To Do + label or bot assignee  →  poll every N seconds     │
-└───────────────────────────────────────┬───────────────────────────────────────┘
-                                        │
-                                        ▼
-┌──────────────────────── Yaver (one process) ─────────────────────────────────┐
-│  Board Poller  →  Job Processor  →  Agent Runner (opencode serve + --dir)     │
-│        │                  │                                                   │
-│        │                  ├─ temp clone: feature/{ISSUE} from issue {params}  │
-│        │                  ├─ Jira comments (progress / plan / error / done)   │
-│        │                  └─ GitLab push + MR (build mode)                    │
-│        │                                                                      │
-│  Ops dashboard (FastAPI + React SPA)  ·  stuck-job monitor  ·  JSON state     │
-└───────────────────────────────────────────────────────────────────────────────┘
+ Jira board poller          GitLab project hook           Azure service hook
+ To Do + bot assignee       @bot /yaver on an MR          @bot /yaver on a PR
+                                                          assign work item
+              \                    |                    /
+               \                   |                   /
+                ▼                  ▼                  ▼
+        ┌──────────────── Yaver (one process) ─────────────────┐
+        │  Intake  →  Job processor  →  OpenCode serve (--dir) │
+        │     temp clone from {params}                         │
+        │     comments on Jira / MR / PR / work item           │
+        │     git push + GitLab MR or Azure PR (build)         │
+        │  Ops dashboard  ·  stuck-job monitor  ·  JSON state  │
+        └──────────────────────────────────────────────────────┘
 ```
-
-| Component | Role |
-|-----------|------|
-| **Board poller** | Sole intake. Reads board/sprint issues; writes a poll snapshot for the UI |
-| **Job processor** | State machine, concurrency limits, plan vs build routing, fail + Jira notify |
-| **Agent runner** | Spawns OpenCode with plan/build mode prompts; streams session logs |
-| **Jira client** | REST API v2 + Agile; Bearer (on-prem PAT) or Basic (Cloud email+token) |
-| **Git manager** | Clone, branch, commit identity, push, MR via `glab` / GitLab API |
-| **State store** | Per-issue JSON under `YAVER_DATA_DIR/state/`; job records for the dashboard |
-| **Ops dashboard** | REST + WebSocket + static SPA from `web/dist` |
-
-### Agents (stock OpenCode)
-
-| Setting | Role |
-|---------|------|
-| **`DEFAULT_AGENT`** (`derman-build`) | OpenCoderman **derman-build** for `Mode: build` (not stock `build`) |
-| **`DEFAULT_PLAN_AGENT`** (`derman-plan`) | OpenCoderman **derman-plan** for `Mode: plan` (not stock `plan`) |
-| **`DEFAULT_TEST_AGENT`** (`derman-test`) | OpenCoderman **derman-test** for `Mode: test` (unit tests only) |
-| **Plan / build / test user text** | Short job facts in `agent/PLAN_PROMPT.md` / `BUILD_PROMPT.md` / `TEST_PROMPT.md`; rules live on the agents |
 
 ---
 
-## Requirements
+## How work starts (all intakes)
 
-- **Python 3.12+** recommended (3.10–3.13 also used on Windows offline wheels), **or** the standalone `yaver` / `yaver.exe` from CI (see below)  
-- **OpenCode** CLI on `PATH` (`OPENCODE_CLI`, default `opencode`) — stock **build** / **plan** agents (no oh-my-openagent)  
-- **Git**  
-- **glab** (GitLab CLI) when push/MR is enabled  
-- Jira access (board browse, comment, optional transitions)  
-- GitLab PAT with clone/push/MR rights when using remote workspaces  
+Every job still needs a **`{params}`** block so Yaver knows the git remote and branches (see [Issue template](#issue-template-params)). Review-thread jobs (`/yaver` on an MR/PR) can reuse the repo and branches from that MR/PR when `{params}` is missing on the bound ticket.
 
-### Standalone executables (no host Python)
+### After accept vs after complete
 
-CI workflow **Standalone Executables** (`.github/workflows/executables.yml`) freezes the daemon + CLI with PyInstaller:
-
-- Windows x64 → `yaver.exe` (onedir folder + zip)
-- Linux x64 → one freeze per Ubuntu: `yaver-linux-x64-ubuntu-18.04`, `20.04`, `22.04`, `24.04` (onedir folder + zip / tar.gz). Download the one that matches the host. A 24.04 freeze will not start on older glibc (`GLIBC_2.38 not found`).
-
-Config: [`packaging/pyinstaller/`](packaging/pyinstaller/README.md) (`versions.env`, `yaver.spec`). Extract the artifact, copy `.env.example` → `.env`, run `yaver start`. OpenCode / Codex are **not** inside the binary — install those separately. This does **not** replace the full offline zips (wheels + OpenCode vendor).  
+| | Jira | Azure work item | GitLab MR / Azure PR |
+|--|------|-----------------|----------------------|
+| **Accept** | Transition toward **In Progress** (best-effort) and assign the PAT user when configured | Set `System.State` to the type’s **InProgress** name: Agile/CMMI **Active**, Basic **Doing**, Scrum **Committed**, or **In Progress** | No board change |
+| **Job done** (plan or build) | Stays **In Progress**. Comment only. | Stays **Active / Doing / In Progress**. **Not** Resolved or Done. | Reply on the thread |
+| **Run again** | Move the ticket back to **To Do** (still assigned to the bot) | Assign again while it is To Do / In Progress (or New / Active / Doing). Moving Active → New while still assigned does **not** re-queue. After an error, edit the title/description. | New `@bot /yaver …` comment |
+| **In-flight** | Never restarted from poll or webhook noise | Same | Same |
 
 ---
 
-## Quick start
+## 1. Jira board (poller)
 
-### Linux
+This is the only Jira intake. There is no Jira comment webhook for starting work.
 
-Same split as Windows: dashboard (Python) vs agent CLIs (OpenCode / Codex).
-See [packaging/linux/README.md](packaging/linux/README.md).
+### Accept
 
-Offline zip (same idea as Windows): download the **Linux Distribution**
-artifact, extract so `vendor/` sits next to the install scripts, then:
+All of these:
 
-```bash
-./install-dashboard.sh    # .venv from vendor/python-wheels
-./install-backends.sh     # OpenCode via opencoderman (vendor CLI / opencode-home.zip)
-./install-codex.sh        # Codex from vendor/codex-*.tar.gz
+- Issue is on the configured **board** (`JIRA_BOARD_ID`). Scrum: **first active sprint only**.
+- Status looks like **To Do** (name or `statusCategory` new/backlog-like: To Do, New, Open, Backlog, Yapılacaklar, …).
+- Assignee matches `JIRA_TRIGGER_USER`.
+- If `JIRA_TRIGGER_LABEL` is set, the issue also needs one of those labels.
+- Not already `planning` / `executing`.
+
+**To Do + bot assignee = rework (intentional).** After `completed` / `error` / `cancelled`, leaving the ticket on To Do (or moving it back to To Do) starts another run. After accept, Yaver moves the board to **In Progress** so the next poll does not start a second job until you put it on To Do again.
+
+`plan_ready` is the exception: **`Mode: plan` never implements by itself.** See [After a plan](#after-a-plan).
+
+### Usage example — plan then implement on the same Jira ticket
+
+1. Create `KAN-12` on the board.
+
+```text
+Summary: Plan login rate limit
+
+{params}
+Repository: https://gitlab.example.com/group/app.git
+Source branch: feature/KAN-12
+Target branch: develop
+Mode: plan
+{params}
 ```
 
-From a git checkout (needs network unless you already have `vendor/`):
+2. Assign it to the bot (`JIRA_TRIGGER_USER`, e.g. `yaver`) and leave it on **To Do**.
+3. Within one poll interval Yaver:
+   - accepts the issue
+   - moves it to **In Progress**
+   - writes `{YAVER_DATA_DIR}/plans/KAN-12.md`
+   - posts the plan as a **comment** (not the description)
+   - sets label `plan_ready` and local status `plan_ready`
+   - **stops**
+4. To implement on the **same** ticket: while it is **In Progress**, rename label `plan_ready` → `plan_execute`.
+5. Yaver starts a **build** session, implements that plan file, pushes `feature/KAN-12`, opens an MR, comments completion. The label becomes `plan_executed`. The Jira status stays **In Progress**.
+6. You move the ticket to Done when you are satisfied.
 
-```bash
-# From repo root
-git submodule update --init --recursive   # opencoderman
-./install-dashboard.sh    # .venv, requirements, .env, cli.py init
-./install-backends.sh     # OpenCode via opencoderman (+ Codex if no args)
-# Or one shot:
-./install.sh
+### Usage example — rework a finished Jira ticket
 
-# Edit .env — at least JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID
-./start-backend.sh        # API + SPA on :8080 (foreground)
-# ./start.sh              # backend + frontend in the background
-# ./start-frontend.sh     # SPA proxy on :5173 (does not kill the daemon)
-# ./stop.sh
-```
+1. `KAN-12` is `completed` and still **In Progress**.
+2. Fix the description or leave it as-is.
+3. Move the ticket back to **To Do** (still assigned to the bot).
+4. Next poll re-queues a new run.
 
-Ops dashboard: **http://127.0.0.1:8080**  
-OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`).
+### Usage example — fail, fix, retry
 
-### Windows (offline zip)
+1. Accept fails (bad `{params}`). Yaver still moves the ticket toward **In Progress** and posts an error comment.
+2. Fix the description.
+3. Move it back to **To Do**. Next poll retries.  
+   Editing the text while it stays on To Do after `error` also retries (`text_changed_retry`).
 
-CI builds `virtual_developer-windows-x64-*.zip` (see [packaging/windows/README.md](packaging/windows/README.md)).
+### What not to do on Jira
 
-```cmd
-:: Extract zip so the install-*.bat scripts sit next to vendor\ and src\
-install-dashboard.bat
-install-backends.bat
-install-codex.bat
-:: Or, use the Python already on PATH (does not create .venv):
-install-dashboard-system-python.bat
-:: Edit .env, then:
-start.bat
-::   or: start-backend.bat / start-frontend.bat
-```
-
-Open the OpenCode TUI only via **`start-opencode.bat`** from the project folder (after `install-backends.bat`) — not bare `opencode` from your user profile (home-as-project causes long black-screen indexing).
-
-### Docker
-
-See [Dockerfile](Dockerfile) and [`.github/workflows/docker.yml`](.github/workflows/docker.yml) if you run containerized builds.
+- Do not start implement by changing `Mode: plan` to `Mode: build` on the **same** plan ticket. Same-ticket implement is **`plan_execute` + In Progress** only.
+- Do not use Azure `/planExecute` / `/planRefactor` on Jira comments.
+- Do not expect a second job while the ticket stays In Progress (except `plan_execute` / `plan_refactor`).
 
 ---
 
-## Jira issue template (`{params}`)
+## 2. GitLab merge request comments
 
-Every issue the bot should work on needs a **`{params}` … `{params}`** block in the description (or summary fields scanned by the parser). Repository URL is **per issue**, not a global env var.
+Register a **project** webhook (Comments + Merge request events) to:
+
+`http://<yaver-host>:8080/yaver/webhook/gitlab`
+
+Set `GITLAB_WEBHOOK_SECRET` to the same secret GitLab sends. Set `GITLAB_TRIGGER_USER` (comma-separated usernames, no `@`).
+
+### Commands
+
+| Comment | What happens |
+|---------|----------------|
+| `@yaver /yaver add tests for login` | Starts a job. Prompt is the rest of the comment. |
+| `@yaver` (no `/yaver`) | Usage note in **that thread**. No job. |
+| `@yaver /ask …` or `@yaver /review …` | Ignored (another agent). No usage note. |
+
+### Which ticket the job binds to
+
+In order:
+
+1. Jira key in the MR title that matches `JIRA_PROJECTS` (e.g. `feat(KAN-12): …`)
+2. `WIT-…` in the title
+3. `#42` (Azure work item) when a collection-scoped item exists
+4. `Closes KAN-12` / similar
+5. `WIT-…` or `#id` in the description
+6. Existing local job with the same repo + source + target
+7. Fallback key `GL-{PROJECT}-{iid}`
+
+### Usage example
+
+MR title: `feat(KAN-12): rate limit login`
+
+```text
+@yaver /yaver cover the new limiter with unit tests
+```
+
+Yaver clones with the host PAT, resumes the **build** session for that repo + branches when one exists, replies on the same discussion, and opens/updates the MR if the agent committed.
+
+When the MR is **merged** or **closed**, Yaver deletes the matching temp clone.
+
+---
+
+## 3. Azure DevOps pull request comments
+
+Same idea as GitLab. Enable `AZURE_WEBHOOK_ENABLED=true`. On the project: Service hooks → Web Hooks:
+
+- Events: **Pull request commented**, **updated**, **merged**, **abandoned**
+- URL: `http://<yaver-host>:8080/yaver/webhook/azure`
+- No webhook secret
+
+Set `AZURE_TRIGGER_USER` and `AZURE_COLLECTION_PATS` (collection URL → PAT). Clone/push/PR use HTTP Basic `pat:<PAT>`.
+
+### Commands (PR thread only)
+
+| Comment | What happens |
+|---------|----------------|
+| `@yaver /yaver explain this diff` | Starts a job on the PR |
+| `@yaver` (no `/yaver`) | Usage note in that thread |
+| `@yaver /ask …` | Ignored |
+
+Do **not** use `/planExecute` / `/planRefactor` on a PR. Those are work-item comments only.
+
+### Which ticket the job binds to
+
+Same order as GitLab: Jira title, `WIT-…`, `#42` in this collection, Closes, description, repo/source/target, then `AZ-{PROJECT}-{id}`.
+
+Dashboard local key for a work item is `WIT-BETA-42`. The agent **Ticket** / `{ISSUE_KEY}` line is the numeric id `42`.
+
+### Usage example
+
+PR title: `feat(KAN-12): login limiter` **or** `Fix #42`
+
+```text
+@yaver /yaver tighten the null check on line 40
+```
+
+Completed or abandoned PRs delete the matching temp clone. Storage warns when a clone has no linked MR/PR (it will not auto-delete).
+
+---
+
+## 4. Azure Boards work items (webhook)
+
+Same Azure URL as PR comments. Add service hooks for **Work item created**, **updated**, and **commented**. Field filters: **Assigned To**, **Description**. State is optional (not a rework signal).
+
+### Accept
+
+- Assigned To matches `AZURE_TRIGGER_USER`
+- If `AZURE_TRIGGER_LABEL` is set, the item also needs one of those tags
+- State is **To Do** or **In Progress**, or the same process-template column:
+
+| Column kind | Names that start a job |
+|-------------|------------------------|
+| To Do | **To Do**, **New**, **Proposed**, **Approved**, Open, Backlog, Yapılacak / Yapılacaklar |
+| In Progress | **In Progress**, **Active**, **Doing**, **Committed**, WIP, Devam Ediyor |
+| Not intake | **Resolved**, **Done**, Closed, Completed, Removed |
+
+After accept Yaver:
+
+1. Sets state to that type’s **In Progress** name (**Active** on Agile, **Doing** on Basic, **Committed** on Scrum, or **In Progress**)
+2. Assigns the collection PAT user
+3. Starts the job from `{params}`
+
+**Unlike Jira**, moving Active → New (or In Progress → To Do) while still assigned does **not** re-queue. First sighting only. After `error`, edit the title or description to retry. After a plan, use comments (below).
+
+Yaver **never** moves a work item to Resolved or Done.
+
+### After a plan (Azure work item only)
+
+Do **not** use Jira labels `plan_ready` / `plan_execute` on Azure.
+
+| Comment on the work item | What happens |
+|--------------------------|----------------|
+| `@yaver /planExecute` | Implement the waiting plan (item must already be `plan_ready`) |
+| `@yaver /planRefactor tighten the API` | Revise the plan on the **plan** session, then `plan_ready` again |
+| `@yaver` without those commands | Work-item usage note (not posted on PRs) |
+
+### Usage example — assign a New bug, then implement
+
+1. Work item **42** in project Beta, state **New** (or To Do / Active / Doing).
+
+```text
+{params}
+Repository: https://tfs.example.com/tfs/DefaultCollection/Beta/_git/app
+Source branch: feature/42
+Target branch: develop
+Mode: plan
+{params}
+```
+
+2. Assign it to `yaver`.
+3. Yaver accepts, moves it to **Active** (Agile) / **Doing** (Basic) / **In Progress**, writes the plan, comments, sets local `plan_ready`, **stops**. Board stays In Progress-like.
+4. Comment:
+
+```text
+@yaver /planExecute
+```
+
+5. Yaver implements, pushes, opens a PR. The work item **stays Active / In Progress**. You close it when the PR is done.
+
+### Usage example — direct build (no plan)
+
+Set `Mode: build` in `{params}`, assign on New/To Do/Active. One build session; no `/planExecute` needed.
+
+---
+
+## After a plan
+
+```text
+Jira
+  To Do + bot  →  Mode: plan  →  plan_ready + label plan_ready  →  In Progress, stop
+       ├─ rename plan_ready → plan_execute (still In Progress)  →  build
+       ├─ remove plan_ready, add plan_refactor, comment @bot   →  revise plan
+       └─ new ticket, Mode: build, same repo/branches          →  own build session
+
+Azure work item
+  assign on To Do / In Progress (or New / Active / Doing)  →  plan_ready, stop
+       ├─ comment @bot /planExecute                         →  build
+       ├─ comment @bot /planRefactor <prompt>               →  revise plan
+       └─ new work item, Mode: build, same repo/branches    →  own build session
+```
+
+Plan and build keep **separate** OpenCode sessions for the same repo + source + target.
+
+Dashboard **Start** is disabled. Do not use `/planExecute` on Jira, GitLab, or Azure PR comments.
+
+---
+
+## Issue template (`{params}`)
+
+Put this block in the Jira description or Azure work-item description:
 
 ```text
 {params}
@@ -154,257 +314,145 @@ Mode: plan
 
 | Field | Meaning |
 |-------|---------|
-| **Repository** | GitLab clone URL (aliases: Repo, GitLab, Project URL) |
-| **Source branch** | Work / MR source branch. If missing or equal to a base name (`main`/`develop`/…), work branch becomes `feature/{ISSUE_KEY}` |
-| **Target branch** | Must exist on remote; work is based on it; MR merges **into** it |
-| **Mode** | **`plan`** — plan only, append plan to Jira, no push. **`build`** — implement, push, open MR |
+| **Repository** | Clone URL (aliases: Repo, GitLab, Project URL). Do not add a trailing `.git` on Azure `…/_git/…` URLs. |
+| **Source branch** | Work / MR source branch. If missing or equal to a base name (`main`/`develop`), work branch becomes `feature/{ISSUE_KEY}` |
+| **Target branch** | Must exist on remote; work is based on it; MR/PR merges **into** it |
+| **Mode** | **`plan`** — plan only, no push. **`build`** — implement, push, open MR/PR. **`test`** — unit tests only |
 
 Mode aliases: `planning`/`prometheus` → plan; `execute`/`execution`/`atlas`/`implement` → build.
 
-Incomplete templates cause a **user-visible Jira comment** with the format help (see `src/issue_git_spec.py`).
-
-### When the poller picks up an issue
-
-All of the following roughly apply **for first intake**:
-
-- Issue is on the configured **board**  
-- Status looks like **To Do** (name or `statusCategory` new/backlog-like)  
-- Assignee name matches `JIRA_TRIGGER_USER`  
-- Not already **in-flight** (`planning` / `executing`) — poll noise never restarts live work  
-
-**To Do + bot assignee = rework (intentional).** A ticket in a To Do-like
-column assigned to the bot is eligible, including after a previous
-`completed` / `error` / `cancelled` run. The poller **re-queues** that work
-(reset and run again). After accept, the bot moves the board to **In Progress**
-so the next poll does not start another job until the issue is To Do again.
-
-The exception is a successful **plan** (`plan_ready`): **`Mode: plan` never
-implements by itself**. Rename label `plan_ready` → `plan_execute` while the
-ticket is In Progress (or open a new build issue) — see
-[After a plan: plan_execute](#after-a-plan-plan_execute).
+Incomplete templates get a user-visible comment with the format help.
 
 ---
 
-## Workflows
-
-### Plan (`Mode: plan`)
-
-1. Poller accepts issue → state `planning`  
-2. Planner writes `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (not in the clone)  
-3. Plan posted to Jira (comment + description) → local state **`plan_ready`**, label **`plan_ready`**  
-4. Bot moves the board to **In Progress** and **stops**.  
-
-### After a plan: `plan_execute`
-
-`Mode: plan` never starts implementation by itself. Same-ticket implement is
-label-driven. Direct `Mode: build` issues are unchanged.
-
-```text
-To Do + bot assignee  →  Mode: plan  →  plan_ready + label plan_ready
-                                              │
-                         plan_ready still     │  wait (never implements)
-                                              ▼
-          ┌──────────────────────────────┼──────────────────────────────┐
-          ▼                              ▼                              ▼
-  Rename label                    Remove plan_ready,              Open a NEW issue
-  plan_ready →                    add plan_refactor,              with Mode: build
-  plan_execute                    comment @bot
-  (In Progress)                   (To Do or In Progress)
-          │                              │                              │
-          │                     same plan session                       │
-          ▼                              ▼                              ▼
-   build session              republish plan +                 independent build
-   implement the plan         restore plan_ready
-   {ISSUE_KEY}.md
-   (label → plan_executed)
-```
-
-| What you see | What it means |
-|--------------|----------------|
-| `plan_ready` label | Plan done; waiting — will **not** build |
-| In Progress + `plan_execute` | **Start implementation** on that same ticket (even if Mode is still plan) |
-| `plan_refactor` (no `plan_ready`) + comment tagging the bot | Revise the plan on the plan session |
-| New ticket with `Mode: build` + bot assignee | Build run; implements the existing plan for that repo + source + target when one exists |
-
-**How to implement after a plan**
-
-1. **Same ticket:** rename `plan_ready` → `plan_execute` while **In Progress**, **or**  
-2. **New ticket:** same repo/branches and `Mode: build`, assigned to the bot.
-   The build prompt still implements the existing plan file (not only the
-   new ticket's Jira description).
-
-Plan and build use **separate** OpenCode sessions for the same repo + source + target.
-
-Dashboard **Start** is disabled.
-
-### Build (`Mode: build`)
-
-1. Poller accepts issue → prepare git workspace from `{params}`  
-2. Atlas (orchestrator) implements the plan when `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` (or the sibling plan for the same repo + branches) exists; otherwise the Jira description
-3. On success: push branch, open MR, comment completion → `completed`  
-4. On failure: state `error` **and** Jira error comment (`_fail_issue` / `post_error`)  
-
-### Task statuses
+## Task statuses
 
 ```text
 pending → planning | executing → (plan_ready) → completed | error | cancelled
 ```
 
-| Status | Meaning for operators |
-|--------|------------------------|
-| `planning` / `executing` | Agent running — poller will not restart from board noise |
-| `plan_ready` | Plan finished; **not** an error. Set label `plan_execute` (In Progress) or open a new `Mode: build` issue |
-| `completed` | Done (build delivered or soft no-op completion). Move back to **To Do** (with trigger) to rework. |
-| `error` | Failed; fix description / params, then return to **To Do** (or edit text) to rework. |
-| `cancelled` | Operator cancel. **To Do + trigger is still rework** — move it back to To Do (or leave it there) to run again. |
-
-Stuck in-flight jobs are watchdogged by the daemon. Startup recovers orphaned disk `planning`/`executing` states to `error`.
+| Status | Meaning |
+|--------|---------|
+| `planning` / `executing` | Agent running — never restarted from intake noise |
+| `plan_ready` | Plan finished; **not** an error. Jira: `plan_execute`. Azure work item: `/planExecute` |
+| `completed` | Delivered (or soft no-op). Jira: To Do to rework. Azure WIT: no auto re-queue |
+| `error` | Failed; comment explains why. Jira: To Do or edit text. Azure WIT: edit text |
+| `cancelled` | Operator cancel. Jira To Do + bot is still rework |
 
 ---
 
-## Azure DevOps Server 2022.2 (same usage as GitLab)
+## Quick start
 
-Mention the bot on a pull-request comment. Yaver clones with the host PAT (no username/password prompt), runs the job, and replies on the PR.
+### Linux
 
-1. Settings → Azure: add the TFS host and a PAT (Code Read & Write).
-2. `.env`: `AZURE_WEBHOOK_ENABLED=true`, `AZURE_TRIGGER_USER=yaver`.
-3. On the Azure DevOps Server project: Service hooks → Web Hooks.
-   - Events: **Pull request commented**, **Pull request updated**, **Pull request merged**.
-   - URL: `http://<yaver-host>:8080/yaver/webhook/azure`
-   - No webhook secret or password.
-4. Comment `@yaver /yaver what does login do?` on a PR. Mention without `/yaver` gets a usage note in that thread. Completed or abandoned PRs delete the matching temp clone. `@yaver /ask …` is ignored (another agent).
+See [packaging/linux/README.md](packaging/linux/README.md).
 
-### Azure Boards work items (webhook)
+```bash
+git submodule update --init --recursive
+./install-dashboard.sh
+./install-backends.sh
+./install-codex.sh
+# Edit .env — JIRA_HOST, JIRA_API_TOKEN, JIRA_BOARD_ID at minimum
+./start-backend.sh        # API + SPA on :8080
+```
 
-New work is assignment while the item is not Done (New, Active, Doing, …). Done/Closed is ignored. Moving Active → New while still assigned to the bot does **not** re-queue (unlike Jira To Do return). After a plan, use work-item comments.
+Ops dashboard: **http://127.0.0.1:8080**  
+OpenCode TUI: `./start-opencode.sh` from the project folder (never from `$HOME`).
 
-1. PAT needs **Work Items (Read & Write)** as well as Code.
-2. `.env`: `AZURE_WEBHOOK_ENABLED=true`. Work-item created/updated is always accepted on that URL. Optional `AZURE_TRIGGER_LABEL` is the same AND as `JIRA_TRIGGER_LABEL`.
-3. On the project: Service hooks → Work item created + Work item updated.
-   Field filters: **Assigned To**, **Description**. **State** is optional (not used as a rework signal).
-   Same URL: `http://<yaver-host>:8080/yaver/webhook/azure`.
-4. Assign an open (not Done) work item to `AZURE_TRIGGER_USER`. Put `{params}` (repo + branches + Mode) in the description. After a plan, comment `@yaver /planRefactor <prompt>` or `@yaver /planExecute`. Mention without those commands gets a usage note on the work item (not on PRs). A new `Mode: build` item is a direct build.
-5. Settings → Azure → Work item lookup fetches one ID and shows whether Yaver would process it.
+### Windows (offline zip)
 
-Git clone, push, and PR create use **the same Azure PAT** as HTTP Basic `pat:<PAT>` (IIS rejects an empty username). Windows Credential Manager is disabled for those git children so they never ask for a username or password.
+See [packaging/windows/README.md](packaging/windows/README.md).
+
+```cmd
+install-dashboard.bat
+install-backends.bat
+install-codex.bat
+start.bat
+```
+
+Open the TUI only via **`start-opencode.bat`** from the project folder.
+
+### Standalone executables
+
+CI **Standalone Executables** freezes `yaver` / `yaver.exe` (onedir). Linux: download the Ubuntu 18.04 / 20.04 / 22.04 / 24.04 build that matches the host. OpenCode / Codex are **not** inside the binary. See [packaging/pyinstaller/](packaging/pyinstaller/README.md).
 
 ---
 
 ## Ops dashboard
 
-Enabled by default with the daemon (`DASHBOARD_ENABLED=true`).
+Enabled with the daemon (`DASHBOARD_ENABLED=true`). Default bind in the offline zip is `0.0.0.0` (LAN). Loopback-only: `DASHBOARD_HOST=127.0.0.1`.
 
 | | |
 |--|--|
 | URL | `http://127.0.0.1:8080` |
-| Stack | FastAPI in-daemon + WebSocket `/ws` + React SPA (`web/`) |
-| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD` (top of `.env`). Empty = no login. Does not apply to the poller, `POST /yaver/webhook/gitlab`, or `POST /yaver/webhook/azure`. |
+| Auth | Optional `DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`. Empty = no login. Does **not** apply to the Jira poller or the GitLab/Azure webhooks. |
 
-**Frontend is display-only.** Filtering, poll math, and settings rules live on the backend.
+**Frontend is display-only.** Filtering and poll math live on the backend.
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| GET | `/api/health` | Liveness + version |
-| GET | `/api/meta` | Version + server time |
-| GET | `/api/tasks` | Agent task list |
-| GET | `/api/jobs` | Paginated job history |
-| GET | `/api/jobs/{id}` | Job detail |
-| DELETE | `/api/jobs/{id}` | Delete job record |
-| GET | `/api/tasks/{key}` | Task detail for issue |
-| POST | `/yaver/webhook/gitlab` | GitLab MR comment + lifecycle (`/webhooks/gitlab` still works) |
-| POST | `/yaver/webhook/azure` | Azure DevOps Server 2022.2 PR comment + lifecycle, and work-item created/updated when enabled (`/webhooks/azure` still works) |
-| POST | `/api/azure/work-item` | Look up one Azure work item (Settings) |
-| POST | `/api/tasks/{key}/cancel` | Cancel live work (preferred over CLI when daemon runs) |
-| GET | `/api/poll` | Last poll snapshot + countdown |
-| GET/PATCH | `/api/settings` | Safe settings (no token values) |
-| GET | `/api/models` | Available OpenCode models |
-| GET | `/api/dashboard` | Full envelope |
-| WS | `/ws` | Live pushes |
+Useful pages:
 
-Writable runtime settings (examples): board id, poll interval, `max_concurrent_jobs`, default model, `project_repositories` (saved git remotes for Scheduled → New issue).  
-`DASHBOARD_ALLOW_REMOTE=false` forces non-loopback hosts back to `127.0.0.1`.
+- **Tasks / Jobs** — live and past runs (prompts and logs are per selected job)
+- **Poll** — last Jira board snapshot
+- **Storage** — temp clones. Delete is refused while a job owns the clone. Merged GitLab MRs and completed/abandoned Azure PRs delete the matching folder. Clones with no linked MR/PR are warned (will not auto-delete).
+- **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
+- **Settings** — board id, poll interval, trigger names, Azure collection PATs (no token values shown)
 
-### Building the UI
+Dashboard **Start** is disabled. **Cancel** kills agent children immediately.
 
 ```bash
 cd web && npm install && npm run build
-# dist/ is served by the daemon; Vite dev: npm run dev (proxies to :8080)
 ```
 
 ---
 
 ## Configuration
 
-Copy [`.env.example`](.env.example) → `.env`. Secrets must never be committed.
+Copy [`.env.example`](.env.example) → `.env`. Never commit secrets.
 
-### Jira connection
+### Jira
 
 | Variable | Description |
 |----------|-------------|
-| `JIRA_HOST` | Base URL (no trailing slash preferred) |
-| `JIRA_API_TOKEN` | Cloud API token **or** on-prem personal access token |
-| `JIRA_EMAIL` | **Cloud/dev only** — with token uses HTTP Basic. Leave empty for Bearer PAT (prod) |
-| `JIRA_PROJECTS` | Comma-separated project keys (reference / allow-list style) |
-| `JIRA_BOARD_ID` | Agile board id to poll (**required** for discovery) |
+| `JIRA_HOST` | Base URL |
+| `JIRA_API_TOKEN` | On-prem PAT or Cloud API token |
+| `JIRA_EMAIL` | Cloud/dev only → HTTP Basic. Empty = Bearer PAT (prod) |
+| `JIRA_PROJECTS` | Project keys: default create + parse keys from GitLab/Azure titles (`feat(KAN-12):`) |
+| `JIRA_BOARD_ID` | Agile board to poll (**required** for Jira discovery) |
+| `JIRA_TRIGGER_USER` | Assignee / mention names (comma-separated, no `@`) |
+| `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake also needs one of these labels |
 
-Auth summary:
-
-- **Prod / on-prem:** `JIRA_HOST` + `JIRA_API_TOKEN` → `Authorization: Bearer …`  
-- **Cloud (dev):** `JIRA_HOST` + `JIRA_EMAIL` + `JIRA_API_TOKEN` → Basic email:token  
-
-TLS verify is currently off for typical on-prem certs; do not “fix” that without a deliberate secure path.
-
-### Intake & dashboard
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `POLL_INTERVAL_SECONDS` | `30` | Board poll interval |
-| `MAX_CONCURRENT_JOBS` | `6` | Parallel agent jobs |
-| `POLL_DISPATCH_WORKERS` | `8` | Parallel dispatch/transitions per poll cycle |
-| `DASHBOARD_ENABLED` | `true` | Serve ops UI with daemon |
-| `DASHBOARD_HOST` | `127.0.0.1` | Bind host |
-| `DASHBOARD_PORT` | `8080` | HTTP port |
-| `DASHBOARD_ALLOW_REMOTE` | `false` | Allow non-loopback bind |
-
-### Triggers
-
-| Variable | Default |
-|----------|---------|
-| `JIRA_TRIGGER_USER` | Jira bot names for assignee intake and mentions (comma-separated, no `@`) |
+TLS verify is off for typical on-prem certs.
 
 ### GitLab
 
 | Variable | Description |
 |----------|-------------|
-| `GITLAB_HOST_PATS` | JSON hostname → PAT. A host with a PAT is allowed (clone / push / MR) |
-| `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
+| `GITLAB_HOST_PATS` | JSON hostname → PAT |
+| `GITLAB_TRIGGER_USER` | Usernames that start a job on `@name /yaver` |
+| `GITLAB_WEBHOOK_SECRET` | Required for `POST /yaver/webhook/gitlab` |
 
 ### Azure DevOps
 
 | Variable | Description |
 |----------|-------------|
-| `AZURE_COLLECTION_PATS` | JSON collection URL → PAT (`https://tfs/tfs/DefaultCollection`). Clone / push / PR |
-| `AZURE_TRIGGER_USER` | Azure display or unique names that start a job on `@name /yaver` in a PR comment, or when Assigned To matches on a work item (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /ask` is ignored (another agent). |
-| `AZURE_TRIGGER_LABEL` | Optional work-item tags required for open (not Done) intake (AND with assignee) |
+| `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` → PAT |
+| `AZURE_WEBHOOK_ENABLED` | Accept PR + work-item hooks on `/yaver/webhook/azure` (no secret) |
+| `AZURE_TRIGGER_USER` | PR `@name /yaver` and work-item Assigned To |
+| `AZURE_TRIGGER_LABEL` | Optional tags required for work-item intake (AND with assignee) |
 
-Repo URL and branches always come from the issue `{params}` block.
-
-### Agent / OpenCode
+### Agent / paths
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENCODE_CLI` | `opencode` | CLI binary/command |
-| `DEFAULT_MODEL` | (see `.env.example`) | Job model for OpenCode and Codex (provider/auth stay in each tool's config) |
-| `DEFAULT_AGENT` | `derman-build` | OpenCoderman derman-build for build jobs |
-| `DEFAULT_PLAN_AGENT` | `derman-plan` | OpenCoderman derman-plan for plan jobs |
-| `AGENT_PROMPTS_DIR` | `agent` | Dir with `PLAN_PROMPT.md` + `BUILD_PROMPT.md` only |
-| `SISYPHUS_PLANS_DIR` | `.sisyphus/plans` | Legacy clone-relative name only; real plans are `{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md` |
-| `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt timeout |
-| `AGENT_TASK_MAX_RETRIES` | `3` | Retries with exponential backoff |
-| `TEMP_DIR_BASE` | `C:\vd\t` (Windows) / `/vd/t` or `~/vd/t` (Linux) | Temp clone root. Outside the install folder so a zip reinstall keeps workspaces. Keep it short on Windows (MAX_PATH). Clones are not auto-deleted; use dashboard Storage. |
-| `YAVER_DATA_DIR` | `C:\vd\yaver` (Windows) / `/vd/yaver` or `~/vd/yaver` (Linux) | Sessions, jobs, OpenCode binds, runtime settings, plans. Survives reinstall. |
-
-List or set models:
+| `POLL_INTERVAL_SECONDS` | `30` | Jira board poll |
+| `MAX_CONCURRENT_JOBS` | `6` | Parallel agent jobs |
+| `DEFAULT_MODEL` | (see `.env.example`) | Shared by OpenCode and Codex |
+| `DEFAULT_AGENT` | `derman-build` | Build jobs |
+| `DEFAULT_PLAN_AGENT` | `derman-plan` | Plan jobs |
+| `DEFAULT_TEST_AGENT` | `derman-test` | Test jobs |
+| `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt wall clock |
+| `TEMP_DIR_BASE` | `C:\vd\t` / `/vd/t` | Temp clones (not auto-deleted except MR/PR complete) |
+| `YAVER_DATA_DIR` | `C:\vd\yaver` / `/vd/yaver` | State, jobs, sessions, plans |
 
 ```bash
 python cli.py models
@@ -418,30 +466,14 @@ python cli.py models --set provider/model-id
 ```bash
 python cli.py --help
 python cli.py --version
-
-# Lifecycle
-python cli.py init              # dirs + .env from example
-python cli.py start             # daemon: poller + dashboard + monitor
-python cli.py config            # safe config dump
-python cli.py models            # list OpenCode models
-
-# Issue ops (need Jira config)
-python cli.py process PROJ-123  # force-process one issue
+python cli.py init
+python cli.py start
+python cli.py process PROJ-123
 python cli.py process PROJ-123 --dry-run
-python cli.py status            # active issues table
+python cli.py status
 python cli.py show PROJ-123
-python cli.py cancel PROJ-123   # state cancel; kill live agent via dashboard if daemon is up
-python cli.py costs             # token/cost rollup from state files
-
-# Local agent smoke (no Jira)
-python cli.py test-issue -t "Fix bugs" -d "Fix calculator divide by zero" -p sample_project
-python cli.py test-issue -t "Plan feature" -d "..." --plan-only --model provider/id
-
-# Simulated Jira (in-memory REST only; does not push to the daemon)
-python cli.py simulate start-server --port 7001
-python cli.py simulate create-issue -s "Title" -d "..." -a DevBot -l ai-assist
-python cli.py simulate list-issues
-python cli.py simulate show-issue SIM-1001
+python cli.py cancel PROJ-123
+python cli.py costs
 ```
 
 ---
@@ -450,29 +482,17 @@ python cli.py simulate show-issue SIM-1001
 
 ```text
 virtual_developer/
-├── cli.py                 # Click CLI entry
-├── VERSION                # SemVer product version
-├── .env.example           # Config template
-├── requirements.txt
-├── agent/PLAN_PROMPT.md   # Short plan-job user stub
-├── agent/BUILD_PROMPT.md  # Short implement-job user stub
-├── opencoderman/          # Submodule: derman-build + derman-plan agents + skills
-├── src/
-│   ├── daemon.py          # Process entry: poller + dashboard + monitor
-│   ├── config.py
-│   ├── processor.py       # Job lifecycle
-│   ├── git_manager.py
-│   ├── issue_git_spec.py  # {params} parser
-│   ├── jira/              # client, poller, simulated client
-│   ├── orchestrator/      # agent_runner, prompts, workflow_router
-│   ├── reporter/          # Jira comments
-│   ├── state/             # models, manager, job_store
-│   └── dashboard/         # FastAPI API, schemas, poll snapshot
-├── web/                   # React + Vite + Tailwind SPA → web/dist
-├── packaging/windows/     # Offline Windows dist
-├── sample_project/        # Calculator with intentional bugs for test-issue
-├── tests/                 # Pytest suite
-└── AGENTS.md              # Contributor / AI agent rules for this repo
+├── cli.py
+├── VERSION
+├── README.md              # this file (English)
+├── README.tr.md           # Turkish operator guide
+├── agent/PLAN_PROMPT.md
+├── agent/BUILD_PROMPT.md
+├── opencoderman/          # derman-build / derman-plan / derman-test
+├── src/                   # daemon, processor, jira, gitlab, azure, dashboard
+├── web/                   # ops SPA
+├── packaging/             # Windows / Linux / PyInstaller
+└── AGENTS.md              # contributor rules
 ```
 
 ---
@@ -485,47 +505,11 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py -q
 ```
 
-- Prefer unit tests with mocks (no live Jira in CI).  
-- **`tests/test_logical_issues.py`** is excluded from the default green suite: it documents desired behaviour that is still incorrect until fixed.  
-- Do not commit `.coverage`, `htmlcov/`, or `.pytest_cache/`.
-
 ---
 
 ## Git flow (this repository)
 
-Default development branch is **`develop`** (not `main`).
-
-```text
-feature/*  →  MR into develop  →  (release) develop → main
-```
-
-Commits and MR titles use [Conventional Commits](https://www.conventionalcommits.org/):
-
-```text
-feat(dashboard): show poll countdown
-fix(poller): do not requeue in-flight issues
-```
-
-Full rules: [AGENTS.md](AGENTS.md). For **target** product repos that agents work in, branch `feature/{JIRA_ISSUE_ID}` and conventional commit policy live in `agent/BUILD_PROMPT.md` / `commitMsgFormat.md`.
-
----
-
-## State on disk
-
-Durable paths (not next to the install / git checkout):
-
-```text
-YAVER_DATA_DIR          # C:\vd\yaver  |  /mnt/c/vd/yaver  |  /vd/yaver or ~/vd/yaver
-  state/                # per-issue JSON (status, plan path, metadata)
-  sessions/             # agent session logs (not auto-deleted)
-  jobs/                 # dashboard job records + per-job system logs
-  logs/                 # durable daemon.log
-  plans/{ISSUE_KEY}.md  # plan files (not inside the clone)
-TEMP_DIR_BASE           # C:\vd\t  |  /mnt/c/vd/t  |  /vd/t or ~/vd/t
-  {remote12}_{hash12}/  # per-issue git clones (kept; delete from Storage)
-```
-
-Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
+Default branch is **`develop`**. Feature MRs go into `develop`. Release: tag `vMAJOR.MINOR.PATCH` and promote `develop` → `main`.
 
 ---
 
@@ -533,30 +517,30 @@ Legacy `.jira-agent/` next to the repo is only a migrate/read fallback.
 
 | Symptom | What to check |
 |---------|----------------|
-| Poller idle / no jobs | `JIRA_BOARD_ID`, issue in To Do, bot assignee (`JIRA_TRIGGER_USER`), `python cli.py process KEY` |
-| Ticket on To Do with bot assignee but bot does nothing | If local status is **`plan_ready`**, rename label `plan_ready` → `plan_execute` while In Progress (or open a new build issue). If local status is `completed` / `error` / `cancelled`, To Do + assignee **is** rework. |
-| 401 / 403 from Jira | Token, Cloud needs `JIRA_EMAIL` for API tokens, host URL, project permissions |
-| Agent never starts | `opencode` / plugin install, `DEFAULT_MODEL`, session logs under `YAVER_DATA_DIR/sessions/` |
-| Git / MR fails | Issue `{params}` complete, host has a PAT in `GITLAB_HOST_PATS` (Settings → GitLab), `glab` available |
-| Dashboard unreachable | Daemon running? `DASHBOARD_*` bind, open `http://127.0.0.1:8080` |
-| Windows TUI black screen | Use `start-opencode.bat` from project dir; re-run `install-backends.bat`; see `packaging/windows/` diag notes |
-| Stuck `planning`/`executing` | Restart daemon (orphan recovery) or cancel from dashboard; check watchdog logs |
+| Jira poller idle | `JIRA_BOARD_ID`, To Do, bot assignee, `python cli.py process KEY` |
+| Jira To Do + bot but nothing happens | `plan_ready` → use `plan_execute`. `completed`/`error`/`cancelled` on To Do **is** rework — check logs |
+| Azure assign does nothing | State must be To Do / In Progress / New / Active / Doing (not Resolved/Done). Webhook enabled? Assigned To matches `AZURE_TRIGGER_USER`? |
+| Azure plan never implements | Comment `@bot /planExecute` on the **work item**, not the PR |
+| MR/PR mention does nothing | Need `@bot /yaver …`. Bare mention only posts a usage note |
+| 401 / 403 Jira | Token; Cloud needs `JIRA_EMAIL` |
+| Git / MR fails | `{params}` complete; host PAT in `GITLAB_HOST_PATS` or `AZURE_COLLECTION_PATS` |
+| Dashboard down | Daemon up? `http://127.0.0.1:8080` |
+| Windows TUI black screen | `start-opencode.bat` from the project folder |
 
 ```bash
 python cli.py config
 python cli.py show PROJ-123
-# DEBUG=true python cli.py start
 ```
 
 ---
 
 ## Security notes
 
-1. Keep **`.env`** out of git (tokens, PATs).  
-2. Dashboard has **no auth** — localhost only unless you knowingly expose it.  
-3. A GitLab PAT is only sent to the host it is stored for (`GITLAB_HOST_PATS`).  
-4. Prefer a dedicated Jira bot account with least privilege.  
-5. Never log raw API tokens or PATs.
+1. Keep **`.env`** out of git.
+2. Dashboard login is optional; lock it down if the host is not on a trusted network.
+3. A GitLab/Azure PAT is only sent to the host/collection it is stored for.
+4. Prefer a dedicated bot account with least privilege.
+5. Never log raw tokens.
 
 ---
 
@@ -564,15 +548,13 @@ python cli.py show PROJ-123
 
 | Doc | Purpose |
 |-----|---------|
-| [AGENTS.md](AGENTS.md) | Coding standards, Jira rules, dashboard rules, Windows packaging hard-won fixes |
-| [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | derman-plan — unattended planner |
-| [opencoderman/agents/derman-test.md](opencoderman/agents/derman-test.md) | derman-test — unattended unit-test writer |
-| [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | derman-build — unattended implementer |
-| [agent/PLAN_PROMPT.md](agent/PLAN_PROMPT.md) | Short plan-job user stub |
-| [agent/BUILD_PROMPT.md](agent/BUILD_PROMPT.md) | Short implement-job user stub |
-| [packaging/windows/README.md](packaging/windows/README.md) | Offline zip design and versioning |
-| [`.env.example`](.env.example) | Full environment template with comments |
-| [web/README.md](web/README.md) | Frontend notes (if present) |
+| [README.tr.md](README.tr.md) | Turkish operator guide |
+| [AGENTS.md](AGENTS.md) | Contributor / AI rules |
+| [opencoderman/agents/derman-plan.md](opencoderman/agents/derman-plan.md) | Unattended planner |
+| [opencoderman/agents/derman-build.md](opencoderman/agents/derman-build.md) | Unattended implementer |
+| [packaging/windows/README.md](packaging/windows/README.md) | Offline Windows zip |
+| [packaging/linux/README.md](packaging/linux/README.md) | Linux install |
+| [`.env.example`](.env.example) | Full environment template |
 
 ---
 
