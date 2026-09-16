@@ -2,7 +2,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { signOutDashboard } from '../auth/dashboardAuth'
 import { Alert } from '../ui/Alert'
 import { ReportIssue } from '../ui/ReportIssue'
-import { formatChatTime, formatDashboardClock, useNow } from '../util/time'
+import { formatDashboardClock, useNow } from '../util/time'
 import { useLive } from './live'
 
 const NAV = [
@@ -82,7 +82,6 @@ export function Shell() {
   const boardMatched = live.poll?.will_process_count ?? 0
   const workQueued = live.queueQueued ?? 0
   const localClock = formatDashboardClock(now)
-  const serverClock = formatChatTime(live.meta?.server_time)
 
   return (
     <div className="vd-app">
@@ -131,12 +130,8 @@ export function Shell() {
         </nav>
 
         <div className="mt-3 space-y-2 px-2 text-xs">
-          <ReportIssue />
-          <div className="hidden font-mono text-[11px] leading-snug text-text-secondary md:block">
-            <div className="text-text">{localClock || '—'}</div>
-            {serverClock && (
-              <div className="mt-0.5 text-text-muted">Server {serverClock}</div>
-            )}
+          <div className="hidden font-mono text-[11px] leading-snug text-text md:block">
+            {localClock || '—'}
           </div>
           <div className="hidden items-center gap-2 md:flex">
             <span
@@ -148,15 +143,18 @@ export function Shell() {
               {live.connected ? 'Connected' : 'Reconnecting'}
             </span>
           </div>
-          {live.meta?.dashboard_auth ? (
-            <button
-              type="button"
-              className="vd-btn vd-btn-secondary w-full justify-center text-xs"
-              onClick={() => signOutDashboard()}
-            >
-              Sign out
-            </button>
-          ) : null}
+          <div className="space-y-1.5">
+            <ReportIssue />
+            {live.meta?.dashboard_auth ? (
+              <button
+                type="button"
+                className="vd-btn vd-btn-secondary w-full justify-start px-3 py-1.5 text-xs"
+                onClick={() => signOutDashboard()}
+              >
+                Sign out
+              </button>
+            ) : null}
+          </div>
         </div>
       </aside>
 
