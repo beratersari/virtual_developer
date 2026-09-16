@@ -1,3 +1,11 @@
+# Yaver 0.9.29
+
+Operator comments no longer use
+“Yapay zekâ — …” headings. Ticket
+{params} stay multiline. Sidebar is
+one clock, Connected, then stacked
+Report issue and Sign out.
+
 # Yaver 0.9.28
 
 PAT assign failure stops the job instead of
