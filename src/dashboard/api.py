@@ -394,7 +394,8 @@ def create_dashboard_app(
         )
         if is_workitem:
             if is_azure_workitem_comment_event(payload, headers):
-                decision = decide_azure_workitem_comment_webhook(
+                decision = await asyncio.to_thread(
+                    decide_azure_workitem_comment_webhook,
                     payload,
                     headers=headers,
                     enabled=enabled,
@@ -406,7 +407,8 @@ def create_dashboard_app(
                         try:
                             names = list(settings.azure_bot_mentions_list or [])
                             posted = bool(
-                                post_azure_workitem_usage_note(
+                                await asyncio.to_thread(
+                                    post_azure_workitem_usage_note,
                                     decision.event,
                                     bot_name=names[0] if names else "",
                                 )
@@ -480,7 +482,8 @@ def create_dashboard_app(
                     "reason": result.get("reason") or "accepted",
                     "server_time": build_meta().server_time,
                 }
-            decision = decide_azure_workitem_webhook(
+            decision = await asyncio.to_thread(
+                decide_azure_workitem_webhook,
                 payload,
                 headers=headers,
                 enabled=enabled,
@@ -531,14 +534,16 @@ def create_dashboard_app(
                 "server_time": build_meta().server_time,
             }
         if is_pr:
-            decision = decide_azure_pr_webhook(
+            decision = await asyncio.to_thread(
+                decide_azure_pr_webhook,
                 payload,
                 headers=headers,
                 enabled=enabled,
                 secret="",
             )
         else:
-            decision = decide_azure_comment_webhook(
+            decision = await asyncio.to_thread(
+                decide_azure_comment_webhook,
                 payload,
                 headers=headers,
                 enabled=enabled,
@@ -554,8 +559,10 @@ def create_dashboard_app(
 
                     names = list(settings.azure_bot_mentions_list or [])
                     posted = bool(
-                        post_azure_usage_note(
-                            decision.event, bot_name=names[0] if names else ""
+                        await asyncio.to_thread(
+                            post_azure_usage_note,
+                            decision.event,
+                            bot_name=names[0] if names else "",
                         )
                     )
                 except Exception:

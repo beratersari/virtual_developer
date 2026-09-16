@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.25] — 2026-09-16
+
+Azure work-item webhooks no longer freeze the ops dashboard.
+
+### Fixed
+
+- Work-item decide / fetch / assign / usage-note HTTP runs off the
+  dashboard event loop. GitLab and Jira were already non-blocking.
+  The Settings Test probe is not used on the webhook path.
+
+[0.9.25]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.25
+
 ## [0.9.24] — 2026-09-16
 
 Azure work-item assign uses the Settings Test identity path.

@@ -1,3 +1,10 @@
+# Yaver 0.9.25
+
+Azure work-item webhooks no longer freeze
+the ops dashboard. TFS HTTP runs off the
+request thread. Settings Test probe is not
+used on assign.
+
 # Yaver 0.9.24
 
 Work-item assign uses the Settings Test

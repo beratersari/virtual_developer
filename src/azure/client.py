@@ -192,12 +192,15 @@ class AzureDevOpsClient:
             bases.extend(identity_roots(f"{scheme}://{self.host}"))
         headers = self._headers()
         try:
-            with httpx.Client(timeout=20.0, verify=False, headers=headers) as client:
+            with httpx.Client(timeout=8.0, verify=False, headers=headers) as client:
                 for base in bases:
                     url = f"{str(base).rstrip('/')}/_apis/connectionData"
-                    for ver in (_API_VERSION, _API_VERSION_FALLBACK, "6.0", "1.0"):
+                    for ver in (_API_VERSION, _API_VERSION_FALLBACK, ""):
                         try:
-                            resp = client.get(url, params={"api-version": ver})
+                            resp = client.get(
+                                url,
+                                params={"api-version": ver} if ver else None,
+                            )
                         except httpx.HTTPError as exc:
                             azure_warning(f"connectionData error root={base} err={exc}")
                             break
