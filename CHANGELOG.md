@@ -18,6 +18,16 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
   the same ticket. ``ERROR`` / ``CANCELLED`` no longer ignore that
   label; ``COMPLETED`` still does. To Do + ``Mode: plan`` is still
   re-plan.
+- Queue reap no longer treats a live ``PENDING`` accept as a leftover
+  after Stop. A finishing job cannot free the same issue for a
+  GitLab/Azure ``/yaver`` while the board accept is still talking to
+  Jira.
+
+### Changed
+
+- Settings → Projects no longer has a Default source field. New-issue
+  source stays ``feature/{KEY}`` unless the operator sets a named
+  branch on the schedule form.
 
 ## [0.9.29] — 2026-09-16
 
