@@ -239,6 +239,7 @@ class JiraStateManager:
         reject_statuses: Optional[set] = None,
         expected_current_task_id: Optional[str] = None,
         expected_job_id: Optional[str] = None,
+        force: bool = False,
         **kwargs: Any,
     ) -> Optional[JiraAgentState]:
         """Compare-and-swap style update under the RLock.
@@ -250,6 +251,8 @@ class JiraStateManager:
           new GitLab/Azure begin must not stamp the new job).
         * On mismatch, returns None without writing (caller treats as aborted/stale).
         * On disk write failure or terminal-clobber refuse, returns None.
+        * ``force=True`` allows an intentional terminal → in-flight write
+          (same-ticket ``plan_execute`` retry after ERROR/CANCELLED).
 
         Metadata patches still merge. Use this for progress→terminal transitions
         so cancel/watchdog ERROR/CANCELLED cannot be overwritten by late success.
@@ -301,7 +304,7 @@ class JiraStateManager:
                 else:
                     setattr(state, key, value)
 
-            if not self.set_state(state):
+            if not self.set_state(state, force=force):
                 return None
             return state
 

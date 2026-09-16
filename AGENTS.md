@@ -97,9 +97,10 @@ To Do + bot assignee
                     repo + source + target (own build session)
 ```
 
-Plan and build keep **separate** OpenCode sessions per repo + source + target
-(`kind=plan` vs `kind=build`). Plan refactor resumes the plan session. A later
-build on that repo/source/target resumes the build session.
+Plan, build, and test keep **separate** OpenCode sessions per repo + source +
+target (`kind=plan` / `kind=build` / `kind=test`). One issue can have three
+`ses_*` chats until Dashboard Reset. Plan refactor resumes the plan session.
+A later build (or test) on that repo/source/target resumes that kind only.
 
 | Situation | Poller / processor behaviour |
 |-----------|------------------------------|
@@ -107,6 +108,7 @@ build on that repo/source/target resumes the build session.
 | Local `planning` / `executing` | **Ignore** poll noise (never restart in-flight) |
 | Local `plan_ready` + label `plan_ready` | **Wait.** Do not implement. |
 | Local `plan_ready` + In Progress + `plan_execute` | **Start** implementation (even if Mode is still plan) |
+| Local `error` / `cancelled` + In Progress + `plan_execute` | **Start** implementation again (same-ticket retry). `completed` is not a retry. |
 | Local `plan_ready` + `plan_refactor` (no `plan_ready` label) + comment @bot | **Revise** the plan on the plan session. Re-adding `plan_refactor` without a new `@bot` comment **reuses the latest existing mention** (intentional). |
 | Local `error` / `cancelled` / `completed` + To Do + bot assignee | **Re-queue** (reset and run again). **To Do is rework — intentional.** |
 
@@ -411,8 +413,8 @@ Open: `http://127.0.0.1:8080` after daemon start.
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest pytest-asyncio pytest-cov
-.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py -q
-.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --cov=src --cov-branch
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --ignore=tests/test_daily_use_critical_audit.py -q
+.venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --ignore=tests/test_daily_use_critical_audit.py --cov=src --cov-branch
 ```
 
 ### Rules

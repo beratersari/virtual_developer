@@ -8,6 +8,17 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Plan, build, and test keep three separate OpenCode sessions for the
+  same repo + source + target. ``Mode: test`` no longer continues a
+  ``derman-build`` chat (and the reverse). Dashboard Reset still
+  forgets the bind.
+- After a failed implement, In Progress + ``plan_execute`` retries
+  the same ticket. ``ERROR`` / ``CANCELLED`` no longer ignore that
+  label; ``COMPLETED`` still does. To Do + ``Mode: plan`` is still
+  re-plan.
+
 ## [0.9.29] — 2026-09-16
 
 Operator comments drop the “Yapay zekâ” banners. Ticket params stay

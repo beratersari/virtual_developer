@@ -731,6 +731,62 @@ def test_ingest_plan_execute_on_active_plan_ready_assigns():
     assigned.assert_called()
 
 
+def test_ingest_plan_execute_after_error_assigns():
+    from src.azure.workitems import parse_workitem_payload as parse
+
+    parsed = parse(_wi_comment_payload(state="Active"))
+    assert parsed is not None
+    parsed.plan_handoff = "execute"
+    proc = _processor()
+    failed = MagicMock()
+    failed.status = TaskStatus.ERROR
+    failed.metadata = {}
+    proc.state_manager.get_state.return_value = failed
+
+    async def _run():
+        with patch(
+            "src.azure.workitems.fetch_work_item_issue",
+            return_value=parsed.issue,
+        ), patch(
+            "src.azure.tracker.AzureWorkItemTracker.transition_to_in_progress",
+            return_value=True,
+        ) as moved, patch(
+            "src.azure.tracker.AzureWorkItemTracker.assign_to_pat_user",
+            return_value=True,
+        ) as assigned:
+            return await proc.ingest_azure_work_item(parsed), moved, assigned
+
+    result, moved, assigned = asyncio.run(_run())
+    assert result["ok"] is True
+    moved.assert_called()
+    assigned.assert_called()
+
+
+def test_ingest_plan_refactor_after_error_skips():
+    from src.azure.workitems import parse_workitem_payload as parse
+
+    parsed = parse(_wi_comment_payload(state="Active"))
+    assert parsed is not None
+    parsed.plan_handoff = "refactor"
+    proc = _processor()
+    failed = MagicMock()
+    failed.status = TaskStatus.ERROR
+    failed.metadata = {}
+    proc.state_manager.get_state.return_value = failed
+
+    async def _run():
+        with patch(
+            "src.azure.workitems.fetch_work_item_issue",
+            return_value=parsed.issue,
+        ):
+            return await proc.ingest_azure_work_item(parsed)
+
+    result = asyncio.run(_run())
+    assert result["status"] == "skipped"
+    assert "plan_ready" in result["reason"]
+    proc.enqueue_jira_event.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Processor update path: Azure To Do / In Progress vs Done vs Jira To Do
 # ---------------------------------------------------------------------------
