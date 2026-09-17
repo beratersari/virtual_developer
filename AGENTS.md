@@ -350,7 +350,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
 | `DASHBOARD_PORT` | Dashboard HTTP port (default `8080`) |
 | `AZURE_COLLECTION_PATS` | JSON TFS collection URL → Azure PAT. Clone/push/MR use Basic `pat:<PAT>` (IIS rejects empty user). Host-only maps are not used. |
-| `AZURE_COLLECTION_URLS` | JSON list of TFS collection URLs (`https://host/tfs/<Collection>`). Settings refuses host-only or `/tfs` without a collection name. |
+| `AZURE_COLLECTION_URLS` | JSON list of collection URLs (`https://host/tfs/<Collection>` or `https://host/<Collection>`). Settings refuses host-only or `/tfs` without a collection name. Do not invent `/tfs` when the operator omitted it. |
 | `AZURE_PAT` | Leftover single Azure PAT (used only when `AZURE_COLLECTION_PATS` is empty) |
 | `AZURE_WEBHOOK_ENABLED` | Accept Azure DevOps Server service hooks on `/yaver/webhook/azure` (no secret). PR comments **and** work-item created/updated. |
 

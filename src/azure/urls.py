@@ -10,7 +10,8 @@ def identity_root(url: str) -> str:
 
     TFS rejects collection-scoped ``/_apis/connectionData`` with 400.
     ``https://host/tfs/Collection`` and ``https://host/tfs`` both resolve
-    to ``https://host/tfs``. Azure DevOps Services keeps the org.
+    to ``https://host/tfs``. ``https://host/Collection`` (no virtual
+    directory) resolves to the host. Azure DevOps Services keeps the org.
     """
     parsed = urlparse(str(url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -24,8 +25,9 @@ def identity_root(url: str) -> str:
         return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
     if parts and parts[0].lower() == "tfs":
         return urlunparse((parsed.scheme, parsed.netloc, "/tfs", "", "", ""))
-    path = f"/{parts[0]}" if len(parts) == 1 else ""
-    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+    # Collection at site root (no /tfs virtual directory): connectionData
+    # is on the host, not /Collection. Azure DevOps Services is handled above.
+    return urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
 
 
 def identity_roots(configured: str) -> list[str]:
@@ -50,12 +52,19 @@ def identity_roots(configured: str) -> list[str]:
     return list(dict.fromkeys(item for item in roots if item))
 
 
-def parse_tfs_collection_url(raw: str) -> str:
-    """Normalize a TFS collection URL or return ``""``.
+_RESERVED_COLLECTION = {"tfs", "_apis", "_git", "_workitems"}
 
-    Accepted: ``https://host/tfs/<Collection>`` (optional extra project /
-    ``_git`` / ``_apis`` suffix is stripped). Host-only and ``/tfs`` with no
-    collection name are rejected.
+
+def parse_tfs_collection_url(raw: str) -> str:
+    """Normalize a collection URL or return ``""``.
+
+    Accepted (optional project / ``_git`` / ``_apis`` suffix is stripped):
+
+    * ``https://host/tfs/<Collection>`` — classic TFS virtual directory
+    * ``https://host/<Collection>`` — Azure DevOps Server without ``/tfs``
+
+    Host-only and ``/tfs`` with no collection name are rejected. ``/tfs`` is
+    never inserted when the operator omitted it.
     """
     text = str(raw or "").strip()
     if not text:
@@ -78,13 +87,20 @@ def parse_tfs_collection_url(raw: str) -> str:
             head = head.rsplit("/", 1)[0]
         path = head
     parts = [item for item in path.split("/") if item]
-    if len(parts) < 2 or parts[0].lower() != "tfs":
+    if not parts:
         return ""
-    collection = parts[1].strip()
-    if not collection or collection.lower() in {"_apis", "_git", "_workitems"}:
+    if parts[0].lower() == "tfs":
+        if len(parts) < 2:
+            return ""
+        collection = parts[1].strip()
+        path_out = f"/tfs/{collection}"
+    else:
+        collection = parts[0].strip()
+        path_out = f"/{collection}"
+    if not collection or collection.lower() in _RESERVED_COLLECTION:
         return ""
     return urlunparse(
-        (parsed.scheme, parsed.netloc, f"/tfs/{collection}", "", "", "")
+        (parsed.scheme, parsed.netloc, path_out, "", "", "")
     ).rstrip("/")
 
 
@@ -111,6 +127,6 @@ def require_tfs_collection_url(raw: str) -> str:
     if url:
         return url
     raise ValueError(
-        "Azure URL must include a TFS collection, e.g. "
-        "https://tfs.example.com/tfs/DefaultCollection"
+        "Azure URL must include a collection name, e.g. "
+        "https://host/tfs/DefaultCollection or https://host/DefaultCollection"
     )

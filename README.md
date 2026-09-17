@@ -434,7 +434,7 @@ TLS verify is off for typical on-prem certs.
 
 | Variable | Description |
 |----------|-------------|
-| `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` → PAT |
+| `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` or `https://host/Collection` → PAT |
 | `AZURE_WEBHOOK_ENABLED` | Accept PR + work-item hooks on `/yaver/webhook/azure` (no secret) |
 | `AZURE_TRIGGER_USER` | PR `@name /yaver` and work-item Assigned To |
 

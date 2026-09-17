@@ -424,7 +424,7 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 
 | Değişken | Açıklama |
 |----------|----------|
-| `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` → PAT |
+| `AZURE_COLLECTION_PATS` | JSON `https://host/tfs/Collection` veya `https://host/Collection` → PAT |
 | `AZURE_WEBHOOK_ENABLED` | `/yaver/webhook/azure` üzerinde PR + iş öğesi (sır yok) |
 | `AZURE_TRIGGER_USER` | PR `@ad /yaver` ve iş öğesi Assigned To |
 

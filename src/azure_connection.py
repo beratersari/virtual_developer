@@ -242,7 +242,7 @@ def save_azure_collection_urls(urls: Iterable[str]) -> List[str]:
 
 
 def remember_azure_collection(host: str, collection_url: str) -> None:
-    """Append a real ``/tfs/<Collection>`` URL (webhooks). Host-only is ignored."""
+    """Append a real collection URL (webhooks). Host-only is ignored."""
     url = parse_tfs_collection_url(collection_url)
     if not url:
         return

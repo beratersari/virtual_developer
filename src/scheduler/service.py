@@ -340,8 +340,8 @@ def preview_azure_work_item(
         return {
             "ok": False,
             "error": (
-                "TFS collection URL is required "
-                "(https://host/tfs/<Collection>)"
+                "Collection URL is required "
+                "(https://host/tfs/<Collection> or https://host/<Collection>)"
             ),
             "issue_key": key,
         }

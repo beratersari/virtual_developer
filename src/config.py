@@ -392,7 +392,10 @@ class Settings(BaseSettings):
     )
     azure_collection_urls: str = Field(
         default="",
-        description="JSON list of TFS collection URLs (must include /tfs/<Collection>)",
+        description=(
+            "JSON list of collection URLs "
+            "(https://host/tfs/<Collection> or https://host/<Collection>)"
+        ),
     )
     azure_webhook_secret: str = Field(
         default="",

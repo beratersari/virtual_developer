@@ -26,6 +26,9 @@ def test_candidate_bases_try_tfs_app_root_not_collection():
     assert not any(b.endswith("/tfs/DefaultCollection") for b in bases)
     with_path = _candidate_bases("https://tfs.example.com/tfs/MyCol")
     assert with_path[0] == "https://tfs.example.com/tfs"
+    no_vdir = _candidate_bases("https://ado.example.com/DefaultCollection")
+    assert no_vdir[0] == "https://ado.example.com"
+    assert "https://ado.example.com/tfs" not in no_vdir
 
 
 def test_probe_azure_skips_host_root_401_then_succeeds(monkeypatch):
