@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.31] — 2026-09-17
+
+Azure collection URLs work with or without a ``/tfs`` virtual directory.
+
+### Changed
+
+- Azure collection URLs no longer require a ``/tfs`` virtual directory.
+  ``https://host/tfs/DefaultCollection`` and ``https://host/DefaultCollection``
+  both save. Host-only and ``/tfs`` with no collection name are still
+  rejected. The saved path is kept as entered; ``/tfs`` is not inserted.
+
+[0.9.31]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.31
+
 ## [0.9.30] — 2026-09-16
 
 Plan, build, and test keep three OpenCode sessions. A failed

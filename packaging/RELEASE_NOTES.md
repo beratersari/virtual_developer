@@ -1,3 +1,10 @@
+# Yaver 0.9.31
+
+Azure collection URLs no longer
+require /tfs. Save either
+https://host/tfs/Collection or
+https://host/Collection.
+
 # Yaver 0.9.30
 
 Plan, build, and test keep three OpenCode
