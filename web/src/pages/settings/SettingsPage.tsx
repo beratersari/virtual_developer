@@ -607,11 +607,14 @@ export function SettingsPage() {
       <div key="azure" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Credentials</div>
       <p className="text-xs text-text-muted">
-        Add the TFS collection URL, not the hostname. Example:
-        https://tfs.example.com/tfs/DefaultCollection. A host-only or
-        /tfs URL without a collection name is rejected on save. Auth is
-        Basic pat:PAT. Leave PAT blank to keep the stored token. Test
-        still authenticates at /tfs/_apis/connectionData (Creasy 0.9.1).
+        Add the collection URL, not the hostname. Use
+        https://tfs.example.com/tfs/DefaultCollection when the server
+        has a /tfs virtual directory, or
+        https://tfs.example.com/DefaultCollection when it does not. A
+        host-only or /tfs URL without a collection name is rejected on
+        save. Auth is Basic pat:PAT. Leave PAT blank to keep the stored
+        token. Test authenticates at the server identity root
+        (/tfs/_apis/connectionData when the URL includes /tfs).
       </p>
       {draft.azure_cred_rows.map((row, idx) => (
         <div key={idx}>

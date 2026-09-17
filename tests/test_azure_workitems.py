@@ -247,6 +247,10 @@ def test_parse_tfs_collection_url():
         )
         == "https://tfs.example.com/tfs/DefaultCollection"
     )
+    assert (
+        parse_tfs_collection_url("https://ado.example.com/DefaultCollection")
+        == "https://ado.example.com/DefaultCollection"
+    )
     assert parse_tfs_collection_url("tfs.example.com") == ""
     assert parse_tfs_collection_url("https://tfs.example.com") == ""
     assert parse_tfs_collection_url("https://tfs.example.com/tfs") == ""
@@ -282,6 +286,41 @@ def test_settings_reject_hostname_only_azure(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "collection" in str(exc).lower()
+
+
+def test_settings_accept_collection_without_tfs(monkeypatch):
+    from src.config import Settings
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    s = Settings()
+    s.set_azure_host_pat_map({})
+    monkeypatch.setattr("src.dashboard.service.settings", s)
+    monkeypatch.setattr("src.config.settings", s)
+    monkeypatch.setattr(
+        "src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        "src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None
+    )
+    view = apply_settings_update(
+        SettingsUpdate(
+            azure_credentials=[
+                {
+                    "host": "https://ado.example.com/DefaultCollection",
+                    "pat": "x",
+                }
+            ]
+        )
+    )
+    assert any(
+        (c.collection_url or c.host) == "https://ado.example.com/DefaultCollection"
+        for c in view.azure_credentials
+    )
+    assert (
+        s.azure_pat_for_collection("https://ado.example.com/DefaultCollection")
+        == "x"
+    )
 
 
 def test_schedule_preview_azure_work_item():

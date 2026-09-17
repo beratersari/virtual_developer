@@ -1381,8 +1381,9 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Azure URL must include a TFS collection, e.g. "
-                    "https://tfs.example.com/tfs/DefaultCollection"
+                    "Azure URL must include a collection name, e.g. "
+                    "https://host/tfs/DefaultCollection or "
+                    "https://host/DefaultCollection"
                 ),
             )
         names = AzureDevOpsClient(collection_url=collection).list_projects()
@@ -1404,8 +1405,9 @@ def create_dashboard_app(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "Azure URL must include a TFS collection, e.g. "
-                    "https://tfs.example.com/tfs/DefaultCollection"
+                    "Azure URL must include a collection name, e.g. "
+                    "https://host/tfs/DefaultCollection or "
+                    "https://host/DefaultCollection"
                 ),
             )
         project = (body.project or "").strip()
