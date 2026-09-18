@@ -1,3 +1,11 @@
+# Yaver 0.9.32
+
+Always-on MR/PR code review.
+@bot /review and /ask, assign,
+or open-if-reviewer. Inline
+findings threads. derman-reviewer.
+No push.
+
 # Yaver 0.9.31
 
 Azure collection URLs no longer

@@ -8,6 +8,28 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.32] — 2026-09-18
+
+Always-on GitLab and Azure **code review**. Jobs use
+``derman-reviewer`` and show ``gitlab-review`` / ``azure-review``.
+
+### Added
+
+- MR/PR **code review** is always on. Yaver uses the Creasy review
+  rules (not Creasy clone layout): `@bot /review`, `@bot /ask`,
+  reviewer assign / re-request, and MR/PR open when the bot is already
+  a reviewer. New commits do not re-review. Overview posts when there
+  is no thread; thread replies stay in-thread. No push or new MR.
+  Work-item `/review` and `/ask` stay silent. A `/review` result
+  that includes an `opencoderman-findings` fence opens one inline
+  file/line thread per finding (GitLab discussion / Azure file
+  thread). `/ask` stays on the request thread only. The OpenCoderman
+  review agent is **derman-reviewer** (`code-reviewer` /
+  `gitlab-reviewer` remain install aliases). Jobs show
+  ``gitlab-review`` / ``azure-review``.
+
+[0.9.32]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.32
+
 ## [0.9.31] — 2026-09-17
 
 Azure collection URLs work with or without a ``/tfs`` virtual directory.
