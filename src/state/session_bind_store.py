@@ -2,7 +2,7 @@
 
 A later issue (or re-run) with the same remote, work/Source branch, **and**
 Target can resume the same OpenCode serve session *of that kind* (plan,
-build, or test). A different Target is a different MR base — new clone
+build, test, or review). A different Target is a different MR base — new clone
 folder + new session so the model is not mixed with work aimed at another
 branch. Dashboard Reset drops the bind.
 """
@@ -66,13 +66,19 @@ def normalize_branch(name: str) -> str:
 SESSION_KIND_PLAN = "plan"
 SESSION_KIND_BUILD = "build"
 SESSION_KIND_TEST = "test"
+SESSION_KIND_REVIEW = "review"
 _SESSION_KINDS = frozenset(
-    {SESSION_KIND_PLAN, SESSION_KIND_BUILD, SESSION_KIND_TEST}
+    {
+        SESSION_KIND_PLAN,
+        SESSION_KIND_BUILD,
+        SESSION_KIND_TEST,
+        SESSION_KIND_REVIEW,
+    }
 )
 
 
 def normalize_session_kind(kind: str = "") -> str:
-    """``plan`` / ``build`` / ``test`` session map, or empty for the legacy bind."""
+    """``plan`` / ``build`` / ``test`` / ``review`` map, or empty for the legacy bind."""
     raw = (kind or "").strip().lower()
     if raw in {"planning", "derman-plan"}:
         return SESSION_KIND_PLAN
@@ -88,11 +94,23 @@ def normalize_session_kind(kind: str = "") -> str:
         return SESSION_KIND_BUILD
     if raw in {"testing", "derman-test", "tester"}:
         return SESSION_KIND_TEST
+    if raw in {
+        "review",
+        "reviewing",
+        "code-reviewer",
+        "derman-reviewer",
+        "code_reviewer",
+        "gitlab_review",
+        "azure_review",
+        "gitlab-review",
+        "azure-review",
+    }:
+        return SESSION_KIND_REVIEW
     return raw if raw in _SESSION_KINDS else ""
 
 
 def other_session_kinds(kind: str = "") -> tuple[str, ...]:
-    """Every session map except ``kind`` (empty kind → all three)."""
+    """Every session map except ``kind`` (empty kind → all kinds)."""
     kind_n = normalize_session_kind(kind)
     return tuple(sorted(k for k in _SESSION_KINDS if k != kind_n))
 

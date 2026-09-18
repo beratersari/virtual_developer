@@ -44,9 +44,13 @@ def test_session_kind_testing_is_separate_from_build():
     assert normalize_session_kind("derman-test") == "test"
     assert normalize_session_kind("execution") == "build"
     assert normalize_session_kind("planning") == "plan"
-    assert set(other_session_kinds("test")) == {"plan", "build"}
-    assert set(other_session_kinds("build")) == {"plan", "test"}
-    assert set(other_session_kinds("plan")) == {"build", "test"}
+    assert normalize_session_kind("review") == "review"
+    assert normalize_session_kind("code-reviewer") == "review"
+    assert normalize_session_kind("derman-reviewer") == "review"
+    assert set(other_session_kinds("test")) == {"plan", "build", "review"}
+    assert set(other_session_kinds("build")) == {"plan", "test", "review"}
+    assert set(other_session_kinds("plan")) == {"build", "test", "review"}
+    assert set(other_session_kinds("review")) == {"plan", "build", "test"}
     assert bind_compatible_with_kind({"kind": "test"}, "build") is False
     assert bind_compatible_with_kind({"kind": "build"}, "test") is False
     assert bind_compatible_with_kind({"kind": "plan"}, "build") is False

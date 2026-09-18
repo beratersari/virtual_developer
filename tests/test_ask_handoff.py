@@ -1,4 +1,4 @@
-"""``@bot /ask`` is another agent. GitLab and Azure webhooks must not start a job."""
+"""``@bot /ask`` / ``/review`` start MR/PR review. Work items stay silent."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from src.gitlab.mentions import (
     ASK_HANDOFF_REASON,
-    REVIEW_HANDOFF_REASON,
+    EMPTY_ASK_REASON,
     flatten_comment_text,
     note_is_ask_handoff,
     note_is_review_handoff,
@@ -137,12 +137,11 @@ def test_ask_handoff_reason_constant():
         "<p>@berat_ai /ask</p>",
     ],
 )
-def test_gitlab_decide_rejects_ask_handoff(note):
+def test_gitlab_decide_accepts_ask(note):
     d = _gl(note)
-    assert d.accepted is False
-    assert d.reason == ASK_HANDOFF_REASON
-    assert d.event is None
-    assert d.http_status == 200
+    assert d.accepted is True
+    assert d.event is not None
+    assert d.event.command == "ask"
 
 
 @pytest.mark.parametrize(
@@ -181,8 +180,8 @@ def test_gitlab_ask_after_bot_not_mentioned():
 
 def test_gitlab_ask_second_configured_bot():
     d = _gl("@devbot /ask ping", bots=["berat_ai", "devbot"])
-    assert d.accepted is False
-    assert d.reason == ASK_HANDOFF_REASON
+    assert d.accepted is True
+    assert d.event.command == "ask"
 
 
 def test_gitlab_mr_lifecycle_not_affected_by_ask_text():
@@ -208,15 +207,14 @@ def test_gitlab_mr_lifecycle_not_affected_by_ask_text():
         "@yaver\n/ask multiline",
         "hey team\n@yaver /ask about the API",
         '<a href="#" data-vss-mention="version:2.0,g">@Yaver</a> /ask html',
-        '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a> /ask',
+        '<a href="#" data-vss-mention="version:2.0,g">@Yaver Bot</a> /ask why',
     ],
 )
-def test_azure_decide_rejects_ask_handoff(note):
+def test_azure_decide_accepts_ask(note):
     d = _az(note)
-    assert d.accepted is False
-    assert d.reason == ASK_HANDOFF_REASON
-    assert d.event is None
-    assert d.http_status == 200
+    assert d.accepted is True
+    assert d.event is not None
+    assert d.event.command == "ask"
 
 
 @pytest.mark.parametrize(
@@ -235,13 +233,13 @@ def test_azure_decide_still_accepts_normal_mention(note):
     assert d.event is not None
 
 
-def test_azure_display_name_ask_handoff():
+def test_azure_display_name_ask():
     d = _az("@Yaver Bot /ask why is this failing", bots=["Yaver Bot"])
-    assert d.accepted is False
-    assert d.reason == ASK_HANDOFF_REASON
+    assert d.accepted is True
+    assert d.event.command == "ask"
 
 
-def test_azure_ask_ignored_without_webhook_secret():
+def test_azure_empty_ask_skipped_without_webhook_secret():
     d = decide_azure_comment_webhook(
         _pr_comment_payload(note="@yaver /ask"),
         headers={},
@@ -249,7 +247,7 @@ def test_azure_ask_ignored_without_webhook_secret():
         bot_mentions=BOTS_AZ,
     )
     assert d.accepted is False
-    assert d.reason == ASK_HANDOFF_REASON
+    assert d.reason == EMPTY_ASK_REASON
 
 
 def test_azure_ask_after_bot_not_mentioned():
@@ -283,19 +281,17 @@ def test_gitlab_bot_reply_still_wins_over_ask():
     assert d.reason == "ignored bot reply"
 
 
-def test_gitlab_review_handoff_is_silent():
+def test_gitlab_review_is_accepted():
     d = _gl("@berat_ai /review")
-    assert d.accepted is False
-    assert d.reason == REVIEW_HANDOFF_REASON
-    assert d.event is None
+    assert d.accepted is True
+    assert d.event.command == "review"
     assert d.usage_note is False
 
 
-def test_azure_review_handoff_is_silent():
+def test_azure_review_is_accepted():
     d = _az("@yaver /review the change")
-    assert d.accepted is False
-    assert d.reason == REVIEW_HANDOFF_REASON
-    assert d.event is None
+    assert d.accepted is True
+    assert d.event.command == "review"
     assert d.usage_note is False
 
 
@@ -316,7 +312,7 @@ def test_new_header_is_ignored_as_bot_reply():
 
 # --- HTTP: processor must not be called --------------------------------------
 
-def test_gitlab_http_review_does_not_post_usage_note(fake_jira, monkeypatch):
+def test_gitlab_http_review_enqueues_without_usage_note(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
 
@@ -331,7 +327,9 @@ def test_gitlab_http_review_does_not_post_usage_note(fake_jira, monkeypatch):
 
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
-    proc.enqueue_gitlab_note = AsyncMock()
+    proc.enqueue_gitlab_note = AsyncMock(
+        return_value={"ok": True, "queued": True, "issue_key": "KAN-12"}
+    )
     app = create_dashboard_app(processor=proc)
     with patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
         with TestClient(app) as client:
@@ -342,14 +340,13 @@ def test_gitlab_http_review_does_not_post_usage_note(fake_jira, monkeypatch):
             )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["ok"] is False
-    assert body["reason"] == REVIEW_HANDOFF_REASON
+    assert body.get("ok") is True
     assert body.get("usage_note") is not True
-    proc.enqueue_gitlab_note.assert_not_awaited()
+    proc.enqueue_gitlab_note.assert_called_once()
     assert posted == {}
 
 
-def test_gitlab_http_ask_does_not_enqueue(fake_jira, monkeypatch):
+def test_gitlab_http_ask_enqueues(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
 
@@ -358,7 +355,9 @@ def test_gitlab_http_ask_does_not_enqueue(fake_jira, monkeypatch):
     monkeypatch.setattr("src.config.settings.gitlab_bot_mentions", "@berat_ai")
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
-    proc.enqueue_gitlab_note = AsyncMock()
+    proc.enqueue_gitlab_note = AsyncMock(
+        return_value={"ok": True, "queued": True, "issue_key": "KAN-12"}
+    )
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
@@ -368,12 +367,11 @@ def test_gitlab_http_ask_does_not_enqueue(fake_jira, monkeypatch):
         )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["ok"] is False
-    assert body["reason"] == ASK_HANDOFF_REASON
-    proc.enqueue_gitlab_note.assert_not_awaited()
+    assert body.get("ok") is True
+    proc.enqueue_gitlab_note.assert_called_once()
 
 
-def test_azure_http_ask_does_not_enqueue(fake_jira, monkeypatch):
+def test_azure_http_ask_enqueues(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
 
@@ -382,7 +380,9 @@ def test_azure_http_ask_does_not_enqueue(fake_jira, monkeypatch):
     monkeypatch.setattr("src.config.settings.azure_bot_mentions", "@yaver")
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
-    proc.enqueue_azure_comment = AsyncMock()
+    proc.enqueue_azure_comment = AsyncMock(
+        return_value={"ok": True, "queued": True, "issue_key": "KAN-12"}
+    )
     app = create_dashboard_app(processor=proc)
     with TestClient(app) as client:
         resp = client.post(
@@ -392,9 +392,8 @@ def test_azure_http_ask_does_not_enqueue(fake_jira, monkeypatch):
         )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["ok"] is False
-    assert body["reason"] == ASK_HANDOFF_REASON
-    proc.enqueue_azure_comment.assert_not_awaited()
+    assert body.get("ok") is True
+    proc.enqueue_azure_comment.assert_called_once()
 
 
 def test_gitlab_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
@@ -457,7 +456,7 @@ def test_azure_http_normal_mention_still_enqueues(fake_jira, monkeypatch):
     proc.enqueue_azure_comment.assert_awaited_once()
 
 
-def test_azure_http_html_chip_ask_does_not_enqueue(fake_jira, monkeypatch):
+def test_azure_http_html_chip_ask_enqueues(fake_jira, monkeypatch):
     from src.dashboard.api import create_dashboard_app
     from src.processor import JobProcessor
 
@@ -466,7 +465,9 @@ def test_azure_http_html_chip_ask_does_not_enqueue(fake_jira, monkeypatch):
     monkeypatch.setattr("src.config.settings.azure_bot_mentions", "@yaver")
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
-    proc.enqueue_azure_comment = AsyncMock()
+    proc.enqueue_azure_comment = AsyncMock(
+        return_value={"ok": True, "queued": True, "issue_key": "KAN-12"}
+    )
     note = (
         '<a href="#" data-vss-mention="version:2.0,guid">@Yaver</a> /ask '
         "redirect this"
@@ -479,5 +480,5 @@ def test_azure_http_html_chip_ask_does_not_enqueue(fake_jira, monkeypatch):
             headers={"X-Azure-Token": "tok"},
         )
     assert resp.status_code == 200
-    assert resp.json()["reason"] == ASK_HANDOFF_REASON
-    proc.enqueue_azure_comment.assert_not_awaited()
+    assert resp.json().get("ok") is True
+    proc.enqueue_azure_comment.assert_called_once()

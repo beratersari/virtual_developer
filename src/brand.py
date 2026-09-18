@@ -126,7 +126,7 @@ def format_execute_usage_note(bot_name: str = "yaver") -> str:
     Do not put ``@name`` / ``@mention`` in this text — those tokens start
     the other agent (Creasy). Same shape as Creasy's usage note.
     """
-    from src.operator_copy import USAGE_MR_PR
+    from src.operator_copy import USAGE_MR_PR_WITH_REVIEW
 
     _ = bot_name
-    return f"{USAGE_MARKER}\n{USAGE_HEADING}\n\n{USAGE_MR_PR}"
+    return f"{USAGE_MARKER}\n{USAGE_HEADING}\n\n{USAGE_MR_PR_WITH_REVIEW}"

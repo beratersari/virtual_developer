@@ -13,6 +13,7 @@ class WorkflowType(Enum):
     PLANNING = "planning"  # Mode: plan — derman-plan (no GitLab push)
     EXECUTION = "execution"  # Mode: build — derman-build → push + MR
     TESTING = "testing"  # Mode: test — derman-test → unit tests, push + MR
+    REVIEW = "review"  # MR/PR /review /ask — derman-reviewer, no push + MR
 
 
 class WorkflowRouter:
@@ -81,6 +82,11 @@ class WorkflowRouter:
             if isinstance(test, str) and test.strip():
                 return test.strip()
             return "derman-test"
+        if workflow_type == WorkflowType.REVIEW:
+            review = getattr(settings, "default_review_agent", None)
+            if isinstance(review, str) and review.strip():
+                return review.strip()
+            return "derman-reviewer"
         agent = getattr(settings, "default_agent", None)
         if isinstance(agent, str) and agent.strip():
             return agent.strip()

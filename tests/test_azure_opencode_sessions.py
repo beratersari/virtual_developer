@@ -41,6 +41,7 @@ def test_azure_pr_workflow_type_is_build_kind():
     assert normalize_session_kind("execution") == "build"
     assert normalize_session_kind("planning") == "plan"
     assert normalize_session_kind("azure_workitem") == ""
+    assert normalize_session_kind("review") == "review"
 
 
 def test_same_repo_work_target_same_bind_id_across_issue_keys():

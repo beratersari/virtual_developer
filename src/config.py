@@ -431,6 +431,17 @@ class Settings(BaseSettings):
         default="derman-test",
         description="OpenCode agent for test jobs (opencoderman derman-test)",
     )
+    default_review_agent: str = Field(
+        default="derman-reviewer",
+        description="OpenCode agent for MR/PR /review and /ask (opencoderman derman-reviewer)",
+    )
+    yaver_review_skip_drafts: bool = Field(
+        default=True,
+        description=(
+            "Skip auto-review of draft MRs/PRs (Creasy). "
+            "Explicit /review, /ask, and reviewer-assign still run."
+        ),
+    )
 
     # Mode prompts (agent name does not change prompt text)
     agent_prompts_dir: Path = Field(
@@ -448,6 +459,10 @@ class Settings(BaseSettings):
     test_prompt_file: Optional[Path] = Field(
         default=None,
         description="Test-mode prompt (default: {agent_prompts_dir}/TEST_PROMPT.md)",
+    )
+    review_prompt_file: Optional[Path] = Field(
+        default=None,
+        description="Review-mode prompt (default: {agent_prompts_dir}/REVIEW_PROMPT.md)",
     )
     
     # How many agent jobs run at once (raise for large boards / many subtasks)

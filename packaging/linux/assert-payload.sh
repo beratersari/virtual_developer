@@ -26,7 +26,7 @@ for rel in \
   vendor/bin/opencode \
   opencoderman/install.py \
   opencoderman.pin \
-  opencoderman/agents/code-reviewer.md \
+  opencoderman/agents/derman-reviewer.md \
   opencoderman/agents/derman-test.md \
   opencoderman/vendor/bin/linux/opencode \
   packaging/install_opencode.py \

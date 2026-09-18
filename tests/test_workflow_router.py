@@ -111,4 +111,5 @@ def test_no_comment_workflow_type():
         "planning",
         "execution",
         "testing",
+        "review",
     }

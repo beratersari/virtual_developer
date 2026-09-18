@@ -84,6 +84,14 @@ class PromptBuilder:
         return PromptBuilder._agent_dir() / "TEST_PROMPT.md"
 
     @staticmethod
+    def review_prompt_path() -> Path:
+        custom = getattr(settings, "review_prompt_file", None)
+        if custom:
+            p = Path(custom)
+            return p if p.is_absolute() else Path.cwd() / p
+        return PromptBuilder._agent_dir() / "REVIEW_PROMPT.md"
+
+    @staticmethod
     def _join_blocks(*parts: str) -> str:
         return "\n\n".join(p.strip() for p in parts if p and p.strip()) + "\n"
 
@@ -492,6 +500,86 @@ class PromptBuilder:
             "open a new merge request — the orchestrator will push onto this "
             "existing MR. Write a clear final answer for the reviewer; it will "
             "be posted back on the MR as a note."
+        )
+        return PromptBuilder._join_blocks(*parts)
+
+    @staticmethod
+    def build_review_comment_prompt(
+        *,
+        issue_key: str,
+        title: str,
+        url: str,
+        source_branch: str,
+        target_branch: str,
+        author: str,
+        comment: str,
+        forge: str = "gitlab",
+        work_branch: Optional[str] = None,
+        replied_message: str = "",
+        raw: Optional[dict] = None,
+        review_context: Optional[dict] = None,
+        command: str = "review",
+    ) -> str:
+        """Read-only review prompt for GitLab MR / Azure PR ``/review`` or ``/ask``."""
+        from src.issue_git_spec import strip_params_block
+        from src.review_thread import extract_review_context, format_review_context
+
+        heading = (
+            "GitLab merge request"
+            if (forge or "").strip().lower() == "gitlab"
+            else "Azure DevOps pull request"
+        )
+        label = "MR" if (forge or "").strip().lower() == "gitlab" else "PR"
+        clean_title = strip_params_block(title or "").strip()
+        branch = (work_branch or source_branch or "").strip()
+        system = PromptBuilder._load_mode_prompt(
+            PromptBuilder.review_prompt_path(),
+            issue_key=issue_key,
+            work_branch=branch or source_branch,
+            plan_path="",
+        )
+        replied = PromptBuilder._distinct_replied_message(
+            PromptBuilder.parent_comment_from_webhook_raw(raw)
+            or (replied_message or ""),
+            comment,
+        )
+        ctx = review_context if isinstance(review_context, dict) else None
+        if not ctx:
+            ctx = extract_review_context(raw, current_body=comment)
+        review_md = format_review_context(ctx)
+        cmd = (command or "review").strip().lower()
+        task = (
+            "Answer the **Prompt** as a follow-up on this review thread. "
+            "Do not start a new full review unless the operator asked for one."
+            if cmd == "ask"
+            else "Write a full review of the changes on this branch versus target."
+        )
+        parts = [
+            system,
+            f"## {heading}: {prompt_ticket_label(issue_key)}",
+            *PromptBuilder._thread_request_sections(
+                author=author,
+                prompt=comment,
+                replied_message=replied,
+                forge=forge,
+                source_branch=source_branch,
+                target_branch=target_branch,
+            ),
+        ]
+        if review_md:
+            parts.append(review_md)
+        parts.append(f"## {label} title\n\n{clean_title or '(no title)'}")
+        if url:
+            parts.append(f"## {label} URL\n\n{url}")
+        parts.append(
+            f"## Branches\n\n* Source (checked out): `{source_branch}`\n"
+            f"* Target: `{target_branch}`\n"
+            f"* Work branch: `{branch or source_branch}`"
+        )
+        parts.append(
+            "## Review delivery\n\n"
+            f"{task} Do **not** edit, commit, push, or open an MR/PR. "
+            "The orchestrator posts your markdown back on this thread."
         )
         return PromptBuilder._join_blocks(*parts)
 
