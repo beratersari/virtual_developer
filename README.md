@@ -146,7 +146,7 @@ Set `GITLAB_WEBHOOK_SECRET` to the same secret GitLab sends. Set `GITLAB_TRIGGER
 |---------|----------------|
 | `@yaver /yaver add tests for login` | Starts a job. Prompt is the rest of the comment. |
 | `@yaver` (no `/yaver`) | Usage note in **that thread**. No job. |
-| `@yaver /ask …` or `@yaver /review …` | Ignored (another agent). No usage note. |
+| `@yaver /ask …` or `@yaver /review …` | Starts a code review (or a follow-up on `/ask`). Same rules as Creasy: `/review`, `/ask`, assign the bot as reviewer, or open an MR that already lists the bot. New commits do not re-review. No push or new MR. |
 
 ### Which ticket the job binds to
 
@@ -190,7 +190,7 @@ Set `AZURE_TRIGGER_USER` and `AZURE_COLLECTION_PATS` (collection URL → PAT). C
 |---------|----------------|
 | `@yaver /yaver explain this diff` | Starts a job on the PR |
 | `@yaver` (no `/yaver`) | Usage note in that thread |
-| `@yaver /ask …` | Ignored |
+| `@yaver /ask …` or `@yaver /review` | Yaver review / follow-up (no push). Assign the bot as reviewer, or open a PR that already lists it, to start a review. |
 
 Do **not** use `/planExecute` / `/planRefactor` on a PR. Those are work-item comments only.
 
