@@ -18,6 +18,7 @@ import { LiveDot } from '../../ui/LiveDot'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { isDaemonChatter } from '../../util/daemonLogs'
+import { jobChannelLabel } from '../../util/jobChannel'
 import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
@@ -212,6 +213,8 @@ export function JobDetailPage() {
     }
   }
 
+  const channel = job ? jobChannelLabel(job) : null
+
   return (
     <section className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -226,6 +229,11 @@ export function JobDetailPage() {
               </span>
             )}
             {job && <StatusBadge status={job.status} />}
+            {channel && (
+              <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                {channel}
+              </span>
+            )}
             {job && (
               <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
                 {workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}
@@ -241,7 +249,7 @@ export function JobDetailPage() {
           </h1>
           <p className="mt-1 font-mono text-xs text-text-muted">
             {job?.job_id}
-            {job?.workflow_type ? ` · ${job.workflow_type}` : ''}
+            {job ? ` · ${channel || job.workflow_type || ''}` : ''}
             {job
               ? ` · ${workerLabel(resolveJobWorker(job, live.settings?.agent_backend || ''))}`
               : ''}

@@ -1,6 +1,7 @@
 import type { JobItem, JobRetryAttempt } from '../../api/types'
 import { IN_FLIGHT_STATUSES } from '../../util/status'
 import { pathBasename } from '../../util/paths'
+import { jobChannelLabel } from '../../util/jobChannel'
 import { resolveJobWorker, sessionKindLabel, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
@@ -41,7 +42,10 @@ export function JobOverview({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <MetaCard label="Job id" mono value={job.job_id} />
         <MetaCard label="Status" valueNode={<StatusBadge status={job.status} />} />
-        <MetaCard label="Workflow" value={job.workflow_type || '—'} />
+        <MetaCard
+          label="Workflow"
+          value={jobChannelLabel(job) || job.workflow_type || '—'}
+        />
         <MetaCard label="Worker" value={workerLabel(worker)} />
         <MetaCard
           label="Model"
