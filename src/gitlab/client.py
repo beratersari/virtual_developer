@@ -164,6 +164,46 @@ class GitlabClient:
             ident = quote(str(project or "").strip().strip("/"), safe="")
         return f"{self.api_base}/projects/{ident}"
 
+    def current_user(self) -> Optional[Dict[str, Any]]:
+        """GET /user — id, username, name (aMIR-mini reviewer match)."""
+        if not self.api_base or not self.pat:
+            return None
+        try:
+            with httpx.Client(timeout=12.0, verify=False) as client:
+                resp = client.get(f"{self.api_base}/user", headers=self._headers())
+            if resp.status_code != 200:
+                logger.info(
+                    f"GitLab GET /user failed ({resp.status_code}) host={self.host}"
+                )
+                return None
+            data = resp.json() if resp.content else {}
+        except Exception as e:
+            logger.info(f"GitLab GET /user error host={self.host}: {e}")
+            return None
+        if not isinstance(data, dict) or data.get("id") is None:
+            return None
+        return data
+
+    def list_mr_reviewers(
+        self, *, project: Any, mr_iid: int
+    ) -> list:
+        if not self.api_base:
+            return []
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/reviewers"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code != 200:
+                return []
+            rows = resp.json() if resp.content else []
+        except Exception as e:
+            logger.debug(f"GitLab LIST reviewers {project}!{mr_iid} error: {e}")
+            return []
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
     def resolve_project(self, project: Any) -> Optional[Dict[str, Any]]:
         """GET ``/projects/:id`` or match ``path_with_namespace`` from the list."""
         if not self.api_base:

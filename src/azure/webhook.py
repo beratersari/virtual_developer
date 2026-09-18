@@ -44,13 +44,22 @@ AZURE_COMMENT_EVENTS = frozenset(
         "git.pullrequest.comment.event",
     }
 )
+# aMIR-mini / TFS: assign-as-reviewer is this event, not git.pullrequest.updated.
+AZURE_REVIEWER_EVENTS = frozenset(
+    {
+        "git.pullrequest.reviewers.update",
+        "ms.vss-code.git-pullrequest-reviewers-update-event",
+    }
+)
 AZURE_PR_EVENTS = frozenset(
     {
         "git.pullrequest.created",
         "git.pullrequest.updated",
+        "git.pullrequest.updatedevent",
         "git.pullrequest.merged",
         "git.pullrequest.abandoned",
         "git.pullrequest.reopened",
+        *AZURE_REVIEWER_EVENTS,
     }
 )
 
@@ -890,6 +899,35 @@ def post_azure_usage_note(event: AzurePrCommentEvent, bot_name: str = "") -> boo
     return posted is not None
 
 
+def _apply_live_reviewers(
+    pr: Dict[str, Any],
+    *,
+    host: str,
+    collection_url: str,
+    project: str,
+    repository: Any,
+    pr_id: int,
+) -> None:
+    """Replace hook reviewers with GET /reviewers (aMIR-mini). TFS assign is often stale."""
+    if pr_id <= 0 or not (project and repository):
+        return
+    try:
+        from src.azure.client import AzureDevOpsClient
+
+        rows = AzureDevOpsClient(
+            host=host, collection_url=collection_url
+        ).list_pr_reviewers(
+            project=project, repository=repository, pr_id=pr_id
+        )
+    except Exception as exc:
+        azure_info(f"lifecycle reviewers GET skip pr={pr_id} err={exc}")
+        return
+    if not rows:
+        return
+    pr["reviewers"] = rows
+    azure_info(f"lifecycle reviewers GET pr={pr_id} count={len(rows)}")
+
+
 def decide_azure_pr_webhook(
     payload: Any,
     *,
@@ -945,6 +983,10 @@ def decide_azure_pr_webhook(
             status = "active"
     elif event_name.endswith(".reopened"):
         action = "reopened"
+        if not status:
+            status = "active"
+    elif event_name in AZURE_REVIEWER_EVENTS or "reviewer" in event_name:
+        action = "updated"
         if not status:
             status = "active"
     else:
@@ -1014,6 +1056,15 @@ def decide_azure_pr_webhook(
     )
 
     event.is_draft = azure_payload_is_draft(pr)
+    if event_name in AZURE_REVIEWER_EVENTS or "reviewer" in event_name:
+        _apply_live_reviewers(
+            pr,
+            host=host,
+            collection_url=collection_url,
+            project=project_name,
+            repository=repo_id or repo_name,
+            pr_id=pr_id,
+        )
     review_kind = classify_azure_review_lifecycle(
         data, pr, action=action, collection_url=collection_url
     )
@@ -1024,6 +1075,7 @@ def decide_azure_pr_webhook(
         f"lifecycle accepted issue={event.issue_key} "
         f"pr={event.project_path}!{event.pr_id} "
         f"action={event.action or '-'} state={event.state or '-'} "
+        f"start_review={event.start_review} event={event_name or '-'} "
         f"host={event.host} collection={event.collection_url} "
         f"source={event.source_branch} target={event.target_branch} "
         f"url={event.pr_url or '-'}"

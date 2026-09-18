@@ -162,6 +162,26 @@ def test_gitlab_assign_reviewer_starts_review(monkeypatch):
     assert d.event.review_explicit is True
 
 
+def test_gitlab_assign_matches_reviewer_id_like_amirmini(monkeypatch):
+    """aMIR-mini matches the PAT user id, not only GITLAB_TRIGGER_USER text."""
+    monkeypatch.setattr("src.config.settings.gitlab_trigger_user", "yaver_bot")
+    payload = _mr_lifecycle_payload(action="update", state="opened")
+    payload["changes"] = {"reviewer_ids": {"previous": [1], "current": [1, 42]}}
+    payload["reviewers"] = [{"id": 42, "username": "other"}]
+    with patch(
+        "src.gitlab.client.GitlabClient.current_user",
+        return_value={"id": 42, "username": "other", "name": "Other Bot"},
+    ):
+        d = decide_gitlab_mr_webhook(
+            payload,
+            headers={"X-Gitlab-Event": "Merge Request Hook", "X-Gitlab-Token": "s"},
+            enabled=True,
+            secret="s",
+        )
+    assert d.event.start_review is True
+    assert d.event.review_explicit is True
+
+
 def test_azure_created_with_reviewer_starts_review(monkeypatch):
     monkeypatch.setattr("src.config.settings.azure_trigger_user", "yaver")
     payload = _pr_lifecycle_payload(event_type="git.pullrequest.created", status="active")
@@ -172,6 +192,60 @@ def test_azure_created_with_reviewer_starts_review(monkeypatch):
     assert d.accepted is True
     assert d.event.start_review is True
     assert d.event.review_explicit is False
+
+
+def test_azure_assign_matches_pat_identity_like_amirmini(monkeypatch):
+    monkeypatch.setattr("src.config.settings.azure_trigger_user", "yaver_bot")
+    from src.review_flow import _AZURE_REVIEWER_CACHE
+
+    _AZURE_REVIEWER_CACHE.clear()
+    payload = _pr_lifecycle_payload(
+        event_type="git.pullrequest.reviewers.update", status="active"
+    )
+    payload["message"] = {"text": "Ada changed the reviewer list for PR 4"}
+    payload["resource"]["reviewers"] = [
+        {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "displayName": "Yaver Service",
+            "uniqueName": "DOMAIN\\svc",
+        }
+    ]
+    with patch(
+        "src.azure.identity.fetch_bot_identity",
+        return_value={
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "names": ["Yaver Service"],
+        },
+    ), patch(
+        "src.azure.client.AzureDevOpsClient.list_pr_reviewers",
+        return_value=payload["resource"]["reviewers"],
+    ):
+        d = decide_azure_pr_webhook(payload, enabled=True)
+    assert d.accepted is True
+    assert d.event.start_review is True
+
+
+def test_azure_reviewers_update_event_starts_review(monkeypatch):
+    """aMIR-mini: assign fires git.pullrequest.reviewers.update, not .updated."""
+    monkeypatch.setattr("src.config.settings.azure_trigger_user", "yaver")
+    from src.review_flow import _AZURE_REVIEWER_CACHE
+
+    _AZURE_REVIEWER_CACHE.clear()
+    payload = _pr_lifecycle_payload(
+        event_type="git.pullrequest.reviewers.update", status="active"
+    )
+    payload["message"] = {"text": "Ada changed the reviewer list for PR 4"}
+    payload["resource"]["reviewers"] = [
+        {"id": "guid-1", "displayName": "Yaver", "uniqueName": "DOMAIN\\yaver"}
+    ]
+    with patch(
+        "src.azure.client.AzureDevOpsClient.list_pr_reviewers",
+        return_value=payload["resource"]["reviewers"],
+    ):
+        d = decide_azure_pr_webhook(payload, enabled=True)
+    assert d.accepted is True
+    assert d.event.start_review is True
+    assert d.event.review_explicit is True
 
 
 def test_azure_update_without_reviewer_change_does_not_review(monkeypatch):
