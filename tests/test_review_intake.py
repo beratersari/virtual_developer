@@ -431,3 +431,53 @@ def test_http_review_enqueues(fake_jira, monkeypatch):
     body = resp.json()
     assert body.get("ok") is True
     proc.enqueue_gitlab_note.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_review_reenqueues_after_error(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
+):
+    """Re-assign after a failed review must not reuse the error queue row."""
+    from src.gitlab.webhook import GitlabMrNoteEvent
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.dispatch_queue = AsyncMock()
+    ev = GitlabMrNoteEvent(
+        issue_key="KAN-13351",
+        note_id="review-update-570",
+        note_body="",
+        prompt="Review this merge request.",
+        author_username="",
+        author_name="",
+        project_id=1,
+        project_path="tanksb/volkan/volkan",
+        repository_url="https://gitlab.example.com/tanksb/volkan/volkan.git",
+        host="gitlab.example.com",
+        mr_iid=570,
+        mr_title="KAN-13351",
+        mr_description="",
+        source_branch="feature/x",
+        target_branch="develop",
+        mr_url="https://gitlab.example.com/tanksb/volkan/volkan/-/merge_requests/570",
+        command="review",
+    )
+    first = await proc.enqueue_gitlab_note(ev)
+    assert first.get("ok") is True
+    proc.queue_store.finish(
+        first["queue_id"], status="error", error_message="agent missing"
+    )
+    second = await proc.enqueue_gitlab_note(ev)
+    assert second.get("duplicate") is not True
+    assert second["queue_id"] != first["queue_id"]
+    assert second.get("status") in {"queued", "running"}
+
+
+def test_lifecycle_stamp_uses_updated_at():
+    ev = MagicMock()
+    ev.raw = {"object_attributes": {"updated_at": "2026-09-18T17:46:26.000Z"}}
+    stamp = JobProcessor._lifecycle_review_stamp(ev)
+    assert "2026-09-18" in stamp
+
