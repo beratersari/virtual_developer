@@ -1,3 +1,10 @@
+# Yaver 0.9.34
+
+Assign as reviewer matches
+aMIR-mini (PAT user id).
+Review model in Settings.
+Jira can be disabled.
+
 # Yaver 0.9.33
 
 Azure DevOps Server 2020
