@@ -9,7 +9,7 @@ Moving In Progress → To Do while still assigned does **not** re-queue
 (Jira To Do return does not apply on Azure Boards).
 Plan revise/implement is comment-only (``/planRefactor`` / ``/planExecute``).
 
-Work-item REST uses the same 7.1 / 7.0 fallback as ``AzureDevOpsClient``.
+Work-item REST uses the same 7.1 / 7.0 / 6.1 / 6.0 walk as ``AzureDevOpsClient``.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ _STATE_FIELDS = frozenset(
 _COMMENT_FIELDS = frozenset({"system.history", "history"})
 _INTAKE_CHANGE_KINDS = frozenset({"assignee"})
 
-# Process-template categories on GET workitemtypes/{type}/states (7.1 / 7.0).
+# Process-template categories on GET workitemtypes/{type}/states.
 _TODO_CATEGORIES = frozenset({"proposed", "new"})
 _IN_PROGRESS_CATEGORIES = frozenset({"inprogress", "in progress"})
 # To Do / In Progress and the official process-template names for those

@@ -1246,6 +1246,51 @@ def test_workitem_client_uses_7_1_then_7_0(monkeypatch):
     assert calls == ["7.1", "7.0"]
 
 
+def test_request_falls_back_to_6_0_for_azure_2020():
+    from src.azure.client import AzureDevOpsClient
+
+    calls = []
+
+    class _Url:
+        def __init__(self, ver):
+            self.params = {"api-version": ver}
+
+    class _Req:
+        def __init__(self, ver):
+            self.url = _Url(ver)
+
+    class _Resp:
+        def __init__(self, status, ver):
+            self.status_code = status
+            self.content = b"{}"
+            self.text = "bad version" if status == 400 else ""
+            self.request = _Req(ver)
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def get(self, url, headers=None, params=None):
+            ver = (params or {}).get("api-version")
+            calls.append(ver)
+            if ver in ("7.1", "7.0", "6.1"):
+                return _Resp(400, ver)
+            return _Resp(200, ver)
+
+    ado = AzureDevOpsClient(
+        host="tfs.example.com",
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+        pat="tok",
+    )
+    resp = ado._request(
+        _Client(),
+        "GET",
+        "https://tfs.example.com/tfs/DefaultCollection/_apis/git/repositories/r/pullrequests/1",
+    )
+    assert resp.status_code == 200
+    assert calls == ["7.1", "7.0", "6.1", "6.0"]
+
+
 def test_ingest_uses_jira_event_path():
     from src.azure.workitems import parse_workitem_payload
     from src.processor import JobProcessor
