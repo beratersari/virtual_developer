@@ -40,6 +40,7 @@ def test_bat_does_not_redirect_with_echo_arrow():
     assert "derman-build.md" in text
     assert "derman-plan.md" in text
     assert "derman-test.md" in text
+    assert "derman-reviewer.md" in text
     assert "gitlab-reviewer" not in text
     assert "opencode_configs" not in text
     assert "Install-OpencodeAgents.ps1" not in text
@@ -164,6 +165,7 @@ def test_sh_copies_opencoderman_without_python():
     assert "derman-build.md" in text
     assert "derman-plan.md" in text
     assert "derman-test.md" in text
+    assert "derman-reviewer.md" in text
     assert "gitlab-reviewer" not in text
     assert "python3" not in text
     assert "install_opencode_agents.py" not in text

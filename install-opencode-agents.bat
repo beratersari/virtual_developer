@@ -12,6 +12,7 @@ set "SRC_SKILLS=%SCRIPT_DIR%\opencoderman\skills"
 if not exist "%SRC_AGENTS%\derman-build.md" goto :missing_src
 if not exist "%SRC_AGENTS%\derman-plan.md" goto :missing_src
 if not exist "%SRC_AGENTS%\derman-test.md" goto :missing_src
+if not exist "%SRC_AGENTS%\derman-reviewer.md" goto :missing_src
 if not exist "%SRC_SKILLS%\" goto :missing_src
 
 set "OC_HOME="
@@ -65,6 +66,12 @@ if errorlevel 1 (
     call :maybe_pause
     exit /b 1
 )
+copy /Y "%SRC_AGENTS%\derman-reviewer.md" "%OC_HOME%\agents\derman-reviewer.md" >nul
+if errorlevel 1 (
+    echo [ERROR] copy derman-reviewer.md failed
+    call :maybe_pause
+    exit /b 1
+)
 robocopy "%SRC_SKILLS%" "%OC_HOME%\skills" /E /NFL /NDL /NJH /NJS /NC /NS /NP >nul
 if errorlevel 8 (
     echo [ERROR] robocopy skills failed with exit %ERRORLEVEL%
@@ -84,6 +91,11 @@ if not exist "%OC_HOME%\agents\derman-plan.md" (
 )
 if not exist "%OC_HOME%\agents\derman-test.md" (
     echo [ERROR] Copy finished but derman-test.md is missing.
+    call :maybe_pause
+    exit /b 1
+)
+if not exist "%OC_HOME%\agents\derman-reviewer.md" (
+    echo [ERROR] Copy finished but derman-reviewer.md is missing.
     call :maybe_pause
     exit /b 1
 )

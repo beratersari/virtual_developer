@@ -4011,6 +4011,41 @@ class JobProcessor:
         except Exception:
             pass
 
+    @staticmethod
+    def _queue_row_blocks_note_dedup(rec: Optional[Dict[str, Any]]) -> bool:
+        """True when this note id must not start another job (still queued/running)."""
+        if not rec:
+            return False
+        status = str(rec.get("status") or "").strip().lower()
+        return status not in {
+            "error",
+            "cancelled",
+            "canceled",
+            "completed",
+            "done",
+            "skipped",
+        }
+
+    @staticmethod
+    def _lifecycle_review_stamp(event: Any) -> str:
+        """GitLab updated_at / Azure updatedDate so a new assign is not the failed row."""
+        raw = getattr(event, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        attrs = raw.get("object_attributes")
+        attrs = attrs if isinstance(attrs, dict) else {}
+        stamp = str(
+            attrs.get("updated_at") or attrs.get("last_edited_at") or ""
+        ).strip()
+        if not stamp:
+            resource = raw.get("resource")
+            resource = resource if isinstance(resource, dict) else {}
+            stamp = str(
+                resource.get("updatedDate") or resource.get("creationDate") or ""
+            ).strip()
+        if not stamp:
+            stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        return re.sub(r"[^0-9A-Za-z._-]+", "-", stamp).strip("-")[:48]
+
     async def enqueue_gitlab_note(self, event: Any) -> Dict[str, Any]:
         """Persist a GitLab MR comment and try to start it (or leave it queued)."""
         from src.gitlab.webhook import GitlabMrNoteEvent
@@ -4026,7 +4061,7 @@ class JobProcessor:
             note_id=event.note_id,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
-        if existing:
+        if existing and self._queue_row_blocks_note_dedup(existing):
             return {
                 "ok": True,
                 "queued": existing.get("status") == "queued",
@@ -4097,7 +4132,7 @@ class JobProcessor:
             project_path=event.project_path,
         )
         existing = self.queue_store.find_note(note_key) if note_key else None
-        if existing:
+        if existing and self._queue_row_blocks_note_dedup(existing):
             azure_info(
                 f"enqueue duplicate comment={note_key} "
                 f"queue_id={existing.get('queue_id')} "
@@ -4872,7 +4907,7 @@ class JobProcessor:
         if isinstance(event, GitlabMrLifecycleEvent):
             note = GitlabMrNoteEvent(
                 issue_key=event.issue_key,
-                note_id=f"review-{event.action or 'open'}-{event.mr_iid}",
+                note_id=f"review-{event.action or 'open'}-{event.mr_iid}-{self._lifecycle_review_stamp(event)}",
                 note_body="",
                 prompt="Review this merge request.",
                 author_username="",
@@ -4907,7 +4942,7 @@ class JobProcessor:
         if isinstance(event, AzurePrLifecycleEvent):
             comment = AzurePrCommentEvent(
                 issue_key=event.issue_key,
-                comment_id=f"review-{event.action or 'created'}-{event.pr_id}",
+                comment_id=f"review-{event.action or 'created'}-{event.pr_id}-{self._lifecycle_review_stamp(event)}",
                 comment_body="",
                 prompt="Review this pull request.",
                 author_username="",
