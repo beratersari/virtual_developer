@@ -91,3 +91,23 @@ def test_begin_workflow_run_records_default_model(
     job = proc.job_store.get_job(job_id)
     assert job is not None
     assert job.get("model") == "provider/test-model-xyz"
+
+
+def test_model_for_issue_uses_review_default(monkeypatch):
+    from src.config import settings
+    from src.processor import JobProcessor
+
+    monkeypatch.setattr(settings, "default_model", "plan/model")
+    monkeypatch.setattr(settings, "default_review_model", "review/model")
+    proc = JobProcessor.__new__(JobProcessor)
+    st = MagicMock()
+    st.issue_summary = ""
+    st.description = ""
+    st.metadata = {"workflow_type": "gitlab-review"}
+    assert proc._model_for_issue(st) == "review/model"
+    assert proc._model_for_issue(st, review=True) == "review/model"
+    st.metadata = {"workflow_type": "gitlab_mr"}
+    assert proc._model_for_issue(st) == "plan/model"
+    monkeypatch.setattr(settings, "default_review_model", "")
+    st.metadata = {"workflow_type": "azure-review"}
+    assert proc._model_for_issue(st, review=True) == "plan/model"

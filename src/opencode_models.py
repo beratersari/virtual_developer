@@ -353,6 +353,17 @@ def list_available_models(
                 source="settings",
             )
         )
+    review = (getattr(settings, "default_review_model", "") or "").strip()
+    if review and review != current:
+        prov, mid = _split_provider_model(review)
+        settings_models.append(
+            ModelInfo(
+                id=review,
+                name=mid or review,
+                provider=prov,
+                source="settings",
+            )
+        )
 
     merged = _merge_models(settings_models, cfg_models, cli_models)
     path_str = str(cfg_path) if cfg_path else None

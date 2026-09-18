@@ -249,6 +249,7 @@ def build_settings_view() -> SettingsView:
     Never includes ``jira_api_token`` or ``gitlab_pat`` values — only booleans.
     """
     return SettingsView(
+        jira_enabled=bool(getattr(settings, "jira_enabled", True)),
         jira_host=settings.jira_host or "",
         jira_board_id=settings.jira_board_id or "",
         jira_projects=settings.jira_projects or "",
@@ -280,6 +281,9 @@ def build_settings_view() -> SettingsView:
             for h in settings.gitlab_allowed_hosts_list
         ],
         default_model=(settings.default_model or "").strip(),
+        default_review_model=(
+            getattr(settings, "default_review_model", "") or ""
+        ).strip(),
         agent_backend=(getattr(settings, "agent_backend", None) or "opencode").strip()
         or "opencode",
         gitlab_webhook_enabled=bool(
@@ -595,6 +599,11 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     # Runtime-persisted fields (survive restart; win over .env)
     runtime_persist: Dict[str, Any] = {}
 
+    if "jira_enabled" in data and data["jira_enabled"] is not None:
+        enabled = bool(data["jira_enabled"])
+        settings.jira_enabled = enabled
+        runtime_persist["jira_enabled"] = enabled
+        dotenv_updates["JIRA_ENABLED"] = "true" if enabled else "false"
     if "jira_host" in data and data["jira_host"] is not None:
         runtime_persist["jira_host"] = settings.jira_host
     if "jira_board_id" in data and data["jira_board_id"] is not None:
@@ -656,6 +665,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         if model:
             settings.default_model = model
             runtime_persist["default_model"] = settings.default_model
+    if "default_review_model" in data and data["default_review_model"] is not None:
+        review_model = str(data["default_review_model"]).strip()
+        settings.default_review_model = review_model
+        runtime_persist["default_review_model"] = review_model
     if "agent_backend" in data and data["agent_backend"] is not None:
         from src.backends.base import BACKEND_OPENCODE, normalize_backend_name
 

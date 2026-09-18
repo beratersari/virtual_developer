@@ -74,6 +74,15 @@ def test_poll_board_no_board(poller):
     assert poller.poll_board() == []
 
 
+def test_poll_board_skipped_when_jira_disabled(poller, monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "jira_enabled", False)
+    poller.client = MagicMock()
+    assert poller.poll_board() == []
+    poller.client.get_active_sprint.assert_not_called()
+
+
 def test_poll_board_no_sprint(poller):
     poller.client = MagicMock()
     poller.client.get_active_sprint.return_value = None

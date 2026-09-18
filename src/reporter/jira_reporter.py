@@ -50,7 +50,11 @@ class JiraReporter:
         from src.azure.tracker import azure_tracker_for
 
         tracker = azure_tracker_for(issue_key, state)
-        return tracker or self.client
+        if tracker is not None:
+            return tracker
+        if not getattr(settings, "jira_enabled", True):
+            return None
+        return self.client
 
     def __init__(
         self,
@@ -98,9 +102,11 @@ class JiraReporter:
 {ACK_BOARD}
 """
         try:
-            result = self._issue_client(state.issue_key, state).add_comment(
-                state.issue_key, body
-            )
+            client = self._issue_client(state.issue_key, state)
+            if client is None:
+                logger.info(f"{state.issue_key}: Jira disabled; skip acknowledgment")
+                return None
+            result = client.add_comment(state.issue_key, body)
             return result.get("id") if result else None
         except Exception as e:
             logger.error(f"Error posting acknowledgment: {e}")
@@ -159,6 +165,9 @@ class JiraReporter:
 """
 
         client = self._issue_client(state.issue_key, state)
+        if client is None:
+            logger.info(f"{state.issue_key}: Jira disabled; skip plan comment")
+            return None
         result = client.add_comment(state.issue_key, body)
         try:
             from src.jira.plan_labels import PLAN_READY_LABEL
@@ -208,7 +217,11 @@ class JiraReporter:
 """
 
         try:
-            result = self._issue_client(state.issue_key, state).add_comment(
+            client = self._issue_client(state.issue_key, state)
+            if client is None:
+                logger.info(f"{state.issue_key}: Jira disabled; skip comment")
+                return None
+            result = client.add_comment(
                 state.issue_key, body
             )
             return result.get("id") if result else None
@@ -326,7 +339,11 @@ class JiraReporter:
 """
 
         try:
-            result = self._issue_client(state.issue_key, state).add_comment(
+            client = self._issue_client(state.issue_key, state)
+            if client is None:
+                logger.info(f"{state.issue_key}: Jira disabled; skip comment")
+                return None
+            result = client.add_comment(
                 state.issue_key, body
             )
             return result.get("id") if result else None
@@ -397,7 +414,11 @@ class JiraReporter:
 """
 
         try:
-            result = self._issue_client(state.issue_key, state).add_comment(
+            client = self._issue_client(state.issue_key, state)
+            if client is None:
+                logger.info(f"{state.issue_key}: Jira disabled; skip comment")
+                return None
+            result = client.add_comment(
                 state.issue_key, body
             )
             return result.get("id") if result else None
@@ -422,7 +443,11 @@ class JiraReporter:
 """
 
         try:
-            result = self._issue_client(issue_key).add_comment(issue_key, body)
+            client = self._issue_client(issue_key)
+            if client is None:
+                logger.info(f"{issue_key}: Jira disabled; skip comment")
+                return None
+            result = client.add_comment(issue_key, body)
             return result.get("id") if result else None
         except Exception as e:
             logger.error(f"Error posting comment response for {issue_key}: {e}")
@@ -434,7 +459,11 @@ class JiraReporter:
         status: str,
     ) -> bool:
         """Update issue status/transition."""
-        return self.client.transition_issue(issue_key, status)
+        client = self._issue_client(issue_key)
+        if client is None:
+            logger.info(f"{issue_key}: Jira disabled; skip transition")
+            return False
+        return client.transition_issue(issue_key, status)
 
     def attach_file(
         self,
@@ -443,5 +472,9 @@ class JiraReporter:
         filename: Optional[str] = None,
     ) -> bool:
         """Attach a file to the issue."""
-        result = self.client.add_attachment(issue_key, file_path, filename)
+        client = self._issue_client(issue_key)
+        if client is None:
+            logger.info(f"{issue_key}: Jira disabled; skip attachment")
+            return False
+        result = client.add_attachment(issue_key, file_path, filename)
         return result is not None

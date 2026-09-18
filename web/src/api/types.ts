@@ -68,6 +68,7 @@ export type ProjectRepository = {
 }
 
 export type SettingsPayload = {
+  jira_enabled?: boolean
   jira_host: string
   jira_board_id: string
   jira_projects: string
@@ -86,6 +87,7 @@ export type SettingsPayload = {
   gitlab_allowed_hosts?: string
   gitlab_credentials?: GitlabHostCredential[]
   default_model: string
+  default_review_model?: string
   agent_backend?: string
   gitlab_webhook_enabled?: boolean
   gitlab_trigger_user?: string
@@ -570,6 +572,7 @@ export type JiraConnectionTestResult = {
 export type SettingsPatch = Partial<
   Pick<
     SettingsPayload,
+    | 'jira_enabled'
     | 'jira_host'
     | 'jira_board_id'
     | 'jira_projects'
@@ -579,6 +582,7 @@ export type SettingsPatch = Partial<
     | 'agent_task_max_retries'
     | 'agent_task_max_incomplete_retries'
     | 'default_model'
+    | 'default_review_model'
     | 'agent_backend'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
