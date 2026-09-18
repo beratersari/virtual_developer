@@ -299,7 +299,7 @@ if ($doOpenCode) {
         throw "opencode.json missing under $userOc"
     }
     Assert-JsonFile $homeCfg
-    $review = Join-Path $userOc "agents\code-reviewer.md"
+    $review = Join-Path $userOc "agents\derman-reviewer.md"
     $alias = Join-Path $userOc "agents\gitlab-reviewer.md"
     if (-not (Test-Path -LiteralPath $review) -and -not (Test-Path -LiteralPath $alias)) {
         throw "opencoderman agent missing: $review"

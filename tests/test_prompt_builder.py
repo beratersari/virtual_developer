@@ -294,4 +294,9 @@ def test_only_two_prompt_files_exist():
 
     agent = Path("agent")
     names = {p.name for p in agent.iterdir() if p.is_file()}
-    assert names == {"PLAN_PROMPT.md", "BUILD_PROMPT.md", "TEST_PROMPT.md"}
+    assert names == {
+        "PLAN_PROMPT.md",
+        "BUILD_PROMPT.md",
+        "TEST_PROMPT.md",
+        "REVIEW_PROMPT.md",
+    }

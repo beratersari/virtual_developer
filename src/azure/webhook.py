@@ -17,17 +17,18 @@ from urllib.parse import unquote, urlparse
 from src.azure.keys import resolve_pr_issue_key
 from src.azure.log import azure_info, clip
 from src.azure.mentions import (
+    ASK_COMMAND,
+    EMPTY_ASK_REASON,
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
+    REVIEW_COMMAND,
     author_is_configured_bot,
+    classify_comment_command,
     expand_guid_mentions,
     extract_mention_guids,
     format_execute_usage_note,
     mention_scan,
-    note_is_execute_command,
-    note_is_other_agent_handoff,
     note_mentions_bot,
-    other_agent_handoff_reason,
     parse_mention_list,
     strip_azure_bot_mentions,
     strip_slash_command,
@@ -118,6 +119,7 @@ class AzurePrCommentEvent:
     pr_url: str
     thread_id: str = ""
     webhook_event: str = "ms.vss-code.git-pullrequest-comment-event"
+    command: str = EXECUTE_COMMAND
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -143,6 +145,7 @@ class AzurePrCommentEvent:
             "pr_url": self.pr_url,
             "thread_id": self.thread_id,
             "webhook_event": self.webhook_event,
+            "command": self.command or EXECUTE_COMMAND,
             "raw": self.raw if isinstance(self.raw, dict) else {},
         }
 
@@ -174,6 +177,7 @@ class AzurePrCommentEvent:
                 d.get("webhook_event")
                 or "ms.vss-code.git-pullrequest-comment-event"
             ),
+            command=str(d.get("command") or EXECUTE_COMMAND),
             raw=d.get("raw") if isinstance(d.get("raw"), dict) else {},
         )
 
@@ -199,6 +203,9 @@ class AzurePrLifecycleEvent:
     target_branch: str
     pr_url: str
     webhook_event: str = "git.pullrequest.updated"
+    start_review: bool = False
+    review_explicit: bool = False
+    is_draft: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -659,10 +666,14 @@ def decide_azure_comment_webhook(
             False, "pull request missing repository or source/target branch"
         )
 
+    command = classify_comment_command(note, bot_mentions or mentions)
     prompt = strip_azure_bot_mentions(note, mentions)
-    prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
+    if command:
+        prompt = strip_slash_command(prompt, command)
+    else:
+        prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
     if not prompt:
-        prompt = note.strip()
+        prompt = strip_slash_command(note.strip(), command or EXECUTE_COMMAND) or note.strip()
 
     pr_title = _s(pr.get("title"))
     pr_description = _s(pr.get("description"))
@@ -739,13 +750,6 @@ def decide_azure_comment_webhook(
             f"guids={pending_guids} preview={clip(note)!r}"
         )
         return WebhookDecision(False, "bot not mentioned")
-    if note_is_other_agent_handoff(note, bot_mentions or trigger_names):
-        reason = other_agent_handoff_reason(note, bot_mentions or trigger_names)
-        azure_info(
-            f"comment reject reason={reason!r} event={event_name!r} "
-            f"preview={clip(note)!r}"
-        )
-        return WebhookDecision(False, reason)
     pr_url = _pr_web_url(
         pr, repo, collection_url, project_name, repo_name, pr_id
     )
@@ -789,6 +793,7 @@ def decide_azure_comment_webhook(
         pr_url=pr_url,
         thread_id=thread_id,
         webhook_event=event_name or "ms.vss-code.git-pullrequest-comment-event",
+        command=command or EXECUTE_COMMAND,
         raw=data,
     )
     try:
@@ -801,7 +806,15 @@ def decide_azure_comment_webhook(
     # (AZURE_TRIGGER_USER). A GUID-only @<VSID> chip can count as a mention
     # (usage note) but does not start a job. Do not pass resolved GUID aliases
     # into this check.
-    if not note_is_execute_command(note, bot_mentions or trigger_names):
+    if command == ASK_COMMAND and not strip_slash_command(
+        strip_azure_bot_mentions(note, mentions), ASK_COMMAND
+    ).strip():
+        azure_info(
+            f"comment reject reason={EMPTY_ASK_REASON!r} event={event_name!r} "
+            f"thread={event.thread_id or '-'}"
+        )
+        return WebhookDecision(False, EMPTY_ASK_REASON, event=event)
+    if command not in {EXECUTE_COMMAND, REVIEW_COMMAND, ASK_COMMAND}:
         azure_info(
             f"comment reject reason={EXECUTE_MISSING_REASON!r} event={event_name!r} "
             f"thread={event.thread_id or '-'} preview={clip(note)!r}"
@@ -809,6 +822,16 @@ def decide_azure_comment_webhook(
         return WebhookDecision(
             False, EXECUTE_MISSING_REASON, event=event, usage_note=True
         )
+    if command in {REVIEW_COMMAND, ASK_COMMAND}:
+        from src.review_flow import ask_wants_new_review
+
+        event.prompt = strip_slash_command(
+            strip_azure_bot_mentions(note, mentions), command
+        ).strip() or (
+            "Review this pull request." if command == REVIEW_COMMAND else event.prompt
+        )
+        if command == ASK_COMMAND and ask_wants_new_review(event.prompt):
+            event.command = REVIEW_COMMAND
     azure_info(
         f"comment accepted issue={event.issue_key} "
         f"pr={event.project_path}!{event.pr_id} comment={event.comment_id} "
@@ -985,6 +1008,18 @@ def decide_azure_pr_webhook(
         webhook_event=event_name or "git.pullrequest.updated",
         raw=data,
     )
+    from src.review_flow import (
+        azure_payload_is_draft,
+        classify_azure_review_lifecycle,
+    )
+
+    event.is_draft = azure_payload_is_draft(pr)
+    review_kind = classify_azure_review_lifecycle(
+        data, pr, action=action, collection_url=collection_url
+    )
+    if review_kind:
+        event.start_review = True
+        event.review_explicit = review_kind == "assign"
     azure_info(
         f"lifecycle accepted issue={event.issue_key} "
         f"pr={event.project_path}!{event.pr_id} "

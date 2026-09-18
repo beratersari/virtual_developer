@@ -25,7 +25,12 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
-AGENT_MARKERS = ("derman-build.md", "derman-plan.md", "derman-test.md")
+AGENT_MARKERS = (
+    "derman-build.md",
+    "derman-plan.md",
+    "derman-test.md",
+    "derman-reviewer.md",
+)
 HOME_MARKERS = (
     Path("bin") / "opencode.exe",
     Path("bin") / "opencode",

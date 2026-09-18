@@ -227,12 +227,14 @@ def test_self_mention_is_ignored_no_usage_note():
     assert d2.reason == "ignored comment from bot user"
 
 
-def test_ask_handoff_still_silent():
+def test_ask_starts_review_followup():
     d = _gl("@berat_ai /ask what is auth?")
-    assert d.accepted is False
+    assert d.accepted is True
+    assert d.event.command == "ask"
     assert d.usage_note is False
     d2 = _az("@yaver /ask what is auth?")
-    assert d2.accepted is False
+    assert d2.accepted is True
+    assert d2.event.command == "ask"
     assert d2.usage_note is False
 
 
@@ -442,8 +444,10 @@ def test_usage_note_matches_creasy_shape_without_at_mention():
     body = format_execute_usage_note("berat_ai")
     assert "<!-- yaver-usage -->" in body
     assert "**Yaver — komut nasıl çalıştırılır**" in body
-    assert "Yalnızca `/yaver`" in body
+    assert "`/yaver`, `/review` ve `/ask`" in body
     assert "/yaver <istek>" in body
+    assert "/review" in body
+    assert "/ask <soru>" in body
     assert "@" not in body
     assert "@mention" not in body
 

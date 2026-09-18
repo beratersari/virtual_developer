@@ -392,3 +392,103 @@ class GitlabClient:
         except Exception as e:
             logger.error(f"GitLab MR note error: {e}")
             return None
+
+    def get_mr_diff_refs(
+        self, *, project: Any, mr_iid: int
+    ) -> tuple[str, str, str]:
+        """``(base_sha, start_sha, head_sha)`` from the MR, or empty strings."""
+        if not self.api_base:
+            return "", "", ""
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(url, headers=self._headers())
+            if resp.status_code != 200:
+                return "", "", ""
+            data = resp.json() if resp.content else {}
+        except Exception as e:
+            logger.debug(f"GitLab GET MR {project}!{mr_iid} error: {e}")
+            return "", "", ""
+        refs = data.get("diff_refs") if isinstance(data, dict) else None
+        if not isinstance(refs, dict):
+            return "", "", ""
+        return (
+            str(refs.get("base_sha") or "").strip(),
+            str(refs.get("start_sha") or "").strip(),
+            str(refs.get("head_sha") or "").strip(),
+        )
+
+    def list_mr_discussions(
+        self, *, project: Any, mr_iid: int
+    ) -> list[Dict[str, Any]]:
+        if not self.api_base:
+            return []
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/discussions"
+        out: list[Dict[str, Any]] = []
+        page = 1
+        try:
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                while page <= 20:
+                    resp = client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"per_page": 100, "page": page},
+                    )
+                    if resp.status_code != 200:
+                        break
+                    batch = resp.json() if resp.content else []
+                    if not isinstance(batch, list) or not batch:
+                        break
+                    out.extend(item for item in batch if isinstance(item, dict))
+                    nxt = (resp.headers.get("X-Next-Page") or "").strip()
+                    if not nxt:
+                        break
+                    try:
+                        page = int(nxt)
+                    except ValueError:
+                        break
+        except Exception as e:
+            logger.debug(f"GitLab LIST discussions {project}!{mr_iid} error: {e}")
+        return out
+
+    def post_mr_discussion(
+        self,
+        *,
+        project: Any,
+        mr_iid: int,
+        body: str,
+        position: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Open a resolvable inline discussion on a file/line."""
+        if not self.api_base:
+            logger.error("GitLab API base missing; cannot post MR discussion")
+            return None
+        text = (body or "").strip()
+        if not text or not isinstance(position, dict) or not position:
+            return None
+        ident = self._project_ident(project)
+        url = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}/discussions"
+        payload: Dict[str, Any] = {"body": text, "position": position}
+        path = position.get("new_path") or position.get("old_path") or "-"
+        try:
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                resp = client.post(url, headers=self._headers(), json=payload)
+            if resp.status_code in (200, 201):
+                data = resp.json() if resp.content else {}
+                if not isinstance(data, dict):
+                    data = {"ok": True}
+                logger.info(
+                    f"Posted GitLab MR discussion on {project}!{mr_iid} "
+                    f"path={path} discussion={data.get('id') or '-'}"
+                )
+                return data
+            logger.warning(
+                f"GitLab MR discussion failed ({resp.status_code}) "
+                f"{project}!{mr_iid} path={path}: {(resp.text or '')[:400]}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(f"GitLab MR discussion error {project}!{mr_iid}: {e}")
+            return None

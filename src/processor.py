@@ -267,6 +267,15 @@ class JobProcessor:
             return True
         return str(meta.get("workflow_type") or "").strip().lower() == "azure_pr"
 
+    @staticmethod
+    def _comment_command(event: Any) -> str:
+        raw = str(getattr(event, "command", "") or "yaver").strip().lower()
+        return raw or "yaver"
+
+    @classmethod
+    def _is_review_comment(cls, event: Any) -> bool:
+        return cls._comment_command(event) in {"review", "ask"}
+
     def _is_azure_workitem_triggered(
         self, issue_key: str, state: Optional[JiraAgentState] = None
     ) -> bool:
@@ -1335,6 +1344,8 @@ class JobProcessor:
                 wt = str(meta.get("workflow_type") or "").strip().lower()
                 if wt == "testing":
                     return "test"
+                if wt in {"review", "gitlab-review", "azure-review", "gitlab_review", "azure_review"}:
+                    return "review"
                 return "build"
         return ""
 
@@ -4629,7 +4640,11 @@ class JobProcessor:
                     ran = await self._run_gitlab_mr_comment(event)
                 if not ran:
                     live_st = self.state_manager.get_state(event.issue_key)
-                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                    if (
+                        live_st
+                        and live_st.status == TaskStatus.PLAN_READY
+                        and not self._is_review_comment(event)
+                    ):
                         self.queue_store.finish(
                             qid,
                             status="skipped",
@@ -4657,7 +4672,11 @@ class JobProcessor:
                     ran = await self._run_azure_pr_comment(event)
                 if not ran:
                     live_st = self.state_manager.get_state(event.issue_key)
-                    if live_st and live_st.status == TaskStatus.PLAN_READY:
+                    if (
+                        live_st
+                        and live_st.status == TaskStatus.PLAN_READY
+                        and not self._is_review_comment(event)
+                    ):
                         self.queue_store.finish(
                             qid,
                             status="skipped",
@@ -4810,9 +4829,95 @@ class JobProcessor:
             mr_iid=int(iid),
             body=text,
             discussion_id=discussion_id,
-            allow_new_thread=False,
+            allow_new_thread=not discussion_id,
         )
+        if posted is None and discussion_id:
+            posted = client.post_mr_note(
+                project=project,
+                mr_iid=int(iid),
+                body=text,
+                discussion_id="",
+                allow_new_thread=True,
+            )
         return posted is not None
+
+    async def _maybe_enqueue_lifecycle_review(self, event: Any) -> Dict[str, Any]:
+        """Creasy: open+already-reviewer or assign/re-request starts a review."""
+        if not getattr(event, "start_review", False):
+            return {}
+        if getattr(event, "should_delete_clone", False):
+            return {}
+        from src.gitlab.webhook import GitlabMrLifecycleEvent, GitlabMrNoteEvent
+        from src.azure.webhook import AzurePrLifecycleEvent, AzurePrCommentEvent
+
+        if isinstance(event, GitlabMrLifecycleEvent):
+            note = GitlabMrNoteEvent(
+                issue_key=event.issue_key,
+                note_id=f"review-{event.action or 'open'}-{event.mr_iid}",
+                note_body="",
+                prompt="Review this merge request.",
+                author_username="",
+                author_name="",
+                project_id=event.project_id,
+                project_path=event.project_path,
+                repository_url=event.repository_url,
+                host=event.host,
+                mr_iid=event.mr_iid,
+                mr_title=event.mr_title,
+                mr_description=event.mr_description,
+                source_branch=event.source_branch,
+                target_branch=event.target_branch,
+                mr_url=event.mr_url,
+                discussion_id="",
+                webhook_event=event.webhook_event,
+                command="review",
+                raw=event.raw if isinstance(event.raw, dict) else {},
+            )
+            queued = await self.enqueue_gitlab_note(note)
+            logger.info(
+                f"{event.issue_key}: lifecycle review "
+                f"{event.project_path}!{event.mr_iid} "
+                f"explicit={bool(event.review_explicit)} "
+                f"status={queued.get('status')}"
+            )
+            return {
+                "review_queued": True,
+                "review_status": queued.get("status"),
+                "review_queue_id": queued.get("queue_id"),
+            }
+        if isinstance(event, AzurePrLifecycleEvent):
+            comment = AzurePrCommentEvent(
+                issue_key=event.issue_key,
+                comment_id=f"review-{event.action or 'created'}-{event.pr_id}",
+                comment_body="",
+                prompt="Review this pull request.",
+                author_username="",
+                author_name="",
+                collection_url=event.collection_url,
+                project=event.project,
+                repository_id=event.repository_id,
+                repository_name=event.repository_name,
+                project_path=event.project_path,
+                repository_url=event.repository_url,
+                host=event.host,
+                pr_id=event.pr_id,
+                pr_title=event.pr_title,
+                pr_description=event.pr_description,
+                source_branch=event.source_branch,
+                target_branch=event.target_branch,
+                pr_url=event.pr_url,
+                thread_id="",
+                webhook_event=event.webhook_event,
+                command="review",
+                raw=event.raw if isinstance(event.raw, dict) else {},
+            )
+            queued = await self.enqueue_azure_comment(comment)
+            return {
+                "review_queued": True,
+                "review_status": queued.get("status"),
+                "review_queue_id": queued.get("queue_id"),
+            }
+        return {}
 
     async def handle_gitlab_mr_lifecycle(self, event: Any) -> Dict[str, Any]:
         """Persist MR state and delete the temp clone when the MR is merged or closed.
@@ -4843,7 +4948,15 @@ class JobProcessor:
             state=state_name,
         )
         if not event.should_delete_clone:
-            return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
+            out = {
+                "ok": True,
+                "reason": f"recorded {state_name}",
+                "deleted": [],
+            }
+            review = await self._maybe_enqueue_lifecycle_review(event)
+            if review:
+                out.update(review)
+            return out
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
 
@@ -4860,11 +4973,15 @@ class JobProcessor:
             f"{event.issue_key}: MR {event.project_path}!{event.mr_iid} "
             f"{state_name} — deleted clones {deleted or '(none)'}"
         )
-        return {
+        out = {
             "ok": True,
             "reason": state_name,
             "deleted": deleted,
         }
+        review = await self._maybe_enqueue_lifecycle_review(event)
+        if review:
+            out.update(review)
+        return out
 
     def _record_merge_request_state(
         self,
@@ -4948,7 +5065,12 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
-        if st is not None and st.status == TaskStatus.PLAN_READY:
+        review_job = self._is_review_comment(event)
+        if (
+            st is not None
+            and st.status == TaskStatus.PLAN_READY
+            and not review_job
+        ):
             logger.info(
                 f"{issue_key}: plan_ready; GitLab comment waits for plan_execute"
             )
@@ -4970,7 +5092,8 @@ class JobProcessor:
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,
             "feature_branch": event.source_branch,
-            "workflow_type": "gitlab_mr",
+            "workflow_type": "gitlab-review" if review_job else "gitlab_mr",
+            "review_command": self._comment_command(event) if review_job else "",
             "requeue_eligible": False,
             "model": str(extra.get("model") or "").strip(),
             "backend": str(extra.get("backend") or "").strip(),
@@ -5010,6 +5133,58 @@ class JobProcessor:
                 self._gitlab_seen_notes = set(list(self._gitlab_seen_notes)[-250:])
         await self._start_gitlab_mr_workflow(st, event)
         return True
+
+    def _workdir_for_issue(self, issue_key: str) -> Optional[object]:
+        try:
+            git = (self._contexts.get(issue_key, {}) or {}).get("git")
+            if git is not None and hasattr(git, "get_working_directory"):
+                return git.get_working_directory()
+        except Exception:
+            return None
+        return None
+
+    def _deliver_review_comment(
+        self,
+        state: JiraAgentState,
+        event: Any,
+        answer: str,
+        *,
+        azure: bool,
+    ) -> None:
+        """Overview note (thread reply when we have one) plus inline findings."""
+        from src.backends.codex import format_agent_answer_for_comment
+        from src.review.findings import split_findings
+        from src.review.post import post_inline_findings
+
+        live = self.state_manager.get_state(state.issue_key) or state
+        formatted = format_agent_answer_for_comment(answer, limit=24000)
+        markdown, findings = split_findings(formatted)
+        if len(markdown) > 8000:
+            markdown = markdown[:7990].rstrip() + "\n…"
+        if azure:
+            self._post_azure_pr_reply(live, markdown, kind="Review")
+        else:
+            self._post_gitlab_mr_reply(live, markdown, kind="Review")
+        if self._comment_command(event) == "ask":
+            return
+        meta = dict(live.metadata or {})
+        target = str(
+            meta.get("target_branch")
+            or getattr(event, "target_branch", "")
+            or ""
+        )
+        posted = post_inline_findings(
+            findings=findings,
+            workdir=self._workdir_for_issue(state.issue_key),
+            target_branch=target,
+            azure=azure,
+            meta=meta,
+        )
+        if posted:
+            self.state_manager.update_state(
+                state.issue_key,
+                metadata={"review_findings_posted": posted},
+            )
 
     def _gitlab_mr_reply_body(
         self,
@@ -5052,15 +5227,35 @@ class JobProcessor:
         from src.gitlab.webhook import GitlabMrNoteEvent
 
         assert isinstance(event, GitlabMrNoteEvent)
+        review_job = self._is_review_comment(event)
+        wf_type = "gitlab-review" if review_job else "gitlab_mr"
+        wf_enum = WorkflowType.REVIEW if review_job else WorkflowType.EXECUTION
+        agent_name = WorkflowRouter.get_agent_for_workflow(wf_enum)
         logger.info(
-            f"Starting GitLab MR build workflow for {state.issue_key} "
-            f"(MR !{event.mr_iid})"
+            f"Starting GitLab MR "
+            f"{'review' if review_job else 'build'} workflow for "
+            f"{state.issue_key} (MR !{event.mr_iid})"
         )
         success: Optional[bool] = False
         try:
-            task = AgentTask(
-                description=f"GitLab MR build: {state.issue_key}",
-                prompt=PromptBuilder.build_gitlab_comment_prompt(
+            if review_job:
+                prompt = PromptBuilder.build_review_comment_prompt(
+                    issue_key=state.issue_key,
+                    title=event.mr_title,
+                    url=event.mr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    forge="gitlab",
+                    work_branch=event.source_branch,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(event),
+                    command=self._comment_command(event),
+                )
+            else:
+                prompt = PromptBuilder.build_gitlab_comment_prompt(
                     issue_key=state.issue_key,
                     mr_title=event.mr_title,
                     mr_url=event.mr_url,
@@ -5072,8 +5267,15 @@ class JobProcessor:
                     replied_message="",
                     raw=getattr(event, "raw", None),
                     review_context=self._review_context_for_event(event),
+                )
+            task = AgentTask(
+                description=(
+                    f"GitLab MR review: {state.issue_key}"
+                    if review_job
+                    else f"GitLab MR build: {state.issue_key}"
                 ),
-                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                prompt=prompt,
+                agent=agent_name,
                 issue_key=state.issue_key,
                 model=self._model_for_issue(state),
                 backend=self._backend_for_issue(state),
@@ -5082,8 +5284,8 @@ class JobProcessor:
                 state,
                 status=TaskStatus.EXECUTING,
                 task=task,
-                workflow_type="gitlab_mr",
-                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                workflow_type=wf_type,
+                agent=agent_name,
                 job_status="executing",
             )
             if job_id is None:
@@ -5145,22 +5347,41 @@ class JobProcessor:
                 if isinstance(raw_wb, str) and raw_wb.strip()
                 else event.source_branch
             )
-            task.prompt = PromptBuilder.build_gitlab_comment_prompt(
-                issue_key=state.issue_key,
-                mr_title=event.mr_title,
-                mr_url=event.mr_url,
-                source_branch=event.source_branch,
-                target_branch=event.target_branch,
-                author=event.author_username or event.author_name,
-                comment=event.prompt,
-                work_branch=work_branch,
-                plan_path=plan_path_for_agent,
-                replied_message="",
-                raw=getattr(event, "raw", None),
-                review_context=self._review_context_for_event(
-                    event, git.get_working_directory()
-                ),
-            )
+            if review_job:
+                task.prompt = PromptBuilder.build_review_comment_prompt(
+                    issue_key=state.issue_key,
+                    title=event.mr_title,
+                    url=event.mr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    forge="gitlab",
+                    work_branch=work_branch,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(
+                        event, git.get_working_directory()
+                    ),
+                    command=self._comment_command(event),
+                )
+            else:
+                task.prompt = PromptBuilder.build_gitlab_comment_prompt(
+                    issue_key=state.issue_key,
+                    mr_title=event.mr_title,
+                    mr_url=event.mr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    work_branch=work_branch,
+                    plan_path=plan_path_for_agent,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(
+                        event, git.get_working_directory()
+                    ),
+                )
             if work_branch:
                 try:
                     self.state_manager.update_state(
@@ -5212,6 +5433,31 @@ class JobProcessor:
 
             if result.get("returncode") == 0:
                 answer = (result.get("stdout") or "").strip() or "(no output)"
+                if review_job:
+                    self._deliver_review_comment(
+                        state, event, answer, azure=False
+                    )
+                    updated = self.state_manager.update_state_if(
+                        state.issue_key,
+                        expected_statuses={TaskStatus.EXECUTING},
+                        reject_statuses=self.ABORTED_STATUSES,
+                        status=TaskStatus.COMPLETED,
+                        completed_at=datetime.now(),
+                        progress_percentage=100,
+                        current_task_id=None,
+                        metadata={"delivery_status": "review_posted"},
+                    )
+                    if updated is None:
+                        success = False
+                    else:
+                        self._finish_job_record(
+                            state.issue_key,
+                            status="completed",
+                            progress_percentage=100,
+                        )
+                        success = True
+                    self._release_context(state.issue_key, success=success)
+                    return
                 pushed = False
                 delivery_note = ""
                 delivery_err = self._assert_build_delivery(state.issue_key)
@@ -5337,6 +5583,15 @@ class JobProcessor:
                     )
                     success = True
             else:
+                if review_job:
+                    err = (result.get("stderr") or result.get("stdout") or "").strip()
+                    self._fail_issue(
+                        state.issue_key,
+                        err or "Review session did not finish cleanly.",
+                        suggestion="Comment @bot /review again, or @bot /ask with a question.",
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
                 outcome = await self._deliver_if_new_commits(
                     state,
                     existing_mr_url=event.mr_url or None,
@@ -5502,9 +5757,19 @@ class JobProcessor:
             pr_id=int(iid),
             body=text,
             thread_id=thread_id,
-            allow_new_thread=False,
+            allow_new_thread=not thread_id,
             parent_comment_id=comment_id,
         )
+        if posted is None and thread_id:
+            posted = client.post_pr_comment(
+                project=str(project),
+                repository=repository,
+                pr_id=int(iid),
+                body=text,
+                thread_id="",
+                allow_new_thread=True,
+                parent_comment_id="",
+            )
         if posted is None:
             azure_warning(f"reply fail {state.issue_key} {project}/{repository}!{iid}")
             return False
@@ -5549,7 +5814,15 @@ class JobProcessor:
             f"delete_clone={event.should_delete_clone}"
         )
         if not event.should_delete_clone:
-            return {"ok": True, "reason": f"recorded {state_name}", "deleted": []}
+            out = {
+                "ok": True,
+                "reason": f"recorded {state_name}",
+                "deleted": [],
+            }
+            review = await self._maybe_enqueue_lifecycle_review(event)
+            if review:
+                out.update(review)
+            return out
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
 
@@ -5566,11 +5839,15 @@ class JobProcessor:
             f"pr={event.project_path}!{event.pr_id} "
             f"{state_name} deleted={deleted or []}"
         )
-        return {
+        out = {
             "ok": True,
             "reason": state_name,
             "deleted": deleted,
         }
+        review = await self._maybe_enqueue_lifecycle_review(event)
+        if review:
+            out.update(review)
+        return out
 
     async def handle_azure_pr_comment(self, event: Any) -> None:
         """Clone the PR source branch, run a build, push if needed, reply on the PR."""
@@ -5621,7 +5898,8 @@ class JobProcessor:
             return False
 
         st = self.state_manager.get_state(issue_key)
-        if st is not None and st.status == TaskStatus.PLAN_READY:
+        review_job = self._is_review_comment(event)
+        if st is not None and st.status == TaskStatus.PLAN_READY and not review_job:
             azure_info(
                 f"job defer plan_ready issue={issue_key} comment={note_id}"
             )
@@ -5645,7 +5923,8 @@ class JobProcessor:
             "source_branch": event.source_branch,
             "target_branch": event.target_branch,
             "feature_branch": event.source_branch,
-            "workflow_type": "azure_pr",
+            "workflow_type": "azure-review" if review_job else "azure_pr",
+            "review_command": self._comment_command(event) if review_job else "",
             "requeue_eligible": False,
             "model": str(extra.get("model") or "").strip(),
             "backend": str(extra.get("backend") or "").strip(),
@@ -5695,17 +5974,37 @@ class JobProcessor:
         assert isinstance(event, AzurePrCommentEvent)
         from src.azure.log import azure_error, azure_info, azure_warning
 
+        review_job = self._is_review_comment(event)
+        wf_type = "azure-review" if review_job else "azure_pr"
+        wf_enum = WorkflowType.REVIEW if review_job else WorkflowType.EXECUTION
+        agent_name = WorkflowRouter.get_agent_for_workflow(wf_enum)
         azure_info(
             f"workflow start issue={state.issue_key} pr=!{event.pr_id} "
+            f"kind={'review' if review_job else 'build'} "
             f"repo={event.repository_url} "
             f"source={event.source_branch} target={event.target_branch} "
             f"author={(event.author_username or event.author_name)!r}"
         )
         success: Optional[bool] = False
         try:
-            task = AgentTask(
-                description=f"Azure PR build: {state.issue_key}",
-                prompt=PromptBuilder.build_azure_comment_prompt(
+            if review_job:
+                prompt = PromptBuilder.build_review_comment_prompt(
+                    issue_key=state.issue_key,
+                    title=event.pr_title,
+                    url=event.pr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    forge="azure",
+                    work_branch=event.source_branch,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(event),
+                    command=self._comment_command(event),
+                )
+            else:
+                prompt = PromptBuilder.build_azure_comment_prompt(
                     issue_key=state.issue_key,
                     pr_title=event.pr_title,
                     pr_url=event.pr_url,
@@ -5717,8 +6016,15 @@ class JobProcessor:
                     replied_message="",
                     raw=getattr(event, "raw", None),
                     review_context=self._review_context_for_event(event),
+                )
+            task = AgentTask(
+                description=(
+                    f"Azure PR review: {state.issue_key}"
+                    if review_job
+                    else f"Azure PR build: {state.issue_key}"
                 ),
-                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                prompt=prompt,
+                agent=agent_name,
                 issue_key=state.issue_key,
                 model=self._model_for_issue(state),
                 backend=self._backend_for_issue(state),
@@ -5727,8 +6033,8 @@ class JobProcessor:
                 state,
                 status=TaskStatus.EXECUTING,
                 task=task,
-                workflow_type="azure_pr",
-                agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.EXECUTION),
+                workflow_type=wf_type,
+                agent=agent_name,
                 job_status="executing",
             )
             if job_id is None:
@@ -5802,22 +6108,41 @@ class JobProcessor:
                 if isinstance(raw_wb, str) and raw_wb.strip()
                 else event.source_branch
             )
-            task.prompt = PromptBuilder.build_azure_comment_prompt(
-                issue_key=state.issue_key,
-                pr_title=event.pr_title,
-                pr_url=event.pr_url,
-                source_branch=event.source_branch,
-                target_branch=event.target_branch,
-                author=event.author_username or event.author_name,
-                comment=event.prompt,
-                work_branch=work_branch,
-                plan_path=plan_path_for_agent,
-                replied_message="",
-                raw=getattr(event, "raw", None),
-                review_context=self._review_context_for_event(
-                    event, git.get_working_directory()
-                ),
-            )
+            if review_job:
+                task.prompt = PromptBuilder.build_review_comment_prompt(
+                    issue_key=state.issue_key,
+                    title=event.pr_title,
+                    url=event.pr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    forge="azure",
+                    work_branch=work_branch,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(
+                        event, git.get_working_directory()
+                    ),
+                    command=self._comment_command(event),
+                )
+            else:
+                task.prompt = PromptBuilder.build_azure_comment_prompt(
+                    issue_key=state.issue_key,
+                    pr_title=event.pr_title,
+                    pr_url=event.pr_url,
+                    source_branch=event.source_branch,
+                    target_branch=event.target_branch,
+                    author=event.author_username or event.author_name,
+                    comment=event.prompt,
+                    work_branch=work_branch,
+                    plan_path=plan_path_for_agent,
+                    replied_message="",
+                    raw=getattr(event, "raw", None),
+                    review_context=self._review_context_for_event(
+                        event, git.get_working_directory()
+                    ),
+                )
             if work_branch:
                 try:
                     self.state_manager.update_state(
@@ -5877,6 +6202,31 @@ class JobProcessor:
 
             if result.get("returncode") == 0:
                 answer = (result.get("stdout") or "").strip() or "(no output)"
+                if review_job:
+                    self._deliver_review_comment(
+                        state, event, answer, azure=True
+                    )
+                    updated = self.state_manager.update_state_if(
+                        state.issue_key,
+                        expected_statuses={TaskStatus.EXECUTING},
+                        reject_statuses=self.ABORTED_STATUSES,
+                        status=TaskStatus.COMPLETED,
+                        completed_at=datetime.now(),
+                        progress_percentage=100,
+                        current_task_id=None,
+                        metadata={"delivery_status": "review_posted"},
+                    )
+                    if updated is None:
+                        success = False
+                    else:
+                        self._finish_job_record(
+                            state.issue_key,
+                            status="completed",
+                            progress_percentage=100,
+                        )
+                        success = True
+                    self._release_context(state.issue_key, success=success)
+                    return
                 pushed = False
                 delivery_note = ""
                 delivery_err = self._assert_build_delivery(state.issue_key)
@@ -6016,6 +6366,15 @@ class JobProcessor:
                         f"pushed={pushed} reply={posted}"
                     )
             else:
+                if review_job:
+                    err = (result.get("stderr") or result.get("stdout") or "").strip()
+                    self._fail_issue(
+                        state.issue_key,
+                        err or "Review session did not finish cleanly.",
+                        suggestion="Comment @bot /review again, or @bot /ask with a question.",
+                    )
+                    self._release_context(state.issue_key, success=False)
+                    return
                 azure_warning(
                     f"workflow agent unsuccessful issue={state.issue_key} "
                     f"returncode={result.get('returncode')} — checking commits"

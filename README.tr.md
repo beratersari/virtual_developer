@@ -146,7 +146,7 @@ Mode: plan
 |-------|---------|
 | `@yaver /yaver login için test ekle` | İş başlar. İstem yorumun geri kalanıdır. |
 | `@yaver` (`/yaver` yok) | **O konuda** kullanım notu. İş yok. |
-| `@yaver /ask …` veya `@yaver /review …` | Yok sayılır (başka ajan). Kullanım notu yok. |
+| `@yaver /ask …` veya `@yaver /review …` | Kod incelemesi başlar (`/ask` takip sorusu). Creasy ile aynı kurallar: `/review`, `/ask`, botu reviewer ata, veya bot zaten reviewer iken MR aç. Yeni commit yeniden incelemez. İtme veya yeni MR yok. |
 
 ### İş hangi kayda bağlanır
 
@@ -190,7 +190,7 @@ GitLab ile aynı fikir. `AZURE_WEBHOOK_ENABLED=true`. Projede Service hooks → 
 |-------|---------|
 | `@yaver /yaver bu farkı anlat` | PR üzerinde iş başlar |
 | `@yaver` (`/yaver` yok) | O konuda kullanım notu |
-| `@yaver /ask …` | Yok sayılır |
+| `@yaver /ask …` veya `@yaver /review` | Yaver inceleme / takip (itme yok). Botu reviewer ata, veya bot zaten listedeyken PR aç. |
 
 PR’de `/planExecute` / `/planRefactor` **kullanmayın**. Bunlar yalnızca iş öğesi yorumlarıdır.
 

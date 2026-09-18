@@ -15,14 +15,15 @@ from urllib.parse import urlparse
 from src.brand import is_yaver_reply
 from src.gitlab.keys import resolve_mr_issue_key
 from src.gitlab.mentions import (
+    ASK_COMMAND,
+    EMPTY_ASK_REASON,
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
+    REVIEW_COMMAND,
     author_is_configured_bot,
+    classify_comment_command,
     format_execute_usage_note,
-    note_is_execute_command,
-    note_is_other_agent_handoff,
     note_mentions_bot,
-    other_agent_handoff_reason,
     parse_mention_list,
     strip_bot_mentions,
     strip_slash_command,
@@ -56,6 +57,7 @@ class GitlabMrNoteEvent:
     mr_url: str
     discussion_id: str = ""
     webhook_event: str = "Note Hook"
+    command: str = EXECUTE_COMMAND
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -78,6 +80,7 @@ class GitlabMrNoteEvent:
             "mr_url": self.mr_url,
             "discussion_id": self.discussion_id,
             "webhook_event": self.webhook_event,
+            "command": self.command or EXECUTE_COMMAND,
             "raw": self.raw if isinstance(self.raw, dict) else {},
         }
 
@@ -103,6 +106,7 @@ class GitlabMrNoteEvent:
             mr_url=str(d.get("mr_url") or ""),
             discussion_id=str(d.get("discussion_id") or ""),
             webhook_event=str(d.get("webhook_event") or "Note Hook"),
+            command=str(d.get("command") or EXECUTE_COMMAND),
             raw=d.get("raw") if isinstance(d.get("raw"), dict) else {},
         )
 
@@ -125,6 +129,9 @@ class GitlabMrLifecycleEvent:
     target_branch: str
     mr_url: str
     webhook_event: str = "Merge Request Hook"
+    start_review: bool = False
+    review_explicit: bool = False
+    is_draft: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -274,6 +281,11 @@ def decide_gitlab_note_webhook(
     if notable.lower() not in {"mergerequest", "merge_request", "merge request"}:
         return WebhookDecision(False, f"ignored noteable_type={notable!r}")
 
+    from src.review_flow import ask_wants_new_review, note_is_edit
+
+    if note_is_edit(attrs):
+        return WebhookDecision(False, "note edit")
+
     note = attrs.get("note")
     if not isinstance(note, str) or not note.strip():
         return WebhookDecision(False, "empty note")
@@ -293,13 +305,6 @@ def decide_gitlab_note_webhook(
         bot_usernames or mentions,
     ):
         return WebhookDecision(False, "ignored comment from bot user")
-    if note_is_other_agent_handoff(note, bot_mentions or mentions):
-        reason = other_agent_handoff_reason(note, bot_mentions or mentions)
-        logger.info(
-            f"GitLab note ignored other-agent command ({reason}) "
-            f"preview={note.strip()[:80]!r}"
-        )
-        return WebhookDecision(False, reason)
 
     project = _as_dict(data.get("project"))
     repository = _as_dict(data.get("repository"))
@@ -333,10 +338,16 @@ def decide_gitlab_note_webhook(
             False, "merge request missing repository or source/target branch"
         )
 
+    command = classify_comment_command(note, bot_mentions or mentions)
     prompt = strip_bot_mentions(note, mentions)
-    prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
+    if command:
+        prompt = strip_slash_command(prompt, command)
+    else:
+        prompt = strip_slash_command(prompt, EXECUTE_COMMAND)
     if not prompt:
         prompt = note.strip()
+        if command:
+            prompt = strip_slash_command(prompt, command) or prompt
 
     note_id = str(attrs.get("id") or attrs.get("note_id") or "")
     mr_title = _s(mr.get("title"))
@@ -382,9 +393,18 @@ def decide_gitlab_note_webhook(
         mr_url=_s(mr.get("web_url") or mr.get("url")),
         discussion_id=_s(attrs.get("discussion_id") or attrs.get("discussionId")),
         webhook_event=event_name or "Note Hook",
+        command=command or EXECUTE_COMMAND,
         raw=data,
     )
-    if not note_is_execute_command(note, bot_mentions or mentions):
+    if command == ASK_COMMAND and not strip_slash_command(
+        strip_bot_mentions(note, mentions), ASK_COMMAND
+    ).strip():
+        logger.info(
+            f"GitLab note empty /ask "
+            f"{event.project_path}!{event.mr_iid} note={event.note_id}"
+        )
+        return WebhookDecision(False, EMPTY_ASK_REASON, event=event)
+    if command not in {EXECUTE_COMMAND, REVIEW_COMMAND, ASK_COMMAND}:
         logger.info(
             f"GitLab note mention without /yaver "
             f"{event.project_path}!{event.mr_iid} note={event.note_id} "
@@ -393,6 +413,14 @@ def decide_gitlab_note_webhook(
         return WebhookDecision(
             False, EXECUTE_MISSING_REASON, event=event, usage_note=True
         )
+    if command in {REVIEW_COMMAND, ASK_COMMAND}:
+        event.prompt = strip_slash_command(
+            strip_bot_mentions(note, mentions), command
+        ).strip() or (
+            "Review this merge request." if command == REVIEW_COMMAND else event.prompt
+        )
+        if command == ASK_COMMAND and ask_wants_new_review(event.prompt):
+            event.command = REVIEW_COMMAND
     logger.info(
         f"GitLab MR note accepted: {event.issue_key} "
         f"{event.project_path}!{event.mr_iid} note={event.note_id} "
@@ -536,8 +564,16 @@ def decide_gitlab_mr_webhook(
         webhook_event=event_name or "Merge Request Hook",
         raw=data,
     )
+    from src.review_flow import classify_gitlab_review_lifecycle, gitlab_payload_is_draft
+
+    event.is_draft = gitlab_payload_is_draft(data)
+    review_kind = classify_gitlab_review_lifecycle(data, action=action)
+    if review_kind:
+        event.start_review = True
+        event.review_explicit = review_kind == "assign"
     logger.info(
         f"GitLab MR lifecycle: {event.issue_key} {event.project_path}!{event.mr_iid} "
-        f"action={event.action or '-'} state={event.state or '-'}"
+        f"action={event.action or '-'} state={event.state or '-'} "
+        f"start_review={event.start_review}"
     )
     return WebhookDecision(True, "accepted", event=event)

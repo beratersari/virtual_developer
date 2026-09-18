@@ -111,6 +111,7 @@ def test_install_agents_copies_into_home(tmp_path: Path):
     (agents / "derman-build.md").write_text("build\n", encoding="utf-8")
     (agents / "derman-plan.md").write_text("plan\n", encoding="utf-8")
     (agents / "derman-test.md").write_text("test\n", encoding="utf-8")
+    (agents / "derman-reviewer.md").write_text("reviewer\n", encoding="utf-8")
     (agents / "gitlab-reviewer.md").write_text("review\n", encoding="utf-8")
     for i in range(10):
         d = src / "opencoderman" / "skills" / f"s{i}"
@@ -123,6 +124,7 @@ def test_install_agents_copies_into_home(tmp_path: Path):
     assert dest == home
     assert (home / "agents" / "derman-build.md").read_text(encoding="utf-8") == "build\n"
     assert (home / "agents" / "derman-plan.md").is_file()
+    assert (home / "agents" / "derman-reviewer.md").is_file()
     assert not (home / "agents" / "gitlab-reviewer.md").exists()
     assert len(list((home / "skills").rglob("SKILL.md"))) == 10
 
@@ -135,6 +137,7 @@ def test_cli_uses_source_root_and_home(tmp_path: Path):
     (src / "opencoderman" / "agents" / "derman-build.md").write_text("b\n", encoding="utf-8")
     (src / "opencoderman" / "agents" / "derman-plan.md").write_text("p\n", encoding="utf-8")
     (src / "opencoderman" / "agents" / "derman-test.md").write_text("t\n", encoding="utf-8")
+    (src / "opencoderman" / "agents" / "derman-reviewer.md").write_text("r\n", encoding="utf-8")
     for i in range(10):
         d = src / "opencoderman" / "skills" / f"s{i}"
         d.mkdir(parents=True, exist_ok=True)

@@ -570,6 +570,149 @@ class AzureDevOpsClient:
             azure_error(f"post_comment error {project}/{repository}!{iid}: {e}")
             return None
 
+    def list_pr_threads(
+        self, *, project: str, repository: Any, pr_id: int
+    ) -> list[Dict[str, Any]]:
+        if not self.api_base:
+            return []
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return []
+        if iid <= 0:
+            return []
+        url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
+        try:
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                resp = client.get(
+                    url,
+                    headers=self._headers(),
+                    params={"api-version": _API_VERSION},
+                )
+                if resp.status_code in (400, 404, 415):
+                    resp = client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"api-version": _API_VERSION_FALLBACK},
+                    )
+            if resp.status_code != 200:
+                return []
+            data = resp.json() if resp.content else {}
+        except Exception as e:
+            azure_warning(f"list_threads error {project}/{repository}!{iid}: {e}")
+            return []
+        rows = data.get("value") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def pr_iteration_span(
+        self, *, project: str, repository: Any, pr_id: int
+    ) -> tuple[int, int]:
+        """``(firstComparingIteration, secondComparingIteration)``."""
+        if not self.api_base:
+            return 1, 1
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return 1, 1
+        if iid <= 0:
+            return 1, 1
+        url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/iterations"
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = client.get(
+                    url,
+                    headers=self._headers(),
+                    params={"api-version": _API_VERSION},
+                )
+                if resp.status_code in (400, 404, 415):
+                    resp = client.get(
+                        url,
+                        headers=self._headers(),
+                        params={"api-version": _API_VERSION_FALLBACK},
+                    )
+            if resp.status_code != 200:
+                return 1, 1
+            data = resp.json() if resp.content else {}
+        except Exception as e:
+            azure_warning(f"iterations error {project}/{repository}!{iid}: {e}")
+            return 1, 1
+        rows = data.get("value") if isinstance(data, dict) else data
+        ids: list[int] = []
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ids.append(int(item.get("id")))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return 1, 1
+        return 1, max(ids)
+
+    def post_pr_file_thread(
+        self,
+        *,
+        project: str,
+        repository: Any,
+        pr_id: int,
+        body: str,
+        thread_context: Dict[str, Any],
+        first_iteration: int = 1,
+        second_iteration: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """Active inline file thread (status 1), not a Closed overview note."""
+        if not self.api_base:
+            azure_error("post_file_thread fail api_base missing")
+            return None
+        text = (body or "").strip()
+        if not text or not isinstance(thread_context, dict) or not thread_context:
+            return None
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
+        payload: Dict[str, Any] = {
+            "comments": [
+                {"parentCommentId": 0, "content": text, "commentType": 1}
+            ],
+            "status": 1,
+            "threadContext": thread_context,
+            "properties": {
+                "Microsoft.TeamFoundation.Discussion.SupportsMarkdown": {
+                    "$type": "System.Int32",
+                    "$value": 1,
+                }
+            },
+            "pullRequestThreadContext": {
+                "iterationContext": {
+                    "firstComparingIteration": max(1, int(first_iteration or 1)),
+                    "secondComparingIteration": max(1, int(second_iteration or 1)),
+                }
+            },
+        }
+        path = thread_context.get("filePath") or "-"
+        try:
+            with httpx.Client(timeout=30.0, verify=False) as client:
+                posted = self._post_json(client, url, payload)
+            if posted is not None:
+                azure_info(
+                    f"post_file_thread ok {project}/{repository}!{iid} "
+                    f"path={path} id={posted.get('id')}"
+                )
+                return posted
+            azure_warning(
+                f"post_file_thread fail {project}/{repository}!{iid} path={path}"
+            )
+            return None
+        except Exception as e:
+            azure_error(f"post_file_thread error {project}/{repository}!{iid}: {e}")
+            return None
+
     def _post_json(
         self, client: httpx.Client, url: str, payload: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:

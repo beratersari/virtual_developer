@@ -160,6 +160,14 @@ USAGE_MR_PR = (
     "- `/yaver <istek>` — bu tartışmada bir iş başlatır\n"
 )
 
+USAGE_MR_PR_WITH_REVIEW = (
+    "`/yaver`, `/review` ve `/ask` komutlarını çalıştırırım. Aynı yorumda "
+    "beni etiketleyin ve komutu yazın.\n\n"
+    "- `/yaver <istek>` — bu tartışmada bir iş başlatır\n"
+    "- `/review` — bu birleştirme/çekme isteğini inceler (dosya değiştirmez)\n"
+    "- `/ask <soru>` — inceleme konusuna takip sorusu\n"
+)
+
 USAGE_WORK_ITEM = (
     "İş öğesinde yalnızca plan komutlarını çalıştırırım. Aynı yorumda beni "
     "etiketleyin ve şunlardan birini yazın.\n\n"

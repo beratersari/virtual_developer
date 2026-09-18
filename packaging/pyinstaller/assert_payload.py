@@ -30,12 +30,14 @@ REQUIRED_BUNDLED = (
     "web/dist/index.html",
     "agent/PLAN_PROMPT.md",
     "agent/BUILD_PROMPT.md",
+    "agent/REVIEW_PROMPT.md",
 )
 
 REQUIRED_OPENCODERMAN = (
     "opencoderman/agents/derman-build.md",
     "opencoderman/agents/derman-plan.md",
     "opencoderman/agents/derman-test.md",
+    "opencoderman/agents/derman-reviewer.md",
 )
 MIN_OPENCODE_SKILLS = 10
 FORBIDDEN_DUPLICATE_CONFIGS = (

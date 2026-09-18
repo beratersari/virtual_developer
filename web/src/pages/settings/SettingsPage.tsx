@@ -563,7 +563,8 @@ export function SettingsPage() {
           GitLab username, no @. Start a job with @name /yaver on a
           merge-request comment. Mention without /yaver gets a usage note
           in the thread. Comments from this user are ignored. Comma-separated
-          if there is more than one.
+          if there is more than one. /review and /ask stay silent unless
+          Code review (below) is on.
         </span>
       </label>
 
@@ -595,6 +596,13 @@ export function SettingsPage() {
             placeholder="leave blank to keep current"
           />
         </label>
+        <span className="text-xs text-text-muted">
+          @bot /review and /ask on merge and pull requests always run
+          derman-reviewer. Assign the bot as reviewer, or open an MR
+          that already lists it, to start a review. New commits do not
+          re-review. No push or new MR. Work-item /review and /ask stay
+          silent.
+        </span>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
           {settings?.gitlab_webhook_path || '/yaver/webhook/gitlab'}

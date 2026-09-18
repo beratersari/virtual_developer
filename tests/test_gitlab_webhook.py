@@ -640,6 +640,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
         session_id="ses_gl1",
         issue_key="GL-ACME-DEMO-4",
         working_directory=str(clone),
+        kind="build",
     )
 
     def fake_init(*_a, **_k):

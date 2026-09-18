@@ -15,11 +15,15 @@ import re
 from typing import Iterable, List
 
 from src.gitlab.mentions import (
+    ASK_COMMAND,
     ASK_HANDOFF_REASON,
+    EMPTY_ASK_REASON,
     EXECUTE_COMMAND,
     EXECUTE_MISSING_REASON,
+    REVIEW_COMMAND,
     REVIEW_HANDOFF_REASON,
     author_is_configured_bot,
+    classify_comment_command,
     extract_mention_guids,
     flatten_comment_text,
     format_execute_usage_note,
@@ -194,9 +198,12 @@ def strip_azure_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 
 __all__ = [
+    "ASK_COMMAND",
     "ASK_HANDOFF_REASON",
+    "EMPTY_ASK_REASON",
     "EXECUTE_COMMAND",
     "EXECUTE_MISSING_REASON",
+    "REVIEW_COMMAND",
     "REVIEW_HANDOFF_REASON",
     "author_is_configured_bot",
     "expand_guid_mentions",
@@ -212,6 +219,7 @@ __all__ = [
     "note_is_execute_command",
     "note_is_other_agent_handoff",
     "note_is_review_handoff",
+    "classify_comment_command",
     "note_mentions_bot",
     "other_agent_handoff_reason",
     "parse_mention_list",

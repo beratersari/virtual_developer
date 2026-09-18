@@ -104,6 +104,20 @@ def strip_bot_mentions(note: str, bot_mentions: Iterable[str]) -> str:
 
 ASK_HANDOFF_REASON = "ignored /ask handoff"
 REVIEW_HANDOFF_REASON = "ignored /review handoff"
+REVIEW_COMMAND = "review"
+ASK_COMMAND = "ask"
+EMPTY_ASK_REASON = "empty /ask"
+
+
+def classify_comment_command(note: str, bot_mentions: Iterable[str]) -> str:
+    """``yaver`` / ``review`` / ``ask`` / ``""`` for a configured bot mention."""
+    if note_is_execute_command(note, bot_mentions):
+        return EXECUTE_COMMAND
+    if note_is_review_handoff(note, bot_mentions):
+        return REVIEW_COMMAND
+    if note_is_ask_handoff(note, bot_mentions):
+        return ASK_COMMAND
+    return ""
 EXECUTE_MISSING_REASON = "mention without /yaver"
 EXECUTE_COMMAND = "yaver"
 
@@ -271,8 +285,9 @@ def note_has_slash_command(
 def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
     """True when the comment contains ``@bot /ask`` for a configured bot.
 
-    That form is routed to another agent. Yaver must not start a job.
-    ``/asking`` and ``/ask-review`` are not this command.
+    On GitLab MRs / Azure PRs this starts a review follow-up. On Azure
+    work items it stays silent (no plan command). ``/asking`` and
+    ``/ask-review`` are not this command.
     """
     return note_has_slash_command(note, bot_mentions, "ask")
 
@@ -280,14 +295,15 @@ def note_is_ask_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
 def note_is_review_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
     """True when the comment contains ``@bot /review`` for a configured bot.
 
-    Creasy owns ``/review``. Yaver must not start a job or post a usage note.
-    ``/reviewing`` and ``/review-in-detail`` are not this command.
+    On GitLab MRs / Azure PRs this starts a review. On Azure work items
+    it stays silent. ``/reviewing`` and ``/review-in-detail`` are not
+    this command.
     """
     return note_has_slash_command(note, bot_mentions, "review")
 
 
 def note_is_other_agent_handoff(note: str, bot_mentions: Iterable[str]) -> bool:
-    """True for ``@bot /ask`` or ``@bot /review`` (silent; other agent)."""
+    """True for ``@bot /ask`` or ``@bot /review`` (work-item silence)."""
     return note_is_ask_handoff(note, bot_mentions) or note_is_review_handoff(
         note, bot_mentions
     )

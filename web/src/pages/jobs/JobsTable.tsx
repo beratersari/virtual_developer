@@ -1,4 +1,5 @@
 import type { JobItem } from '../../api/types'
+import { jobChannelLabel } from '../../util/jobChannel'
 import { sortJobsByCreatedAt } from '../../util/jobs'
 import { jobIsDeletable, statusToneClass } from '../../util/status'
 import { resolveJobWorker, workerLabel } from '../../util/worker'
@@ -35,6 +36,7 @@ export function JobsTable({
       {ordered.map((j) => {
         const canSelect = jobIsDeletable(j.status, Boolean(j.live))
         const isChecked = Boolean(selectedIds?.has(j.job_id))
+        const channel = jobChannelLabel(j)
         return (
           <div
             key={j.job_id}
@@ -55,18 +57,23 @@ export function JobsTable({
                 <span className="font-mono text-sm font-semibold text-text">
                   {j.issue_key}
                 </span>
-                {(j.source || 'jira') === 'gitlab' && (
+                {!channel && (j.source || 'jira') === 'gitlab' && (
                   <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                     GitLab
                   </span>
                 )}
-                {(j.source || 'jira') === 'azure' && (
+                {!channel && (j.source || 'jira') === 'azure' && (
                   <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                     Azure
                   </span>
                 )}
                 {j.live && <LiveDot />}
                 <StatusBadge status={j.status} size="sm" />
+                {channel && (
+                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                    {channel}
+                  </span>
+                )}
                 <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                   {workerLabel(resolveJobWorker(j))}
                 </span>
@@ -76,7 +83,7 @@ export function JobsTable({
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-text-muted">
                 <span>{j.job_id.length > 22 ? `${j.job_id.slice(0, 20)}…` : j.job_id}</span>
-                {j.workflow_type && <span>{j.workflow_type}</span>}
+                {j.workflow_type && !channel && <span>{j.workflow_type}</span>}
                 {j.agent && <span>{j.agent}</span>}
                 <span>{j.started_at ?? 'not started'}</span>
                 {j.merge_request_url && (

@@ -73,7 +73,12 @@ def _copy_tree_filtered(src: Path, dest: Path) -> int:
     return count
 
 
-_PLAN_BUILD_AGENTS = ("derman-build.md", "derman-plan.md", "derman-test.md")
+_PLAN_BUILD_AGENTS = (
+    "derman-build.md",
+    "derman-plan.md",
+    "derman-test.md",
+    "derman-reviewer.md",
+)
 
 
 def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:

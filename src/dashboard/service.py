@@ -795,7 +795,6 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         enabled = bool(data["azure_webhook_enabled"])
         settings.azure_webhook_enabled = enabled
         runtime_persist["azure_webhook_enabled"] = enabled
-        dotenv_updates["AZURE_WEBHOOK_ENABLED"] = "true" if enabled else "false"
     # Posted jira_email is ignored. Cloud keeps the existing .env / runtime
     # email (Basic). On-prem stays token-only Bearer.
     if jira_host_is_cloud(getattr(settings, "jira_host", "")):
