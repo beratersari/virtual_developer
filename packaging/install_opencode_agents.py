@@ -2,9 +2,9 @@
 """Copy derman-build / derman-plan and skills into an existing OpenCode home.
 
 Does not install the OpenCode CLI. Detects the home, then copies only
-``derman-build.md``, ``derman-plan.md``, and ``derman-test.md`` plus
-``skills/``. Other OpenCoderman agents (for example gitlab-reviewer)
-are left in the zip.
+``derman-build.md``, ``derman-plan.md``, ``derman-test.md``, and
+``derman-reviewer.md`` plus ``skills/``. Other OpenCoderman agents
+(for example gitlab-reviewer) are left in the zip.
 
 Home detection (first match):
 
