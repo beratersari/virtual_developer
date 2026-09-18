@@ -1,8 +1,12 @@
-"""Azure DevOps Server REST client (2022.2 / TFS).
+"""Azure DevOps Server REST client (2020.1+ and 2022).
 
 PAT auth is the same as Creasy: ``Authorization: Basic pat:<PAT>``.
 IIS rejects an empty username (``:PAT`` / Bearer). ``verify=False`` is
 the product TLS policy (on-prem / intercept; no custom-CA path yet).
+
+REST mapping (Microsoft): 2022.1→7.1, 2022→7.0, 2020 (incl. Update 1.1)→6.0.
+Older api-version values work on newer servers, so every call walks
+``API_VERSIONS`` on 400/404/415.
 """
 
 from __future__ import annotations
@@ -28,9 +32,22 @@ __all__ = [
     "azure_basic_user",
 ]
 
-# Azure DevOps Server 2022.2 ships REST 7.1; 7.0 is accepted as fallback.
-_API_VERSION = "7.1"
-_API_VERSION_FALLBACK = "7.0"
+# Newest first. 2020 Update 1.1 stops at 6.0; 2022 accepts 6.0 and 7.x.
+API_VERSIONS: tuple[str, ...] = ("7.1", "7.0", "6.1", "6.0")
+_API_VERSION = API_VERSIONS[0]
+_API_VERSION_FALLBACK = API_VERSIONS[1]
+
+
+def _response_api_version(resp: Any) -> str:
+    req = getattr(resp, "request", None)
+    url = getattr(req, "url", None)
+    params = getattr(url, "params", None)
+    if params is None:
+        return "-"
+    try:
+        return str(params.get("api-version") or "-")
+    except Exception:
+        return "-"
 
 
 def _normalize_host(raw: str) -> str:
@@ -170,6 +187,41 @@ class AzureDevOpsClient:
             headers["Authorization"] = azure_basic_auth(self.pat)
         return headers
 
+    def _request(
+        self,
+        client: httpx.Client,
+        method: str,
+        url: str,
+        *,
+        extra_params: Optional[Dict[str, Any]] = None,
+        json: Any = None,
+        ok: tuple = (200, 201),
+        retry_on: tuple = (400, 404, 415),
+    ) -> httpx.Response:
+        """Walk ``API_VERSIONS`` so 2020.1.1 (6.0) and 2022 (7.x) both work."""
+        extra = dict(extra_params or {})
+        last: Optional[httpx.Response] = None
+        verb = (method or "GET").upper()
+        for ver in API_VERSIONS:
+            params = {**extra, "api-version": ver}
+            if verb == "GET":
+                resp = client.get(url, headers=self._headers(), params=params)
+            elif verb == "POST":
+                resp = client.post(
+                    url, headers=self._headers(), params=params, json=json
+                )
+            elif verb == "PATCH":
+                resp = client.patch(
+                    url, headers=self._headers(), params=params, json=json
+                )
+            else:
+                raise ValueError(f"unsupported Azure HTTP method {verb}")
+            last = resp
+            if resp.status_code in ok or resp.status_code not in retry_on:
+                return resp
+        assert last is not None
+        return last
+
     def connection_user(self) -> Optional[Dict[str, Any]]:
         """PAT user from ``connectionData`` on collection and TFS identity roots."""
         from src.azure.identity import parse_authenticated_user
@@ -195,7 +247,7 @@ class AzureDevOpsClient:
             with httpx.Client(timeout=8.0, verify=False, headers=headers) as client:
                 for base in bases:
                     url = f"{str(base).rstrip('/')}/_apis/connectionData"
-                    for ver in (_API_VERSION, _API_VERSION_FALLBACK, ""):
+                    for ver in (*API_VERSIONS, ""):
                         try:
                             resp = client.get(
                                 url,
@@ -259,22 +311,10 @@ class AzureDevOpsClient:
         for url, extra_params in urls:
             try:
                 with httpx.Client(timeout=20.0, verify=False) as client:
-                    resp = client.get(
-                        url,
-                        headers=self._headers(),
-                        params={"api-version": _API_VERSION, **extra_params},
+                    resp = self._request(
+                        client, "GET", url, extra_params=extra_params
                     )
-                    ver = _API_VERSION
-                    if resp.status_code in (400, 404, 415):
-                        resp = client.get(
-                            url,
-                            headers=self._headers(),
-                            params={
-                                "api-version": _API_VERSION_FALLBACK,
-                                **extra_params,
-                            },
-                        )
-                        ver = _API_VERSION_FALLBACK
+                    ver = _response_api_version(resp)
                 if resp.status_code != 200:
                     azure_warning(
                         f"identity lookup fail id={gid} "
@@ -324,30 +364,8 @@ class AzureDevOpsClient:
         url = f"{self._repo_url(project, repository)}/pullrequests/{iid}"
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
-                resp = client.get(
-                    url,
-                    headers=self._headers(),
-                    params={"api-version": _API_VERSION},
-                )
-                ver = _API_VERSION
-                if resp.status_code == 404:
-                    azure_info(
-                        "http "
-                        + http_detail(
-                            method="GET",
-                            url=url,
-                            status=resp.status_code,
-                            api_version=_API_VERSION,
-                            body=resp.text,
-                        )
-                        + " — retry 7.0"
-                    )
-                    resp = client.get(
-                        url,
-                        headers=self._headers(),
-                        params={"api-version": _API_VERSION_FALLBACK},
-                    )
-                    ver = _API_VERSION_FALLBACK
+                resp = self._request(client, "GET", url)
+                ver = _response_api_version(resp)
             if resp.status_code == 200:
                 data = resp.json() if resp.content else {}
                 status = ""
@@ -400,19 +418,8 @@ class AzureDevOpsClient:
         url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
-                resp = client.get(
-                    url,
-                    headers=self._headers(),
-                    params={"api-version": _API_VERSION},
-                )
-                ver = _API_VERSION
-                if resp.status_code in (400, 404, 415):
-                    resp = client.get(
-                        url,
-                        headers=self._headers(),
-                        params={"api-version": _API_VERSION_FALLBACK},
-                    )
-                    ver = _API_VERSION_FALLBACK
+                resp = self._request(client, "GET", url)
+                ver = _response_api_version(resp)
             if resp.status_code != 200:
                 azure_warning(
                     f"find_thread fail {project}/{repository}!{iid} "
@@ -584,17 +591,7 @@ class AzureDevOpsClient:
         url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads"
         try:
             with httpx.Client(timeout=30.0, verify=False) as client:
-                resp = client.get(
-                    url,
-                    headers=self._headers(),
-                    params={"api-version": _API_VERSION},
-                )
-                if resp.status_code in (400, 404, 415):
-                    resp = client.get(
-                        url,
-                        headers=self._headers(),
-                        params={"api-version": _API_VERSION_FALLBACK},
-                    )
+                resp = self._request(client, "GET", url)
             if resp.status_code != 200:
                 return []
             data = resp.json() if resp.content else {}
@@ -621,17 +618,7 @@ class AzureDevOpsClient:
         url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/iterations"
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
-                resp = client.get(
-                    url,
-                    headers=self._headers(),
-                    params={"api-version": _API_VERSION},
-                )
-                if resp.status_code in (400, 404, 415):
-                    resp = client.get(
-                        url,
-                        headers=self._headers(),
-                        params={"api-version": _API_VERSION_FALLBACK},
-                    )
+                resp = self._request(client, "GET", url)
             if resp.status_code != 200:
                 return 1, 1
             data = resp.json() if resp.content else {}
@@ -716,12 +703,8 @@ class AzureDevOpsClient:
     def _post_json(
         self, client: httpx.Client, url: str, payload: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        resp = client.post(
-            url,
-            headers=self._headers(),
-            params={"api-version": _API_VERSION},
-            json=payload,
-        )
+        resp = self._request(client, "POST", url, json=payload)
+        ver = _response_api_version(resp)
         if resp.status_code in (200, 201):
             azure_info(
                 "http "
@@ -729,59 +712,18 @@ class AzureDevOpsClient:
                     method="POST",
                     url=url,
                     status=resp.status_code,
-                    api_version=_API_VERSION,
+                    api_version=ver,
                 )
             )
             data = resp.json() if resp.content else {}
             return data if isinstance(data, dict) else {"ok": True}
-        if resp.status_code in (400, 404, 415):
-            azure_info(
-                "http "
-                + http_detail(
-                    method="POST",
-                    url=url,
-                    status=resp.status_code,
-                    api_version=_API_VERSION,
-                    body=resp.text,
-                )
-                + " — retry 7.0"
-            )
-            resp2 = client.post(
-                url,
-                headers=self._headers(),
-                params={"api-version": _API_VERSION_FALLBACK},
-                json=payload,
-            )
-            if resp2.status_code in (200, 201):
-                azure_info(
-                    "http "
-                    + http_detail(
-                        method="POST",
-                        url=url,
-                        status=resp2.status_code,
-                        api_version=_API_VERSION_FALLBACK,
-                    )
-                )
-                data = resp2.json() if resp2.content else {}
-                return data if isinstance(data, dict) else {"ok": True}
-            azure_error(
-                "http "
-                + http_detail(
-                    method="POST",
-                    url=url,
-                    status=resp2.status_code,
-                    api_version=_API_VERSION_FALLBACK,
-                    body=resp2.text,
-                )
-            )
-            return None
         azure_error(
             "http "
             + http_detail(
                 method="POST",
                 url=url,
                 status=resp.status_code,
-                api_version=_API_VERSION,
+                api_version=ver,
                 body=resp.text,
             )
         )
@@ -812,12 +754,10 @@ class AzureDevOpsClient:
         if target:
             params["searchCriteria.targetRefName"] = target
         url = f"{self._repo_url(project, repository)}/pullrequests"
+        extra = {k: v for k, v in params.items() if k != "api-version"}
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
-                resp = client.get(url, headers=self._headers(), params=params)
-                if resp.status_code == 404:
-                    params["api-version"] = _API_VERSION_FALLBACK
-                    resp = client.get(url, headers=self._headers(), params=params)
+                resp = self._request(client, "GET", url, extra_params=extra)
             if resp.status_code != 200:
                 azure_warning(
                     f"find_pr fail {project}/{repository} "
@@ -952,7 +892,7 @@ class AzureDevOpsClient:
         accept: str = "application/json",
     ) -> Optional[Any]:
         extra = dict(params or {})
-        vers = list(versions or [_API_VERSION, _API_VERSION_FALLBACK])
+        vers = list(versions or API_VERSIONS)
         headers = dict(self._headers())
         headers["Accept"] = accept
         try:
@@ -1007,7 +947,7 @@ class AzureDevOpsClient:
         versions: Optional[List[str]] = None,
         content_type: str = "application/json-patch+json",
     ) -> Optional[Dict[str, Any]]:
-        vers = list(versions or [_API_VERSION, _API_VERSION_FALLBACK])
+        vers = list(versions or API_VERSIONS)
         headers = dict(self._headers())
         headers["Content-Type"] = content_type
         try:
@@ -1112,7 +1052,7 @@ class AzureDevOpsClient:
         if not ops:
             return None
         url = f"{self.api_base}/{proj}/_apis/wit/workitems/${wtype}"
-        vers = [_API_VERSION, _API_VERSION_FALLBACK]
+        vers = list(API_VERSIONS)
         headers = dict(self._headers())
         headers["Content-Type"] = "application/json-patch+json"
         try:
@@ -1162,7 +1102,7 @@ class AzureDevOpsClient:
     def get_work_item(
         self, project: str, work_item_id: int
     ) -> Optional[Dict[str, Any]]:
-        """GET work item (expand=all). Azure DevOps Server 2022.2: 7.1 then 7.0."""
+        """GET work item (expand=all). Walks 7.1 → 6.0 for 2020 and 2022."""
         if not self.api_base:
             return None
         try:
@@ -1263,9 +1203,9 @@ class AzureDevOpsClient:
         versions = [
             "7.1-preview.4",
             "7.0-preview.3",
+            "6.1-preview.3",
             "6.0-preview.3",
-            _API_VERSION,
-            _API_VERSION_FALLBACK,
+            *API_VERSIONS,
         ]
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
@@ -1332,9 +1272,9 @@ class AzureDevOpsClient:
             versions=[
                 "7.1-preview.4",
                 "7.0-preview.3",
+                "6.1-preview.3",
                 "6.0-preview.3",
-                _API_VERSION,
-                _API_VERSION_FALLBACK,
+                *API_VERSIONS,
             ],
         )
         rows: List[Any] = []

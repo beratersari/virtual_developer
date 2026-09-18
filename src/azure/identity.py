@@ -214,7 +214,7 @@ def fetch_bot_identity(
         with httpx.Client(timeout=8.0, verify=False, headers=headers) as client:
             for base in roots:
                 url = f"{base.rstrip('/')}/_apis/connectionData"
-                for ver in ("7.1", "7.0", ""):
+                for ver in ("7.1", "7.0", "6.1", "6.0", ""):
                     try:
                         params = {"api-version": ver} if ver else None
                         resp = client.get(url, params=params)

@@ -139,7 +139,7 @@ def _discover_collection_bases(client: httpx.Client, origins: List[str]) -> List
     for origin in origins:
         for prefix in ("/tfs", ""):
             listed = False
-            for ver in ("7.1", "7.0", "6.0", "4.1"):
+            for ver in ("7.1", "7.0", "6.1", "6.0", "4.1"):
                 url = f"{origin}{prefix}/_apis/projectCollections"
                 try:
                     resp = client.get(url, params={"api-version": ver})
@@ -337,7 +337,7 @@ def probe_azure_connection(
             for base in _candidate_bases(raw_host or h, extra):
                 conn_url = f"{base}/_apis/connectionData"
                 resp = None
-                for api_ver in ("7.1", "7.0", "6.0", "4.1", "1.0", ""):
+                for api_ver in ("7.1", "7.0", "6.1", "6.0", "4.1", "1.0", ""):
                     try:
                         params = {"api-version": api_ver} if api_ver else None
                         resp = client.get(conn_url, params=params)
@@ -397,14 +397,20 @@ def probe_azure_connection(
 
                 projects: List[Dict[str, Any]] = []
                 projects_error: Optional[str] = None
-                proj_resp = client.get(
-                    f"{base}/_apis/projects",
-                    params={
-                        "api-version": "7.1",
-                        "$top": max(1, min(int(max_projects), 50)),
-                    },
-                )
-                if proj_resp.status_code == 200:
+                proj_resp = None
+                for ver in ("7.1", "7.0", "6.1", "6.0"):
+                    proj_resp = client.get(
+                        f"{base}/_apis/projects",
+                        params={
+                            "api-version": ver,
+                            "$top": max(1, min(int(max_projects), 50)),
+                        },
+                    )
+                    if proj_resp.status_code == 200:
+                        break
+                    if proj_resp.status_code not in (400, 404, 415):
+                        break
+                if proj_resp is not None and proj_resp.status_code == 200:
                     raw = proj_resp.json() if proj_resp.content else {}
                     items = raw.get("value") if isinstance(raw, dict) else raw
                     if isinstance(items, list):

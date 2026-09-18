@@ -1,3 +1,9 @@
+# Yaver 0.9.33
+
+Azure DevOps Server 2020
+Update 1.1 works with 2022.
+REST walks 7.1 → 6.0.
+
 # Yaver 0.9.32
 
 Always-on MR/PR code review.
