@@ -259,6 +259,10 @@ class Settings(BaseSettings):
     # JIRA Configuration
     # - Prod / on-prem PAT: JIRA_HOST + JIRA_API_TOKEN → Bearer
     # - Cloud (dev): also set JIRA_EMAIL → HTTP Basic (email + API token)
+    jira_enabled: bool = Field(
+        default=True,
+        description="When false, skip the board poller and all Jira writes. GitLab/Azure jobs still run.",
+    )
     jira_host: str = Field(default="", description="JIRA instance URL")
     jira_email: str = Field(
         default="",
@@ -290,7 +294,14 @@ class Settings(BaseSettings):
     sisyphus_plans_dir: Path = Field(default=Path(".sisyphus/plans"))
     default_model: str = Field(
         default="ollama/Qwen3.5-397B-A17B-FP8",
-        description="Default model id for OpenCode and Codex jobs (provider/auth stay in each tool's config)",
+        description="Default model for plan, build, test, and /yaver (provider/auth stay in each tool's config)",
+    )
+    default_review_model: str = Field(
+        default="",
+        description=(
+            "Default model for MR/PR /review and /ask. "
+            "Empty = use default_model."
+        ),
     )
     agent_backend: str = Field(
         default="opencode",
@@ -1043,11 +1054,13 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "agent_task_max_incomplete_retries",
         "poll_interval_seconds",
         "max_concurrent_jobs",
+        "jira_enabled",
         "jira_board_id",
         "jira_projects",
         "jira_host",
         "jira_email",
         "default_model",
+        "default_review_model",
         "agent_backend",
         "project_repositories",
         "trigger_mentions",
@@ -1072,11 +1085,13 @@ _RUNTIME_ENV_MIRROR = {
     "agent_task_max_incomplete_retries": "AGENT_TASK_MAX_INCOMPLETE_RETRIES",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
+    "jira_enabled": "JIRA_ENABLED",
     "jira_board_id": "JIRA_BOARD_ID",
     "jira_projects": "JIRA_PROJECTS",
     "jira_host": "JIRA_HOST",
     "jira_email": "JIRA_EMAIL",
     "default_model": "DEFAULT_MODEL",
+    "default_review_model": "DEFAULT_REVIEW_MODEL",
     "agent_backend": "AGENT_BACKEND",
     "trigger_mentions": "TRIGGER_MENTIONS",
     "trigger_assignee_names": "TRIGGER_ASSIGNEE_NAMES",

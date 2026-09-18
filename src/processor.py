@@ -385,6 +385,8 @@ class JobProcessor:
         try:
             from src.jira.client import assign_to_pat_user
 
+            if not getattr(settings, "jira_enabled", True):
+                return False
             return bool(assign_to_pat_user(self.jira_client, issue_key))
         except Exception as e:
             logger.warning(f"{issue_key}: PAT assign failed: {e}")
@@ -634,8 +636,10 @@ class JobProcessor:
             pass
         posted = False
         try:
-            if self.jira_client is not None and hasattr(
-                self.jira_client, "add_comment"
+            if (
+                getattr(settings, "jira_enabled", True)
+                and self.jira_client is not None
+                and hasattr(self.jira_client, "add_comment")
             ):
                 self.jira_client.add_comment(key, f"AI Agent — ERROR\n\n{msg}")
                 posted = True
@@ -1696,9 +1700,18 @@ class JobProcessor:
                 jid = str((rows[0] or {}).get("job_id") or "").strip()
         return jid
 
-    def _model_for_issue(self, state: Any) -> str:
-        """Per-issue Model: from {params}, else settings default."""
+    def _state_is_review(self, state: Any) -> bool:
+        meta = getattr(state, "metadata", None) or {}
+        wt = str(meta.get("workflow_type") or "").lower().replace("_", "-")
+        return wt in {"review", "gitlab-review", "azure-review"}
+
+    def _model_for_issue(self, state: Any, *, review: Optional[bool] = None) -> str:
+        """Per-issue Model: from {params}, else review or shared default."""
         if state is None:
+            if review:
+                rev = (getattr(settings, "default_review_model", "") or "").strip()
+                if rev:
+                    return rev
             return (getattr(settings, "default_model", "") or "").strip()
         try:
             from src.issue_git_spec import parse_issue_git_spec
@@ -1716,6 +1729,12 @@ class JobProcessor:
         mid = str(meta.get("model") or "").strip()
         if mid:
             return mid
+        if review is None:
+            review = self._state_is_review(state)
+        if review:
+            rev = (getattr(settings, "default_review_model", "") or "").strip()
+            if rev:
+                return rev
         return (getattr(settings, "default_model", "") or "").strip()
 
     def _backend_for_issue(self, state: Any) -> str:
@@ -5277,7 +5296,7 @@ class JobProcessor:
                 prompt=prompt,
                 agent=agent_name,
                 issue_key=state.issue_key,
-                model=self._model_for_issue(state),
+                model=self._model_for_issue(state, review=review_job),
                 backend=self._backend_for_issue(state),
             )
             job_id = self._begin_workflow_run(
@@ -6026,7 +6045,7 @@ class JobProcessor:
                 prompt=prompt,
                 agent=agent_name,
                 issue_key=state.issue_key,
-                model=self._model_for_issue(state),
+                model=self._model_for_issue(state, review=review_job),
                 backend=self._backend_for_issue(state),
             )
             job_id = self._begin_workflow_run(

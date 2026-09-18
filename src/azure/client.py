@@ -577,6 +577,28 @@ class AzureDevOpsClient:
             azure_error(f"post_comment error {project}/{repository}!{iid}: {e}")
             return None
 
+    def list_pr_reviewers(
+        self, *, project: str, repository: Any, pr_id: int
+    ) -> list[Dict[str, Any]]:
+        """Live reviewer list. Used to verify a reviewer-change webhook."""
+        if not self.api_base:
+            return []
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return []
+        if iid <= 0:
+            return []
+        url = f"{self._repo_url(project, repository)}/pullrequests/{iid}/reviewers"
+        data = self._get_json(url)
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            rows = data.get("value") if isinstance(data.get("value"), list) else []
+        else:
+            rows = []
+        return [row for row in rows if isinstance(row, dict)]
+
     def list_pr_threads(
         self, *, project: str, repository: Any, pr_id: int
     ) -> list[Dict[str, Any]]:

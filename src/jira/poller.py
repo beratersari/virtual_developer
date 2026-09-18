@@ -122,6 +122,15 @@ class JiraPoller:
         return JiraPoller._is_todo_status_name(name)
 
     def poll_board(self) -> List[dict]:
+        if not getattr(settings, "jira_enabled", True):
+            logger.info("Jira disabled; skipping board poll")
+            poll_snapshot_store.end_poll(
+                source="disabled",
+                issues=[],
+                interval_seconds=self.interval,
+                error="Jira disabled",
+            )
+            return []
         if not self.board_id:
             logger.debug("No board_id configured, skipping poll")
             poll_snapshot_store.end_poll(

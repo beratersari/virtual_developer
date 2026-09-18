@@ -19,6 +19,7 @@ import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 
 type Draft = {
+  jira_enabled: boolean
   jira_host: string
   jira_api_token: string
   jira_board_id: string
@@ -36,6 +37,7 @@ type Draft = {
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
   default_model: string
+  default_review_model: string
   agent_backend: string
   gitlab_cred_rows: GitlabHostCredentialDraft[]
   azure_cred_rows: GitlabHostCredentialDraft[]
@@ -44,6 +46,7 @@ type Draft = {
 
 function fromSettings(s: SettingsPayload): Draft {
   return {
+    jira_enabled: s.jira_enabled !== false,
     jira_host: s.jira_host,
     jira_api_token: '',
     jira_board_id: s.jira_board_id,
@@ -61,6 +64,7 @@ function fromSettings(s: SettingsPayload): Draft {
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
     agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
     default_model: s.default_model,
+    default_review_model: s.default_review_model || '',
     agent_backend: s.agent_backend || 'opencode',
     gitlab_cred_rows: (s.gitlab_credentials ?? []).map((c) => ({
       host: c.host,
@@ -159,6 +163,7 @@ export function SettingsPage() {
         }
       }
       const body: Parameters<typeof patchSettings>[0] = {}
+      if (dirtyKeys.has('jira_enabled')) body.jira_enabled = draft.jira_enabled
       if (dirtyKeys.has('jira_host')) body.jira_host = draft.jira_host.trim()
       if (dirtyKeys.has('jira_board_id')) body.jira_board_id = draft.jira_board_id.trim()
       if (dirtyKeys.has('jira_projects')) body.jira_projects = draft.jira_projects.trim()
@@ -202,6 +207,9 @@ export function SettingsPage() {
         )
       }
       if (dirtyKeys.has('default_model')) body.default_model = draft.default_model.trim()
+      if (dirtyKeys.has('default_review_model')) {
+        body.default_review_model = draft.default_review_model.trim()
+      }
       if (dirtyKeys.has('agent_backend')) body.agent_backend = draft.agent_backend
       if (dirtyKeys.has('gitlab_cred_rows')) {
         body.gitlab_credentials = draft.gitlab_cred_rows
@@ -304,6 +312,19 @@ export function SettingsPage() {
       {section === 'jira' && (
       <div key="jira" className="vd-fade space-y-3">
       <div className="text-sm font-semibold text-text">Connection</div>
+      <label className="field">
+        <span>Enabled</span>
+        <input
+          type="checkbox"
+          checked={draft.jira_enabled}
+          onChange={(e) => mark('jira_enabled', e.target.checked)}
+        />
+      </label>
+      <span className="text-xs text-text-muted">
+        Off: skip the board poller and Jira comments. GitLab and Azure
+        jobs still run. Test Jira still works so you can check the
+        token before turning this on.
+      </span>
       <p className="text-xs text-text-muted">
         Site URL and API token. A blank token keeps the saved value.
       </p>
@@ -913,7 +934,8 @@ export function SettingsPage() {
         </span>
       </label>
       <p className="text-xs text-text-muted">
-        Default model for new jobs. The list follows the selected worker.
+        Default model for plan, build, test, and /yaver. The list
+        follows the selected worker.
       </p>
       <ModelField
         label="Default model"
@@ -921,6 +943,18 @@ export function SettingsPage() {
         onChange={(v) => mark('default_model', v)}
         backend={draft.agent_backend}
         allowEmpty={false}
+        showRefresh
+        onLoadingChange={setModelsLoading}
+      />
+      <p className="mt-3 text-xs text-text-muted">
+        Model for /review and /ask. Leave empty to use Default model.
+      </p>
+      <ModelField
+        label="Review model"
+        value={draft.default_review_model}
+        onChange={(v) => mark('default_review_model', v)}
+        backend={draft.agent_backend}
+        allowEmpty
         showRefresh
         onLoadingChange={setModelsLoading}
       />

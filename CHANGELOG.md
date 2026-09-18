@@ -8,6 +8,28 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.34] — 2026-09-18
+
+Review assign matches aMIR-mini. Separate review model. Jira can be turned off.
+
+### Added
+
+- Separate **Review model** in Settings (``DEFAULT_REVIEW_MODEL``).
+  Plan, build, test, and ``/yaver`` keep **Default model**. Empty
+  review model still uses Default model. Per-issue ``Model:`` still
+  wins.
+- Settings **Jira → Enabled**. Off skips the board poller and Jira
+  comments (``JIRA_ENABLED=false``). GitLab and Azure jobs still run.
+
+### Fixed
+
+- GitLab and Azure **assign as reviewer** match the PAT user id
+  (GitLab ``GET /user``, Azure ``connectionData``), not only the
+  trigger-user string. Azure accepts
+  ``git.pullrequest.reviewers.update`` like aMIR-mini.
+
+[0.9.34]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.34
+
 ## [0.9.33] — 2026-09-18
 
 Azure DevOps Server **2020 Update 1.1** works next to 2022.

@@ -260,6 +260,10 @@ def create_dashboard_app(
             kind = str(payload.get("object_kind") or payload.get("event_type") or "")
         enabled = bool(getattr(settings, "gitlab_webhook_enabled", False))
         secret = str(getattr(settings, "gitlab_webhook_secret", "") or "")
+        logger.info(
+            f"http gitlab webhook received event={event_name!r} "
+            f"object_kind={kind!r} enabled={enabled}"
+        )
         is_mr = event_name in GITLAB_MR_EVENTS or kind.lower() in {
             "merge_request",
             "mergerequest",
@@ -344,7 +348,8 @@ def create_dashboard_app(
         """Azure DevOps Server 2022.2 service hook.
 
         Register on the project: Pull request commented + Pull request
-        updated/merged/abandoned. No webhook secret.
+        created/updated/merged/abandoned + reviewers update (same URL
+        as /yaver). No webhook secret.
         """
         from fastapi.responses import JSONResponse
 

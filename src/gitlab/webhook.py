@@ -567,13 +567,16 @@ def decide_gitlab_mr_webhook(
     from src.review_flow import classify_gitlab_review_lifecycle, gitlab_payload_is_draft
 
     event.is_draft = gitlab_payload_is_draft(data)
-    review_kind = classify_gitlab_review_lifecycle(data, action=action)
+    review_kind = classify_gitlab_review_lifecycle(
+        data, action=action, host=host
+    )
     if review_kind:
         event.start_review = True
         event.review_explicit = review_kind == "assign"
     logger.info(
         f"GitLab MR lifecycle: {event.issue_key} {event.project_path}!{event.mr_iid} "
         f"action={event.action or '-'} state={event.state or '-'} "
-        f"start_review={event.start_review}"
+        f"start_review={event.start_review} reviewers="
+        f"{len((data.get('reviewers') or []) if isinstance(data.get('reviewers'), list) else [])}"
     )
     return WebhookDecision(True, "accepted", event=event)

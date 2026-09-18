@@ -388,6 +388,7 @@ class OpencodeSessionBind(BaseModel):
 class SettingsView(BaseModel):
     """Safe settings projection (secrets never included as plaintext values)."""
 
+    jira_enabled: bool = True
     jira_host: str = ""
     jira_board_id: str = ""
     jira_projects: str = ""
@@ -412,6 +413,7 @@ class SettingsView(BaseModel):
     gitlab_credentials: List["GitlabHostCredentialView"] = Field(default_factory=list)
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
+    default_review_model: str = ""
     # Unattended worker: opencode | codex
     agent_backend: str = "opencode"
     gitlab_webhook_enabled: bool = False
@@ -554,6 +556,10 @@ class SettingsUpdate(BaseModel):
     unchanged. They are never echoed in SettingsView.
     """
 
+    jira_enabled: Optional[bool] = Field(
+        default=None,
+        description="When false, skip the board poller and Jira comments. GitLab/Azure still run.",
+    )
     jira_host: Optional[str] = Field(default=None, max_length=500)
     jira_email: Optional[str] = Field(
         default=None,
@@ -643,6 +649,11 @@ class SettingsUpdate(BaseModel):
         ),
     )
     default_model: Optional[str] = Field(default=None, max_length=200)
+    default_review_model: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="Model for /review and /ask. Empty uses default_model.",
+    )
     agent_backend: Optional[str] = Field(
         default=None,
         max_length=40,
