@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.33] — 2026-09-18
+
+Azure DevOps Server **2020 Update 1.1** works next to 2022.
+
+### Fixed
+
+- Azure REST calls walk ``7.1 → 7.0 → 6.1 → 6.0``. Server 2022 still
+  uses 7.x. Server 2020 Update 1.1 (REST 6.0 only) no longer fails
+  after 7.1/7.0. Settings Test, PR comments, threads, and work items
+  use the same list.
+
+[0.9.33]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.33
+
 ## [0.9.32] — 2026-09-18
 
 Always-on GitLab and Azure **code review**. Jobs use
