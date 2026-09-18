@@ -1,3 +1,10 @@
+# Yaver 0.9.35
+
+Re-request after a failed
+review starts a new job.
+install-opencode-agents copies
+derman-reviewer.
+
 # Yaver 0.9.34
 
 Assign as reviewer matches

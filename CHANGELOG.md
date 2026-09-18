@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.35] — 2026-09-18
+
+Re-request after a failed review starts again. Install copies derman-reviewer.
+
+### Fixed
+
+- GitLab/Azure assign after an **error** no longer reuses the failed
+  queue row (``review-update-{iid}``). A new assign/re-request
+  enqueues a new job.
+- ``install-opencode-agents.bat`` / ``.sh`` copy ``derman-reviewer.md``
+  (they only copied build/plan/test).
+
+[0.9.35]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.35
+
 ## [0.9.34] — 2026-09-18
 
 Review assign matches aMIR-mini. Separate review model. Jira can be turned off.
