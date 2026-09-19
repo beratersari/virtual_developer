@@ -65,11 +65,20 @@ def test_spa_freshness_needles_exist_in_dashboard_source():
     blob = _web_src_blob()
     needles = _required_needles()
     assert "agent_backend" in needles
-    assert "Default model for new jobs." in needles
+    assert "Default model for plan, build, test, and /yaver." in needles
     assert "Type any id Codex accepts" in needles
+    assert "Delete unused clones after (days)" in needles
     assert "Codex API key" not in needles
     missing = [n for n in needles if n not in blob]
     assert missing == [], f"CI SPA needles missing from web/src: {missing}"
+
+
+def test_windows_dist_requires_derman_reviewer_agent():
+    text = _workflow_text()
+    assert "opencoderman/agents/derman-reviewer.md" in text
+    assert "opencoderman/agents/code-reviewer.md" not in text
+    agent = ROOT / "opencoderman" / "agents" / "derman-reviewer.md"
+    assert agent.is_file(), "Windows zip CI requires derman-reviewer.md in the tree"
 
 
 def test_removed_settings_are_gone_from_dashboard_source():
