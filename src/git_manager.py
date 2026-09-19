@@ -3227,15 +3227,18 @@ def purge_stale_temp_dirs(
     base_dir: Optional[Path] = None,
     protect_paths: Optional[set] = None,
 ) -> int:
-    """Delete temp clone directories older than ``max_age_days`` under the temp base.
+    """Delete temp clone directories unused longer than ``max_age_days``.
 
-    Returns the number of directories removed. Safe to call when the base is missing.
-    The daemon does not call this automatically. ``protect_paths`` are clone dirs
-    that must not be removed. Session-bound workspaces are always protected.
+    Live job clones in ``protect_paths`` are never removed. OpenCode
+    session binds are kept so the next clone resumes the same ``ses_*``.
+    ``max_age_days`` 0 or negative means do nothing. Default is 7 days.
     """
-    age = 1.0 if max_age_days is None else float(max_age_days)
-    if age < 0:
-        age = 0.0
+    if max_age_days is None:
+        age = float(getattr(settings, "temp_clone_max_age_days", 7) or 0)
+    else:
+        age = float(max_age_days)
+    if age <= 0:
+        return 0
 
     base = base_dir
     if base is None:
@@ -3246,7 +3249,7 @@ def purge_stale_temp_dirs(
         return 0
 
     protected: set = set()
-    for p in list(protect_paths or ()) + list(session_bound_workspace_paths()):
+    for p in list(protect_paths or ()):
         try:
             protected.add(Path(p).resolve())
         except (OSError, TypeError):
@@ -3281,7 +3284,10 @@ def purge_stale_temp_dirs(
 
             force_rmtree(entry)
             removed += 1
-            logger.info(f"Purged stale temp directory (>{age}d): {entry}")
+            logger.info(
+                f"Purged unused temp directory (>{age}d): {entry} "
+                "(session bind kept for resume)"
+            )
         except Exception as e:
             logger.warning(f"Failed to purge stale temp dir {entry}: {e}")
     if removed:

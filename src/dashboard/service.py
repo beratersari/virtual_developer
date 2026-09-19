@@ -255,6 +255,9 @@ def build_settings_view() -> SettingsView:
         jira_projects=settings.jira_projects or "",
         poll_interval_seconds=int(settings.poll_interval_seconds or 30),
         max_concurrent_jobs=int(settings.max_concurrent_jobs or 1),
+        temp_clone_max_age_days=float(
+            getattr(settings, "temp_clone_max_age_days", 7) or 0
+        ),
         agent_task_timeout_seconds=int(
             getattr(settings, "agent_task_timeout_seconds", 1800) or 1800
         ),
@@ -622,6 +625,14 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     if "max_concurrent_jobs" in data and data["max_concurrent_jobs"] is not None:
         settings.max_concurrent_jobs = int(data["max_concurrent_jobs"])
         runtime_persist["max_concurrent_jobs"] = settings.max_concurrent_jobs
+    if (
+        "temp_clone_max_age_days" in data
+        and data["temp_clone_max_age_days"] is not None
+    ):
+        settings.temp_clone_max_age_days = float(data["temp_clone_max_age_days"])
+        runtime_persist["temp_clone_max_age_days"] = (
+            settings.temp_clone_max_age_days
+        )
     if (
         "agent_task_timeout_seconds" in data
         and data["agent_task_timeout_seconds"] is not None

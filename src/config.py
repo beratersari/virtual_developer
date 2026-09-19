@@ -526,6 +526,13 @@ class Settings(BaseSettings):
             "the durable host default (C:\\vd\\t, /mnt/c/vd/t, /vd/t, or ~/vd/t)."
         ),
     )
+    temp_clone_max_age_days: float = Field(
+        default=7.0,
+        description=(
+            "Delete unused temp clones older than this many days. "
+            "Live jobs are never deleted. 0 = never auto-delete."
+        ),
+    )
     @field_validator("temp_dir_base", mode="after")
     @classmethod
     def _durable_temp_dir(cls, v: Path) -> Path:
@@ -1054,6 +1061,7 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "agent_task_max_incomplete_retries",
         "poll_interval_seconds",
         "max_concurrent_jobs",
+        "temp_clone_max_age_days",
         "jira_enabled",
         "jira_board_id",
         "jira_projects",
@@ -1085,6 +1093,7 @@ _RUNTIME_ENV_MIRROR = {
     "agent_task_max_incomplete_retries": "AGENT_TASK_MAX_INCOMPLETE_RETRIES",
     "poll_interval_seconds": "POLL_INTERVAL_SECONDS",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
+    "temp_clone_max_age_days": "TEMP_CLONE_MAX_AGE_DAYS",
     "jira_enabled": "JIRA_ENABLED",
     "jira_board_id": "JIRA_BOARD_ID",
     "jira_projects": "JIRA_PROJECTS",

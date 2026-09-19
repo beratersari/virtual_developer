@@ -811,14 +811,21 @@ def test_g1_purge_currently_deletes_old_dirs_unconditionally(tmp_path):
     assert not live.exists()
 
 
-def test_g1_purge_age_zero_deletes_everything_including_fresh(tmp_path):
+def test_g1_purge_age_zero_is_disabled(tmp_path):
     from src.git_manager import purge_stale_temp_dirs
 
     fresh = tmp_path / "fresh"
     fresh.mkdir()
+    old = tmp_path / "old"
+    old.mkdir()
+    import os
+    import time
+
+    os.utime(old, (time.time() - 10 * 86400, time.time() - 10 * 86400))
     removed = purge_stale_temp_dirs(max_age_days=0.0, base_dir=tmp_path)
-    assert removed >= 1
-    assert not fresh.exists()
+    assert removed == 0
+    assert fresh.exists()
+    assert old.exists()
 
 
 # ===========================================================================
