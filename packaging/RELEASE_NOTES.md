@@ -1,3 +1,8 @@
+# Yaver 0.9.38
+
+Windows offline zip builds again.
+CI looks for derman-reviewer.
+
 # Yaver 0.9.37
 
 Unused temp clones older than

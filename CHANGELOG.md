@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.38] — 2026-09-19
+
+Windows offline zip builds again.
+
+### Fixed
+
+- Windows Distribution CI requires
+  ``opencoderman/agents/derman-reviewer.md`` (the agent in the
+  tree) instead of the old ``code-reviewer.md`` alias, and greps
+  current Settings copy so the zip attaches to the GitHub Release.
+
+[0.9.38]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.38
+
 ## [0.9.37] — 2026-09-19
 
 Unused clones older than 7 days are deleted. A later mention
