@@ -319,13 +319,18 @@ export function StoragePage() {
 
   const disk = data?.disk
   const usedPct = Math.max(0, Math.min(100, disk?.used_percent ?? 0))
+  const ageDays = data?.clone_max_age_days
+  const ageNote =
+    ageDays && ageDays > 0
+      ? ` Unused folders older than ${ageDays} days are deleted hourly.`
+      : ' Automatic age delete is off.'
 
   return (
     <section className="space-y-5">
       <PageHeader
         kicker="Host"
         title="Storage"
-        description="Temp clones under TEMP_DIR_BASE. Linked GitLab MRs and Azure PRs show live status. Yaver deletes that clone after the linked review is merged, completed, or abandoned. Folders with no MR/PR must be deleted by hand."
+        description={`Temp clones under TEMP_DIR_BASE. Live jobs are never deleted.${ageNote} Linked GitLab MRs and Azure PRs still delete the clone when that review is merged, completed, or abandoned.`}
         actions={
           <button type="button" className="vd-btn vd-btn-secondary text-xs" onClick={() => void reload(true)}>
             Refresh

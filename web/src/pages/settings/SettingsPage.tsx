@@ -33,6 +33,7 @@ type Draft = {
   gitlab_webhook_secret: string
   azure_webhook_enabled: boolean
   max_concurrent_jobs: number
+  temp_clone_max_age_days: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
@@ -60,6 +61,7 @@ function fromSettings(s: SettingsPayload): Draft {
     gitlab_webhook_secret: '',
     azure_webhook_enabled: s.azure_webhook_enabled === true,
     max_concurrent_jobs: s.max_concurrent_jobs,
+    temp_clone_max_age_days: s.temp_clone_max_age_days ?? 7,
     agent_task_timeout_seconds: s.agent_task_timeout_seconds,
     agent_task_max_retries: s.agent_task_max_retries ?? 3,
     agent_task_max_incomplete_retries: s.agent_task_max_incomplete_retries ?? 256,
@@ -194,6 +196,9 @@ export function SettingsPage() {
 
       if (dirtyKeys.has('max_concurrent_jobs')) {
         body.max_concurrent_jobs = Number(draft.max_concurrent_jobs)
+      }
+      if (dirtyKeys.has('temp_clone_max_age_days')) {
+        body.temp_clone_max_age_days = Number(draft.temp_clone_max_age_days)
       }
       if (dirtyKeys.has('agent_task_timeout_seconds')) {
         body.agent_task_timeout_seconds = Number(draft.agent_task_timeout_seconds)
@@ -971,6 +976,23 @@ export function SettingsPage() {
           value={draft.max_concurrent_jobs}
           onChange={(e) => mark('max_concurrent_jobs', Number(e.target.value))}
         />
+      </label>
+      <label className="field">
+        <span>Delete unused clones after (days)</span>
+        <input
+          type="number"
+          min={0}
+          max={3650}
+          value={draft.temp_clone_max_age_days}
+          onChange={(e) =>
+            mark('temp_clone_max_age_days', Number(e.target.value))
+          }
+        />
+        <span className="text-xs text-text-muted">
+          Folders with no live job and last used longer than this are
+          deleted hourly. 0 = never auto-delete. Live clones are never
+          removed.
+        </span>
       </label>
       <label className="field">
         <span>Agent timeout (seconds)</span>
