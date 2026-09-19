@@ -1,3 +1,10 @@
+# Yaver 0.9.37
+
+Unused temp clones older than
+7 days are deleted. A later
+mention reclones and resumes
+the same OpenCode session.
+
 # Yaver 0.9.36
 
 Git clone uses its own

@@ -8,6 +8,21 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.37] — 2026-09-19
+
+Unused clones older than 7 days are deleted. A later mention
+reclones and resumes the same OpenCode session.
+
+### Added
+
+- Unused temp clones older than **7 days** are deleted hourly
+  (``TEMP_CLONE_MAX_AGE_DAYS``, Settings). Live jobs are never
+  removed. Set 0 to turn the policy off. The OpenCode session bind
+  is kept so a later mention on the same MR/PR reclones and
+  **resumes** that session.
+
+[0.9.37]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.37
+
 ## [0.9.36] — 2026-09-19
 
 Dashboard stays up while many clones run.
