@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
+from src.executors import resize_git_executor, to_git_thread
 from src.git_manager import (
     GitCancelledError,
     GitCloneError,
@@ -1185,6 +1186,7 @@ class JobProcessor:
         """
         limit = max(1, int(new_limit or 1))
         settings.max_concurrent_jobs = limit
+        resize_git_executor(limit)
         if isinstance(self._job_semaphore, _JobSlotLimiter):
             self._job_semaphore.resize(limit)
         else:
@@ -3883,7 +3885,7 @@ class JobProcessor:
         """Sync clone + work-branch setup (may take minutes on large repos).
 
         Must not run on the asyncio event loop — use
-        :meth:`_prepare_git_workspace` which offloads via ``asyncio.to_thread``.
+        :meth:`_prepare_git_workspace` which offloads to the git thread pool.
 
         Returns ``None`` on hard failure (``_fail_issue`` already called) **or**
         when the issue was cancelled/errored mid-setup (no fail — already terminal).
@@ -3998,7 +4000,7 @@ class JobProcessor:
         Large clones previously froze the ops dashboard (same process/loop as
         uvicorn). Offload clone/checkout to a worker thread.
         """
-        return await asyncio.to_thread(self._prepare_git_workspace_blocking, state)
+        return await to_git_thread(self._prepare_git_workspace_blocking, state)
 
     def _kick_queue(self) -> None:
         """Schedule a queue dispatch on the running loop (safe from sync code)."""
@@ -5014,7 +5016,7 @@ class JobProcessor:
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
 
-        deleted = await asyncio.to_thread(
+        deleted = await to_git_thread(
             delete_clones_for_merge_request,
             mr_url=event.mr_url,
             project_path=event.project_path,
@@ -5350,7 +5352,7 @@ class JobProcessor:
                 return
 
             try:
-                git = await asyncio.to_thread(
+                git = await to_git_thread(
                     self._init_git_manager,
                     state.issue_key,
                     state,
@@ -5375,7 +5377,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
             try:
-                await asyncio.to_thread(
+                await to_git_thread(
                     git.ensure_feature_branch, state.issue_key
                 )
             except Exception as e:
@@ -5880,7 +5882,8 @@ class JobProcessor:
 
         from src.dashboard.temp_storage import delete_clones_for_merge_request
 
-        deleted = delete_clones_for_merge_request(
+        deleted = await to_git_thread(
+            delete_clones_for_merge_request,
             mr_url=event.pr_url,
             project_path=event.project_path,
             mr_iid=event.pr_id,
@@ -6099,7 +6102,7 @@ class JobProcessor:
             azure_info(f"workflow job_id={job_id} issue={state.issue_key}")
 
             try:
-                git = await asyncio.to_thread(
+                git = await to_git_thread(
                     self._init_git_manager,
                     state.issue_key,
                     state,
@@ -6135,7 +6138,7 @@ class JobProcessor:
                 self._release_context(state.issue_key, success=False)
                 return
             try:
-                await asyncio.to_thread(
+                await to_git_thread(
                     git.ensure_feature_branch, state.issue_key
                 )
             except Exception as e:
@@ -7842,7 +7845,7 @@ class JobProcessor:
         logger.info(f"Starting push and MR creation for {state.issue_key}")
 
         # B5: force work_branch, never drift HEAD (off event loop — git I/O)
-        on_work = await asyncio.to_thread(git.ensure_on_work_branch)
+        on_work = await to_git_thread(git.ensure_on_work_branch)
         if self._is_aborted(state.issue_key):
             logger.info(
                 f"Abort after work-branch checkout for {state.issue_key}; "
@@ -7865,7 +7868,7 @@ class JobProcessor:
 
         branch_name = (getattr(git, "work_branch", None) or "").strip()
         if not branch_name:
-            branch_name = await asyncio.to_thread(git.get_current_branch)
+            branch_name = await to_git_thread(git.get_current_branch)
 
         # Refuse to push protected bases / MR target / release/* unless this
         # is an existing-MR update (GitLab note intake keeps the MR source,
@@ -7917,7 +7920,7 @@ class JobProcessor:
             return False
 
         try:
-            push_success = await asyncio.to_thread(git.push, branch_name)
+            push_success = await to_git_thread(git.push, branch_name)
         except GitCancelledError:
             logger.info(
                 f"Abort during push for {state.issue_key}; skipping remote delivery"
@@ -7935,7 +7938,7 @@ class JobProcessor:
             already_remote = False
             if hasattr(git, "head_is_on_remote"):
                 try:
-                    already_remote = await asyncio.to_thread(
+                    already_remote = await to_git_thread(
                         git.head_is_on_remote, branch_name
                     )
                 except Exception as e:
@@ -8024,7 +8027,7 @@ class JobProcessor:
                 f"(not opening a new one)"
             )
         else:
-            mr_url = await asyncio.to_thread(
+            mr_url = await to_git_thread(
                 git.create_merge_request,
                 title=mr_title,
                 body=mr_body,
