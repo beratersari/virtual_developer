@@ -1,3 +1,9 @@
+# Yaver 0.9.43
+
+Sessions workspace shows MR
+links. The list is paginated
+and searchable.
+
 # Yaver 0.9.42
 
 Sessions lists one workspace
