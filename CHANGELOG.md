@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.40] — 2026-09-19
+
+Windows offline zip attaches again.
+
+### Fixed
+
+- Windows Distribution CI disables runner Defender on ``opencode.exe``
+  and restores it from ``vendor/bin`` if AV ate the copy under
+  ``opencoderman/vendor/bin/windows``. That assert was failing on
+  every 0.9.36–0.9.39 Windows zip, so the GitHub Release never got
+  the offline zip.
+
+[0.9.40]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.40
+
 ## [0.9.39] — 2026-09-19
 
 A compact recap with ``finish=None`` is not a crash and not success.

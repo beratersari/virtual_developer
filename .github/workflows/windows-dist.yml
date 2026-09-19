@@ -40,6 +40,37 @@ jobs:
           fetch-depth: 0
           submodules: true
 
+      # Runner Defender quarantines opencode.exe (21-byte stub) after the PE
+      # check, then Assert payload layout fails on
+      # opencoderman/vendor/bin/windows/opencode.exe. Same as e2e-smoke.ps1.
+      - name: Defender exclusions for opencode.exe
+        shell: pwsh
+        run: |
+          try {
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+            Write-Host "realtime monitoring disabled"
+          } catch {
+            Write-Host "could not disable realtime: $($_.Exception.Message)"
+          }
+          foreach ($ep in @(
+              "${{ github.workspace }}",
+              "${{ github.workspace }}\dist",
+              (Join-Path $env:TEMP "vd-oc-home")
+            )) {
+            try {
+              Add-MpPreference -ExclusionPath $ep -ErrorAction Stop
+              Write-Host "exclusion: $ep"
+            } catch {
+              Write-Host "skip exclusion $ep : $($_.Exception.Message)"
+            }
+          }
+          try {
+            Add-MpPreference -ExclusionProcess "opencode.exe" -ErrorAction Stop
+            Write-Host "exclusion process: opencode.exe"
+          } catch {
+            Write-Host "skip process exclusion: $($_.Exception.Message)"
+          }
+
       - name: Load pinned dependency versions
         id: versions
         shell: pwsh
@@ -112,6 +143,18 @@ jobs:
         shell: pwsh
         run: |
           $p = "dist/stage/${{ steps.meta.outputs.dist_name }}"
+          if (-not (Test-Path -LiteralPath $p)) {
+            throw "Payload dir missing: $p"
+          }
+          # Defender may eat opencoderman\...\opencode.exe after the PE check.
+          # vendor\bin\opencode.exe is the short-path backup copy.
+          $ocmExe = Join-Path $p "opencoderman\vendor\bin\windows\opencode.exe"
+          $vendorExe = Join-Path $p "vendor\bin\opencode.exe"
+          if (-not (Test-Path -LiteralPath $ocmExe) -and (Test-Path -LiteralPath $vendorExe)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $ocmExe) | Out-Null
+            Copy-Item -LiteralPath $vendorExe -Destination $ocmExe -Force
+            Write-Host "Restored opencoderman opencode.exe from vendor/bin (AV quarantine)"
+          }
           foreach ($rel in @(
             ".env.example",
             "install-dashboard.bat",
@@ -127,6 +170,7 @@ jobs:
             "opencoderman.pin",
             "opencoderman/agents/derman-reviewer.md",
             "opencoderman/agents/derman-test.md",
+            "vendor/bin/opencode.exe",
             "opencoderman/vendor/bin/windows/opencode.exe",
             "start.bat",
             "start-backend.bat",
@@ -170,7 +214,11 @@ jobs:
           $css = @(Get-ChildItem -LiteralPath (Join-Path $spa "assets") -Filter "index-*.css" -File -ErrorAction SilentlyContinue)
           if ($js.Count -lt 1) { throw "web/dist/assets/index-*.js missing (SPA not built)" }
           if ($css.Count -lt 1) { throw "web/dist/assets/index-*.css missing (SPA not built)" }
-          $jsText = Get-Content -LiteralPath $js[0].FullName -Raw -ErrorAction Stop
+          $jsText = (
+            $js | ForEach-Object {
+              Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 -ErrorAction Stop
+            }
+          ) -join "`n"
           foreach ($needle in @(
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",

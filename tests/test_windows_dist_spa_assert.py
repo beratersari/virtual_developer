@@ -81,6 +81,15 @@ def test_windows_dist_requires_derman_reviewer_agent():
     assert agent.is_file(), "Windows zip CI requires derman-reviewer.md in the tree"
 
 
+def test_windows_dist_guards_opencode_exe_against_defender():
+    """Runner AV has been eating opencode.exe between build and assert."""
+    text = _workflow_text()
+    assert "ExclusionProcess" in text
+    assert "opencode.exe" in text
+    assert "vendor/bin/opencode.exe" in text or r"vendor\bin\opencode.exe" in text
+    assert "AV quarantine" in text or "Restored opencoderman opencode.exe" in text
+
+
 def test_removed_settings_are_gone_from_dashboard_source():
     blob = _web_src_blob()
     gone = _removed_needles()

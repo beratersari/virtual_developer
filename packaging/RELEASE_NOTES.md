@@ -1,3 +1,9 @@
+# Yaver 0.9.40
+
+Windows offline zip attaches
+again. CI keeps opencode.exe
+out of Defender.
+
 # Yaver 0.9.39
 
 A compact recap with finish=None
