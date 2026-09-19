@@ -80,6 +80,8 @@ export function SessionWorkspacePage() {
       </div>
       {error && <p className="text-sm text-danger-text">{error}</p>}
 
+      <MergeRequestLinks urls={detail?.merge_requests || []} />
+
       <CloneBlock
         detail={detail}
         deleting={busy && deleteClone}
@@ -257,6 +259,36 @@ function CloneBlock({
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+function mrShortLabel(url: string): string {
+  const gl = /\/merge_requests\/(\d+)/i.exec(url)
+  if (gl) return `!${gl[1]}`
+  const az = /\/pullrequest\/(\d+)/i.exec(url)
+  if (az) return `PR ${az[1]}`
+  return url
+}
+
+function MergeRequestLinks({ urls }: { urls: string[] }) {
+  if (urls.length === 0) return null
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+      <span className="text-xs font-semibold uppercase tracking-[0.12em] text-text-muted">
+        {urls.length === 1 ? 'Merge request' : 'Merge requests'}
+      </span>
+      {urls.map((url) => (
+        <a
+          key={url}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent-text hover:underline"
+        >
+          {mrShortLabel(url)}
+        </a>
+      ))}
     </div>
   )
 }

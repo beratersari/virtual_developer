@@ -262,6 +262,9 @@ export type OpencodeWorkspaceItem = {
 export type OpencodeWorkspaceList = {
   workspaces: OpencodeWorkspaceItem[]
   total: number
+  page?: number
+  page_size?: number
+  q?: string
   server_time?: string
 }
 
@@ -292,6 +295,7 @@ export type OpencodeWorkspaceDetail = {
   jobs: JobItem[]
   clone?: WorkspaceClone | null
   plans?: WorkspacePlanFile[]
+  merge_requests?: string[]
   server_time?: string
 }
 

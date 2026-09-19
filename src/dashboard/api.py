@@ -1108,12 +1108,28 @@ def create_dashboard_app(
         }
 
     @app.get("/api/opencode-workspaces")
-    def opencode_workspaces_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
+    def opencode_workspaces_list(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        q: Optional[str] = Query(
+            default=None,
+            description="Search repo, source, target, issue key, or kind",
+        ),
+        limit: Optional[int] = Query(
+            default=None,
+            ge=1,
+            le=100,
+            description="Deprecated alias for page_size (page forced to 1 if set alone)",
+        ),
+    ) -> dict:
         """One row per repository + source + target (all kinds rolled up)."""
         from src.dashboard.service import build_opencode_workspaces
 
+        size = page_size if limit is None else limit
         return build_opencode_workspaces(
-            limit=limit,
+            page=page,
+            page_size=size,
+            q=q,
             store=getattr(app.state, "job_store", None),
         ).model_dump()
 
