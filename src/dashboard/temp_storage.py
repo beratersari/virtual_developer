@@ -92,6 +92,61 @@ def _safe_child(base: Path, name: str) -> Path:
     return resolved
 
 
+def describe_clone_folder(raw_path: str) -> Optional[Dict[str, Any]]:
+    """One temp-clone row for a workspace (path, size, in_use). None if unset."""
+    text = (raw_path or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    exists = False
+    try:
+        exists = resolved.is_dir()
+    except OSError:
+        exists = False
+    in_use = False
+    if exists:
+        try:
+            in_use = resolved in _in_use_paths()
+        except Exception:
+            in_use = False
+    size = 0
+    size_label = None
+    modified = None
+    if exists:
+        try:
+            mtime = resolved.stat().st_mtime
+            modified = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        except OSError:
+            modified = None
+        size = _dir_size_bytes(resolved)
+        size_label = format_bytes(size)
+    name = ""
+    under_temp = False
+    try:
+        base = resolve_temp_base().resolve()
+        under_temp = resolved.parent == base
+        if under_temp:
+            name = resolved.name
+    except OSError:
+        name = resolved.name if exists else path.name
+    return {
+        "name": name,
+        "path": str(resolved),
+        "exists": exists,
+        "size_bytes": int(size),
+        "size_label": size_label,
+        "modified_at": modified,
+        "in_use": bool(in_use),
+        "can_delete": bool(exists and name and under_temp and not in_use),
+    }
+
+
 def _dir_size_bytes(path: Path) -> int:
     total = 0
     try:

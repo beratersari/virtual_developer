@@ -227,6 +227,61 @@ def test_bind_id_differs_when_only_target_differs():
     assert a == c
 
 
+def test_workspace_id_groups_kinds_and_splits_on_target():
+    from src.state.session_bind_store import workspace_id_for
+
+    plan = workspace_id_for(
+        "https://gitlab.com/g/r.git", "feature/shared", "develop"
+    )
+    build = workspace_id_for(
+        "https://gitlab.com/acme/r.git", "feature/shared", "develop"
+    )
+    # host/path collapse: gitlab.com/g/r vs gitlab.com/acme/r differ
+    same = workspace_id_for(
+        "https://gitlab.com/g/r.git", "feature/shared", "develop"
+    )
+    other_tgt = workspace_id_for(
+        "https://gitlab.com/g/r.git", "feature/shared", "main"
+    )
+    assert plan == same
+    assert plan != other_tgt
+    assert plan != build
+    assert plan.startswith("osw_")
+
+
+def test_list_workspaces_rolls_up_plan_build_test(tmp_path):
+    from src.state.session_bind_store import workspace_id_for
+
+    store = SessionBindStore(binds_dir=tmp_path / "binds")
+    repo = "https://gitlab.com/acme/app.git"
+    for kind, sid in (("plan", "ses_p"), ("build", "ses_b"), ("test", "ses_t")):
+        store.upsert(
+            repository_url=repo,
+            branch="feature/login",
+            target_branch="develop",
+            session_id=sid,
+            kind=kind,
+            issue_key="KAN-12",
+        )
+    store.upsert(
+        repository_url=repo,
+        branch="feature/login",
+        target_branch="main",
+        session_id="ses_other",
+        kind="build",
+        issue_key="KAN-13",
+    )
+    rows = store.list_workspaces()
+    assert len(rows) == 2
+    wid = workspace_id_for(repo, "feature/login", "develop")
+    develop = next(r for r in rows if r["workspace_id"] == wid)
+    assert develop["session_count"] == 3
+    assert set(develop["kinds"]) == {"plan", "build", "test"}
+    binds = store.binds_for_workspace(wid)
+    assert [b["kind"] for b in binds] == ["plan", "build", "test"]
+    assert store.binds_for_workspace("osw_missing") == []
+
+
 def test_bind_store_isolates_sessions_by_target(tmp_path):
     store = SessionBindStore(binds_dir=tmp_path / "binds")
     store.upsert(

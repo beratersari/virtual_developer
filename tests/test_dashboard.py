@@ -811,6 +811,167 @@ def test_build_one_job_includes_working_directory(tmp_path, monkeypatch):
     assert item2.working_directory == str((tmp_path / "clone-b").resolve())
 
 
+def test_opencode_workspaces_list_and_detail_join_sessions_and_jobs(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import workspace_id_for
+    import src.dashboard.service as dash_service
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    jobs = JobStore(jobs_dir=tmp_path / "jobs-ws")
+    monkeypatch.setattr(dash_service, "default_job_store", jobs)
+    repo = "https://gitlab.example.com/acme/app.git"
+    work = "feature/login"
+    tgt = "develop"
+    binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=tgt,
+        session_id="ses_plan",
+        kind="plan",
+        issue_key="KAN-12",
+        job_id="job_plan1",
+    )
+    binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=tgt,
+        session_id="ses_build",
+        kind="build",
+        issue_key="KAN-12",
+        job_id="job_build1",
+    )
+    plan_job = jobs.create_job(
+        issue_key="KAN-12",
+        summary="plan login",
+        description="{params}\nRepository: https://gitlab.example.com/acme/app.git\nSource branch: feature/login\nTarget branch: develop\nMode: plan\n{params}",
+        workflow_type="planning",
+        status="plan_ready",
+        repository_url=repo,
+    )
+    jobs.update_job(plan_job["job_id"], opencode_session_id="ses_plan")
+    build_job = jobs.create_job(
+        issue_key="KAN-12",
+        summary="build login",
+        workflow_type="execution",
+        status="completed",
+        repository_url=repo,
+    )
+    jobs.update_job(
+        build_job["job_id"],
+        opencode_session_id="ses_build",
+        feature_branch=work,
+        source_branch=work,
+        target_branch=tgt,
+    )
+    other = jobs.create_job(
+        issue_key="KAN-99",
+        summary="other repo",
+        status="completed",
+        repository_url="https://gitlab.example.com/other/app.git",
+    )
+    jobs.update_job(
+        other["job_id"],
+        feature_branch="feature/x",
+        source_branch="feature/x",
+        target_branch="main",
+    )
+
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    listing = TestClient(app).get("/api/opencode-workspaces").json()
+    assert listing["total"] == 1
+    row = listing["workspaces"][0]
+    wid = workspace_id_for(repo, work, tgt)
+    assert row["workspace_id"] == wid
+    assert set(row["kinds"]) == {"plan", "build"}
+    assert row["session_count"] == 2
+    assert row["job_count"] >= 2
+
+    detail = TestClient(app).get(f"/api/opencode-workspaces/{wid}").json()
+    sids = {s["session_id"] for s in detail["sessions"]}
+    assert sids == {"ses_plan", "ses_build"}
+    job_ids = {j["job_id"] for j in detail["jobs"]}
+    assert plan_job["job_id"] in job_ids
+    assert build_job["job_id"] in job_ids
+    assert other["job_id"] not in job_ids
+    missing = TestClient(app).get("/api/opencode-workspaces/osw_nope")
+    assert missing.status_code == 404
+
+
+def test_workspace_detail_includes_clone_and_plan_file(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import workspace_id_for
+    import src.dashboard.service as dash_service
+    import src.dashboard.temp_storage as temp_storage
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    jobs = JobStore(jobs_dir=tmp_path / "jobs-ws2")
+    monkeypatch.setattr(dash_service, "default_job_store", jobs)
+    temp_base = tmp_path / "t"
+    clone = temp_base / "origin_abc"
+    clone.mkdir(parents=True)
+    (clone / "README").write_text("seed\n", encoding="utf-8")
+    monkeypatch.setattr(temp_storage, "resolve_temp_base", lambda: temp_base)
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "KAN-12.md").write_text("# plan\n\nDo the login.\n", encoding="utf-8")
+    monkeypatch.setattr("src.paths.plans_dir", lambda: plans)
+
+    repo = "https://gitlab.example.com/acme/app.git"
+    binds.upsert(
+        repository_url=repo,
+        branch="feature/login",
+        target_branch="develop",
+        session_id="ses_plan",
+        kind="plan",
+        issue_key="KAN-12",
+        working_directory=str(clone),
+    )
+    binds.upsert(
+        repository_url=repo,
+        branch="feature/login",
+        target_branch="develop",
+        session_id="ses_build",
+        kind="build",
+        issue_key="KAN-12",
+        working_directory=str(clone),
+    )
+    wid = workspace_id_for(repo, "feature/login", "develop")
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws2")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    detail = TestClient(app).get(f"/api/opencode-workspaces/{wid}").json()
+    clone_row = detail.get("clone") or {}
+    assert clone_row.get("exists") is True
+    assert clone_row.get("name") == "origin_abc"
+    assert clone_row.get("in_use") is False
+    assert clone_row.get("can_delete") is True
+    assert (clone_row.get("size_bytes") or 0) >= 1
+    plans_row = detail.get("plans") or []
+    assert len(plans_row) == 1
+    assert plans_row[0]["issue_key"] == "KAN-12"
+    assert plans_row[0]["exists"] is True
+    assert "Do the login" in (plans_row[0].get("preview") or "")
+
+    for rec in list(binds.list_binds()):
+        if rec.get("kind") == "plan":
+            binds.delete(rec["bind_id"])
+    detail_build = TestClient(app).get(f"/api/opencode-workspaces/{wid}").json()
+    assert detail_build.get("plans") == []
+
+
+def test_describe_clone_folder_none_when_empty():
+    from src.dashboard.temp_storage import describe_clone_folder
+
+    assert describe_clone_folder("") is None
+    assert describe_clone_folder("   ") is None
+
+
 def test_build_one_job_does_not_inherit_later_run_session(tmp_path):
     """Job detail is run-scoped: an older job must not show the later ses_*."""
     from src.dashboard.service import build_one_job

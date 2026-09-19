@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -30,6 +30,12 @@ from src.dashboard.schemas import (
     MetaResponse,
     ModelOption,
     ModelsResponse,
+    OpencodeSessionBind,
+    OpencodeWorkspaceDetail,
+    OpencodeWorkspaceItem,
+    OpencodeWorkspaceList,
+    WorkspaceClone,
+    WorkspacePlanFile,
     PolledIssueItem,
     PollStatusResponse,
     ProjectRepositoryItem,
@@ -2634,3 +2640,316 @@ def build_task_detail(
         "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def _workspace_id_from_job(job: Dict[str, Any]) -> str:
+    """Repo + work/source + target identity for a stored job, if known."""
+    from src.state.session_bind_store import workspace_id_for
+
+    repo = str(job.get("repository_url") or "").strip()
+    work = str(job.get("source_branch") or job.get("feature_branch") or "").strip()
+    tgt = str(job.get("target_branch") or "").strip()
+    if not (repo and work and tgt):
+        try:
+            from src.issue_git_spec import parse_issue_git_spec
+
+            spec, err = parse_issue_git_spec(
+                str(job.get("issue_key") or ""),
+                str(job.get("description") or ""),
+            )
+            if spec is not None and not err:
+                repo = repo or (spec.repository_url or "")
+                work = work or (spec.source_branch or "")
+                tgt = tgt or (spec.target_branch or "")
+        except Exception:
+            pass
+    return workspace_id_for(repo, work, tgt)
+
+
+def _job_matches_workspace(
+    job: Dict[str, Any],
+    *,
+    workspace_id: str,
+    session_ids: set,
+    job_ids: set,
+) -> bool:
+    jid = str(job.get("job_id") or "").strip()
+    if jid and jid in job_ids:
+        return True
+    sid = str(job.get("opencode_session_id") or "").strip()
+    if sid and sid in session_ids:
+        return True
+    for raw in job.get("opencode_session_ids") or []:
+        if str(raw or "").strip() in session_ids:
+            return True
+    got = _workspace_id_from_job(job)
+    return bool(got) and got == workspace_id
+
+
+def _workspace_item_from_row(
+    row: Dict[str, Any], *, job_count: int = 0
+) -> OpencodeWorkspaceItem:
+    return OpencodeWorkspaceItem(
+        workspace_id=str(row.get("workspace_id") or ""),
+        repository_url=str(row.get("repository_url") or ""),
+        repository_key=str(row.get("repository_key") or ""),
+        branch=str(row.get("branch") or ""),
+        target_branch=str(row.get("target_branch") or ""),
+        kinds=[str(k) for k in (row.get("kinds") or []) if str(k).strip()],
+        session_count=int(row.get("session_count") or 0),
+        job_count=int(job_count),
+        issue_key=str(row.get("issue_key") or ""),
+        working_directory=row.get("working_directory") or None,
+        updated_at=row.get("updated_at") or None,
+    )
+
+
+_PLAN_PREVIEW_CHARS = 4000
+
+
+def _workspace_clone(raw_path: Optional[str]) -> Optional[WorkspaceClone]:
+    from src.dashboard.temp_storage import describe_clone_folder
+
+    row = describe_clone_folder(str(raw_path or ""))
+    if not row:
+        return None
+    return WorkspaceClone(
+        name=str(row.get("name") or ""),
+        path=str(row.get("path") or ""),
+        exists=bool(row.get("exists")),
+        size_bytes=int(row.get("size_bytes") or 0),
+        size_label=row.get("size_label"),
+        modified_at=row.get("modified_at"),
+        in_use=bool(row.get("in_use")),
+        can_delete=bool(row.get("can_delete")),
+    )
+
+
+def _plan_files_for_workspace(
+    recs: List[Dict[str, Any]],
+    jobs: List[Dict[str, Any]],
+    *,
+    state_manager: Optional[JiraStateManager] = None,
+) -> List[WorkspacePlanFile]:
+    from src.state.session_bind_store import normalize_session_kind
+    from src.temp_fs import format_bytes
+    from src.paths import plans_dir
+
+    has_plan = any(
+        normalize_session_kind(str(r.get("kind") or "")) == "plan" for r in recs
+    )
+    if not has_plan:
+        return []
+    keys: List[str] = []
+    seen: set = set()
+
+    def _add(raw: Any) -> None:
+        key = str(raw or "").strip().upper()
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    for rec in recs:
+        if normalize_session_kind(str(rec.get("kind") or "")) == "plan":
+            _add(rec.get("issue_key"))
+    for job in jobs:
+        wf = str(job.get("workflow_type") or "").strip().lower()
+        if wf in {"planning", "plan"}:
+            _add(job.get("issue_key"))
+    root = plans_dir()
+    out: List[WorkspacePlanFile] = []
+    for key in keys:
+        path = root / f"{key}.md"
+        if state_manager is not None:
+            try:
+                st = state_manager.get_state(key)
+                raw_path = (getattr(st, "plan_path", None) or "").strip() if st else ""
+                if raw_path:
+                    cand = Path(raw_path)
+                    if cand.is_file():
+                        path = cand
+            except Exception:
+                pass
+        exists = False
+        size = 0
+        modified = None
+        preview = ""
+        try:
+            exists = path.is_file()
+        except OSError:
+            exists = False
+        if exists:
+            try:
+                stt = path.stat()
+                size = int(stt.st_size)
+                modified = datetime.fromtimestamp(
+                    stt.st_mtime, tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except OSError:
+                pass
+            try:
+                preview = path.read_text(encoding="utf-8", errors="replace")
+                if len(preview) > _PLAN_PREVIEW_CHARS:
+                    preview = preview[:_PLAN_PREVIEW_CHARS].rstrip() + "\n… (truncated)"
+            except OSError:
+                preview = ""
+        out.append(
+            WorkspacePlanFile(
+                issue_key=key,
+                path=str(path),
+                exists=exists,
+                size_bytes=size,
+                size_label=format_bytes(size) if exists else None,
+                modified_at=modified,
+                preview=preview,
+            )
+        )
+    return out
+
+
+def _bind_to_schema(rec: Dict[str, Any]) -> OpencodeSessionBind:
+    return OpencodeSessionBind(
+        bind_id=str(rec.get("bind_id") or ""),
+        repository_url=str(rec.get("repository_url") or ""),
+        repository_key=str(rec.get("repository_key") or ""),
+        branch=str(rec.get("branch") or ""),
+        target_branch=str(rec.get("target_branch") or ""),
+        session_id=str(rec.get("session_id") or ""),
+        kind=str(rec.get("kind") or ""),
+        issue_key=str(rec.get("issue_key") or ""),
+        job_id=rec.get("job_id"),
+        working_directory=rec.get("working_directory") or None,
+        created_at=rec.get("created_at") or None,
+        updated_at=rec.get("updated_at") or None,
+    )
+
+
+def build_opencode_workspaces(
+    *,
+    limit: int = 200,
+    store: Optional[JobStore] = None,
+) -> OpencodeWorkspaceList:
+    """Unique repo + source + target rows for the Sessions page."""
+    from src.state.session_bind_store import session_bind_store as binds
+
+    js = store or default_job_store
+    rows = binds.list_workspaces(limit=limit)
+    jobs = js.list_jobs(limit=500)
+    counts: Dict[str, int] = {}
+    for job in jobs:
+        wid = _workspace_id_from_job(job)
+        if not wid:
+            continue
+        counts[wid] = counts.get(wid, 0) + 1
+    items = [
+        _workspace_item_from_row(
+            row, job_count=counts.get(str(row.get("workspace_id") or ""), 0)
+        )
+        for row in rows
+    ]
+    return OpencodeWorkspaceList(
+        workspaces=items,
+        total=len(items),
+        server_time=build_meta().server_time,
+    )
+
+
+def build_opencode_workspace_detail(
+    workspace_id: str,
+    *,
+    processor: Optional["JobProcessor"] = None,
+    state_manager: Optional[JiraStateManager] = None,
+    store: Optional[JobStore] = None,
+) -> Optional[OpencodeWorkspaceDetail]:
+    """Sessions (by kind) and jobs for one repo + source + target."""
+    from src.state.session_bind_store import session_bind_store as binds
+
+    wid = (workspace_id or "").strip()
+    recs = binds.binds_for_workspace(wid)
+    if not recs:
+        return None
+    js = store or default_job_store
+    session_ids = {
+        str(r.get("session_id") or "").strip()
+        for r in recs
+        if str(r.get("session_id") or "").strip()
+    }
+    linked_job_ids = {
+        str(r.get("job_id") or "").strip()
+        for r in recs
+        if str(r.get("job_id") or "").strip()
+    }
+    matched = [
+        job
+        for job in js.list_jobs(limit=500)
+        if _job_matches_workspace(
+            job,
+            workspace_id=wid,
+            session_ids=session_ids,
+            job_ids=linked_job_ids,
+        )
+    ]
+    live_keys: set = set()
+    active_ids: set = set()
+    if processor is not None:
+        try:
+            live_keys = set(processor.list_live_processing_keys())
+        except Exception:
+            live_keys = set()
+        try:
+            active_ids = set((processor._active_jobs or {}).values())
+        except Exception:
+            active_ids = set()
+    summaries: Dict[str, str] = {}
+    if state_manager is not None:
+        try:
+            for st in state_manager.get_all_states():
+                if st.issue_summary:
+                    summaries[st.issue_key] = st.issue_summary
+        except Exception:
+            pass
+    job_items = [
+        job_dict_to_item(
+            job,
+            summaries=summaries,
+            live_keys=live_keys,
+            active_job_ids=active_ids,
+            store=js,
+            include_description=False,
+        )
+        for job in matched
+    ]
+    kinds: List[str] = []
+    for rec in recs:
+        k = str(rec.get("kind") or "").strip() or "legacy"
+        if k not in kinds:
+            kinds.append(k)
+    newest = recs[0]
+    for rec in recs:
+        if (rec.get("updated_at") or "") >= (newest.get("updated_at") or ""):
+            newest = rec
+    workspace = _workspace_item_from_row(
+        {
+            "workspace_id": wid,
+            "repository_url": newest.get("repository_url") or recs[0].get("repository_url"),
+            "repository_key": newest.get("repository_key") or recs[0].get("repository_key"),
+            "branch": recs[0].get("branch"),
+            "target_branch": recs[0].get("target_branch"),
+            "working_directory": newest.get("working_directory"),
+            "issue_key": newest.get("issue_key") or "",
+            "updated_at": newest.get("updated_at") or "",
+            "kinds": kinds,
+            "session_count": len(recs),
+        },
+        job_count=len(job_items),
+    )
+    return OpencodeWorkspaceDetail(
+        workspace=workspace,
+        sessions=[_bind_to_schema(r) for r in recs],
+        jobs=job_items,
+        clone=_workspace_clone(workspace.working_directory),
+        plans=_plan_files_for_workspace(
+            recs, matched, state_manager=state_manager
+        ),
+        server_time=build_meta().server_time,
+    )
