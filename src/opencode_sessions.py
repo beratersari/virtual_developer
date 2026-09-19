@@ -1233,7 +1233,9 @@ def strip_compact_reasons(result: Dict[str, Any]) -> Dict[str, Any]:
     """Drop transient compact *log* flags after we waited for auto-compact.
 
     Compact-then-stop / summary-stop / compaction user part stay: those mean
-    the session still ended on compact (opencode#13946 false success).
+    the session still ended on compact (opencode#13946 false success). A
+    recap with finish=None uses the same "compaction summary" marker — keep
+    it. Never flip that to complete=True.
     """
     kept = [
         r
@@ -1292,10 +1294,74 @@ def _apply_todo_counts(result: Dict[str, Any], todos: List[Dict[str, Any]]) -> N
 
 
 def _is_compaction_summary(summary: Any) -> bool:
-    """True for OpenCode compaction summary flags (bool or ``{compaction: …}``)."""
+    """True for OpenCode compaction summary flags (bool or ``{compaction: …}``).
+
+    Git/session ``summary: {diffs|additions|files}`` is **not** compaction.
+    """
     if summary is True:
         return True
     if isinstance(summary, dict) and summary.get("compaction"):
+        return True
+    return False
+
+
+def _compaction_agent(msg: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    return str(
+        msg.get("agent") or info.get("agent") or msg.get("mode") or info.get("mode") or ""
+    ).strip().lower()
+
+
+def message_finish(msg: Optional[Dict[str, Any]]) -> Any:
+    """Assistant finish from ``info.finish`` or a ``step-finish`` part reason.
+
+    OpenCode 1.18 often omits ``info.finish`` on the POST /message body and
+    on compaction recaps (the UI already shows the summary). Prefer the
+    ``step-finish`` part. A missing finish on a recap is not a crash.
+    """
+    if not isinstance(msg, dict):
+        return None
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    finish = msg.get("finish")
+    if finish is None:
+        finish = info.get("finish")
+    if finish is not None:
+        return finish
+    parts = msg.get("_parts") or msg.get("parts") or []
+    if not isinstance(parts, list):
+        return None
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("type") or "").lower() != "step-finish":
+            continue
+        reason = p.get("reason") or p.get("finish")
+        if reason is not None:
+            return reason
+    return None
+
+
+def message_is_compaction_recap(msg: Optional[Dict[str, Any]]) -> bool:
+    """True when this message is the compact recap the operator sees in chat.
+
+    Live 1.18.10 (caught on four parallel serve tasks): last assistant is
+    ``agent=compaction`` + ``summary=true``, ``finish`` still null, parts
+    still empty — while the TUI already shows the recap. Git
+    ``summary: {diffs: []}`` on a user message is **not** this.
+
+    A recap is **incomplete** (wait for auto-resume). It is not a crashed
+    turn and not COMPLETE. Success only after a later non-recap assistant
+    ``finish=stop``.
+    """
+    if not isinstance(msg, dict):
+        return False
+    if _is_compaction_summary(_message_summary_flag(msg)):
+        return True
+    if _compaction_agent(msg) in {"compaction", "summarize", "summary"}:
+        return True
+    if _message_has_compaction_part(msg):
         return True
     return False
 
@@ -1314,14 +1380,9 @@ def _apply_last_assistant(
     finish: Any,
     summary: Any,
     parts: Optional[List[Any]] = None,
+    is_summary: bool = False,
 ) -> None:
     """Record last-message signals used for premature-exit detection."""
-    is_summary = _is_compaction_summary(summary)
-    if parts:
-        if any(isinstance(p, dict) and p.get("type") == "compaction" for p in parts):
-            # Not necessarily incomplete alone; summary assistant check below
-            pass
-
     result["last_role"] = role
     result["last_finish"] = finish
     result["last_is_summary"] = bool(is_summary)
@@ -1332,13 +1393,23 @@ def _apply_last_assistant(
         if asked:
             # Clarifying question is a clean stop, not a crashed turn.
             pass
+        elif is_summary:
+            # Recap stays incomplete (wait). Do **not** classify finish=None
+            # as "unfinished crash" and do **not** accept as COMPLETE just
+            # because the operator can see the summary in chat.
+            if finish_s == "stop":
+                result["reasons"].append(
+                    "session ended on compaction summary "
+                    "(finish=stop, summary=true)"
+                )
+            else:
+                result["reasons"].append(
+                    "session ended on compaction summary "
+                    f"(finish={finish!r}, summary={summary!r})"
+                )
         elif finish is None or finish_s in _UNFINISHED_FINISH:
             result["reasons"].append(
                 f"last assistant finish is unfinished ({finish!r})"
-            )
-        elif is_summary and finish_s == "stop":
-            result["reasons"].append(
-                "session ended on compaction summary (finish=stop, summary=true)"
             )
 
 
@@ -1436,13 +1507,10 @@ def _apply_message_list(
         return
     info = target.get("info") if isinstance(target.get("info"), dict) else {}
     role = target.get("role") or info.get("role")
-    finish = target.get("finish")
-    if finish is None:
-        finish = info.get("finish")
-    summary = target.get("summary")
-    if summary is None:
-        summary = info.get("summary")
+    finish = message_finish(target)
+    summary = _message_summary_flag(target)
     parts = target.get("_parts") or target.get("parts") or []
+    is_summary = message_is_compaction_recap(target)
     # Only the *last* assistant turn. Earlier "Shall I…?" or question tools
     # must not fail a later successful completion (post unattended-nudge).
     # A user message after that assistant means we already nudged — do not
@@ -1469,6 +1537,7 @@ def _apply_message_list(
         finish=finish,
         summary=summary,
         parts=parts if isinstance(parts, list) else None,
+        is_summary=is_summary,
     )
     # If the absolute last message is a compaction *user* part with no
     # following assistant, treat as mid-compact incomplete.
