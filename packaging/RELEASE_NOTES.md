@@ -1,3 +1,9 @@
+# Yaver 0.9.36
+
+Git clone uses its own
+thread pool so the dashboard
+does not hang.
+
 # Yaver 0.9.35
 
 Re-request after a failed

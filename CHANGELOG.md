@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.36] — 2026-09-19
+
+Dashboard stays up while many clones run.
+
+### Fixed
+
+- Git clone, checkout, push, and clone-delete use a dedicated
+  ``yaver-git`` thread pool (size = max concurrent jobs). They no
+  longer occupy FastAPI's default executor, so ``/api/jobs`` and
+  ``/ws`` do not hang behind ``git clone``.
+
+[0.9.36]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.36
+
 ## [0.9.35] — 2026-09-18
 
 Re-request after a failed review starts again. Install copies derman-reviewer.
