@@ -5,6 +5,7 @@ import { JobsPage } from '../pages/jobs/JobsPage'
 import { PollPage } from '../pages/poll/PollPage'
 import { SchedulesPage } from '../pages/schedules/SchedulesPage'
 import { SessionsPage } from '../pages/sessions/SessionsPage'
+import { SessionWorkspacePage } from '../pages/sessions/SessionWorkspacePage'
 import { SettingsPage } from '../pages/settings/SettingsPage'
 import { StoragePage } from '../pages/storage/StoragePage'
 import { DashboardAuthGate } from '../auth/DashboardAuthGate'
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="/scheduled" element={<SchedulesPage />} />
             <Route path="/schedules" element={<Navigate to="/scheduled" replace />} />
             <Route path="/sessions" element={<SessionsPage />} />
+            <Route path="/sessions/:workspaceId" element={<SessionWorkspacePage />} />
             <Route path="/storage" element={<StoragePage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/jobs" replace />} />

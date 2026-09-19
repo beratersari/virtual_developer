@@ -245,6 +245,56 @@ export type OpencodeSessionsPayload = {
   server_time?: string
 }
 
+export type OpencodeWorkspaceItem = {
+  workspace_id: string
+  repository_url: string
+  repository_key?: string
+  branch: string
+  target_branch?: string
+  kinds: string[]
+  session_count: number
+  job_count: number
+  issue_key?: string
+  working_directory?: string | null
+  updated_at?: string | null
+}
+
+export type OpencodeWorkspaceList = {
+  workspaces: OpencodeWorkspaceItem[]
+  total: number
+  server_time?: string
+}
+
+export type WorkspaceClone = {
+  name: string
+  path: string
+  exists: boolean
+  size_bytes: number
+  size_label?: string | null
+  modified_at?: string | null
+  in_use: boolean
+  can_delete: boolean
+}
+
+export type WorkspacePlanFile = {
+  issue_key: string
+  path: string
+  exists: boolean
+  size_bytes: number
+  size_label?: string | null
+  modified_at?: string | null
+  preview: string
+}
+
+export type OpencodeWorkspaceDetail = {
+  workspace: OpencodeWorkspaceItem
+  sessions: OpencodeSessionBind[]
+  jobs: JobItem[]
+  clone?: WorkspaceClone | null
+  plans?: WorkspacePlanFile[]
+  server_time?: string
+}
+
 export type ScheduleItem = {
   schedule_id: string
   title: string

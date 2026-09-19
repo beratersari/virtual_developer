@@ -13,6 +13,7 @@ export function JobsTable({
   selectedIds,
   onToggleSelect,
   onOpenJob,
+  empty = 'Nothing here for this filter.',
 }: {
   jobs: JobItem[]
   compact?: boolean
@@ -20,11 +21,12 @@ export function JobsTable({
   selectedIds?: Set<string>
   onToggleSelect?: (jobId: string) => void
   onOpenJob: (issueKey: string, jobId: string) => void
+  empty?: string
 }) {
   if (jobs.length === 0) {
     return (
       <div className="vd-panel px-5 py-10 text-center text-sm text-text-muted">
-        Nothing here for this filter.
+        {empty}
       </div>
     )
   }

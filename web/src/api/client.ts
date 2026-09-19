@@ -6,6 +6,8 @@ import type {
   JobItem,
   JobsPayload,
   OpencodeSessionsPayload,
+  OpencodeWorkspaceDetail,
+  OpencodeWorkspaceList,
   JiraConnectionTestResult,
   JiraIssueTypesPayload,
   Meta,
@@ -421,6 +423,16 @@ export function deleteTempFolder(name: string) {
 
 export function fetchOpencodeSessions() {
   return request<OpencodeSessionsPayload>('/api/opencode-sessions')
+}
+
+export function fetchOpencodeWorkspaces() {
+  return request<OpencodeWorkspaceList>('/api/opencode-workspaces')
+}
+
+export function fetchOpencodeWorkspace(workspaceId: string) {
+  return request<OpencodeWorkspaceDetail>(
+    `/api/opencode-workspaces/${encodeURIComponent(workspaceId)}`,
+  )
 }
 
 export function resetOpencodeSession(bindId: string) {

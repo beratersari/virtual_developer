@@ -155,6 +155,31 @@ def bind_id_for(
     return f"osb_{digest}"
 
 
+def workspace_id_for(
+    repository_url: str,
+    branch: str,
+    target_branch: str = "",
+) -> str:
+    """Stable id for one repo + work/source + target (all kinds share it)."""
+    repo_key = normalize_repo_key(repository_url)
+    br = normalize_branch(branch)
+    tgt = normalize_branch(target_branch)
+    if not repo_key or not br or not tgt:
+        return ""
+    material = f"{repo_key}\0{br}\0{tgt}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"osw_{digest}"
+
+
+_KIND_ORDER = {
+    SESSION_KIND_PLAN: 0,
+    SESSION_KIND_BUILD: 1,
+    SESSION_KIND_TEST: 2,
+    SESSION_KIND_REVIEW: 3,
+    "": 4,
+}
+
+
 class SessionBindStore:
     """One JSON file per (repo, work branch, target) → OpenCode session id."""
 
@@ -551,6 +576,74 @@ class SessionBindStore:
                     items.append(rec)
         items.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
         return items[: max(1, int(limit))]
+
+    def list_workspaces(self, *, limit: int = 200) -> List[Dict[str, Any]]:
+        """One row per repo + work/source + target, with kind binds rolled up."""
+        buckets: Dict[str, Dict[str, Any]] = {}
+        for rec in self.list_binds(limit=500):
+            wid = workspace_id_for(
+                str(rec.get("repository_url") or rec.get("repository_key") or ""),
+                str(rec.get("branch") or ""),
+                str(rec.get("target_branch") or ""),
+            )
+            if not wid:
+                continue
+            kind = str(rec.get("kind") or "").strip() or "legacy"
+            bucket = buckets.get(wid)
+            if bucket is None:
+                buckets[wid] = {
+                    "workspace_id": wid,
+                    "repository_url": rec.get("repository_url") or "",
+                    "repository_key": rec.get("repository_key")
+                    or normalize_repo_key(str(rec.get("repository_url") or "")),
+                    "branch": rec.get("branch") or "",
+                    "target_branch": rec.get("target_branch") or "",
+                    "working_directory": rec.get("working_directory"),
+                    "issue_key": rec.get("issue_key") or "",
+                    "updated_at": rec.get("updated_at") or "",
+                    "kinds": [kind],
+                    "session_count": 1,
+                }
+                continue
+            bucket["session_count"] = int(bucket.get("session_count") or 0) + 1
+            kinds = list(bucket.get("kinds") or [])
+            if kind not in kinds:
+                kinds.append(kind)
+                kinds.sort(key=lambda k: _KIND_ORDER.get(k, 9))
+                bucket["kinds"] = kinds
+            if (rec.get("updated_at") or "") >= (bucket.get("updated_at") or ""):
+                bucket["updated_at"] = rec.get("updated_at") or ""
+                if rec.get("issue_key"):
+                    bucket["issue_key"] = rec.get("issue_key")
+                if rec.get("working_directory"):
+                    bucket["working_directory"] = rec.get("working_directory")
+                if rec.get("repository_url"):
+                    bucket["repository_url"] = rec.get("repository_url")
+        rows = list(buckets.values())
+        rows.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        return rows[: max(1, int(limit))]
+
+    def binds_for_workspace(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """Kind binds (plan/build/test/review) for one workspace id."""
+        want = (workspace_id or "").strip()
+        if not want:
+            return []
+        out: List[Dict[str, Any]] = []
+        for rec in self.list_binds(limit=500):
+            wid = workspace_id_for(
+                str(rec.get("repository_url") or rec.get("repository_key") or ""),
+                str(rec.get("branch") or ""),
+                str(rec.get("target_branch") or ""),
+            )
+            if wid == want:
+                out.append(rec)
+        out.sort(
+            key=lambda r: (
+                _KIND_ORDER.get(str(r.get("kind") or ""), 9),
+                r.get("updated_at") or "",
+            )
+        )
+        return out
 
     def relocate_working_directory(self, old_dir: Any, new_dir: Any) -> int:
         """Point binds at *new_dir* after a clone folder was renamed in place."""

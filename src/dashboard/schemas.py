@@ -385,6 +385,62 @@ class OpencodeSessionBind(BaseModel):
     updated_at: Optional[str] = None
 
 
+class OpencodeWorkspaceItem(BaseModel):
+    """One repo + source/work + target. Plan/build/test binds hang off this."""
+
+    workspace_id: str
+    repository_url: str = ""
+    repository_key: str = ""
+    branch: str = ""
+    target_branch: str = ""
+    kinds: List[str] = Field(default_factory=list)
+    session_count: int = 0
+    job_count: int = 0
+    issue_key: str = ""
+    working_directory: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class OpencodeWorkspaceList(BaseModel):
+    workspaces: List[OpencodeWorkspaceItem] = Field(default_factory=list)
+    total: int = 0
+    server_time: str = ""
+
+
+class WorkspaceClone(BaseModel):
+    """Temp clone for this repo + source + target (same rules as Storage)."""
+
+    name: str = ""
+    path: str = ""
+    exists: bool = False
+    size_bytes: int = 0
+    size_label: Optional[str] = None
+    modified_at: Optional[str] = None
+    in_use: bool = False
+    can_delete: bool = False
+
+
+class WorkspacePlanFile(BaseModel):
+    """Durable ``{issue}.md`` under the plans dir, when a plan bind exists."""
+
+    issue_key: str
+    path: str
+    exists: bool = False
+    size_bytes: int = 0
+    size_label: Optional[str] = None
+    modified_at: Optional[str] = None
+    preview: str = ""
+
+
+class OpencodeWorkspaceDetail(BaseModel):
+    workspace: OpencodeWorkspaceItem
+    sessions: List[OpencodeSessionBind] = Field(default_factory=list)
+    jobs: List[JobItem] = Field(default_factory=list)
+    clone: Optional[WorkspaceClone] = None
+    plans: List[WorkspacePlanFile] = Field(default_factory=list)
+    server_time: str = ""
+
+
 class SettingsView(BaseModel):
     """Safe settings projection (secrets never included as plaintext values)."""
 

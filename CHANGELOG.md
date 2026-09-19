@@ -8,6 +8,28 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.42] — 2026-09-19
+
+Sessions lists one workspace per repo + source + target.
+GitLab/Azure queue holds the issue lock.
+
+### Added
+
+- Dashboard **Sessions** lists unique repository + source +
+  target workspaces. Click-through shows linked OpenCode
+  sessions (plan/build/test), jobs, the temp clone (Storage
+  delete when not in use), and plan files when a plan bind
+  exists.
+
+### Fixed
+
+- GitLab and Azure jobs started from the webhook queue now
+  take the same per-issue lock as the handle path. Stop + a
+  leftover ``/yaver`` cannot start a second OpenCode session
+  beside the cancelled worker.
+
+[0.9.42]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.42
+
 ## [0.9.41] — 2026-09-19
 
 Windows Dist no longer fails when Defender eats opencode.exe.

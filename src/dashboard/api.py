@@ -1107,6 +1107,33 @@ def create_dashboard_app(
             "server_time": build_meta().server_time,
         }
 
+    @app.get("/api/opencode-workspaces")
+    def opencode_workspaces_list(limit: int = Query(default=200, ge=1, le=500)) -> dict:
+        """One row per repository + source + target (all kinds rolled up)."""
+        from src.dashboard.service import build_opencode_workspaces
+
+        return build_opencode_workspaces(
+            limit=limit,
+            store=getattr(app.state, "job_store", None),
+        ).model_dump()
+
+    @app.get("/api/opencode-workspaces/{workspace_id}")
+    def opencode_workspace_detail(workspace_id: str) -> dict:
+        """Linked OpenCode sessions and jobs for one repo + source + target."""
+        from src.dashboard.service import build_opencode_workspace_detail
+
+        detail = build_opencode_workspace_detail(
+            workspace_id,
+            processor=app.state.processor,
+            state_manager=app.state.state_manager,
+            store=getattr(app.state, "job_store", None),
+        )
+        if detail is None:
+            raise HTTPException(
+                status_code=404, detail=f"No workspace {workspace_id}"
+            )
+        return detail.model_dump()
+
     @app.delete("/api/opencode-sessions/{bind_id}")
     def opencode_sessions_reset(bind_id: str) -> dict:
         """Forget the stored session for this repo+branch (next job starts cold)."""
