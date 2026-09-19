@@ -1,3 +1,10 @@
+# Yaver 0.9.42
+
+Sessions lists one workspace
+per repo + source + target.
+GitLab/Azure queue holds the
+issue lock.
+
 # Yaver 0.9.41
 
 Windows Dist no longer fails
