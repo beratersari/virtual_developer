@@ -473,14 +473,15 @@ async def test_e2e_cleanup_keeps_clone_after_session_reset(
 
 
 @pytest.mark.asyncio
-async def test_e2e_purge_protects_bound_dir_then_deletes_after_reset(harness):
+async def test_e2e_purge_protects_live_dir_then_deletes_unused(harness):
     d1 = await harness.run_build("PRG-A", agent_sid="ses_prg")
     old = time.time() - 3 * 86400
     os.utime(d1, (old, old))
-    removed = purge_stale_temp_dirs(max_age_days=1.0, base_dir=d1.parent)
+    removed = purge_stale_temp_dirs(
+        max_age_days=1.0, base_dir=d1.parent, protect_paths={d1.resolve()}
+    )
     assert d1.exists()
     assert removed == 0
-    harness.binds.delete_for(REPO, "feature/shared", "develop")
     os.utime(d1, (old, old))
     removed = purge_stale_temp_dirs(max_age_days=1.0, base_dir=d1.parent)
     assert removed >= 1

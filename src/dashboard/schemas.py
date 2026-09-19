@@ -394,6 +394,7 @@ class SettingsView(BaseModel):
     jira_projects: str = ""
     poll_interval_seconds: int = 30
     max_concurrent_jobs: int = 3
+    temp_clone_max_age_days: float = 7
     # Single wall-clock budget for agent runner + OpenCode process (same value)
     agent_task_timeout_seconds: int = 1800
     agent_task_max_retries: int = 3
@@ -626,6 +627,12 @@ class SettingsUpdate(BaseModel):
         return text
     poll_interval_seconds: Optional[int] = Field(default=None, ge=5, le=3600)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1, le=64)
+    temp_clone_max_age_days: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=3650,
+        description="Delete unused temp clones older than this many days. 0 = never.",
+    )
     # Agent and OpenCode share this one timeout (orchestrator aborts the serve turn)
     agent_task_timeout_seconds: Optional[int] = Field(
         default=None,

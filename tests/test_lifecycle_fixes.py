@@ -232,8 +232,23 @@ def test_purge_stale_temp_dirs_removes_old_only(tmp_path):
     assert new.exists()
 
 
-def test_daemon_does_not_auto_purge_temp_clones():
-    """No automatic clone deletion (start, hourly, or job-end policy)."""
+def test_purge_skips_protected_live_clone(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    old_mtime = time.time() - (10 * 86400)
+    import os
+
+    os.utime(live, (old_mtime, old_mtime))
+    removed = purge_stale_temp_dirs(
+        max_age_days=7.0,
+        base_dir=tmp_path,
+        protect_paths={live.resolve()},
+    )
+    assert removed == 0
+    assert live.exists()
+
+
+def test_daemon_runs_unused_clone_age_policy():
     import inspect
     from pathlib import Path
 
@@ -241,15 +256,12 @@ def test_daemon_does_not_auto_purge_temp_clones():
     from src.config import Settings
 
     source = inspect.getsource(daemon_mod.JiraAgentDaemon)
-    assert "_run_temp_cleanup_sweeper" not in source
-    assert "purge_stale_temp_dirs" not in source
-    assert not hasattr(daemon_mod.JiraAgentDaemon, "_run_temp_cleanup_sweeper")
-    assert "temp_cleanup_policy" not in Settings.model_fields
-    assert "temp_cleanup_max_age_days" not in Settings.model_fields
+    assert "_run_stale_clone_purge" in source
+    assert "purge_stale_temp_dirs" in source
+    assert "temp_clone_max_age_days" in Settings.model_fields
     example = Path(__file__).resolve().parents[1] / ".env.example"
     text = example.read_text(encoding="utf-8")
-    assert "TEMP_CLEANUP_POLICY" not in text
-    assert "TEMP_CLEANUP_MAX_AGE_DAYS" not in text
+    assert "TEMP_CLONE_MAX_AGE_DAYS" in text
 
 
 def test_cleanup_keeps_temp_dir(tmp_path):

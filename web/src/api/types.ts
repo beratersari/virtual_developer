@@ -74,6 +74,7 @@ export type SettingsPayload = {
   jira_projects: string
   poll_interval_seconds: number
   max_concurrent_jobs: number
+  temp_clone_max_age_days?: number
   agent_task_timeout_seconds: number
   agent_task_max_retries: number
   agent_task_max_incomplete_retries: number
@@ -578,6 +579,7 @@ export type SettingsPatch = Partial<
     | 'jira_projects'
     | 'poll_interval_seconds'
     | 'max_concurrent_jobs'
+    | 'temp_clone_max_age_days'
     | 'agent_task_timeout_seconds'
     | 'agent_task_max_retries'
     | 'agent_task_max_incomplete_retries'
@@ -648,6 +650,7 @@ export type StoragePayload = {
   disk: StorageDisk
   data_dir?: string
   temp_dir?: string
+  clone_max_age_days?: number
   sessions_dir?: string
   folders: StorageFolder[]
   folder_count: number

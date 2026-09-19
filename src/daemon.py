@@ -161,6 +161,9 @@ class JiraAgentDaemon:
         schedule_task = asyncio.create_task(self._run_schedule_dispatcher())
         tasks.append(schedule_task)
 
+        logger.info("Starting unused-clone age policy...")
+        tasks.append(asyncio.create_task(self._run_stale_clone_purge()))
+
         logger.info("Daemon started. Press Ctrl+C to stop.")
 
         # Wait for all tasks
@@ -382,6 +385,30 @@ class JiraAgentDaemon:
             self.processor._release_context(issue_key, success=False)
         except Exception as e:
             logger.warning(f"Could not release context for stuck {issue_key}: {e}")
+
+    async def _run_stale_clone_purge(self) -> None:
+        """Hourly: delete temp clones unused longer than temp_clone_max_age_days."""
+        from src.dashboard.temp_storage import _in_use_paths
+        from src.executors import to_git_thread
+        from src.git_manager import purge_stale_temp_dirs
+
+        while self._running:
+            days = float(getattr(settings, "temp_clone_max_age_days", 7) or 0)
+            if days > 0:
+                try:
+                    n = await to_git_thread(
+                        purge_stale_temp_dirs,
+                        max_age_days=days,
+                        protect_paths=_in_use_paths(),
+                    )
+                    if n:
+                        logger.info(
+                            f"Age policy removed {n} unused clone folder(s) "
+                            f"(>{days:g} days)"
+                        )
+                except Exception as e:
+                    logger.exception(f"Unused-clone age policy failed: {e}", e)
+            await asyncio.sleep(3600)
 
     async def _run_schedule_dispatcher(self):
         """Poll local schedule store and dispatch due jobs via process_event."""

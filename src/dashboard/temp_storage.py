@@ -818,6 +818,9 @@ def build_storage_view() -> Dict[str, Any]:
             "used_percent": used_pct,
         },
         "temp_dir": str(base),
+        "clone_max_age_days": float(
+            getattr(settings, "temp_clone_max_age_days", 7) or 0
+        ),
         "folders": folders,
         "folder_count": len(folders),
         "folders_bytes": folders_bytes,

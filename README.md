@@ -449,7 +449,8 @@ TLS verify is off for typical on-prem certs.
 | `DEFAULT_PLAN_AGENT` | `derman-plan` | Plan jobs |
 | `DEFAULT_TEST_AGENT` | `derman-test` | Test jobs |
 | `AGENT_TASK_TIMEOUT_SECONDS` | `1800` | Per-attempt wall clock |
-| `TEMP_DIR_BASE` | `C:\vd\t` / `/vd/t` | Temp clones (not auto-deleted except MR/PR complete) |
+| `TEMP_DIR_BASE` | `C:\vd\t` / `/vd/t` | Temp clones |
+| `TEMP_CLONE_MAX_AGE_DAYS` | `7` | Hourly delete of unused clones older than this. Live jobs are never removed. `0` = off. Session bind is kept so a later mention reclones and resumes. |
 | `YAVER_DATA_DIR` | `C:\vd\yaver` / `/vd/yaver` | State, jobs, sessions, plans |
 
 ```bash

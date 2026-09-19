@@ -170,9 +170,16 @@ def test_purge_protects_bound_workspace(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("src.state.session_bind_store.session_bind_store", store)
     removed = purge_stale_temp_dirs(max_age_days=1.0, base_dir=tmp_path)
-    assert clone.exists()
-    assert removed == 0
-    assert clone.resolve() in session_bound_workspace_paths()
+    assert not clone.exists()
+    assert removed == 1
+    rec = store.get(
+        "https://gitlab.example.com/acme/app.git",
+        "feature/shared",
+        "develop",
+        issue_key="KAN-A",
+    )
+    assert rec is not None
+    assert rec.get("session_id") == "ses_keep"
 
 
 def test_attach_resumes_when_second_job_reuses_folder(tmp_path, monkeypatch):
