@@ -4693,7 +4693,8 @@ class JobProcessor:
                     limit = max(1, int(settings.max_concurrent_jobs or 1))
                     self._job_semaphore = _JobSlotLimiter(limit)
                 async with self._job_semaphore:
-                    ran = await self._run_gitlab_mr_comment(event)
+                    async with self._get_issue_lock(event.issue_key):
+                        ran = await self._run_gitlab_mr_comment(event)
                 if not ran:
                     live_st = self.state_manager.get_state(event.issue_key)
                     if (
@@ -4725,7 +4726,8 @@ class JobProcessor:
                     limit = max(1, int(settings.max_concurrent_jobs or 1))
                     self._job_semaphore = _JobSlotLimiter(limit)
                 async with self._job_semaphore:
-                    ran = await self._run_azure_pr_comment(event)
+                    async with self._get_issue_lock(event.issue_key):
+                        ran = await self._run_azure_pr_comment(event)
                 if not ran:
                     live_st = self.state_manager.get_state(event.issue_key)
                     if (
