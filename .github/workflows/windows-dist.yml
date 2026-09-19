@@ -125,7 +125,7 @@ jobs:
             "packaging/windows/Install-Backends.ps1",
             "opencoderman/install.py",
             "opencoderman.pin",
-            "opencoderman/agents/code-reviewer.md",
+            "opencoderman/agents/derman-reviewer.md",
             "opencoderman/agents/derman-test.md",
             "opencoderman/vendor/bin/windows/opencode.exe",
             "start.bat",
@@ -175,9 +175,10 @@ jobs:
               "agent_task_max_retries",
               "agent_task_max_incomplete_retries",
               "Maximum extra attempts after a timeout or error.",
-              "Default model for new jobs.",
+              "Default model for plan, build, test, and /yaver.",
               "Type any id Codex accepts",
-              "agent_backend"
+              "agent_backend",
+              "Delete unused clones after (days)",
             )) {
             if ($jsText -notmatch [regex]::Escape($needle)) {
               throw "Stale dashboard SPA: '$needle' not in $($js[0].Name)"
