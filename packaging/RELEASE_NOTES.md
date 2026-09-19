@@ -1,3 +1,9 @@
+# Yaver 0.9.41
+
+Windows Dist no longer fails
+when Defender eats opencode.exe.
+The zip is enough for install.
+
 # Yaver 0.9.40
 
 Windows offline zip attaches
