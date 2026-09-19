@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.41] — 2026-09-19
+
+Windows Dist no longer fails when Defender eats opencode.exe.
+
+### Fixed
+
+- Payload assert lists every missing path. If
+  ``vendor/opencode-home.zip`` is in the zip, a missing
+  ``opencode.exe`` (runner AV quarantine) is a warning, not a
+  failed GitHub Release.
+
+[0.9.41]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.41
+
 ## [0.9.40] — 2026-09-19
 
 Windows offline zip attaches again.

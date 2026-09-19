@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-dist.yml"
+ASSERT_PS1 = ROOT / "packaging" / "windows" / "assert-payload.ps1"
 WEB_SRC = ROOT / "web" / "src"
 
 
@@ -20,25 +21,30 @@ def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
+def _assert_ps1() -> str:
+    assert ASSERT_PS1.is_file(), "packaging/windows/assert-payload.ps1 missing"
+    return ASSERT_PS1.read_text(encoding="utf-8")
+
+
 def _required_needles() -> list[str]:
-    text = _workflow_text()
+    text = _assert_ps1()
     block = re.search(
         r'foreach \(\$needle in @\((.*?)\)\)',
         text,
         flags=re.S,
     )
-    assert block, "Windows dist workflow is missing the SPA needle foreach"
+    assert block, "assert-payload.ps1 is missing the SPA needle foreach"
     return re.findall(r'"([^"]+)"', block.group(1))
 
 
 def _removed_needles() -> list[str]:
-    text = _workflow_text()
+    text = _assert_ps1()
     block = re.search(
         r'foreach \(\$gone in @\((.*?)\)\)',
         text,
         flags=re.S,
     )
-    assert block, "Windows dist workflow is missing the removed-setting foreach"
+    assert block, "assert-payload.ps1 is missing the removed-setting foreach"
     return re.findall(r'"([^"]+)"', block.group(1))
 
 
@@ -57,8 +63,10 @@ def _web_src_blob() -> str:
 
 def test_windows_dist_ships_env_example():
     text = _workflow_text()
-    assert '".env.example"' in text
+    ps1 = _assert_ps1()
+    assert ".env.example" in ps1
     assert "include-hidden-files: true" in text
+    assert "assert-payload.ps1" in text
 
 
 def test_spa_freshness_needles_exist_in_dashboard_source():
@@ -74,20 +82,23 @@ def test_spa_freshness_needles_exist_in_dashboard_source():
 
 
 def test_windows_dist_requires_derman_reviewer_agent():
-    text = _workflow_text()
-    assert "opencoderman/agents/derman-reviewer.md" in text
-    assert "opencoderman/agents/code-reviewer.md" not in text
+    text = _workflow_text() + "\n" + _assert_ps1()
+    assert "opencoderman\\agents\\derman-reviewer.md" in _assert_ps1()
+    assert "code-reviewer.md" not in _assert_ps1()
     agent = ROOT / "opencoderman" / "agents" / "derman-reviewer.md"
     assert agent.is_file(), "Windows zip CI requires derman-reviewer.md in the tree"
+    assert "assert-payload.ps1" in text
 
 
 def test_windows_dist_guards_opencode_exe_against_defender():
     """Runner AV has been eating opencode.exe between build and assert."""
-    text = _workflow_text()
-    assert "ExclusionProcess" in text
-    assert "opencode.exe" in text
-    assert "vendor/bin/opencode.exe" in text or r"vendor\bin\opencode.exe" in text
-    assert "AV quarantine" in text or "Restored opencoderman opencode.exe" in text
+    wf = _workflow_text()
+    ps1 = _assert_ps1()
+    assert "ExclusionProcess" in wf
+    assert "opencode.exe" in wf
+    assert "optionalExe" in ps1
+    assert "opencode-home.zip" in ps1
+    assert "AV quarantine" in ps1 or "Restored opencoderman opencode.exe" in ps1
 
 
 def test_removed_settings_are_gone_from_dashboard_source():
