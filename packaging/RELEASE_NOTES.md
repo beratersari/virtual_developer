@@ -1,3 +1,12 @@
+# Yaver 0.9.39
+
+A compact recap with finish=None
+is not a crash and not success.
+Wait for auto-resume. The UI
+summary is that recap; the log
+finish=stop summary=None is the
+work turn.
+
 # Yaver 0.9.38
 
 Windows offline zip builds again.

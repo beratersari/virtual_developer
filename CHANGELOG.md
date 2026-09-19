@@ -8,6 +8,21 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.39] — 2026-09-19
+
+A compact recap with ``finish=None`` is not a crash and not success.
+
+### Fixed
+
+- OpenCode 1.18 lists the compact recap (``agent=compaction``,
+  ``summary=true``) before ``info.finish`` is set, while the UI
+  already shows the summary. The work-turn log is
+  ``finish='stop' summary=None``. That recap is **incomplete**
+  (wait for auto-resume), not an unfinished crash and not
+  COMPLETE. Success only after a later non-recap assistant turn.
+
+[0.9.39]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.39
+
 ## [0.9.38] — 2026-09-19
 
 Windows offline zip builds again.
