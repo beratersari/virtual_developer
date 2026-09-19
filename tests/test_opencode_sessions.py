@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from src.opencode_serve import assess_serve_turn
 from src.opencode_sessions import (
     assess_session_completeness,
     chat_display_role,
+    message_finish,
+    message_is_compaction_recap,
     compact_output_indicates_premature_exit,
     compact_related_reasons,
     detect_compact_in_output,
@@ -519,6 +522,96 @@ def test_assess_premature_open_todos(tmp_path: Path):
     assert r["open_todos"] == 2
     assert any("open todos" in x for x in r["reasons"])
     assert any("unfinished" in x for x in r["reasons"])
+
+
+def test_live_118_compaction_recap_finish_none_is_not_unfinished():
+    """Caught on 4 live :4096 tasks (OpenCode 1.18.10).
+
+    Last assistant is the compact recap (``agent=compaction``,
+    ``summary=true``) with ``finish`` still null and empty parts. The UI
+    already shows a summary. That is compact-then-stop, not a crashed turn.
+    """
+    messages = [
+        {
+            "info": {
+                "role": "user",
+                "agent": "plan",
+                "summary": {"diffs": []},
+            },
+            "parts": [{"type": "text", "text": "do the work"}],
+        },
+        {
+            "info": {"role": "assistant", "agent": "plan", "finish": "stop"},
+            "parts": [{"type": "text", "text": "done"}],
+        },
+        {
+            "info": {"role": "user", "agent": "plan"},
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "info": {
+                "role": "assistant",
+                "agent": "compaction",
+                "mode": "compaction",
+                "summary": True,
+            },
+            "parts": [],
+        },
+    ]
+    r = assess_serve_turn("ses_live", messages=messages, todos=[])
+    assert r["last_is_summary"] is True
+    assert r["premature"] is True
+    assert not any("unfinished" in x for x in r["reasons"])
+    assert any("compaction summary" in x for x in r["reasons"])
+    assert any("compact-then-stop" in x for x in r["reasons"])
+    assert reasons_are_compact_only(r["reasons"]) is True
+
+
+def test_finish_stop_summary_none_agent_compaction_is_recap():
+    """Operator sees the recap; POST log used to say summary=None."""
+    messages = [
+        {
+            "info": {"role": "user"},
+            "parts": [{"type": "compaction", "auto": True}],
+        },
+        {
+            "info": {
+                "role": "assistant",
+                "agent": "compaction",
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "## Objective\nThe work so far."}],
+        },
+    ]
+    r = assess_serve_turn("ses_live", messages=messages, todos=[])
+    assert r["last_is_summary"] is True
+    assert r["last_finish"] == "stop"
+    assert any("compaction summary" in x for x in r["reasons"])
+    assert not any("unfinished" in x for x in r["reasons"])
+    assert message_is_compaction_recap(messages[-1]) is True
+
+
+def test_step_finish_part_supplies_missing_info_finish():
+    msg = {
+        "info": {"role": "assistant", "agent": "plan"},
+        "parts": [
+            {"type": "text", "text": "PONG"},
+            {"type": "step-finish", "reason": "stop"},
+        ],
+    }
+    assert message_finish(msg) == "stop"
+    r = assess_serve_turn("ses_live", messages=[msg], todos=[])
+    assert r["last_finish"] == "stop"
+    assert r["complete"] is True
+    assert r["last_is_summary"] is False
+
+
+def test_git_diffs_summary_is_not_compaction_recap():
+    msg = {
+        "info": {"role": "user", "agent": "plan", "summary": {"diffs": []}},
+        "parts": [{"type": "text", "text": "hello"}],
+    }
+    assert message_is_compaction_recap(msg) is False
 
 
 def test_assess_premature_compaction_summary_stop(tmp_path: Path):

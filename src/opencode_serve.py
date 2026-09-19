@@ -48,6 +48,9 @@ from src.logger import logger
 from src.opencode_sessions import (
     assess_session_completeness,
     compact_related_reasons,
+    message_finish,
+    message_is_compaction_recap,
+    _message_summary_flag,
     reasons_are_compact_only,
     reasons_are_open_todos_only,
     strip_compact_reasons,
@@ -2157,9 +2160,6 @@ class ServeOrchestrator:
                     _emit=_emit,
                 )
             elapsed = time.time() - t0
-            info = msg.get("info") if isinstance(msg.get("info"), dict) else msg
-            finish = info.get("finish") if isinstance(info, dict) else None
-            summary = info.get("summary") if isinstance(info, dict) else None
             text_parts = []
             for p in msg.get("parts") or []:
                 if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
@@ -2167,11 +2167,6 @@ class ServeOrchestrator:
             reply_text = "\n".join(text_parts)
             if reply_text:
                 _emit("stdout", reply_text[:4000])
-            _emit(
-                "stdout",
-                f"[serve] turn={label} done finish={finish!r} summary={summary!r} "
-                f"elapsed={elapsed:.2f}s",
-            )
 
             # Optional forced compaction (e2e / stress): simulate context pressure
             forced_compact = False
@@ -2216,6 +2211,24 @@ class ServeOrchestrator:
             )
             self._fail_closed_if_no_evidence(
                 assessment, messages=messages, messages_failed=messages_failed
+            )
+            # Log the last *listed* assistant, not the POST /message body.
+            # The work turn is finish=stop summary=None; the UI recap is a
+            # later compaction assistant (often finish=None, summary=true).
+            last_asst = None
+            for raw in reversed(raw_messages):
+                inf = raw.get("info") if isinstance(raw.get("info"), dict) else raw
+                if isinstance(inf, dict) and inf.get("role") == "assistant":
+                    last_asst = raw
+                    break
+            finish = message_finish(last_asst) if last_asst else None
+            summary = _message_summary_flag(last_asst) if last_asst else None
+            if last_asst and message_is_compaction_recap(last_asst) and summary is None:
+                summary = True
+            _emit(
+                "stdout",
+                f"[serve] turn={label} done finish={finish!r} summary={summary!r} "
+                f"elapsed={elapsed:.2f}s",
             )
             turn_rec = {
                 "turn": label,
