@@ -425,8 +425,18 @@ export function fetchOpencodeSessions() {
   return request<OpencodeSessionsPayload>('/api/opencode-sessions')
 }
 
-export function fetchOpencodeWorkspaces() {
-  return request<OpencodeWorkspaceList>('/api/opencode-workspaces')
+export function fetchOpencodeWorkspaces(opts?: {
+  page?: number
+  pageSize?: number
+  q?: string
+}) {
+  const params = new URLSearchParams()
+  if (opts?.page != null) params.set('page', String(opts.page))
+  if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
+  const needle = opts?.q?.trim()
+  if (needle) params.set('q', needle)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return request<OpencodeWorkspaceList>(`/api/opencode-workspaces${qs}`)
 }
 
 export function fetchOpencodeWorkspace(workspaceId: string) {

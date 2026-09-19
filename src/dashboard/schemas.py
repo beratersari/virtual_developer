@@ -404,6 +404,9 @@ class OpencodeWorkspaceItem(BaseModel):
 class OpencodeWorkspaceList(BaseModel):
     workspaces: List[OpencodeWorkspaceItem] = Field(default_factory=list)
     total: int = 0
+    page: int = 1
+    page_size: int = 25
+    q: str = ""
     server_time: str = ""
 
 
@@ -438,6 +441,7 @@ class OpencodeWorkspaceDetail(BaseModel):
     jobs: List[JobItem] = Field(default_factory=list)
     clone: Optional[WorkspaceClone] = None
     plans: List[WorkspacePlanFile] = Field(default_factory=list)
+    merge_requests: List[str] = Field(default_factory=list)
     server_time: str = ""
 
 

@@ -2666,6 +2666,22 @@ def _workspace_id_from_job(job: Dict[str, Any]) -> str:
     return workspace_id_for(repo, work, tgt)
 
 
+def _merge_request_urls_for_jobs(jobs: List[Dict[str, Any]]) -> List[str]:
+    """Distinct MR/PR URLs from jobs on this workspace, first-seen order."""
+    urls: List[str] = []
+    seen: set = set()
+    for job in jobs:
+        url = str(job.get("merge_request_url") or "").strip().rstrip("/")
+        if not url:
+            continue
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+    return urls
+
+
 def _job_matches_workspace(
     job: Dict[str, Any],
     *,
@@ -2824,32 +2840,70 @@ def _bind_to_schema(rec: Dict[str, Any]) -> OpencodeSessionBind:
     )
 
 
+def _workspace_matches_search(row: Dict[str, Any], needle: str) -> bool:
+    """True when *needle* appears in repo, branches, issue key, or kind."""
+    text = (needle or "").strip()
+    if not text:
+        return True
+    n = text.casefold()
+    kinds = row.get("kinds") or []
+    kind_text = " ".join(str(k) for k in kinds if k)
+    hay = " ".join(
+        [
+            str(row.get("repository_url") or ""),
+            str(row.get("repository_key") or ""),
+            str(row.get("branch") or ""),
+            str(row.get("target_branch") or ""),
+            str(row.get("issue_key") or ""),
+            kind_text,
+        ]
+    ).casefold()
+    return n in hay
+
+
 def build_opencode_workspaces(
     *,
-    limit: int = 200,
+    limit: int = 25,
+    page: int = 1,
+    page_size: Optional[int] = None,
+    q: Optional[str] = None,
     store: Optional[JobStore] = None,
 ) -> OpencodeWorkspaceList:
-    """Unique repo + source + target rows for the Sessions page."""
+    """Unique repo + source + target rows for the Sessions page (paginated)."""
     from src.state.session_bind_store import session_bind_store as binds
 
     js = store or default_job_store
-    rows = binds.list_workspaces(limit=limit)
-    jobs = js.list_jobs(limit=500)
+    size = int(page_size if page_size is not None else limit or 25)
+    size = max(1, min(size, 100))
+    page_n = max(1, int(page or 1))
+    offset = (page_n - 1) * size
+    needle = (q or "").strip()
+    rows = binds.list_workspaces(limit=500)
+    if needle:
+        rows = [row for row in rows if _workspace_matches_search(row, needle)]
+    total = len(rows)
+    page_rows = rows[offset : offset + size]
+    page_ids = {str(row.get("workspace_id") or "") for row in page_rows}
+    page_ids.discard("")
     counts: Dict[str, int] = {}
-    for job in jobs:
-        wid = _workspace_id_from_job(job)
-        if not wid:
-            continue
-        counts[wid] = counts.get(wid, 0) + 1
+    if page_ids:
+        for job in js.list_jobs(limit=500):
+            wid = _workspace_id_from_job(job)
+            if not wid or wid not in page_ids:
+                continue
+            counts[wid] = counts.get(wid, 0) + 1
     items = [
         _workspace_item_from_row(
             row, job_count=counts.get(str(row.get("workspace_id") or ""), 0)
         )
-        for row in rows
+        for row in page_rows
     ]
     return OpencodeWorkspaceList(
         workspaces=items,
-        total=len(items),
+        total=total,
+        page=page_n,
+        page_size=size,
+        q=needle,
         server_time=build_meta().server_time,
     )
 
@@ -2951,5 +3005,6 @@ def build_opencode_workspace_detail(
         plans=_plan_files_for_workspace(
             recs, matched, state_manager=state_manager
         ),
+        merge_requests=_merge_request_urls_for_jobs(matched),
         server_time=build_meta().server_time,
     )

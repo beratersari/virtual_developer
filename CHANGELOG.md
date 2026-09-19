@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.43] — 2026-09-19
+
+Sessions workspace shows MR links.
+Sessions list is paginated and searchable.
+
+### Added
+
+- Workspace detail lists every distinct linked GitLab MR
+  or Azure PR URL from jobs on that repo + source + target.
+- Sessions list pagination (25 per page) and search by
+  repository, branch, issue key, or kind.
+
+[0.9.43]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.43
+
 ## [0.9.42] — 2026-09-19
 
 Sessions lists one workspace per repo + source + target.

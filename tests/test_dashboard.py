@@ -883,6 +883,8 @@ def test_opencode_workspaces_list_and_detail_join_sessions_and_jobs(
     app = create_dashboard_app(processor=None, state_manager=sm)
     listing = TestClient(app).get("/api/opencode-workspaces").json()
     assert listing["total"] == 1
+    assert listing.get("page") == 1
+    assert listing.get("page_size") == 25
     row = listing["workspaces"][0]
     wid = workspace_id_for(repo, work, tgt)
     assert row["workspace_id"] == wid
@@ -899,6 +901,122 @@ def test_opencode_workspaces_list_and_detail_join_sessions_and_jobs(
     assert other["job_id"] not in job_ids
     missing = TestClient(app).get("/api/opencode-workspaces/osw_nope")
     assert missing.status_code == 404
+
+
+def test_opencode_workspaces_list_paginates(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import workspace_id_for
+    import src.dashboard.service as dash_service
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    jobs = JobStore(jobs_dir=tmp_path / "jobs-ws-page")
+    monkeypatch.setattr(dash_service, "default_job_store", jobs)
+    repo = "https://gitlab.example.com/acme/app.git"
+    ids = []
+    for i, work in enumerate(("feature/a", "feature/b", "feature/c")):
+        binds.upsert(
+            repository_url=repo,
+            branch=work,
+            target_branch="develop",
+            session_id=f"ses_{i}",
+            kind="build",
+            issue_key=f"KAN-{i}",
+        )
+        ids.append(workspace_id_for(repo, work, "develop"))
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws-page")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    client = TestClient(app)
+    page1 = client.get("/api/opencode-workspaces", params={"page": 1, "page_size": 2}).json()
+    assert page1["total"] == 3
+    assert page1["page"] == 1
+    assert page1["page_size"] == 2
+    assert len(page1["workspaces"]) == 2
+    page2 = client.get("/api/opencode-workspaces", params={"page": 2, "page_size": 2}).json()
+    assert page2["total"] == 3
+    assert page2["page"] == 2
+    assert len(page2["workspaces"]) == 1
+    seen = {row["workspace_id"] for row in page1["workspaces"] + page2["workspaces"]}
+    assert seen == set(ids)
+
+
+def test_opencode_workspaces_list_search_filters_and_paginates(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import workspace_id_for
+    import src.dashboard.service as dash_service
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    jobs = JobStore(jobs_dir=tmp_path / "jobs-ws-q")
+    monkeypatch.setattr(dash_service, "default_job_store", jobs)
+    repo = "https://gitlab.example.com/acme/app.git"
+    other = "https://gitlab.example.com/other/lib.git"
+    binds.upsert(
+        repository_url=repo,
+        branch="feature/login",
+        target_branch="develop",
+        session_id="ses_a",
+        kind="build",
+        issue_key="KAN-12",
+    )
+    binds.upsert(
+        repository_url=repo,
+        branch="feature/logout",
+        target_branch="develop",
+        session_id="ses_b",
+        kind="plan",
+        issue_key="KAN-13",
+    )
+    binds.upsert(
+        repository_url=other,
+        branch="feature/login",
+        target_branch="main",
+        session_id="ses_c",
+        kind="build",
+        issue_key="KAN-99",
+    )
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws-q")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    client = TestClient(app)
+    login = client.get("/api/opencode-workspaces", params={"q": "login"}).json()
+    assert login["total"] == 2
+    assert login["q"] == "login"
+    branches = {row["branch"] for row in login["workspaces"]}
+    assert branches == {"feature/login"}
+    keys = {row["issue_key"] for row in login["workspaces"]}
+    assert keys == {"KAN-12", "KAN-99"}
+    acme = client.get("/api/opencode-workspaces", params={"q": "acme"}).json()
+    assert acme["total"] == 2
+    plan = client.get("/api/opencode-workspaces", params={"q": "plan"}).json()
+    assert plan["total"] == 1
+    assert plan["workspaces"][0]["issue_key"] == "KAN-13"
+    miss = client.get("/api/opencode-workspaces", params={"q": "no-such"}).json()
+    assert miss["total"] == 0
+    assert miss["workspaces"] == []
+    page1 = client.get(
+        "/api/opencode-workspaces",
+        params={"q": "login", "page": 1, "page_size": 1},
+    ).json()
+    page2 = client.get(
+        "/api/opencode-workspaces",
+        params={"q": "login", "page": 2, "page_size": 1},
+    ).json()
+    assert page1["total"] == 2
+    assert len(page1["workspaces"]) == 1
+    assert len(page2["workspaces"]) == 1
+    assert page1["workspaces"][0]["workspace_id"] != page2["workspaces"][0]["workspace_id"]
+    login_ids = {
+        workspace_id_for(repo, "feature/login", "develop"),
+        workspace_id_for(other, "feature/login", "main"),
+    }
+    assert {
+        page1["workspaces"][0]["workspace_id"],
+        page2["workspaces"][0]["workspace_id"],
+    } == login_ids
 
 
 def test_workspace_detail_includes_clone_and_plan_file(
@@ -963,6 +1081,92 @@ def test_workspace_detail_includes_clone_and_plan_file(
             binds.delete(rec["bind_id"])
     detail_build = TestClient(app).get(f"/api/opencode-workspaces/{wid}").json()
     assert detail_build.get("plans") == []
+    assert detail.get("merge_requests") == []
+
+
+def test_workspace_detail_lists_distinct_merge_requests(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    from src.dashboard.api import create_dashboard_app
+    from src.state.job_store import JobStore
+    from src.state.session_bind_store import workspace_id_for
+    import src.dashboard.service as dash_service
+
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    jobs = JobStore(jobs_dir=tmp_path / "jobs-ws-mr")
+    monkeypatch.setattr(dash_service, "default_job_store", jobs)
+    repo = "https://gitlab.example.com/acme/app.git"
+    work = "feature/login"
+    tgt = "develop"
+    binds.upsert(
+        repository_url=repo,
+        branch=work,
+        target_branch=tgt,
+        session_id="ses_build",
+        kind="build",
+        issue_key="KAN-12",
+    )
+    first = jobs.create_job(
+        issue_key="KAN-12",
+        summary="build login",
+        status="completed",
+        repository_url=repo,
+    )
+    jobs.update_job(
+        first["job_id"],
+        source_branch=work,
+        feature_branch=work,
+        target_branch=tgt,
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/7",
+    )
+    second = jobs.create_job(
+        issue_key="KAN-12",
+        summary="follow-up",
+        status="completed",
+        repository_url=repo,
+    )
+    jobs.update_job(
+        second["job_id"],
+        source_branch=work,
+        feature_branch=work,
+        target_branch=tgt,
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/12",
+    )
+    dup = jobs.create_job(
+        issue_key="KAN-12",
+        summary="same mr again",
+        status="completed",
+        repository_url=repo,
+    )
+    jobs.update_job(
+        dup["job_id"],
+        source_branch=work,
+        feature_branch=work,
+        target_branch=tgt,
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/7/",
+    )
+    other = jobs.create_job(
+        issue_key="KAN-99",
+        summary="other repo",
+        status="completed",
+        repository_url="https://gitlab.example.com/other/app.git",
+    )
+    jobs.update_job(
+        other["job_id"],
+        source_branch="feature/x",
+        feature_branch="feature/x",
+        target_branch="main",
+        merge_request_url="https://gitlab.example.com/other/app/-/merge_requests/3",
+    )
+    wid = workspace_id_for(repo, work, tgt)
+    sm = JiraStateManager(state_dir=tmp_path / "state-ws-mr")
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    detail = TestClient(app).get(f"/api/opencode-workspaces/{wid}").json()
+    urls = detail.get("merge_requests") or []
+    assert urls == [
+        "https://gitlab.example.com/acme/app/-/merge_requests/7",
+        "https://gitlab.example.com/acme/app/-/merge_requests/12",
+    ]
 
 
 def test_describe_clone_folder_none_when_empty():
