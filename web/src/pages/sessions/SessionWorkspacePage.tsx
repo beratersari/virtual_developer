@@ -229,7 +229,7 @@ function CloneBlock({
               {!clone.exists
                 ? 'Not on disk'
                 : [
-                    clone.size_label || '0 B',
+                    clone.size_pending ? 'Measuring…' : clone.size_label || '0 B',
                     clone.modified_at,
                     clone.in_use ? 'in use' : null,
                   ]

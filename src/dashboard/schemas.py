@@ -418,6 +418,7 @@ class WorkspaceClone(BaseModel):
     exists: bool = False
     size_bytes: int = 0
     size_label: Optional[str] = None
+    size_pending: bool = False
     modified_at: Optional[str] = None
     in_use: bool = False
     can_delete: bool = False
