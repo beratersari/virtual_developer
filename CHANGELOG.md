@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.49] — 2026-09-20
+
+Analytics no longer times out when you change the chart bucket.
+
+### Fixed
+
+- Switching period or bucket (for example 24 hours then Month) cancels
+  the previous Analytics GET instead of showing Request timed out.
+  The request budget is 60s. Bucket series is capped so a coarse
+  bucket cannot hang the handler.
+
+[0.9.49]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.49
+
 ## [0.9.48] — 2026-09-20
 
 Analytics page. Merged reviews keep job history. Plan tickets survive /review.

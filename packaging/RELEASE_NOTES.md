@@ -1,3 +1,9 @@
+# Yaver 0.9.49
+
+Analytics no longer times
+out when you change the
+chart bucket.
+
 # Yaver 0.9.48
 
 Analytics page for job
