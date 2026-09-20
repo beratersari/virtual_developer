@@ -492,20 +492,21 @@ def _live_git_paths() -> Set[Path]:
     return found
 
 
-def _forget_binds_for_clone(clone: Path) -> None:
+def _forget_binds_for_clone(clone: Path) -> List[str]:
     """Drop OpenCode resume pointers so a later job does not reuse a deleted dir."""
+    forgotten: List[str] = []
     try:
         want = Path(clone).resolve()
     except OSError:
-        return
+        return forgotten
     try:
         from src.state.session_bind_store import session_bind_store
     except Exception:
-        return
+        return forgotten
     try:
         recs = session_bind_store.list_binds(limit=500)
     except Exception:
-        return
+        return forgotten
     for rec in recs:
         raw = rec.get("working_directory")
         bid = str(rec.get("bind_id") or "").strip()
@@ -516,10 +517,96 @@ def _forget_binds_for_clone(clone: Path) -> None:
                 continue
         except OSError:
             continue
+        sid = str(rec.get("session_id") or "").strip()
         try:
             session_bind_store.forget_session(bid, reason="mr-merged")
         except Exception as e:
             logger.debug(f"Could not forget session bind {bid}: {e}")
+            continue
+        if sid:
+            forgotten.append(sid)
+    return forgotten
+
+
+def _job_session_ids(job: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for raw in list(job.get("opencode_session_ids") or []):
+        sid = str(raw or "").strip()
+        if sid and sid not in out:
+            out.append(sid)
+    one = str(job.get("opencode_session_id") or "").strip()
+    if one and one not in out:
+        out.append(one)
+    return out
+
+
+def _purge_merged_review_artifacts(
+    *,
+    mr_url: str = "",
+    clone: Optional[Path] = None,
+    issue_key: str = "",
+) -> None:
+    """Remove jobs, logs, plan, issue state, and OpenCode rows for this review.
+
+    Does not touch the shared daemon log. Live jobs are skipped.
+    """
+    want = _norm_mr_url(mr_url)
+    sids: List[str] = []
+    if clone is not None:
+        sids.extend(_forget_binds_for_clone(clone))
+    try:
+        from src.state.job_store import job_store
+        from src.dashboard.service import delete_job_record
+    except Exception as e:
+        logger.debug(f"MR-merge job purge skipped: {e}")
+        job_store = None  # type: ignore
+        delete_job_record = None  # type: ignore
+    if job_store is not None and delete_job_record is not None and want:
+        try:
+            jobs = job_store.list_jobs(limit=2000)
+        except Exception:
+            jobs = []
+        for job in jobs:
+            ju = _norm_mr_url(str(job.get("merge_request_url") or ""))
+            if not ju or ju != want:
+                continue
+            sids.extend(_job_session_ids(job))
+            jid = str(job.get("job_id") or "")
+            try:
+                delete_job_record(jid, store=job_store, delete_artifacts=True)
+            except Exception as e:
+                logger.debug(f"MR-merge could not delete job {jid}: {e}")
+    key = (issue_key or "").strip().upper()
+    if key:
+        try:
+            from src.paths import plans_dir
+
+            plan = plans_dir() / f"{key}.md"
+            if plan.is_file():
+                plan.unlink()
+        except OSError as e:
+            logger.debug(f"MR-merge could not delete plan {key}: {e}")
+        try:
+            from src.state.manager import JiraStateManager
+
+            JiraStateManager().delete_state(key)
+        except Exception as e:
+            logger.debug(f"MR-merge could not delete state {key}: {e}")
+    uniq = [s for s in sids if s.startswith("ses_")]
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for sid in uniq:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        ordered.append(sid)
+    if ordered:
+        try:
+            from src.opencode_sessions import delete_opencode_session_rows
+
+            delete_opencode_session_rows(ordered)
+        except Exception as e:
+            logger.debug(f"MR-merge OpenCode session delete failed: {e}")
 
 
 def _in_use_paths() -> Set[Path]:
@@ -1276,6 +1363,8 @@ def delete_clones_for_merge_request(
     exist = _existing_temp_names()
     deleted: List[str] = []
     live = _live_git_paths()
+    any_live = False
+    resolved_names: List[tuple] = []
     for name in names:
         if name not in exist:
             logger.debug(f"Skip MR-merge delete of {name}: already gone")
@@ -1291,7 +1380,12 @@ def delete_clones_for_merge_request(
             resolved = target
         if resolved in live:
             logger.info(f"Skip MR-merge delete of {name}: clone is in flight")
+            any_live = True
             continue
+        resolved_names.append((name, resolved))
+    if not any_live:
+        _purge_merged_review_artifacts(mr_url=mr_url, issue_key=issue_key)
+    for name, resolved in resolved_names:
         _forget_binds_for_clone(resolved)
         try:
             queue_delete_temp_folder(name, area="temp")
@@ -1353,7 +1447,11 @@ def sweep_merged_storage_clones() -> List[str]:
         if resolved in live:
             logger.debug(f"Skip MR-merge delete of {child.name}: clone is in flight")
             continue
-        _forget_binds_for_clone(resolved)
+        _purge_merged_review_artifacts(
+            mr_url=url,
+            clone=resolved,
+            issue_key=str(fields.get("issue_key") or ""),
+        )
         try:
             queue_delete_temp_folder(child.name, area="temp")
             deleted.append(child.name)

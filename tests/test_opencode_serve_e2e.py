@@ -31,6 +31,8 @@ from src.opencode_serve import (
     format_serve_error,
     is_serve_timeout,
     known_model_ids_from_payload,
+    format_last_assistant_finish_log,
+    last_assistant_row,
     last_turn_is_live_question,
     model_is_known,
     next_compact_loop_streak,
@@ -324,6 +326,40 @@ def test_turn_should_wait_for_compact_ignores_lifetime_history():
         )
         is True
     )
+
+
+def test_format_last_assistant_finish_log_from_get_message():
+    rows = [
+        {"info": {"role": "user", "id": "u1"}},
+        {
+            "id": "msg_asst",
+            "info": {
+                "role": "assistant",
+                "id": "msg_asst",
+                "finish": None,
+                "agent": "derman-build",
+                "summary": None,
+            },
+            "parts": [
+                {"type": "text", "text": "done"},
+                {"type": "step-finish", "reason": "stop"},
+            ],
+        },
+    ]
+    assert last_assistant_row(rows)["id"] == "msg_asst"
+    line = format_last_assistant_finish_log(rows)
+    assert "id=msg_asst" in line
+    assert "finish='stop'" in line
+    assert "info_finish=None" in line
+    assert "step_finish='stop'" in line
+    assert "agent='derman-build'" in line
+    assert "parts=['text', 'step-finish']" in line
+    assert "done" not in line
+
+
+def test_format_last_assistant_finish_log_none():
+    assert format_last_assistant_finish_log([]) == "[serve] last assistant (none)"
+    assert format_last_assistant_finish_log(None) == "[serve] last assistant (none)"
 
 
 def test_last_turn_is_live_question_requires_stop_not_summary():

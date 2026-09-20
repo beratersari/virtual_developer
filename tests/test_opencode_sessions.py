@@ -24,6 +24,7 @@ from src.opencode_sessions import (
     paths_equivalent,
     relocate_session_directories,
     resolve_session_id,
+    delete_opencode_session_rows,
 )
 from src.opencode_serve import DEFAULT_CONTINUE_PROMPT
 
@@ -376,6 +377,23 @@ def test_relocate_session_directories_rewrites_matching_rows(tmp_path: Path):
     assert paths_equivalent(d, new)
     keep, _ = lookup_session_directory("ses_keep", db_path=db)
     assert paths_equivalent(keep, tmp_path / "other")
+
+
+def test_delete_opencode_session_rows_removes_session(tmp_path: Path):
+    db = _make_session_db(
+        tmp_path / "del.db",
+        [
+            {"id": "ses_gone", "title": "KAN-1: x", "directory": str(tmp_path)},
+            {"id": "ses_keep", "title": "other", "directory": str(tmp_path)},
+        ],
+    )
+    n = delete_opencode_session_rows(["ses_gone"], db_path=db)
+    assert n == 1
+    gone, ok = lookup_session_directory("ses_gone", db_path=db)
+    assert ok is True
+    assert gone is None
+    keep, _ = lookup_session_directory("ses_keep", db_path=db)
+    assert keep is not None
 
 
 def test_resolve_uses_path_segment_when_no_preferred(session_db: Path):

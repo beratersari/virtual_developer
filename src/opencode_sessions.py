@@ -7,7 +7,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.logger import logger
 
@@ -347,6 +347,41 @@ def resolve_session_id(
     if sessions:
         return sessions[0]["id"]
     return preferred
+
+
+def delete_opencode_session_rows(
+    session_ids: Sequence[str],
+    *,
+    db_path: Optional[Path] = None,
+) -> int:
+    """Best-effort delete of OpenCode sqlite rows for these ``ses_*`` ids."""
+    ids = [str(s).strip() for s in session_ids if str(s).strip().startswith("ses_")]
+    if not ids:
+        return 0
+    path = db_path or _default_db_path()
+    if not path.is_file():
+        return 0
+    n = 0
+    try:
+        con = sqlite3.connect(str(path), timeout=2.0)
+        cur = con.cursor()
+        for sid in ids:
+            for sql in (
+                "DELETE FROM part WHERE session_id = ?",
+                "DELETE FROM message WHERE session_id = ?",
+                "DELETE FROM session WHERE id = ?",
+            ):
+                try:
+                    cur.execute(sql, (sid,))
+                except sqlite3.Error:
+                    continue
+            n += 1
+        con.commit()
+        con.close()
+    except Exception as e:
+        logger.debug(f"OpenCode session row delete failed: {e}")
+        return 0
+    return n
 
 
 def lookup_session_directory(

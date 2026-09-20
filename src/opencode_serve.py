@@ -70,6 +70,91 @@ def assessment_still_asking(assessment: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def last_assistant_row(
+    raw_messages: Optional[Sequence[Any]],
+) -> Optional[Dict[str, Any]]:
+    """Newest assistant message from GET /session/{id}/message."""
+    for raw in reversed(list(raw_messages or [])):
+        if not isinstance(raw, dict):
+            continue
+        inf = raw.get("info") if isinstance(raw.get("info"), dict) else raw
+        role = ""
+        if isinstance(inf, dict):
+            role = str(inf.get("role") or "")
+        if not role:
+            role = str(raw.get("role") or "")
+        if role.lower() == "assistant":
+            return raw
+    return None
+
+
+def _step_finish_reason(msg: Dict[str, Any]) -> Any:
+    parts = msg.get("_parts") or msg.get("parts") or []
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    if not isinstance(parts, list):
+        parts = info.get("parts") if isinstance(info.get("parts"), list) else []
+    if not isinstance(parts, list):
+        return None
+    last = None
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if str(part.get("type") or "").lower() != "step-finish":
+            continue
+        last = part.get("reason") if part.get("reason") is not None else part.get(
+            "finish"
+        )
+    return last
+
+
+def _part_types(msg: Dict[str, Any]) -> List[str]:
+    parts = msg.get("_parts") or msg.get("parts") or []
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    if not isinstance(parts, list):
+        parts = info.get("parts") if isinstance(info.get("parts"), list) else []
+    if not isinstance(parts, list):
+        return []
+    out: List[str] = []
+    for part in parts:
+        if isinstance(part, dict):
+            out.append(str(part.get("type") or "unknown"))
+        else:
+            out.append("unknown")
+        if len(out) >= 16:
+            break
+    return out
+
+
+def format_last_assistant_finish_log(
+    raw_messages: Optional[Sequence[Any]],
+) -> str:
+    """One line for the last assistant finish from GET /session/{id}/message."""
+    msg = last_assistant_row(raw_messages)
+    if msg is None:
+        return "[serve] last assistant (none)"
+    info = msg.get("info") if isinstance(msg.get("info"), dict) else {}
+    if not isinstance(info, dict):
+        info = {}
+    mid = msg.get("id") or info.get("id") or ""
+    info_finish = msg.get("finish")
+    if info_finish is None:
+        info_finish = info.get("finish")
+    summary = _message_summary_flag(msg)
+    agent = (
+        msg.get("agent")
+        or info.get("agent")
+        or msg.get("mode")
+        or info.get("mode")
+        or ""
+    )
+    types = _part_types(msg)
+    return (
+        f"[serve] last assistant id={mid} finish={message_finish(msg)!r} "
+        f"info_finish={info_finish!r} step_finish={_step_finish_reason(msg)!r} "
+        f"summary={summary!r} agent={agent!r} parts={types}"
+    )
+
+
 def last_turn_is_live_question(assessment: Optional[Dict[str, Any]]) -> bool:
     """True when the last assistant *stopped* on a real operator question.
 
@@ -1509,6 +1594,7 @@ class ServeOrchestrator:
         self._fail_closed_if_no_evidence(
             assessment, messages=messages, messages_failed=messages_failed
         )
+        _emit("stdout", format_last_assistant_finish_log(raw))
         return raw, assessment, compact_total
 
     async def _turn_after_compact_wait(
@@ -2215,12 +2301,7 @@ class ServeOrchestrator:
             # Log the last *listed* assistant, not the POST /message body.
             # The work turn is finish=stop summary=None; the UI recap is a
             # later compaction assistant (often finish=None, summary=true).
-            last_asst = None
-            for raw in reversed(raw_messages):
-                inf = raw.get("info") if isinstance(raw.get("info"), dict) else raw
-                if isinstance(inf, dict) and inf.get("role") == "assistant":
-                    last_asst = raw
-                    break
+            last_asst = last_assistant_row(raw_messages)
             finish = message_finish(last_asst) if last_asst else None
             summary = _message_summary_flag(last_asst) if last_asst else None
             if last_asst and message_is_compaction_recap(last_asst) and summary is None:
@@ -2230,6 +2311,7 @@ class ServeOrchestrator:
                 f"[serve] turn={label} done finish={finish!r} summary={summary!r} "
                 f"elapsed={elapsed:.2f}s",
             )
+            _emit("stdout", format_last_assistant_finish_log(raw_messages))
             turn_rec = {
                 "turn": label,
                 "finish": finish,
