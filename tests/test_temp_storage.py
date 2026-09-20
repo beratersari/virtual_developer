@@ -473,6 +473,92 @@ def test_sweep_merged_skips_missing_names_and_deletes_existing_azure_pr(
     assert "project_c83e441a3ad2" not in deleted
 
 
+def test_sweep_merged_deletes_job_logs_plan_and_state(
+    tmp_path: Path, isolate_jira_agent_artifacts, monkeypatch: pytest.MonkeyPatch
+):
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        reset_delete_jobs,
+        reset_mr_state_cache,
+        sweep_merged_storage_clones,
+    )
+    from src.paths import plans_dir
+    from src.state.manager import JiraStateManager
+    from src.state.models import JiraAgentState, TaskStatus
+
+    reset_delete_jobs()
+    reset_mr_state_cache()
+    runtime = isolate_jira_agent_artifacts["runtime"]
+    monkeypatch.setenv("YAVER_DATA_DIR", str(runtime))
+    jobs = isolate_jira_agent_artifacts["job_store"]
+    binds = isolate_jira_agent_artifacts["session_bind_store"]
+    base = tmp_path / "t"
+    clone = base / "app_merged01"
+    clone.mkdir(parents=True)
+    (clone / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+
+    log = runtime / "sessions" / "job.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("[serve] last assistant finish='stop'\n", encoding="utf-8")
+    prompt = runtime / "sessions" / "job.prompt.txt"
+    prompt.write_text("build it\n", encoding="utf-8")
+    rec = jobs.create_job(
+        issue_key="KAN-44",
+        summary="ship",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/9",
+    )
+    jobs.update_job(
+        rec["job_id"],
+        working_directory=str(clone.resolve()),
+        session_log_path=str(log),
+        prompt_path=str(prompt),
+        opencode_session_id="ses_merged44",
+        status="completed",
+    )
+    binds.upsert(
+        repository_url="https://gitlab.example.com/acme/app.git",
+        branch="feature/KAN-44",
+        target_branch="develop",
+        session_id="ses_merged44",
+        issue_key="KAN-44",
+        working_directory=str(clone),
+        kind="build",
+        job_id=rec["job_id"],
+    )
+    plan = plans_dir()
+    plan.mkdir(parents=True, exist_ok=True)
+    plan_file = plan / "KAN-44.md"
+    plan_file.write_text("# plan\n", encoding="utf-8")
+    sm = JiraStateManager()
+    st = JiraAgentState(
+        issue_key="KAN-44",
+        issue_summary="ship",
+        status=TaskStatus.COMPLETED,
+    )
+    sm.set_state(st, force=True)
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_merge_request(self, project, iid):
+            return {"state": "merged", "iid": iid}
+
+    monkeypatch.setattr("src.gitlab.client.GitlabClient", _Fake)
+    deleted = sweep_merged_storage_clones()
+    assert "app_merged01" in deleted
+    assert jobs.get_job(rec["job_id"]) is None
+    assert not log.is_file()
+    assert not prompt.is_file()
+    assert not plan_file.is_file()
+    assert sm.get_state("KAN-44") is None
+    bind = binds.get_by_id(binds.list_binds()[0]["bind_id"]) if binds.list_binds() else None
+    if bind:
+        assert not (bind.get("session_id") or "").strip()
+
+
 def test_resolve_temp_base_and_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from src.config import settings
 
