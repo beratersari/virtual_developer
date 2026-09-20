@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.47] — 2026-09-20
+
+Windows clone delete no longer wipes plan files.
+
+### Fixed
+
+- Storage Delete and merged GitLab MR / Azure PR clone cleanup no longer
+  follow the Windows ``.yaver-plans`` junction into
+  ``{YAVER_DATA_DIR}/plans``. Other tickets' plan files stay.
+
+[0.9.47]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.47
+
 ## [0.9.46] — 2026-09-20
 
 Merged reviews clean up their jobs and logs. Serve session logs record finish.

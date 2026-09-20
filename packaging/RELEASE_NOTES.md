@@ -1,3 +1,9 @@
+# Yaver 0.9.47
+
+Windows Storage Delete and
+merged-review clone cleanup
+no longer delete plan files.
+
 # Yaver 0.9.46
 
 Merged GitLab MRs and Azure
