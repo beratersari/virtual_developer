@@ -170,6 +170,31 @@ def test_analytics_omits_unset_model_series(
     assert gpt["share"] == 50.0
 
 
+def test_analytics_24h_month_bucket_stays_small(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """24 hours + Month must not explode into a huge series / hang the GET."""
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    rec = jobs.create_job(
+        issue_key="KAN-24",
+        summary="today",
+        workflow_type="execution",
+        status="completed",
+    )
+    started = (datetime.now() - timedelta(hours=1)).replace(microsecond=0)
+    jobs.update_job(
+        rec["job_id"],
+        started_at=started.isoformat(timespec="seconds"),
+        status="completed",
+    )
+    r = http.get("/api/analytics", params={"period": "24h", "bucket": "month"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["range"]["bucket"] == "month"
+    assert 1 <= len(body["series"]) <= 3
+    assert body["totals"]["jobs"] == 1
+
+
 def test_analytics_custom_from_to(tmp_path, isolate_jira_agent_artifacts, monkeypatch):
     http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
     rec = jobs.create_job(
