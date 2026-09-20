@@ -1,3 +1,10 @@
+# Yaver 0.9.48
+
+Analytics page for job
+counts. Merged MRs keep
+job history. Plan tickets
+are safe from /review.
+
 # Yaver 0.9.47
 
 Windows Storage Delete and

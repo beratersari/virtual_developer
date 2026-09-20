@@ -264,6 +264,26 @@ class JobStore:
                 logger.error(f"Error deleting job {jid}: {e}")
                 return False
 
+    def iter_jobs(self) -> List[Dict[str, Any]]:
+        """Every stored job JSON (unsorted). Analytics walks this set."""
+        jobs: List[Dict[str, Any]] = []
+        if not self.jobs_dir.is_dir():
+            return jobs
+        try:
+            paths = list(self.jobs_dir.glob("job_*.json"))
+        except OSError:
+            return jobs
+        for path in paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    job = json.load(f)
+            except Exception as e:
+                logger.debug(f"Error loading {path}: {e}")
+                continue
+            if isinstance(job, dict):
+                jobs.append(job)
+        return jobs
+
     def list_jobs(
         self,
         *,

@@ -1592,6 +1592,41 @@ def _safe_delete_agent_artifact(path_str: Optional[str]) -> Optional[str]:
         return None
 
 
+def delete_job_session_artifacts(job: Dict[str, Any]) -> List[str]:
+    """Unlink session logs and prompts for a job. Does not delete job JSON.
+
+    Merge/close cleanup uses this so Analytics can still count the run.
+    Manual Jobs → Delete still removes the store file via ``delete_job_record``.
+    """
+    deleted_paths: List[str] = []
+    artifact_candidates: List[Optional[str]] = []
+    artifact_candidates.extend(_job_session_log_paths(job))
+    artifact_candidates.extend(_job_prompt_paths(job))
+    artifact_candidates.append(job.get("session_log_path"))
+    artifact_candidates.append(job.get("prompt_path"))
+    for raw_ra in job.get("retry_attempts") or []:
+        if isinstance(raw_ra, dict):
+            artifact_candidates.append(raw_ra.get("failed_session_log_path"))
+    seen_art: set = set()
+    for p in artifact_candidates:
+        if not p or p in seen_art:
+            continue
+        seen_art.add(p)
+        gone = _safe_delete_agent_artifact(p)
+        if gone:
+            deleted_paths.append(gone)
+        try:
+            log = Path(str(p))
+            if log.suffix == ".log":
+                sibling = log.parent / f"{log.stem}.prompt.txt"
+                gone = _safe_delete_agent_artifact(str(sibling))
+                if gone:
+                    deleted_paths.append(gone)
+        except Exception:
+            pass
+    return deleted_paths
+
+
 def delete_job_record(
     job_id: str,
     *,
@@ -1648,33 +1683,7 @@ def delete_job_record(
         store_deleted = js.delete_job(jid) if jid.startswith("job_") else False
 
     if delete_artifacts:
-        # All session/prompt artifacts for this job (initial + retries)
-        artifact_candidates: List[Optional[str]] = []
-        artifact_candidates.extend(_job_session_log_paths(job))
-        artifact_candidates.extend(_job_prompt_paths(job))
-        artifact_candidates.append(job.get("session_log_path"))
-        artifact_candidates.append(job.get("prompt_path"))
-        for raw_ra in job.get("retry_attempts") or []:
-            if isinstance(raw_ra, dict):
-                artifact_candidates.append(raw_ra.get("failed_session_log_path"))
-        seen_art: set = set()
-        for p in artifact_candidates:
-            if not p or p in seen_art:
-                continue
-            seen_art.add(p)
-            gone = _safe_delete_agent_artifact(p)
-            if gone:
-                deleted_paths.append(gone)
-            # Sibling prompt next to each session log
-            try:
-                log = Path(str(p))
-                if log.suffix == ".log":
-                    sibling = log.parent / f"{log.stem}.prompt.txt"
-                    gone = _safe_delete_agent_artifact(str(sibling))
-                    if gone:
-                        deleted_paths.append(gone)
-            except Exception:
-                pass
+        deleted_paths.extend(delete_job_session_artifacts(job))
         # Durable per-job system log (daemon lines tagged with job_id)
         try:
             from src.dashboard.issue_logs import job_system_log_path

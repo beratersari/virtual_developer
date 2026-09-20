@@ -1517,6 +1517,41 @@ def create_dashboard_app(
         result["server_time"] = build_meta().server_time
         return result
 
+    @app.get("/api/analytics")
+    def analytics(
+        period: str = Query(default="30d"),
+        bucket: str = Query(default="auto"),
+        date_from: str = Query(default="", alias="from"),
+        date_to: str = Query(default="", alias="to"),
+        status: str = Query(default=""),
+        category: str = Query(default=""),
+        source: str = Query(default=""),
+        model: str = Query(default=""),
+        backend: str = Query(default=""),
+        agent: str = Query(default=""),
+        repository: str = Query(default=""),
+        issue_key: str = Query(default=""),
+        q: str = Query(default=""),
+    ) -> dict:
+        """Job counts over time plus filter facets (status, model, category, …)."""
+        from src.dashboard.analytics import build_analytics
+
+        return build_analytics(
+            period=period,
+            bucket=bucket,
+            date_from=date_from,
+            date_to=date_to,
+            status=status,
+            category=category,
+            source=source,
+            model=model,
+            backend=backend,
+            agent=agent,
+            repository=repository,
+            issue_key=issue_key,
+            q=q,
+        ).model_dump()
+
     @app.get("/api/models")
     def get_models(refresh: bool = False, backend: str = "") -> dict:
         """List models for the selected worker (OpenCode CLI or Codex ~/.codex)."""
@@ -1740,6 +1775,7 @@ def create_dashboard_app(
                     "task_cancel": "POST /api/tasks/{issue_key}/cancel",
                     "job_delete": "DELETE /api/jobs/{job_id}",
                     "jobs_bulk_delete": "POST /api/jobs/bulk-delete",
+                    "analytics": "/api/analytics",
                     "schedules": "GET|POST /api/schedules",
                     "schedule_dispatch": "POST /api/schedules/{id}/dispatch",
                     "schedule_cancel": "POST /api/schedules/{id}/cancel",

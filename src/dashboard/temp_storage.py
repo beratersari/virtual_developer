@@ -540,15 +540,20 @@ def _job_session_ids(job: Dict[str, Any]) -> List[str]:
     return out
 
 
+_LIVE_JOB_STATUSES = frozenset({"running", "planning", "executing", "pending"})
+
+
 def _purge_merged_review_artifacts(
     *,
     mr_url: str = "",
     clone: Optional[Path] = None,
     issue_key: str = "",
 ) -> None:
-    """Remove jobs, logs, plan, issue state, and OpenCode rows for this review.
+    """Remove clone logs, plan, issue state, and OpenCode rows for this review.
 
-    Does not touch the shared daemon log. Live jobs are skipped.
+    Keeps ``job_*.json`` so Analytics still counts the run. Manual Jobs →
+    Delete removes the store file. Does not touch the shared daemon log.
+    Live jobs skip session-log delete.
     """
     want = _norm_mr_url(mr_url)
     sids: List[str] = []
@@ -556,12 +561,12 @@ def _purge_merged_review_artifacts(
         sids.extend(_forget_binds_for_clone(clone))
     try:
         from src.state.job_store import job_store
-        from src.dashboard.service import delete_job_record
+        from src.dashboard.service import delete_job_session_artifacts
     except Exception as e:
-        logger.debug(f"MR-merge job purge skipped: {e}")
+        logger.debug(f"MR-merge session-log purge skipped: {e}")
         job_store = None  # type: ignore
-        delete_job_record = None  # type: ignore
-    if job_store is not None and delete_job_record is not None and want:
+        delete_job_session_artifacts = None  # type: ignore
+    if job_store is not None and want:
         try:
             jobs = job_store.list_jobs(limit=2000)
         except Exception:
@@ -571,11 +576,16 @@ def _purge_merged_review_artifacts(
             if not ju or ju != want:
                 continue
             sids.extend(_job_session_ids(job))
+            status = str(job.get("status") or "").strip().lower()
+            if status in _LIVE_JOB_STATUSES:
+                continue
+            if delete_job_session_artifacts is None:
+                continue
             jid = str(job.get("job_id") or "")
             try:
-                delete_job_record(jid, store=job_store, delete_artifacts=True)
+                delete_job_session_artifacts(job)
             except Exception as e:
-                logger.debug(f"MR-merge could not delete job {jid}: {e}")
+                logger.debug(f"MR-merge could not delete session logs for {jid}: {e}")
     key = (issue_key or "").strip().upper()
     if key:
         try:

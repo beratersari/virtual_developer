@@ -574,7 +574,9 @@ def test_sweep_merged_deletes_job_logs_plan_and_state(
     monkeypatch.setattr("src.gitlab.client.GitlabClient", _Fake)
     deleted = sweep_merged_storage_clones()
     assert "app_merged01" in deleted
-    assert jobs.get_job(rec["job_id"]) is None
+    kept = jobs.get_job(rec["job_id"])
+    assert kept is not None, "merge must keep job JSON for Analytics"
+    assert kept.get("issue_key") == "KAN-44"
     assert not log.is_file()
     assert not prompt.is_file()
     assert not plan_file.is_file()

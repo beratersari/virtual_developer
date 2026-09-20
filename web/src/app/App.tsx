@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { AnalyticsPage } from '../pages/analytics/AnalyticsPage'
 import { IssueDetailPage } from '../pages/issues/IssueDetailPage'
 import { JobDetailPage } from '../pages/jobs/JobDetailPage'
 import { JobsPage } from '../pages/jobs/JobsPage'
@@ -21,6 +22,7 @@ export default function App() {
           <Route element={<Shell />}>
             <Route path="/" element={<Navigate to="/jobs" replace />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/analytics" element={<AnalyticsPage />} />
             {/* Queue is shown on Jobs; keep old path as redirect */}
             <Route path="/queue" element={<Navigate to="/jobs" replace />} />
             <Route path="/jobs/:jobId" element={<JobDetailPage />} />
