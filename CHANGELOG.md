@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.44] — 2026-09-20
+
+Sessions workspace detail no longer times out while measuring clone size.
+
+### Fixed
+
+- Workspace detail GET uses the Storage size cache instead of
+  walking the temp clone on the request path. The SPA aborts
+  GETs at 15s; a real clone on Windows/WSL could take longer.
+
+[0.9.44]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.44
+
 ## [0.9.43] — 2026-09-19
 
 Sessions workspace shows MR links.
