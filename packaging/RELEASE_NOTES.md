@@ -1,3 +1,9 @@
+# Yaver 0.9.45
+
+Dashboard uses the new
+Yaver mark. The sidebar
+icon winks.
+
 # Yaver 0.9.44
 
 Sessions workspace GET no

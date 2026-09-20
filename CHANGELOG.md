@@ -8,6 +8,17 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.45] — 2026-09-20
+
+Dashboard uses the new Yaver mark. The sidebar icon winks.
+
+### Changed
+
+- Sidebar, login, and boot show icon A as a short wink GIF.
+- README uses lockup C (YAVER / Sanal Geliştirici).
+
+[0.9.45]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.45
+
 ## [0.9.44] — 2026-09-20
 
 Sessions workspace detail no longer times out while measuring clone size.
