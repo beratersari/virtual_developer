@@ -108,8 +108,75 @@ def _win_cmd(args: List[str], *, timeout: int = 120) -> subprocess.CompletedProc
     )
 
 
+def _is_dir_link(path: Path) -> bool:
+    """True for a symlink or Windows directory junction (not a real folder).
+
+    ``Path.is_symlink()`` is false for ``mklink /J`` junctions. ``os.walk``
+    and ``rd /s`` then descend into the target — for ``.yaver-plans`` that
+    is ``{YAVER_DATA_DIR}/plans``.
+    """
+    try:
+        if path.is_symlink():
+            return True
+        is_junc = getattr(path, "is_junction", None)
+        if callable(is_junc) and is_junc():
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _remove_dir_link(path: Path) -> None:
+    """Drop a symlink/junction. Never ``rd /s`` — that follows the target."""
+    _chmod_writable(path)
+    if is_windows():
+        long = win_long_path(path)
+        try:
+            os.rmdir(long)
+            return
+        except OSError:
+            pass
+        try:
+            os.unlink(long)
+            return
+        except OSError:
+            pass
+        _win_cmd(["cmd.exe", "/c", "rmdir", long], timeout=60)
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        os.rmdir(path)
+
+
+def _unlink_dir_links(root: Path) -> None:
+    """Remove symlink/junction children so a later ``rd /s`` cannot follow them."""
+    try:
+        for dirpath, dirnames, _filenames in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            dp = Path(dirpath)
+            skip: List[str] = []
+            for name in list(dirnames):
+                child = dp / name
+                if not _is_dir_link(child):
+                    continue
+                try:
+                    _remove_dir_link(child)
+                except OSError as e:
+                    logger.warning(f"force delete link {child}: {e}")
+                skip.append(name)
+            for name in skip:
+                dirnames.remove(name)
+    except OSError:
+        pass
+
+
 def _win_unlink_one(path: Path) -> None:
     """Delete one reserved-name file or empty dir via ``del`` / ``rd`` + prefixes."""
+    if _is_dir_link(path):
+        _remove_dir_link(path)
+        return
     long = win_long_path(path)
     device = win_device_path(path)
     _chmod_writable(path)
@@ -149,7 +216,7 @@ def _walk_reserved(root: Path) -> Iterable[Path]:
         return
     for ent in entries:
         child = Path(ent.path)
-        if ent.is_dir(follow_symlinks=False):
+        if ent.is_dir(follow_symlinks=False) and not _is_dir_link(child):
             yield from _walk_reserved(child)
         if _stem_reserved(ent.name):
             yield child
@@ -158,9 +225,13 @@ def _walk_reserved(root: Path) -> Iterable[Path]:
 def force_rmtree(path: Path | str) -> None:
     """Hard-delete ``path``. Raises ``OSError`` if anything remains."""
     target = Path(path)
+    if _is_dir_link(target):
+        _remove_dir_link(target)
+        return
     if not target.exists():
         return
     if is_windows():
+        _unlink_dir_links(target)
         # Whole-tree ``rd`` with the long-path prefix.
         _win_rd_tree(target)
         if target.exists():
@@ -179,17 +250,35 @@ def force_rmtree(path: Path | str) -> None:
 
 
 def _collect_tree_entries(root: Path) -> List[Path]:
-    """Files then child dirs (deepest first), then ``root``."""
-    found: List[Path] = []
+    """Files then links then child dirs (deepest first), then ``root``.
+
+    Directory junctions/symlinks are leaves. Windows ``os.walk(followlinks=
+    False)`` still descends into ``mklink /J`` targets.
+    """
+    files: List[Path] = []
+    links: List[Path] = []
+    dirs: List[Path] = []
     try:
-        for dirpath, dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(
+            root, topdown=True, followlinks=False
+        ):
             dp = Path(dirpath)
-            for name in filenames:
-                found.append(dp / name)
+            skip: List[str] = []
             for name in dirnames:
-                found.append(dp / name)
+                child = dp / name
+                if _is_dir_link(child):
+                    links.append(child)
+                    skip.append(name)
+                else:
+                    dirs.append(child)
+            for name in skip:
+                dirnames.remove(name)
+            for name in filenames:
+                files.append(dp / name)
     except OSError:
         pass
+    dirs.sort(key=lambda p: len(p.parts), reverse=True)
+    found = files + links + dirs
     found.append(root)
     return found
 
@@ -198,6 +287,9 @@ def _remove_one(path: Path) -> None:
     """Unlink a file / reserved name, or rmdir an empty directory."""
     _chmod_writable(path)
     try:
+        if _is_dir_link(path):
+            _remove_dir_link(path)
+            return
         if path.is_symlink() or path.is_file():
             if is_windows():
                 try:
@@ -238,6 +330,11 @@ def force_rmtree_progress(
     ``force_rmtree`` (Windows ``rd /s /q`` + reserved-name unlink).
     """
     target = Path(path)
+    if _is_dir_link(target):
+        _remove_dir_link(target)
+        if on_progress is not None:
+            on_progress(1, 1)
+        return
     if not target.exists():
         if on_progress is not None:
             on_progress(1, 1)
@@ -249,7 +346,7 @@ def force_rmtree_progress(
     done = 0
     for entry in entries:
         try:
-            if entry.exists() or entry.is_symlink():
+            if entry.exists() or entry.is_symlink() or _is_dir_link(entry):
                 _remove_one(entry)
         except OSError as e:
             logger.warning(f"force delete entry {entry}: {e}")

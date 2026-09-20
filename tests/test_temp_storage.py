@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -111,6 +113,29 @@ def test_force_rmtree_progress_reports_and_deletes(tmp_path: Path):
     assert seen[0][0] == 0
     assert seen[-1][0] == seen[-1][1]
     assert seen[-1][1] >= 2
+
+
+def test_force_rmtree_progress_does_not_follow_yaver_plans_link(tmp_path: Path):
+    """``.yaver-plans`` is a junction (Windows) or symlink (POSIX) to plans."""
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "KAN-1.md").write_text("# plan\n", encoding="utf-8")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "README.md").write_text("x\n", encoding="utf-8")
+    link = clone / ".yaver-plans"
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(plans)],
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, (completed.stderr or completed.stdout)
+    else:
+        os.symlink(str(plans), str(link), target_is_directory=True)
+    force_rmtree_progress(clone)
+    assert not clone.exists()
+    assert (plans / "KAN-1.md").is_file()
 
 
 def test_storage_view_shows_live_mr_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
