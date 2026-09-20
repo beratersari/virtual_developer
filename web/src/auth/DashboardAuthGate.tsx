@@ -11,9 +11,13 @@ function GateBrand({ blurb }: { blurb: string }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2.5">
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-muted text-sm font-bold text-accent">
-          Y
-        </span>
+        <img
+          src="/yaver-wink.gif"
+          alt=""
+          width={40}
+          height={40}
+          className="h-10 w-10 rounded-lg"
+        />
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">
             Yaver
