@@ -1,0 +1,492 @@
+"""Job analytics for the ops dashboard (aggregation only; SPA renders DTOs)."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timedelta
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from src.dashboard.schemas import (
+    AnalyticsFacet,
+    AnalyticsModelPoint,
+    AnalyticsNamedCount,
+    AnalyticsPoint,
+    AnalyticsRange,
+    AnalyticsResponse,
+)
+from src.state.job_store import JobStore, job_store as default_job_store
+
+_COMPLETED = frozenset({"completed"})
+_ERROR = frozenset({"error", "unknown"})
+_CANCELLED = frozenset({"cancelled", "canceled", "superseded"})
+_IN_FLIGHT = frozenset({"pending", "planning", "executing", "running"})
+
+_RANGE_PRESETS = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+    "90d": timedelta(days=90),
+    "1y": timedelta(days=365),
+}
+
+_MAX_BUCKETS = 400
+_TOP_MODELS = 8
+
+_CATEGORY_LABELS = {
+    "plan": "Plan",
+    "build": "Build",
+    "test": "Test",
+    "review": "Review",
+    "other": "Other",
+}
+
+
+def job_category(workflow_type: str) -> str:
+    wt = (workflow_type or "").strip().lower().replace("_", "-")
+    if wt in {"planning", "plan"}:
+        return "plan"
+    if wt in {"testing", "test"}:
+        return "test"
+    if wt in {"review", "gitlab-review", "azure-review"}:
+        return "review"
+    if wt in {"execution", "build", "direct", "gitlab-mr", "azure-pr"}:
+        return "build"
+    return "other"
+
+
+def _csv_set(raw: Optional[str]) -> set[str]:
+    if not raw:
+        return set()
+    return {p.strip().lower() for p in str(raw).split(",") if p.strip()}
+
+
+def _parse_ts(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.replace(microsecond=0)
+
+
+def _floor(dt: datetime, bucket: str) -> datetime:
+    if bucket == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0)
+    if bucket == "week":
+        day = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return day - timedelta(days=day.weekday())
+    if bucket == "month":
+        return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _step(bucket: str) -> timedelta:
+    if bucket == "hour":
+        return timedelta(hours=1)
+    if bucket == "week":
+        return timedelta(days=7)
+    if bucket == "month":
+        return timedelta(days=32)
+    return timedelta(days=1)
+
+
+def _add_bucket(dt: datetime, bucket: str) -> datetime:
+    if bucket == "month":
+        year = dt.year + (1 if dt.month == 12 else 0)
+        month = 1 if dt.month == 12 else dt.month + 1
+        return dt.replace(year=year, month=month, day=1)
+    return dt + _step(bucket)
+
+
+def _label(dt: datetime, bucket: str) -> str:
+    if bucket == "hour":
+        return dt.strftime("%m-%d %H:%M")
+    if bucket == "week":
+        return dt.strftime("%Y-%m-%d")
+    if bucket == "month":
+        return dt.strftime("%Y-%m")
+    return dt.strftime("%Y-%m-%d")
+
+
+def _auto_bucket(start: datetime, end: datetime) -> str:
+    span = max(0.0, (end - start).total_seconds())
+    if span <= 2 * 86400:
+        return "hour"
+    if span <= 90 * 86400:
+        return "day"
+    if span <= 730 * 86400:
+        return "week"
+    return "month"
+
+
+def _coarsen(start: datetime, end: datetime, bucket: str) -> str:
+    order = ["hour", "day", "week", "month"]
+    idx = order.index(bucket) if bucket in order else 1
+    while idx < len(order) - 1:
+        cur = order[idx]
+        n = 0
+        t = _floor(start, cur)
+        last = _floor(end, cur)
+        while t <= last and n <= _MAX_BUCKETS:
+            t = _add_bucket(t, cur)
+            n += 1
+        if n <= _MAX_BUCKETS:
+            return cur
+        idx += 1
+    return "month"
+
+
+def _outcome(status: str) -> str:
+    st = (status or "").strip().lower()
+    if st in _COMPLETED:
+        return "completed"
+    if st in _ERROR:
+        return "error"
+    if st in _CANCELLED:
+        return "cancelled"
+    if st in _IN_FLIGHT:
+        return "in_flight"
+    return "other"
+
+
+def _job_when(job: Dict[str, Any]) -> Optional[datetime]:
+    return _parse_ts(job.get("started_at") or job.get("created_at") or job.get("updated_at"))
+
+
+def _repo_key(job: Dict[str, Any]) -> str:
+    return str(job.get("repository_url") or "").strip()
+
+
+def _model_id(job: Dict[str, Any]) -> str:
+    """Named model id, or empty when the job has no model (not a fake series)."""
+    return str(job.get("model") or "").strip()
+
+
+def _backend_id(job: Dict[str, Any]) -> str:
+    raw = str(job.get("backend") or "").strip().lower()
+    return raw or "(unset)"
+
+
+def _source_id(job: Dict[str, Any]) -> str:
+    raw = str(job.get("source") or "jira").strip().lower() or "jira"
+    if raw in {"gitlab_mr", "gitlab-mr"}:
+        return "gitlab"
+    if raw in {"azure_pr", "azure-pr", "azure_workitem"}:
+        return "azure"
+    return raw
+
+
+def _agent_id(job: Dict[str, Any]) -> str:
+    return str(job.get("agent") or "").strip() or "(unset)"
+
+
+def _in_set(value: str, allowed: set[str]) -> bool:
+    if not allowed:
+        return True
+    return (value or "").strip().lower() in allowed
+
+
+def _matches_text(job: Dict[str, Any], needle: str) -> bool:
+    if not needle:
+        return True
+    n = needle.lower()
+    blob = " ".join(
+        [
+            str(job.get("issue_key") or ""),
+            str(job.get("summary") or ""),
+            str(job.get("description") or ""),
+            str(job.get("repository_url") or ""),
+            str(job.get("agent") or ""),
+            str(job.get("model") or ""),
+        ]
+    ).lower()
+    return n in blob
+
+
+def _empty_counts() -> Dict[str, int]:
+    return {
+        "total": 0,
+        "completed": 0,
+        "error": 0,
+        "cancelled": 0,
+        "in_flight": 0,
+        "other": 0,
+    }
+
+
+def _bump(counts: Dict[str, int], outcome: str) -> None:
+    counts["total"] += 1
+    if outcome in counts:
+        counts[outcome] += 1
+    else:
+        counts["other"] += 1
+
+
+def _named(
+    key: str,
+    counts: Dict[str, int],
+    *,
+    label: Optional[str] = None,
+    total_jobs: int = 0,
+) -> AnalyticsNamedCount:
+    jobs = int(counts.get("total") or 0)
+    share = round((100.0 * jobs / total_jobs), 1) if total_jobs > 0 else 0.0
+    return AnalyticsNamedCount(
+        id=key,
+        label=label or key,
+        jobs=jobs,
+        completed=int(counts.get("completed") or 0),
+        error=int(counts.get("error") or 0),
+        cancelled=int(counts.get("cancelled") or 0),
+        in_flight=int(counts.get("in_flight") or 0),
+        share=share,
+    )
+
+
+def _facet(rows: Iterable[Tuple[str, str, int]]) -> List[AnalyticsFacet]:
+    out = [
+        AnalyticsFacet(id=i, label=lab or i, jobs=n)
+        for i, lab, n in rows
+        if i
+    ]
+    out.sort(key=lambda f: (-f.jobs, f.label.lower()))
+    return out
+
+
+def build_analytics(
+    *,
+    period: str = "30d",
+    bucket: str = "auto",
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    category: str = "",
+    source: str = "",
+    model: str = "",
+    backend: str = "",
+    agent: str = "",
+    repository: str = "",
+    issue_key: str = "",
+    q: str = "",
+    store: Optional[JobStore] = None,
+) -> AnalyticsResponse:
+    """Aggregate stored jobs for the Analytics page."""
+    js = store or default_job_store
+    now = datetime.now().replace(microsecond=0)
+    want_status = _csv_set(status)
+    want_cat = _csv_set(category)
+    want_src = _csv_set(source)
+    want_model = _csv_set(model)
+    want_backend = _csv_set(backend)
+    want_agent = {p.strip().lower() for p in (agent or "").split(",") if p.strip()}
+    repo_needle = (repository or "").strip().lower()
+    key_needle = (issue_key or "").strip().upper()
+    search = (q or "").strip()
+
+    jobs = js.iter_jobs() if hasattr(js, "iter_jobs") else js.list_jobs(limit=5000)
+    dated: List[Tuple[datetime, Dict[str, Any]]] = []
+    for job in jobs:
+        when = _job_when(job)
+        if when is None:
+            continue
+        dated.append((when, job))
+
+    period_key = (period or "30d").strip().lower() or "30d"
+    start = _parse_ts(date_from)
+    end = _parse_ts(date_to) or now
+    if start is None:
+        if period_key == "all":
+            start = min((w for w, _ in dated), default=now - timedelta(days=30))
+        else:
+            delta = _RANGE_PRESETS.get(period_key, _RANGE_PRESETS["30d"])
+            start = now - delta
+    if end < start:
+        start, end = end, start
+
+    bucket_key = (bucket or "auto").strip().lower() or "auto"
+    if bucket_key not in {"auto", "hour", "day", "week", "month"}:
+        bucket_key = "auto"
+    if bucket_key == "auto":
+        bucket_key = _auto_bucket(start, end)
+    bucket_key = _coarsen(start, end, bucket_key)
+
+    in_range = [(w, j) for w, j in dated if start <= w <= end]
+    facet_cat: Dict[str, int] = defaultdict(int)
+    facet_src: Dict[str, int] = defaultdict(int)
+    facet_model: Dict[str, int] = defaultdict(int)
+    facet_backend: Dict[str, int] = defaultdict(int)
+    facet_agent: Dict[str, int] = defaultdict(int)
+    facet_status: Dict[str, int] = defaultdict(int)
+    facet_repo: Dict[str, int] = defaultdict(int)
+    for _w, job in in_range:
+        facet_cat[job_category(str(job.get("workflow_type") or ""))] += 1
+        facet_src[_source_id(job)] += 1
+        mid = _model_id(job)
+        if mid:
+            facet_model[mid] += 1
+        facet_backend[_backend_id(job)] += 1
+        facet_agent[_agent_id(job)] += 1
+        st = str(job.get("status") or "unknown").strip().lower() or "unknown"
+        facet_status[st] += 1
+        repo = _repo_key(job)
+        if repo:
+            facet_repo[repo] += 1
+
+    matched: List[Tuple[datetime, Dict[str, Any]]] = []
+    for when, job in in_range:
+        st = str(job.get("status") or "").strip().lower()
+        cat = job_category(str(job.get("workflow_type") or ""))
+        src = _source_id(job)
+        mid = _model_id(job)
+        bid = _backend_id(job)
+        ag = _agent_id(job)
+        ik = str(job.get("issue_key") or "").strip().upper()
+        if want_status and st not in want_status and _outcome(st) not in want_status:
+            continue
+        if not _in_set(cat, want_cat):
+            continue
+        if not _in_set(src, want_src):
+            continue
+        if want_model and (not mid or mid.lower() not in want_model):
+            continue
+        if want_backend and bid.lower() not in want_backend:
+            continue
+        if want_agent and ag.lower() not in want_agent:
+            continue
+        if repo_needle and repo_needle not in _repo_key(job).lower():
+            continue
+        if key_needle and key_needle not in ik:
+            continue
+        if not _matches_text(job, search):
+            continue
+        matched.append((when, job))
+
+    origin = _floor(start, bucket_key)
+    last = _floor(end, bucket_key)
+    keys: List[datetime] = []
+    t = origin
+    while t <= last:
+        keys.append(t)
+        nxt = _add_bucket(t, bucket_key)
+        if nxt <= t:
+            break
+        t = nxt
+
+    series_map: Dict[datetime, Dict[str, int]] = {k: _empty_counts() for k in keys}
+    totals = _empty_counts()
+    by_cat: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
+    by_src: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
+    by_model: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
+    by_backend: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
+    model_series: Dict[datetime, Dict[str, int]] = {k: {} for k in keys}
+
+    for when, job in matched:
+        out = _outcome(str(job.get("status") or ""))
+        _bump(totals, out)
+        cat = job_category(str(job.get("workflow_type") or ""))
+        _bump(by_cat[cat], out)
+        _bump(by_src[_source_id(job)], out)
+        mid = _model_id(job)
+        if mid:
+            _bump(by_model[mid], out)
+        _bump(by_backend[_backend_id(job)], out)
+        b = _floor(when, bucket_key)
+        if b < origin:
+            b = origin
+        if b > last:
+            b = last
+        if b not in series_map:
+            series_map[b] = _empty_counts()
+        _bump(series_map[b], out)
+        if mid:
+            if b not in model_series:
+                model_series[b] = {}
+            model_series[b][mid] = int(model_series[b].get(mid) or 0) + 1
+
+    page_total = int(totals.get("total") or 0)
+    top_models = sorted(
+        by_model.items(), key=lambda kv: (-int(kv[1].get("total") or 0), kv[0])
+    )[:_TOP_MODELS]
+    top_ids = [k for k, _ in top_models]
+
+    points: List[AnalyticsPoint] = []
+    model_points: List[AnalyticsModelPoint] = []
+    for k in keys:
+        c = series_map.get(k) or _empty_counts()
+        points.append(
+            AnalyticsPoint(
+                t=k.isoformat(timespec="seconds"),
+                label=_label(k, bucket_key),
+                total=int(c.get("total") or 0),
+                completed=int(c.get("completed") or 0),
+                error=int(c.get("error") or 0),
+                cancelled=int(c.get("cancelled") or 0),
+                in_flight=int(c.get("in_flight") or 0),
+            )
+        )
+        raw = model_series.get(k) or {}
+        counts: Dict[str, int] = {}
+        other = 0
+        for mid, n in raw.items():
+            if mid in top_ids:
+                counts[mid] = n
+            else:
+                other += n
+        if other:
+            counts["(other)"] = other
+        model_points.append(
+            AnalyticsModelPoint(
+                t=k.isoformat(timespec="seconds"),
+                label=_label(k, bucket_key),
+                counts=counts,
+            )
+        )
+
+    def _sort_named(
+        items: Dict[str, Dict[str, int]], labels: Optional[Dict[str, str]] = None
+    ) -> List[AnalyticsNamedCount]:
+        rows = [
+            _named(k, v, label=(labels or {}).get(k) or k, total_jobs=page_total)
+            for k, v in items.items()
+        ]
+        rows.sort(key=lambda r: (-r.jobs, r.label.lower()))
+        return rows
+
+    return AnalyticsResponse(
+        range=AnalyticsRange(
+            period=period_key,
+            bucket=bucket_key,
+            start=start.isoformat(timespec="seconds"),
+            end=end.isoformat(timespec="seconds"),
+        ),
+        totals=_named("all", totals, label="All", total_jobs=page_total),
+        series=points,
+        models=_sort_named(by_model),
+        model_series=model_points,
+        model_keys=top_ids
+        + (["(other)"] if any("(other)" in p.counts for p in model_points) else []),
+        categories=_sort_named(by_cat, _CATEGORY_LABELS),
+        sources=_sort_named(by_src),
+        backends=_sort_named(by_backend),
+        facets={
+            "status": _facet((k, k, n) for k, n in facet_status.items()),
+            "category": _facet(
+                (k, _CATEGORY_LABELS.get(k, k), n) for k, n in facet_cat.items()
+            ),
+            "source": _facet((k, k, n) for k, n in facet_src.items()),
+            "model": _facet((k, k, n) for k, n in facet_model.items()),
+            "backend": _facet((k, k, n) for k, n in facet_backend.items()),
+            "agent": _facet((k, k, n) for k, n in facet_agent.items()),
+            "repository": _facet((k, k, n) for k, n in facet_repo.items()),
+        },
+        matched=len(matched),
+        scanned=len(dated),
+        in_range=len(in_range),
+        server_time=now.isoformat(timespec="seconds"),
+    )

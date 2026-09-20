@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -314,6 +314,63 @@ class JobsResponse(BaseModel):
     page_size: int = 25
     issue_key_filter: Optional[str] = None
     server_time: str
+
+
+class AnalyticsRange(BaseModel):
+    period: str = "30d"
+    bucket: str = "day"
+    start: str = ""
+    end: str = ""
+
+
+class AnalyticsPoint(BaseModel):
+    t: str
+    label: str
+    total: int = 0
+    completed: int = 0
+    error: int = 0
+    cancelled: int = 0
+    in_flight: int = 0
+
+
+class AnalyticsNamedCount(BaseModel):
+    id: str
+    label: str = ""
+    jobs: int = 0
+    completed: int = 0
+    error: int = 0
+    cancelled: int = 0
+    in_flight: int = 0
+    share: float = 0.0
+
+
+class AnalyticsFacet(BaseModel):
+    id: str
+    label: str = ""
+    jobs: int = 0
+
+
+class AnalyticsModelPoint(BaseModel):
+    t: str
+    label: str
+    counts: Dict[str, int] = Field(default_factory=dict)
+
+
+class AnalyticsResponse(BaseModel):
+    range: AnalyticsRange
+    totals: AnalyticsNamedCount
+    series: List[AnalyticsPoint] = Field(default_factory=list)
+    models: List[AnalyticsNamedCount] = Field(default_factory=list)
+    model_series: List[AnalyticsModelPoint] = Field(default_factory=list)
+    model_keys: List[str] = Field(default_factory=list)
+    categories: List[AnalyticsNamedCount] = Field(default_factory=list)
+    sources: List[AnalyticsNamedCount] = Field(default_factory=list)
+    backends: List[AnalyticsNamedCount] = Field(default_factory=list)
+    facets: Dict[str, List[AnalyticsFacet]] = Field(default_factory=dict)
+    matched: int = 0
+    scanned: int = 0
+    in_range: int = 0
+    server_time: str = ""
 
 
 class PolledIssueItem(BaseModel):

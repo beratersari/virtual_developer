@@ -45,6 +45,63 @@ export type ModelOption = {
   label: string
 }
 
+export type AnalyticsRange = {
+  period: string
+  bucket: string
+  start: string
+  end: string
+}
+
+export type AnalyticsPoint = {
+  t: string
+  label: string
+  total: number
+  completed: number
+  error: number
+  cancelled: number
+  in_flight: number
+}
+
+export type AnalyticsNamedCount = {
+  id: string
+  label: string
+  jobs: number
+  completed: number
+  error: number
+  cancelled: number
+  in_flight: number
+  share: number
+}
+
+export type AnalyticsFacet = {
+  id: string
+  label: string
+  jobs: number
+}
+
+export type AnalyticsModelPoint = {
+  t: string
+  label: string
+  counts: Record<string, number>
+}
+
+export type AnalyticsPayload = {
+  range: AnalyticsRange
+  totals: AnalyticsNamedCount
+  series: AnalyticsPoint[]
+  models: AnalyticsNamedCount[]
+  model_series: AnalyticsModelPoint[]
+  model_keys: string[]
+  categories: AnalyticsNamedCount[]
+  sources: AnalyticsNamedCount[]
+  backends: AnalyticsNamedCount[]
+  facets: Record<string, AnalyticsFacet[]>
+  matched: number
+  scanned: number
+  in_range: number
+  server_time: string
+}
+
 export type ModelsPayload = {
   default_model: string
   models: ModelOption[]

@@ -7,6 +7,7 @@ import { useLive } from './live'
 
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
+  { to: '/analytics', label: 'Analytics', match: (p: string) => p.startsWith('/analytics') },
   { to: '/scheduled', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
   { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
   { to: '/storage', label: 'Storage', match: (p: string) => p.startsWith('/storage') },
@@ -20,6 +21,19 @@ function IconJobs() {
       <rect x="2" y="3" width="12" height="3" rx="1" fill="currentColor" opacity="0.9" />
       <rect x="2" y="8" width="12" height="2" rx="1" fill="currentColor" opacity="0.55" />
       <rect x="2" y="12" width="8" height="2" rx="1" fill="currentColor" opacity="0.35" />
+    </svg>
+  )
+}
+function IconChart() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M2.5 12.5h11M4 10.5l2.2-3 2.1 1.6L12 4.5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }
@@ -73,7 +87,7 @@ function IconGear() {
   )
 }
 
-const ICONS = [IconJobs, IconClock, IconSession, IconDisk, IconBoard, IconGear]
+const ICONS = [IconJobs, IconChart, IconClock, IconSession, IconDisk, IconBoard, IconGear]
 
 export function Shell() {
   const live = useLive()

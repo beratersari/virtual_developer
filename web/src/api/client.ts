@@ -1,4 +1,5 @@
 import type {
+  AnalyticsPayload,
   BulkDeleteJobsResult,
   GitlabConnectionTestResult,
   JobChatPayload,
@@ -187,6 +188,39 @@ export function cancelQueueItem(queueId: string) {
     `/api/queue/${encodeURIComponent(queueId)}`,
     { method: 'DELETE' },
   )
+}
+
+export function fetchAnalytics(opts?: {
+  period?: string
+  bucket?: string
+  from?: string
+  to?: string
+  status?: string
+  category?: string
+  source?: string
+  model?: string
+  backend?: string
+  agent?: string
+  repository?: string
+  issueKey?: string
+  q?: string
+}) {
+  const params = new URLSearchParams()
+  if (opts?.period) params.set('period', opts.period)
+  if (opts?.bucket) params.set('bucket', opts.bucket)
+  if (opts?.from) params.set('from', opts.from)
+  if (opts?.to) params.set('to', opts.to)
+  if (opts?.status) params.set('status', opts.status)
+  if (opts?.category) params.set('category', opts.category)
+  if (opts?.source) params.set('source', opts.source)
+  if (opts?.model) params.set('model', opts.model)
+  if (opts?.backend) params.set('backend', opts.backend)
+  if (opts?.agent) params.set('agent', opts.agent)
+  if (opts?.repository) params.set('repository', opts.repository)
+  if (opts?.issueKey) params.set('issue_key', opts.issueKey)
+  if (opts?.q) params.set('q', opts.q)
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return request<AnalyticsPayload>(`/api/analytics${q}`)
 }
 
 export async function fetchJobs(opts?: {
