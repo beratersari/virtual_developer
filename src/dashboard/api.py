@@ -1518,7 +1518,7 @@ def create_dashboard_app(
         return result
 
     @app.get("/api/analytics")
-    def analytics(
+    async def analytics(
         period: str = Query(default="30d"),
         bucket: str = Query(default="auto"),
         date_from: str = Query(default="", alias="from"),
@@ -1536,7 +1536,8 @@ def create_dashboard_app(
         """Job counts over time plus filter facets (status, model, category, …)."""
         from src.dashboard.analytics import build_analytics
 
-        return build_analytics(
+        payload = await asyncio.to_thread(
+            build_analytics,
             period=period,
             bucket=bucket,
             date_from=date_from,
@@ -1550,7 +1551,8 @@ def create_dashboard_app(
             repository=repository,
             issue_key=issue_key,
             q=q,
-        ).model_dump()
+        )
+        return payload.model_dump()
 
     @app.get("/api/models")
     def get_models(refresh: bool = False, backend: str = "") -> dict:

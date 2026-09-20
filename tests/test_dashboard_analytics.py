@@ -136,10 +136,13 @@ def test_analytics_counts_and_filters(tmp_path, isolate_jira_agent_artifacts, mo
     assert any(f["id"] == "plan" for f in facets["category"])
 
 
-def test_analytics_omits_unset_model_series(
+def test_analytics_unset_model_is_in_table_not_series(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):
-    """Jobs with no model still count in totals, not as a fake model row."""
+    """Jobs with no model appear in the table/facet so shares sum to 100%.
+
+    They still must not appear on model_series / model_keys (no fake line).
+    """
     http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
     named = jobs.create_job(
         issue_key="KAN-1",
@@ -160,14 +163,97 @@ def test_analytics_omits_unset_model_series(
     body = http.get("/api/analytics", params={"period": "7d"}).json()
     assert body["totals"]["jobs"] == 2
     ids = [row["id"] for row in body["models"]]
-    assert ids == ["gpt-4.1"]
-    assert "(unset)" not in ids
+    assert ids == ["gpt-4.1", "(unset)"]
     assert "(unset)" not in body["model_keys"]
     assert all("(unset)" not in (p.get("counts") or {}) for p in body["model_series"])
     facet_ids = [f["id"] for f in body["facets"]["model"]]
-    assert "(unset)" not in facet_ids
+    assert "(unset)" in facet_ids
     gpt = next(r for r in body["models"] if r["id"] == "gpt-4.1")
+    unset = next(r for r in body["models"] if r["id"] == "(unset)")
     assert gpt["share"] == 50.0
+    assert unset["share"] == 50.0
+    assert gpt["share"] + unset["share"] == 100.0
+
+
+def test_analytics_plan_ready_is_its_own_outcome(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    ready = jobs.create_job(
+        issue_key="KAN-10",
+        summary="plan wait",
+        workflow_type="planning",
+        model="gpt-4.1",
+        status="plan_ready",
+        agent="derman-plan",
+    )
+    jobs.update_job(ready["job_id"], started_at=_stamp(1), status="plan_ready")
+    done = jobs.create_job(
+        issue_key="KAN-11",
+        summary="built",
+        workflow_type="execution",
+        model="gpt-4.1",
+        status="completed",
+        agent="derman-build",
+    )
+    jobs.update_job(done["job_id"], started_at=_stamp(1), status="completed")
+
+    body = http.get("/api/analytics", params={"period": "7d"}).json()
+    totals = body["totals"]
+    assert totals["jobs"] == 2
+    assert totals["completed"] == 1
+    assert totals["plan_ready"] == 1
+    assert totals["error"] == 0
+    assert (
+        totals["completed"]
+        + totals["error"]
+        + totals["cancelled"]
+        + totals["plan_ready"]
+        + totals["in_flight"]
+        == totals["jobs"]
+    )
+    assert sum(p["plan_ready"] for p in body["series"]) == 1
+    agents = {row["id"]: row["jobs"] for row in body["agents"]}
+    assert agents.get("derman-plan") == 1
+    assert agents.get("derman-build") == 1
+    only_ready = http.get(
+        "/api/analytics", params={"period": "7d", "status": "plan_ready"}
+    ).json()
+    assert only_ready["totals"]["jobs"] == 1
+    assert only_ready["totals"]["plan_ready"] == 1
+
+
+def test_analytics_merges_repo_urls_with_and_without_git_suffix(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    a = jobs.create_job(
+        issue_key="KAN-20",
+        summary="with git",
+        workflow_type="execution",
+        status="completed",
+        repository_url="https://gitlab.com/acme/app.git",
+    )
+    jobs.update_job(a["job_id"], started_at=_stamp(1), status="completed")
+    b = jobs.create_job(
+        issue_key="KAN-21",
+        summary="no git",
+        workflow_type="execution",
+        status="error",
+        repository_url="https://gitlab.com/acme/app",
+    )
+    jobs.update_job(b["job_id"], started_at=_stamp(1), status="error")
+
+    body = http.get("/api/analytics", params={"period": "7d"}).json()
+    repos = body["facets"]["repository"]
+    assert len(repos) == 1
+    assert repos[0]["jobs"] == 2
+    assert repos[0]["id"] == "https://gitlab.com/acme/app"
+    filtered = http.get(
+        "/api/analytics",
+        params={"period": "7d", "repository": "https://gitlab.com/acme/app.git"},
+    ).json()
+    assert filtered["totals"]["jobs"] == 2
 
 
 def test_analytics_24h_month_bucket_stays_small(

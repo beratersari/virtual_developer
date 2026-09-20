@@ -29,13 +29,21 @@ const BUCKETS = [
   { id: 'month', label: 'Month' },
 ] as const
 
-type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled'
+type SeriesKey =
+  | 'total'
+  | 'completed'
+  | 'error'
+  | 'cancelled'
+  | 'plan_ready'
+  | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
   { id: 'total', label: 'Total', color: '#ff7a45' },
   { id: 'completed', label: 'Completed', color: '#3ecf8e' },
   { id: 'error', label: 'Error', color: '#f25c54' },
   { id: 'cancelled', label: 'Cancelled', color: '#7b88a8' },
+  { id: 'plan_ready', label: 'Plan ready', color: '#6ea8ff' },
+  { id: 'in_flight', label: 'In flight', color: '#c9a227' },
 ]
 
 function csv(set: Set<string>) {
@@ -156,6 +164,8 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
             <th>Completed</th>
             <th>Error</th>
             <th>Cancelled</th>
+            <th>Plan ready</th>
+            <th>In flight</th>
             <th className="w-1/3">Share</th>
           </tr>
         </thead>
@@ -167,6 +177,8 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
               <td className="font-mono text-success-text">{row.completed}</td>
               <td className="font-mono text-danger-text">{row.error}</td>
               <td className="font-mono text-text-muted">{row.cancelled}</td>
+              <td className="font-mono">{row.plan_ready}</td>
+              <td className="font-mono">{row.in_flight}</td>
               <td>
                 <div className="flex items-center gap-2">
                   <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-bg">
@@ -200,14 +212,13 @@ export function AnalyticsPage() {
   const [model, setModel] = useState<Set<string>>(() => new Set())
   const [backend, setBackend] = useState<Set<string>>(() => new Set())
   const [agent, setAgent] = useState<Set<string>>(() => new Set())
-  const [repository, setRepository] = useState('')
+  const [repository, setRepository] = useState<Set<string>>(() => new Set())
   const [issueKey, setIssueKey] = useState('')
   const [q, setQ] = useState('')
-  const [debouncedRepo, setDebouncedRepo] = useState('')
   const [debouncedKey, setDebouncedKey] = useState('')
   const [debouncedQ, setDebouncedQ] = useState('')
   const [visible, setVisible] = useState<Set<SeriesKey>>(
-    () => new Set(['total', 'completed', 'error']),
+    () => new Set(['total', 'completed', 'error', 'plan_ready']),
   )
   const [payload, setPayload] = useState<AnalyticsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -218,12 +229,11 @@ export function AnalyticsPage() {
 
   useEffect(() => {
     const t = window.setTimeout(() => {
-      setDebouncedRepo(repository.trim())
       setDebouncedKey(issueKey.trim())
       setDebouncedQ(q.trim())
     }, 250)
     return () => window.clearTimeout(t)
-  }, [repository, issueKey, q])
+  }, [issueKey, q])
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
@@ -233,6 +243,7 @@ export function AnalyticsPage() {
       const req = ++reqId.current
       if (!opts?.quiet) setLoading(true)
       try {
+        if (period === 'custom' && (!customFrom || !customTo)) return
         const data = await fetchAnalytics({
           period: period === 'custom' ? 'all' : period,
           bucket,
@@ -244,7 +255,7 @@ export function AnalyticsPage() {
           model: csv(model) || undefined,
           backend: csv(backend) || undefined,
           agent: csv(agent) || undefined,
-          repository: debouncedRepo || undefined,
+          repository: csv(repository) || undefined,
           issueKey: debouncedKey || undefined,
           q: debouncedQ || undefined,
           signal: ac.signal,
@@ -272,7 +283,7 @@ export function AnalyticsPage() {
       model,
       backend,
       agent,
-      debouncedRepo,
+      repository,
       debouncedKey,
       debouncedQ,
     ],
@@ -313,7 +324,7 @@ export function AnalyticsPage() {
     setModel(new Set())
     setBackend(new Set())
     setAgent(new Set())
-    setRepository('')
+    setRepository(new Set())
     setIssueKey('')
     setQ('')
   }
@@ -324,9 +335,10 @@ export function AnalyticsPage() {
       source.size +
       model.size +
       backend.size +
-      agent.size >
+      agent.size +
+      repository.size >
       0 ||
-    Boolean(debouncedRepo || debouncedKey || debouncedQ)
+    Boolean(debouncedKey || debouncedQ)
 
   return (
     <section className="space-y-5">
@@ -356,7 +368,15 @@ export function AnalyticsPage() {
             <button
               key={p.id}
               type="button"
-              onClick={() => setPeriod(p.id)}
+              onClick={() => {
+                if (p.id === 'custom') {
+                  const start = payload?.range.start || ''
+                  const end = payload?.range.end || ''
+                  setCustomFrom((prev) => prev || localInputFromIso(start))
+                  setCustomTo((prev) => prev || localInputFromIso(end))
+                }
+                setPeriod(p.id)
+              }}
               className={`rounded-full px-3 py-1 text-xs font-semibold ${
                 period === p.id
                   ? 'bg-accent text-[#1a0d08]'
@@ -401,7 +421,7 @@ export function AnalyticsPage() {
             <input
               type="datetime-local"
               className="vd-input mt-1"
-              value={customTo || localInputFromIso(payload?.range.end || '')}
+              value={customTo}
               onChange={(e) => setCustomTo(e.target.value)}
             />
           </label>
@@ -427,15 +447,6 @@ export function AnalyticsPage() {
             onChange={(e) => setIssueKey(e.target.value)}
           />
         </label>
-        <label className="text-xs text-text-muted">
-          Repository
-          <input
-            className="vd-input mt-1"
-            placeholder="group/app"
-            value={repository}
-            onChange={(e) => setRepository(e.target.value)}
-          />
-        </label>
         <FacetGroup title="Status" items={facets.status || []} selected={status} onChange={setStatus} />
         <FacetGroup
           title="Category"
@@ -452,6 +463,12 @@ export function AnalyticsPage() {
         />
         <FacetGroup title="Model" items={facets.model || []} selected={model} onChange={setModel} />
         <FacetGroup title="Agent" items={facets.agent || []} selected={agent} onChange={setAgent} />
+        <FacetGroup
+          title="Repository"
+          items={facets.repository || []}
+          selected={repository}
+          onChange={setRepository}
+        />
         {filterActive && (
           <div className="flex items-end">
             <button type="button" className="vd-btn vd-btn-secondary" onClick={resetFilters}>
@@ -461,7 +478,7 @@ export function AnalyticsPage() {
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
         <CountCard label="Total jobs" value={payload?.totals.jobs ?? 0} />
         <CountCard
           label="Completed"
@@ -474,7 +491,12 @@ export function AnalyticsPage() {
           value={payload?.totals.cancelled ?? 0}
           tone="muted"
         />
-        <CountCard label="Models used" value={payload?.models.length ?? 0} />
+        <CountCard label="Plan ready" value={payload?.totals.plan_ready ?? 0} />
+        <CountCard label="In flight" value={payload?.totals.in_flight ?? 0} />
+        <CountCard
+          label="Models used"
+          value={(payload?.models || []).filter((m) => m.id !== '(unset)').length}
+        />
       </div>
 
       <div className="vd-card p-4">
@@ -497,7 +519,7 @@ export function AnalyticsPage() {
         </div>
         {!showCharts ? (
           <p className="py-8 text-center text-sm text-text-muted">
-            Select Total, Completed, Error, or Cancelled to show the chart.
+            Select a series to show the chart.
           </p>
         ) : outcomeSeries.some((s) => s.values.some((v) => v > 0)) ? (
           <LineChart labels={labels} series={outcomeSeries} />
@@ -526,6 +548,11 @@ export function AnalyticsPage() {
           <h2 className="mb-2 text-sm font-semibold">By backend</h2>
           <BreakdownTable rows={payload?.backends || []} />
         </div>
+      </div>
+
+      <div>
+        <h2 className="mb-2 text-sm font-semibold">By agent</h2>
+        <BreakdownTable rows={payload?.agents || []} />
       </div>
     </section>
   )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from src.dashboard.schemas import (
     AnalyticsFacet,
@@ -19,7 +20,9 @@ from src.state.job_store import JobStore, job_store as default_job_store
 _COMPLETED = frozenset({"completed"})
 _ERROR = frozenset({"error", "unknown"})
 _CANCELLED = frozenset({"cancelled", "canceled", "superseded"})
+_PLAN_READY = frozenset({"plan_ready"})
 _IN_FLIGHT = frozenset({"pending", "planning", "executing", "running"})
+_UNSET = "(unset)"
 
 _RANGE_PRESETS = {
     "24h": timedelta(hours=24),
@@ -167,6 +170,8 @@ def _outcome(status: str) -> str:
         return "error"
     if st in _CANCELLED:
         return "cancelled"
+    if st in _PLAN_READY:
+        return "plan_ready"
     if st in _IN_FLIGHT:
         return "in_flight"
     return "other"
@@ -176,13 +181,37 @@ def _job_when(job: Dict[str, Any]) -> Optional[datetime]:
     return _parse_ts(job.get("started_at") or job.get("created_at") or job.get("updated_at"))
 
 
+def _normalize_repo(raw: str) -> str:
+    """Same Git remote with or without ``.git`` (and trailing slash) is one repo."""
+    text = (raw or "").strip().rstrip("/")
+    if text.lower().endswith(".git"):
+        text = text[:-4].rstrip("/")
+    if "://" not in text:
+        return text
+    try:
+        parsed = urlparse(text)
+    except Exception:
+        return text
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return text
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith(".git"):
+        path = path[:-4].rstrip("/")
+    netloc = host
+    if parsed.port and parsed.port not in (80, 443):
+        netloc = f"{host}:{parsed.port}"
+    scheme = (parsed.scheme or "https").lower()
+    return f"{scheme}://{netloc}{path}"
+
+
 def _repo_key(job: Dict[str, Any]) -> str:
-    return str(job.get("repository_url") or "").strip()
+    return _normalize_repo(str(job.get("repository_url") or ""))
 
 
 def _model_id(job: Dict[str, Any]) -> str:
-    """Named model id, or empty when the job has no model (not a fake series)."""
-    return str(job.get("model") or "").strip()
+    """Named model, or ``(unset)`` so breakdown shares still sum to 100%."""
+    return str(job.get("model") or "").strip() or _UNSET
 
 
 def _backend_id(job: Dict[str, Any]) -> str:
@@ -232,6 +261,7 @@ def _empty_counts() -> Dict[str, int]:
         "completed": 0,
         "error": 0,
         "cancelled": 0,
+        "plan_ready": 0,
         "in_flight": 0,
         "other": 0,
     }
@@ -261,6 +291,7 @@ def _named(
         completed=int(counts.get("completed") or 0),
         error=int(counts.get("error") or 0),
         cancelled=int(counts.get("cancelled") or 0),
+        plan_ready=int(counts.get("plan_ready") or 0),
         in_flight=int(counts.get("in_flight") or 0),
         share=share,
     )
@@ -302,7 +333,11 @@ def build_analytics(
     want_model = _csv_set(model)
     want_backend = _csv_set(backend)
     want_agent = {p.strip().lower() for p in (agent or "").split(",") if p.strip()}
-    repo_needle = (repository or "").strip().lower()
+    want_repo = {
+        _normalize_repo(p).lower()
+        for p in str(repository or "").split(",")
+        if p.strip()
+    }
     key_needle = (issue_key or "").strip().upper()
     search = (q or "").strip()
 
@@ -345,8 +380,7 @@ def build_analytics(
         facet_cat[job_category(str(job.get("workflow_type") or ""))] += 1
         facet_src[_source_id(job)] += 1
         mid = _model_id(job)
-        if mid:
-            facet_model[mid] += 1
+        facet_model[mid] += 1
         facet_backend[_backend_id(job)] += 1
         facet_agent[_agent_id(job)] += 1
         st = str(job.get("status") or "unknown").strip().lower() or "unknown"
@@ -370,14 +404,16 @@ def build_analytics(
             continue
         if not _in_set(src, want_src):
             continue
-        if want_model and (not mid or mid.lower() not in want_model):
+        if want_model and mid.lower() not in want_model:
             continue
         if want_backend and bid.lower() not in want_backend:
             continue
         if want_agent and ag.lower() not in want_agent:
             continue
-        if repo_needle and repo_needle not in _repo_key(job).lower():
-            continue
+        if want_repo:
+            rkl = _repo_key(job).lower()
+            if rkl not in want_repo and not any(n in rkl for n in want_repo):
+                continue
         if key_needle and key_needle not in ik:
             continue
         if not _matches_text(job, search):
@@ -394,6 +430,7 @@ def build_analytics(
     by_src: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
     by_model: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
     by_backend: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
+    by_agent: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
     model_series: Dict[datetime, Dict[str, int]] = {k: {} for k in keys}
 
     for when, job in matched:
@@ -403,9 +440,9 @@ def build_analytics(
         _bump(by_cat[cat], out)
         _bump(by_src[_source_id(job)], out)
         mid = _model_id(job)
-        if mid:
-            _bump(by_model[mid], out)
+        _bump(by_model[mid], out)
         _bump(by_backend[_backend_id(job)], out)
+        _bump(by_agent[_agent_id(job)], out)
         b = _floor(when, bucket_key)
         if b < origin:
             b = origin
@@ -414,14 +451,15 @@ def build_analytics(
         if b not in series_map:
             series_map[b] = _empty_counts()
         _bump(series_map[b], out)
-        if mid:
+        if mid != _UNSET:
             if b not in model_series:
                 model_series[b] = {}
             model_series[b][mid] = int(model_series[b].get(mid) or 0) + 1
 
     page_total = int(totals.get("total") or 0)
+    named_models = [(k, v) for k, v in by_model.items() if k != _UNSET]
     top_models = sorted(
-        by_model.items(), key=lambda kv: (-int(kv[1].get("total") or 0), kv[0])
+        named_models, key=lambda kv: (-int(kv[1].get("total") or 0), kv[0])
     )[:_TOP_MODELS]
     top_ids = [k for k, _ in top_models]
 
@@ -437,6 +475,7 @@ def build_analytics(
                 completed=int(c.get("completed") or 0),
                 error=int(c.get("error") or 0),
                 cancelled=int(c.get("cancelled") or 0),
+                plan_ready=int(c.get("plan_ready") or 0),
                 in_flight=int(c.get("in_flight") or 0),
             )
         )
@@ -465,7 +504,7 @@ def build_analytics(
             _named(k, v, label=(labels or {}).get(k) or k, total_jobs=page_total)
             for k, v in items.items()
         ]
-        rows.sort(key=lambda r: (-r.jobs, r.label.lower()))
+        rows.sort(key=lambda r: (r.id == _UNSET, -r.jobs, r.label.lower()))
         return rows
 
     return AnalyticsResponse(
@@ -484,6 +523,7 @@ def build_analytics(
         categories=_sort_named(by_cat, _CATEGORY_LABELS),
         sources=_sort_named(by_src),
         backends=_sort_named(by_backend),
+        agents=_sort_named(by_agent),
         facets={
             "status": _facet((k, k, n) for k, n in facet_status.items()),
             "category": _facet(
