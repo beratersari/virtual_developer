@@ -1,3 +1,10 @@
+# Yaver 0.9.46
+
+Merged GitLab MRs and Azure
+PRs also drop that review's
+jobs, logs, and plan. Serve
+logs record assistant finish.
+
 # Yaver 0.9.45
 
 Dashboard uses the new

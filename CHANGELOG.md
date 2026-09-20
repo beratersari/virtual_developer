@@ -8,6 +8,23 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.46] — 2026-09-20
+
+Merged reviews clean up their jobs and logs. Serve session logs record finish.
+
+### Added
+
+- After each OpenCode ``GET /session/{id}/message``, the job session log
+  records the last assistant ``finish`` / ``info.finish`` / ``step-finish``.
+
+### Changed
+
+- When a GitLab MR or Azure PR is merged or closed, Yaver also deletes
+  that review's jobs, session logs, plan file, issue state, and OpenCode
+  session rows. The shared daemon log is kept. Live jobs are skipped.
+
+[0.9.46]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.46
+
 ## [0.9.45] — 2026-09-20
 
 Dashboard uses the new Yaver mark. The sidebar icon winks.
