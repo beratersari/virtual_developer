@@ -202,6 +202,11 @@ ASSIGN_PAT_FAILED_SUGGEST = (
     "doğrulayın, sonra öğeyi yeniden atayın."
 )
 
+SUGGEST_PLAN_EXECUTE_RETRY = (
+    "Kayıt *Devam Ediyor* kalsın ve `plan_execute` etiketi dursun; "
+    "sonraki yoklama implementi yeniden dener. *Yapılacaklar* + Mode: plan "
+    "yeni bir plan başlatır, implement değil."
+)
 SUGGEST_FIX_DESC_TODO = (
     "Kayıt açıklamasını düzeltin, sonra yeniden kuyruğa almak için "
     "kaydı *Yapılacaklar* sütununa alın."

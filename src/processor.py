@@ -277,6 +277,46 @@ class JobProcessor:
     def _is_review_comment(cls, event: Any) -> bool:
         return cls._comment_command(event) in {"review", "ask"}
 
+    def _rebind_review_off_busy_plan(self, event: Any) -> None:
+        """Run /review and /ask on GL-/AZ- when the title key is a live plan ticket.
+
+        ``feat(KAN-12)`` must not force-reset Jira ``plan_ready`` / in-flight.
+        """
+        if event is None or not self._is_review_comment(event):
+            return
+        key = str(getattr(event, "issue_key", "") or "").strip()
+        if not key:
+            return
+        from src.azure.keys import azure_issue_key, is_azure_issue_key
+        from src.gitlab.keys import gitlab_issue_key, is_gitlab_issue_key
+
+        if is_gitlab_issue_key(key) or is_azure_issue_key(key):
+            return
+        st = self.state_manager.get_state(key)
+        if st is None:
+            return
+        if st.status not in {
+            TaskStatus.PLAN_READY,
+            TaskStatus.PENDING,
+            *self.IN_FLIGHT_STATUSES,
+        }:
+            return
+        rebound = ""
+        from src.azure.webhook import AzurePrCommentEvent
+        from src.gitlab.webhook import GitlabMrNoteEvent
+
+        if isinstance(event, GitlabMrNoteEvent):
+            rebound = gitlab_issue_key(event.project_path, event.mr_iid)
+        elif isinstance(event, AzurePrCommentEvent):
+            rebound = azure_issue_key(event.project_path, event.pr_id)
+        if not rebound or rebound == key:
+            return
+        logger.info(
+            f"{key}: /{self._comment_command(event)} rebound to {rebound} "
+            f"(local status={st.status.value})"
+        )
+        event.issue_key = rebound
+
     def _is_azure_workitem_triggered(
         self, issue_key: str, state: Optional[JiraAgentState] = None
     ) -> bool:
@@ -483,6 +523,9 @@ class JobProcessor:
             # summary/description while staying on To Do. Store full + light
             # (summary-only) so light board scans do not false-match every poll.
             st0 = self.state_manager.get_state(issue_key)
+            plan_execute_run = bool(
+                st0 is not None and (st0.metadata or {}).get("plan_execute_run")
+            )
             if st0 is not None:
                 from src.jira.poller import JiraPoller
 
@@ -522,6 +565,8 @@ class JobProcessor:
                     f"(not overwriting COMPLETED/CANCELLED)"
                 )
                 return
+            if plan_execute_run:
+                self._keep_plan_execute_retryable(issue_key, updated)
             reply_job_id = self._job_id_for_reply(updated)
             self._finish_job_record(
                 issue_key, status="error", error_message=error_text, progress_percentage=0
@@ -557,7 +602,11 @@ class JobProcessor:
                 return
             # Default suggestion for config errors if caller did not pass one
             effective_suggestion = suggestion
-            if not effective_suggestion:
+            if plan_execute_run:
+                from src.operator_copy import SUGGEST_PLAN_EXECUTE_RETRY
+
+                effective_suggestion = SUGGEST_PLAN_EXECUTE_RETRY
+            elif not effective_suggestion:
                 if moved_ip or already_tracked_ip:
                     from src.operator_copy import (
                         SUGGEST_FIX_DESC_NO_IP,
@@ -2074,6 +2123,8 @@ class JobProcessor:
             getattr(live, "agent_task_max_incomplete_retries", None), 0
         )
         archive["max_incomplete_retries"] = max_incomplete
+        if allow_from_failed:
+            archive["plan_execute_run"] = True
         reject = (
             {TaskStatus.COMPLETED}
             if allow_from_failed
@@ -2661,6 +2712,42 @@ class JobProcessor:
         if isinstance(latch, set):
             latch.discard(key)
 
+    def _keep_plan_execute_retryable(
+        self, issue_key: str, state: Optional[JiraAgentState] = None
+    ) -> bool:
+        """Leave/restore ``plan_execute`` after a failed implement so poller retries."""
+        st = state or self.state_manager.get_state(issue_key)
+        if st is None or not (st.metadata or {}).get("plan_execute_run"):
+            return False
+        from src.jira.plan_labels import PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL
+
+        self._release_plan_execute_latch(issue_key)
+        self._apply_plan_labels(
+            issue_key,
+            add=[PLAN_EXECUTE_LABEL],
+            remove=[PLAN_EXECUTED_LABEL],
+        )
+        return True
+
+    def _stamp_plan_executed(self, issue_key: str) -> None:
+        from src.jira.plan_labels import (
+            PLAN_EXECUTE_LABEL,
+            PLAN_EXECUTED_LABEL,
+            PLAN_READY_LABEL,
+        )
+
+        self._apply_plan_labels(
+            issue_key,
+            replace=(PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL),
+            remove=[PLAN_READY_LABEL],
+        )
+        try:
+            self.state_manager.update_state(
+                issue_key, metadata={"plan_execute_run": False}
+            )
+        except Exception:
+            pass
+
     def _notify_plan_execute_without_plan(
         self, issue_key: str, state: Optional[JiraAgentState]
     ) -> None:
@@ -2713,8 +2800,6 @@ class JobProcessor:
         from src.jira.plan_labels import (
             HANDOFF_EXECUTE,
             HANDOFF_REFACTOR,
-            PLAN_EXECUTE_LABEL,
-            PLAN_EXECUTED_LABEL,
             PLAN_READY_LABEL,
             PLAN_REFACTOR_LABEL,
         )
@@ -2769,14 +2854,10 @@ class JobProcessor:
                 metadata={
                     "workflow_type": WorkflowType.EXECUTION.value,
                     "plan_execute_missing_plan_notified": False,
+                    "plan_execute_run": True,
                 },
             )
             state = self.state_manager.get_state(issue_key) or state
-            self._apply_plan_labels(
-                issue_key,
-                replace=(PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL),
-                remove=[PLAN_READY_LABEL],
-            )
             logger.info(
                 f"{issue_key} plan_execute + In Progress; beginning execution"
             )
@@ -3151,21 +3232,36 @@ class JobProcessor:
             self._nudge_poller_after_terminal(issue_key, marker="__cancelled__")
 
             state = updated
+            kept_execute = self._keep_plan_execute_retryable(issue_key, state)
             if status == TaskStatus.ERROR:
+                from src.operator_copy import SUGGEST_PLAN_EXECUTE_RETRY
+
                 self.reporter.post_error(
                     state,
                     text,
                     suggestion=(
-                        "Move the issue back to To Do to re-queue after the daemon is running."
+                        SUGGEST_PLAN_EXECUTE_RETRY
+                        if kept_execute
+                        else (
+                            "Move the issue back to To Do to re-queue after "
+                            "the daemon is running."
+                        )
                     ),
                 )
             else:
+                from src.operator_copy import SUGGEST_PLAN_EXECUTE_RETRY
+
+                follow = (
+                    SUGGEST_PLAN_EXECUTE_RETRY
+                    if kept_execute
+                    else "Move the issue back to *To Do* to re-queue when ready."
+                )
                 self.reporter.post_comment_response(
                     issue_key,
                     (
                         f"*Work interrupted* (`{status.value}`)\n\n"
                         f"{text}\n\n"
-                        "Move the issue back to *To Do* to re-queue when ready."
+                        f"{follow}"
                     ),
                 )
             return True
@@ -4054,6 +4150,7 @@ class JobProcessor:
 
         if not isinstance(event, GitlabMrNoteEvent):
             return {"ok": False, "reason": "invalid event"}
+        self._rebind_review_off_busy_plan(event)
         from src.gitlab.keys import gitlab_note_key
 
         note_key = gitlab_note_key(
@@ -4117,6 +4214,7 @@ class JobProcessor:
 
             azure_error("enqueue fail invalid event")
             return {"ok": False, "reason": "invalid event"}
+        self._rebind_review_off_busy_plan(event)
         from src.azure.log import azure_info
 
         azure_info(
@@ -4689,6 +4787,7 @@ class JobProcessor:
                 from src.gitlab.webhook import GitlabMrNoteEvent
 
                 event = GitlabMrNoteEvent.from_dict(rec.get("payload") or {})
+                self._rebind_review_off_busy_plan(event)
                 if self._job_semaphore is None:
                     limit = max(1, int(settings.max_concurrent_jobs or 1))
                     self._job_semaphore = _JobSlotLimiter(limit)
@@ -4717,6 +4816,7 @@ class JobProcessor:
                 from src.azure.webhook import AzurePrCommentEvent
 
                 event = AzurePrCommentEvent.from_dict(rec.get("payload") or {})
+                self._rebind_review_off_busy_plan(event)
                 azure_info(
                     f"queue run start queue_id={qid} issue={event.issue_key} "
                     f"pr={event.project_path}!{event.pr_id} "
@@ -5089,6 +5189,7 @@ class JobProcessor:
         if not isinstance(event, GitlabMrNoteEvent):
             logger.warning("handle_gitlab_mr_comment: invalid event")
             return
+        self._rebind_review_off_busy_plan(event)
         issue_key = event.issue_key
         from src.log_context import set_issue_key
 
@@ -5105,6 +5206,7 @@ class JobProcessor:
         from src.gitlab.webhook import GitlabMrNoteEvent
 
         assert isinstance(event, GitlabMrNoteEvent)
+        self._rebind_review_off_busy_plan(event)
         issue_key = event.issue_key
         from src.gitlab.keys import gitlab_note_key
 
@@ -5917,6 +6019,7 @@ class JobProcessor:
 
             azure_warning("comment handle invalid event")
             return
+        self._rebind_review_off_busy_plan(event)
         issue_key = event.issue_key
         from src.log_context import set_issue_key
 
@@ -5933,6 +6036,7 @@ class JobProcessor:
         from src.azure.webhook import AzurePrCommentEvent, azure_comment_key
 
         assert isinstance(event, AzurePrCommentEvent)
+        self._rebind_review_off_busy_plan(event)
         issue_key = event.issue_key
         from src.azure.log import azure_info
 
@@ -7238,6 +7342,8 @@ class JobProcessor:
             state.issue_key, status="completed", progress_percentage=100
         )
         logger.info(f"State updated to COMPLETED for {state.issue_key}")
+        if (updated.metadata or {}).get("plan_execute_run"):
+            self._stamp_plan_executed(state.issue_key)
 
         live = self.state_manager.get_state(state.issue_key) or state
         if self._is_git_comment_triggered(state.issue_key, live):
