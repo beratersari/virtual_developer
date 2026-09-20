@@ -128,18 +128,35 @@ def _auto_bucket(start: datetime, end: datetime) -> str:
 def _coarsen(start: datetime, end: datetime, bucket: str) -> str:
     order = ["hour", "day", "week", "month"]
     idx = order.index(bucket) if bucket in order else 1
-    while idx < len(order) - 1:
+    while idx < len(order):
         cur = order[idx]
         n = 0
         t = _floor(start, cur)
         last = _floor(end, cur)
         while t <= last and n <= _MAX_BUCKETS:
-            t = _add_bucket(t, cur)
+            nxt = _add_bucket(t, cur)
+            if nxt <= t:
+                break
+            t = nxt
             n += 1
         if n <= _MAX_BUCKETS:
             return cur
         idx += 1
     return "month"
+
+
+def _bucket_keys(start: datetime, end: datetime, bucket: str) -> List[datetime]:
+    origin = _floor(start, bucket)
+    last = _floor(end, bucket)
+    keys: List[datetime] = []
+    t = origin
+    while t <= last and len(keys) < _MAX_BUCKETS:
+        keys.append(t)
+        nxt = _add_bucket(t, bucket)
+        if nxt <= t:
+            break
+        t = nxt
+    return keys
 
 
 def _outcome(status: str) -> str:
@@ -367,16 +384,9 @@ def build_analytics(
             continue
         matched.append((when, job))
 
-    origin = _floor(start, bucket_key)
-    last = _floor(end, bucket_key)
-    keys: List[datetime] = []
-    t = origin
-    while t <= last:
-        keys.append(t)
-        nxt = _add_bucket(t, bucket_key)
-        if nxt <= t:
-            break
-        t = nxt
+    keys = _bucket_keys(start, end, bucket_key)
+    origin = keys[0] if keys else _floor(start, bucket_key)
+    last = keys[-1] if keys else _floor(end, bucket_key)
 
     series_map: Dict[datetime, Dict[str, int]] = {k: _empty_counts() for k in keys}
     totals = _empty_counts()

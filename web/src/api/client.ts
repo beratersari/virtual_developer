@@ -83,18 +83,26 @@ async function request<T>(
   }
   const { notifyUnauthorized } = await import('../auth/dashboardAuth')
   const method = (rest.method || 'GET').toUpperCase()
-  let timer: number | undefined
-  let signal = rest.signal
   // Auth gate used to sit on "Loading…" for the full 15s GET budget when the
   // daemon event loop was busy (Jira/GitLab on the loop, models CLI, …).
   const budget = timeoutMs ?? (method === 'GET' ? 15_000 : undefined)
-  if (!signal && budget != null) {
-    const ctrl = new AbortController()
-    timer = window.setTimeout(() => ctrl.abort(), budget)
-    signal = ctrl.signal
+  const ctrl = new AbortController()
+  const abortCtrl = () => ctrl.abort()
+  if (rest.signal) {
+    if (rest.signal.aborted) abortCtrl()
+    else rest.signal.addEventListener('abort', abortCtrl, { once: true })
+  }
+  let timer: number | undefined
+  if (budget != null) {
+    timer = window.setTimeout(abortCtrl, budget)
   }
   try {
-    const res = await fetch(path, { ...rest, headers, credentials: 'include', signal })
+    const res = await fetch(path, {
+      ...rest,
+      headers,
+      credentials: 'include',
+      signal: ctrl.signal,
+    })
     const body = await res.json().catch(() => ({}))
     if (!res.ok) {
       const { isLoginRequiredResponse } = await import('../auth/dashboardAuth')
@@ -111,11 +119,13 @@ async function request<T>(
   } catch (err) {
     if (err instanceof ApiError) throw err
     if (err instanceof DOMException && err.name === 'AbortError') {
+      if (rest.signal?.aborted) throw err
       throw new ApiError('Request timed out', 408)
     }
     throw err
   } finally {
     if (timer) window.clearTimeout(timer)
+    rest.signal?.removeEventListener('abort', abortCtrl)
   }
 }
 
@@ -204,6 +214,8 @@ export function fetchAnalytics(opts?: {
   repository?: string
   issueKey?: string
   q?: string
+  timeoutMs?: number
+  signal?: AbortSignal
 }) {
   const params = new URLSearchParams()
   if (opts?.period) params.set('period', opts.period)
@@ -220,7 +232,10 @@ export function fetchAnalytics(opts?: {
   if (opts?.issueKey) params.set('issue_key', opts.issueKey)
   if (opts?.q) params.set('q', opts.q)
   const q = params.toString() ? `?${params.toString()}` : ''
-  return request<AnalyticsPayload>(`/api/analytics${q}`)
+  return request<AnalyticsPayload>(`/api/analytics${q}`, {
+    timeoutMs: opts?.timeoutMs ?? 60_000,
+    signal: opts?.signal,
+  })
 }
 
 export async function fetchJobs(opts?: {

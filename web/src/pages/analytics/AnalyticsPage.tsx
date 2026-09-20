@@ -214,6 +214,7 @@ export function AnalyticsPage() {
   const [loading, setLoading] = useState(true)
   const reqId = useRef(0)
   const lastGenReload = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -226,6 +227,9 @@ export function AnalyticsPage() {
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
+      abortRef.current?.abort()
+      const ac = new AbortController()
+      abortRef.current = ac
       const req = ++reqId.current
       if (!opts?.quiet) setLoading(true)
       try {
@@ -243,12 +247,13 @@ export function AnalyticsPage() {
           repository: debouncedRepo || undefined,
           issueKey: debouncedKey || undefined,
           q: debouncedQ || undefined,
+          signal: ac.signal,
         })
         if (req !== reqId.current) return
         setPayload(data)
         setError(null)
       } catch (e) {
-        if (req !== reqId.current) return
+        if (req !== reqId.current || ac.signal.aborted) return
         if (!opts?.quiet) {
           setError(e instanceof Error ? e.message : 'Load failed')
         }
@@ -275,6 +280,7 @@ export function AnalyticsPage() {
 
   useEffect(() => {
     void load()
+    return () => abortRef.current?.abort()
   }, [load])
 
   useEffect(() => {
@@ -282,7 +288,10 @@ export function AnalyticsPage() {
     if (now - lastGenReload.current < 8000) return
     lastGenReload.current = now
     void load({ quiet: true })
-  }, [live.generation, load])
+    // Reload on live ticks only. Including `load` here refetched on every
+    // bucket/period click and could abort the in-flight chart request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live.generation])
 
   const facets = payload?.facets || {}
   const labels = payload?.series.map((p) => p.label) || []
