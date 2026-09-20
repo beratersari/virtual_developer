@@ -4936,6 +4936,75 @@ class JobProcessor:
         logger.info(f"{state.issue_key}: posted plan_ready wait note on MR !{iid}")
         return True
 
+    def _post_azure_plan_ready_wait(self, event: Any, state: JiraAgentState) -> bool:
+        """Tell the PR thread we will not implement until plan_execute.
+
+        Does not start a build. Uses the webhook event coords — plan_ready
+        Jira state often has no azure_* metadata yet.
+        """
+        from src.azure.log import azure_info, azure_warning
+
+        host = str(getattr(event, "host", "") or "").strip()
+        collection = str(getattr(event, "collection_url", "") or "").strip()
+        project = str(getattr(event, "project", "") or "").strip()
+        repository = (
+            getattr(event, "repository_id", "") or getattr(event, "repository_name", "")
+        )
+        try:
+            iid = int(getattr(event, "pr_id", 0) or 0)
+        except (TypeError, ValueError):
+            iid = 0
+        if not (host or collection) or not project or not repository or iid <= 0:
+            azure_warning(
+                f"{state.issue_key}: plan_ready wait note skipped "
+                f"(host={host!r} collection={collection!r} "
+                f"project={project!r} repo={repository!r} iid={iid})"
+            )
+            return False
+        from src.azure.client import AzureDevOpsClient
+        from src.brand import wrap_operator_reply
+        from src.operator_copy import PLAN_READY_WAIT_MR
+
+        body = wrap_operator_reply(
+            "Plan ready",
+            PLAN_READY_WAIT_MR,
+            state=state,
+        )
+        thread_id = str(getattr(event, "thread_id", "") or "").strip()
+        comment_id = str(getattr(event, "comment_id", "") or "").strip()
+        client = AzureDevOpsClient(host=host, collection_url=collection)
+        try:
+            posted = client.post_pr_comment(
+                project=project,
+                repository=repository,
+                pr_id=iid,
+                body=body,
+                thread_id=thread_id,
+                allow_new_thread=not bool(thread_id),
+                parent_comment_id=comment_id,
+            )
+            if posted is None and thread_id:
+                posted = client.post_pr_comment(
+                    project=project,
+                    repository=repository,
+                    pr_id=iid,
+                    body=body,
+                    thread_id="",
+                    allow_new_thread=True,
+                    parent_comment_id="",
+                )
+        except Exception as e:
+            azure_warning(f"{state.issue_key}: plan_ready wait note failed: {e}")
+            return False
+        if posted is None:
+            azure_warning(f"{state.issue_key}: plan_ready wait note was not posted")
+            return False
+        azure_info(
+            f"{state.issue_key}: posted plan_ready wait note on PR "
+            f"{project}/{repository}!{iid}"
+        )
+        return True
+
     def _post_gitlab_mr_reply(
         self,
         state: JiraAgentState,
@@ -6066,6 +6135,7 @@ class JobProcessor:
             azure_info(
                 f"job defer plan_ready issue={issue_key} comment={note_id}"
             )
+            self._post_azure_plan_ready_wait(event, st)
             return False
         summary = event.pr_title or f"PR !{event.pr_id}"
         description = event.prompt
