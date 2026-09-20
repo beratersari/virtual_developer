@@ -8,6 +8,31 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.48] — 2026-09-20
+
+Analytics page. Merged reviews keep job history. Plan tickets survive /review.
+
+### Added
+
+- Dashboard Analytics (``/analytics``) charts job counts over time with
+  filters for status, model, category, source, and more.
+
+### Changed
+
+- When a GitLab MR or Azure PR is merged or closed, Yaver still deletes
+  the clone, session logs, and OpenCode rows, but keeps ``job_*.json``
+  so Analytics can count those runs. Manual Jobs → Delete still removes
+  a row.
+
+### Fixed
+
+- ``/review`` and ``/ask`` no longer reset a waiting ``plan_ready``
+  ticket; they rebind onto a synthetic GL/AZ key.
+- Failed ``plan_execute`` keeps the label retryable instead of renaming
+  to ``plan_executed`` before implement completes.
+
+[0.9.48]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.48
+
 ## [0.9.47] — 2026-09-20
 
 Windows clone delete no longer wipes plan files.
