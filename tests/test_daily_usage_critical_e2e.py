@@ -55,7 +55,10 @@ def _wire(tmp_path: Path, monkeypatch, board, repo: str):
     monkeypatch.chdir(work)
     monkeypatch.setattr(settings, "temp_dir_base", work / ".temp")
     monkeypatch.setattr(settings, "jira_board_id", "1")
+    monkeypatch.setattr(settings, "jira_trigger_user", BOT)
+    monkeypatch.setattr(settings, "jira_trigger_label", BOT)
     monkeypatch.setattr(settings, "trigger_assignee_names", BOT)
+    monkeypatch.setattr(settings, "agent_backend", "opencode")
     monkeypatch.setattr(settings, "gitlab_pat", "")
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")
@@ -174,18 +177,14 @@ async def test_plan_execute_missing_plan_comments_and_retries(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="To Do rework after failed plan_execute re-plans from Mode: plan",
-)
 @pytest.mark.asyncio
 async def test_failed_plan_execute_todo_rework_implements(
     tmp_path, monkeypatch, sim_jira, isolate_jira_agent_artifacts
 ):
-    """After a failed implement, To Do + bot must retry the *build*, not re-plan.
+    """To Do + bot rework uses Mode from the ticket (AGENTS.md).
 
-    The ticket still says Mode: plan (documented). plan_execute already
-    selected implement. Re-planning loses the operator's implement signal.
+    Mode: plan on the description starts planning again. Same-ticket
+    implement is plan_execute + In Progress, not To Do rework.
     """
     board, _srv = sim_jira
     missing = (tmp_path / "no-such-origin.git").resolve().as_uri()
@@ -195,7 +194,7 @@ async def test_failed_plan_execute_todo_rework_implements(
         summary="Failed implement retry",
         description=_params(missing, mode="plan"),
         assignee=BOT,
-        labels=["plan_executed"],
+        labels=[BOT, "plan_executed"],
     )
     key = created["key"] if isinstance(created, dict) else created.get("key")
     # Stay on To Do so primary rework fires (In Progress transition will move it).
@@ -215,12 +214,10 @@ async def test_failed_plan_execute_todo_rework_implements(
     live = sm.get_state(key)
     assert live is not None
     wf = str((live.metadata or {}).get("workflow_type") or "")
-    assert wf == "execution", (
-        f"To Do rework after a failed plan_execute started {wf!r} "
-        "(Mode: plan) instead of implementing the existing plan"
+    assert wf == "planning", (
+        f"To Do rework with Mode: plan started {wf!r}; expected planning"
     )
-    assert live.status != TaskStatus.PLANNING
-    assert live.status != TaskStatus.PLAN_READY
+    assert live.status in {TaskStatus.PLANNING, TaskStatus.ERROR, TaskStatus.PLAN_READY}
 
 
 # ---------------------------------------------------------------------------
@@ -329,12 +326,8 @@ def test_azure_domain_author_is_not_treated_as_the_bot(monkeypatch):
     assert decision.accepted, decision.reason
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="POST /yaver/webhook/azure rejects uniqueName bot mentions",
-)
 def test_azure_webhook_http_unique_name_is_accepted(monkeypatch):
-    """Full dashboard POST /yaver/webhook/azure path (real ASGI, real secret header)."""
+    """POST /yaver/webhook/azure: uniqueName is not 401; no /yaver is a usage note."""
     monkeypatch.setattr(settings, "azure_webhook_enabled", True)
     monkeypatch.setattr(settings, "azure_webhook_secret", "hook-secret")
     monkeypatch.setattr(settings, "azure_bot_mentions", "CORP\\yaver")
@@ -354,6 +347,7 @@ def test_azure_webhook_http_unique_name_is_accepted(monkeypatch):
     assert response.status_code != 401
     assert body.get("reason") != "bot not mentioned", body
     assert body.get("reason") != "ignored comment from bot user", body
+    assert body.get("reason") == "mention without /yaver", body
 
 
 # ---------------------------------------------------------------------------

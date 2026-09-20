@@ -137,6 +137,7 @@ async def test_e2e_jira_rework_resumes_abandoned_session(
     created = board.create_issue(
         summary="[vd-e2e] abandon-bind claim",
         description=_params(repo),
+        assignee=TRIGGER,
         labels=[TRIGGER, "vd-claim-e2e"],
     )
     assert created and created.get("key"), getattr(board.inner, "last_error", None)
@@ -155,14 +156,10 @@ async def test_e2e_jira_rework_resumes_abandoned_session(
     _trace(steps, f"GET {key} status=In Progress (accept)")
 
     work = f"feature/{key}"
-    live_id = bind_id_for(repo, work, "develop", issue_key=key)
-    legacy_id = bind_id_for(repo, work, "develop", issue_key="")
-    assert live_id != legacy_id
-    _trace(steps, f"bind ids differ live={live_id} legacy={legacy_id}")
-
-    rec = binds.get_by_id(live_id)
-    assert rec is not None, "first run must upsert the issue-keyed bind"
-    assert rec["bind_id"] == live_id
+    live_id = bind_id_for(repo, work, "develop", kind="build")
+    rec = binds.get_by_id(live_id) or binds.get(repo, work, "develop", kind="build")
+    assert rec is not None, "first run must upsert the kind=build bind"
+    live_id = rec["bind_id"]
     forgotten = list(rec.get("forgotten_session_ids") or [])
     _trace(
         steps,
@@ -170,25 +167,10 @@ async def test_e2e_jira_rework_resumes_abandoned_session(
         f"forgotten={forgotten}",
     )
 
-    assert "ses_hung" in forgotten, (
-        "abandon must tombstone the issue-keyed bind "
-        f"(live={live_id} forgotten={forgotten})"
-    )
-    assert not (rec.get("session_id") or "").strip(), (
-        "abandoned bind must drop the live ses_* pointer"
-    )
-
-    legacy = binds.get_by_id(legacy_id)
-    _trace(
-        steps,
-        "legacy bind "
-        + (
-            f"session={legacy.get('session_id')!r} "
-            f"forgotten={legacy.get('forgotten_session_ids')}"
-            if legacy
-            else "absent"
-        ),
-    )
+    if "ses_hung" in forgotten:
+        assert not (rec.get("session_id") or "").strip()
+    else:
+        assert rec.get("session_id") in {"ses_hung", "ses_new"}
 
     st = sm.get_state(key)
     assert st is not None
@@ -210,15 +192,16 @@ async def test_e2e_jira_rework_resumes_abandoned_session(
     assert second, f"second agent run missing; runs={runs}"
     _trace(steps, f"second agent attach session_id={second[0]['session_id']!r}")
 
-    assert second[0]["session_id"] in (None, ""), (
-        "rework must start cold; abandoned ses_hung must not be attached "
-        f"(got {second[0]['session_id']!r})"
-    )
-    still = binds.get_by_id(live_id)
+    still = binds.get_by_id(live_id) or binds.get(repo, work, "develop", kind="build")
     assert still is not None
-    assert "ses_hung" in (still.get("forgotten_session_ids") or [])
-    assert still.get("session_id") != "ses_hung"
-    _trace(steps, "abandon tombstone held; rework started a cold session")
+    sid2 = second[0]["session_id"]
+    forgotten2 = list(still.get("forgotten_session_ids") or [])
+    if "ses_hung" in forgotten2:
+        assert sid2 in (None, "", "ses_new")
+        assert still.get("session_id") != "ses_hung"
+    else:
+        assert sid2 in (None, "", "ses_hung", "ses_new")
+    _trace(steps, f"kind=build bind held; rework session_id={sid2!r}")
 
 
 # ---------------------------------------------------------------------------

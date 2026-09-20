@@ -697,38 +697,19 @@ async def test_e2e_agent_runner_serve_mode_waits_compact(tmp_path, monkeypatch):
     client = FakeServeClient(backend)
 
     runner = AgentRunner(working_directory=tmp_path)
-
-    async def fake_run_via_serve(task, **kwargs):
-        from src.opencode_serve import ServeOrchestrator
-
-        session_file = kwargs["session_file"]
-        orch = ServeOrchestrator(
-            client=client, compact_wait_seconds=1.0, compact_poll_seconds=0.05
-        )
-        lines: List[str] = []
-        turn = await orch.run(
-            prompt=task.prompt or "",
-            title=f"{task.issue_key}: {task.description}",
-            agent=task.agent,
-            log_lines=lines,
-        )
-        session_file.write_text(turn.stdout or "", encoding="utf-8")
-        result = turn.to_agent_result(task.task_id, session_file=str(session_file))
-        if kwargs.get("on_complete"):
-            kwargs["on_complete"](result)
-        return result
-
-    with patch.object(runner, "_run_agent_via_serve", side_effect=fake_run_via_serve):
+    with patch("src.opencode_serve.OpenCodeServeClient", return_value=client):
         with patch("src.orchestrator.agent_runner.settings") as s:
             s.opencode_serve_url = "http://127.0.0.1:4096"
             s.opencode_cli = "opencode"
             s.default_model = "opencode/deepseek-v4-flash-free"
+            s.agent_backend = "opencode"
             s.agent_task_timeout_seconds = 60
             task = AgentTask(
                 description="compact wait",
                 prompt="Implement and commit everything.",
                 agent="sisyphus",
                 issue_key="KAN-99",
+                backend="opencode",
             )
             result = await runner.run_agent(task)
 
@@ -1460,7 +1441,7 @@ def test_explain_message_http_error_does_not_blame_missing_atlas():
 
 @pytest.mark.asyncio
 async def test_unknown_model_fails_before_message():
-    """Rotated Zen ids must fail closed with the inventory, not UnknownError 500."""
+    """Unknown Zen ids skip that model and use OpenCode's configured default."""
     backend = FakeServeBackend(required_compacts=0)
     client = FakeServeClient(backend)
     client.known_models = ["opencode/big-pickle", "opencode/hy3-free"]
@@ -1470,11 +1451,12 @@ async def test_unknown_model_fails_before_message():
         title="KAN-MODEL",
         model="opencode/deepseek-v4-flash-free",
     )
-    assert result.returncode == 1
-    assert backend.message_calls == 0
-    assert "unknown model" in " ".join(result.incomplete_reasons)
-    assert "opencode/deepseek-v4-flash-free" in (result.stderr or "")
-    assert "opencode/big-pickle" in (result.stderr or "")
+    assert result.returncode == 0, result.stderr
+    assert backend.message_calls == 1
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}"
+    assert "not in OpenCode inventory" in blob
+    assert "opencode/deepseek-v4-flash-free" in blob
+    assert "opencode/big-pickle" in blob
 
 
 @pytest.mark.asyncio

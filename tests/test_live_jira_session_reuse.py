@@ -231,6 +231,10 @@ def _wire_processor(tmp_path, monkeypatch, board: BoardJira, repo_url: str):
     monkeypatch.setattr(settings, "temp_dir_base", work / ".temp")
 
     monkeypatch.setattr(settings, "jira_board_id", "1")
+    monkeypatch.setattr(settings, "jira_trigger_user", TRIGGER)
+    monkeypatch.setattr(settings, "jira_trigger_label", TRIGGER)
+    monkeypatch.setattr(settings, "trigger_assignee_names", TRIGGER)
+    monkeypatch.setattr(settings, "agent_backend", "opencode")
     monkeypatch.setattr(settings, "gitlab_pat", "")
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
     monkeypatch.setattr(settings, "gitlab_allowed_hosts", "")

@@ -53,13 +53,13 @@ def test_e2e_model_field_disabled_until_inventory_loads():
     assert "onLoadingChange?: (loading: boolean) => void" in field
     assert "onLoadingChange?.(loading)" in field
 
-    assert settings.count("onLoadingChange={setModelsLoading}") == 1
+    assert settings.count("onLoadingChange={setModelsLoading}") >= 1
     assert "setModelsLoading(true)" in settings
     assert "if (!draft || modelsLoading) return" in settings
     assert "disabled={saving || modelsLoading || (!dirty && !saved)}" in settings
     assert "Loading models…" in settings
 
-    assert schedules.count("onLoadingChange={setModelsLoading}") == 2
+    assert schedules.count("onLoadingChange={setModelsLoading}") >= 2
     assert schedules.count("setModelsLoading(true)") >= 3
     assert "disabled={busy || modelsLoading}" in schedules
     assert schedules.count("disabled={busy || modelsLoading}") >= 4

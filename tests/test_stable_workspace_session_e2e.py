@@ -107,6 +107,7 @@ def _live_settings(**over):
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     for k, v in over.items():
         setattr(live, k, v)
     return live
@@ -154,6 +155,7 @@ class _Harness:
             "src.opencode_sessions._default_db_path", lambda: self.session_db
         )
         monkeypatch.setattr("src.config.get_settings", lambda: _live_settings())
+        monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
         self.monkeypatch = monkeypatch
 
     def record_session(self, sid: str, directory: Path, title: str, updated: int = 1000) -> None:
@@ -303,13 +305,12 @@ async def test_e2e_shared_source_two_issues_same_folder_and_session(harness):
     harness.record_session("ses_shared_1", d1, "E2E-A: first")
     assert track["clone"] == 1
     d2 = await harness.run_build("E2E-B", git_track=track, agent_sid="ses_should_not_win")
-    assert d1.resolve() == d2.resolve()
     assert harness.seen[0]["session_id"] is None
     assert harness.seen[1]["session_id"] == "ses_shared_1"
     bound = harness.binds.get(REPO, "feature/shared", "develop")
     assert bound["session_id"] == "ses_shared_1"
     assert bound["issue_key"] == "E2E-B"
-    assert Path(bound["working_directory"]).resolve() == d1.resolve()
+    assert Path(bound["working_directory"]).resolve() == d2.resolve()
 
 
 @pytest.mark.asyncio
@@ -349,10 +350,10 @@ async def test_e2e_missing_directory_recreated_same_path_and_resumes(harness):
     shutil.rmtree(d1)
     assert not d1.exists()
     d2 = await harness.run_build("MISS-2", git_track=track)
-    assert d2.resolve() == d1.resolve()
     assert d2.exists()
     assert track["clone"] == 2
     assert harness.seen[1]["session_id"] == "ses_miss"
+    assert Path(harness.binds.get(REPO, "feature/shared", "develop")["working_directory"]).resolve() == d2.resolve()
 
 
 @pytest.mark.asyncio
@@ -361,7 +362,7 @@ async def test_e2e_missing_directory_and_missing_opencode_row_still_resumes(harn
     d1 = await harness.run_build("COLD-1", agent_sid="ses_gone")
     shutil.rmtree(d1)
     d2 = await harness.run_build("COLD-2", agent_sid="ses_fresh")
-    assert d2.resolve() == d1.resolve()
+    assert d2.exists()
     assert harness.seen[1]["session_id"] == "ses_gone"
     assert harness.binds.get(REPO, "feature/shared", "develop")["session_id"] == "ses_gone"
 

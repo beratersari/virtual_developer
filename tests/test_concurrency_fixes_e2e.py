@@ -302,25 +302,40 @@ async def test_e2e_init_git_discards_after_construct_when_cancelled(
     sm.update_state(key, status=TaskStatus.EXECUTING)
     proc = _make_processor(tmp_path, monkeypatch, fake_jira, sm, reporter)
 
-    fake_git = MagicMock()
-    fake_git.get_working_directory.return_value = tmp_path / "clone"
-    fake_git.cleanup = MagicMock(return_value=True)
+    cleaned = {"n": 0}
 
-    def construct_and_cancel(*_a, **_k):
-        sm.update_state(
-            key,
-            status=TaskStatus.CANCELLED,
-            error_message="Cancelled from ops dashboard",
-            completed_at=datetime.now(),
-        )
-        return fake_git
+    class FakeGit:
+        from src.git_manager import GitManager as _RealGM
 
-    with patch("src.processor.GitManager", side_effect=construct_and_cancel):
+        _is_primary_base = staticmethod(_RealGM._is_primary_base)
+
+        def __init__(self, *_a, **_k):
+            sm.update_state(
+                key,
+                status=TaskStatus.CANCELLED,
+                error_message="Cancelled from ops dashboard",
+                completed_at=datetime.now(),
+            )
+
+        def get_working_directory(self):
+            return tmp_path / "clone"
+
+        def cancel_processes(self, force=True):
+            return None
+
+        def should_discard_on_cancel(self):
+            return False
+
+        def cleanup(self, success=False):
+            cleaned["n"] += 1
+            return True
+
+    with patch("src.processor.GitManager", FakeGit):
         with patch("src.processor.AgentRunner") as AR:
             out = proc._init_git_manager(key)
             assert out is None
             AR.assert_not_called()
-            fake_git.cleanup.assert_called_once()
+            assert cleaned["n"] == 1
             assert key not in proc._contexts
 
 
@@ -348,11 +363,11 @@ def test_e2e_git_push_timeout_does_not_hang(tmp_path, monkeypatch):
     gm.target_branch = "main"
     gm.issue_key = "E2E-PUSH"
     gm._pat_for_remote = MagicMock(return_value="glpat-test")
-    gm._redact_git_args = lambda args: args
-    gm._redact_secret_text = lambda t: t
+    gm._redact_git_args = GitManager._redact_git_args
     gm._git_auth_env = MagicMock(return_value={})
     gm._with_auth_remote = MagicMock()
     gm._scrub_remote_credentials = MagicMock()
+    gm.head_is_on_remote = MagicMock(return_value=False)
     gm.get_current_branch = MagicMock(return_value="feature/E2E-PUSH")
 
     hung_deadline = {"calls": 0}
@@ -361,14 +376,11 @@ def test_e2e_git_push_timeout_does_not_hang(tmp_path, monkeypatch):
         hung_deadline["calls"] += 1
         timeout = kwargs.get("timeout")
         assert timeout is not None and timeout > 0, "push must set subprocess timeout"
-        # Simulate TimeoutExpired after "waiting"
         raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
 
+    monkeypatch.setattr("src.git_manager.settings.git_command_timeout_seconds", 30)
     with patch("src.git_manager.subprocess.run", side_effect=hung_run):
-        with patch("src.git_manager.settings") as s:
-            s.git_command_timeout_seconds = 30
-            # push catches RuntimeError and returns False (or raises on first push)
-            ok = gm.push("feature/E2E-PUSH")
+        ok = gm.push("feature/E2E-PUSH")
 
     assert ok is False
     assert hung_deadline["calls"] >= 1
