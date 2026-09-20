@@ -265,12 +265,26 @@ async def test_e2e_gitlab_primary_source_mrs_share_queue_lock(
         e1.repository_url, clone_work, "main"
     )
 
+    from src.gitlab.keys import gitlab_note_key
+
+    k1 = gitlab_note_key(
+        host=e1.host,
+        project_path=e1.project_path,
+        project_id=e1.project_id,
+        note_id=str(e1.note_id),
+    )
+    k2 = gitlab_note_key(
+        host=e2.host,
+        project_path=e2.project_path,
+        project_id=e2.project_id,
+        note_id=str(e2.note_id),
+    )
     t1 = asyncio.create_task(proc.enqueue_gitlab_note(e1))
     await asyncio.wait_for(started.wait(), timeout=3)
     r2 = await proc.enqueue_gitlab_note(e2)
-    rec1 = proc.queue_store.find_note("11")
-    rec2 = proc.queue_store.find_note("12")
-    assert rec1 and rec2
+    rec1 = proc.queue_store.find_note(k1)
+    rec2 = proc.queue_store.find_note(k2)
+    assert rec1 and rec2, (k1, k2)
     assert rec1["lock_key"] == rec2["lock_key"] == expected_lock
     assert r2["status"] == "queued"
     assert rec2["status"] == "queued"
@@ -317,7 +331,15 @@ async def test_e2e_gitlab_deferred_note_is_not_marked_completed(
         "deferred note was dropped (seen-before-accept) or never started"
     )
     assert live_hits["n"] >= 2
-    assert "99" in proc._gitlab_seen_notes
+    from src.gitlab.keys import gitlab_note_key
+
+    seen_key = gitlab_note_key(
+        host=event.host,
+        project_path=event.project_path,
+        project_id=event.project_id,
+        note_id=str(event.note_id),
+    )
+    assert seen_key in proc._gitlab_seen_notes
 
 
 # ---------------------------------------------------------------------------

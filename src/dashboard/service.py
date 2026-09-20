@@ -2735,6 +2735,7 @@ def _workspace_clone(raw_path: Optional[str]) -> Optional[WorkspaceClone]:
         exists=bool(row.get("exists")),
         size_bytes=int(row.get("size_bytes") or 0),
         size_label=row.get("size_label"),
+        size_pending=bool(row.get("size_pending")),
         modified_at=row.get("modified_at"),
         in_use=bool(row.get("in_use")),
         can_delete=bool(row.get("can_delete")),

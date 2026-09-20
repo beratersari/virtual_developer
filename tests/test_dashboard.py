@@ -1069,6 +1069,12 @@ def test_workspace_detail_includes_clone_and_plan_file(
     assert clone_row.get("name") == "origin_abc"
     assert clone_row.get("in_use") is False
     assert clone_row.get("can_delete") is True
+    if clone_row.get("size_pending") or (clone_row.get("size_bytes") or 0) < 1:
+        temp_storage.scan_folder_sizes_now()
+        clone_row = (
+            TestClient(app).get(f"/api/opencode-workspaces/{wid}").json().get("clone")
+            or {}
+        )
     assert (clone_row.get("size_bytes") or 0) >= 1
     plans_row = detail.get("plans") or []
     assert len(plans_row) == 1

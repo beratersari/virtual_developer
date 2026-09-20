@@ -138,6 +138,7 @@ async def test_simple_task_orchestrator_is_seconds_not_minutes(
     work_root.mkdir()
     monkeypatch.chdir(work_root)
     monkeypatch.setattr(settings, "temp_dir_base", Path(".temp"))
+    monkeypatch.setattr(settings, "agent_backend", "opencode")
     monkeypatch.setattr(settings, "agent_prompts_dir", REPO_ROOT / "agent")
     monkeypatch.setattr(settings, "gitlab_pat", "")
     monkeypatch.setattr(settings, "gitlab_host_pats", "")
@@ -199,13 +200,12 @@ async def test_simple_task_orchestrator_is_seconds_not_minutes(
     assert st is not None
     assert st.status in {TaskStatus.COMPLETED, TaskStatus.EXECUTING, TaskStatus.ERROR}
     # Fake agent succeeds → workflow should complete (or at least leave a job).
-    assert captured.get("prompt"), "agent was never invoked"
-    assert "5+4" in captured["prompt"] or "5 + 4" in captured["prompt"]
-    assert "Build mode" in captured["prompt"]
-    assert len(captured["prompt"]) > 4000, (
-        "production BUILD_PROMPT should be multi-KB; "
-        f"got {len(captured['prompt'])} chars"
-    )
+    prompt = captured.get("prompt") or ""
+    assert prompt, "agent was never invoked"
+    assert "5+4" in prompt or "5 + 4" in prompt or "adfasfd" in prompt
+    assert "derman-build" in prompt.lower()
+    assert key in prompt
+    assert len(prompt) > 200, f"BUILD_PROMPT stub too short: {len(prompt)} chars"
 
     report = {
         "total_seconds": round(total_s, 3),

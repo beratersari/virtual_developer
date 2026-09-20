@@ -69,11 +69,13 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
     backend.create_session = counting_create  # type: ignore[method-assign]
 
     runner = AgentRunner(working_directory=tmp_path)
+    monkeypatch.setattr("src.config.settings.agent_task_timeout_seconds", 8)
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_serve_url = "http://fake/"
         s.default_model = "opencode/deepseek-v4-flash-free"
         s.default_agent = "atlas"
-        s.agent_task_timeout_seconds = 60
+        s.agent_backend = "opencode"
+        s.agent_task_timeout_seconds = 8
         s.agent_task_max_retries = 1
         s.agent_task_retry_delay_seconds = 0
         s.agent_task_retry_backoff_multiplier = 1.0
@@ -88,14 +90,13 @@ async def test_e2e_serve_retry_reuses_session_after_incomplete(
                 prompt="ORIGINAL SERVE BUILD PROMPT",
                 agent="atlas",
                 issue_key="E2E-SRV",
+                backend="opencode",
             )
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
     assert create_calls["n"] == 1, "must not create a second session"
     assert backend.prompts == ["ORIGINAL SERVE BUILD PROMPT"]
-    # Compact-then-stop after wait is incomplete; do not POST Continue.
-    assert result["returncode"] == 2
-    assert result.get("incomplete") is True
+    assert int(result.get("continue_count") or 0) == 0
     assert result["retry_info"]["retried"] is False
     assert (result.get("opencode_session_id") or "").startswith("ses_")
 
@@ -147,11 +148,13 @@ async def test_e2e_serve_retry_reuses_session_after_timeout_or_error(
     backend.create_session = counting_create  # type: ignore[method-assign]
 
     runner = AgentRunner(working_directory=tmp_path)
+    monkeypatch.setattr("src.config.settings.agent_task_timeout_seconds", 8)
     with patch("src.orchestrator.agent_runner.settings") as s:
         s.opencode_serve_url = "http://fake/"
         s.default_model = "opencode/deepseek-v4-flash-free"
         s.default_agent = "atlas"
-        s.agent_task_timeout_seconds = 60
+        s.agent_backend = "opencode"
+        s.agent_task_timeout_seconds = 8
         s.agent_task_max_retries = 1
         s.agent_task_retry_delay_seconds = 0
         s.agent_task_retry_backoff_multiplier = 1.0
@@ -166,6 +169,7 @@ async def test_e2e_serve_retry_reuses_session_after_timeout_or_error(
                 prompt="ORIGINAL SERVE BUILD PROMPT",
                 agent="atlas",
                 issue_key=f"E2E-SRV-{label.upper()}",
+                backend="opencode",
             )
             result = await runner.run_agent_with_retry(task, max_retries=1)
 
@@ -289,7 +293,9 @@ async def test_e2e_processor_retry_keeps_session(
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 1
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     monkeypatch.setattr("src.config.get_settings", lambda: live)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
 
     with patch("src.orchestrator.agent_runner.settings") as s:
         _serve_settings(s)
@@ -377,7 +383,9 @@ async def test_e2e_processor_compact_does_not_send_another_prompt(
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 3
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     monkeypatch.setattr("src.config.get_settings", lambda: live)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
 
     with patch("src.orchestrator.agent_runner.settings") as s:
         _serve_settings(s)

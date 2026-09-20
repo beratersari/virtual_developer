@@ -474,8 +474,10 @@ async def test_e2e_cancel_in_flight_then_second_issue_resumes(
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     live.agent_task_max_incomplete_retries = 0
     monkeypatch.setattr("src.config.get_settings", lambda: live)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
 
     sm.create_state("KAN-A", "first", _params())
     job_a = asyncio.create_task(proc._start_execution_workflow(sm.get_state("KAN-A")))
@@ -562,8 +564,10 @@ async def test_e2e_error_then_new_issue_resumes(
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     live.agent_task_max_incomplete_retries = 0
     monkeypatch.setattr("src.config.get_settings", lambda: live)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
 
     sm.create_state("KAN-A", "first", _params())
     await proc._start_execution_workflow(sm.get_state("KAN-A"))

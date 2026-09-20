@@ -1,3 +1,10 @@
+# Yaver 0.9.44
+
+Sessions workspace GET no
+longer walks the clone on
+the request path. The SPA
+does not time out at 15s.
+
 # Yaver 0.9.43
 
 Sessions workspace shows MR

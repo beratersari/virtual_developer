@@ -113,8 +113,7 @@ def describe_clone_folder(raw_path: str) -> Optional[Dict[str, Any]]:
             in_use = resolved in _in_use_paths()
         except Exception:
             in_use = False
-    size = 0
-    size_label = None
+    mtime = None
     modified = None
     if exists:
         try:
@@ -123,9 +122,8 @@ def describe_clone_folder(raw_path: str) -> Optional[Dict[str, Any]]:
                 "%Y-%m-%dT%H:%M:%SZ"
             )
         except OSError:
+            mtime = None
             modified = None
-        size = _dir_size_bytes(resolved)
-        size_label = format_bytes(size)
     name = ""
     under_temp = False
     try:
@@ -135,12 +133,26 @@ def describe_clone_folder(raw_path: str) -> Optional[Dict[str, Any]]:
             name = resolved.name
     except OSError:
         name = resolved.name if exists else path.name
+    # Same as Storage: never os.walk on the request path. A real clone on
+    # Windows/WSL can take tens of seconds and the SPA aborts GETs at 15s.
+    size = 0
+    size_label = None
+    size_pending = False
+    if exists and name and under_temp:
+        cached = _cached_size(name, mtime)
+        if cached is None:
+            size_pending = True
+            _ensure_size_scan()
+        else:
+            size = cached
+            size_label = format_bytes(size)
     return {
         "name": name,
         "path": str(resolved),
         "exists": exists,
         "size_bytes": int(size),
         "size_label": size_label,
+        "size_pending": bool(size_pending),
         "modified_at": modified,
         "in_use": bool(in_use),
         "can_delete": bool(exists and name and under_temp and not in_use),

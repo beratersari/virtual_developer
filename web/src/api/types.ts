@@ -274,6 +274,7 @@ export type WorkspaceClone = {
   exists: boolean
   size_bytes: number
   size_label?: string | null
+  size_pending?: boolean
   modified_at?: string | null
   in_use: boolean
   can_delete: boolean

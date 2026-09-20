@@ -111,7 +111,9 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     live.agent_task_timeout_seconds = 30
     live.agent_task_max_retries = 0
     live.default_agent = "atlas"
+    live.agent_backend = "opencode"
     monkeypatch.setattr("src.config.get_settings", lambda: live)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
 
     async def run_issue(key: str) -> None:
         sm.create_state(key, f"work {key}", _params(repo, branch))
@@ -157,7 +159,7 @@ async def test_e2e_cli_same_repo_branch_resumes_then_dashboard_reset(
     assert reset.json()["ok"] is True
     empty = client.get("/api/opencode-sessions").json()
     assert empty["total"] == 0
-    tomb = binds.get(repo, branch, "develop")
+    tomb = binds.get_by_id(bind_id)
     assert tomb is not None
     assert not (tomb.get("session_id") or "").strip()
     assert first_sid in (tomb.get("forgotten_session_ids") or [])
