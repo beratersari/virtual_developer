@@ -133,22 +133,18 @@ body {
 }
 
 .vd-mark {
-  width: 2rem;
-  height: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border-radius: 9px;
   background: #11182c;
-  color: #e8d5b0;
-  font-weight: 700;
-  font-size: 0.72rem;
-  letter-spacing: -0.03em;
-  display: grid;
-  place-items: center;
   overflow: hidden;
+  flex-shrink: 0;
 }
 .vd-mark img {
-  width: 2rem;
-  height: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
   display: block;
+  object-fit: cover;
 }
 
 .vd-nav {

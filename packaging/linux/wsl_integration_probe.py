@@ -112,7 +112,7 @@ def main() -> int:
 
     # --- Yaver dashboard / API (distinct routes) ---
     index = p.req("yaver.spa_index", "GET", f"{YAVER}/", expect=200)
-    p.req("yaver.favicon", "GET", f"{YAVER}/favicon.svg", expect=(200, 404))
+    p.req("yaver.favicon", "GET", f"{YAVER}/favicon.png", expect=(200, 404))
     if isinstance(index, (bytes, bytearray)):
         text = index.decode("utf-8", errors="replace")
         js = css = None

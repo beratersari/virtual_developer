@@ -1,5 +1,9 @@
 # Yaver
 
+<p align="center">
+  <img src="web/public/yaver-logo.png" alt="Yaver — Sanal Geliştirici" width="220" />
+</p>
+
 [English](README.md) · **Türkçe**
 
 **Sürüm:** kökteki [`VERSION`](VERSION) dosyasına bakın.

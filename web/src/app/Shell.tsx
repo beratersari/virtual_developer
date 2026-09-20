@@ -88,7 +88,7 @@ export function Shell() {
       <aside className="vd-sidebar">
         <div className="vd-brand">
           <div className="vd-mark" aria-hidden>
-            <img src="/favicon.svg" alt="" width={32} height={32} />
+            <img src="/yaver-wink.gif" alt="" width={40} height={40} />
           </div>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold tracking-tight">Yaver</div>
