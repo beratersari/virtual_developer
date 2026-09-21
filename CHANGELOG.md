@@ -8,6 +8,18 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.51] — 2026-09-21
+
+A second GitLab ``/yaver`` on the same MR no longer fails to push.
+
+### Fixed
+
+- Queued follow-up jobs on an existing MR fetch the first job's push and
+  rebase onto it before delivering. The local branch no longer stays
+  behind origin (``tip of your current branch is behind``).
+
+[0.9.51]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.51
+
 ## [0.9.50] — 2026-09-21
 
 Analytics no longer hangs. Issue key is exact. Azure /yaver on a

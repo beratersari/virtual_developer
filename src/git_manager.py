@@ -2257,41 +2257,129 @@ class GitManager:
 
         current = (self.get_current_branch() or "").strip()
         if current == work_branch:
-            # Reused clone already on this MR source — keep commits and
-            # intentional uncommitted edits (GitLab comment / rework).
             porcelain = self._working_tree_status()
             if porcelain:
                 logger.info(
-                    f"Already on '{work_branch}'; skip checkout/stash — "
-                    f"preserving uncommitted files: "
+                    f"Already on '{work_branch}'; keeping uncommitted files: "
                     f"{self._dirty_paths_summary(porcelain)}"
                 )
             else:
-                logger.info(
-                    f"Already on '{work_branch}'; skip checkout — "
-                    f"fast-forward to {start_point} if possible"
-                )
-                self._run_git(["merge", "--ff-only", start_point], check=False)
-            self.work_branch = work_branch
-            self.source_branch = work_branch
-            return work_branch
-
-        logger.info(
-            f"Switching to existing work branch '{work_branch}' "
-            f"(currently '{current or '(detached)'}')"
-        )
-        self._stash_uncommitted(f"before checkout {work_branch}")
-        if self._branch_exists(work_branch, check_remote=False):
-            self._run_git(["checkout", work_branch])
+                logger.info(f"Already on '{work_branch}'")
         else:
-            self._run_git(["checkout", "-B", work_branch, start_point])
-        logger.info(
-            f"Checked out existing work branch '{work_branch}' "
-            f"(local commits kept; origin tip is {start_point})"
-        )
+            logger.info(
+                f"Switching to existing work branch '{work_branch}' "
+                f"(currently '{current or '(detached)'}')"
+            )
+            self._stash_uncommitted(f"before checkout {work_branch}")
+            if self._branch_exists(work_branch, check_remote=False):
+                self._run_git(["checkout", work_branch])
+            else:
+                self._run_git(["checkout", "-B", work_branch, start_point])
+            logger.info(
+                f"Checked out existing work branch '{work_branch}'"
+            )
+        # Queued follow-up on the same MR: origin may have the previous job's
+        # push. Fetch already ran; move HEAD onto that tip before the agent.
+        self._sync_work_branch_to_origin(work_branch)
         self.work_branch = work_branch
         self.source_branch = work_branch
         return work_branch
+
+    def _counts_vs_origin(self, branch: str) -> tuple[int, int]:
+        """Return (commits ahead of origin/{branch}, commits behind)."""
+        remote = f"origin/{branch}"
+        if not self._origin_ref_is_commit(branch):
+            return 0, 0
+        ahead = self._run_git(
+            ["rev-list", "--count", f"{remote}..HEAD"], check=False
+        )
+        behind = self._run_git(
+            ["rev-list", "--count", f"HEAD..{remote}"], check=False
+        )
+
+        def _n(proc: subprocess.CompletedProcess) -> int:
+            try:
+                return max(0, int((proc.stdout or "0").strip() or "0"))
+            except ValueError:
+                return 0
+
+        return _n(ahead), _n(behind)
+
+    def _sync_work_branch_to_origin(self, work_branch: str) -> None:
+        """Move the work branch onto origin/{work} when the remote is ahead.
+
+        Equal to origin: leave uncommitted edits (same-job rework).
+        Behind only: fast-forward (stash first if dirty).
+        Diverged: reset to the remote tip so a queued second MR comment
+        starts from the first job's push, not a stale local T0.
+        """
+        start_point = f"origin/{work_branch}"
+        if not self._origin_ref_is_commit(work_branch):
+            return
+        ahead, behind = self._counts_vs_origin(work_branch)
+        if behind == 0:
+            return
+        dirty = self._working_tree_status()
+        if dirty:
+            self._stash_uncommitted(f"before sync to {start_point}")
+        if ahead == 0:
+            logger.info(
+                f"Fast-forwarding '{work_branch}' to {start_point} "
+                f"({behind} commit(s) behind)"
+            )
+            ff = self._run_git(["merge", "--ff-only", start_point], check=False)
+            if ff.returncode == 0:
+                return
+            logger.warning(
+                f"ff-only onto {start_point} failed; resetting to remote tip"
+            )
+        else:
+            logger.info(
+                f"Local '{work_branch}' diverged from {start_point} "
+                f"(ahead={ahead} behind={behind}); resetting to remote tip "
+                "so this job starts from the latest MR head"
+            )
+        self._run_git(["reset", "--hard", start_point], check=False)
+
+    def _integrate_remote_before_push(self, branch: str) -> bool:
+        """Fetch origin/{branch} and rebase local commits onto it.
+
+        Two ``/yaver`` notes on the same MR run one after the other. The
+        second push must sit on the first job's remote tip.
+        """
+        self._run_git(["fetch", "origin", "--", branch], check=False, auth=True)
+        if not self._origin_ref_is_commit(branch):
+            return True
+        if self._working_tree_status():
+            self._stash_uncommitted("before rebase onto origin")
+        ahead, behind = self._counts_vs_origin(branch)
+        if behind == 0:
+            return True
+        remote = f"origin/{branch}"
+        if ahead == 0:
+            ff = self._run_git(["merge", "--ff-only", remote], check=False)
+            if ff.returncode == 0:
+                logger.info(f"Fast-forwarded '{branch}' to {remote} before push")
+                return True
+            logger.warning(f"ff-only onto {remote} failed before push")
+            return False
+        logger.info(
+            f"Rebasing {ahead} local commit(s) onto {remote} "
+            f"({behind} remote commit(s) not in HEAD)"
+        )
+        rb = self._run_git(["rebase", remote], check=False)
+        if rb.returncode == 0:
+            return True
+        self._run_git(["rebase", "--abort"], check=False)
+        detail = self._redact_secret_text(
+            ((rb.stderr or "") + "\n" + (rb.stdout or "")).strip()
+        )
+        self.last_push_error = (
+            f"origin/{branch} moved (another job pushed to this MR) and "
+            f"rebase onto that tip failed.\n{detail[:1500]}"
+        )
+        logger.error(self.last_push_error)
+        return False
 
     def _origin_ref_is_commit(self, branch: str) -> bool:
         """True when ``refs/remotes/origin/{branch}`` resolves to a commit."""
@@ -2705,21 +2793,28 @@ class GitManager:
         try:
             self._with_auth_remote()
             try:
+                if not self._integrate_remote_before_push(branch):
+                    return False
                 self._run_git(["push", "-u", "origin", "--", branch], auth=True)
                 logger.info(f"Pushed branch '{branch}' to origin.")
                 return True
             except GitCancelledError:
                 raise
-            except RuntimeError:
-                logger.warning(f"Push failed, attempting to pull and merge...")
+            except RuntimeError as e1:
+                logger.warning(
+                    f"Push failed, fetching origin/{branch} and rebasing..."
+                )
                 try:
-                    self._run_git(["fetch", "origin", "--", branch], check=False, auth=True)
-                    self._run_git(
-                        ["merge", f"origin/{branch}", "-m", f"Merge remote branch {branch}"],
-                        check=False,
-                    )
+                    if not self._integrate_remote_before_push(branch):
+                        if not self.last_push_error:
+                            self.last_push_error = self._redact_secret_text(
+                                summarize_git_error(e1) or str(e1).strip()
+                            ) or "git push failed"
+                        return False
                     self._run_git(["push", "-u", "origin", "--", branch], auth=True)
-                    logger.info(f"Pushed branch '{branch}' after merge.")
+                    logger.info(
+                        f"Pushed branch '{branch}' after rebase onto origin."
+                    )
                     return True
                 except GitCancelledError:
                     raise
@@ -2737,7 +2832,7 @@ class GitManager:
                         summarize_git_error(e2) or str(e2).strip()
                     )
                     self.last_push_error = reason or "git push failed"
-                    logger.error(f"Push failed after merge attempt: {reason}")
+                    logger.error(f"Push failed after rebase onto origin: {reason}")
                     return False
         finally:
             self._scrub_remote_credentials()

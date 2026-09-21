@@ -710,28 +710,25 @@ def test_push_paths(gm):
     assert gm.push() is False
     assert gm.last_push_error
     gm.remote_enabled = True
-    # push() does: auth set-url, push, scrub set-url (and more on merge retry)
+    gm._integrate_remote_before_push = lambda branch: True
+    # push() does: auth set-url, push, scrub set-url (and rebase retry)
     with patch.object(gm, "get_current_branch", return_value="feature/x"):
         with patch.object(gm, "_run_git", return_value=_cp()):
             assert gm.push() is True
             assert gm.last_push_error is None
-        # auth set-url ok, push fails, fetch/merge/push ok, scrub set-url
+        # auth set-url ok, push fails, integrate already mocked True, push retry
         with patch.object(gm, "_run_git", side_effect=[
             _cp(),  # auth set-url
             RuntimeError("fail"),  # push
-            _cp(),  # fetch
-            _cp(),  # merge
             _cp(),  # push retry
             _cp(),  # scrub
         ]):
             assert gm.push("feature/x") is True
-        # push/merge fail and remote tip check fails → False
+        # push retry fail and remote tip check fails → False
         with patch.object(gm, "head_is_on_remote", return_value=False):
             with patch.object(gm, "_run_git", side_effect=[
                 _cp(),  # set-url
                 RuntimeError("fail"),  # push
-                _cp(),  # fetch
-                _cp(),  # merge
                 RuntimeError("fail2"),  # push retry
                 _cp(),  # scrub
             ]):
@@ -742,8 +739,6 @@ def test_push_paths(gm):
             with patch.object(gm, "_run_git", side_effect=[
                 _cp(),  # set-url
                 RuntimeError("fail"),  # push
-                _cp(),  # fetch
-                _cp(),  # merge
                 RuntimeError("fail2"),  # push retry
                 _cp(),  # scrub
             ]):
