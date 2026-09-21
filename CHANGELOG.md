@@ -8,6 +8,35 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.50] — 2026-09-21
+
+Analytics no longer hangs. Issue key is exact. Azure /yaver on a
+waiting plan posts a note.
+
+### Fixed
+
+- Live ticks no longer abort an in-flight Analytics GET (that looked
+  like a hang or Request timed out). Changing period or filters still
+  cancels the previous GET. The daemon stops a cancelled walk and
+  returns 504 if aggregation exceeds 55s.
+- Analytics Issue key is an exact match (``KAN-24`` no longer pulls
+  ``KAN-240``). Search still contains. Comma-separated keys are allowed.
+- Azure ``/yaver`` on a ``plan_ready`` ticket posts the same wait note
+  GitLab already posts on the MR. Implement still waits for
+  ``plan_execute``.
+- GET ``/api/analytics`` runs off the event loop so Jobs and Stop stay
+  responsive.
+
+### Changed
+
+- Plan ready and in flight are first-class outcomes on cards, chart,
+  and tables. Repository URLs with or without ``.git`` count as one
+  repo. Jobs with no model appear as ``(unset)`` so shares sum to 100%.
+  There is a By agent table and a repository facet. Custom range copies
+  the current from/to instead of jumping to all-time.
+
+[0.9.50]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.50
+
 ## [0.9.49] — 2026-09-20
 
 Analytics no longer times out when you change the chart bucket.
