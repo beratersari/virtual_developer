@@ -8,6 +8,24 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.53] — 2026-09-21
+
+Analytics splits MRs Yaver opened from MRs we only commented on.
+Cards open the unique-MR list. Search and issue-key filters are gone.
+
+### Added
+
+- Analytics Open / Merged / Closed cards go to a list of unique MR/PR
+  links. Counts split into **Opened by us** (Jira / Azure Boards) and
+  **Contributed** (existing GitLab MR or Azure PR comments). Review and
+  build jobs on the same URL still count once.
+
+### Changed
+
+- Analytics no longer has Search or Issue key filters.
+
+[0.9.53]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.53
+
 ## [0.9.52] — 2026-09-21
 
 Selected code on GitLab and Azure review comments reaches the agent.

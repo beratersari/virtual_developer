@@ -1,3 +1,12 @@
+# Yaver 0.9.53
+
+Analytics splits MRs we
+opened from MRs we only
+commented on. Cards open
+the unique-MR list.
+Search and issue-key
+filters are gone.
+
 # Yaver 0.9.52
 
 Selected GitLab and Azure
