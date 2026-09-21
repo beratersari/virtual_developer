@@ -1447,10 +1447,11 @@ def list_scheduled_jobs(
     *,
     status: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
     store: Optional[ScheduleStore] = None,
 ) -> List[Dict[str, Any]]:
     ss = store or schedule_store
-    return ss.list_schedules(status=status, limit=limit)
+    return ss.list_schedules(status=status, limit=limit, offset=offset)
 
 
 def cancel_scheduled_job(

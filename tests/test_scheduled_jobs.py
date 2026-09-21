@@ -1202,3 +1202,89 @@ async def test_skipped_dispatched_schedule_refires_on_next_tick(tmp_path):
     assert event["issue"]["key"] == "KAN-SKIPPED"
     assert event["scheduled_job"] is True
     assert store.get(rec["schedule_id"])["status"] == "dispatched"
+
+
+def test_list_schedules_pages_after_sort_not_mtime(tmp_path):
+    """Older waiting rows stay in the list; limit is a page, not an mtime cap."""
+    import os
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    waiting = store.create(
+        title="still waiting",
+        description="",
+        repository_url="https://gitlab.com/a/b.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at="2099-01-01T10:00:00",
+        issue_key="KAN-WAIT",
+        issue_description="",
+    )
+    os.utime(store._path(waiting["schedule_id"]), (1_700_000_000.0, 1_700_000_000.0))
+    now = datetime.now().timestamp()
+    for i in range(30):
+        rec = store.create(
+            title=f"history {i}",
+            description="",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+            scheduled_at=f"2026-01-01T{i % 10:02d}:00:00",
+            issue_key=f"KAN-{i + 1}",
+            issue_description="",
+        )
+        os.utime(store._path(rec["schedule_id"]), (now + i, now + i))
+
+    assert store.count_schedules() == 31
+    page1 = store.list_schedules(limit=25, offset=0)
+    page2 = store.list_schedules(limit=25, offset=25)
+    assert len(page1) == 25
+    assert len(page2) == 6
+    ids = [r["schedule_id"] for r in page1 + page2]
+    assert waiting["schedule_id"] in ids
+    assert ids[0] == waiting["schedule_id"]
+
+
+def test_api_schedules_pagination(tmp_path, monkeypatch):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    for i in range(30):
+        store.create(
+            title=f"job {i}",
+            description="",
+            repository_url="https://gitlab.com/a/b.git",
+            source_branch="develop",
+            target_branch="develop",
+            mode="build",
+            scheduled_at=f"2026-06-{(i % 28) + 1:02d}T10:00:00",
+            issue_key=f"KAN-{i + 1}",
+            issue_description="",
+        )
+    monkeypatch.setattr("src.dashboard.api.schedule_store", store)
+    app = create_dashboard_app(processor=None, state_manager=sm)
+    tc = TestClient(app)
+
+    first = tc.get("/api/schedules", params={"page": 1, "page_size": 25})
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["total"] == 30
+    assert body["page"] == 1
+    assert body["page_size"] == 25
+    assert len(body["schedules"]) == 25
+
+    second = tc.get("/api/schedules", params={"page": 2, "page_size": 25})
+    assert second.status_code == 200, second.text
+    page2 = second.json()
+    assert page2["total"] == 30
+    assert page2["page"] == 2
+    assert len(page2["schedules"]) == 5
+    first_ids = {r["schedule_id"] for r in body["schedules"]}
+    second_ids = {r["schedule_id"] for r in page2["schedules"]}
+    assert not first_ids & second_ids
+
+    default = tc.get("/api/schedules")
+    assert default.json()["page"] == 1
+    assert default.json()["page_size"] == 25
+    assert default.json()["total"] == 30
+    assert len(default.json()["schedules"]) == 25
