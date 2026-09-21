@@ -1612,6 +1612,85 @@ def create_dashboard_app(
         finally:
             cancel.set()
             watcher.cancel()
+
+    @app.get("/api/analytics/reviews")
+    async def analytics_reviews(
+        request: Request,
+        state: str = Query(default="all"),
+        origin: str = Query(default="all"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        period: str = Query(default="30d"),
+        date_from: str = Query(default="", alias="from"),
+        date_to: str = Query(default="", alias="to"),
+        status: str = Query(default=""),
+        category: str = Query(default=""),
+        source: str = Query(default=""),
+        model: str = Query(default=""),
+        backend: str = Query(default=""),
+        agent: str = Query(default=""),
+        repository: str = Query(default=""),
+        issue_key: str = Query(default=""),
+        q: str = Query(default=""),
+    ) -> dict:
+        """Unique GitLab MR / Azure PR links for an Analytics Open/Merged/Closed card."""
+        from src.dashboard.analytics import (
+            ANALYTICS_TIMEOUT_SECONDS,
+            AnalyticsCancelled,
+            list_analytics_reviews,
+        )
+
+        cancel = threading.Event()
+
+        async def _watch_disconnect() -> None:
+            try:
+                while not cancel.is_set():
+                    if await request.is_disconnected():
+                        cancel.set()
+                        return
+                    await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                return
+
+        watcher = asyncio.create_task(_watch_disconnect())
+        try:
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(
+                    list_analytics_reviews,
+                    state=state,
+                    origin=origin,
+                    page=page,
+                    page_size=page_size,
+                    period=period,
+                    date_from=date_from,
+                    date_to=date_to,
+                    status=status,
+                    category=category,
+                    source=source,
+                    model=model,
+                    backend=backend,
+                    agent=agent,
+                    repository=repository,
+                    issue_key=issue_key,
+                    q=q,
+                    cancel=cancel,
+                ),
+                timeout=ANALYTICS_TIMEOUT_SECONDS,
+            )
+            return payload.model_dump()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except AnalyticsCancelled:
+            return Response(status_code=204)
+        except asyncio.TimeoutError:
+            cancel.set()
+            raise HTTPException(
+                status_code=504,
+                detail="Analytics timed out. Try a shorter period or fewer filters.",
+            ) from None
+        finally:
+            cancel.set()
+            watcher.cancel()
             try:
                 await watcher
             except (asyncio.CancelledError, Exception):

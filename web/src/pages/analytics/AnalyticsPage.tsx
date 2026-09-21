@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ApiError, fetchAnalytics } from '../../api/client'
 import type {
   AnalyticsFacet,
@@ -127,10 +128,12 @@ function CountCard({
   label,
   value,
   tone,
+  to,
 }: {
   label: string
   value: number
   tone?: 'success' | 'danger' | 'muted'
+  to?: string
 }) {
   const color =
     tone === 'success'
@@ -140,14 +143,25 @@ function CountCard({
         : tone === 'muted'
           ? 'text-text-muted'
           : 'text-text'
-  return (
-    <div className="vd-card px-4 py-3">
+  const body = (
+    <>
       <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
         {label}
       </div>
       <div className={`mt-1 font-mono text-2xl font-semibold ${color}`}>{value}</div>
-    </div>
+    </>
   )
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className="vd-card block px-4 py-3 text-inherit no-underline hover:border-accent"
+      >
+        {body}
+      </Link>
+    )
+  }
+  return <div className="vd-card px-4 py-3">{body}</div>
 }
 
 function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
@@ -213,10 +227,6 @@ export function AnalyticsPage() {
   const [backend, setBackend] = useState<Set<string>>(() => new Set())
   const [agent, setAgent] = useState<Set<string>>(() => new Set())
   const [repository, setRepository] = useState<Set<string>>(() => new Set())
-  const [issueKey, setIssueKey] = useState('')
-  const [q, setQ] = useState('')
-  const [debouncedKey, setDebouncedKey] = useState('')
-  const [debouncedQ, setDebouncedQ] = useState('')
   const [visible, setVisible] = useState<Set<SeriesKey>>(
     () => new Set(['total', 'completed', 'error', 'plan_ready']),
   )
@@ -226,14 +236,6 @@ export function AnalyticsPage() {
   const reqId = useRef(0)
   const lastGenReload = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
-
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      setDebouncedKey(issueKey.trim())
-      setDebouncedQ(q.trim())
-    }, 250)
-    return () => window.clearTimeout(t)
-  }, [issueKey, q])
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
@@ -263,8 +265,6 @@ export function AnalyticsPage() {
           backend: csv(backend) || undefined,
           agent: csv(agent) || undefined,
           repository: csv(repository) || undefined,
-          issueKey: debouncedKey || undefined,
-          q: debouncedQ || undefined,
           signal: ac.signal,
         })
         if (req !== reqId.current) return
@@ -298,8 +298,6 @@ export function AnalyticsPage() {
       backend,
       agent,
       repository,
-      debouncedKey,
-      debouncedQ,
     ],
   )
 
@@ -340,8 +338,6 @@ export function AnalyticsPage() {
     setBackend(new Set())
     setAgent(new Set())
     setRepository(new Set())
-    setIssueKey('')
-    setQ('')
   }
 
   const filterActive =
@@ -352,8 +348,28 @@ export function AnalyticsPage() {
       backend.size +
       agent.size +
       repository.size >
-      0 ||
-    Boolean(debouncedKey || debouncedQ)
+    0
+
+  const reviewHref = (origin: string, state: string) => {
+    const p = new URLSearchParams()
+    p.set('origin', origin)
+    p.set('state', state)
+    if (period === 'custom') {
+      p.set('period', 'all')
+      if (customFrom) p.set('from', isoFromLocal(customFrom))
+      if (customTo) p.set('to', isoFromLocal(customTo))
+    } else {
+      p.set('period', period)
+    }
+    if (csv(status)) p.set('status', csv(status))
+    if (csv(category)) p.set('category', csv(category))
+    if (csv(source)) p.set('source', csv(source))
+    if (csv(model)) p.set('model', csv(model))
+    if (csv(backend)) p.set('backend', csv(backend))
+    if (csv(agent)) p.set('agent', csv(agent))
+    if (csv(repository)) p.set('repository', csv(repository))
+    return `/analytics/reviews?${p.toString()}`
+  }
 
   return (
     <section className="space-y-5">
@@ -444,25 +460,6 @@ export function AnalyticsPage() {
       )}
 
       <div className="vd-card grid gap-4 p-4 md:grid-cols-3 lg:grid-cols-4">
-        <label className="text-xs text-text-muted md:col-span-2">
-          Search
-          <input
-            className="vd-input mt-1"
-            placeholder="Key, title, model, repo"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </label>
-        <label className="text-xs text-text-muted">
-          Issue key
-          <input
-            className="vd-input mt-1 font-mono"
-            placeholder="KAN-240"
-            title="Exact issue key. Use Search for a contains match."
-            value={issueKey}
-            onChange={(e) => setIssueKey(e.target.value)}
-          />
-        </label>
         <FacetGroup title="Status" items={facets.status || []} selected={status} onChange={setStatus} />
         <FacetGroup
           title="Category"
@@ -515,27 +512,72 @@ export function AnalyticsPage() {
         />
       </div>
 
-      <div>
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-          Merge requests
+      <div className="space-y-5">
+        <div>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            Opened by us
+          </div>
+          <p className="mb-3 text-xs text-text-muted">
+            Merge requests Yaver opened from a Jira or Azure Boards job. Click a
+            card for the links. A later /yaver on the same MR does not count twice.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <CountCard
+              label="Open"
+              value={payload?.reviews?.ours?.opened ?? 0}
+              to={reviewHref('ours', 'opened')}
+            />
+            <CountCard
+              label="Merged"
+              value={payload?.reviews?.ours?.merged ?? 0}
+              tone="success"
+              to={reviewHref('ours', 'merged')}
+            />
+            <CountCard
+              label="Closed"
+              value={payload?.reviews?.ours?.closed ?? 0}
+              tone="muted"
+              to={reviewHref('ours', 'closed')}
+            />
+            <CountCard
+              label="Total"
+              value={payload?.reviews?.ours?.total ?? 0}
+              to={reviewHref('ours', 'all')}
+            />
+          </div>
         </div>
-        <p className="mb-3 text-xs text-text-muted">
-          Unique GitLab MRs and Azure PRs on jobs in this filter. State comes from
-          Yaver history (open when created, merged/closed when the webhook arrives).
-        </p>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <CountCard label="Open" value={payload?.reviews?.opened ?? 0} />
-          <CountCard
-            label="Merged"
-            value={payload?.reviews?.merged ?? 0}
-            tone="success"
-          />
-          <CountCard
-            label="Closed"
-            value={payload?.reviews?.closed ?? 0}
-            tone="muted"
-          />
-          <CountCard label="Total MRs" value={payload?.reviews?.total ?? 0} />
+        <div>
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            Contributed
+          </div>
+          <p className="mb-3 text-xs text-text-muted">
+            Existing GitLab MRs and Azure PRs we commented on (/yaver, /review,
+            /ask). Click a card for the links.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <CountCard
+              label="Open"
+              value={payload?.reviews?.contributed?.opened ?? 0}
+              to={reviewHref('contributed', 'opened')}
+            />
+            <CountCard
+              label="Merged"
+              value={payload?.reviews?.contributed?.merged ?? 0}
+              tone="success"
+              to={reviewHref('contributed', 'merged')}
+            />
+            <CountCard
+              label="Closed"
+              value={payload?.reviews?.contributed?.closed ?? 0}
+              tone="muted"
+              to={reviewHref('contributed', 'closed')}
+            />
+            <CountCard
+              label="Total"
+              value={payload?.reviews?.contributed?.total ?? 0}
+              to={reviewHref('contributed', 'all')}
+            />
+          </div>
         </div>
       </div>
 

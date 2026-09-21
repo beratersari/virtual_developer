@@ -1,5 +1,6 @@
 import type {
   AnalyticsPayload,
+  AnalyticsReviewsPayload,
   BulkDeleteJobsResult,
   GitlabConnectionTestResult,
   JobChatPayload,
@@ -250,6 +251,50 @@ export function fetchAnalytics(opts?: {
   if (opts?.q) params.set('q', opts.q)
   const q = params.toString() ? `?${params.toString()}` : ''
   return request<AnalyticsPayload>(`/api/analytics${q}`, {
+    timeoutMs: opts?.timeoutMs ?? ANALYTICS_TIMEOUT_MS,
+    signal: opts?.signal,
+  })
+}
+
+export function fetchAnalyticsReviews(opts?: {
+  state?: string
+  origin?: string
+  page?: number
+  pageSize?: number
+  period?: string
+  from?: string
+  to?: string
+  status?: string
+  category?: string
+  source?: string
+  model?: string
+  backend?: string
+  agent?: string
+  repository?: string
+  issueKey?: string
+  q?: string
+  timeoutMs?: number
+  signal?: AbortSignal
+}) {
+  const params = new URLSearchParams()
+  if (opts?.state) params.set('state', opts.state)
+  if (opts?.origin) params.set('origin', opts.origin)
+  if (opts?.page) params.set('page', String(opts.page))
+  if (opts?.pageSize) params.set('page_size', String(opts.pageSize))
+  if (opts?.period) params.set('period', opts.period)
+  if (opts?.from) params.set('from', opts.from)
+  if (opts?.to) params.set('to', opts.to)
+  if (opts?.status) params.set('status', opts.status)
+  if (opts?.category) params.set('category', opts.category)
+  if (opts?.source) params.set('source', opts.source)
+  if (opts?.model) params.set('model', opts.model)
+  if (opts?.backend) params.set('backend', opts.backend)
+  if (opts?.agent) params.set('agent', opts.agent)
+  if (opts?.repository) params.set('repository', opts.repository)
+  if (opts?.issueKey) params.set('issue_key', opts.issueKey)
+  if (opts?.q) params.set('q', opts.q)
+  const q = params.toString() ? `?${params.toString()}` : ''
+  return request<AnalyticsReviewsPayload>(`/api/analytics/reviews${q}`, {
     timeoutMs: opts?.timeoutMs ?? ANALYTICS_TIMEOUT_MS,
     signal: opts?.signal,
   })

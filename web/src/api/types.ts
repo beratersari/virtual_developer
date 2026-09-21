@@ -87,11 +87,38 @@ export type AnalyticsModelPoint = {
   counts: Record<string, number>
 }
 
-export type AnalyticsReviews = {
+export type AnalyticsReviewCounts = {
   opened: number
   merged: number
   closed: number
   total: number
+}
+
+export type AnalyticsReviews = {
+  ours: AnalyticsReviewCounts
+  contributed: AnalyticsReviewCounts
+}
+
+export type AnalyticsReviewItem = {
+  url: string
+  state: string
+  origin: string
+  issue_key: string
+  title: string
+  jobs: number
+  gitlab_project: string
+  gitlab_mr_iid: number | null
+  azure_project: string
+  azure_pr_id: number | null
+}
+
+export type AnalyticsReviewsPayload = {
+  state: string
+  origin: string
+  items: AnalyticsReviewItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export type AnalyticsPayload = {

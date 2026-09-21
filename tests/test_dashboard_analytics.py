@@ -383,7 +383,8 @@ def test_analytics_reviews_count_unique_mrs(
     """Open / merged / closed are unique GitLab MRs and Azure PRs, not jobs."""
     http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
     empty = http.get("/api/analytics", params={"period": "7d"}).json()["reviews"]
-    assert empty == {"opened": 0, "merged": 0, "closed": 0, "total": 0}
+    zeros = {"opened": 0, "merged": 0, "closed": 0, "total": 0}
+    assert empty == {"ours": zeros, "contributed": zeros}
 
     open_a = jobs.create_job(
         issue_key="KAN-1",
@@ -476,10 +477,20 @@ def test_analytics_reviews_count_unique_mrs(
 
     body = http.get("/api/analytics", params={"period": "7d"}).json()
     reviews = body["reviews"]
-    assert reviews["opened"] == 1, reviews
-    assert reviews["merged"] == 2, reviews
-    assert reviews["closed"] == 1, reviews
-    assert reviews["total"] == 4, reviews
+    # Jira jobs opened !4, !9, !11. GitLab follow-up on !4 does not duplicate.
+    # Azure PR comment on PR 7 is contributed (already open).
+    assert reviews["ours"] == {
+        "opened": 1,
+        "merged": 1,
+        "closed": 1,
+        "total": 3,
+    }, reviews
+    assert reviews["contributed"] == {
+        "opened": 0,
+        "merged": 1,
+        "closed": 0,
+        "total": 1,
+    }, reviews
     assert body["totals"]["jobs"] == 6
 
     later = jobs.update_job(
@@ -488,10 +499,53 @@ def test_analytics_reviews_count_unique_mrs(
     )
     assert later is not None
     after = http.get("/api/analytics", params={"period": "7d"}).json()["reviews"]
-    assert after["opened"] == 0, after
-    assert after["merged"] == 3, after
-    assert after["closed"] == 1, after
-    assert after["total"] == 4, after
+    assert after["ours"]["opened"] == 0, after
+    assert after["ours"]["merged"] == 2, after
+    assert after["ours"]["closed"] == 1, after
+    assert after["ours"]["total"] == 3, after
+    assert after["contributed"]["merged"] == 1, after
+
+    listed = http.get(
+        "/api/analytics/reviews",
+        params={"period": "7d", "state": "opened", "origin": "ours"},
+    )
+    assert listed.status_code == 200, listed.text
+    open_body = listed.json()
+    assert open_body["state"] == "opened"
+    assert open_body["origin"] == "ours"
+    assert open_body["total"] == 0
+
+    ours_merged = http.get(
+        "/api/analytics/reviews",
+        params={"period": "7d", "state": "merged", "origin": "ours"},
+    ).json()
+    assert ours_merged["total"] == 2, ours_merged
+    urls = [row["url"] for row in ours_merged["items"]]
+    assert urls.count(
+        "https://gitlab.example.com/acme/app/-/merge_requests/4"
+    ) == 1, urls
+    same = [
+        row
+        for row in ours_merged["items"]
+        if row["url"].endswith("/merge_requests/4")
+    ]
+    assert same and same[0]["jobs"] == 2
+    assert same[0]["origin"] == "ours"
+    assert {row["state"] for row in ours_merged["items"]} == {"merged"}
+
+    contrib = http.get(
+        "/api/analytics/reviews",
+        params={"period": "7d", "origin": "contributed"},
+    ).json()
+    assert contrib["total"] == 1
+    assert contrib["items"][0]["url"].endswith("pullrequest/7")
+    assert contrib["items"][0]["origin"] == "contributed"
+
+    all_list = http.get("/api/analytics/reviews", params={"period": "7d"}).json()
+    assert all_list["total"] == 4
+    assert all_list["state"] == "all"
+    bad = http.get("/api/analytics/reviews", params={"state": "nope"})
+    assert bad.status_code == 400
 
 
 def test_analytics_in_flight_and_combined_filters(
