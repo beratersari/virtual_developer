@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { fetchAnalytics } from '../../api/client'
+import { ApiError, fetchAnalytics } from '../../api/client'
 import type {
   AnalyticsFacet,
   AnalyticsNamedCount,
@@ -237,6 +237,13 @@ export function AnalyticsPage() {
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
+      // Live ticks must not abort an in-flight chart GET. Doing that on an
+      // 8s cadence while aggregation takes longer looks like a hang (spinner
+      // forever) or a false "Request timed out". Period/bucket/filter changes
+      // still cancel the previous GET so requests do not stack.
+      if (opts?.quiet && abortRef.current && !abortRef.current.signal.aborted) {
+        return
+      }
       abortRef.current?.abort()
       const ac = new AbortController()
       abortRef.current = ac
@@ -266,7 +273,14 @@ export function AnalyticsPage() {
       } catch (e) {
         if (req !== reqId.current || ac.signal.aborted) return
         if (!opts?.quiet) {
-          setError(e instanceof Error ? e.message : 'Load failed')
+          const timedOut = e instanceof ApiError && e.status === 408
+          setError(
+            timedOut
+              ? 'Analytics took too long. Try a shorter period or fewer filters.'
+              : e instanceof Error
+                ? e.message
+                : 'Load failed',
+          )
         }
       } finally {
         if (req === reqId.current) setLoading(false)
@@ -300,7 +314,8 @@ export function AnalyticsPage() {
     lastGenReload.current = now
     void load({ quiet: true })
     // Reload on live ticks only. Including `load` here refetched on every
-    // bucket/period click and could abort the in-flight chart request.
+    // bucket/period click. Quiet loads skip while a chart GET is in flight
+    // so a live tick cannot abort (and restack) a slow aggregation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live.generation])
 

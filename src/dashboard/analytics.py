@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -34,6 +35,18 @@ _RANGE_PRESETS = {
 
 _MAX_BUCKETS = 400
 _TOP_MODELS = 8
+# Slightly under the SPA Analytics GET budget (60s) so the handler can
+# answer 504 instead of leaving the browser on a spinner until abort.
+ANALYTICS_TIMEOUT_SECONDS = 55.0
+
+
+class AnalyticsCancelled(Exception):
+    """Client disconnected (or the operator aborted) mid-aggregation."""
+
+
+def _throw_if_cancelled(cancel: Optional[threading.Event]) -> None:
+    if cancel is not None and cancel.is_set():
+        raise AnalyticsCancelled()
 
 _CATEGORY_LABELS = {
     "plan": "Plan",
@@ -323,8 +336,15 @@ def build_analytics(
     issue_key: str = "",
     q: str = "",
     store: Optional[JobStore] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> AnalyticsResponse:
-    """Aggregate stored jobs for the Analytics page."""
+    """Aggregate stored jobs for the Analytics page.
+
+    ``cancel`` is set when the HTTP client disconnects or the handler
+    hits ``ANALYTICS_TIMEOUT_SECONDS``. The walk stops instead of stacking
+    behind a superseded GET.
+    """
+    _throw_if_cancelled(cancel)
     js = store or default_job_store
     now = datetime.now().replace(microsecond=0)
     want_status = _csv_set(status)
@@ -342,8 +362,11 @@ def build_analytics(
     search = (q or "").strip()
 
     jobs = js.iter_jobs() if hasattr(js, "iter_jobs") else js.list_jobs(limit=5000)
+    _throw_if_cancelled(cancel)
     dated: List[Tuple[datetime, Dict[str, Any]]] = []
-    for job in jobs:
+    for i, job in enumerate(jobs):
+        if i % 32 == 0:
+            _throw_if_cancelled(cancel)
         when = _job_when(job)
         if when is None:
             continue
@@ -369,6 +392,7 @@ def build_analytics(
     bucket_key = _coarsen(start, end, bucket_key)
 
     in_range = [(w, j) for w, j in dated if start <= w <= end]
+    _throw_if_cancelled(cancel)
     facet_cat: Dict[str, int] = defaultdict(int)
     facet_src: Dict[str, int] = defaultdict(int)
     facet_model: Dict[str, int] = defaultdict(int)
@@ -376,7 +400,9 @@ def build_analytics(
     facet_agent: Dict[str, int] = defaultdict(int)
     facet_status: Dict[str, int] = defaultdict(int)
     facet_repo: Dict[str, int] = defaultdict(int)
-    for _w, job in in_range:
+    for i, (_w, job) in enumerate(in_range):
+        if i % 32 == 0:
+            _throw_if_cancelled(cancel)
         facet_cat[job_category(str(job.get("workflow_type") or ""))] += 1
         facet_src[_source_id(job)] += 1
         mid = _model_id(job)
@@ -390,7 +416,9 @@ def build_analytics(
             facet_repo[repo] += 1
 
     matched: List[Tuple[datetime, Dict[str, Any]]] = []
-    for when, job in in_range:
+    for i, (when, job) in enumerate(in_range):
+        if i % 32 == 0:
+            _throw_if_cancelled(cancel)
         st = str(job.get("status") or "").strip().lower()
         cat = job_category(str(job.get("workflow_type") or ""))
         src = _source_id(job)
@@ -433,7 +461,9 @@ def build_analytics(
     by_agent: Dict[str, Dict[str, int]] = defaultdict(_empty_counts)
     model_series: Dict[datetime, Dict[str, int]] = {k: {} for k in keys}
 
-    for when, job in matched:
+    for i, (when, job) in enumerate(matched):
+        if i % 32 == 0:
+            _throw_if_cancelled(cancel)
         out = _outcome(str(job.get("status") or ""))
         _bump(totals, out)
         cat = job_category(str(job.get("workflow_type") or ""))
