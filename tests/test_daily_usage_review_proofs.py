@@ -394,18 +394,14 @@ def _start_azure_listener() -> Tuple[str, List[str], ThreadingHTTPServer]:
     return f"http://{host}:{port}", posts, httpd
 
 
-@pytest.mark.xfail(
-    reason="Azure /yaver on plan_ready still has no PR wait note (not in this fix)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_azure_yaver_on_plan_ready_must_post_a_wait_note_on_the_pr(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):
     """``@yaver /yaver`` on a PR titled feat(KAN-12) while Jira is plan_ready.
 
-    GitLab posts a wait note. Azure finishes the queue row as skipped and
-    leaves the PR thread silent, so the operator thinks the bot ignored them.
+    Waiting is intentional (do not start implement). The PR thread must
+    still get the same wait note GitLab posts, not stay silent.
     """
     paths = _isolate_data(tmp_path, monkeypatch)
     plan = paths["plans"] / "KAN-12.md"
@@ -497,6 +493,10 @@ async def test_azure_yaver_on_plan_ready_must_post_a_wait_note_on_the_pr(
             live = sm.get_state("KAN-12")
             assert live is not None
             assert live.status == TaskStatus.PLAN_READY
+            qid = resp.json().get("queue_id")
+            rec = proc.queue_store.get(qid) if qid else None
+            assert rec is not None
+            assert rec.get("status") == "skipped", rec
         finally:
             server.should_exit = True
             try:

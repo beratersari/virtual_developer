@@ -1,3 +1,10 @@
+# Yaver 0.9.50
+
+Analytics no longer hangs.
+Issue key is exact. Azure
+/yaver on a waiting plan
+posts a note on the PR.
+
 # Yaver 0.9.49
 
 Analytics no longer times

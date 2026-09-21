@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Set
 
@@ -1518,7 +1519,8 @@ def create_dashboard_app(
         return result
 
     @app.get("/api/analytics")
-    def analytics(
+    async def analytics(
+        request: Request,
         period: str = Query(default="30d"),
         bucket: str = Query(default="auto"),
         date_from: str = Query(default="", alias="from"),
@@ -1533,24 +1535,69 @@ def create_dashboard_app(
         issue_key: str = Query(default=""),
         q: str = Query(default=""),
     ) -> dict:
-        """Job counts over time plus filter facets (status, model, category, …)."""
-        from src.dashboard.analytics import build_analytics
+        """Job counts over time plus filter facets (status, model, category, …).
 
-        return build_analytics(
-            period=period,
-            bucket=bucket,
-            date_from=date_from,
-            date_to=date_to,
-            status=status,
-            category=category,
-            source=source,
-            model=model,
-            backend=backend,
-            agent=agent,
-            repository=repository,
-            issue_key=issue_key,
-            q=q,
-        ).model_dump()
+        Aggregation runs in a worker thread. A superseded SPA GET (period /
+        bucket / filter change) disconnects; this handler then stops the walk
+        instead of stacking. A hard timeout keeps a stuck store from hanging
+        the page past the SPA budget.
+        """
+        from src.dashboard.analytics import (
+            ANALYTICS_TIMEOUT_SECONDS,
+            AnalyticsCancelled,
+            build_analytics,
+        )
+
+        cancel = threading.Event()
+
+        async def _watch_disconnect() -> None:
+            try:
+                while not cancel.is_set():
+                    if await request.is_disconnected():
+                        cancel.set()
+                        return
+                    await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                return
+
+        watcher = asyncio.create_task(_watch_disconnect())
+        try:
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(
+                    build_analytics,
+                    period=period,
+                    bucket=bucket,
+                    date_from=date_from,
+                    date_to=date_to,
+                    status=status,
+                    category=category,
+                    source=source,
+                    model=model,
+                    backend=backend,
+                    agent=agent,
+                    repository=repository,
+                    issue_key=issue_key,
+                    q=q,
+                    cancel=cancel,
+                ),
+                timeout=ANALYTICS_TIMEOUT_SECONDS,
+            )
+            return payload.model_dump()
+        except AnalyticsCancelled:
+            return Response(status_code=204)
+        except asyncio.TimeoutError:
+            cancel.set()
+            raise HTTPException(
+                status_code=504,
+                detail="Analytics timed out. Try a shorter period or fewer filters.",
+            ) from None
+        finally:
+            cancel.set()
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
 
     @app.get("/api/models")
     def get_models(refresh: bool = False, backend: str = "") -> dict:

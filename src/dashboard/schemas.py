@@ -330,6 +330,7 @@ class AnalyticsPoint(BaseModel):
     completed: int = 0
     error: int = 0
     cancelled: int = 0
+    plan_ready: int = 0
     in_flight: int = 0
 
 
@@ -340,6 +341,7 @@ class AnalyticsNamedCount(BaseModel):
     completed: int = 0
     error: int = 0
     cancelled: int = 0
+    plan_ready: int = 0
     in_flight: int = 0
     share: float = 0.0
 
@@ -366,6 +368,7 @@ class AnalyticsResponse(BaseModel):
     categories: List[AnalyticsNamedCount] = Field(default_factory=list)
     sources: List[AnalyticsNamedCount] = Field(default_factory=list)
     backends: List[AnalyticsNamedCount] = Field(default_factory=list)
+    agents: List[AnalyticsNamedCount] = Field(default_factory=list)
     facets: Dict[str, List[AnalyticsFacet]] = Field(default_factory=dict)
     matched: int = 0
     scanned: int = 0

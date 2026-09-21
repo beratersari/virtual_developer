@@ -39,6 +39,15 @@ export class ApiError extends Error {
   }
 }
 
+/** Default SPA GET budget. Cheap pages stay snappy; Analytics overrides this. */
+export const DEFAULT_GET_TIMEOUT_MS = 15_000
+/** Analytics walks every job JSON; keep a hard cap so a stuck GET cannot hang forever. */
+export const ANALYTICS_TIMEOUT_MS = 60_000
+
+export function isAbortError(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError'
+}
+
 /** FastAPI `detail` may be a string, object, or validation list. */
 export function formatApiError(detail: unknown, fallback: string): string {
   if (detail == null || detail === '') return fallback
@@ -83,18 +92,23 @@ async function request<T>(
   }
   const { notifyUnauthorized } = await import('../auth/dashboardAuth')
   const method = (rest.method || 'GET').toUpperCase()
-  // Auth gate used to sit on "Loading…" for the full 15s GET budget when the
+  // Auth gate used to sit on "Loading…" for the full GET budget when the
   // daemon event loop was busy (Jira/GitLab on the loop, models CLI, …).
-  const budget = timeoutMs ?? (method === 'GET' ? 15_000 : undefined)
+  const budget = timeoutMs ?? (method === 'GET' ? DEFAULT_GET_TIMEOUT_MS : undefined)
   const ctrl = new AbortController()
-  const abortCtrl = () => ctrl.abort()
+  let timedOut = false
+  const abortFromTimer = () => {
+    timedOut = true
+    ctrl.abort()
+  }
+  const abortFromCaller = () => ctrl.abort()
   if (rest.signal) {
-    if (rest.signal.aborted) abortCtrl()
-    else rest.signal.addEventListener('abort', abortCtrl, { once: true })
+    if (rest.signal.aborted) abortFromCaller()
+    else rest.signal.addEventListener('abort', abortFromCaller, { once: true })
   }
   let timer: number | undefined
   if (budget != null) {
-    timer = window.setTimeout(abortCtrl, budget)
+    timer = window.setTimeout(abortFromTimer, budget)
   }
   try {
     const res = await fetch(path, {
@@ -118,14 +132,17 @@ async function request<T>(
     return body as T
   } catch (err) {
     if (err instanceof ApiError) throw err
-    if (err instanceof DOMException && err.name === 'AbortError') {
+    if (isAbortError(err)) {
+      // A filter/period change aborts the previous GET. That must not look
+      // like a timeout even if the 15s/60s timer also fired.
       if (rest.signal?.aborted) throw err
-      throw new ApiError('Request timed out', 408)
+      if (timedOut) throw new ApiError('Request timed out', 408)
+      throw err
     }
     throw err
   } finally {
     if (timer) window.clearTimeout(timer)
-    rest.signal?.removeEventListener('abort', abortCtrl)
+    rest.signal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
@@ -233,7 +250,7 @@ export function fetchAnalytics(opts?: {
   if (opts?.q) params.set('q', opts.q)
   const q = params.toString() ? `?${params.toString()}` : ''
   return request<AnalyticsPayload>(`/api/analytics${q}`, {
-    timeoutMs: opts?.timeoutMs ?? 60_000,
+    timeoutMs: opts?.timeoutMs ?? ANALYTICS_TIMEOUT_MS,
     signal: opts?.signal,
   })
 }

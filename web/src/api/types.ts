@@ -59,6 +59,7 @@ export type AnalyticsPoint = {
   completed: number
   error: number
   cancelled: number
+  plan_ready: number
   in_flight: number
 }
 
@@ -69,6 +70,7 @@ export type AnalyticsNamedCount = {
   completed: number
   error: number
   cancelled: number
+  plan_ready: number
   in_flight: number
   share: number
 }
@@ -95,6 +97,7 @@ export type AnalyticsPayload = {
   categories: AnalyticsNamedCount[]
   sources: AnalyticsNamedCount[]
   backends: AnalyticsNamedCount[]
+  agents: AnalyticsNamedCount[]
   facets: Record<string, AnalyticsFacet[]>
   matched: number
   scanned: number
