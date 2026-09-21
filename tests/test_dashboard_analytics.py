@@ -377,6 +377,123 @@ def test_analytics_issue_key_is_exact_not_substring(
     assert contains.json()["totals"]["jobs"] == 2
 
 
+def test_analytics_reviews_count_unique_mrs(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """Open / merged / closed are unique GitLab MRs and Azure PRs, not jobs."""
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    empty = http.get("/api/analytics", params={"period": "7d"}).json()["reviews"]
+    assert empty == {"opened": 0, "merged": 0, "closed": 0, "total": 0}
+
+    open_a = jobs.create_job(
+        issue_key="KAN-1",
+        summary="first push",
+        workflow_type="execution",
+        source="jira",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/4",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=4,
+    )
+    jobs.update_job(
+        open_a["job_id"],
+        started_at=_stamp(1),
+        status="completed",
+        merge_request_state="opened",
+    )
+    open_follow = jobs.create_job(
+        issue_key="KAN-1",
+        summary="follow-up on same MR",
+        workflow_type="execution",
+        source="gitlab",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/4",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=4,
+    )
+    jobs.update_job(
+        open_follow["job_id"],
+        started_at=_stamp(1, 11),
+        status="completed",
+        merge_request_state="opened",
+    )
+    merged = jobs.create_job(
+        issue_key="KAN-2",
+        summary="shipped",
+        workflow_type="execution",
+        source="jira",
+        status="completed",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/9",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=9,
+    )
+    jobs.update_job(
+        merged["job_id"],
+        started_at=_stamp(1, 12),
+        status="completed",
+        merge_request_state="merged",
+    )
+    closed = jobs.create_job(
+        issue_key="KAN-3",
+        summary="dropped",
+        workflow_type="execution",
+        source="jira",
+        status="cancelled",
+        merge_request_url="https://gitlab.example.com/acme/app/-/merge_requests/11",
+        gitlab_project="acme/app",
+        gitlab_mr_iid=11,
+    )
+    jobs.update_job(
+        closed["job_id"],
+        started_at=_stamp(1, 13),
+        status="cancelled",
+        merge_request_state="closed",
+    )
+    azure = jobs.create_job(
+        issue_key="KAN-4",
+        summary="tfs pr",
+        workflow_type="execution",
+        source="azure",
+        status="completed",
+        merge_request_url="https://tfs.example.com/tfs/DefaultCollection/App/_git/app/pullrequest/7",
+        azure_project="App",
+        azure_pr_id=7,
+    )
+    jobs.update_job(
+        azure["job_id"],
+        started_at=_stamp(1, 14),
+        status="completed",
+        merge_request_state="completed",
+    )
+    no_mr = jobs.create_job(
+        issue_key="KAN-5",
+        summary="plan only",
+        workflow_type="planning",
+        source="jira",
+        status="plan_ready",
+    )
+    jobs.update_job(no_mr["job_id"], started_at=_stamp(1, 15), status="plan_ready")
+
+    body = http.get("/api/analytics", params={"period": "7d"}).json()
+    reviews = body["reviews"]
+    assert reviews["opened"] == 1, reviews
+    assert reviews["merged"] == 2, reviews
+    assert reviews["closed"] == 1, reviews
+    assert reviews["total"] == 4, reviews
+    assert body["totals"]["jobs"] == 6
+
+    later = jobs.update_job(
+        open_follow["job_id"],
+        merge_request_state="merged",
+    )
+    assert later is not None
+    after = http.get("/api/analytics", params={"period": "7d"}).json()["reviews"]
+    assert after["opened"] == 0, after
+    assert after["merged"] == 3, after
+    assert after["closed"] == 1, after
+    assert after["total"] == 4, after
+
+
 def test_analytics_in_flight_and_combined_filters(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):
