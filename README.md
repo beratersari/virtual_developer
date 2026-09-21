@@ -15,8 +15,8 @@ Four ways work starts:
 | Intake | How it starts | After accept | After the job finishes |
 |--------|---------------|--------------|------------------------|
 | **Jira board** | Poller: To Do-like + bot assignee | Board → **In Progress** | Stays In Progress. Move it back to **To Do** to run again. |
-| **GitLab MR comment** | `@bot /yaver …` on a merge request | No board move | Reply on the same thread. Merged/closed MR deletes the temp clone. |
-| **Azure PR comment** | `@bot /yaver …` on a pull request | No board move | Reply on the same thread. Completed/abandoned PR deletes the temp clone. |
+| **GitLab MR comment** | `@bot /yaver …` on a merge request | No board move | Reply on the same thread. Merged/closed MR deletes the temp clone, the durable plan named in the MR title, and that key's local state (even if the Jira ticket is still `plan_ready`). Job history stays. |
+| **Azure PR comment** | `@bot /yaver …` on a pull request | No board move | Reply on the same thread. Completed/abandoned PR deletes the temp clone, the durable plan named in the PR title, and that key's local state. Job history stays. |
 | **Azure Boards work item** | Assign the bot on **To Do** / **In Progress** (or New / Active / Doing, …) | State → **In Progress** category (**Active** / **Doing** / **Committed** / **In Progress**) | Stays there. Yaver does **not** move it to Resolved or Done. |
 
 Same `Repository` + `Source branch` + `Target branch` + kind (`plan` vs `build`) resume the existing OpenCode session. Concurrency follows `MAX_CONCURRENT_JOBS`.
@@ -174,7 +174,7 @@ MR title: `feat(KAN-12): rate limit login`
 
 Yaver clones with the host PAT, resumes the **build** session for that repo + branches when one exists, replies on the same discussion, and opens/updates the MR if the agent committed.
 
-When the MR is **merged** or **closed**, Yaver deletes the matching temp clone.
+When the MR is **merged** or **closed**, Yaver deletes the matching temp clone, unlinks `{YAVER_DATA_DIR}/plans/{KEY}.md` for the key parsed from the title (`feat(KAN-12): …` → `KAN-12`), and drops that key's local issue state. Job JSON stays for Analytics. This is intentional even if the Jira ticket is still `plan_ready` or executing.
 
 ---
 

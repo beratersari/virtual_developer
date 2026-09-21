@@ -554,6 +554,10 @@ def _purge_merged_review_artifacts(
     Keeps ``job_*.json`` so Analytics still counts the run. Manual Jobs →
     Delete removes the store file. Does not touch the shared daemon log.
     Live jobs skip session-log delete.
+
+    The issue key comes from the MR/PR title (``feat(KAN-12)`` → ``KAN-12``).
+    Unlinking that plan file and local state is intentional, including when
+    the Jira ticket is still ``plan_ready`` or executing.
     """
     want = _norm_mr_url(mr_url)
     sids: List[str] = []
