@@ -188,14 +188,14 @@ class Logger:
         except Exception:
             pass
 
-    def debug(self, message: str) -> None:
-        self._log(LogLevel.DEBUG, message)
+    def debug(self, message: str, *args: object) -> None:
+        self._log(LogLevel.DEBUG, _interpolate(message, args))
 
-    def info(self, message: str) -> None:
-        self._log(LogLevel.INFO, message)
+    def info(self, message: str, *args: object) -> None:
+        self._log(LogLevel.INFO, _interpolate(message, args))
 
-    def warning(self, message: str) -> None:
-        self._log(LogLevel.WARNING, message)
+    def warning(self, message: str, *args: object) -> None:
+        self._log(LogLevel.WARNING, _interpolate(message, args))
 
     def error(self, message: str, exception: Optional[BaseException] = None) -> None:
         self._log(LogLevel.ERROR, message, exception)
@@ -217,6 +217,17 @@ def configure_stdio() -> None:
                 reconf(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+
+
+def _interpolate(message: str, args: tuple[object, ...]) -> str:
+    """Apply stdlib-style ``%`` args so a logging call cannot crash a job."""
+    if not args:
+        return message
+    try:
+        return message % args
+    except Exception:
+        extra = " ".join(str(a) for a in args)
+        return f"{message} {extra}" if extra else message
 
 
 def _write_stream(stream, text: str) -> None:

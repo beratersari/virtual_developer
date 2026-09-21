@@ -8,6 +8,20 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.54] — 2026-09-21
+
+GitLab review jobs keep the overview comment when an inline
+finding cannot be posted. Linux scripts are LF for WSL.
+
+### Fixed
+
+- A GitLab review keeps the overview comment when an inline finding
+  cannot be posted. That skip is logged and no longer fails the MR job.
+- Linux install and start scripts are stored as LF, so WSL bash can
+  run them.
+
+[0.9.54]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.54
+
 ## [0.9.53] — 2026-09-21
 
 Analytics splits MRs Yaver opened from MRs we only commented on.

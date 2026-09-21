@@ -1156,3 +1156,4 @@ def test_decide_gitlab_mr_reopen_does_not_delete(monkeypatch):
     assert not d.event.is_merged
     assert not d.event.is_closed
     assert not d.event.should_delete_clone
+

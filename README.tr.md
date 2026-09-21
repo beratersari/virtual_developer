@@ -15,8 +15,8 @@
 | Giriş | Nasıl başlar | Kabulden sonra | İş bitince |
 |--------|--------------|----------------|------------|
 | **Jira panosu** | Tarayıcı: Yapılacaklar benzeri sütun + bota atama | Pano → **Devam Ediyor** (In Progress) | Orada kalır. Yeniden çalıştırmak için **Yapılacaklar**’a alın. |
-| **GitLab MR yorumu** | Birleştirme isteğinde `@bot /yaver …` | Pano değişmez | Aynı konuda yanıt. Birleşen / kapanan MR geçici kopyayı siler. |
-| **Azure PR yorumu** | Çekme isteğinde `@bot /yaver …` | Pano değişmez | Aynı konuda yanıt. Tamamlanan / vazgeçilen PR geçici kopyayı siler. |
+| **GitLab MR yorumu** | Birleştirme isteğinde `@bot /yaver …` | Pano değişmez | Aynı konuda yanıt. Birleşen / kapanan MR geçici kopyayı, başlıktaki anahtarın kalıcı plan dosyasını ve o anahtarın yerel durumunu siler (Jira işi hâlâ `plan_ready` olsa da). İş geçmişi kalır. |
+| **Azure PR yorumu** | Çekme isteğinde `@bot /yaver …` | Pano değişmez | Aynı konuda yanıt. Tamamlanan / vazgeçilen PR geçici kopyayı, başlıktaki anahtarın kalıcı plan dosyasını ve o anahtarın yerel durumunu siler. İş geçmişi kalır. |
 | **Azure Boards iş öğesi** | Botu **Yapılacaklar** / **Devam Ediyor** (veya New / Active / Doing …) üzerinde atayın | Durum → **InProgress** karşılığı (**Active** / **Doing** / **Committed** / **In Progress**) | Orada kalır. Yaver öğeyi **Resolved** veya **Done** yapmaz. |
 
 Aynı `Repository` + `Source branch` + `Target branch` + tür (`plan` / `build`) mevcut OpenCode oturumunu sürdürür. Paralellik `MAX_CONCURRENT_JOBS` ile sınırlıdır.
@@ -174,7 +174,7 @@ MR başlığı: `feat(KAN-12): giriş hız sınırı`
 
 Yaver ev sahibi PAT ile klonlar, o depo + dallar için **build** oturumu varsa onu sürdürür, aynı tartışmada yanıtlar, ajan commitlediyse MR’yi açar veya günceller.
 
-MR **birleşince** veya **kapanınca** eşleşen geçici kopya silinir.
+MR **birleşince** veya **kapanınca** eşleşen geçici kopya silinir; başlıktan okunan anahtar için `{YAVER_DATA_DIR}/plans/{KEY}.md` ve yerel iş durumu da silinir (`feat(KAN-12): …` → `KAN-12`). Jira işi hâlâ `plan_ready` veya çalışıyor olsa da bu **bilinçli** temizliktir. Analytics için iş JSON’u kalır.
 
 ---
 

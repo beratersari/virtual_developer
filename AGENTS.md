@@ -63,6 +63,7 @@ Yaver is a Python daemon that:
 - Unused temp clones older than ``TEMP_CLONE_MAX_AGE_DAYS`` (default 7) are deleted hourly. Live jobs are never purged. 0 = keep forever (operators delete from Storage).
 - Storage Delete is **disabled / refused** while a live job owns the clone (`in_use`). Stop the job first.
 - Dashboard schedule **Cancel** is only for `scheduled` / `error`. **`dispatching` cannot be cancelled** (would abort a live job on the same issue).
+- GitLab MR **merged/closed** and Azure PR **completed/abandoned** cleanup uses the issue key parsed from the title (``feat(KAN-12): …`` → ``KAN-12``, or the synthetic ``GL-…`` / ``AZ-…`` fallback). That **unlinks** ``{YAVER_DATA_DIR}/plans/{KEY}.md`` and **deletes local issue state** for that key — including while the Jira ticket is still ``plan_ready`` or executing. Job JSON stays for Analytics. The matching temp clone is deleted. **Intentional.** Do not “fix” by keeping the plan file because implement has not run yet. Proof: ``tests/test_daily_usage_review_proofs.py::test_gitlab_merge_webhook_deletes_plan_named_in_mr_title``.
 
 ### Intake vs `plan_ready` (**intentional** — not a stuck bug)
 
@@ -120,6 +121,11 @@ To Do and assigned to the bot. That is the rework loop: To Do means “run again
 The bot then moves the issue to In Progress. If In Progress transition fails
 and the ticket stays To Do, the next poll will try again — same rule, not a
 poller bug.
+
+**Do not “fix”** GitLab MR merge/close (or Azure PR completed/abandoned) deleting
+``plans/{KEY}.md`` and local state for the key in the title. That is merge
+cleanup. ``plan_execute`` after that needs a new plan run (To Do rework or a
+new Mode: plan ticket).
 
 ### Fail → In Progress → fix → To Do requeue (**intentional**)
 

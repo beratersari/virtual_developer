@@ -105,9 +105,8 @@ def _post_gitlab(
                 variants.append(item)
         if not variants:
             logger.warning(
-                "review finding skip %s:%s: no GitLab position",
-                finding.path,
-                finding.start_line,
+                f"review finding skip {finding.path}:{finding.start_line}: "
+                "no GitLab position"
             )
             continue
         body = format_discussion(finding)
@@ -125,9 +124,7 @@ def _post_gitlab(
             posted += 1
         else:
             logger.warning(
-                "review finding post failed %s:%s",
-                finding.path,
-                finding.start_line,
+                f"review finding post failed {finding.path}:{finding.start_line}"
             )
     if posted:
         logger.info(f"review findings posted {posted} GitLab thread(s)")
@@ -160,9 +157,8 @@ def _post_azure(
         context = azure_thread_context(finding, diffmap)
         if not context:
             logger.warning(
-                "review finding skip %s:%s: no Azure position",
-                finding.path,
-                finding.start_line,
+                f"review finding skip {finding.path}:{finding.start_line}: "
+                "no Azure position"
             )
             continue
         body = format_discussion(finding)
@@ -183,9 +179,7 @@ def _post_azure(
             posted += 1
         else:
             logger.warning(
-                "review finding post failed %s:%s",
-                finding.path,
-                finding.start_line,
+                f"review finding post failed {finding.path}:{finding.start_line}"
             )
     if posted:
         logger.info(f"review findings posted {posted} Azure thread(s)")

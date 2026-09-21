@@ -119,7 +119,7 @@ def _isolate_data(tmp_path: Path, monkeypatch) -> Dict[str, Path]:
 
 
 # ---------------------------------------------------------------------------
-# 1) GitLab merge webhook must not wipe a waiting Jira plan
+# 1) GitLab merge webhook deletes the plan named in the MR title (intentional)
 # ---------------------------------------------------------------------------
 
 

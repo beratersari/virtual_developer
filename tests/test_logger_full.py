@@ -126,6 +126,22 @@ def test_info_line_includes_caller_file_and_line(capsys):
     assert "caller location check" in out
 
 
+def test_warning_accepts_percent_args(capsys):
+    lg = Logger()
+    lg.set_color_output(False)
+    lg.warning("review finding skip %s:%s: no GitLab position", "src/buf.cpp", 5)
+    err = capsys.readouterr().err
+    assert "review finding skip src/buf.cpp:5: no GitLab position" in err
+
+
+def test_warning_percent_mismatch_does_not_raise(capsys):
+    lg = Logger()
+    lg.set_color_output(False)
+    lg.warning("plain %s", "a", "b")
+    err = capsys.readouterr().err
+    assert "plain %s a b" in err
+
+
 def test_format_collapses_multiline_message():
     lg = Logger()
     lg.set_color_output(False)

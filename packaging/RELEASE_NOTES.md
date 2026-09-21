@@ -1,3 +1,9 @@
+# Yaver 0.9.54
+
+GitLab review comments stay
+up when an inline note fails.
+Linux scripts run under WSL.
+
 # Yaver 0.9.53
 
 Analytics splits MRs we

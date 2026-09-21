@@ -130,6 +130,94 @@ def test_post_inline_skips_without_clone(tmp_path: Path):
     assert n == 0
 
 
+def _post_inline(tmp_path: Path, *, azure: bool, finding=None, **client_patches):
+    (tmp_path / ".git").mkdir()
+    finding = finding or _finding()
+    patches = [
+        patch("src.review.post.merge_base", return_value="aaa"),
+        patch("src.review.post.head_sha", return_value="bbb"),
+        patch("src.review.post.unified_diff", return_value=_DIFF),
+    ]
+    if azure:
+        az = MagicMock()
+        az.pr_iteration_span.return_value = (1, 2)
+        az.list_pr_threads.return_value = []
+        az.post_pr_file_thread.return_value = {"id": 9}
+        for name, value in client_patches.items():
+            setattr(az, name, value)
+        patches.append(patch("src.azure.client.AzureDevOpsClient", return_value=az))
+        client = az
+        meta = {
+            "azure_host": "tfs.example.com",
+            "azure_project": "P",
+            "azure_repository": "R",
+            "azure_pr_id": 7,
+        }
+    else:
+        gl = MagicMock()
+        gl.get_mr_diff_refs.return_value = ("aaa", "aaa", "bbb")
+        gl.list_mr_discussions.return_value = []
+        gl.post_mr_discussion.return_value = {"id": "d1"}
+        for name, value in client_patches.items():
+            setattr(gl, name, value)
+        patches.append(patch("src.gitlab.client.GitlabClient", return_value=gl))
+        client = gl
+        meta = {
+            "gitlab_host": "gitlab.example.com",
+            "gitlab_project": "g/r",
+            "gitlab_mr_iid": 12,
+        }
+    with patches[0], patches[1], patches[2], patches[3]:
+        n = post_inline_findings(
+            findings=[finding],
+            workdir=tmp_path,
+            target_branch="develop",
+            azure=azure,
+            meta=meta,
+        )
+    return n, client
+
+
+def test_post_inline_gitlab_skips_finding_without_position(tmp_path: Path):
+    n, gl = _post_inline(
+        tmp_path,
+        azure=False,
+        finding=_finding(path="src/missing.cpp"),
+    )
+    assert n == 0
+    gl.post_mr_discussion.assert_not_called()
+
+
+def test_post_inline_gitlab_continues_when_discussion_post_fails(tmp_path: Path):
+    n, gl = _post_inline(
+        tmp_path,
+        azure=False,
+        post_mr_discussion=MagicMock(return_value=None),
+    )
+    assert n == 0
+    gl.post_mr_discussion.assert_called()
+
+
+def test_post_inline_azure_skips_finding_without_position(tmp_path: Path):
+    n, az = _post_inline(
+        tmp_path,
+        azure=True,
+        finding=_finding(path="src/missing.cpp"),
+    )
+    assert n == 0
+    az.post_pr_file_thread.assert_not_called()
+
+
+def test_post_inline_azure_continues_when_thread_post_fails(tmp_path: Path):
+    n, az = _post_inline(
+        tmp_path,
+        azure=True,
+        post_pr_file_thread=MagicMock(return_value=None),
+    )
+    assert n == 0
+    az.post_pr_file_thread.assert_called()
+
+
 def test_deliver_review_ask_does_not_post_findings():
     from src.processor import JobProcessor
 
@@ -158,3 +246,36 @@ def test_deliver_review_ask_does_not_post_findings():
     post.assert_not_called()
     body = proc._post_gitlab_mr_reply.call_args[0][1]
     assert "opencoderman-findings" not in body
+
+
+def test_deliver_review_survives_findings_post_error():
+    from src.processor import JobProcessor
+
+    proc = object.__new__(JobProcessor)
+    state = MagicMock()
+    state.issue_key = "KAN-1"
+    state.metadata = {}
+    live = MagicMock()
+    live.metadata = {"target_branch": "develop"}
+    proc.state_manager = MagicMock()
+    proc.state_manager.get_state.return_value = live
+    proc._post_gitlab_mr_reply = MagicMock()
+    proc._post_azure_pr_reply = MagicMock()
+    proc._comment_command = MagicMock(return_value="review")
+    proc._workdir_for_issue = MagicMock(return_value=None)
+    with patch(
+        "src.review.post.post_inline_findings",
+        side_effect=TypeError(
+            "Logger.warning() takes 2 positional arguments but 4 were given"
+        ),
+    ):
+        JobProcessor._deliver_review_comment(
+            proc,
+            state,
+            MagicMock(command="review", target_branch="develop"),
+            "overview\n```opencoderman-findings\n"
+            '{"findings":[{"path":"a.py","start_line":1,"title":"t","body":"b"}]}\n```',
+            azure=False,
+        )
+    proc._post_gitlab_mr_reply.assert_called_once()
+    proc.state_manager.update_state.assert_not_called()
