@@ -5402,13 +5402,19 @@ class JobProcessor:
             or getattr(event, "target_branch", "")
             or ""
         )
-        posted = post_inline_findings(
-            findings=findings,
-            workdir=self._workdir_for_issue(state.issue_key),
-            target_branch=target,
-            azure=azure,
-            meta=meta,
-        )
+        posted = 0
+        try:
+            posted = post_inline_findings(
+                findings=findings,
+                workdir=self._workdir_for_issue(state.issue_key),
+                target_branch=target,
+                azure=azure,
+                meta=meta,
+            )
+        except Exception as e:
+            logger.exception(
+                f"{state.issue_key}: review findings post failed: {e}", e
+            )
         if posted:
             self.state_manager.update_state(
                 state.issue_key,
