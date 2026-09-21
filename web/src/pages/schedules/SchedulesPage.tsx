@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   cancelSchedule,
@@ -40,6 +40,7 @@ import {
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
 const CUSTOM_REPO = '__custom__'
+const PAGE_SIZE = 25
 
 /** Picker default for "schedule later" only — not used by Run now. */
 function defaultWhen(): string {
@@ -56,32 +57,57 @@ function scheduledAtForSubmit(when: string, dispatchNow: boolean): string {
 export function SchedulesPage() {
   const live = useLive()
   const [rows, setRows] = useState<ScheduleItem[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
   const [cancelId, setCancelId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<'existing' | 'new' | 'mr' | 'pr'>('existing')
   const lastGenReload = useRef(0)
+  const reqId = useRef(0)
 
-  const reload = async () => {
+  const reload = useCallback(async (pageOverride?: number) => {
+    const nextPage = pageOverride ?? page
+    const req = ++reqId.current
     try {
-      const p = await fetchSchedules()
+      const p = await fetchSchedules({ page: nextPage, pageSize: PAGE_SIZE })
+      if (req !== reqId.current) return
+      const size = p.page_size ?? PAGE_SIZE
+      const count = p.total ?? 0
+      const pages = Math.max(1, Math.ceil(count / size) || 1)
+      const landed = p.page ?? nextPage
       setRows(p.schedules || [])
+      setTotal(count)
+      setPageSize(size)
       setError(null)
+      if (landed > pages) {
+        setPage(pages)
+        return
+      }
+      if (landed !== nextPage) setPage(landed)
     } catch (e) {
+      if (req !== reqId.current) return
       setError(e instanceof Error ? e.message : 'Load failed')
     }
-  }
+  }, [page])
 
   useEffect(() => {
     void reload()
-  }, [])
+  }, [reload])
   useEffect(() => {
     const now = Date.now()
     if (now - lastGenReload.current < 1500) return
     lastGenReload.current = now
     void reload()
-  }, [live.generation])
+  }, [live.generation, reload])
+
+  const currentPage = page
+  const size = pageSize || PAGE_SIZE
+  const totalPages = Math.max(1, Math.ceil(total / size) || 1)
+  const from = total === 0 ? 0 : (currentPage - 1) * size + 1
+  const to = Math.min(currentPage * size, total)
 
   return (
     <section className="space-y-5">
@@ -135,15 +161,36 @@ export function SchedulesPage() {
         </button>
       </div>
       {mode === 'existing' ? (
-        <Existing onDone={() => void reload()} />
+        <Existing onDone={() => { setPage(1); void reload(1) }} />
       ) : mode === 'mr' ? (
-        <ExistingMr onDone={() => void reload()} />
+        <ExistingMr onDone={() => { setPage(1); void reload(1) }} />
       ) : mode === 'pr' ? (
-        <ExistingPr onDone={() => void reload()} />
+        <ExistingPr onDone={() => { setPage(1); void reload(1) }} />
       ) : (
-        <CreateNew onDone={() => void reload()} />
+        <CreateNew onDone={() => { setPage(1); void reload(1) }} />
       )}
       {error && <p className="text-sm text-danger-text">{error}</p>}
+      <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-text-muted">
+        <span>
+          {from}–{to} of {total}
+        </span>
+        <button
+          type="button"
+          disabled={currentPage <= 1}
+          onClick={() => setPage((p) => Math.max(1, p - 1))}
+          className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
+        >
+          Prev
+        </button>
+        <button
+          type="button"
+          disabled={currentPage >= totalPages}
+          onClick={() => setPage((p) => p + 1)}
+          className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
+        >
+          Next
+        </button>
+      </div>
       <ul className="divide-y divide-border rounded-2xl border border-border bg-surface px-4">
         {rows.map((s) => (
           <li key={s.schedule_id} className="py-3 text-sm">

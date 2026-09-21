@@ -87,9 +87,17 @@ export type AnalyticsModelPoint = {
   counts: Record<string, number>
 }
 
+export type AnalyticsReviews = {
+  opened: number
+  merged: number
+  closed: number
+  total: number
+}
+
 export type AnalyticsPayload = {
   range: AnalyticsRange
   totals: AnalyticsNamedCount
+  reviews?: AnalyticsReviews
   series: AnalyticsPoint[]
   models: AnalyticsNamedCount[]
   model_series: AnalyticsModelPoint[]
@@ -419,6 +427,8 @@ export type SchedulePreview = {
 export type SchedulesPayload = {
   schedules: ScheduleItem[]
   total: number
+  page?: number
+  page_size?: number
   server_time?: string
 }
 

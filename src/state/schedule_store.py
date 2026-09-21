@@ -278,15 +278,13 @@ class ScheduleStore:
         *,
         status: Optional[str] = None,
         limit: Optional[int] = 200,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         cap = None if limit is None else max(0, int(limit))
+        start = max(0, int(offset or 0))
         with self._lock:
-            for path in sorted(
-                self.schedules_dir.glob("sched_*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            ):
+            for path in self.schedules_dir.glob("sched_*.json"):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         rec = json.load(f)
@@ -295,14 +293,30 @@ class ScheduleStore:
                 if status and (rec.get("status") or "") != status:
                     continue
                 items.append(rec)
-                if cap is not None and len(items) >= cap:
-                    break
-        # Sort by scheduled_at then created_at (newest first for list UI)
+        # Newest scheduled_at first (list UI). Slice after sort so an older
+        # waiting row is not dropped behind newer dispatched files.
         items.sort(
             key=lambda r: r.get("scheduled_at") or r.get("created_at") or "",
             reverse=True,
         )
-        return items
+        if cap is None:
+            return items[start:]
+        return items[start : start + cap]
+
+    def count_schedules(self, *, status: Optional[str] = None) -> int:
+        """How many schedule files match *status* (all files when unset)."""
+        n = 0
+        with self._lock:
+            for path in self.schedules_dir.glob("sched_*.json"):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        rec = json.load(f)
+                except Exception:
+                    continue
+                if status and (rec.get("status") or "") != status:
+                    continue
+                n += 1
+        return n
 
     def has_open_for_issue(
         self,

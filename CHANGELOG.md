@@ -8,6 +8,27 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.52] — 2026-09-21
+
+Selected code on GitLab and Azure review comments reaches the agent.
+Scheduled list pages. Analytics counts unique MRs.
+
+### Added
+
+- Analytics Open / Merged / Closed / Total unique merge-request cards
+  from stored job history.
+- Scheduled jobs list paginates like Jobs (page size 25).
+
+### Fixed
+
+- GitLab inline ``/yaver`` (and ``/review`` / ``/ask``) on a selected
+  range puts file, lines, and the clone snippet in the prompt. A reply
+  on that thread loads the original range and earlier notes.
+- Azure PR file-thread comments load file, lines, and parent comments
+  from the thread API (the webhook does not send them).
+
+[0.9.52]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.52
+
 ## [0.9.51] — 2026-09-21
 
 A second GitLab ``/yaver`` on the same MR no longer fails to push.

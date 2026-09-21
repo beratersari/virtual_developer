@@ -515,6 +515,30 @@ export function AnalyticsPage() {
         />
       </div>
 
+      <div>
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+          Merge requests
+        </div>
+        <p className="mb-3 text-xs text-text-muted">
+          Unique GitLab MRs and Azure PRs on jobs in this filter. State comes from
+          Yaver history (open when created, merged/closed when the webhook arrives).
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CountCard label="Open" value={payload?.reviews?.opened ?? 0} />
+          <CountCard
+            label="Merged"
+            value={payload?.reviews?.merged ?? 0}
+            tone="success"
+          />
+          <CountCard
+            label="Closed"
+            value={payload?.reviews?.closed ?? 0}
+            tone="muted"
+          />
+          <CountCard label="Total MRs" value={payload?.reviews?.total ?? 0} />
+        </div>
+      </div>
+
       <div className="vd-card p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">Jobs over time</h2>

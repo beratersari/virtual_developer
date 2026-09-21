@@ -15,6 +15,7 @@ from src.dashboard.schemas import (
     AnalyticsPoint,
     AnalyticsRange,
     AnalyticsResponse,
+    AnalyticsReviews,
 )
 from src.state.job_store import JobStore, job_store as default_job_store
 
@@ -220,6 +221,64 @@ def _normalize_repo(raw: str) -> str:
 
 def _repo_key(job: Dict[str, Any]) -> str:
     return _normalize_repo(str(job.get("repository_url") or ""))
+
+
+_MERGED_REVIEW = frozenset({"merged", "completed"})
+_CLOSED_REVIEW = frozenset({"closed", "abandoned"})
+_REVIEW_RANK = {"opened": 1, "closed": 2, "merged": 3}
+
+
+def _review_identity(job: Dict[str, Any]) -> str:
+    """Stable id for one GitLab MR or Azure PR (URL first, then host ids)."""
+    url = str(job.get("merge_request_url") or "").strip().rstrip("/").lower()
+    if url:
+        return f"url:{url}"
+    project = str(job.get("gitlab_project") or "").strip().lower()
+    try:
+        iid = int(job.get("gitlab_mr_iid") or 0)
+    except (TypeError, ValueError):
+        iid = 0
+    if project and iid > 0:
+        return f"gl:{project}:{iid}"
+    azure_project = str(job.get("azure_project") or "").strip().lower()
+    try:
+        pr_id = int(job.get("azure_pr_id") or 0)
+    except (TypeError, ValueError):
+        pr_id = 0
+    if azure_project and pr_id > 0:
+        return f"az:{azure_project}:{pr_id}"
+    return ""
+
+
+def _review_bucket(state: Any) -> str:
+    raw = str(state or "").strip().lower()
+    if raw in _MERGED_REVIEW:
+        return "merged"
+    if raw in _CLOSED_REVIEW:
+        return "closed"
+    return "opened"
+
+
+def _review_counts(jobs: Iterable[Dict[str, Any]]) -> AnalyticsReviews:
+    """Unique MRs/PRs. Several jobs can share one URL; keep the latest state."""
+    best: Dict[str, str] = {}
+    for job in jobs:
+        ident = _review_identity(job)
+        if not ident:
+            continue
+        bucket = _review_bucket(job.get("merge_request_state"))
+        prev = best.get(ident)
+        if prev is None or _REVIEW_RANK[bucket] >= _REVIEW_RANK[prev]:
+            best[ident] = bucket
+    opened = sum(1 for v in best.values() if v == "opened")
+    merged = sum(1 for v in best.values() if v == "merged")
+    closed = sum(1 for v in best.values() if v == "closed")
+    return AnalyticsReviews(
+        opened=opened,
+        merged=merged,
+        closed=closed,
+        total=len(best),
+    )
 
 
 def _model_id(job: Dict[str, Any]) -> str:
@@ -545,6 +604,7 @@ def build_analytics(
             end=end.isoformat(timespec="seconds"),
         ),
         totals=_named("all", totals, label="All", total_jobs=page_total),
+        reviews=_review_counts(j for _, j in matched),
         series=points,
         models=_sort_named(by_model),
         model_series=model_points,

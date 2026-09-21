@@ -1,3 +1,12 @@
+# Yaver 0.9.52
+
+Selected GitLab and Azure
+code ranges and thread
+replies reach the agent
+prompt. Scheduled list
+pages. Analytics counts
+unique MRs.
+
 # Yaver 0.9.51
 
 A second /yaver on the

@@ -625,6 +625,50 @@ class AzureDevOpsClient:
             return []
         return [row for row in rows if isinstance(row, dict)]
 
+    def get_pr_thread(
+        self,
+        *,
+        project: str,
+        repository: Any,
+        pr_id: int,
+        thread_id: str = "",
+        comment_id: str = "",
+        comment_content: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """One PR thread (file range + comments) when the webhook omitted it."""
+        tid = str(thread_id or "").strip()
+        if not tid:
+            tid = self.find_thread_id_for_comment(
+                project=project,
+                repository=repository,
+                pr_id=pr_id,
+                comment_id=comment_id,
+                comment_content=comment_content,
+            )
+        if not tid or not self.api_base:
+            return None
+        try:
+            iid = int(pr_id)
+        except (TypeError, ValueError):
+            return None
+        if iid <= 0:
+            return None
+        url = (
+            f"{self._repo_url(project, repository)}/pullrequests/{iid}/threads/"
+            f"{quote(tid, safe='')}"
+        )
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                resp = self._request(client, "GET", url)
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                return data if isinstance(data, dict) else None
+        except Exception as e:
+            azure_warning(
+                f"get_thread error {project}/{repository}!{iid} thread={tid}: {e}"
+            )
+        return None
+
     def pr_iteration_span(
         self, *, project: str, repository: Any, pr_id: int
     ) -> tuple[int, int]:

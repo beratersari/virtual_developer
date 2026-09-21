@@ -358,9 +358,19 @@ class AnalyticsModelPoint(BaseModel):
     counts: Dict[str, int] = Field(default_factory=dict)
 
 
+class AnalyticsReviews(BaseModel):
+    """Unique GitLab MRs / Azure PRs on jobs in this filter (job history)."""
+
+    opened: int = 0
+    merged: int = 0
+    closed: int = 0
+    total: int = 0
+
+
 class AnalyticsResponse(BaseModel):
     range: AnalyticsRange
     totals: AnalyticsNamedCount
+    reviews: AnalyticsReviews = Field(default_factory=AnalyticsReviews)
     series: List[AnalyticsPoint] = Field(default_factory=list)
     models: List[AnalyticsNamedCount] = Field(default_factory=list)
     model_series: List[AnalyticsModelPoint] = Field(default_factory=list)

@@ -518,9 +518,15 @@ export function resetOpencodeSession(bindId: string) {
   )
 }
 
-export function fetchSchedules(opts?: { status?: string }) {
+export function fetchSchedules(opts?: {
+  status?: string
+  page?: number
+  pageSize?: number
+}) {
   const params = new URLSearchParams()
   if (opts?.status) params.set('status', opts.status)
+  if (opts?.page != null) params.set('page', String(opts.page))
+  if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
   const q = params.toString() ? `?${params.toString()}` : ''
   return request<SchedulesPayload>(`/api/schedules${q}`)
 }

@@ -32,6 +32,116 @@ def extract_review_context(
     return _trim_empty(ctx)
 
 
+def apply_gitlab_note_position(
+    ctx: Optional[Dict[str, Any]], note: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Fill file/lines from a GitLab Discussions/Notes API note.
+
+    The Note Hook often has only ``line_code`` (one endpoint). The API
+    ``position.line_range`` is the selected span — it wins when present.
+    """
+    body = ""
+    if isinstance(note, dict):
+        body = str(note.get("body") or note.get("note") or "")
+    return apply_gitlab_discussion(
+        ctx,
+        {"notes": [note] if isinstance(note, dict) else []},
+        current_body=body,
+    )
+
+
+def apply_gitlab_discussion(
+    ctx: Optional[Dict[str, Any]],
+    discussion: Optional[Dict[str, Any]],
+    *,
+    current_body: str = "",
+) -> Dict[str, Any]:
+    """Fill range + earlier notes from a GitLab discussion (replies included)."""
+    notes: List[Any] = []
+    if isinstance(discussion, dict) and isinstance(discussion.get("notes"), list):
+        notes = [n for n in discussion["notes"] if isinstance(n, dict)]
+    best = _best_gitlab_position_note(notes)
+    extra = extract_review_context(
+        {"object_attributes": best, "notes": notes},
+        current_body=current_body,
+    )
+    return _merge_review_fields(
+        ctx,
+        extra,
+        (
+            "file_path",
+            "old_path",
+            "start_line",
+            "end_line",
+            "side",
+            "commit_sha",
+            "kind",
+            "thread_comments",
+        ),
+    )
+
+
+def apply_azure_thread(
+    ctx: Optional[Dict[str, Any]],
+    thread: Optional[Dict[str, Any]],
+    *,
+    current_body: str = "",
+) -> Dict[str, Any]:
+    """Fill file/lines + earlier comments from a GET PR-thread payload."""
+    extra = extract_review_context(
+        {
+            "eventType": "ms.vss-code.git-pullrequest-comment-event",
+            "resource": {"thread": thread if isinstance(thread, dict) else {}},
+        },
+        current_body=current_body,
+    )
+    return _merge_review_fields(
+        ctx,
+        extra,
+        (
+            "file_path",
+            "start_line",
+            "end_line",
+            "side",
+            "kind",
+            "thread_comments",
+        ),
+    )
+
+
+def _merge_review_fields(
+    ctx: Optional[Dict[str, Any]], extra: Dict[str, Any], keys: tuple[str, ...]
+) -> Dict[str, Any]:
+    out = dict(ctx or {})
+    for key in keys:
+        if extra.get(key):
+            out[key] = extra[key]
+    return _trim_empty(out)
+
+
+def _best_gitlab_position_note(notes: List[Any]) -> Dict[str, Any]:
+    """Prefer the DiffNote that still has ``line_range`` (the root of a reply)."""
+    fallback: Dict[str, Any] = {}
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        pos = note.get("position")
+        if isinstance(pos, str) and pos.strip().startswith("{"):
+            fallback = fallback or note
+            continue
+        if not isinstance(pos, dict) and not (
+            note.get("line_code") or note.get("st_diff") or note.get("stDiff")
+        ):
+            continue
+        fallback = fallback or note
+        rng = {}
+        if isinstance(pos, dict):
+            rng = pos.get("line_range") or pos.get("lineRange") or {}
+        if isinstance(rng, dict) and (rng.get("start") or rng.get("end")):
+            return note
+    return fallback
+
+
 def attach_workdir_snippet(
     ctx: Optional[Dict[str, Any]], workdir: Optional[str]
 ) -> Dict[str, Any]:
@@ -166,25 +276,45 @@ def _looks_azure(raw: Dict[str, Any]) -> bool:
 
 def _extract_gitlab(raw: Dict[str, Any], *, current_body: str) -> Dict[str, Any]:
     attrs = _as_dict(raw.get("object_attributes"))
-    pos = _as_dict(attrs.get("position") or attrs.get("original_position"))
+    pos = _coerce_position(
+        attrs.get("position")
+        or attrs.get("original_position")
+        or attrs.get("change_position")
+        or raw.get("position")
+    )
     note_type = str(attrs.get("type") or attrs.get("noteable_type") or "").strip()
+    st_diff = _as_dict(attrs.get("st_diff") or attrs.get("stDiff"))
     ctx: Dict[str, Any] = {"forge": "gitlab"}
-    if str(note_type).lower() == "diffnote" or pos:
+    if str(note_type).lower() == "diffnote" or pos or st_diff or attrs.get("line_code"):
         ctx["kind"] = "diff"
-    path = str(pos.get("new_path") or pos.get("old_path") or "").strip()
-    old_path = str(pos.get("old_path") or "").strip()
+    path = str(
+        _first_str(
+            pos.get("new_path"),
+            pos.get("newPath"),
+            pos.get("old_path"),
+            pos.get("oldPath"),
+            st_diff.get("new_path"),
+            st_diff.get("old_path"),
+        )
+    )
+    old_path = str(_first_str(pos.get("old_path"), pos.get("oldPath")))
     if path:
         ctx["file_path"] = path
     if old_path and old_path != path:
         ctx["old_path"] = old_path
-    start, end, side = _gitlab_lines(pos)
+    start, end, side = _gitlab_lines(pos, attrs)
     if start:
         ctx["start_line"] = start
         ctx["end_line"] = end or start
         ctx["side"] = side
     sha = str(
-        pos.get("head_sha") or attrs.get("commit_id") or attrs.get("commitId") or ""
-    ).strip()
+        _first_str(
+            pos.get("head_sha"),
+            pos.get("headSha"),
+            attrs.get("commit_id"),
+            attrs.get("commitId"),
+        )
+    )
     if sha:
         ctx["commit_sha"] = sha
     comments = _gitlab_thread_comments(raw, current_body=current_body)
@@ -193,28 +323,103 @@ def _extract_gitlab(raw: Dict[str, Any], *, current_body: str) -> Dict[str, Any]
     return ctx
 
 
-def _gitlab_lines(pos: Dict[str, Any]) -> tuple[Optional[int], Optional[int], str]:
-    rng = _as_dict(pos.get("line_range"))
+def _coerce_position(raw: Any) -> Dict[str, Any]:
+    """GitLab webhooks send position as a dict, JSON string, or camelCase."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        import json
+
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def _first_str(*vals: Any) -> str:
+    for val in vals:
+        text = str(val or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _gitlab_lines(
+    pos: Dict[str, Any], attrs: Optional[Dict[str, Any]] = None
+) -> tuple[Optional[int], Optional[int], str]:
+    rng = _as_dict(pos.get("line_range") or pos.get("lineRange"))
     start_row = _as_dict(rng.get("start"))
     end_row = _as_dict(rng.get("end"))
-    start = (
-        _as_int(start_row.get("new_line"))
-        or _as_int(start_row.get("old_line"))
-        or _as_int(pos.get("new_line"))
-        or _as_int(pos.get("old_line"))
-    )
-    end = (
-        _as_int(end_row.get("new_line"))
-        or _as_int(end_row.get("old_line"))
-        or start
-    )
-    if start_row.get("new_line") or pos.get("new_line"):
+    start_side = str(start_row.get("type") or "").strip().lower()
+    start = _gitlab_row_line(start_row, start_side)
+    end = _gitlab_row_line(end_row, str(end_row.get("type") or start_side).strip().lower())
+    if not start:
+        start = (
+            _as_int(pos.get("new_line") or pos.get("newLine"))
+            or _as_int(pos.get("old_line") or pos.get("oldLine"))
+            or _line_from_code(
+                str(pos.get("line_code") or pos.get("lineCode") or ""),
+                prefer="new",
+            )
+        )
+        if attrs and not start:
+            start = _line_from_code(str(attrs.get("line_code") or ""), prefer="new")
+    if not end:
+        end = start
+    if (
+        start_row.get("new_line")
+        or start_row.get("newLine")
+        or pos.get("new_line")
+        or pos.get("newLine")
+        or start_side == "new"
+    ):
         side = "new"
-    elif start_row.get("old_line") or pos.get("old_line"):
+    elif (
+        start_row.get("old_line")
+        or start_row.get("oldLine")
+        or pos.get("old_line")
+        or pos.get("oldLine")
+        or start_side == "old"
+    ):
         side = "old"
     else:
         side = ""
     return start, end, side
+
+
+def _gitlab_row_line(row: Dict[str, Any], side: str) -> Optional[int]:
+    prefer = "old" if side == "old" else "new"
+    n = _as_int(row.get("new_line") or row.get("newLine"))
+    o = _as_int(row.get("old_line") or row.get("oldLine"))
+    if prefer == "old":
+        return o or n or _line_from_code(
+            str(row.get("line_code") or row.get("lineCode") or ""), prefer="old"
+        )
+    return n or o or _line_from_code(
+        str(row.get("line_code") or row.get("lineCode") or ""), prefer="new"
+    )
+
+
+def _line_from_code(code: str, *, prefer: str) -> Optional[int]:
+    """Parse GitLab ``<sha1>_<old>_<new>`` line_code into a 1-based line."""
+    text = (code or "").strip()
+    if "_" not in text:
+        return None
+    parts = text.rsplit("_", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        old_n = int(parts[1])
+        new_n = int(parts[2])
+    except ValueError:
+        return None
+    if prefer == "old" and old_n > 0:
+        return old_n
+    if prefer == "new" and new_n > 0:
+        return new_n
+    return new_n or old_n or None
 
 
 def _gitlab_thread_comments(
@@ -226,6 +431,8 @@ def _gitlab_thread_comments(
         rows = raw.get(key)
         if isinstance(rows, list):
             for note in rows:
+                if isinstance(note, dict) and note.get("system"):
+                    continue
                 item = _comment_item(note, body_keys=("body", "note", "content"))
                 if item and not _same_text(item.get("body"), current_body):
                     out.append(item)

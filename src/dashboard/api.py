@@ -771,13 +771,31 @@ def create_dashboard_app(
     @app.get("/api/schedules")
     def schedules_list(
         status: Optional[str] = Query(default=None),
-        limit: int = Query(default=100, ge=1, le=500),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=25, ge=1, le=100),
+        limit: Optional[int] = Query(
+            default=None,
+            ge=1,
+            le=100,
+            description="Deprecated alias for page_size (page forced to 1 if set alone)",
+        ),
     ) -> dict:
         """List local scheduled jobs (create via CLI or POST /api/schedules)."""
-        rows = list_scheduled_jobs(status=status, limit=limit, store=schedule_store)
+        size = page_size if limit is None else limit
+        page_n = 1 if limit is not None else max(1, int(page))
+        offset = (page_n - 1) * size
+        rows = list_scheduled_jobs(
+            status=status,
+            limit=size,
+            offset=offset,
+            store=schedule_store,
+        )
+        total = schedule_store.count_schedules(status=status)
         return {
             "schedules": rows,
-            "total": len(rows),
+            "total": int(total),
+            "page": page_n,
+            "page_size": size,
             "server_time": build_meta().server_time,
         }
 
