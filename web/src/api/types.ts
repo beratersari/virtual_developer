@@ -204,6 +204,7 @@ export type SettingsPayload = {
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
+  base_dir?: string
   data_dir?: string
   temp_dir_base?: string
 }

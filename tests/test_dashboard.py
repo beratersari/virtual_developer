@@ -98,6 +98,37 @@ def test_snapshot_countdown(store):
     assert 0 <= snap["seconds_until_next_poll"] <= 30
 
 
+def test_settings_view_reports_one_base_dir(tmp_path, monkeypatch):
+    """Settings shows the single base and the two folders created under it."""
+    base = tmp_path / "Yaver"
+    monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
+    monkeypatch.delenv("VD_DATA_DIR", raising=False)
+    monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.setenv("YAVER_BASE_DIR", str(base))
+    monkeypatch.setattr(
+        "src.dashboard.service._settings_temp_dir",
+        lambda: str(base / "t"),
+    )
+    view = build_settings_view()
+    assert view.base_dir == str(base)
+    assert view.data_dir == str(base / "yaver")
+    assert view.temp_dir_base == str(base / "t")
+    assert (base / "yaver").is_dir()
+
+
+def test_settings_temp_dir_follows_base_outside_pytest(tmp_path, monkeypatch):
+    """An unset TEMP_DIR_BASE uses {YAVER_BASE_DIR}/t once pytest is not short-circuiting."""
+    from src.config import Settings
+
+    monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
+    monkeypatch.delenv("VD_DATA_DIR", raising=False)
+    monkeypatch.setenv("YAVER_BASE_DIR", str(tmp_path))
+    monkeypatch.setattr("src.paths._under_pytest", lambda: False)
+    loaded = Settings(_env_file=None)
+    assert loaded.temp_dir_base == tmp_path / "t"
+
+
 def test_settings_view_hides_secrets(monkeypatch):
     from src.config import settings
 
@@ -686,6 +717,45 @@ def test_build_jobs_sorts_by_created_date_not_issue_key(tmp_path):
     assert ids[1] == mid["job_id"]
     assert ids[2] == old["job_id"]
     assert job_created_stamp(listed.jobs[0]) >= job_created_stamp(listed.jobs[1])
+
+
+def test_build_jobs_hydrates_only_the_visible_page(tmp_path):
+    """Filter and totals use the index. JSON is opened only for this page."""
+    from src.dashboard.service import build_jobs
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    created = []
+    for i in range(12):
+        created.append(
+            jobs.create_job(
+                issue_key=f"IX-{i}",
+                summary=f"run {i}",
+                status="completed",
+            )
+        )
+    for i, job in enumerate(created):
+        fields = {"started_at": f"2026-09-21T10:{i:02d}:00", "status": "completed"}
+        if i == 11:
+            fields["error_message"] = "push failed"
+            fields["delivery_status"] = "no_new_commits"
+        jobs.update_job(job["job_id"], **fields)
+    calls = {"n": 0}
+    orig = jobs.get_job
+
+    def counted(job_id: str):
+        calls["n"] += 1
+        return orig(job_id)
+
+    jobs.get_job = counted  # type: ignore[method-assign]
+    listed = build_jobs(page=1, page_size=5, store=jobs, state_manager=sm)
+    assert listed.total == 12
+    assert len(listed.jobs) == 5
+    assert calls["n"] == 5
+    assert listed.jobs[0].job_id == created[-1]["job_id"]
+    assert listed.jobs[0].error_message == "push failed"
+    assert listed.jobs[0].delivery_status == "no_new_commits"
 
 
 def test_build_jobs_pagination(tmp_path):

@@ -22,14 +22,6 @@ const PERIODS = [
   { id: 'custom', label: 'Custom' },
 ] as const
 
-const BUCKETS = [
-  { id: 'auto', label: 'Auto' },
-  { id: 'hour', label: 'Hour' },
-  { id: 'day', label: 'Day' },
-  { id: 'week', label: 'Week' },
-  { id: 'month', label: 'Month' },
-] as const
-
 type SeriesKey =
   | 'total'
   | 'completed'
@@ -217,7 +209,6 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
 export function AnalyticsPage() {
   const live = useLive()
   const [period, setPeriod] = useState<string>('30d')
-  const [bucket, setBucket] = useState<string>('auto')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
   const [status, setStatus] = useState<Set<string>>(() => new Set())
@@ -241,7 +232,7 @@ export function AnalyticsPage() {
     async (opts?: { quiet?: boolean }) => {
       // Live ticks must not abort an in-flight chart GET. Doing that on an
       // 8s cadence while aggregation takes longer looks like a hang (spinner
-      // forever) or a false "Request timed out". Period/bucket/filter changes
+      // forever) or a false "Request timed out". Period and filter changes
       // still cancel the previous GET so requests do not stack.
       if (opts?.quiet && abortRef.current && !abortRef.current.signal.aborted) {
         return
@@ -255,7 +246,6 @@ export function AnalyticsPage() {
         if (period === 'custom' && (!customFrom || !customTo)) return
         const data = await fetchAnalytics({
           period: period === 'custom' ? 'all' : period,
-          bucket,
           from: period === 'custom' ? isoFromLocal(customFrom) : undefined,
           to: period === 'custom' ? isoFromLocal(customTo) : undefined,
           status: csv(status) || undefined,
@@ -288,7 +278,6 @@ export function AnalyticsPage() {
     },
     [
       period,
-      bucket,
       customFrom,
       customTo,
       status,
@@ -312,7 +301,7 @@ export function AnalyticsPage() {
     lastGenReload.current = now
     void load({ quiet: true })
     // Reload on live ticks only. Including `load` here refetched on every
-    // bucket/period click. Quiet loads skip while a chart GET is in flight
+    // period click. Quiet loads skip while a chart GET is in flight
     // so a live tick cannot abort (and restack) a slow aggregation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live.generation])
@@ -415,22 +404,6 @@ export function AnalyticsPage() {
               }`}
             >
               {p.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
-          {BUCKETS.map((b) => (
-            <button
-              key={b.id}
-              type="button"
-              onClick={() => setBucket(b.id)}
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                bucket === b.id
-                  ? 'bg-accent text-[#1a0d08]'
-                  : 'text-text-secondary hover:text-text'
-              }`}
-            >
-              {b.label}
             </button>
           ))}
         </div>

@@ -439,8 +439,7 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 | `POLL_INTERVAL_SECONDS` | `30` | Jira pano taraması |
 | `MAX_CONCURRENT_JOBS` | `6` | Paralel ajan işi |
 | `DEFAULT_MODEL` | (`.env.example`) | OpenCode ve Codex ortak |
-| `TEMP_DIR_BASE` | `C:\vd\t` / `/vd/t` | Geçici klonlar |
-| `YAVER_DATA_DIR` | `C:\vd\yaver` / `/vd/yaver` | Durum, işler, oturumlar, planlar |
+| `YAVER_BASE_DIR` | Windows `%LOCALAPPDATA%\Yaver`; Linux `~/.local/share/yaver` | Kullanıcının yazabildiği tek klasör. Veriler `{base}/yaver`. Klonlar `{base}/t`. |
 
 ---
 

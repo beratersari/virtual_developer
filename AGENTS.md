@@ -352,8 +352,7 @@ JIRA_API_TOKEN=your-api-token-here
 | `JIRA_TRIGGER_USER` | Assignee name fragments the poller requires (e.g. `devbot, jira ai bot`). Comma-separated, no `@`. |
 | `JIRA_TRIGGER_LABEL` | Optional. When set, To Do intake needs bot assignee **and** one of these labels (e.g. `bot, ai-assist`). Empty = assignee only. |
 | `GITLAB_TRIGGER_USER` | GitLab usernames that start a job on `@name /yaver` in an MR comment (comma-separated, no `@`). Mention without `/yaver` gets a usage note in the thread. `@name /review` and `@name /ask` start a derman-reviewer job (no push). |
-| `TEMP_DIR_BASE` | Temp clone root: `C:\vd\t` (Windows/WSL) or `/vd/t` / `~/vd/t` (Linux) |
-| `YAVER_DATA_DIR` | Sessions, jobs, state, plans: `C:\vd\yaver` or `/vd/yaver` / `~/vd/yaver` |
+| `YAVER_BASE_DIR` | One folder. Data is `{base}/yaver`, clones are `{base}/t`. Windows default `%LOCALAPPDATA%\Yaver`. Linux default `$XDG_DATA_HOME/yaver` or `~/.local/share/yaver`. An old `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still overrides that side. |
 | `POLL_INTERVAL_SECONDS` | Board poller interval |
 | `DASHBOARD_ENABLED` | Serve ops dashboard with the daemon (default true) |
 | `DASHBOARD_HOST` | Dashboard bind host (default `127.0.0.1`) |
@@ -383,6 +382,7 @@ JIRA_API_TOKEN=your-api-token-here
 - **All business logic is backend-only.** Frontend only renders DTOs from REST/WS (no filter rules, no poll scheduling math except displaying server-provided countdown).
 - Poller writes a thread-safe **poll snapshot** (`src/dashboard/snapshot.py`) each cycle: every board issue, assignee match flag, `will_process`, next poll time.
 - Tasks come from state store + live `_contexts` keys (`live: true` when process cache holds the issue).
+- Job history JSON stays in ``{YAVER_DATA_DIR}/jobs/job_*.json``. Analytics and Jobs list/count use a local SQLite index ``{YAVER_DATA_DIR}/jobs.sqlite`` (created on first daemon start; no extra dependency; one file per data dir). Do not put plans, session logs, or clones in SQL.
 - Settings API exposes **safe projection only** (no token values). Writable runtime fields: board id, poll interval, jira_trigger_user, jira_trigger_label, gitlab_trigger_user, azure_trigger_user, max_concurrent_jobs, temp_clone_max_age_days, default_model (plan/build/test//yaver; shared by OpenCode and Codex; provider/auth stay in each tool's config), default_review_model (/review and /ask; empty = default_model), agent_task_timeout_seconds (single agent/OpenCode wall-clock budget), agent_task_max_retries, agent_task_max_incomplete_retries, project_repositories (saved git remotes for the New-issue picker). Compact wait has no continue cap. After a plan, set label plan_execute (In Progress) to implement (see §2). Azure Boards: assign to the bot on To Do or In Progress, then `/planRefactor` or `/planExecute` in a work-item comment. `@bot /review` and `/ask` on GitLab MRs and Azure PRs always run `derman-reviewer` (no push). Work-item `/review` and `/ask` stay silent.
 - Optional dashboard login: **`DASHBOARD_USERNAME` + `DASHBOARD_PASSWORD`** (both set). Empty pair = no login. **Do not** put that login on the board poller, `POST /yaver/webhook/gitlab` (webhook keeps `GITLAB_WEBHOOK_SECRET`), or `POST /yaver/webhook/azure` (no Azure webhook secret). Default bind `0.0.0.0` + `DASHBOARD_ALLOW_REMOTE=true` stay intentional for LAN / offline zip. Lock down with login and/or `DASHBOARD_HOST=127.0.0.1` when the host is not on a trusted network.
 - Version is read from repo root `VERSION`.
@@ -576,6 +576,17 @@ When creating MRs via `glab` / API, set **title** explicitly:
 ```bash
 glab mr create --title "feat(auth): bearer-only jira token" --description "..." --target-branch develop
 ```
+
+### Release notes (`packaging/RELEASE_NOTES.md`)
+
+This file is the GitHub Release body. Tag CI passes it as `body_path`. Operators read it on the release page, above the zip list.
+
+Write each version as normal prose:
+
+- Heading `# Yaver X.Y.Z`, a blank line, then one or more paragraphs of complete sentences.
+- Say what changed and what the operator can do differently. Match the detail already in `CHANGELOG.md` for that version. A version with several fixes gets several sentences, not a three-word telegram.
+- Keep sentences on one line. Do not hard-wrap the paragraph every few words. A newline in this file shows up as a line break on the GitHub release. Short stacked lines (`Analytics no longer hangs.` / `Issue key is exact.`) are a broken release note.
+- Leave older version sections in place. Prepend the new version. Do not restyle the download table or the config block at the bottom into prose.
 
 ---
 
@@ -802,7 +813,7 @@ Before claiming Windows start is fixed, verify (on Windows or CI assert + local 
 | `README.md` | English operator guide: all Jira / GitLab / Azure flows |
 | `README.tr.md` | Turkish operator guide (same flows) |
 | `CHANGELOG.md` | User-facing release notes (Keep a Changelog) |
-| `packaging/RELEASE_NOTES.md` | GitHub Release body used by tag CI |
+| `packaging/RELEASE_NOTES.md` | GitHub Release body (full paragraphs, no short hard-wraps; see §6) |
 | `VERSION` | SemVer product version (`MAJOR.MINOR.PATCH`) |
 | `web/` | Ops dashboard frontend (React) |
 | `src/dashboard/` | Dashboard API and poll snapshot |

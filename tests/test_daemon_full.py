@@ -42,6 +42,53 @@ async def test_start_and_stop_unix():
 
 
 @pytest.mark.asyncio
+async def test_start_backfills_job_sqlite_index(isolate_jira_agent_artifacts):
+    """First daemon start must open/backfill {YAVER_DATA_DIR}/jobs.sqlite."""
+    from src.daemon import JiraAgentDaemon
+
+    store = isolate_jira_agent_artifacts["job_store"]
+    with patch.object(store, "ensure_index", wraps=store.ensure_index) as ens:
+        with patch("src.daemon.settings") as s:
+            s.validate_or_raise = MagicMock()
+            s.project_root = "/tmp"
+            s.jira_host = "http://j"
+            s.jira_board_id = "1"
+            s.poll_interval_seconds = 30
+            s.temp_dir_base = str(
+                isolate_jira_agent_artifacts["jobs_dir"].parent / "t"
+            )
+
+            daemon = JiraAgentDaemon()
+            daemon.processor = MagicMock()
+            daemon.processor.recover_orphaned_in_flight.return_value = 0
+            daemon.processor.dispatch_queue = AsyncMock(return_value=0)
+            daemon.state_manager = MagicMock()
+            daemon.state_manager.get_active_issues.return_value = []
+
+            async def fake_poller():
+                await asyncio.sleep(0.01)
+
+            async def fake_monitor():
+                daemon._running = False
+                await asyncio.sleep(0.01)
+
+            with patch.object(daemon, "_start_poller", side_effect=fake_poller):
+                with patch.object(
+                    daemon, "_monitor_active_issues", side_effect=fake_monitor
+                ):
+                    with patch("src.daemon.IS_WINDOWS", False):
+                        with patch("asyncio.get_event_loop") as gel:
+                            gel.return_value = MagicMock()
+                            with patch(
+                                "asyncio.gather", new_callable=AsyncMock
+                            ) as gather:
+                                gather.return_value = None
+                                await daemon.start()
+    ens.assert_called()
+    assert (isolate_jira_agent_artifacts["jobs_dir"].parent / "jobs.sqlite").is_file()
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_tasks():
     from src.daemon import JiraAgentDaemon
 

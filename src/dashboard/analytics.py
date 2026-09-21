@@ -595,64 +595,155 @@ def _load_matched(
     want_keys = {p.strip().upper() for p in (issue_key or "").split(",") if p.strip()}
     search = (q or "").strip()
 
-    jobs = js.iter_jobs() if hasattr(js, "iter_jobs") else js.list_jobs(limit=5000)
-    _throw_if_cancelled(cancel)
-    dated: List[Tuple[datetime, Dict[str, Any]]] = []
-    for i, job in enumerate(jobs):
-        if i % 32 == 0:
-            _throw_if_cancelled(cancel)
-        when = _job_when(job)
-        if when is None:
-            continue
-        dated.append((when, job))
-
     period_key = (period or "30d").strip().lower() or "30d"
     start = _parse_ts(date_from)
     end = _parse_ts(date_to) or now
     if start is None:
         if period_key == "all":
-            start = min((w for w, _ in dated), default=now - timedelta(days=30))
+            min_raw = None
+            if hasattr(js, "min_job_when"):
+                try:
+                    min_raw = js.min_job_when()
+                except Exception:
+                    min_raw = None
+            start = _parse_ts(min_raw) or (now - timedelta(days=30))
         else:
             delta = _RANGE_PRESETS.get(period_key, _RANGE_PRESETS["30d"])
             start = now - delta
     if end < start:
         start, end = end, start
 
-    in_range = [(w, j) for w, j in dated if start <= w <= end]
-    _throw_if_cancelled(cancel)
-    matched: List[Tuple[datetime, Dict[str, Any]]] = []
-    for i, (when, job) in enumerate(in_range):
-        if i % 32 == 0:
+    start_s = start.isoformat(timespec="seconds")
+    end_s = end.isoformat(timespec="seconds")
+    extra_filters = bool(
+        want_status
+        or want_cat
+        or want_src
+        or want_model
+        or want_backend
+        or want_agent
+        or want_repo
+        or want_keys
+        or search
+    )
+
+    sql_ok = hasattr(js, "query_jobs")
+    in_range_jobs: List[Dict[str, Any]] = []
+    matched_jobs: List[Dict[str, Any]] = []
+    if sql_ok:
+        try:
             _throw_if_cancelled(cancel)
-        st = str(job.get("status") or "").strip().lower()
-        cat = job_category(str(job.get("workflow_type") or ""))
-        src = _source_id(job)
-        mid = _model_id(job)
-        bid = _backend_id(job)
-        ag = _agent_id(job)
-        ik = str(job.get("issue_key") or "").strip().upper()
-        if want_status and st not in want_status and _outcome(st) not in want_status:
-            continue
-        if not _in_set(cat, want_cat):
-            continue
-        if not _in_set(src, want_src):
-            continue
-        if want_model and mid.lower() not in want_model:
-            continue
-        if want_backend and bid.lower() not in want_backend:
-            continue
-        if want_agent and ag.lower() not in want_agent:
-            continue
-        if want_repo:
-            rkl = _repo_key(job).lower()
-            if rkl not in want_repo and not any(n in rkl for n in want_repo):
+            in_range_jobs = js.query_jobs(start=start_s, end=end_s)
+            _throw_if_cancelled(cancel)
+            if extra_filters:
+                matched_jobs = js.query_jobs(
+                    start=start_s,
+                    end=end_s,
+                    status=status,
+                    category=category,
+                    source=source,
+                    model=model,
+                    backend=backend,
+                    agent=agent,
+                    repository=repository,
+                    issue_key=issue_key,
+                    q=q,
+                )
+                _throw_if_cancelled(cancel)
+            else:
+                matched_jobs = in_range_jobs
+        except Exception:
+            sql_ok = False
+
+    if not sql_ok:
+        jobs = js.iter_jobs() if hasattr(js, "iter_jobs") else js.list_jobs(limit=5000)
+        _throw_if_cancelled(cancel)
+        dated: List[Tuple[datetime, Dict[str, Any]]] = []
+        for i, job in enumerate(jobs):
+            if i % 32 == 0:
+                _throw_if_cancelled(cancel)
+            when = _job_when(job)
+            if when is None:
                 continue
-        if want_keys and ik not in want_keys:
-            continue
-        if not _matches_text(job, search):
-            continue
-        matched.append((when, job))
-    return matched, dated, in_range, start, end, period_key, now
+            dated.append((when, job))
+        in_range = [(w, j) for w, j in dated if start <= w <= end]
+        _throw_if_cancelled(cancel)
+        matched = []
+        for i, (when, job) in enumerate(in_range):
+            if i % 32 == 0:
+                _throw_if_cancelled(cancel)
+            if _job_matches_python(
+                job,
+                want_status=want_status,
+                want_cat=want_cat,
+                want_src=want_src,
+                want_model=want_model,
+                want_backend=want_backend,
+                want_agent=want_agent,
+                want_repo=want_repo,
+                want_keys=want_keys,
+                search=search,
+            ):
+                matched.append((when, job))
+        return matched, dated, in_range, start, end, period_key, now
+
+    def _dated(rows: List[Dict[str, Any]]) -> List[Tuple[datetime, Dict[str, Any]]]:
+        out: List[Tuple[datetime, Dict[str, Any]]] = []
+        for i, job in enumerate(rows):
+            if i % 32 == 0:
+                _throw_if_cancelled(cancel)
+            when = _job_when(job)
+            if when is None:
+                continue
+            out.append((when, job))
+        return out
+
+    in_range = _dated(in_range_jobs)
+    matched = _dated(matched_jobs)
+    return matched, in_range, in_range, start, end, period_key, now
+
+
+def _job_matches_python(
+    job: Dict[str, Any],
+    *,
+    want_status: set[str],
+    want_cat: set[str],
+    want_src: set[str],
+    want_model: set[str],
+    want_backend: set[str],
+    want_agent: set[str],
+    want_repo: set[str],
+    want_keys: set[str],
+    search: str,
+) -> bool:
+    st = str(job.get("status") or "").strip().lower()
+    cat = job_category(str(job.get("workflow_type") or ""))
+    src = _source_id(job)
+    mid = _model_id(job)
+    bid = _backend_id(job)
+    ag = _agent_id(job)
+    ik = str(job.get("issue_key") or "").strip().upper()
+    if want_status and st not in want_status and _outcome(st) not in want_status:
+        return False
+    if not _in_set(cat, want_cat):
+        return False
+    if not _in_set(src, want_src):
+        return False
+    if want_model and mid.lower() not in want_model:
+        return False
+    if want_backend and bid.lower() not in want_backend:
+        return False
+    if want_agent and ag.lower() not in want_agent:
+        return False
+    if want_repo:
+        rkl = _repo_key(job).lower()
+        if rkl not in want_repo and not any(n in rkl for n in want_repo):
+            return False
+    if want_keys and ik not in want_keys:
+        return False
+    if not _matches_text(job, search):
+        return False
+    return True
 
 
 def build_analytics(
@@ -696,12 +787,9 @@ def build_analytics(
         cancel=cancel,
     )
 
-    bucket_key = (bucket or "auto").strip().lower() or "auto"
-    if bucket_key not in {"auto", "hour", "day", "week", "month"}:
-        bucket_key = "auto"
-    if bucket_key == "auto":
-        bucket_key = _auto_bucket(start, end)
-    bucket_key = _coarsen(start, end, bucket_key)
+    # The chart step follows the selected range. A requested hour/day/week
+    # is ignored so a long range cannot be forced into a fine bucket.
+    bucket_key = _coarsen(start, end, _auto_bucket(start, end))
 
     _throw_if_cancelled(cancel)
     facet_cat: Dict[str, int] = defaultdict(int)
