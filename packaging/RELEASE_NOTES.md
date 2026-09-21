@@ -1,3 +1,11 @@
+# Yaver 0.9.55
+
+Analytics and the Jobs list read a local SQLite index next to the job files. The index is created on first start, including for a data directory that already has months of job JSON. The visible Jobs page still opens those files, so error text and the session id stay on the list.
+
+Storage is one folder, YAVER_BASE_DIR. The default is %LOCALAPPDATA%\Yaver on Windows and ~/.local/share/yaver on Linux. Data is {base}/yaver and clones are {base}/t. An existing YAVER_DATA_DIR or TEMP_DIR_BASE still wins for that path.
+
+The chart step follows the time range. There is no separate Hour, Day, Week, or Month control. The mark is phosphor green, and the in-app wink is larger.
+
 # Yaver 0.9.54
 
 A GitLab review keeps the overview comment on the merge request when an inline finding cannot be posted. That skip is logged, and it no longer fails the whole MR job. Linux install and start scripts are stored with LF line endings, so WSL bash can run them.
