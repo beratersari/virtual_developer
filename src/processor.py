@@ -7680,19 +7680,51 @@ class JobProcessor:
         self, event: Any, workdir: Optional[str] = None
     ) -> Dict[str, Any]:
         """File/line/thread context for a GitLab or Azure review comment."""
-        from src.review_thread import attach_workdir_snippet, extract_review_context
+        from src.review_thread import (
+            apply_gitlab_note_position,
+            attach_workdir_snippet,
+            extract_review_context,
+        )
 
-        raw = getattr(event, "raw", None)
-        current = (
-            getattr(event, "prompt", None)
-            or getattr(event, "note_body", None)
-            or getattr(event, "comment_body", None)
-            or ""
-        )
-        ctx = extract_review_context(
-            raw if isinstance(raw, dict) else {},
-            current_body=str(current),
-        )
+        filled = getattr(event, "_filled_review_context", None)
+        if isinstance(filled, dict):
+            ctx = dict(filled)
+        else:
+            raw = getattr(event, "raw", None)
+            current = (
+                getattr(event, "prompt", None)
+                or getattr(event, "note_body", None)
+                or getattr(event, "comment_body", None)
+                or ""
+            )
+            ctx = extract_review_context(
+                raw if isinstance(raw, dict) else {},
+                current_body=str(current),
+            )
+            if self._gitlab_review_needs_position(event, ctx):
+                try:
+                    from src.gitlab.client import GitlabClient
+
+                    note = GitlabClient(
+                        host=str(getattr(event, "host", "") or "")
+                    ).get_mr_discussion_note(
+                        project=getattr(event, "project_id", None)
+                        or getattr(event, "project_path", ""),
+                        mr_iid=int(getattr(event, "mr_iid", 0) or 0),
+                        note_id=str(getattr(event, "note_id", "") or ""),
+                        discussion_id=str(getattr(event, "discussion_id", "") or ""),
+                    )
+                    if note:
+                        ctx = apply_gitlab_note_position(ctx, note)
+                except Exception as e:
+                    logger.debug(
+                        f"{getattr(event, 'issue_key', '')}: "
+                        f"could not load DiffNote position: {e}"
+                    )
+            try:
+                setattr(event, "_filled_review_context", dict(ctx))
+            except Exception:
+                pass
         wd = workdir
         if not wd:
             try:
@@ -7704,6 +7736,31 @@ class JobProcessor:
             except Exception:
                 wd = None
         return attach_workdir_snippet(ctx, wd)
+
+    @staticmethod
+    def _gitlab_review_needs_position(event: Any, ctx: Dict[str, Any]) -> bool:
+        """True for DiffNotes — webhook line_code is one line, not the range."""
+        if str(getattr(event, "host", "") or "").strip() == "":
+            return False
+        if not getattr(event, "mr_iid", None):
+            return False
+        if not (getattr(event, "note_id", None) or getattr(event, "discussion_id", None)):
+            return False
+        raw = getattr(event, "raw", None)
+        attrs: Dict[str, Any] = {}
+        if isinstance(raw, dict) and isinstance(raw.get("object_attributes"), dict):
+            attrs = raw["object_attributes"]
+        note_type = str(attrs.get("type") or "").strip().lower()
+        return bool(
+            note_type == "diffnote"
+            or attrs.get("line_code")
+            or attrs.get("lineCode")
+            or attrs.get("st_diff")
+            or attrs.get("stDiff")
+            or attrs.get("position")
+            or attrs.get("original_position")
+            or str(ctx.get("kind") or "") == "diff"
+        )
 
     def _durable_plan_path(self, issue_key: str) -> Path:
         """Host-side plan path under ``{YAVER_DATA_DIR}/plans``."""

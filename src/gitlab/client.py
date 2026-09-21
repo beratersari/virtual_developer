@@ -433,6 +433,98 @@ class GitlabClient:
             logger.error(f"GitLab MR note error: {e}")
             return None
 
+    def get_mr_discussion_note(
+        self,
+        *,
+        project: Any,
+        mr_iid: int,
+        note_id: str = "",
+        discussion_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """One MR discussion note (for DiffNote position when the webhook omitted it)."""
+        nid = str(note_id or "").strip()
+        did = str(discussion_id or "").strip()
+        if not self.api_base or not (nid or did):
+            return None
+        ident = self._project_ident(project)
+        base = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}"
+        found: Optional[Dict[str, Any]] = None
+        try:
+            with httpx.Client(timeout=20.0, verify=False) as client:
+                if did:
+                    url = f"{base}/discussions/{quote(did, safe='')}"
+                    resp = client.get(url, headers=self._headers())
+                    if resp.status_code == 200:
+                        found = self._note_from_discussion(
+                            resp.json() if resp.content else {}, nid
+                        )
+                if nid and not self._note_has_line_range(found):
+                    url = f"{base}/notes/{quote(nid, safe='')}"
+                    resp = client.get(url, headers=self._headers())
+                    if resp.status_code == 200:
+                        data = resp.json() if resp.content else {}
+                        if isinstance(data, dict) and data.get("id") is not None:
+                            if found is None or self._note_has_line_range(data):
+                                found = data
+        except Exception as e:
+            logger.debug(
+                f"GitLab GET discussion note {project}!{mr_iid} "
+                f"note={nid} discussion={did}: {e}"
+            )
+        if nid and not self._note_has_line_range(found):
+            looked = self.find_discussion_id_for_note(
+                project=project, mr_iid=int(mr_iid), note_id=nid
+            )
+            if looked and looked != did:
+                try:
+                    with httpx.Client(timeout=20.0, verify=False) as client:
+                        url = (
+                            f"{self._project_url(self._project_ident(project))}"
+                            f"/merge_requests/{int(mr_iid)}/discussions/"
+                            f"{quote(looked, safe='')}"
+                        )
+                        resp = client.get(url, headers=self._headers())
+                    if resp.status_code == 200:
+                        disc = self._note_from_discussion(
+                            resp.json() if resp.content else {}, nid
+                        )
+                        if disc is not None and (
+                            found is None or self._note_has_line_range(disc)
+                        ):
+                            found = disc
+                except Exception as e:
+                    logger.debug(
+                        f"GitLab GET discussion {project}!{mr_iid} {looked}: {e}"
+                    )
+        return found
+
+    @staticmethod
+    def _note_has_line_range(note: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(note, dict):
+            return False
+        pos = note.get("position")
+        if not isinstance(pos, dict):
+            return False
+        rng = pos.get("line_range") or pos.get("lineRange")
+        if not isinstance(rng, dict):
+            return False
+        return bool(rng.get("start") or rng.get("end"))
+
+    @staticmethod
+    def _note_from_discussion(data: Any, note_id: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        notes = data.get("notes")
+        if not isinstance(notes, list):
+            return None
+        want = str(note_id or "").strip()
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            if not want or str(note.get("id") or "") == want:
+                return note
+        return notes[0] if notes and isinstance(notes[0], dict) else None
+
     def get_mr_diff_refs(
         self, *, project: Any, mr_iid: int
     ) -> tuple[str, str, str]:
