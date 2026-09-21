@@ -36,45 +36,77 @@ SCRIPTS = (
 )
 
 
+_WRAPPERS = (
+    "install.sh",
+    "install-dashboard.sh",
+    "install-backends.sh",
+    "install-opencode-agents.sh",
+    "install-codex.sh",
+    "start.sh",
+    "start-backend.sh",
+    "start-frontend.sh",
+    "start-opencode.sh",
+    "start-opencode-serve.sh",
+    "stop.sh",
+)
+
+
+def _shell_script_paths() -> list[Path]:
+    paths = [LINUX / name for name in SCRIPTS]
+    paths.extend(ROOT / name for name in _WRAPPERS)
+    freeze = ROOT / "packaging" / "pyinstaller" / "freeze-in-ubuntu.sh"
+    if freeze.is_file():
+        paths.append(freeze)
+    return paths
+
+
+def _bash_can_parse() -> bool:
+    """False when ``bash`` is a broken WSL shim (missing default distro disk)."""
+    try:
+        parsed = subprocess.run(
+            ["bash", "-c", "echo ok"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return parsed.returncode == 0 and "ok" in (parsed.stdout or "")
+
+
+def test_linux_scripts_are_lf_not_crlf():
+    """Windows ``core.autocrlf`` used to rewrite these to CRLF.
+
+    WSL then reads the same files via ``/mnt/c/...`` and ``bash`` fails with
+    ``syntax error near unexpected token $'{\\r'``.
+    """
+    attrs = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.sh text eol=lf" in attrs
+    for path in _shell_script_paths():
+        assert path.is_file(), path.name
+        raw = path.read_bytes()
+        assert b"\r" not in raw, f"{path} has CR bytes; bash on Linux/WSL cannot parse it"
+
+
 def test_linux_scripts_exist_and_parse():
     assert (LINUX / "README.md").is_file()
     assert (LINUX / "opencode.json").is_file()
     cfg = (LINUX / "opencode.json").read_text(encoding="utf-8")
     assert '"plugin": []' in cfg
     assert "oh-my-openagent" not in cfg
-    for name in SCRIPTS:
-        path = LINUX / name
-        assert path.is_file(), name
+    can_parse = _bash_can_parse()
+    for path in _shell_script_paths():
+        assert path.is_file(), path.name
+        if not can_parse:
+            continue
         parsed = subprocess.run(
             ["bash", "-n", str(path)],
             check=False,
             capture_output=True,
             text=True,
         )
-        assert parsed.returncode == 0, f"{name}: {parsed.stderr}"
-    wrappers = (
-        "install.sh",
-        "install-dashboard.sh",
-        "install-backends.sh",
-        "install-opencode-agents.sh",
-        "install-codex.sh",
-        "start.sh",
-        "start-backend.sh",
-        "start-frontend.sh",
-        "start-opencode.sh",
-        "start-opencode-serve.sh",
-        "stop.sh",
-    )
-    for name in wrappers:
-        path = ROOT / name
-        assert path.is_file(), name
-        parsed = subprocess.run(
-            ["bash", "-n", str(path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert parsed.returncode == 0, f"{name}: {parsed.stderr}"
+        assert parsed.returncode == 0, f"{path.name}: {parsed.stderr}"
 
 
 def test_wsl_integration_probe_has_thirty_named_requests():
@@ -112,28 +144,19 @@ def test_linux_dist_ci_and_offline_vendor_hooks():
     assert "opencoderman.pin" in assert_sh
     cx = (LINUX / "install-codex.sh").read_text(encoding="utf-8")
     assert "vendor/codex" in cx
-    build = LINUX / "build-dist.sh"
-    parsed = subprocess.run(
-        ["bash", "-n", str(build)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert parsed.returncode == 0, parsed.stderr
-    parsed = subprocess.run(
-        ["bash", "-n", str(LINUX / "resolve-version.sh")],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert parsed.returncode == 0, parsed.stderr
-    parsed = subprocess.run(
-        ["bash", "-n", str(LINUX / "assert-payload.sh")],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert parsed.returncode == 0, parsed.stderr
+    if _bash_can_parse():
+        for path in (
+            LINUX / "build-dist.sh",
+            LINUX / "resolve-version.sh",
+            LINUX / "assert-payload.sh",
+        ):
+            parsed = subprocess.run(
+                ["bash", "-n", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert parsed.returncode == 0, f"{path.name}: {parsed.stderr}"
 
 
 def test_linux_installers_do_not_install_oh_my_plugin():
