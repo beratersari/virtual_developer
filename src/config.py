@@ -522,8 +522,8 @@ class Settings(BaseSettings):
     temp_dir_base: Path = Field(
         default=Path(".temp"),
         description=(
-            "Base directory for temp clones. Relative ``.temp`` is remapped to "
-            "the durable host default (C:\\vd\\t, /mnt/c/vd/t, /vd/t, or ~/vd/t)."
+            "Clone directory. Prefer YAVER_BASE_DIR, which uses {base}/t. "
+            "An absolute TEMP_DIR_BASE still overrides that."
         ),
     )
     temp_clone_max_age_days: float = Field(
@@ -536,14 +536,17 @@ class Settings(BaseSettings):
     @field_validator("temp_dir_base", mode="after")
     @classmethod
     def _durable_temp_dir(cls, v: Path) -> Path:
-        from src.paths import _under_pytest, coerce_win_path, default_temp_dir
+        from src.paths import _under_pytest, agent_temp_dir, coerce_win_path
 
         v = coerce_win_path(v)
-        if _under_pytest() or v.is_absolute():
+        if _under_pytest():
+            return v
+        # An explicit TEMP_DIR_BASE stays put. Otherwise clones go to {base}/t.
+        if v.is_absolute():
             return v
         text = str(v).replace("\\", "/").strip()
         if text in {".temp", "temp", "./.temp"}:
-            return default_temp_dir()
+            return agent_temp_dir()
         return v
 
     # Agent / OpenCode Task Configuration (single wall-clock budget for both)

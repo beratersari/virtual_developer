@@ -26,8 +26,9 @@ Other commands (same as ``python cli.py``):
    yaver process KEY-123
 
 Config is the .env file next to this binary. Secrets are never baked
-into the executable. Durable data still goes to YAVER_DATA_DIR
-(C:\vd\yaver on Windows, /vd/yaver or ~/vd/yaver on Linux).
+into the executable. Leave YAVER_BASE_DIR unset to use
+%LOCALAPPDATA%\Yaver on Windows, or ~/.local/share/yaver on Linux.
+Data is {base}/yaver and clones are {base}/t.
 
 opencoderman.pin records the exact OpenCoderman submodule commit this
 build was frozen against (also attached on the GitHub Release).
