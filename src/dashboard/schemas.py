@@ -358,13 +358,42 @@ class AnalyticsModelPoint(BaseModel):
     counts: Dict[str, int] = Field(default_factory=dict)
 
 
-class AnalyticsReviews(BaseModel):
-    """Unique GitLab MRs / Azure PRs on jobs in this filter (job history)."""
-
+class AnalyticsReviewCounts(BaseModel):
     opened: int = 0
     merged: int = 0
     closed: int = 0
     total: int = 0
+
+
+class AnalyticsReviews(BaseModel):
+    """Unique GitLab MRs / Azure PRs, split by whether Yaver opened them."""
+
+    ours: AnalyticsReviewCounts = Field(default_factory=AnalyticsReviewCounts)
+    contributed: AnalyticsReviewCounts = Field(default_factory=AnalyticsReviewCounts)
+
+
+class AnalyticsReviewItem(BaseModel):
+    """One unique GitLab MR or Azure PR (several jobs may share it)."""
+
+    url: str = ""
+    state: str = "opened"
+    origin: str = "contributed"
+    issue_key: str = ""
+    title: str = ""
+    jobs: int = 0
+    gitlab_project: str = ""
+    gitlab_mr_iid: Optional[int] = None
+    azure_project: str = ""
+    azure_pr_id: Optional[int] = None
+
+
+class AnalyticsReviewsList(BaseModel):
+    state: str = "all"
+    origin: str = "all"
+    items: List[AnalyticsReviewItem] = Field(default_factory=list)
+    total: int = 0
+    page: int = 1
+    page_size: int = 25
 
 
 class AnalyticsResponse(BaseModel):

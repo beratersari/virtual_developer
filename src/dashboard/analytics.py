@@ -15,7 +15,10 @@ from src.dashboard.schemas import (
     AnalyticsPoint,
     AnalyticsRange,
     AnalyticsResponse,
+    AnalyticsReviewCounts,
+    AnalyticsReviewItem,
     AnalyticsReviews,
+    AnalyticsReviewsList,
 )
 from src.state.job_store import JobStore, job_store as default_job_store
 
@@ -259,25 +262,195 @@ def _review_bucket(state: Any) -> str:
     return "opened"
 
 
-def _review_counts(jobs: Iterable[Dict[str, Any]]) -> AnalyticsReviews:
-    """Unique MRs/PRs. Several jobs can share one URL; keep the latest state."""
-    best: Dict[str, str] = {}
-    for job in jobs:
+def _mr_origin_from_job(job: Dict[str, Any]) -> str:
+    """ours = Yaver opened the MR (Jira / Azure Boards). contributed = comment on an existing MR/PR."""
+    raw = str(job.get("source") or "jira").strip().lower().replace("_", "-") or "jira"
+    if raw in {"gitlab", "gitlab-mr"}:
+        return "contributed"
+    if raw in {"azure", "azure-pr"}:
+        return "contributed"
+    return "ours"
+
+
+def _unique_review_rows(
+    jobs: Iterable[Tuple[datetime, Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """One row per MR/PR. Review + build on the same URL stay one row."""
+    best: Dict[str, Dict[str, Any]] = {}
+    for when, job in jobs:
         ident = _review_identity(job)
         if not ident:
             continue
         bucket = _review_bucket(job.get("merge_request_state"))
-        prev = best.get(ident)
-        if prev is None or _REVIEW_RANK[bucket] >= _REVIEW_RANK[prev]:
-            best[ident] = bucket
-    opened = sum(1 for v in best.values() if v == "opened")
-    merged = sum(1 for v in best.values() if v == "merged")
-    closed = sum(1 for v in best.values() if v == "closed")
+        url = str(job.get("merge_request_url") or "").strip()
+        issue_key = str(job.get("issue_key") or "").strip()
+        title = str(job.get("summary") or job.get("title") or "").strip()
+        project = str(job.get("gitlab_project") or "").strip()
+        try:
+            iid = int(job.get("gitlab_mr_iid") or 0) or None
+        except (TypeError, ValueError):
+            iid = None
+        azure_project = str(job.get("azure_project") or "").strip()
+        try:
+            pr_id = int(job.get("azure_pr_id") or 0) or None
+        except (TypeError, ValueError):
+            pr_id = None
+        origin = _mr_origin_from_job(job)
+        row = best.get(ident)
+        if row is None:
+            best[ident] = {
+                "url": url,
+                "state": bucket,
+                "origin": origin,
+                "issue_key": issue_key,
+                "title": title,
+                "jobs": 1,
+                "gitlab_project": project,
+                "gitlab_mr_iid": iid,
+                "azure_project": azure_project,
+                "azure_pr_id": pr_id,
+                "when": when,
+            }
+            continue
+        row["jobs"] = int(row.get("jobs") or 0) + 1
+        if origin == "ours":
+            row["origin"] = "ours"
+        if url and not row.get("url"):
+            row["url"] = url
+        if project and not row.get("gitlab_project"):
+            row["gitlab_project"] = project
+        if iid and not row.get("gitlab_mr_iid"):
+            row["gitlab_mr_iid"] = iid
+        if azure_project and not row.get("azure_project"):
+            row["azure_project"] = azure_project
+        if pr_id and not row.get("azure_pr_id"):
+            row["azure_pr_id"] = pr_id
+        if _REVIEW_RANK[bucket] >= _REVIEW_RANK[str(row.get("state") or "opened")]:
+            row["state"] = bucket
+        if when >= row.get("when"):
+            row["when"] = when
+            if issue_key:
+                row["issue_key"] = issue_key
+            if title:
+                row["title"] = title
+    rows = list(best.values())
+    rows.sort(key=lambda r: r.get("when") or datetime.min, reverse=True)
+    return rows
+
+
+def _counts_for_origin(rows: List[Dict[str, Any]], origin: str) -> AnalyticsReviewCounts:
+    picked = [r for r in rows if r.get("origin") == origin]
+    return AnalyticsReviewCounts(
+        opened=sum(1 for r in picked if r.get("state") == "opened"),
+        merged=sum(1 for r in picked if r.get("state") == "merged"),
+        closed=sum(1 for r in picked if r.get("state") == "closed"),
+        total=len(picked),
+    )
+
+
+def _review_counts(jobs: Iterable[Dict[str, Any]]) -> AnalyticsReviews:
+    """Unique MRs/PRs. Same URL is one row; a Jira/work-item job marks it ours."""
+    rows = _unique_review_rows((datetime.min, job) for job in jobs)
     return AnalyticsReviews(
-        opened=opened,
-        merged=merged,
-        closed=closed,
-        total=len(best),
+        ours=_counts_for_origin(rows, "ours"),
+        contributed=_counts_for_origin(rows, "contributed"),
+    )
+
+
+def list_analytics_reviews(
+    *,
+    state: str = "",
+    origin: str = "",
+    page: int = 1,
+    page_size: int = 25,
+    period: str = "30d",
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    category: str = "",
+    source: str = "",
+    model: str = "",
+    backend: str = "",
+    agent: str = "",
+    repository: str = "",
+    issue_key: str = "",
+    q: str = "",
+    store: Optional[JobStore] = None,
+    cancel: Optional[threading.Event] = None,
+) -> AnalyticsReviewsList:
+    """Unique MR/PR rows for the Analytics cards (same filters and identity)."""
+    want = str(state or "").strip().lower()
+    if want in {"", "all"}:
+        want = "all"
+    elif want in {"open", "opened"}:
+        want = "opened"
+    elif want not in {"merged", "closed"}:
+        raise ValueError("state must be opened, merged, closed, or all")
+    want_origin = str(origin or "").strip().lower()
+    if want_origin in {"", "all"}:
+        want_origin = "all"
+    elif want_origin in {"ours", "opened_by_us", "owned"}:
+        want_origin = "ours"
+    elif want_origin in {"contributed", "contrib"}:
+        want_origin = "contributed"
+    else:
+        raise ValueError("origin must be ours, contributed, or all")
+    matched, _dated, _in_range, _start, _end, _period_key, _now = _load_matched(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        category=category,
+        source=source,
+        model=model,
+        backend=backend,
+        agent=agent,
+        repository=repository,
+        issue_key=issue_key,
+        q=q,
+        store=store,
+        cancel=cancel,
+    )
+    rows = _unique_review_rows(matched)
+    if want != "all":
+        rows = [r for r in rows if r.get("state") == want]
+    if want_origin != "all":
+        rows = [r for r in rows if r.get("origin") == want_origin]
+    try:
+        size = int(page_size)
+    except (TypeError, ValueError):
+        size = 25
+    size = max(1, min(size, 100))
+    try:
+        pg = int(page)
+    except (TypeError, ValueError):
+        pg = 1
+    pg = max(1, pg)
+    total = len(rows)
+    start_i = (pg - 1) * size
+    page_rows = rows[start_i : start_i + size]
+    items = [
+        AnalyticsReviewItem(
+            url=str(r.get("url") or ""),
+            state=str(r.get("state") or "opened"),
+            origin=str(r.get("origin") or "contributed"),
+            issue_key=str(r.get("issue_key") or ""),
+            title=str(r.get("title") or ""),
+            jobs=int(r.get("jobs") or 0),
+            gitlab_project=str(r.get("gitlab_project") or ""),
+            gitlab_mr_iid=r.get("gitlab_mr_iid"),
+            azure_project=str(r.get("azure_project") or ""),
+            azure_pr_id=r.get("azure_pr_id"),
+        )
+        for r in page_rows
+    ]
+    return AnalyticsReviewsList(
+        state=want,
+        origin=want_origin,
+        items=items,
+        total=total,
+        page=pg,
+        page_size=size,
     )
 
 
@@ -379,10 +552,9 @@ def _facet(rows: Iterable[Tuple[str, str, int]]) -> List[AnalyticsFacet]:
     return out
 
 
-def build_analytics(
+def _load_matched(
     *,
     period: str = "30d",
-    bucket: str = "auto",
     date_from: str = "",
     date_to: str = "",
     status: str = "",
@@ -396,13 +568,16 @@ def build_analytics(
     q: str = "",
     store: Optional[JobStore] = None,
     cancel: Optional[threading.Event] = None,
-) -> AnalyticsResponse:
-    """Aggregate stored jobs for the Analytics page.
-
-    ``cancel`` is set when the HTTP client disconnects or the handler
-    hits ``ANALYTICS_TIMEOUT_SECONDS``. The walk stops instead of stacking
-    behind a superseded GET.
-    """
+) -> Tuple[
+    List[Tuple[datetime, Dict[str, Any]]],
+    List[Tuple[datetime, Dict[str, Any]]],
+    List[Tuple[datetime, Dict[str, Any]]],
+    datetime,
+    datetime,
+    str,
+    datetime,
+]:
+    """dated, in_range, matched, start, end, period_key, now — shared by charts and MR list."""
     _throw_if_cancelled(cancel)
     js = store or default_job_store
     now = datetime.now().replace(microsecond=0)
@@ -443,37 +618,8 @@ def build_analytics(
     if end < start:
         start, end = end, start
 
-    bucket_key = (bucket or "auto").strip().lower() or "auto"
-    if bucket_key not in {"auto", "hour", "day", "week", "month"}:
-        bucket_key = "auto"
-    if bucket_key == "auto":
-        bucket_key = _auto_bucket(start, end)
-    bucket_key = _coarsen(start, end, bucket_key)
-
     in_range = [(w, j) for w, j in dated if start <= w <= end]
     _throw_if_cancelled(cancel)
-    facet_cat: Dict[str, int] = defaultdict(int)
-    facet_src: Dict[str, int] = defaultdict(int)
-    facet_model: Dict[str, int] = defaultdict(int)
-    facet_backend: Dict[str, int] = defaultdict(int)
-    facet_agent: Dict[str, int] = defaultdict(int)
-    facet_status: Dict[str, int] = defaultdict(int)
-    facet_repo: Dict[str, int] = defaultdict(int)
-    for i, (_w, job) in enumerate(in_range):
-        if i % 32 == 0:
-            _throw_if_cancelled(cancel)
-        facet_cat[job_category(str(job.get("workflow_type") or ""))] += 1
-        facet_src[_source_id(job)] += 1
-        mid = _model_id(job)
-        facet_model[mid] += 1
-        facet_backend[_backend_id(job)] += 1
-        facet_agent[_agent_id(job)] += 1
-        st = str(job.get("status") or "unknown").strip().lower() or "unknown"
-        facet_status[st] += 1
-        repo = _repo_key(job)
-        if repo:
-            facet_repo[repo] += 1
-
     matched: List[Tuple[datetime, Dict[str, Any]]] = []
     for i, (when, job) in enumerate(in_range):
         if i % 32 == 0:
@@ -506,6 +652,79 @@ def build_analytics(
         if not _matches_text(job, search):
             continue
         matched.append((when, job))
+    return matched, dated, in_range, start, end, period_key, now
+
+
+def build_analytics(
+    *,
+    period: str = "30d",
+    bucket: str = "auto",
+    date_from: str = "",
+    date_to: str = "",
+    status: str = "",
+    category: str = "",
+    source: str = "",
+    model: str = "",
+    backend: str = "",
+    agent: str = "",
+    repository: str = "",
+    issue_key: str = "",
+    q: str = "",
+    store: Optional[JobStore] = None,
+    cancel: Optional[threading.Event] = None,
+) -> AnalyticsResponse:
+    """Aggregate stored jobs for the Analytics page.
+
+    ``cancel`` is set when the HTTP client disconnects or the handler
+    hits ``ANALYTICS_TIMEOUT_SECONDS``. The walk stops instead of stacking
+    behind a superseded GET.
+    """
+    matched, dated, in_range, start, end, period_key, now = _load_matched(
+        period=period,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        category=category,
+        source=source,
+        model=model,
+        backend=backend,
+        agent=agent,
+        repository=repository,
+        issue_key=issue_key,
+        q=q,
+        store=store,
+        cancel=cancel,
+    )
+
+    bucket_key = (bucket or "auto").strip().lower() or "auto"
+    if bucket_key not in {"auto", "hour", "day", "week", "month"}:
+        bucket_key = "auto"
+    if bucket_key == "auto":
+        bucket_key = _auto_bucket(start, end)
+    bucket_key = _coarsen(start, end, bucket_key)
+
+    _throw_if_cancelled(cancel)
+    facet_cat: Dict[str, int] = defaultdict(int)
+    facet_src: Dict[str, int] = defaultdict(int)
+    facet_model: Dict[str, int] = defaultdict(int)
+    facet_backend: Dict[str, int] = defaultdict(int)
+    facet_agent: Dict[str, int] = defaultdict(int)
+    facet_status: Dict[str, int] = defaultdict(int)
+    facet_repo: Dict[str, int] = defaultdict(int)
+    for i, (_w, job) in enumerate(in_range):
+        if i % 32 == 0:
+            _throw_if_cancelled(cancel)
+        facet_cat[job_category(str(job.get("workflow_type") or ""))] += 1
+        facet_src[_source_id(job)] += 1
+        mid = _model_id(job)
+        facet_model[mid] += 1
+        facet_backend[_backend_id(job)] += 1
+        facet_agent[_agent_id(job)] += 1
+        st = str(job.get("status") or "unknown").strip().lower() or "unknown"
+        facet_status[st] += 1
+        repo = _repo_key(job)
+        if repo:
+            facet_repo[repo] += 1
 
     keys = _bucket_keys(start, end, bucket_key)
     origin = keys[0] if keys else _floor(start, bucket_key)
