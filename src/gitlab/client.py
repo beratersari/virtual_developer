@@ -433,7 +433,7 @@ class GitlabClient:
             logger.error(f"GitLab MR note error: {e}")
             return None
 
-    def get_mr_discussion_note(
+    def get_mr_discussion(
         self,
         *,
         project: Any,
@@ -441,37 +441,36 @@ class GitlabClient:
         note_id: str = "",
         discussion_id: str = "",
     ) -> Optional[Dict[str, Any]]:
-        """One MR discussion note (for DiffNote position when the webhook omitted it)."""
+        """Full MR discussion (notes + DiffNote position) for a comment or reply."""
         nid = str(note_id or "").strip()
         did = str(discussion_id or "").strip()
         if not self.api_base or not (nid or did):
             return None
         ident = self._project_ident(project)
         base = f"{self._project_url(ident)}/merge_requests/{int(mr_iid)}"
-        found: Optional[Dict[str, Any]] = None
+        note: Optional[Dict[str, Any]] = None
         try:
             with httpx.Client(timeout=20.0, verify=False) as client:
                 if did:
                     url = f"{base}/discussions/{quote(did, safe='')}"
                     resp = client.get(url, headers=self._headers())
                     if resp.status_code == 200:
-                        found = self._note_from_discussion(
-                            resp.json() if resp.content else {}, nid
-                        )
-                if nid and not self._note_has_line_range(found):
+                        data = resp.json() if resp.content else {}
+                        if isinstance(data, dict) and isinstance(data.get("notes"), list):
+                            return data
+                if nid:
                     url = f"{base}/notes/{quote(nid, safe='')}"
                     resp = client.get(url, headers=self._headers())
                     if resp.status_code == 200:
                         data = resp.json() if resp.content else {}
                         if isinstance(data, dict) and data.get("id") is not None:
-                            if found is None or self._note_has_line_range(data):
-                                found = data
+                            note = data
         except Exception as e:
             logger.debug(
-                f"GitLab GET discussion note {project}!{mr_iid} "
+                f"GitLab GET discussion {project}!{mr_iid} "
                 f"note={nid} discussion={did}: {e}"
             )
-        if nid and not self._note_has_line_range(found):
+        if nid:
             looked = self.find_discussion_id_for_note(
                 project=project, mr_iid=int(mr_iid), note_id=nid
             )
@@ -485,18 +484,37 @@ class GitlabClient:
                         )
                         resp = client.get(url, headers=self._headers())
                     if resp.status_code == 200:
-                        disc = self._note_from_discussion(
-                            resp.json() if resp.content else {}, nid
-                        )
-                        if disc is not None and (
-                            found is None or self._note_has_line_range(disc)
+                        data = resp.json() if resp.content else {}
+                        if isinstance(data, dict) and isinstance(
+                            data.get("notes"), list
                         ):
-                            found = disc
+                            return data
                 except Exception as e:
                     logger.debug(
                         f"GitLab GET discussion {project}!{mr_iid} {looked}: {e}"
                     )
-        return found
+            if note:
+                return {"notes": [note]}
+        return None
+
+    def get_mr_discussion_note(
+        self,
+        *,
+        project: Any,
+        mr_iid: int,
+        note_id: str = "",
+        discussion_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """One MR discussion note (for DiffNote position when the webhook omitted it)."""
+        disc = self.get_mr_discussion(
+            project=project,
+            mr_iid=mr_iid,
+            note_id=note_id,
+            discussion_id=discussion_id,
+        )
+        if not disc:
+            return None
+        return self._note_from_discussion(disc, str(note_id or "").strip())
 
     @staticmethod
     def _note_has_line_range(note: Optional[Dict[str, Any]]) -> bool:

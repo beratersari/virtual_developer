@@ -11,11 +11,29 @@ from urllib.parse import urlparse
 
 from src.orchestrator.prompt_builder import PromptBuilder
 from src.review_thread import (
+    apply_azure_thread,
+    apply_gitlab_discussion,
     apply_gitlab_note_position,
     attach_workdir_snippet,
     extract_review_context,
     format_review_context,
 )
+
+
+def _start_http(handler_cls) -> ThreadingHTTPServer:
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            sock = socket.create_connection(httpd.server_address, timeout=0.2)
+            sock.close()
+            return httpd
+        except OSError:
+            time.sleep(0.05)
+    httpd.shutdown()
+    httpd.server_close()
+    raise RuntimeError("loopback test server did not start")
 
 
 def test_gitlab_diffnote_position_becomes_review_location():
@@ -422,6 +440,37 @@ def test_gitlab_review_needs_position_for_official_diff_webhook():
     )
     empty = extract_review_context(overview.raw, current_body=overview.prompt)
     assert JobProcessor._gitlab_review_needs_position(overview, empty) is False
+    reply = GitlabMrNoteEvent(
+        issue_key="GL-ACME-DEMO-4",
+        note_id="79",
+        note_body="@yaver /yaver extract this helper",
+        prompt="extract this helper",
+        author_username="alice",
+        author_name="Alice",
+        project_id=1,
+        project_path="acme/demo",
+        repository_url="https://gitlab.example.com/acme/demo.git",
+        host="gitlab.example.com",
+        mr_iid=4,
+        mr_title="Login",
+        mr_description="",
+        source_branch="feature/x",
+        target_branch="develop",
+        mr_url="https://gitlab.example.com/acme/demo/-/merge_requests/4",
+        discussion_id="disc-range",
+        raw={
+            "object_attributes": {
+                "id": 79,
+                "type": "DiscussionNote",
+                "note": "@yaver /yaver extract this helper",
+                "noteable_type": "MergeRequest",
+                "discussion_id": "disc-range",
+            }
+        },
+    )
+    reply_ctx = extract_review_context(reply.raw, current_body=reply.prompt)
+    assert "file_path" not in reply_ctx
+    assert JobProcessor._gitlab_review_needs_position(reply, reply_ctx) is True
 
 
 def test_gitlab_selected_range_from_notes_api_lands_in_prompt(tmp_path):
@@ -634,6 +683,308 @@ def test_gitlab_notes_without_range_falls_back_to_discussion_http():
         rng = note["position"]["line_range"]
         assert rng["start"]["new_line"] == 3
         assert rng["end"]["new_line"] == 7
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_apply_gitlab_discussion_uses_root_range_and_earlier_notes():
+    ctx = apply_gitlab_discussion(
+        {},
+        {
+            "id": "disc-range",
+            "notes": [
+                {
+                    "id": 10,
+                    "type": "DiffNote",
+                    "body": "This helper is too long.",
+                    "author": {"username": "bob"},
+                    "position": {
+                        "new_path": "src/auth.py",
+                        "line_range": {
+                            "start": {"new_line": 10, "type": "new"},
+                            "end": {"new_line": 14, "type": "new"},
+                        },
+                    },
+                },
+                {
+                    "id": 79,
+                    "type": "DiscussionNote",
+                    "body": "@yaver /yaver extract this helper",
+                    "author": {"username": "alice"},
+                },
+            ],
+        },
+        current_body="@yaver /yaver extract this helper",
+    )
+    assert ctx["file_path"] == "src/auth.py"
+    assert ctx["start_line"] == 10
+    assert ctx["end_line"] == 14
+    bodies = [c["body"] for c in ctx["thread_comments"]]
+    assert "This helper is too long." in bodies
+    assert "@yaver /yaver extract this helper" not in bodies
+
+
+def test_apply_azure_thread_fills_range_and_parent():
+    ctx = apply_azure_thread(
+        {},
+        {
+            "id": 8,
+            "threadContext": {
+                "filePath": "/src/lock.c",
+                "rightFileStart": {"line": 40},
+                "rightFileEnd": {"line": 48},
+            },
+            "comments": [
+                {
+                    "id": 1,
+                    "content": "This lock looks racy.",
+                    "author": {"displayName": "Bob"},
+                },
+                {
+                    "id": 2,
+                    "content": "@yaver /yaver fix the race",
+                    "author": {"displayName": "Alice"},
+                },
+            ],
+        },
+        current_body="@yaver /yaver fix the race",
+    )
+    assert ctx["file_path"] == "src/lock.c"
+    assert ctx["start_line"] == 40
+    assert ctx["end_line"] == 48
+    bodies = [c["body"] for c in ctx["thread_comments"]]
+    assert "This lock looks racy." in bodies
+    assert "@yaver /yaver fix the race" not in bodies
+
+
+def test_gitlab_reply_loads_discussion_range_into_prompt(tmp_path):
+    """Reply webhook has no DiffNote position; GET discussion supplies the range."""
+    from src.gitlab.webhook import GitlabMrNoteEvent
+    from src.processor import JobProcessor
+
+    discussion = {
+        "id": "disc-range",
+        "notes": [
+            {
+                "id": 10,
+                "type": "DiffNote",
+                "body": "This helper is too long.",
+                "author": {"username": "bob", "name": "Bob"},
+                "position": {
+                    "new_path": "src/auth.py",
+                    "old_path": "src/auth.py",
+                    "new_line": 14,
+                    "line_range": {
+                        "start": {"new_line": 10, "type": "new"},
+                        "end": {"new_line": 14, "type": "new"},
+                    },
+                },
+            },
+            {
+                "id": 79,
+                "type": "DiscussionNote",
+                "body": "@yaver /yaver extract this helper",
+                "author": {"username": "alice", "name": "Alice"},
+            },
+        ],
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = urlparse(self.path).path
+            if path.endswith("/merge_requests/4/discussions/disc-range"):
+                payload = json.dumps(discussion).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    httpd = _start_http(Handler)
+    try:
+        host = f"127.0.0.1:{httpd.server_address[1]}"
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "auth.py").write_text(
+            "\n".join(f"line-{i}" for i in range(1, 21)) + "\n",
+            encoding="utf-8",
+        )
+        event = GitlabMrNoteEvent(
+            issue_key="KAN-9",
+            note_id="79",
+            note_body="@yaver /yaver extract this helper",
+            prompt="extract this helper",
+            author_username="alice",
+            author_name="Alice",
+            project_id=1,
+            project_path="acme/demo",
+            repository_url=f"http://{host}/acme/demo.git",
+            host=host,
+            mr_iid=4,
+            mr_title="Login",
+            mr_description="",
+            source_branch="feature/x",
+            target_branch="develop",
+            mr_url=f"http://{host}/acme/demo/-/merge_requests/4",
+            discussion_id="disc-range",
+            raw={
+                "object_kind": "note",
+                "object_attributes": {
+                    "id": 79,
+                    "type": "DiscussionNote",
+                    "note": "@yaver /yaver extract this helper",
+                    "noteable_type": "MergeRequest",
+                    "discussion_id": "disc-range",
+                },
+            },
+        )
+        proc = JobProcessor()
+        ctx = proc._review_context_for_event(event, str(tmp_path))
+        assert ctx["file_path"] == "src/auth.py"
+        assert ctx["start_line"] == 10
+        assert ctx["end_line"] == 14
+        assert "line-10" in ctx["snippet"]
+        bodies = [c["body"] for c in ctx.get("thread_comments") or []]
+        assert "This helper is too long." in bodies
+        PromptBuilder.clear_prompt_file_cache()
+        prompt = PromptBuilder.build_gitlab_comment_prompt(
+            issue_key="KAN-9",
+            mr_title="Login",
+            mr_url=event.mr_url,
+            source_branch="feature/x",
+            target_branch="develop",
+            author="alice",
+            comment="extract this helper",
+            raw=event.raw,
+            review_context=ctx,
+        )
+        assert "## Review location" in prompt
+        assert "10–14" in prompt
+        assert "This helper is too long." in prompt
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_azure_file_thread_from_api_lands_in_prompt(tmp_path):
+    """TFS comment hook has threadId only; GET /threads/{id} supplies the range."""
+    from src.azure.webhook import AzurePrCommentEvent
+    from src.processor import JobProcessor
+
+    thread = {
+        "id": 8,
+        "threadContext": {
+            "filePath": "/src/lock.c",
+            "rightFileStart": {"line": 40, "offset": 1},
+            "rightFileEnd": {"line": 48, "offset": 8},
+        },
+        "comments": [
+            {
+                "id": 1,
+                "content": "This lock looks racy.",
+                "author": {"displayName": "Bob"},
+            },
+            {
+                "id": 2,
+                "content": "@yaver /yaver fix the race",
+                "author": {"displayName": "Alice"},
+            },
+        ],
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            path = urlparse(self.path).path
+            if path.endswith("/pullrequests/4/threads/8"):
+                payload = json.dumps(thread).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    httpd = _start_http(Handler)
+    try:
+        host = f"127.0.0.1:{httpd.server_address[1]}"
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "lock.c").write_text(
+            "\n".join(f"lock-{i}" for i in range(1, 61)) + "\n",
+            encoding="utf-8",
+        )
+        collection = f"http://{host}/tfs/DefaultCollection"
+        event = AzurePrCommentEvent(
+            issue_key="WIT-DEMO-4",
+            comment_id="2",
+            comment_body="@yaver /yaver fix the race",
+            prompt="fix the race",
+            author_username=r"DOMAIN\\alice",
+            author_name="Alice",
+            collection_url=collection,
+            project="Demo",
+            repository_id="repo-guid",
+            repository_name="demo",
+            project_path="Demo/demo",
+            repository_url=f"{collection}/Demo/_git/demo",
+            host=host,
+            pr_id=4,
+            pr_title="Lock",
+            pr_description="",
+            source_branch="feature/x",
+            target_branch="develop",
+            pr_url=f"{collection}/Demo/_git/demo/pullrequest/4",
+            thread_id="8",
+            raw={
+                "eventType": "ms.vss-code.git-pullrequest-comment-event",
+                "resource": {
+                    "comment": {
+                        "id": 2,
+                        "parentCommentId": 1,
+                        "threadId": 8,
+                        "content": "@yaver /yaver fix the race",
+                    },
+                    "pullRequest": {"pullRequestId": 4, "title": "Lock"},
+                },
+            },
+        )
+        proc = JobProcessor()
+        assert proc._azure_review_needs_thread(event) is True
+        ctx = proc._review_context_for_event(event, str(tmp_path))
+        assert ctx["file_path"] == "src/lock.c"
+        assert ctx["start_line"] == 40
+        assert ctx["end_line"] == 48
+        assert "lock-40" in ctx["snippet"]
+        bodies = [c["body"] for c in ctx.get("thread_comments") or []]
+        assert "This lock looks racy." in bodies
+        PromptBuilder.clear_prompt_file_cache()
+        prompt = PromptBuilder.build_azure_comment_prompt(
+            issue_key="WIT-DEMO-4",
+            pr_title="Lock",
+            pr_url=event.pr_url,
+            source_branch="feature/x",
+            target_branch="develop",
+            author="alice",
+            comment="fix the race",
+            raw=event.raw,
+            review_context=ctx,
+        )
+        assert "## Review location" in prompt
+        assert "`src/lock.c`" in prompt
+        assert "40–48" in prompt
+        assert "This lock looks racy." in prompt
     finally:
         httpd.shutdown()
         httpd.server_close()

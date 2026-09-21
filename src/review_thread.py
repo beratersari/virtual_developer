@@ -40,23 +40,106 @@ def apply_gitlab_note_position(
     The Note Hook often has only ``line_code`` (one endpoint). The API
     ``position.line_range`` is the selected span — it wins when present.
     """
-    out = dict(ctx or {})
-    extra = extract_review_context(
-        {"object_attributes": note or {}},
-        current_body="",
+    body = ""
+    if isinstance(note, dict):
+        body = str(note.get("body") or note.get("note") or "")
+    return apply_gitlab_discussion(
+        ctx,
+        {"notes": [note] if isinstance(note, dict) else []},
+        current_body=body,
     )
-    for key in (
-        "file_path",
-        "old_path",
-        "start_line",
-        "end_line",
-        "side",
-        "commit_sha",
-        "kind",
-    ):
+
+
+def apply_gitlab_discussion(
+    ctx: Optional[Dict[str, Any]],
+    discussion: Optional[Dict[str, Any]],
+    *,
+    current_body: str = "",
+) -> Dict[str, Any]:
+    """Fill range + earlier notes from a GitLab discussion (replies included)."""
+    notes: List[Any] = []
+    if isinstance(discussion, dict) and isinstance(discussion.get("notes"), list):
+        notes = [n for n in discussion["notes"] if isinstance(n, dict)]
+    best = _best_gitlab_position_note(notes)
+    extra = extract_review_context(
+        {"object_attributes": best, "notes": notes},
+        current_body=current_body,
+    )
+    return _merge_review_fields(
+        ctx,
+        extra,
+        (
+            "file_path",
+            "old_path",
+            "start_line",
+            "end_line",
+            "side",
+            "commit_sha",
+            "kind",
+            "thread_comments",
+        ),
+    )
+
+
+def apply_azure_thread(
+    ctx: Optional[Dict[str, Any]],
+    thread: Optional[Dict[str, Any]],
+    *,
+    current_body: str = "",
+) -> Dict[str, Any]:
+    """Fill file/lines + earlier comments from a GET PR-thread payload."""
+    extra = extract_review_context(
+        {
+            "eventType": "ms.vss-code.git-pullrequest-comment-event",
+            "resource": {"thread": thread if isinstance(thread, dict) else {}},
+        },
+        current_body=current_body,
+    )
+    return _merge_review_fields(
+        ctx,
+        extra,
+        (
+            "file_path",
+            "start_line",
+            "end_line",
+            "side",
+            "kind",
+            "thread_comments",
+        ),
+    )
+
+
+def _merge_review_fields(
+    ctx: Optional[Dict[str, Any]], extra: Dict[str, Any], keys: tuple[str, ...]
+) -> Dict[str, Any]:
+    out = dict(ctx or {})
+    for key in keys:
         if extra.get(key):
             out[key] = extra[key]
     return _trim_empty(out)
+
+
+def _best_gitlab_position_note(notes: List[Any]) -> Dict[str, Any]:
+    """Prefer the DiffNote that still has ``line_range`` (the root of a reply)."""
+    fallback: Dict[str, Any] = {}
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        pos = note.get("position")
+        if isinstance(pos, str) and pos.strip().startswith("{"):
+            fallback = fallback or note
+            continue
+        if not isinstance(pos, dict) and not (
+            note.get("line_code") or note.get("st_diff") or note.get("stDiff")
+        ):
+            continue
+        fallback = fallback or note
+        rng = {}
+        if isinstance(pos, dict):
+            rng = pos.get("line_range") or pos.get("lineRange") or {}
+        if isinstance(rng, dict) and (rng.get("start") or rng.get("end")):
+            return note
+    return fallback
 
 
 def attach_workdir_snippet(
@@ -348,6 +431,8 @@ def _gitlab_thread_comments(
         rows = raw.get(key)
         if isinstance(rows, list):
             for note in rows:
+                if isinstance(note, dict) and note.get("system"):
+                    continue
                 item = _comment_item(note, body_keys=("body", "note", "content"))
                 if item and not _same_text(item.get("body"), current_body):
                     out.append(item)

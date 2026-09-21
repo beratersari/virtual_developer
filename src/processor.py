@@ -7681,7 +7681,8 @@ class JobProcessor:
     ) -> Dict[str, Any]:
         """File/line/thread context for a GitLab or Azure review comment."""
         from src.review_thread import (
-            apply_gitlab_note_position,
+            apply_azure_thread,
+            apply_gitlab_discussion,
             attach_workdir_snippet,
             extract_review_context,
         )
@@ -7697,29 +7698,63 @@ class JobProcessor:
                 or getattr(event, "comment_body", None)
                 or ""
             )
+            exclude = (
+                getattr(event, "note_body", None)
+                or getattr(event, "comment_body", None)
+                or current
+            )
             ctx = extract_review_context(
                 raw if isinstance(raw, dict) else {},
-                current_body=str(current),
+                current_body=str(exclude),
             )
             if self._gitlab_review_needs_position(event, ctx):
                 try:
                     from src.gitlab.client import GitlabClient
 
-                    note = GitlabClient(
+                    disc = GitlabClient(
                         host=str(getattr(event, "host", "") or "")
-                    ).get_mr_discussion_note(
+                    ).get_mr_discussion(
                         project=getattr(event, "project_id", None)
                         or getattr(event, "project_path", ""),
                         mr_iid=int(getattr(event, "mr_iid", 0) or 0),
                         note_id=str(getattr(event, "note_id", "") or ""),
                         discussion_id=str(getattr(event, "discussion_id", "") or ""),
                     )
-                    if note:
-                        ctx = apply_gitlab_note_position(ctx, note)
+                    if disc:
+                        ctx = apply_gitlab_discussion(
+                            ctx, disc, current_body=str(exclude)
+                        )
                 except Exception as e:
                     logger.debug(
                         f"{getattr(event, 'issue_key', '')}: "
                         f"could not load DiffNote position: {e}"
+                    )
+            elif self._azure_review_needs_thread(event):
+                try:
+                    from src.azure.client import AzureDevOpsClient
+
+                    thread = AzureDevOpsClient(
+                        host=str(getattr(event, "host", "") or ""),
+                        collection_url=str(
+                            getattr(event, "collection_url", "") or ""
+                        ),
+                    ).get_pr_thread(
+                        project=str(getattr(event, "project", "") or ""),
+                        repository=getattr(event, "repository_id", None)
+                        or getattr(event, "repository_name", ""),
+                        pr_id=int(getattr(event, "pr_id", 0) or 0),
+                        thread_id=str(getattr(event, "thread_id", "") or ""),
+                        comment_id=str(getattr(event, "comment_id", "") or ""),
+                        comment_content=str(exclude),
+                    )
+                    if thread:
+                        ctx = apply_azure_thread(
+                            ctx, thread, current_body=str(exclude)
+                        )
+                except Exception as e:
+                    logger.debug(
+                        f"{getattr(event, 'issue_key', '')}: "
+                        f"could not load Azure PR thread: {e}"
                     )
             try:
                 setattr(event, "_filled_review_context", dict(ctx))
@@ -7739,13 +7774,15 @@ class JobProcessor:
 
     @staticmethod
     def _gitlab_review_needs_position(event: Any, ctx: Dict[str, Any]) -> bool:
-        """True for DiffNotes — webhook line_code is one line, not the range."""
+        """True for DiffNotes and replies (discussion_id) — range lives on GET discussion."""
         if str(getattr(event, "host", "") or "").strip() == "":
             return False
         if not getattr(event, "mr_iid", None):
             return False
         if not (getattr(event, "note_id", None) or getattr(event, "discussion_id", None)):
             return False
+        if str(getattr(event, "discussion_id", "") or "").strip():
+            return True
         raw = getattr(event, "raw", None)
         attrs: Dict[str, Any] = {}
         if isinstance(raw, dict) and isinstance(raw.get("object_attributes"), dict):
@@ -7760,6 +7797,22 @@ class JobProcessor:
             or attrs.get("position")
             or attrs.get("original_position")
             or str(ctx.get("kind") or "") == "diff"
+        )
+
+    @staticmethod
+    def _azure_review_needs_thread(event: Any) -> bool:
+        """True for Azure PR comments — file range lives on GET /threads/{id}."""
+        if getattr(event, "mr_iid", None):
+            return False
+        if not getattr(event, "pr_id", None):
+            return False
+        if not (
+            str(getattr(event, "host", "") or "").strip()
+            or str(getattr(event, "collection_url", "") or "").strip()
+        ):
+            return False
+        return bool(
+            getattr(event, "thread_id", None) or getattr(event, "comment_id", None)
         )
 
     def _durable_plan_path(self, issue_key: str) -> Path:
