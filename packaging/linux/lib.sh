@@ -143,12 +143,9 @@ vd_parse_serve_url() {
 }
 
 vd_ensure_durable_dirs() {
-  if mkdir -p /vd/yaver /vd/t 2>/dev/null && [[ -w /vd/yaver && -w /vd/t ]]; then
-    echo "[OK] durable dirs /vd/yaver and /vd/t"
-    return 0
-  fi
-  mkdir -p "${HOME}/vd/yaver" "${HOME}/vd/t"
-  echo "[OK] durable dirs ${HOME}/vd/yaver and ${HOME}/vd/t"
+  local base="${XDG_DATA_HOME:-${HOME}/.local/share}/yaver"
+  mkdir -p "${base}/yaver" "${base}/t"
+  echo "[OK] durable dirs ${base}/yaver and ${base}/t"
 }
 
 vd_write_opencode_config() {

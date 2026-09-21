@@ -1,17 +1,24 @@
 """Durable on-disk locations for clones and agent state.
 
-Session logs, jobs, state, and OpenCode binds live *outside* the install
-folder (zip reinstall on Windows, or a git pull on Linux):
+One operator setting, ``YAVER_BASE_DIR``. Yaver creates two folders under it:
 
-* Windows: ``C:\\vd\\yaver`` and ``C:\\vd\\t`` (short TEMP for MAX_PATH)
-* WSL:     ``/mnt/c/vd/yaver`` and ``/mnt/c/vd/t``
-* Linux:   ``/vd/yaver`` and ``/vd/t`` (or ``~/vd/…`` if ``/vd`` is not writable)
+* ``{base}/yaver`` — sessions, jobs, state, plans, logs
+* ``{base}/t`` — temp git clones (short name for Windows MAX_PATH)
 
-Plans are ``{YAVER_DATA_DIR}/plans/{ISSUE_KEY}.md`` (not inside the clone).
+Defaults follow other local tools, in a folder the user can write without
+administrator rights:
 
-``C:\\vd\\…`` in ``.env`` is remapped on Linux. Override with
-``YAVER_DATA_DIR`` / ``VD_DATA_DIR`` and ``TEMP_DIR_BASE``.
-Legacy ``.jira-agent/`` next to the repo is only a migrate/read fallback.
+* Windows: ``%LOCALAPPDATA%\\Yaver`` (same place as Docker and other
+  per-user app data; not the roaming profile)
+* Linux and WSL: ``$XDG_DATA_HOME/yaver`` or ``~/.local/share/yaver``
+  (same place as OpenCode's ``~/.local/share/opencode``)
+
+Plans are ``{base}/yaver/plans/{ISSUE_KEY}.md`` (not inside the clone).
+
+An existing ``.env`` that still sets ``YAVER_DATA_DIR`` or ``TEMP_DIR_BASE``
+keeps those exact paths so months of data are not moved. Those two variables
+override the base. Legacy ``.jira-agent/`` next to the repo is only a
+migrate/read fallback.
 """
 
 from __future__ import annotations
@@ -23,13 +30,9 @@ from pathlib import Path
 from typing import List, Optional
 
 
-WIN_DATA_DIR = Path(r"C:\vd\yaver")
-WIN_TEMP_DIR = Path(r"C:\vd\t")
-WSL_DATA_DIR = Path("/mnt/c/vd/yaver")
-WSL_TEMP_DIR = Path("/mnt/c/vd/t")
-LINUX_ROOT_DATA_DIR = Path("/vd/yaver")
-LINUX_ROOT_TEMP_DIR = Path("/vd/t")
 _LEGACY_NAME = ".jira-agent"
+_DATA_FOLDER = "yaver"
+_TEMP_FOLDER = "t"
 
 
 def coerce_win_path(path: Path | str) -> Path:
@@ -80,26 +83,38 @@ def _dir_usable(path: Path) -> bool:
         return False
 
 
+def default_windows_base_dir() -> Path:
+    """``%LOCALAPPDATA%\\Yaver``. Falls back to the profile AppData path."""
+    local = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if local:
+        return Path(local) / "Yaver"
+    return Path.home() / "AppData" / "Local" / "Yaver"
+
+
+def default_linux_base_dir() -> Path:
+    """``$XDG_DATA_HOME/yaver`` or ``~/.local/share/yaver``."""
+    xdg = (os.environ.get("XDG_DATA_HOME") or "").strip()
+    if xdg:
+        return Path(xdg).expanduser() / "yaver"
+    return Path.home() / ".local" / "share" / "yaver"
+
+
 def linux_home_data_dir() -> Path:
-    return Path.home() / "vd" / "yaver"
+    return default_linux_base_dir() / _DATA_FOLDER
 
 
 def linux_home_temp_dir() -> Path:
-    return Path.home() / "vd" / "t"
+    return default_linux_base_dir() / _TEMP_FOLDER
 
 
 def default_linux_data_dir() -> Path:
-    """``/vd/yaver`` when writable, otherwise ``~/vd/yaver``."""
-    if _dir_usable(LINUX_ROOT_DATA_DIR):
-        return LINUX_ROOT_DATA_DIR
-    return linux_home_data_dir()
+    """``~/.local/share/yaver/yaver`` unless ``XDG_DATA_HOME`` is set."""
+    return default_linux_base_dir() / _DATA_FOLDER
 
 
 def default_linux_temp_dir() -> Path:
-    """``/vd/t`` when writable, otherwise ``~/vd/t``."""
-    if _dir_usable(LINUX_ROOT_TEMP_DIR):
-        return LINUX_ROOT_TEMP_DIR
-    return linux_home_temp_dir()
+    """``~/.local/share/yaver/t`` unless ``XDG_DATA_HOME`` is set."""
+    return default_linux_base_dir() / _TEMP_FOLDER
 
 
 def _env_path(*names: str) -> Optional[Path]:
@@ -117,37 +132,50 @@ def _under_pytest() -> bool:
     return "pytest" in sys.modules
 
 
-def uses_windows_layout() -> bool:
-    """True on native Windows, or WSL with the project on a Windows drive."""
-    if _under_pytest():
-        return False
+def default_base_dir() -> Path:
+    """Parent of ``yaver`` and ``t`` when ``YAVER_BASE_DIR`` is not set."""
     if os.name == "nt":
-        return True
-    try:
-        text = str(Path.cwd().resolve()).replace("\\", "/").lower()
-    except OSError:
-        return False
-    return text.startswith("/mnt/c/") or text.startswith("/mnt/c")
+        return default_windows_base_dir()
+    return default_linux_base_dir()
 
 
 def default_data_dir() -> Path:
     if _under_pytest():
         return Path.cwd() / _LEGACY_NAME
-    if os.name == "nt":
-        return WIN_DATA_DIR
-    if uses_windows_layout():
-        return WSL_DATA_DIR
-    return default_linux_data_dir()
+    return default_base_dir() / _DATA_FOLDER
 
 
 def default_temp_dir() -> Path:
     if _under_pytest():
         return Path(".temp")
-    if os.name == "nt":
-        return WIN_TEMP_DIR
-    if uses_windows_layout():
-        return WSL_TEMP_DIR
-    return default_linux_temp_dir()
+    return default_base_dir() / _TEMP_FOLDER
+
+
+def configured_base_dir() -> Optional[Path]:
+    """The one folder from ``YAVER_BASE_DIR``, or the shared parent of the legacy pair.
+
+    Returns None when data and clones were pointed at unrelated paths, or
+    when tests left both variables unset (pytest defaults are not ``yaver``/``t``).
+    """
+    base = _env_path("YAVER_BASE_DIR")
+    if base is not None:
+        return base
+    data = _env_path("YAVER_DATA_DIR", "VD_DATA_DIR")
+    temp = _env_path("TEMP_DIR_BASE")
+    if data is not None and temp is not None:
+        try:
+            same_parent = data.parent.resolve() == temp.parent.resolve()
+        except OSError:
+            same_parent = data.parent == temp.parent
+        if (
+            data.name.lower() == _DATA_FOLDER
+            and temp.name.lower() == _TEMP_FOLDER
+            and same_parent
+        ):
+            return data.parent
+    if data is None and temp is None and not _under_pytest():
+        return default_base_dir()
+    return None
 
 
 def resolve_temp_dir_base(raw: Path | str | None = None) -> Path:
@@ -166,11 +194,25 @@ def resolve_temp_dir_base(raw: Path | str | None = None) -> Path:
 
 
 def agent_data_dir() -> Path:
-    """Root for sessions, jobs, state, binds, plans — not the install folder."""
+    """``{YAVER_BASE_DIR}/yaver``. An explicit ``YAVER_DATA_DIR`` still wins."""
     override = _env_path("YAVER_DATA_DIR", "VD_DATA_DIR")
     if override is not None:
         return override
+    base = _env_path("YAVER_BASE_DIR")
+    if base is not None:
+        return base / _DATA_FOLDER
     return default_data_dir()
+
+
+def agent_temp_dir() -> Path:
+    """``{YAVER_BASE_DIR}/t``. An explicit absolute ``TEMP_DIR_BASE`` still wins."""
+    override = _env_path("TEMP_DIR_BASE")
+    if override is not None and override.is_absolute():
+        return override
+    base = _env_path("YAVER_BASE_DIR")
+    if base is not None:
+        return base / _TEMP_FOLDER
+    return default_temp_dir()
 
 
 def plans_dir() -> Path:

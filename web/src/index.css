@@ -133,16 +133,16 @@ body {
 }
 
 .vd-mark {
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 9px;
+  width: 4rem;
+  height: 4rem;
+  border-radius: 12px;
   background: #11182c;
   overflow: hidden;
   flex-shrink: 0;
 }
 .vd-mark img {
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 4rem;
+  height: 4rem;
   display: block;
   object-fit: cover;
 }

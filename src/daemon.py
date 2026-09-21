@@ -42,14 +42,28 @@ class JiraAgentDaemon:
         # run_coroutine_threadsafe on a closed/stale loop reference.
         self._main_loop = asyncio.get_running_loop()
 
-        from src.paths import agent_data_dir, ensure_agent_data_dir, plans_dir
+        from src.paths import (
+            agent_data_dir,
+            configured_base_dir,
+            ensure_agent_data_dir,
+            plans_dir,
+        )
 
         logger.info("Starting Yaver daemon")
         logger.info(f"project_root={settings.project_root}")
+        logger.info(f"base_dir={configured_base_dir() or '(split)'}")
         logger.info(f"data_dir={agent_data_dir()}")
         logger.info(f"temp_dir_base={settings.temp_dir_base}")
         logger.info(f"plans_dir={plans_dir()}")
         ensure_agent_data_dir(migrate=True)
+        try:
+            from src.state.job_store import job_store as _job_store
+
+            n = _job_store.ensure_index()
+            if n:
+                logger.info(f"Job SQLite index ready ({n} new row(s))")
+        except Exception as e:
+            logger.warning(f"Job SQLite index skipped: {e}")
         try:
             Path(settings.temp_dir_base).mkdir(parents=True, exist_ok=True)
         except OSError as e:

@@ -1,12 +1,17 @@
-"""GET /api/analytics — real HTTP, real job JSON files."""
+"""GET /api/analytics — real HTTP, job JSON plus local jobs.sqlite index."""
 
 from __future__ import annotations
 
+import json
+import socket
 import threading
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
+import httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 
 from src.dashboard.api import create_dashboard_app
@@ -84,9 +89,15 @@ def test_analytics_counts_and_filters(tmp_path, isolate_jira_agent_artifacts, mo
     )
     jobs.update_job(d["job_id"], started_at=_stamp(40), status="completed")
 
+    sqlite = isolate_jira_agent_artifacts["jobs_dir"].parent / "jobs.sqlite"
+    assert sqlite.is_file()
+    assert jobs.count_jobs() == 4
+
     all7 = http.get("/api/analytics", params={"period": "7d", "bucket": "day"})
     assert all7.status_code == 200, all7.text
     body = all7.json()
+    assert body["in_range"] == 3
+    assert body["scanned"] == 3
     assert body["totals"]["jobs"] == 3
     assert body["totals"]["completed"] == 2
     assert body["totals"]["error"] == 1
@@ -133,10 +144,29 @@ def test_analytics_counts_and_filters(tmp_path, isolate_jira_agent_artifacts, mo
 
     year = http.get("/api/analytics", params={"period": "90d"})
     assert year.json()["totals"]["jobs"] == 4
+    assert year.json()["scanned"] == 4
 
-    facets = body["facets"]
-    assert any(f["id"] == "gpt-4.1" for f in facets["model"])
-    assert any(f["id"] == "plan" for f in facets["category"])
+
+def test_analytics_sql_does_not_walk_iter_jobs(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    rec = jobs.create_job(
+        issue_key="KAN-sql",
+        summary="indexed",
+        workflow_type="execution",
+        status="completed",
+    )
+    jobs.update_job(rec["job_id"], started_at=_stamp(1), status="completed")
+
+    def _boom():
+        raise AssertionError("iter_jobs should not run when SQLite WHERE is used")
+
+    jobs.iter_jobs = _boom  # type: ignore[method-assign]
+    r = http.get("/api/analytics", params={"period": "7d", "status": "completed"})
+    assert r.status_code == 200, r.text
+    assert r.json()["totals"]["jobs"] == 1
+    assert r.json()["scanned"] == 1
 
 
 def test_analytics_unset_model_is_in_table_not_series(
@@ -259,10 +289,10 @@ def test_analytics_merges_repo_urls_with_and_without_git_suffix(
     assert filtered["totals"]["jobs"] == 2
 
 
-def test_analytics_24h_month_bucket_stays_small(
+def test_analytics_bucket_follows_the_range(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):
-    """24 hours + Month must not explode into a huge series / hang the GET."""
+    """The chart step is chosen from the time range. A bucket query is ignored."""
     http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
     rec = jobs.create_job(
         issue_key="KAN-24",
@@ -276,12 +306,16 @@ def test_analytics_24h_month_bucket_stays_small(
         started_at=started.isoformat(timespec="seconds"),
         status="completed",
     )
-    r = http.get("/api/analytics", params={"period": "24h", "bucket": "month"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["range"]["bucket"] == "month"
-    assert 1 <= len(body["series"]) <= 3
+    day = http.get("/api/analytics", params={"period": "24h", "bucket": "month"})
+    assert day.status_code == 200, day.text
+    body = day.json()
+    assert body["range"]["bucket"] == "hour"
+    assert 1 <= len(body["series"]) <= 48
     assert body["totals"]["jobs"] == 1
+    month = http.get("/api/analytics", params={"period": "30d", "bucket": "hour"})
+    assert month.status_code == 200, month.text
+    assert month.json()["range"]["bucket"] == "day"
+    assert len(month.json()["series"]) <= 40
 
 
 def test_analytics_custom_from_to(tmp_path, isolate_jira_agent_artifacts, monkeypatch):
@@ -333,15 +367,17 @@ def test_analytics_cancel_after_iter_jobs_raises(
         status="completed",
     )
     jobs.update_job(rec["job_id"], started_at=_stamp(1), status="completed")
+    indexed = jobs.iter_jobs()
+    assert indexed and indexed[0]["issue_key"] == "KAN-cancel-2"
     ev = threading.Event()
-    real_iter = jobs.iter_jobs
+    real_query = jobs.query_jobs
 
-    def _iter_then_cancel():
-        rows = real_iter()
+    def _query_then_cancel(**kwargs):
+        rows = real_query(**kwargs)
         ev.set()
         return rows
 
-    jobs.iter_jobs = _iter_then_cancel  # type: ignore[method-assign]
+    jobs.query_jobs = _query_then_cancel  # type: ignore[method-assign]
     with pytest.raises(AnalyticsCancelled):
         build_analytics(period="7d", store=jobs, cancel=ev)
 
@@ -684,10 +720,10 @@ def test_analytics_all_hour_coarsens_long_span(
         started_at=started.isoformat(timespec="seconds"),
         status="completed",
     )
-    r = http.get("/api/analytics", params={"period": "all", "bucket": "hour"})
+    r = http.get("/api/analytics", params={"period": "all"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["range"]["bucket"] in {"day", "week", "month"}
+    assert body["range"]["bucket"] == "month"
     assert len(body["series"]) <= 400
     assert body["totals"]["jobs"] == 1
 
@@ -711,3 +747,112 @@ def test_analytics_http_timeout_returns_504(
     r = http.get("/api/analytics", params={"period": "7d"})
     assert r.status_code == 504, r.text
     assert "timed out" in str(r.json().get("detail", "")).lower()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_http(url: str, timeout: float = 15.0) -> None:
+    deadline = time.time() + timeout
+    last: Optional[Exception] = None
+    while time.time() < deadline:
+        try:
+            resp = httpx.get(url, timeout=0.5, verify=False)
+            if resp.status_code < 500:
+                return
+        except Exception as exc:
+            last = exc
+        time.sleep(0.05)
+    raise RuntimeError(f"{url} not ready: {last}")
+
+
+def test_uvicorn_analytics_and_jobs_after_json_backfill(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """Old job JSON only → new store backfills sqlite → live Analytics + Jobs."""
+    jobs_dir = isolate_jira_agent_artifacts["jobs_dir"]
+    now = datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
+    records = [
+        {
+            "job_id": "job_e2ea0001",
+            "issue_key": "KAN-101",
+            "summary": "plan login",
+            "description": "write the plan",
+            "status": "completed",
+            "workflow_type": "planning",
+            "source": "jira",
+            "model": "gpt-4.1",
+            "backend": "opencode",
+            "started_at": now,
+            "updated_at": now,
+            "completed_at": now,
+        },
+        {
+            "job_id": "job_e2ea0002",
+            "issue_key": "KAN-102",
+            "summary": "build login",
+            "status": "error",
+            "workflow_type": "execution",
+            "source": "jira",
+            "model": "gpt-4.1",
+            "started_at": now,
+            "updated_at": now,
+        },
+    ]
+    for rec in records:
+        (jobs_dir / f"{rec['job_id']}.json").write_text(
+            json.dumps(rec), encoding="utf-8"
+        )
+
+    store = JobStore(jobs_dir=jobs_dir)
+    assert store.ensure_index() == 2
+    sqlite = jobs_dir.parent / "jobs.sqlite"
+    assert sqlite.is_file()
+    monkeypatch.setattr("src.dashboard.analytics.default_job_store", store)
+    monkeypatch.setattr("src.state.job_store.job_store", store)
+    monkeypatch.setattr("src.dashboard.api.job_store", store)
+    monkeypatch.setattr("src.dashboard.service.default_job_store", store)
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    app = create_dashboard_app(state_manager=sm)
+    port = _free_port()
+    config = uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="warning", lifespan="off"
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        _wait_http(f"http://127.0.0.1:{port}/api/health")
+        analytics = httpx.get(
+            f"http://127.0.0.1:{port}/api/analytics",
+            params={"period": "7d"},
+            timeout=15.0,
+            verify=False,
+        )
+        assert analytics.status_code == 200, analytics.text
+        body = analytics.json()
+        assert body["totals"]["jobs"] == 2
+        assert body["matched"] == 2
+        listed = httpx.get(
+            f"http://127.0.0.1:{port}/api/jobs",
+            params={"page": 1, "page_size": 25},
+            timeout=15.0,
+            verify=False,
+        )
+        assert listed.status_code == 200, listed.text
+        jobs_body = listed.json()
+        keys = {j["issue_key"] for j in jobs_body.get("jobs") or []}
+        assert keys == {"KAN-101", "KAN-102"}
+        detail = httpx.get(
+            f"http://127.0.0.1:{port}/api/jobs/job_e2ea0001",
+            timeout=15.0,
+            verify=False,
+        )
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["job"]["description"] == "write the plan"
+        assert (jobs_dir / "job_e2ea0001.json").is_file()
+    finally:
+        server.should_exit = True

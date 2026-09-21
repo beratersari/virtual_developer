@@ -453,9 +453,9 @@ def schedule_cancel(schedule_id: str):
 def init():
     """Initialize the project structure."""
     from src.paths import (
-        agent_data_dir,
         agent_subdir,
-        default_temp_dir,
+        configured_base_dir,
+        default_base_dir,
         ensure_agent_data_dir,
         plans_dir,
         resolve_temp_dir_base,
@@ -463,27 +463,15 @@ def init():
     from src.config import upsert_dotenv_keys
 
     ensure_agent_data_dir(migrate=True)
+    base = configured_base_dir() or default_base_dir()
     dirs = [
         settings.state_dir,
         agent_subdir("sessions"),
-        resolve_temp_dir_base(
-            settings.temp_dir_base
-            if Path(settings.temp_dir_base).is_absolute()
-            else default_temp_dir()
-        ),
+        resolve_temp_dir_base(settings.temp_dir_base),
         plans_dir(),
         Path("logs"),
     ]
-    upsert_dotenv_keys(
-        {
-            "YAVER_DATA_DIR": str(agent_data_dir()),
-            "TEMP_DIR_BASE": str(
-                settings.temp_dir_base
-                if Path(settings.temp_dir_base).is_absolute()
-                else default_temp_dir()
-            ),
-        }
-    )
+    upsert_dotenv_keys({"YAVER_BASE_DIR": str(base)})
     
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)

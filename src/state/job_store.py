@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.logger import logger
+from src.state.job_index import JobIndex, default_index_path
 
 
 def _default_jobs_dir() -> Path:
@@ -95,12 +96,44 @@ def description_from_prompt_path(prompt_path: Optional[str]) -> str:
 
 
 class JobStore:
-    """File-backed store of agent jobs (one JSON file per job)."""
+    """File-backed store of agent jobs (one JSON file per job).
+
+    A local SQLite index (``jobs.sqlite`` next to ``jobs/``) speeds Analytics
+    and list/count. JSON remains the full record; ``get_job`` always reads it.
+    """
 
     def __init__(self, jobs_dir: Optional[Path] = None) -> None:
         self.jobs_dir = jobs_dir or _default_jobs_dir()
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._index: Optional[JobIndex] = None
+        self._index_ready = False
+        try:
+            self._index = JobIndex(default_index_path(self.jobs_dir))
+        except Exception as e:
+            logger.warning(f"Job SQLite index unavailable: {e}")
+            self._index = None
+
+    def ensure_index(self) -> int:
+        """Create/open jobs.sqlite and insert JSON files not yet indexed.
+
+        Called on daemon start and on the first list/count/Analytics walk.
+        JSON remains the source of truth; this is a local index only.
+        """
+        if self._index is None:
+            return 0
+        with self._lock:
+            if self._index_ready:
+                return 0
+            try:
+                n = self._index.reconcile(self.jobs_dir)
+            except Exception as e:
+                logger.warning(f"Job index backfill failed: {e}")
+                return 0
+            self._index_ready = True
+            if n:
+                logger.info(f"Job index backfilled {n} job(s) from JSON")
+            return n
 
     def _path(self, job_id: str) -> Path:
         safe = job_id.replace("/", "_").replace("\\", "_")
@@ -258,6 +291,7 @@ class JobStore:
                 return False
             try:
                 path.unlink()
+                self._index_delete(jid)
                 logger.info(f"Job deleted: {jid}")
                 return True
             except OSError as e:
@@ -265,7 +299,33 @@ class JobStore:
                 return False
 
     def iter_jobs(self) -> List[Dict[str, Any]]:
-        """Every stored job JSON (unsorted). Analytics walks this set."""
+        """Every indexed job (unsorted). Analytics walks this set."""
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                return self._index.iter_jobs()
+            except Exception as e:
+                logger.debug(f"Job index iter failed, using JSON: {e}")
+        return self._iter_jobs_json()
+
+    def min_job_when(self) -> Optional[str]:
+        self.ensure_index()
+        if self._index is None:
+            return None
+        try:
+            return self._index.min_when()
+        except Exception as e:
+            logger.debug(f"Job index min_when failed: {e}")
+            return None
+
+    def query_jobs(self, **filters: Any) -> List[Dict[str, Any]]:
+        """Analytics rows with period/filters applied in SQLite."""
+        self.ensure_index()
+        if self._index is None:
+            raise RuntimeError("job sqlite index unavailable")
+        return self._index.query_jobs(**filters)
+
+    def _iter_jobs_json(self) -> List[Dict[str, Any]]:
         jobs: List[Dict[str, Any]] = []
         if not self.jobs_dir.is_dir():
             return jobs
@@ -295,6 +355,31 @@ class JobStore:
 
         ``offset`` skips that many rows after sorting (for pagination).
         """
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                ids = self._index.list_ids(
+                    issue_key=issue_key, limit=limit, offset=offset
+                )
+                jobs: List[Dict[str, Any]] = []
+                for jid in ids:
+                    job = self.get_job(jid)
+                    if job:
+                        jobs.append(job)
+                return jobs
+            except Exception as e:
+                logger.debug(f"Job index list failed, using JSON: {e}")
+        return self._list_jobs_json(
+            issue_key=issue_key, limit=limit, offset=offset
+        )
+
+    def _list_jobs_json(
+        self,
+        *,
+        issue_key: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         jobs: List[Dict[str, Any]] = []
         if not self.jobs_dir.is_dir():
             return jobs
@@ -323,6 +408,15 @@ class JobStore:
 
     def count_jobs(self, *, issue_key: Optional[str] = None) -> int:
         """Count stored jobs matching optional issue filter."""
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                return self._index.count(issue_key=issue_key)
+            except Exception as e:
+                logger.debug(f"Job index count failed, using JSON: {e}")
+        return self._count_jobs_json(issue_key=issue_key)
+
+    def _count_jobs_json(self, *, issue_key: Optional[str] = None) -> int:
         if not self.jobs_dir.is_dir():
             return 0
         needle = (issue_key or "").strip().upper()
@@ -387,6 +481,7 @@ class JobStore:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(job, f, indent=2, ensure_ascii=False)
                 tmp.replace(path)
+                self._index_upsert(job)
             except Exception as e:
                 logger.error(f"Error saving job {job.get('job_id')}: {e}")
                 try:
@@ -394,6 +489,22 @@ class JobStore:
                         tmp.unlink()
                 except OSError:
                     pass
+
+    def _index_upsert(self, job: Dict[str, Any]) -> None:
+        if self._index is None:
+            return
+        try:
+            self._index.upsert(job)
+        except Exception as e:
+            logger.debug(f"Job index upsert failed: {e}")
+
+    def _index_delete(self, job_id: str) -> None:
+        if self._index is None:
+            return
+        try:
+            self._index.delete(job_id)
+        except Exception as e:
+            logger.debug(f"Job index delete failed: {e}")
 
 
 # Process-wide default store

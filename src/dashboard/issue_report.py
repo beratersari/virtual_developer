@@ -976,7 +976,7 @@ def _git_missing_explanation(
         "",
         "This is not the Yaver repo and not sample_project/.",
         "Jira/GitLab jobs clone the Repository URL from the issue {params}",
-        "into a temp folder under TEMP_DIR_BASE (C:\\vd\\t, /vd/t, or ~/vd/t).",
+        "into a temp folder under {YAVER_BASE_DIR}/t.",
         f"sample_project/ (PROJECT_ROOT={project_root}) is only used by",
         "`cli.py test-issue`. It is never this job's working tree.",
         "",

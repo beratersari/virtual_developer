@@ -8,6 +8,33 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.55] — 2026-09-22
+
+Analytics and the Jobs list read a local SQLite index. Data lives
+under one per-user folder. The chart step follows the time range.
+The mark is phosphor green.
+
+### Added
+
+- Local SQLite job index (`{YAVER_BASE_DIR}/yaver/jobs.sqlite`) for Analytics and
+  Jobs list/count. Created on first daemon start. Full `job_*.json` files
+  stay on disk. No extra install; each computer keeps its own file.
+
+### Changed
+
+- Storage is one folder, `YAVER_BASE_DIR`. The default is a per-user
+  directory: `%LOCALAPPDATA%\Yaver` on Windows and `~/.local/share/yaver`
+  on Linux. Yaver keeps its data in `{base}/yaver` and temp clones in
+  `{base}/t`. An existing `YAVER_DATA_DIR` or `TEMP_DIR_BASE` still wins.
+- The Jobs list still opens `job_*.json` for the current page, so error
+  text, delivery status, and the session id stay on the row.
+- The Analytics chart step is chosen from the time range. There is no
+  separate Hour / Day / Week / Month control. A long range is not drawn
+  as hours.
+- The Yaver mark is phosphor green, and the in-app wink is 64 pixels.
+
+[0.9.55]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.55
+
 ## [0.9.54] — 2026-09-21
 
 GitLab review jobs keep the overview comment when an inline

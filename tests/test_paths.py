@@ -13,10 +13,9 @@ def isolate_jira_agent_artifacts():
     yield
 
 from src.paths import (
-    WSL_DATA_DIR,
-    WSL_TEMP_DIR,
     agent_data_dir,
     coerce_win_path,
+    default_base_dir,
     default_data_dir,
     default_temp_dir,
     ensure_agent_data_dir,
@@ -43,6 +42,87 @@ def test_agent_data_dir_honors_env(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     dest = tmp_path / "durable"
     monkeypatch.setenv("YAVER_DATA_DIR", str(dest))
     assert agent_data_dir() == dest
+
+
+def test_base_dir_creates_yaver_and_t(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.paths import agent_temp_dir, configured_base_dir
+
+    base = tmp_path / "vd"
+    monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
+    monkeypatch.delenv("VD_DATA_DIR", raising=False)
+    monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.setenv("YAVER_BASE_DIR", str(base))
+    assert configured_base_dir() == base
+    assert agent_data_dir() == base / "yaver"
+    assert agent_temp_dir() == base / "t"
+
+
+def test_legacy_data_dir_wins_over_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    base = tmp_path / "vd"
+    explicit = tmp_path / "old-data"
+    monkeypatch.setenv("YAVER_BASE_DIR", str(base))
+    monkeypatch.setenv("YAVER_DATA_DIR", str(explicit))
+    assert agent_data_dir() == explicit
+
+
+def test_legacy_pair_shares_one_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.paths import configured_base_dir
+
+    base = tmp_path / "vd"
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
+    monkeypatch.setenv("YAVER_DATA_DIR", str(base / "yaver"))
+    monkeypatch.setenv("TEMP_DIR_BASE", str(base / "t"))
+    assert configured_base_dir() == base
+
+
+def test_absolute_temp_dir_wins_over_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.paths import agent_temp_dir
+
+    base = tmp_path / "base"
+    clones = tmp_path / "custom-clones"
+    monkeypatch.setenv("YAVER_BASE_DIR", str(base))
+    monkeypatch.setenv("TEMP_DIR_BASE", str(clones))
+    assert agent_temp_dir() == clones
+
+
+def test_split_legacy_paths_are_not_one_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.paths import configured_base_dir
+
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
+    monkeypatch.setenv("YAVER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("TEMP_DIR_BASE", str(tmp_path / "clones"))
+    assert configured_base_dir() is None
+
+
+def test_init_writes_base_dir_and_creates_both_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from click.testing import CliRunner
+
+    from cli import cli
+    from src.config import settings
+
+    base = tmp_path / "base"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
+    monkeypatch.delenv("VD_DATA_DIR", raising=False)
+    monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.setenv("YAVER_BASE_DIR", str(base))
+    monkeypatch.setattr(settings, "temp_dir_base", base / "t")
+    result = CliRunner().invoke(cli, ["init"])
+    assert result.exit_code == 0, result.output
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "YAVER_BASE_DIR=" in text
+    assert "base" in text
+    assert "YAVER_DATA_DIR=" not in text
+    assert "TEMP_DIR_BASE=" not in text
+    assert (base / "yaver").is_dir()
+    assert (base / "t").is_dir()
+
+
+def test_windows_base_without_localappdata(monkeypatch: pytest.MonkeyPatch):
+    from src.paths import default_windows_base_dir
+
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert default_windows_base_dir() == Path.home() / "AppData" / "Local" / "Yaver"
 
 
 def test_ensure_migrates_legacy_jira_agent(
@@ -75,32 +155,43 @@ def test_under_agent_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert under_agent_data(tmp_path / "secret.txt") is False
 
 
-def test_linux_defaults_prefer_home_when_root_unusable(monkeypatch: pytest.MonkeyPatch):
+def test_linux_default_is_xdg_data_home(monkeypatch: pytest.MonkeyPatch):
     from src import paths as paths_mod
 
-    monkeypatch.setattr(paths_mod, "_dir_usable", lambda p: False)
-    assert paths_mod.default_linux_data_dir() == Path.home() / "vd" / "yaver"
-    assert paths_mod.default_linux_temp_dir() == Path.home() / "vd" / "t"
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert paths_mod.default_linux_base_dir() == Path.home() / ".local" / "share" / "yaver"
+    assert paths_mod.default_linux_data_dir() == Path.home() / ".local" / "share" / "yaver" / "yaver"
+    assert paths_mod.default_linux_temp_dir() == Path.home() / ".local" / "share" / "yaver" / "t"
+    custom = Path.home() / "custom-xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(custom))
+    assert paths_mod.default_linux_base_dir() == custom / "yaver"
+
+
+def test_windows_default_is_local_appdata(monkeypatch: pytest.MonkeyPatch):
+    from src import paths as paths_mod
+
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\dev\AppData\Local")
+    assert paths_mod.default_windows_base_dir() == Path(r"C:\Users\dev\AppData\Local\Yaver")
 
 
 def test_coerce_win_path_native_linux_without_mnt(monkeypatch: pytest.MonkeyPatch):
     from src import paths as paths_mod
 
-    monkeypatch.setattr(paths_mod, "_dir_usable", lambda p: False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     got = paths_mod._linux_path_from_win_rest("vd/yaver")
-    assert got == Path.home() / "vd" / "yaver"
+    assert got == Path.home() / ".local" / "share" / "yaver" / "yaver"
     got_t = paths_mod._linux_path_from_win_rest("vd/t")
-    assert got_t == Path.home() / "vd" / "t"
+    assert got_t == Path.home() / ".local" / "share" / "yaver" / "t"
 
 
 def test_pytest_stays_on_local_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("YAVER_DATA_DIR", raising=False)
     monkeypatch.delenv("VD_DATA_DIR", raising=False)
     monkeypatch.delenv("TEMP_DIR_BASE", raising=False)
+    monkeypatch.delenv("YAVER_BASE_DIR", raising=False)
     assert default_data_dir() == Path.cwd() / ".jira-agent"
     assert default_temp_dir() == Path(".temp")
-    assert WSL_DATA_DIR.as_posix().endswith("vd/yaver")
-    assert WSL_TEMP_DIR.as_posix().endswith("vd/t")
+    assert default_base_dir().name in {"Yaver", "yaver"}
 
 
 def test_plans_dir_is_under_yaver_data(

@@ -1,5 +1,6 @@
 """Job history store tests."""
 
+import json
 from pathlib import Path
 
 from src.state.job_store import (
@@ -26,6 +27,10 @@ def test_create_list_filter_update(tmp_path: Path):
         agent="prometheus",
     )
     store.update_job(j1["job_id"], status="completed", opencode_session_id="ses_abc")
+
+    assert (tmp_path / "jobs.sqlite").is_file()
+    assert store.count_jobs() == 2
+    assert store.count_jobs(issue_key="KAN-1") == 1
 
     all_jobs = store.list_jobs()
     assert len(all_jobs) == 2
@@ -103,3 +108,65 @@ def test_ensure_description_from_prompt_file(tmp_path: Path):
     assert fixed["description"] == "old description v1"
     assert store.get_job(job["job_id"])["description"] == "old description v1"
     assert description_from_prompt_path(str(prompt)) == "old description v1"
+
+
+def test_sqlite_index_dual_write_and_analytics_iter(tmp_path: Path):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    j1 = store.create_job(
+        issue_key="KAN-1",
+        summary="login",
+        workflow_type="execution",
+        source="jira",
+        model="gpt-4.1",
+        status="completed",
+    )
+    store.update_job(j1["job_id"], status="completed")
+    assert (tmp_path / "jobs.sqlite").is_file()
+    rows = store.iter_jobs()
+    assert len(rows) == 1
+    assert rows[0]["issue_key"] == "KAN-1"
+    assert rows[0]["model"] == "gpt-4.1"
+    assert store.count_jobs() == 1
+    assert store.count_jobs(issue_key="kan-1") == 1
+    listed = store.list_jobs(issue_key="KAN-1")
+    assert listed[0]["job_id"] == j1["job_id"]
+    assert listed[0]["summary"] == "login"
+    assert store.delete_job(j1["job_id"]) is True
+    assert store.count_jobs() == 0
+    assert store.iter_jobs() == []
+
+
+def test_sqlite_index_backfills_existing_json(tmp_path: Path):
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    raw = {
+        "job_id": "job_legacy01ab",
+        "issue_key": "KAN-9",
+        "summary": "old run",
+        "status": "completed",
+        "workflow_type": "planning",
+        "source": "jira",
+        "started_at": "2026-01-02T10:00:00",
+        "updated_at": "2026-01-02T10:05:00",
+    }
+    (jobs_dir / "job_legacy01ab.json").write_text(
+        json.dumps(raw), encoding="utf-8"
+    )
+    store = JobStore(jobs_dir=jobs_dir)
+    assert store.ensure_index() == 1
+    assert store.count_jobs() == 1
+    rows = store.iter_jobs()
+    assert rows[0]["issue_key"] == "KAN-9"
+    assert rows[0]["workflow_type"] == "planning"
+    listed = store.list_jobs()
+    assert listed[0]["summary"] == "old run"
+
+
+def test_sqlite_index_drops_rows_when_json_gone(tmp_path: Path):
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    job = store.create_job(issue_key="KAN-3", summary="x", status="completed")
+    path = tmp_path / "jobs" / f"{job['job_id']}.json"
+    path.unlink()
+    store._index_ready = False
+    store.ensure_index()
+    assert store.count_jobs() == 0

@@ -236,6 +236,13 @@ def _settings_project_repositories() -> List[ProjectRepositoryItem]:
     return [ProjectRepositoryItem(**item) for item in parse_project_repositories(raw)]
 
 
+def _settings_base_dir() -> str:
+    from src.paths import configured_base_dir
+
+    base = configured_base_dir()
+    return str(base) if base is not None else ""
+
+
 def _settings_data_dir() -> str:
     from src.paths import agent_data_dir, ensure_agent_data_dir
 
@@ -365,6 +372,7 @@ def build_settings_view() -> SettingsView:
             getattr(settings, "trigger_mentions_list", None) or []
         ),
         project_repositories=_settings_project_repositories(),
+        base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
     )
@@ -1277,10 +1285,9 @@ def build_jobs(
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
 
-    # JobStore only — never synthesize legacy_* rows from session files.
+    # JobStore SQLite index — do not hydrate every job_*.json for the list.
     # Retries live under the parent job (session_log_paths / retry_attempts).
-    fetch_cap = 2000
-    raw = js.list_jobs(limit=fetch_cap, offset=0)
+    raw = js.iter_jobs()
     raw = [j for j in raw if not str(j.get("job_id") or "").startswith("legacy_")]
     if exact_issue_key:
         raw = [j for j in raw if _job_matches_exact_key(j, issue_key)]
@@ -1306,9 +1313,23 @@ def build_jobs(
 
     total = len(raw)
     page_raw = raw[offset : offset + size]
+    # Index rows omit error text, session ids, and delivery. Open JSON only
+    # for this page so a months-old history still shows those fields.
+    page_jobs: List[Dict[str, Any]] = []
+    for j in page_raw:
+        full = None
+        jid = str(j.get("job_id") or "")
+        if jid:
+            try:
+                full = js.get_job(jid)
+            except Exception:
+                full = None
+        if full is not None and not str(full.get("job_id") or "").strip():
+            full = {**full, "job_id": jid}
+        page_jobs.append(full or j)
 
     items: List[JobItem] = []
-    for j in page_raw:
+    for j in page_jobs:
         items.append(
             job_dict_to_item(
                 j,

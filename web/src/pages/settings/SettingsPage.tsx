@@ -1040,18 +1040,16 @@ export function SettingsPage() {
         </span>
       </label>
 
-      <div className="text-sm font-semibold text-text">Data locations</div>
+      <div className="text-sm font-semibold text-text">Data location</div>
       <p className="text-xs text-text-muted">
-        Change <span className="font-mono">YAVER_DATA_DIR</span> and{' '}
-        <span className="font-mono">TEMP_DIR_BASE</span> in .env.
+        Set <span className="font-mono">YAVER_BASE_DIR</span> in .env. Yaver
+        creates <span className="font-mono">yaver</span> and{' '}
+        <span className="font-mono">t</span> under that folder.
       </p>
       <dl className="space-y-1 font-mono text-[11px] text-text-secondary">
-        <div>
-          Sessions / jobs: {settings.data_dir || '(default)'}
-        </div>
-        <div>
-          Clones: {settings.temp_dir_base || '(default)'}
-        </div>
+        <div>Base: {settings.base_dir || '(not one folder)'}</div>
+        <div>Data: {settings.data_dir || '(default)'}</div>
+        <div>Clones: {settings.temp_dir_base || '(default)'}</div>
       </dl>
 
       <p className="quiet">

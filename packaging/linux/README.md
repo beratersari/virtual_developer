@@ -54,10 +54,11 @@ Without that zip, OpenCode falls back to `opencoderman/packaging/build_artifact.
 OpenCode is configured with `"plugin": []` and `autoupdate: false` (stock
 `build` / `plan` agents). Do not install `oh-my-openagent`.
 
-Durable data (not next to the git checkout):
+Durable data (not next to the git checkout). The default base is
+`~/.local/share/yaver` (or `$XDG_DATA_HOME/yaver`):
 
-- `/vd/yaver` + `/vd/t` when writable
-- otherwise `~/vd/yaver` + `~/vd/t`
+- `{base}/yaver` — jobs, sessions, plans
+- `{base}/t` — temp clones
 
 ## Start
 

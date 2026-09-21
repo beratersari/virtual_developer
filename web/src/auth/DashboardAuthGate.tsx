@@ -14,9 +14,9 @@ function GateBrand({ blurb }: { blurb: string }) {
         <img
           src="/yaver-wink.gif"
           alt=""
-          width={40}
-          height={40}
-          className="h-10 w-10 rounded-lg"
+          width={64}
+          height={64}
+          className="h-16 w-16 rounded-xl"
         />
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-text-muted">
