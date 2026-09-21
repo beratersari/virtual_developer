@@ -1,3 +1,10 @@
+# Yaver 0.9.51
+
+A second /yaver on the
+same MR fetches the first
+job's push and rebases
+before delivering.
+
 # Yaver 0.9.50
 
 Analytics no longer hangs.
