@@ -358,7 +358,7 @@ def build_analytics(
         for p in str(repository or "").split(",")
         if p.strip()
     }
-    key_needle = (issue_key or "").strip().upper()
+    want_keys = {p.strip().upper() for p in (issue_key or "").split(",") if p.strip()}
     search = (q or "").strip()
 
     jobs = js.iter_jobs() if hasattr(js, "iter_jobs") else js.list_jobs(limit=5000)
@@ -442,7 +442,7 @@ def build_analytics(
             rkl = _repo_key(job).lower()
             if rkl not in want_repo and not any(n in rkl for n in want_repo):
                 continue
-        if key_needle and key_needle not in ik:
+        if want_keys and ik not in want_keys:
             continue
         if not _matches_text(job, search):
             continue

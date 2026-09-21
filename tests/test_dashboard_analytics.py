@@ -346,6 +346,37 @@ def test_analytics_cancel_after_iter_jobs_raises(
         build_analytics(period="7d", store=jobs, cancel=ev)
 
 
+def test_analytics_issue_key_is_exact_not_substring(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """KAN-24 must not pull KAN-240. Search (q) still contains."""
+    http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
+    a = jobs.create_job(
+        issue_key="KAN-24",
+        summary="short key",
+        workflow_type="execution",
+        status="completed",
+    )
+    jobs.update_job(a["job_id"], started_at=_stamp(1), status="completed")
+    b = jobs.create_job(
+        issue_key="KAN-240",
+        summary="longer key",
+        workflow_type="execution",
+        status="error",
+    )
+    jobs.update_job(b["job_id"], started_at=_stamp(1), status="error")
+    exact = http.get("/api/analytics", params={"period": "7d", "issue_key": "KAN-24"})
+    assert exact.status_code == 200, exact.text
+    assert exact.json()["totals"]["jobs"] == 1
+    assert exact.json()["totals"]["completed"] == 1
+    both = http.get(
+        "/api/analytics", params={"period": "7d", "issue_key": "KAN-24,KAN-240"}
+    )
+    assert both.json()["totals"]["jobs"] == 2
+    contains = http.get("/api/analytics", params={"period": "7d", "q": "KAN-24"})
+    assert contains.json()["totals"]["jobs"] == 2
+
+
 def test_analytics_in_flight_and_combined_filters(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):

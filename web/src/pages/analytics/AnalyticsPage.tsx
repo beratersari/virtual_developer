@@ -457,7 +457,8 @@ export function AnalyticsPage() {
           Issue key
           <input
             className="vd-input mt-1 font-mono"
-            placeholder="KAN-12"
+            placeholder="KAN-240"
+            title="Exact issue key. Use Search for a contains match."
             value={issueKey}
             onChange={(e) => setIssueKey(e.target.value)}
           />
