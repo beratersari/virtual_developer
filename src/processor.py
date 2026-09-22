@@ -4036,7 +4036,7 @@ class JobProcessor:
                 e.user_message,
                 suggestion=(
                     "Update the issue `{params}` block with Repository, "
-                    "Source branch, Target branch, and Mode (plan or build). "
+                    "Source branch, Target branch, and Mode (plan, build, or test). "
                     "The issue was moved to *In Progress* — after fixing the "
                     "description, move it back to *To Do* to re-queue."
                 ),
