@@ -498,7 +498,7 @@ def test_create_state_does_not_return_phantom_pending_over_completed(tmp_path):
 
 
 def test_pending_schedule_is_seen_behind_500_newer_rows(tmp_path, monkeypatch):
-    """A future schedule must still suppress poller intake after 500 newer rows."""
+    """A future schedule in SQLite must still suppress poller intake after 500 newer rows."""
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     future = (datetime.now() + timedelta(hours=6)).isoformat(timespec="seconds")
     waiting = store.create(

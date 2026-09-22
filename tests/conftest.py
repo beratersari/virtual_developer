@@ -52,22 +52,27 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     jobs_dir = runtime / "jobs"
     sessions_dir = runtime / "sessions"
     binds_dir = runtime / "opencode-binds"
+    schedules_dir = runtime / "schedules"
     queue_dir = runtime / "queue"
     jobs_dir.mkdir(parents=True)
     sessions_dir.mkdir(parents=True)
     binds_dir.mkdir(parents=True)
+    schedules_dir.mkdir(parents=True)
     queue_dir.mkdir(parents=True)
 
     from src.state.job_store import JobStore
+    from src.state.schedule_store import ScheduleStore
     from src.state.session_bind_store import SessionBindStore
     from src.state.queue_store import WorkQueueStore
     import src.processor as processor_mod
     import src.state.job_store as job_store_mod
+    import src.state.schedule_store as schedule_store_mod
     import src.state.session_bind_store as bind_store_mod
     import src.state.queue_store as queue_store_mod
 
     isolated_store = JobStore(jobs_dir=jobs_dir)
     isolated_binds = SessionBindStore(binds_dir=binds_dir)
+    isolated_schedules = ScheduleStore(schedules_dir=schedules_dir)
     isolated_queue = WorkQueueStore(queue_dir=queue_dir)
     monkeypatch.setattr(job_store_mod, "job_store", isolated_store)
     monkeypatch.setattr(job_store_mod, "_default_jobs_dir", lambda: jobs_dir)
@@ -75,6 +80,10 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(processor_mod, "work_queue_store", isolated_queue)
     monkeypatch.setattr(bind_store_mod, "session_bind_store", isolated_binds)
     monkeypatch.setattr(bind_store_mod, "_default_binds_dir", lambda: binds_dir)
+    monkeypatch.setattr(schedule_store_mod, "schedule_store", isolated_schedules)
+    monkeypatch.setattr(
+        schedule_store_mod, "_default_schedules_dir", lambda: schedules_dir
+    )
     monkeypatch.setattr(queue_store_mod, "work_queue_store", isolated_queue)
     monkeypatch.setattr(queue_store_mod, "_default_queue_dir", lambda: queue_dir)
 
@@ -108,6 +117,8 @@ def isolate_jira_agent_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         "job_store": isolated_store,
         "session_bind_store": isolated_binds,
         "binds_dir": binds_dir,
+        "schedule_store": isolated_schedules,
+        "schedules_dir": schedules_dir,
         "queue_store": isolated_queue,
         "queue_dir": queue_dir,
     }

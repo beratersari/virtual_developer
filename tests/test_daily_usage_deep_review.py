@@ -285,9 +285,9 @@ def _write_schedule(store, *, issue_key: str, scheduled_at: str, mtime: float):
 def test_f3_list_due_must_include_older_due_row_hidden_by_500_newer_files(tmp_path):
     """Daemon dispatch uses ``ScheduleStore.list_due``.
 
-    ``list_due`` calls ``list_schedules(status='scheduled', limit=500)``,
-    which keeps the 500 newest *files* (mtime). A due row whose file is
-    older than 500 future schedules never fires.
+    Due rows come from ``schedules.sqlite``, not the 500 newest JSON files
+    by mtime. An older due file must still be returned when 500 newer
+    future schedules exist.
     """
     from src.state.schedule_store import ScheduleStore
 
@@ -319,9 +319,8 @@ def test_f3_poller_must_honor_pending_schedule_beyond_newest_500(
 ):
     """To Do + bot assignee is rework — except when a schedule is still waiting.
 
-    ``_issue_has_pending_schedule`` also scans only 500 newest scheduled
-    rows. An older waiting schedule is invisible, so the poller starts the
-    ticket immediately instead of waiting for fire time.
+    Pending checks read ``schedules.sqlite`` by issue key. An older waiting
+    schedule must still hide the ticket after 500 newer schedule files exist.
     """
     from src.config import settings
     from src.state.schedule_store import ScheduleStore

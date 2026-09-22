@@ -2909,7 +2909,7 @@ def build_opencode_workspaces(
     page_n = max(1, int(page or 1))
     offset = (page_n - 1) * size
     needle = (q or "").strip()
-    rows = binds.list_workspaces(limit=500)
+    rows = binds.list_workspaces(limit=None)
     if needle:
         rows = [row for row in rows if _workspace_matches_search(row, needle)]
     total = len(rows)
