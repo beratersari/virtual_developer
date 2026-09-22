@@ -252,7 +252,7 @@ def test_clone_into_temp_success_and_fail(gm, tmp_path):
                     s.gitlab_host_pat_map = lambda: {host: "pat"}
                     s.all_gitlab_pats = lambda: ["pat"]
                     gm._clone_into_temp()
-        upd.assert_called_once()
+        upd.assert_not_called()
         clone_cmds = [
             c.args[0]
             for c in run.call_args_list

@@ -130,6 +130,9 @@ class GitManager:
         self.work_branch: Optional[str] = None
         # Last failed push reason (operator-facing; cleared on success)
         self.last_push_error: Optional[str] = None
+        # Last failed MR/PR create reason (status, URL, remote body). Cleared
+        # at the start of each create attempt.
+        self.last_mr_error: Optional[str] = None
         self._init_proc_state()
 
         logger.info(f"Initializing GitManager for issue: {issue_key}")
@@ -428,7 +431,8 @@ class GitManager:
         finally:
             self._scrub_remote_credentials()
         self._enable_git_longpaths()
-        self._update_submodules(reason="after reuse fetch")
+        # Submodules stay untouched until ensure_feature_branch has the work
+        # branch checked out. Pins differ per branch.
         self._materialize_job_remote_refs()
 
     @staticmethod
@@ -632,7 +636,11 @@ class GitManager:
         return self._apply_pat_to_git_env(self._base_git_env())
 
     def _update_submodules(self, *, reason: str = "") -> None:
-        """Init and update submodules recursively after clone / branch checkout.
+        """Init and update submodules recursively for the checked-out commit.
+
+        Call this only after the work branch is checked out. A clone still
+        sits on the remote default branch, whose submodule SHAs are not the
+        ones the job will edit.
 
         No-op when ``settings.git_update_submodules`` is false or when the repo
         has no ``.gitmodules``. Hard-fails with ``GitCloneError`` on timeout or
@@ -840,10 +848,6 @@ class GitManager:
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
         self._enable_git_longpaths()
-
-        # Init nested modules on the default tip from clone.
-        # ensure_feature_branch re-runs after work-branch checkout so pins match.
-        self._update_submodules(reason="after clone")
 
         # Do NOT create local tracking branches for every remote feature/*.
         # Clone already has origin/* refs (--no-single-branch); ensure_feature_branch
@@ -2517,8 +2521,8 @@ class GitManager:
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(key)
         checked_out = self._prepare_work_branch(work, target)
-        # Submodule SHAs often differ per branch — refresh after checkout so the
-        # agent sees the tree for the work branch (not only the clone default).
+        # Work branch is ready. Submodule gitlinks belong to this commit,
+        # not the default branch that clone left checked out.
         self._update_submodules(
             reason=f"after work branch checkout ({checked_out or work})"
         )
@@ -2940,15 +2944,22 @@ class GitManager:
         host, project = self._gitlab_host_and_project()
         pat = self._pat_for_remote(self.remote_url or f"https://{host}")
         if not pat:
-            logger.error("Cannot create MR via API: no GitLab PAT for this host")
+            self._note_mr_error(
+                "Cannot create MR via API: no GitLab PAT for this host"
+            )
+            logger.error(self.last_mr_error)
             return None
         try:
             self._assert_remote_host_allowed(self.remote_url or f"https://{host}")
         except GitCloneError as e:
-            logger.error(f"Cannot create MR via API: host not allowed: {e}")
+            self._note_mr_error(f"Cannot create MR via API: host not allowed: {e}")
+            logger.error(self.last_mr_error)
             return None
         if not project:
-            logger.error("Cannot create MR via API: project path missing from repository URL")
+            self._note_mr_error(
+                "Cannot create MR via API: project path missing from repository URL"
+            )
+            logger.error(self.last_mr_error)
             return None
         enc = quote(project, safe="")
         # INTENTIONAL: GitLab REST is always HTTPS, even when the clone URL
@@ -2980,13 +2991,22 @@ class GitManager:
                 if resp.status_code == 409 or "already exists" in (resp.text or "").lower():
                     logger.info("MR already exists (API 409); resolving URL")
                     return self._get_existing_mr_url(source_branch)
-                logger.error(
-                    f"GitLab API MR create failed ({resp.status_code}): "
-                    f"{self._redact_secret_text(resp.text[:500])}"
-                )
+                detail = self._redact_secret_text((resp.text or "")[:800])
+                if detail:
+                    self._note_mr_error(
+                        f"GitLab API MR create failed status={resp.status_code} "
+                        f"POST {url}: {detail}"
+                    )
+                else:
+                    self._note_mr_error(
+                        f"GitLab API MR create failed status={resp.status_code} "
+                        f"POST {url} (empty body)"
+                    )
+                logger.error(self.last_mr_error)
                 return None
         except Exception as e:
-            logger.error(f"GitLab API MR create error: {e}")
+            self._note_mr_error(f"GitLab API MR create error: {e}")
+            logger.error(self.last_mr_error)
             return None
 
     def _mr_matches_target(self, mr: Any, target_branch: str) -> bool:
@@ -3093,19 +3113,24 @@ class GitManager:
         from src.azure.log import azure_error, azure_info
 
         if not repository:
-            azure_error(
-                f"create_pr skip repository missing from {self.remote_url!r}"
+            self._note_mr_error(
+                f"Azure PR skipped: repository missing from remote URL "
+                f"{self.remote_url!r}"
             )
+            azure_error(self.last_mr_error)
             return None
         client = self._azure_client_for_remote()
         if client is None:
-            azure_error("create_pr skip no REST client for this remote")
+            self._note_mr_error(
+                "Azure PR skipped: no REST client for this remote"
+            )
+            azure_error(self.last_mr_error)
             return None
         azure_info(
             f"create_pr via git {project}/{repository} "
             f"{source_branch} → {target_branch}"
         )
-        return client.create_pull_request(
+        web = client.create_pull_request(
             project=project,
             repository=repository,
             source_branch=source_branch,
@@ -3113,10 +3138,35 @@ class GitManager:
             title=title,
             description=body,
         )
+        if not web:
+            reason = str(getattr(client, "last_error", "") or "").strip()
+            if not reason:
+                reason = (
+                    f"Azure PR create returned no URL for {project}/{repository} "
+                    f"{source_branch} → {target_branch}"
+                )
+            self._note_mr_error(reason)
+        return web
+
+    def _note_mr_error(self, reason: str) -> None:
+        """Remember why MR/PR creation failed. Secrets are redacted."""
+        try:
+            text = self._redact_secret_text(str(reason or ""))
+        except Exception:
+            text = str(reason or "")
+        text = " ".join(text.split())
+        if len(text) > 1500:
+            text = text[:1499] + "…"
+        if text:
+            self.last_mr_error = text
 
     def create_merge_request(self, title: str, body: str = "", target_branch: Optional[str] = None) -> Optional[str]:
+        self.last_mr_error = None
         if not self.remote_enabled:
-            logger.info("Merge request not available (no remote configured).")
+            self._note_mr_error(
+                "Merge request not available (no remote configured)."
+            )
+            logger.info(self.last_mr_error)
             return None
 
         # Prefer prepared work_branch (never open MR from protected bases)
@@ -3125,16 +3175,20 @@ class GitManager:
             (self.target_branch or "").strip().lower(),
         }
         if not branch or branch.lower() in protected or branch.lower().startswith("release/"):
-            logger.warning(
+            self._note_mr_error(
                 f"Cannot create MR from protected/empty branch '{branch}'."
             )
+            logger.warning(self.last_mr_error)
             return None
 
         if not target_branch:
             target_branch = (self.target_branch or self.source_branch or "").strip()
         if self._looks_like_azure_remote(self.remote_url or ""):
             if not target_branch:
-                logger.error("Cannot create Azure PR: no target branch on GitManager")
+                self._note_mr_error(
+                    "Cannot create Azure PR: no target branch on GitManager"
+                )
+                logger.error(self.last_mr_error)
                 return None
             return self._create_or_reuse_azure_pr(
                 title, body, branch, target_branch
@@ -3144,7 +3198,8 @@ class GitManager:
             logger.info(f"MR already exists: {existing_mr}")
             return existing_mr
         if not target_branch:
-            logger.error("Cannot create MR: no target branch on GitManager")
+            self._note_mr_error("Cannot create MR: no target branch on GitManager")
+            logger.error(self.last_mr_error)
             return None
 
         # Issue target branch only (no silent fall back to main/develop)
@@ -3193,16 +3248,25 @@ class GitManager:
                     )
                     if existing:
                         return existing
-                    logger.error(
+                    self._note_mr_error(
                         "glab reported success but no MR URL was parsed"
                     )
+                    logger.error(self.last_mr_error)
                     return None
 
                 err = (result.stderr or "") + (result.stdout or "")
                 last_err = err
                 if "already exists" in err.lower() or "409" in err:
                     logger.info("MR already exists, getting URL...")
-                    return self._get_existing_mr_url(branch)
+                    existing = self._get_existing_mr_url(branch)
+                    if not existing:
+                        detail = self._redact_secret_text(err)[:500]
+                        self._note_mr_error(
+                            "Remote said the merge request already exists, "
+                            "but its URL could not be resolved. "
+                            f"Detail: {detail or '(no glab output)'}"
+                        )
+                    return existing
                 # Try next candidate when target branch is missing
                 if "target_branch" in err.lower() or "does not exist" in err.lower():
                     logger.warning(f"MR target '{target}' unavailable; trying next fallback")
@@ -3226,9 +3290,15 @@ class GitManager:
                 if api_url:
                     return api_url
 
+            safe_err = self._redact_secret_text(last_err)
+            if not (self.last_mr_error or "").strip():
+                self._note_mr_error(
+                    "Merge request failed after glab+API fallbacks: "
+                    f"{safe_err or '(no glab output)'}"
+                )
             logger.error(
-                f"Merge request failed after glab+API fallbacks: "
-                f"{self._redact_secret_text(last_err)}"
+                "Merge request failed after glab+API fallbacks: "
+                f"{self.last_mr_error or safe_err}"
             )
             return None
         except FileNotFoundError:
@@ -3237,9 +3307,15 @@ class GitManager:
                 api_url = self._create_mr_via_api(title, body, branch, target)
                 if api_url:
                     return api_url
+            if not (self.last_mr_error or "").strip():
+                self._note_mr_error(
+                    "glab CLI not found and GitLab REST API did not create an MR"
+                )
             return None
         except Exception as e:
-            logger.error(f"Merge request error: {e}")
+            if not (self.last_mr_error or "").strip():
+                self._note_mr_error(f"Merge request error: {e}")
+            logger.error(self.last_mr_error or f"Merge request error: {e}")
             # Last chance API
             for target in candidates:
                 api_url = self._create_mr_via_api(title, body, branch, target)

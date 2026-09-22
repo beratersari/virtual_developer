@@ -235,8 +235,8 @@ def test_c3_older_scheduled_ticket_still_suppresses_poller_intake(
 ):
     """A future schedule must still hide the ticket from To Do intake.
 
-    list_schedules(limit=500) walks newest mtime first. After 500 newer
-    rows, WAIT-9 is invisible and the poller starts it now.
+    The pending check uses ``schedules.sqlite``, not the 500 newest files
+    by mtime. After 500 newer rows, WAIT-9 must still suppress intake.
     """
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     future = (datetime.now() + timedelta(hours=6)).isoformat(timespec="seconds")

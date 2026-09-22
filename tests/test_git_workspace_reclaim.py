@@ -227,7 +227,8 @@ def test_refresh_existing_clone_reclaims_first(gm):
                 with patch.object(gm, "_run_git"):
                     with patch.object(gm, "_scrub_remote_credentials"):
                         with patch.object(gm, "_enable_git_longpaths"):
-                            with patch.object(gm, "_update_submodules"):
+                            with patch.object(gm, "_update_submodules") as upd:
                                 with patch.object(gm, "_materialize_job_remote_refs"):
                                     gm._refresh_existing_clone()
+    upd.assert_not_called()
     reclaim.assert_called()

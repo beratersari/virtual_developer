@@ -41,12 +41,42 @@ def _as_local_aware(dt: datetime) -> datetime:
 
 
 class ScheduleStore:
-    """File-backed store of scheduled agent jobs (one JSON per schedule)."""
+    """File-backed store of scheduled agent jobs (one JSON per schedule).
+
+    ``schedules.sqlite`` next to the folder is the list/count/due index.
+    JSON remains the full record; ``get`` always reads it.
+    """
 
     def __init__(self, schedules_dir: Optional[Path] = None) -> None:
         self.schedules_dir = schedules_dir or _default_schedules_dir()
         self.schedules_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._index = None
+        self._index_ready = False
+        try:
+            from src.state.schedule_index import ScheduleIndex, default_index_path
+
+            self._index = ScheduleIndex(default_index_path(self.schedules_dir))
+        except Exception as e:
+            logger.warning(f"Schedule SQLite index unavailable: {e}")
+            self._index = None
+
+    def ensure_index(self) -> int:
+        """Create/open schedules.sqlite and insert JSON files not yet indexed."""
+        if self._index is None:
+            return 0
+        with self._lock:
+            if self._index_ready:
+                return 0
+            try:
+                n = self._index.reconcile(self.schedules_dir)
+            except Exception as e:
+                logger.warning(f"Schedule index backfill failed: {e}")
+                return 0
+            self._index_ready = True
+            if n:
+                logger.info(f"Schedule index backfilled {n} schedule(s) from JSON")
+            return n
 
     def _path(self, schedule_id: str) -> Path:
         safe = schedule_id.replace("/", "_").replace("\\", "_")
@@ -59,6 +89,13 @@ class ScheduleStore:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(rec, f, indent=2, ensure_ascii=False)
         tmp.replace(path)
+        if self._index is not None:
+            try:
+                self._index.upsert(rec)
+            except Exception as e:
+                logger.warning(
+                    f"Schedule index upsert failed for {rec.get('schedule_id')}: {e}"
+                )
 
     def create(
         self,
@@ -229,8 +266,18 @@ class ScheduleStore:
             str(x).strip() for x in (exclude_ids or []) if str(x).strip()
         }
         recovered = 0
+        self.ensure_index()
+        paths = None
+        if self._index is not None:
+            try:
+                paths = [self._path(sid) for sid in self._index.ids_with_status("dispatching")]
+            except Exception as e:
+                logger.warning(f"Schedule index dispatching lookup failed: {e}")
+                paths = None
+        if paths is None:
+            paths = list(self.schedules_dir.glob("sched_*.json"))
         with self._lock:
-            for path in list(self.schedules_dir.glob("sched_*.json")):
+            for path in paths:
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         rec = json.load(f)
@@ -280,7 +327,22 @@ class ScheduleStore:
         limit: Optional[int] = 200,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                ids = self._index.list_ids(status=status, limit=limit, offset=offset)
+                items: List[Dict[str, Any]] = []
+                for sid in ids:
+                    rec = self.get(sid)
+                    if rec is None:
+                        continue
+                    if status and (rec.get("status") or "") != status:
+                        continue
+                    items.append(rec)
+                return items
+            except Exception as e:
+                logger.warning(f"Schedule index list failed: {e}")
+        items = []
         cap = None if limit is None else max(0, int(limit))
         start = max(0, int(offset or 0))
         with self._lock:
@@ -304,7 +366,13 @@ class ScheduleStore:
         return items[start : start + cap]
 
     def count_schedules(self, *, status: Optional[str] = None) -> int:
-        """How many schedule files match *status* (all files when unset)."""
+        """How many schedules match *status* (all rows when unset)."""
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                return self._index.count(status=status)
+            except Exception as e:
+                logger.warning(f"Schedule index count failed: {e}")
         n = 0
         with self._lock:
             for path in self.schedules_dir.glob("sched_*.json"):
@@ -331,6 +399,12 @@ class ScheduleStore:
         want = {str(s or "").strip().lower() for s in statuses if str(s or "").strip()}
         if not want:
             return False
+        self.ensure_index()
+        if self._index is not None:
+            try:
+                return self._index.has_issue_status(key, want)
+            except Exception as e:
+                logger.warning(f"Schedule index issue lookup failed: {e}")
         with self._lock:
             for path in self.schedules_dir.glob("sched_*.json"):
                 try:

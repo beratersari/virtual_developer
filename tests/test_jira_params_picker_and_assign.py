@@ -98,6 +98,118 @@ def test_schedule_existing_picker_writes_params(tmp_path):
     assert client.assign_issue.call_args.args[1] == "devbot"
 
 
+def _valid_description() -> str:
+    return (
+        "Add 2+2.\n\n"
+        "{code}\n"
+        "{params}\n"
+        "Repository: https://gitlab.com/org/app.git\n"
+        "Source branch: feature/KAN-13458\n"
+        "Target branch: develop\n"
+        "Mode: build\n"
+        "{params}\n"
+        "{code}"
+    )
+
+
+def test_preview_prompt_omits_params_for_the_form():
+    client = MagicMock()
+    client.get_issue.return_value = _issue("KAN-13458", _valid_description())
+    out = preview_existing_issue("KAN-13458", jira_client=client)
+    assert out["ok"] is True
+    assert out["template_valid"] is True
+    assert out["prompt"] == "Add 2+2."
+    assert "{params}" not in out["prompt"]
+    assert "Repository:" not in out["prompt"]
+    assert "{code}" not in out["prompt"]
+    assert out["repository_url"].endswith("app.git")
+    assert out["source_branch"] == "feature/KAN-13458"
+    assert out["target_branch"] == "develop"
+    assert out["mode"] == "build"
+
+
+def test_schedule_existing_unchanged_lookup_does_not_rewrite_jira(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    desc = _valid_description()
+    client.get_issue.return_value = _issue("KAN-13458", desc)
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    out = schedule_existing_issue(
+        "KAN-13458",
+        scheduled_at="2026-12-01T10:00:00",
+        description="Add 2+2.",
+        repository_url="https://gitlab.com/org/app.git",
+        source_branch_mode="issue_key",
+        target_branch="develop",
+        mode="build",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    client.update_issue.assert_not_called()
+    assert out["schedule"]["issue_description"] == desc
+    assert out["schedule"]["target_branch"] == "develop"
+
+
+def test_schedule_existing_changed_target_rewrites_jira(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = _issue("KAN-13458", _valid_description())
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    out = schedule_existing_issue(
+        "KAN-13458",
+        scheduled_at="2026-12-01T10:00:00",
+        description="Please add 3+3 instead.",
+        repository_url="https://gitlab.com/org/app.git",
+        source_branch_mode="issue_key",
+        target_branch="main",
+        mode="plan",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    client.update_issue.assert_called()
+    written = client.update_issue.call_args.kwargs["fields"]["description"]
+    assert "Please add 3+3 instead." in written
+    assert "Target branch: main" in written
+    assert "Mode: plan" in written
+    assert "Source branch: feature/KAN-13458" in written
+    assert written.count("{params}") == 2
+    assert "Add 2+2." not in written
+    assert out["schedule"]["issue_description"] == written
+
+
+def test_schedule_existing_unchanged_picker_still_writes_model(tmp_path):
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = _issue("KAN-13458", _valid_description())
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    out = schedule_existing_issue(
+        "KAN-13458",
+        scheduled_at="2026-12-01T10:00:00",
+        description="Add 2+2.",
+        repository_url="https://gitlab.com/org/app.git",
+        source_branch_mode="issue_key",
+        target_branch="develop",
+        mode="build",
+        model="opencode/hy3-free",
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    client.update_issue.assert_called()
+    written = client.update_issue.call_args.kwargs["fields"]["description"]
+    assert "Model: opencode/hy3-free" in written
+    assert "Add 2+2." in written
+    assert "Target branch: develop" in written
+
+
 def test_schedule_existing_invalid_without_picker_still_fails(tmp_path):
     store = ScheduleStore(schedules_dir=tmp_path / "schedules")
     client = MagicMock()

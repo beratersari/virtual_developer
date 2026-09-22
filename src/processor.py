@@ -8362,20 +8362,28 @@ class JobProcessor:
             except Exception:
                 pass
         else:
-            logger.warning(f"Could not create merge request for {state.issue_key}")
+            raw_reason = getattr(git, "last_mr_error", None)
+            reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+            if not reason:
+                reason = "remote returned no error detail"
+            logger.warning(
+                f"Could not create merge request for {state.issue_key}: {reason}"
+            )
             try:
                 commit_line = (
                     f"\nCommit: `{commit_sha[:12]}`" if commit_sha else ""
                 )
                 if commit_url:
                     commit_line = f"\nCommit: {commit_url}"
+                target_note = (
+                    f" Target branch: `{target_branch}`." if target_branch else ""
+                )
                 self.reporter.post_progress_update(
                     state,
                     (
                         f"Branch `{branch_name}` is on the remote, but a merge "
-                        f"request could not be created (target branch may be "
-                        f"`{target_branch}`, or `glab` may be missing/misconfigured). "
-                        "Open an MR manually in GitLab if needed."
+                        f"request could not be created.{target_note}\n\n"
+                        f"Remote error:\n{reason[:1500]}"
                         f"{commit_line}"
                     ),
                 )

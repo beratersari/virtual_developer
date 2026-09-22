@@ -65,6 +65,22 @@ class JiraAgentDaemon:
         except Exception as e:
             logger.warning(f"Job SQLite index skipped: {e}")
         try:
+            from src.state.schedule_store import schedule_store as _schedules
+
+            n = _schedules.ensure_index()
+            if n:
+                logger.info(f"Schedule SQLite index ready ({n} row(s))")
+        except Exception as e:
+            logger.warning(f"Schedule SQLite index skipped: {e}")
+        try:
+            from src.state.session_bind_store import session_bind_store as _binds
+
+            n = _binds.ensure_index()
+            if n:
+                logger.info(f"Session SQLite index ready ({n} row(s))")
+        except Exception as e:
+            logger.warning(f"Session SQLite index skipped: {e}")
+        try:
             Path(settings.temp_dir_base).mkdir(parents=True, exist_ok=True)
         except OSError as e:
             logger.warning(f"Could not create TEMP_DIR_BASE {settings.temp_dir_base}: {e}")

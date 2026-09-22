@@ -22,7 +22,14 @@ from src.azure.auth import (
     azure_basic_auth_header,
     azure_basic_user,
 )
-from src.azure.log import azure_error, azure_info, azure_warning, http_detail, yn
+from src.azure.log import (
+    azure_error,
+    azure_info,
+    azure_warning,
+    clip,
+    http_detail,
+    yn,
+)
 from src.config import settings
 
 __all__ = [
@@ -36,6 +43,36 @@ __all__ = [
 API_VERSIONS: tuple[str, ...] = ("7.1", "7.0", "6.1", "6.0")
 _API_VERSION = API_VERSIONS[0]
 _API_VERSION_FALLBACK = API_VERSIONS[1]
+
+
+def _http_failure(method: str, url: str, resp: Any, api_version: str = "") -> str:
+    """One-line remote failure: method, URL, status, and the server message."""
+    body = str(getattr(resp, "text", "") or "")
+    message = ""
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        raw = data.get("message")
+        if isinstance(raw, str):
+            message = raw.strip()
+        elif raw:
+            message = str(raw).strip()
+        if not message:
+            message = str(data.get("typeKey") or "").strip()
+    status = getattr(resp, "status_code", None)
+    parts = [str(method or "GET").upper(), str(url)]
+    if status is not None:
+        parts.append(f"status={status}")
+    ver = (api_version or "").strip()
+    if ver and ver != "-":
+        parts.append(f"api={ver}")
+    if message:
+        parts.append(f"message={clip(message, 800)}")
+    elif body.strip():
+        parts.append(f"body={clip(body, 800)}")
+    return " ".join(parts)
 
 
 def _response_api_version(resp: Any) -> str:
@@ -153,6 +190,9 @@ class AzureDevOpsClient:
         else:
             self.api_base = ""
         self.pat = (pat or "").strip()
+        # Last failed REST call for this client (status, URL, server message).
+        # Merge-request creation copies it onto GitManager.last_mr_error.
+        self.last_error = ""
         if (
             not self.pat
             and self.collection_url
@@ -177,6 +217,12 @@ class AzureDevOpsClient:
             f"client host={self.host or '-'} collection={self.collection_url or '-'} "
             f"api_base={self.api_base or '-'} pat={yn(self.pat)}"
         )
+
+    def _remember_error(self, reason: str) -> None:
+        text = " ".join(str(reason or "").split())
+        if len(text) > 1500:
+            text = text[:1499] + "…"
+        self.last_error = text
 
     def _headers(self) -> Dict[str, str]:
         headers = {
@@ -783,16 +829,9 @@ class AzureDevOpsClient:
             )
             data = resp.json() if resp.content else {}
             return data if isinstance(data, dict) else {"ok": True}
-        azure_error(
-            "http "
-            + http_detail(
-                method="POST",
-                url=url,
-                status=resp.status_code,
-                api_version=ver,
-                body=resp.text,
-            )
-        )
+        detail = _http_failure("POST", url, resp, ver)
+        self._remember_error(detail)
+        azure_error("http " + detail)
         return None
 
     def find_pull_request(
@@ -870,15 +909,18 @@ class AzureDevOpsClient:
         description: str = "",
     ) -> Optional[str]:
         """Create a PR (or reuse an active one) using the same PAT as clone/push."""
+        self.last_error = ""
         if not self.api_base:
-            azure_error("create_pr fail api_base missing")
+            self._remember_error("create_pr fail api_base missing")
+            azure_error(self.last_error)
             return None
         source = _ref_name(source_branch)
         target = _ref_name(target_branch)
         if not source or not target:
-            azure_error(
+            self._remember_error(
                 f"create_pr refuse missing branch source={source!r} target={target!r}"
             )
+            azure_error(self.last_error)
             return None
         azure_info(
             f"create_pr start {project}/{repository} "
@@ -904,21 +946,30 @@ class AzureDevOpsClient:
             with httpx.Client(timeout=30.0, verify=False) as client:
                 posted = self._post_json(client, url, payload)
             if not posted:
+                if not (self.last_error or "").strip():
+                    self._remember_error(
+                        f"create_pr fail {project}/{repository} {source} → {target} "
+                        "(no HTTP body)"
+                    )
                 azure_error(
-                    f"create_pr fail {project}/{repository} {source} → {target}"
+                    f"create_pr fail {project}/{repository} {source} → {target}: "
+                    f"{self.last_error}"
                 )
                 return None
             web = self._pr_web_url(posted, project, repository)
             if web:
                 azure_info(f"create_pr ok {web}")
+                self.last_error = ""
             else:
-                azure_warning(
+                self._remember_error(
                     f"create_pr posted but no web URL {project}/{repository} "
                     f"id={posted.get('pullRequestId')}"
                 )
+                azure_warning(self.last_error)
             return web
         except Exception as e:
-            azure_error(f"create_pr error {project}/{repository}: {e}")
+            self._remember_error(f"create_pr error {project}/{repository}: {e}")
+            azure_error(self.last_error)
             return None
 
     def _pr_web_url(

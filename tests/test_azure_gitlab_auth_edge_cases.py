@@ -729,6 +729,105 @@ def test_48_azure_create_without_repo_returns_none(monkeypatch):
     assert gm._create_or_reuse_azure_pr("t", "b", "feature/x", "develop") is None
 
 
+def test_50_azure_pr_http_error_keeps_server_message(monkeypatch):
+    message = (
+        "TF401179: The source branch does not exist, "
+        "or the source and target are the same."
+    )
+    payload = {
+        "message": message,
+        "typeKey": "GitPullRequestNotFoundException",
+    }
+
+    def get(url, headers, params):
+        return _Resp(200, {"value": []}, text='{"value":[]}')
+
+    def post(url, headers, params, json):
+        return _Resp(400, payload, text='{"message":"' + message + '"}')
+
+    monkeypatch.setattr("src.azure.client.httpx.Client", _httpx_client(get, post))
+    client = AzureDevOpsClient(
+        host="tfs.example.com",
+        pat=AZ_PAT,
+        collection_url="https://tfs.example.com/tfs/DefaultCollection",
+    )
+    url = client.create_pull_request(
+        project="Demo",
+        repository="demo",
+        source_branch="feature/edge",
+        target_branch="develop",
+        title="feat: x",
+        description="body",
+    )
+    assert url is None
+    assert "status=400" in client.last_error
+    assert "TF401179" in client.last_error
+    assert "pullrequests" in client.last_error
+    assert AZ_PAT not in client.last_error
+
+
+def test_51_azure_mr_failure_reason_reaches_git_manager(monkeypatch):
+    gm, _ = _gm(monkeypatch, remote=AZURE_URL, azure_map={"tfs.example.com": AZ_PAT})
+
+    class FakeClient:
+        last_error = (
+            "POST https://tfs.example.com/tfs/DefaultCollection/Demo/"
+            "_apis/git/repositories/demo/pullrequests status=400 "
+            "message=TF401179: The source branch does not exist."
+        )
+
+        def create_pull_request(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(gm, "_azure_client_for_remote", lambda: FakeClient())
+    assert gm.create_merge_request("feat: x", "body") is None
+    assert "status=400" in (gm.last_mr_error or "")
+    assert "TF401179" in (gm.last_mr_error or "")
+
+
+def test_52_gitlab_api_failure_keeps_status_and_body(monkeypatch):
+    gm, _ = _gm(
+        monkeypatch,
+        remote=GITLAB_URL,
+        gitlab_map={"gitlab.example.com": GL_PAT},
+    )
+    body = '{"message":"target branch does not exist"}'
+
+    class Resp:
+        status_code = 422
+        text = body
+
+        def json(self):
+            return {"message": "target branch does not exist"}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            return Resp()
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    out = gm._create_mr_via_api("feat: x", "body", "feature/edge", "develop")
+    assert out is None
+    assert "status=422" in (gm.last_mr_error or "")
+    assert "target branch does not exist" in (gm.last_mr_error or "")
+    assert GL_PAT not in (gm.last_mr_error or "")
+
+
+def test_53_mr_error_redacts_pat(monkeypatch):
+    gm, _ = _gm(monkeypatch, remote=AZURE_URL, azure_map={"tfs.example.com": AZ_PAT})
+    gm._note_mr_error(f"POST https://tfs.example.com/pullrequests rejected {AZ_PAT}")
+    assert AZ_PAT not in (gm.last_mr_error or "")
+    assert "rejected" in (gm.last_mr_error or "")
+
+
 def test_49_parse_azure_urls_git_suffix_ssh_and_collection_only():
     parsed = parse_azure_git_url(
         "https://tfs.example.com/tfs/DefaultCollection/Demo/_git/demo.git"

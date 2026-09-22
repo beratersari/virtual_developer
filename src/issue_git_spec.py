@@ -304,6 +304,18 @@ def strip_params_block(text: str) -> str:
     return cleaned.strip()
 
 
+# {code} fences that only wrapped a {params} block are empty after the strip.
+_EMPTY_CODE_FENCE = re.compile(r"(?is)\{code\}\s*\{code\}")
+
+
+def editor_prompt(text: str) -> str:
+    """Ticket prose for the schedule form, without ``{params}`` or empty fences."""
+    cleaned = strip_params_block(text or "")
+    cleaned = _EMPTY_CODE_FENCE.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _params_block_text(summary: str = "", description: str = "") -> Optional[str]:
     """Return expanded body of the first ``{params}`` block, or None."""
     raw = f"{summary or ''}\n{description or ''}"
