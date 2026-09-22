@@ -1,3 +1,19 @@
+# Yaver 0.9.56
+
+Scheduled and Sessions now use a local SQLite index, the same way Jobs does.
+schedules.sqlite and opencode-binds.sqlite are created on first start, including when the JSON files are already there.
+The JSON files remain the full record, and the Sessions page lists every live bind.
+
+Looking up an existing issue fills repository, source, target, and mode in the same fields as a new issue.
+The prompt box shows the ticket text without the {params} block.
+Schedule or Run now writes those fields back to Jira only when you change them.
+The source choice is labeled custom branch.
+
+Hovering a dot on the Analytics jobs chart shows the time bucket and the exact count for every series that is turned on.
+
+When a merge request cannot be created, the job log and the Jira comment include the remote status and the server message.
+Submodules are updated after the work branch is checked out, so the pins match the branch the job edits.
+
 # Yaver 0.9.55
 
 Analytics and the Jobs list read a local SQLite index next to the job files. The index is created on first start, including for a data directory that already has months of job JSON. The visible Jobs page still opens those files, so error text and the session id stay on the list.

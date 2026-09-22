@@ -8,6 +8,39 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.56] — 2026-09-22
+
+Schedules and Sessions use a SQLite index. Looking up an existing
+issue fills the same fields as a new issue. The Analytics chart shows
+exact counts on hover. Merge-request failures include the remote
+error. Submodules update after the work branch is checked out.
+
+### Added
+
+- Local SQLite indexes for schedules (`schedules.sqlite`) and OpenCode
+  session binds (`opencode-binds.sqlite`). Created on first daemon
+  start, including when the JSON files are already there. JSON remains
+  the full record. The Sessions page lists every live bind.
+
+### Changed
+
+- Looking up an existing issue puts repository, source, target, and
+  mode in the same fields as a new issue. The prompt box does not
+  include the `{params}` block. Schedule or Run now writes those
+  fields back to Jira only when they changed. The source choice is
+  labeled custom branch.
+- Hovering a point on the Analytics jobs chart shows the time bucket
+  and the exact count for each series that is turned on.
+
+### Fixed
+
+- When a merge request cannot be created, the job log and the Jira
+  comment include the remote status and the server message.
+- Submodules are updated after the work branch is checked out, so the
+  pins match the branch the job edits.
+
+[0.9.56]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.56
+
 ## [0.9.55] — 2026-09-22
 
 Analytics and the Jobs list read a local SQLite index. Data lives
