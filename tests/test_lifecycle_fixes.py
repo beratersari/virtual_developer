@@ -280,6 +280,47 @@ def test_cleanup_keeps_temp_dir(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mr_create_failure_logs_remote_reason(
+    processor, state_manager, fake_jira
+):
+    """A refused MR/PR must log the remote status and message, not only the issue key."""
+    state_manager.create_state("MR-ERR", "s", "d")
+    state_manager.update_state("MR-ERR", status=TaskStatus.EXECUTING)
+    git = MagicMock()
+    git.work_branch = "feature/MR-ERR"
+    git.target_branch = "develop"
+    git.ensure_on_work_branch.return_value = True
+    git.get_current_branch.return_value = "feature/MR-ERR"
+    git.commits_ahead_of_target.return_value = 1
+    git.push.return_value = True
+    git.get_last_commit_subject.return_value = "feat: add"
+    git.get_last_commit_message.return_value = "feat: add"
+    git.get_last_commit_sha.return_value = "abc123deadbeef"
+    git.build_commit_url.return_value = None
+    git.create_merge_request.return_value = None
+    git.last_mr_error = (
+        "POST https://tfs.example.com/Demo/_apis/git/repositories/demo/pullrequests "
+        "status=400 message=TF401179: The source branch does not exist."
+    )
+    processor._contexts = {"MR-ERR": {"git": git, "runner": MagicMock()}}
+    warnings = []
+
+    def _warn(message, *args):
+        warnings.append(message % args if args else message)
+
+    with patch("src.processor.logger.warning", side_effect=_warn):
+        ok = await processor._push_and_create_mr(state_manager.get_state("MR-ERR"))
+
+    assert ok is True
+    assert any(
+        "Could not create merge request for MR-ERR:" in w and "TF401179" in w and "status=400" in w
+        for w in warnings
+    )
+    bodies = [c.get("body", "") for c in fake_jira.comments]
+    assert any("TF401179" in b and "status=400" in b for b in bodies)
+
+
+@pytest.mark.asyncio
 async def test_push_and_create_mr_skips_when_aborted(processor, state_manager):
     """Cancel/watchdog before delivery must not push or open MR."""
     state_manager.create_state("AB-1", "s", "d")
@@ -348,7 +389,7 @@ async def test_push_skips_mr_when_aborted_after_push(processor, state_manager):
             state_manager.update_state("AB-2", status=TaskStatus.CANCELLED)
         return out
 
-    with patch("src.processor.asyncio.to_thread", side_effect=fake_to_thread):
+    with patch("src.processor.to_git_thread", side_effect=fake_to_thread):
         ok = await processor._push_and_create_mr(state)
 
     assert ok is False

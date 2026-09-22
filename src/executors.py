@@ -8,6 +8,7 @@ Clones used to share asyncio's default executor with FastAPI sync routes
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -56,8 +57,17 @@ def resize_git_executor(limit: int) -> None:
 
 
 async def to_git_thread(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run git/MR work off the event loop, keeping the caller's log context.
+
+    ``loop.run_in_executor`` does not copy ``contextvars`` (Python 3.12).
+    Without an explicit copy, push and merge-request errors lose ``job_id``
+    and never land in the job system log — only the later main-thread
+    warning does.
+    """
     loop = asyncio.get_running_loop()
     pool = git_executor()
+    ctx = contextvars.copy_context()
     if kwargs:
-        return await loop.run_in_executor(pool, partial(fn, *args, **kwargs))
-    return await loop.run_in_executor(pool, fn, *args)
+        call = partial(fn, *args, **kwargs)
+        return await loop.run_in_executor(pool, ctx.run, call)
+    return await loop.run_in_executor(pool, ctx.run, fn, *args)
