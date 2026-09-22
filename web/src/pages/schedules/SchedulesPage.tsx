@@ -876,11 +876,14 @@ function Existing({ onDone }: { onDone: () => void }) {
       setRepoPick(CUSTOM_REPO)
       setRepo(fromIssue)
     }
-    if (p.source_branch) {
+    const lookedUpSource = (p.source_branch || '').trim()
+    const feature = featureBranchForKey(p.issue_key || '')
+    if (lookedUpSource && lookedUpSource.toLowerCase() !== feature.toLowerCase()) {
       setSrcMode('custom')
-      setSource(p.source_branch)
+      setSource(lookedUpSource)
     } else {
       setSrcMode('issue_key')
+      if (lookedUpSource) setSource(lookedUpSource)
     }
     if (p.target_branch) setTarget(p.target_branch)
     if (p.mode === 'plan' || p.mode === 'build' || p.mode === 'test') setMode(p.mode)
@@ -905,8 +908,7 @@ function Existing({ onDone }: { onDone: () => void }) {
       setPreview(p)
       setModelsLoading(true)
       setKey(p.issue_key || key)
-      const body = p.template_valid ? p.description || '' : p.prompt || p.description || ''
-      setPrompt(body)
+      setPrompt(p.prompt || '')
       setModel(p.model || '')
       setBackend(p.backend || '')
       const rows = live.settings?.project_repositories || projects
@@ -925,8 +927,16 @@ function Existing({ onDone }: { onDone: () => void }) {
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
     if (!preview || modelsLoading) return
-    if (needsParams && !repo.trim()) {
+    if (!repo.trim()) {
       setErr('Pick a project or enter a repository URL')
+      return
+    }
+    if (srcMode === 'custom' && !source.trim()) {
+      setErr('Enter a source branch')
+      return
+    }
+    if (!target.trim()) {
+      setErr('Enter a target branch')
       return
     }
     setBusy(true)
@@ -939,15 +949,11 @@ function Existing({ onDone }: { onDone: () => void }) {
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
         description: prompt,
-        ...(needsParams
-          ? {
-              repository_url: repo.trim(),
-              source_branch: srcMode === 'custom' ? source.trim() : undefined,
-              target_branch: target.trim(),
-              mode,
-              source_branch_mode: srcMode,
-            }
-          : {}),
+        repository_url: repo.trim(),
+        source_branch: srcMode === 'custom' ? source.trim() : undefined,
+        target_branch: target.trim(),
+        mode,
+        source_branch_mode: srcMode,
       })
       setPreview(null)
       setKey('')
@@ -1077,22 +1083,11 @@ function Existing({ onDone }: { onDone: () => void }) {
               className="min-h-[12rem] font-mono text-xs"
             />
             <span className="mt-1 block text-xs text-text-muted">
-              {needsParams ? (
-                <>
-                  Fetched from the ticket. Project and branches below become a new{' '}
-                  <span className="font-mono">{'{params}'}</span> block on Schedule /
-                  Run now.
-                </>
-              ) : (
-                <>
-                  Fetched from the ticket. Edit before Schedule / Run now. Keep the{' '}
-                  <span className="font-mono">{'{params}'}</span> block valid.
-                </>
-              )}
+              Ticket text only. Repository, source, target, and mode are the fields
+              below. Schedule or Run now writes them back to Jira when you change them.
             </span>
           </label>
-          {needsParams && (
-            <ProjectBranchFields
+          <ProjectBranchFields
               projects={projects}
               repo={repo}
               setRepo={setRepo}
@@ -1110,7 +1105,6 @@ function Existing({ onDone }: { onDone: () => void }) {
               rememberRepo={false}
               setRememberRepo={() => undefined}
             />
-          )}
           <BackendField
             value={backend}
             onChange={(v) => {
@@ -1155,6 +1149,12 @@ function Existing({ onDone }: { onDone: () => void }) {
       {err && <p className="err">{err}</p>}
     </form>
   )
+}
+
+function featureBranchForKey(issueKey: string): string {
+  const raw = (issueKey || '').trim() || 'issue'
+  const safe = raw.replace(/[^A-Za-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'issue'
+  return `feature/${safe}`
 }
 
 function applyProject(
@@ -1268,7 +1268,7 @@ function ProjectBranchFields({
         <span>Source</span>
         <select value={srcMode} onChange={(e) => setSrcMode(e.target.value === 'custom' ? 'custom' : 'issue_key')}>
           <option value="issue_key">feature/&lt;issue key&gt;</option>
-          <option value="custom">named branch</option>
+          <option value="custom">custom branch</option>
         </select>
       </label>
       {srcMode === 'custom' && (

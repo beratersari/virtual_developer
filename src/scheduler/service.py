@@ -24,7 +24,7 @@ from src.issue_git_spec import (
     _normalize_repo_url,
     parse_issue_git_spec,
     peek_issue_git_fields,
-    strip_params_block,
+    editor_prompt,
     upsert_params_backend,
     upsert_params_model,
 )
@@ -266,7 +266,7 @@ def _preview_from_loaded_issue(
         "issue_key": str(issue.get("key") or key).upper(),
         "title": summary,
         "description": description,
-        "prompt": strip_params_block(description),
+        "prompt": editor_prompt(description),
         "jira_status": status_name,
         "issue_type": itype_name,
         "labels": [str(x) for x in labels],
@@ -429,6 +429,45 @@ def preview_existing_issue(
                 pass
 
 
+def _selection_unchanged(
+    preview: Dict[str, Any],
+    *,
+    prompt: str,
+    repository_url: str,
+    source_branch: str,
+    target_branch: str,
+    mode: str,
+) -> bool:
+    """True when the form still matches the looked-up ticket.
+
+    Prompt text is compared without ``{params}``. Repository, branches, and
+    mode are compared after the same normalization the parser uses. An
+    invalid template is never "unchanged": the operator is supplying the
+    missing block.
+    """
+    if not preview.get("template_valid"):
+        return False
+    live = preview.get("description") or ""
+    if editor_prompt(prompt) != editor_prompt(live):
+        return False
+    if _normalize_repo_url(repository_url) != _normalize_repo_url(
+        preview.get("repository_url") or ""
+    ):
+        return False
+    if _normalize_branch(source_branch) != _normalize_branch(
+        preview.get("source_branch") or ""
+    ):
+        return False
+    if _normalize_branch(target_branch) != _normalize_branch(
+        preview.get("target_branch") or ""
+    ):
+        return False
+    live_mode = (preview.get("mode") or "").strip().lower()
+    if (mode or "").strip().lower() != live_mode:
+        return False
+    return True
+
+
 def schedule_existing_issue(
     issue_key: str,
     *,
@@ -449,9 +488,10 @@ def schedule_existing_issue(
     Hard-fails if the issue cannot be loaded. An invalid ``{params}`` block
     is allowed when the operator supplies picker fields (repo / branches /
     mode); those are written back onto the Jira description.
-    ``description`` (optional) is the operator-edited Jira prompt; when set
-    it replaces the live ticket body after a template check (or is wrapped
-    with a new ``{params}`` block from the picker).
+    ``description`` is the prompt without ``{params}``. When the picker
+    fields or that prompt differ from the looked-up ticket, Jira is updated
+    at schedule time. An unchanged lookup does not rewrite the description
+    (a model or backend change still updates those lines).
     Soft-fails: In Progress transition, PAT-user assign, SCHEDULED_AI_JOB label.
     """
     key = (issue_key or "").strip().upper()
@@ -520,33 +560,47 @@ def schedule_existing_issue(
             if not repo:
                 return {
                     "ok": False,
-                    "error": "repository_url is required when {params} is missing",
+                    "error": "repository_url is required",
                     "issue_key": key,
                     "template_valid": False,
                 }
             if not src:
                 return {
                     "ok": False,
-                    "error": "source_branch is required when {params} is missing",
+                    "error": "source_branch is required",
                     "issue_key": key,
                     "template_valid": False,
                 }
             if not tgt:
                 tgt = src
-            prompt_body = strip_params_block(operator_desc or live_desc)
+            prompt_body = editor_prompt(operator_desc or live_desc)
             mid = _normalize_model_id(model) or (preview.get("model") or "")
             mid = _normalize_model_id(mid)
             bid = _normalize_backend_id(backend) or (preview.get("backend") or "")
             bid = _normalize_backend_id(bid)
-            desc = build_issue_description(
-                description=prompt_body,
+            if _selection_unchanged(
+                preview,
+                prompt=prompt_body,
                 repository_url=repo,
                 source_branch=src,
                 target_branch=tgt,
                 mode=mode_c,
-                model=mid,
-                backend=bid,
-            )
+            ):
+                desc = live_desc
+                if mid:
+                    desc = upsert_params_model(desc, mid)
+                if bid:
+                    desc = upsert_params_backend(desc, bid)
+            else:
+                desc = build_issue_description(
+                    description=prompt_body,
+                    repository_url=repo,
+                    source_branch=src,
+                    target_branch=tgt,
+                    mode=mode_c,
+                    model=mid,
+                    backend=bid,
+                )
         else:
             desc = operator_desc or live_desc
             if operator_desc:
