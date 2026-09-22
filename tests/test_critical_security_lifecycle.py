@@ -91,11 +91,12 @@ def test_clone_uses_settings_pat_in_url_then_scrubs(tmp_path, monkeypatch):
         return MagicMock(returncode=0, stdout="", stderr="")
 
     with patch("src.git_manager.subprocess.run", side_effect=fake_run):
-        with patch.object(gm, "_update_submodules"):
+        with patch.object(gm, "_update_submodules") as upd:
             with patch.object(gm, "_materialize_job_remote_refs"):
                 with patch.object(gm, "_scrub_remote_credentials") as scrub:
                     gm._clone_into_temp()
                     scrub.assert_called()
+    upd.assert_not_called()
 
     cmd = captured["cmd"]
     assert cmd[0] == "git"

@@ -599,16 +599,17 @@ class Settings(BaseSettings):
         default=1800,
         description=(
             "Max seconds for git submodule update --init --recursive "
-            "(hard kill; default 1800 = 30 minutes). Applied after clone and "
-            "again after work-branch checkout."
+            "(hard kill; default 1800 = 30 minutes). Applied after the "
+            "work branch is checked out."
         ),
     )
     git_update_submodules: bool = Field(
         default=True,
         description=(
-            "After clone (and after work-branch checkout), run "
-            "`git submodule update --init --recursive`. Disable only if "
-            "target repos never use submodules."
+            "After the work branch is checked out, run "
+            "`git submodule update --init --recursive`. Not run on the "
+            "clone default branch. Disable only if target repos never "
+            "use submodules."
         ),
     )
     # Push / fetch / merge / glab MR — hung network ops must not pin job slots forever

@@ -431,7 +431,8 @@ class GitManager:
         finally:
             self._scrub_remote_credentials()
         self._enable_git_longpaths()
-        self._update_submodules(reason="after reuse fetch")
+        # Submodules stay untouched until ensure_feature_branch has the work
+        # branch checked out. Pins differ per branch.
         self._materialize_job_remote_refs()
 
     @staticmethod
@@ -635,7 +636,11 @@ class GitManager:
         return self._apply_pat_to_git_env(self._base_git_env())
 
     def _update_submodules(self, *, reason: str = "") -> None:
-        """Init and update submodules recursively after clone / branch checkout.
+        """Init and update submodules recursively for the checked-out commit.
+
+        Call this only after the work branch is checked out. A clone still
+        sits on the remote default branch, whose submodule SHAs are not the
+        ones the job will edit.
 
         No-op when ``settings.git_update_submodules`` is false or when the repo
         has no ``.gitmodules``. Hard-fails with ``GitCloneError`` on timeout or
@@ -843,10 +848,6 @@ class GitManager:
         # Ensure origin has no embedded credentials
         self._scrub_remote_credentials()
         self._enable_git_longpaths()
-
-        # Init nested modules on the default tip from clone.
-        # ensure_feature_branch re-runs after work-branch checkout so pins match.
-        self._update_submodules(reason="after clone")
 
         # Do NOT create local tracking branches for every remote feature/*.
         # Clone already has origin/* refs (--no-single-branch); ensure_feature_branch
@@ -2520,8 +2521,8 @@ class GitManager:
         target = self._require_target_on_remote()
         work = self._resolve_work_branch_name(key)
         checked_out = self._prepare_work_branch(work, target)
-        # Submodule SHAs often differ per branch — refresh after checkout so the
-        # agent sees the tree for the work branch (not only the clone default).
+        # Work branch is ready. Submodule gitlinks belong to this commit,
+        # not the default branch that clone left checked out.
         self._update_submodules(
             reason=f"after work branch checkout ({checked_out or work})"
         )
