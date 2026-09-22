@@ -28,6 +28,7 @@ from src.dashboard.schemas import (
     GitlabConnectionTestRequest,
     IssueReportRequest,
     JiraConnectionTestRequest,
+    PlanRefactorRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     ScheduleMrRequest,
@@ -1410,6 +1411,34 @@ def create_dashboard_app(
                 "while the ticket is In Progress, or open a new Mode: build issue."
             ),
         )
+
+    @app.post("/api/tasks/{issue_key}/plan-execute")
+    async def task_plan_execute(issue_key: str) -> dict:
+        """Set plan_execute, or hand an Azure work item to /planExecute."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        result = await proc.request_plan_execute_from_dashboard(issue_key)
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400, detail=result.get("error") or "Implement failed"
+            )
+        return result
+
+    @app.post("/api/tasks/{issue_key}/plan-refactor")
+    async def task_plan_refactor(issue_key: str, body: PlanRefactorRequest) -> dict:
+        """Set plan_refactor plus a mention, or hand Azure /planRefactor."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        result = await proc.request_plan_refactor_from_dashboard(
+            issue_key, body.prompt
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400, detail=result.get("error") or "Revise failed"
+            )
+        return result
 
     @app.get("/api/poll")
     def poll() -> dict:

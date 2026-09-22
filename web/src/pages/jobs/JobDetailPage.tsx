@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { cancelTask, deleteJob, fetchJobArtifacts, fetchJobById } from '../../api/client'
+import {
+  cancelTask,
+  deleteJob,
+  fetchJobArtifacts,
+  fetchJobById,
+  planExecute,
+  planRefactor,
+} from '../../api/client'
 import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
 import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
@@ -40,7 +47,11 @@ export function JobDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
   const [tab, setTab] = useState<JobTab>('overview')
-  const [confirm, setConfirm] = useState<'cancel' | 'delete' | null>(null)
+  const [confirm, setConfirm] = useState<'cancel' | 'delete' | 'implement' | null>(null)
+  const [reviseOpen, setReviseOpen] = useState(false)
+  const [reviseText, setReviseText] = useState('')
+  const [notice, setNotice] = useState<string | null>(null)
+  const [planActionSent, setPlanActionSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
@@ -128,6 +139,11 @@ export function JobDetailPage() {
 
   useEffect(() => {
     setTab('overview')
+    setReviseOpen(false)
+    setReviseText('')
+    setNotice(null)
+    setPlanActionSent(false)
+    setConfirm(null)
     artsGen.current += 1
     artsInFlight.current = false
     artsFor.current = ''
@@ -183,6 +199,50 @@ export function JobDetailPage() {
   const canCancel =
     Boolean(job?.issue_key) && jobIsCancellable(job?.status || '', Boolean(job?.live))
   const canDelete = Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
+
+  const planReady =
+    (job?.status || '').toLowerCase() === 'plan_ready' &&
+    job?.job_id === jobId.trim() &&
+    Boolean(job?.issue_key) &&
+    !planActionSent
+
+  const onImplement = async () => {
+    if (!planReady || !job?.issue_key) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const res = await planExecute(job.issue_key)
+      setConfirm(null)
+      setPlanActionSent(true)
+      setNotice(res.message || 'Implementation queued.')
+      await load(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Implement failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onRevise = async () => {
+    const prompt = reviseText.trim()
+    if (!planReady || !job?.issue_key || !prompt) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const res = await planRefactor(job.issue_key, prompt)
+      setReviseOpen(false)
+      setReviseText('')
+      setPlanActionSent(true)
+      setNotice(res.message || 'Revision queued.')
+      await load(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Revise failed')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const onCancel = async () => {
     if (!job?.issue_key || job.job_id !== jobId.trim()) return
@@ -255,8 +315,37 @@ export function JobDetailPage() {
               : ''}
             {job?.model ? ` · ${job.model}` : ''}
           </p>
+          {planReady && (
+            <p className="mt-2 max-w-xl text-xs text-text-muted">
+              Plan is ready. Implement starts the build. Revise asks for a change, then updates the plan.
+            </p>
+          )}
+          {notice && <p className="mt-2 text-sm text-text-secondary">{notice}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {planReady && (
+            <>
+              <button
+                type="button"
+                className="vd-btn vd-btn-primary"
+                disabled={busy}
+                onClick={() => setConfirm('implement')}
+              >
+                Implement
+              </button>
+              <button
+                type="button"
+                className="vd-btn vd-btn-secondary"
+                disabled={busy}
+                onClick={() => {
+                  setReviseOpen((open) => !open)
+                  setError(null)
+                }}
+              >
+                Revise
+              </button>
+            </>
+          )}
           {canCancel && (
             <button
               type="button"
@@ -291,6 +380,48 @@ export function JobDetailPage() {
           </button>
         </div>
       </div>
+
+      {planReady && reviseOpen && (
+        <div className="vd-panel px-4 py-3">
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+            What should change in the plan
+          </label>
+          <textarea
+            className="vd-input mt-1 min-h-[5.5rem] w-full resize-y py-1.5 text-sm leading-relaxed"
+            value={reviseText}
+            disabled={busy}
+            placeholder="Use Redis for the rate limit instead of memory"
+            onChange={(e) => setReviseText(e.target.value)}
+          />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="vd-btn vd-btn-primary"
+              disabled={busy || !reviseText.trim()}
+              onClick={() => void onRevise()}
+            >
+              {busy ? (
+                <>
+                  <Spinner /> Revising…
+                </>
+              ) : (
+                'Revise plan'
+              )}
+            </button>
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                setReviseOpen(false)
+                setReviseText('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       <Tabs
         tabs={[
@@ -371,6 +502,15 @@ export function JobDetailPage() {
         )}
       </div>
 
+      <ConfirmDialog
+        open={confirm === 'implement'}
+        title={`Implement ${job?.issue_key ?? 'this plan'}?`}
+        body="Starts the build from the saved plan. The ticket stays In Progress."
+        confirmLabel="Implement"
+        busy={busy}
+        onConfirm={() => void onImplement()}
+        onCancel={() => setConfirm(null)}
+      />
       <ConfirmDialog
         open={confirm === 'cancel'}
         title={`Cancel work for ${job?.issue_key}?`}

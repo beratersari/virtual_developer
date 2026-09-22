@@ -298,7 +298,7 @@ Azure iş öğesi
 
 Aynı depo + kaynak + hedef için plan ve yapım **ayrı** OpenCode oturumlarıdır.
 
-Paneldeki **Start** kapalıdır. `/planExecute`’u Jira, GitLab veya Azure PR yorumunda kullanmayın.
+Plan hazır işte paneldeki **Implement** ve **Revise**, yoklayıcının ve webhook’un zaten kabul ettiği etiket veya Azure yorumunu yazar. Genel **Start** kapalı kalır. `/planExecute`’u Jira, GitLab veya Azure PR yorumunda kullanmayın.
 
 ---
 
@@ -396,7 +396,7 @@ Daemon ile açılır (`DASHBOARD_ENABLED=true`). Çevrimdışı zip varsayılan�
 - **Scheduled** — sonra Jira işi veya Azure iş öğesi oluşturun / var olanı bulun. **Cancel** yalnız `scheduled` / `error` içindir (`dispatching` iptal edilemez).
 - **Settings** — pano, tarama aralığı, tetik adları, Azure koleksiyon PAT’leri (jeton gösterilmez)
 
-**Start** kapalıdır. **Cancel** ajan çocuklarını hemen öldürür.
+Plan hazır işte **Implement** ve **Revise**, **Refresh**’in yanındadır. Genel **Start** kapalı kalır. **Stop work** ajan çocuklarını hemen öldürür.
 
 ---
 
