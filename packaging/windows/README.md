@@ -33,6 +33,7 @@ Bump product releases by editing `VERSION`, merging to `develop`/`main`, and tag
      - Uses `python` already on PATH and `pip install -r requirements.txt` into that interpreter
      - `start-backend.bat` / `start-frontend.bat` fall back to system `python` when `.venv` is missing
    - **`install-agents.bat`** — copy `opencoderman/agents` + `skills` into the OpenCode home, and into the Claude Code home when Python is available (does not install either CLI).
+   - **`yaver-clis-windows-x64-*.zip`** (separate release file) — offline OpenCode, Codex, and Claude CLIs only. Each has its own bat. Edit `YOUR_HOST` in that tool's config, then run the bat. The bat copies the CLI and the config. It does not copy agents; use `install-agents.bat` from the product zip for those.
    - **`install-backends.bat`** — **OpenCode** via the **opencoderman** submodule (plus Codex when run with no args):
      - Calls `packaging/install_opencode.py` → `opencoderman/install.py`
      - OpenCode to **`%USERPROFILE%\.opencode`** (CLI + agents + skills; stock `plugin: []`)

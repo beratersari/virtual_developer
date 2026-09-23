@@ -47,7 +47,7 @@ read_ocm_versions() {
   return 1
 }
 
-OPENCODE_VERSION="$(read_ocm_versions OPENCODE_VERSION || read_versions OPENCODE_VERSION)"
+OPENCODE_VERSION="$(read_versions OPENCODE_VERSION)"
 OPENCODE_LINUX_ASSET="$(read_ocm_versions OPENCODE_LINUX_ASSET || read_versions OPENCODE_LINUX_ASSET || true)"
 OPENCODE_LINUX_ASSET="${OPENCODE_LINUX_ASSET:-opencode-linux-x64.tar.gz}"
 GLAB_VERSION="$(read_versions GLAB_VERSION)"
@@ -60,8 +60,16 @@ WHEEL_VERS="$(read_versions PYTHON_WHEEL_VERSIONS || true)"
 WHEEL_VERS="${WHEEL_VERS:-3.10,3.11,3.12,3.13}"
 IFS=',' read -r -a WHEEL_LIST <<<"$WHEEL_VERS"
 
-if [[ -z "$OPENCODE_VERSION" || -z "$GLAB_VERSION" || -z "$CODEX_VERSION" ]]; then
-  echo "Missing OPENCODE_VERSION / GLAB_VERSION / CODEX_VERSION in versions.env" >&2
+if [[ "$OPENCODE_VERSION" != "1.18.10" ]]; then
+  echo "OpenCode must be 1.18.10 (versions.env has '$OPENCODE_VERSION')" >&2
+  exit 1
+fi
+if [[ "$CODEX_VERSION" != "0.149.0" ]]; then
+  echo "Codex must be 0.149.0 (versions.env has '$CODEX_VERSION')" >&2
+  exit 1
+fi
+if [[ -z "$GLAB_VERSION" ]]; then
+  echo "Missing GLAB_VERSION in versions.env" >&2
   exit 1
 fi
 
@@ -275,10 +283,11 @@ cat >"$PAYLOAD/DIST_VERSION.txt" <<EOF
 virtual_developer Linux offline distribution
 ProductVersion=$PRODUCT_VERSION
 DistName=$DIST_NAME
-OpenCode=$OPENCODE_VERSION
+OpenCode=1.18.10
 OpenCodeAsset=$OPENCODE_LINUX_ASSET
-Codex=$CODEX_VERSION
+Codex=0.149.0
 CodexAsset=$CODEX_LINUX_ASSET
+ClaudeCode=2.1.280
 glab=$GLAB_VERSION
 PythonMin=$PYTHON_MIN_VERSION
 PythonWheels=${WHEEL_VERS}

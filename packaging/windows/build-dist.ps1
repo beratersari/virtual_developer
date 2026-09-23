@@ -204,10 +204,10 @@ $ver = Read-Versions $versionsFile
 $ocmVersions = Join-Path $root "opencoderman\packaging\versions.env"
 if (Test-Path -LiteralPath $ocmVersions) {
     $ov = Read-Versions $ocmVersions
-    foreach ($k in @("OPENCODE_VERSION", "OPENCODE_WINDOWS_ASSET", "OPENCODE_LINUX_ASSET", "OPENCODE_REPO")) {
+    foreach ($k in @("OPENCODE_WINDOWS_ASSET", "OPENCODE_LINUX_ASSET", "OPENCODE_REPO")) {
         if ($ov.ContainsKey($k) -and $ov[$k]) { $ver[$k] = $ov[$k] }
     }
-    Write-Host "OpenCode pins from opencoderman/packaging/versions.env"
+    Write-Host "OpenCode asset names from opencoderman; version stays the Yaver pin"
 } else {
     Write-Host "[WARNING] opencoderman/packaging/versions.env missing; using packaging/windows/versions.env"
 }
@@ -216,6 +216,7 @@ $OPENCODE_VERSION = $ver["OPENCODE_VERSION"]
 $OH_MY_OPENCODE_VERSION = $ver["OH_MY_OPENCODE_VERSION"]
 $GLAB_VERSION = $ver["GLAB_VERSION"]
 $CODEX_VERSION = $ver["CODEX_VERSION"]
+$CLAUDE_CODE_VERSION = $ver["CLAUDE_CODE_VERSION"]
 $CODEX_WINDOWS_ASSET = if ($ver["CODEX_WINDOWS_ASSET"]) {
     $ver["CODEX_WINDOWS_ASSET"]
 } else {
@@ -229,10 +230,20 @@ $wheelVersionList = if ($ver["PYTHON_WHEEL_VERSIONS"]) {
     @("3.10", "3.11", "3.12", "3.13")
 }
 
+if ($OPENCODE_VERSION -ne "1.18.10") {
+    throw "OpenCode must be 1.18.10 (versions.env has '$OPENCODE_VERSION')"
+}
+if ($CODEX_VERSION -ne "0.149.0") {
+    throw "Codex must be 0.149.0 (versions.env has '$CODEX_VERSION')"
+}
+if ($CLAUDE_CODE_VERSION -ne "2.1.280") {
+    throw "Claude Code must be 2.1.280 (versions.env has '$CLAUDE_CODE_VERSION')"
+}
 if (-not $OPENCODE_VERSION) { throw "OPENCODE_VERSION missing in versions.env" }
 if (-not $OH_MY_OPENCODE_VERSION) { throw "OH_MY_OPENCODE_VERSION missing in versions.env" }
 if (-not $GLAB_VERSION) { throw "GLAB_VERSION missing in versions.env" }
 if (-not $CODEX_VERSION) { throw "CODEX_VERSION missing in versions.env" }
+if (-not $CLAUDE_CODE_VERSION) { throw "CLAUDE_CODE_VERSION missing in versions.env" }
 if (-not $NODE_FULL_VERSION) { throw "NODE_FULL_VERSION missing in versions.env" }
 
 if (-not $OutDir) {
@@ -256,6 +267,7 @@ Write-Host "OpenCode  : $OPENCODE_VERSION"
 Write-Host "oh-my-oc  : $OH_MY_OPENCODE_VERSION"
 Write-Host "glab      : $GLAB_VERSION"
 Write-Host "Codex     : $CODEX_VERSION"
+Write-Host "Claude    : $CLAUDE_CODE_VERSION"
 Write-Host "Wheels for: $($wheelVersionList -join ', ') (min runtime $PYTHON_MIN_VERSION)"
 Write-Host ""
 
@@ -565,6 +577,22 @@ $codexSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexExe.FullName).Has
 Write-Host ("  Codex SHA256: {0} ({1:N1} MB)" -f $codexSha, ($codexExe.Length / 1MB))
 
 # ---------------------------------------------------------------------------
+# 3c) Fetch Claude Code Windows binary (pinned). No npm, no agents.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "Step 3c: Fetching Claude Code CLI v$CLAUDE_CODE_VERSION..."
+
+$claudeExe = Join-Path $dl "claude.exe"
+$claudeUrl = "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/win32-x64/claude.exe"
+Download-File $claudeUrl $claudeExe
+& $assertPe -Path $claudeExe -MinBytes 5MB
+if ($LASTEXITCODE -ne 0) {
+    throw "claude.exe is not AMD64"
+}
+$claudeSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $claudeExe).Hash
+Write-Host ("  Claude SHA256: {0} ({1:N1} MB)" -f $claudeSha, ((Get-Item -LiteralPath $claudeExe).Length / 1MB))
+
+# ---------------------------------------------------------------------------
 # 4) Build OpenCode home in a SHORT temp path, then pack as ONE zip
 #    (Users never extract thousands of node_modules files from the outer zip.)
 # ---------------------------------------------------------------------------
@@ -611,6 +639,8 @@ if ($LASTEXITCODE -ne 0) { throw "vendor\bin\opencode.exe failed AMD64 check" }
     "CODEX_VERSION=$CODEX_VERSION"
     "CODEX_ASSET=$CODEX_WINDOWS_ASSET"
     "CODEX_SHA256=$codexSha"
+    "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
+    "CLAUDE_SHA256=$claudeSha"
     "CODEX_BYTES=$((Get-Item -LiteralPath $codexExe.FullName).Length)"
     "TARGET_OS=Windows 10/11 64-bit (x64 / AMD64)"
     "BACKUP=vendor\bin\opencode.exe"
@@ -803,9 +833,10 @@ Write-Host "Step 6: Writing vendor metadata..."
 
 $versionsCopy = @"
 OPENCODE_VERSION=$OPENCODE_VERSION
+CODEX_VERSION=$CODEX_VERSION
+CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION
 OH_MY_OPENCODE_VERSION=$OH_MY_OPENCODE_VERSION
 GLAB_VERSION=$GLAB_VERSION
-CODEX_VERSION=$CODEX_VERSION
 NODE_FULL_VERSION=$NODE_FULL_VERSION
 PYTHON_MIN_VERSION=$PYTHON_MIN_VERSION
 PYTHON_WHEEL_VERSIONS=$($wheelVersionList -join ',')
@@ -847,6 +878,35 @@ OpenCoderman pin: opencoderman.pin (exact submodule commit for this build)
 "@
 Set-Content -Path (Join-Path $payload "START_HERE.txt") -Value $howTo -Encoding UTF8
 
+# CLI-only offline zip: three bats, three binaries, three host configs. No agents.
+$clisSrc = Join-Path $root "packaging\windows\cli-offline"
+$clisName = $DistName -replace '^virtual_developer-', 'yaver-clis-'
+if ($clisName -eq $DistName) { $clisName = "yaver-clis-windows-x64" }
+$clisStage = Join-Path $stage $clisName
+if (Test-Path -LiteralPath $clisStage) {
+    Remove-Item -LiteralPath $clisStage -Recurse -Force
+}
+Ensure-Dir (Join-Path $clisStage "opencode")
+Ensure-Dir (Join-Path $clisStage "codex")
+Ensure-Dir (Join-Path $clisStage "claude")
+Copy-Item -LiteralPath (Join-Path $clisSrc "install-opencode.bat") -Destination (Join-Path $clisStage "install-opencode.bat") -Force
+Copy-Item -LiteralPath (Join-Path $clisSrc "install-codex.bat") -Destination (Join-Path $clisStage "install-codex.bat") -Force
+Copy-Item -LiteralPath (Join-Path $clisSrc "install-claude.bat") -Destination (Join-Path $clisStage "install-claude.bat") -Force
+Copy-Item -LiteralPath $opencodeExe.FullName -Destination (Join-Path $clisStage "opencode\opencode.exe") -Force
+Copy-Item -LiteralPath (Join-Path $clisSrc "opencode.json") -Destination (Join-Path $clisStage "opencode\opencode.json") -Force
+Copy-Item -LiteralPath $codexExe.FullName -Destination (Join-Path $clisStage "codex\codex.exe") -Force
+Copy-Item -LiteralPath (Join-Path $clisSrc "config.toml") -Destination (Join-Path $clisStage "codex\config.toml") -Force
+Copy-Item -LiteralPath $claudeExe -Destination (Join-Path $clisStage "claude\claude.exe") -Force
+Copy-Item -LiteralPath (Join-Path $clisSrc "settings.json") -Destination (Join-Path $clisStage "claude\settings.json") -Force
+@(
+    "OPENCODE_VERSION=$OPENCODE_VERSION"
+    "CODEX_VERSION=$CODEX_VERSION"
+    "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
+) | Set-Content -Path (Join-Path $clisStage "VERSIONS.txt") -Encoding ASCII
+$agentLeak = Get-ChildItem -Path $clisStage -Recurse -Directory -Filter "agents" -ErrorAction SilentlyContinue
+if ($agentLeak) { throw "CLI zip must not contain an agents directory" }
+Write-Host "  CLI offline stage: $clisStage"
+
 if (Test-Path -LiteralPath $dl) {
     Remove-Item -LiteralPath $dl -Recurse -Force
 }
@@ -883,6 +943,29 @@ if ($tar) {
     )
 }
 
+$clisZip = Join-Path $OutDir "$clisName.zip"
+if (Test-Path -LiteralPath $clisZip) {
+    Remove-Item -LiteralPath $clisZip -Force
+}
+if ($tar) {
+    Push-Location $clisStage
+    try {
+        & tar -a -cf $clisZip *
+        if ($LASTEXITCODE -ne 0) { throw "tar failed creating CLI zip" }
+    } finally {
+        Pop-Location
+    }
+} else {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $clisStage,
+        $clisZip,
+        [System.IO.Compression.CompressionLevel]::Optimal,
+        $false
+    )
+}
+Write-Host ("CLI zip : {0} ({1:N1} MB)" -f $clisZip, ((Get-Item -LiteralPath $clisZip).Length / 1MB))
+
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
 $payloadSize = (Get-ChildItem -Path $payload -Recurse -File -ErrorAction SilentlyContinue |
     Measure-Object -Property Length -Sum).Sum
@@ -900,6 +983,8 @@ Write-Host "Supported Python: $($supportedPy -join ', ')"
 
 if ($env:GITHUB_OUTPUT) {
     "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "clis_zip=$clisZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+    "clis_name=$clisName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "dist_name=$DistName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "payload_path=$payload" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
     "supported_python=$($supportedPy -join ',')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
