@@ -84,20 +84,23 @@ def test_second_prepare_checkouts_local_when_source_never_pushed(
     assert remote.returncode != 0
 
 
-def test_dirty_readme_kept_when_already_on_work_branch(
+def test_dirty_readme_is_reset_when_already_on_work_branch(
     origin_and_clone, monkeypatch
 ):
-    """Reused clone already on the MR source must keep intentional uncommitted edits."""
+    """A reused clone must drop uncommitted leftovers before the next job."""
     from src.config import settings as real_settings
 
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
     _origin, clone = origin_and_clone
+    _git(clone, "config", "user.email", "dev@example.com")
+    _git(clone, "config", "user.name", "Dev")
     _git(clone, "checkout", "-B", "feature/KAN-12278")
     (clone / "app.txt").write_text("work\n")
     _git(clone, "add", "app.txt")
     _git(clone, "commit", "-m", "feat")
     _git(clone, "push", "-u", "origin", "feature/KAN-12278")
     (clone / "README").write_text("intentional leftover\n")
+    (clone / "untracked.txt").write_text("left behind\n")
 
     with patch.object(GitManager, "_setup_temp_working_dir"):
         gm = GitManager(
@@ -115,21 +118,24 @@ def test_dirty_readme_kept_when_already_on_work_branch(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=clone, text=True
     ).strip()
     assert head == "feature/KAN-12278"
-    assert (clone / "README").read_text() == "intentional leftover\n"
+    assert (clone / "README").read_text() == "ok\n"
+    assert not (clone / "untracked.txt").exists()
     status = subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=clone, text=True
     ).strip()
-    assert "README" in status
+    assert status == ""
 
 
-def test_dirty_tree_stashed_when_switching_branches(
+def test_dirty_tree_is_reset_when_switching_branches(
     origin_and_clone, monkeypatch
 ):
-    """Switching branches must stash leftovers, not reset --hard."""
+    """Switching branches hard-resets leftovers instead of stashing them."""
     from src.config import settings as real_settings
 
     monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
     _origin, clone = origin_and_clone
+    _git(clone, "config", "user.email", "dev@example.com")
+    _git(clone, "config", "user.name", "Dev")
     _git(clone, "checkout", "-B", "feature/KAN-12278")
     (clone / "app.txt").write_text("work\n")
     _git(clone, "add", "app.txt")
@@ -156,12 +162,8 @@ def test_dirty_tree_stashed_when_switching_branches(
     stash = subprocess.check_output(
         ["git", "stash", "list"], cwd=clone, text=True
     )
-    assert "vd: preserve uncommitted" in stash
-    # Recoverable — not deleted
-    subprocess.run(
-        ["git", "stash", "pop"], cwd=clone, check=True, capture_output=True
-    )
-    assert "wip on develop" in (clone / "README").read_text()
+    assert "vd: preserve uncommitted" not in stash
+    assert "wip on develop" not in (clone / "README").read_text()
 
 
 def _wire_file_origin(gm, clone: Path) -> None:
@@ -221,6 +223,113 @@ def test_queued_followup_checkouts_latest_remote_tip(origin_and_clone, monkeypat
         ["git", "rev-parse", "HEAD"], cwd=clone, text=True
     ).strip()
     assert head == job1, "queued job 2 must fast-forward onto job 1's remote tip"
+
+
+def test_unpushed_leftovers_are_dropped_so_the_next_push_works(
+    origin_and_clone, monkeypatch
+):
+    """A failed push leaves commits and dirty files; the next start must not."""
+    from src.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    _origin, clone = origin_and_clone
+    _git(clone, "config", "user.email", "dev@example.com")
+    _git(clone, "config", "user.name", "Dev")
+    _git(clone, "checkout", "-B", "feature/KAN-24")
+    (clone / "pushed.txt").write_text("on remote\n")
+    _git(clone, "add", "pushed.txt")
+    _git(clone, "commit", "-m", "pushed")
+    _git(clone, "push", "-u", "origin", "feature/KAN-24")
+    remote_tip = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=clone, text=True
+    ).strip()
+
+    (clone / "leftover.txt").write_text("never pushed\n")
+    _git(clone, "add", "leftover.txt")
+    _git(clone, "commit", "-m", "unpushed leftover")
+    (clone / "README").write_text("dirty leftover\n")
+    (clone / "extra.txt").write_text("untracked\n")
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(
+            issue_key="KAN-24",
+            remote_url="https://gitlab.example.com/g/r.git",
+            source_branch="feature/KAN-24",
+            target_branch="develop",
+        )
+    _wire_file_origin(gm, clone)
+    gm.work_branch = "feature/KAN-24"
+
+    out = gm._prepare_work_branch("feature/KAN-24", "develop")
+    assert out == "feature/KAN-24"
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=clone, text=True
+    ).strip()
+    assert head == remote_tip
+    assert not (clone / "leftover.txt").exists()
+    assert not (clone / "extra.txt").exists()
+    assert (clone / "README").read_text() == "ok\n"
+    log = subprocess.check_output(
+        ["git", "log", "--oneline"], cwd=clone, text=True
+    )
+    assert "unpushed leftover" not in log
+
+    (clone / "next.txt").write_text("next job\n")
+    _git(clone, "add", "next.txt")
+    _git(clone, "commit", "-m", "next job")
+    assert gm.push("feature/KAN-24") is True
+    pushed = subprocess.check_output(
+        ["git", "rev-parse", "origin/feature/KAN-24"], cwd=clone, text=True
+    ).strip()
+    assert pushed == subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=clone, text=True
+    ).strip()
+
+
+def test_missing_remote_branch_is_created_from_target(
+    origin_and_clone, monkeypatch
+):
+    """A local-only leftover branch is recreated from the target, then pushable."""
+    from src.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "gitlab_allowed_hosts", "gitlab.example.com")
+    _origin, clone = origin_and_clone
+    _git(clone, "config", "user.email", "dev@example.com")
+    _git(clone, "config", "user.name", "Dev")
+    target = subprocess.check_output(
+        ["git", "rev-parse", "origin/develop"], cwd=clone, text=True
+    ).strip()
+    _git(clone, "checkout", "-B", "feature/KAN-24")
+    (clone / "leftover.txt").write_text("local only\n")
+    _git(clone, "add", "leftover.txt")
+    _git(clone, "commit", "-m", "local only")
+    (clone / "README").write_text("dirty\n")
+
+    with patch.object(GitManager, "_setup_temp_working_dir"):
+        gm = GitManager(
+            issue_key="KAN-24",
+            remote_url="https://gitlab.example.com/g/r.git",
+            source_branch="feature/KAN-24",
+            target_branch="develop",
+        )
+    _wire_file_origin(gm, clone)
+
+    out = gm._prepare_work_branch("feature/KAN-24", "develop")
+    assert out == "feature/KAN-24"
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=clone, text=True
+    ).strip()
+    assert head == target
+    assert not (clone / "leftover.txt").exists()
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=clone, text=True
+    ).strip()
+    assert status == ""
+
+    (clone / "next.txt").write_text("created clean\n")
+    _git(clone, "add", "next.txt")
+    _git(clone, "commit", "-m", "created clean")
+    assert gm.push("feature/KAN-24") is True
 
 
 def test_push_rebases_stale_local_commit_onto_origin(origin_and_clone, monkeypatch):
