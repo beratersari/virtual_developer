@@ -404,6 +404,7 @@ export function JobsPage() {
           selectable
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          fallbackWorker={live.settings?.agent_backend || ''}
           onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
         />
       )}

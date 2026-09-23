@@ -118,7 +118,7 @@ export function SchedulesPage() {
           <>
             Queue a run for a chosen time. Existing MR or PR posts your prompt
             on the merge request / pull request when it fires, then posts the
-            agent answer when OpenCode finishes.
+            agent answer when the worker finishes.
           </>
         }
       />
@@ -523,7 +523,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
             />
             <span className="mt-1 block text-xs text-text-muted">
               Posted on the MR as a *Yaver* note marked “written in the ops
-              dashboard”. The agent answer is posted there when OpenCode finishes.
+              dashboard”. The agent answer is posted there when the worker finishes.
             </span>
           </label>
           <BackendField
@@ -756,7 +756,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
             />
             <span className="mt-1 block text-xs text-text-muted">
               Posted on the PR as a *Yaver* comment marked “written in the ops
-              dashboard”. The agent answer is posted there when OpenCode finishes.
+              dashboard”. The agent answer is posted there when the worker finishes.
             </span>
           </label>
           <BackendField
@@ -1672,9 +1672,10 @@ function BackendField({
         </option>
         <option value="opencode">OpenCode</option>
         <option value="codex">Codex</option>
+        <option value="claude">Claude Code</option>
       </select>
       <span className="mt-1 block text-xs text-text-muted">
-        Same job contract as OpenCode. Leave default to use Settings.
+        Leave default to use the worker from Settings.
       </span>
     </label>
   )

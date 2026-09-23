@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJobChat } from '../../api/client'
 import type { ChatPart, JobChatPayload, TextArtifact } from '../../api/types'
 import { buildCodexTranscriptEvents } from '../../util/codexLog'
+import { buildClaudeTranscriptEvents } from '../../util/claudeLog'
 import type { WorkerId } from '../../util/worker'
 import { useLive } from '../../app/live'
 import { MarkdownBody } from '../../ui/MarkdownBody'
@@ -227,6 +228,76 @@ function CodexTranscript({
   )
 }
 
+function ClaudeTranscript({
+  logs,
+  prompts,
+  liveRun,
+}: {
+  logs: TextArtifact[]
+  prompts: TextArtifact[]
+  liveRun: boolean
+}) {
+  const events = useMemo(() => buildClaudeTranscriptEvents(logs, prompts), [logs, prompts])
+  if (events.length === 0) {
+    if (liveRun) {
+      return (
+        <p className="text-sm text-text-muted">
+          <span className="mr-2 inline-flex items-center gap-1 text-live">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
+            live
+          </span>
+          Waiting for Claude Code…
+        </p>
+      )
+    }
+    return (
+      <div className="vd-alert vd-alert-warning">
+        No Claude Code output in this run yet. The reply is stored when the CLI
+        finishes. Open the Output tab for the raw log.
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="text-xs text-text-muted">
+        Claude Code transcript
+        {liveRun ? (
+          <span className="ml-2 inline-flex items-center gap-1 text-live">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
+            live
+          </span>
+        ) : null}
+      </p>
+      <div className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
+        {events.map((ev, i) =>
+          ev.kind === 'user' ? (
+            <div key={`${ev.kind}-${i}`} className="flex justify-end">
+              <div className="max-w-[min(52rem,92%)] rounded-2xl border border-accent/35 bg-accent-muted px-4 py-3">
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+                  You
+                </div>
+                <div className="max-h-[min(70vh,36rem)] overflow-auto">
+                  <MarkdownBody text={ev.body || ''} />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div
+              key={`${ev.kind}-${i}`}
+              className="rounded-lg border border-border bg-surface px-3 py-2"
+            >
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+                {ev.title}
+              </div>
+              {ev.body ? <MarkdownBody text={ev.body} /> : null}
+            </div>
+          ),
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function JobChatTab({
   jobId,
   liveRun = false,
@@ -257,7 +328,7 @@ export function JobChatTab({
   const load = (soft: boolean) => {
     const id = jobId.trim()
     if (!id) return
-    if (worker === 'codex') {
+    if (worker === 'codex' || worker === 'claude') {
       setLoading(false)
       setError(null)
       return
@@ -337,6 +408,10 @@ export function JobChatTab({
 
   if (worker === 'codex') {
     return <CodexTranscript logs={sessionLogs} prompts={prompts} liveRun={liveRun} />
+  }
+
+  if (worker === 'claude') {
+    return <ClaudeTranscript logs={sessionLogs} prompts={prompts} liveRun={liveRun} />
   }
 
   if (loading && !data) {

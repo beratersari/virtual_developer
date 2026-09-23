@@ -931,11 +931,13 @@ export function SettingsPage() {
         >
           <option value="opencode">OpenCode</option>
           <option value="codex">Codex</option>
+          <option value="claude">Claude Code</option>
         </select>
         <span className="mt-1 block text-xs text-text-muted">
           Default worker for new jobs. An issue {'{params}'} Backend field
           overrides this. Provider credentials stay in each tool&apos;s own
-          config (OpenCode: opencode.json · Codex: ~/.codex/config.toml).
+          config (OpenCode: opencode.json · Codex: ~/.codex/config.toml ·
+          Claude: ANTHROPIC_BASE_URL).
         </span>
       </label>
       <p className="text-xs text-text-muted">

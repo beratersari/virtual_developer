@@ -2,7 +2,7 @@ import type { JobItem, JobRetryAttempt } from '../../api/types'
 import { IN_FLIGHT_STATUSES } from '../../util/status'
 import { pathBasename } from '../../util/paths'
 import { jobChannelLabel } from '../../util/jobChannel'
-import { resolveJobWorker, sessionKindLabel, workerLabel } from '../../util/worker'
+import { resolveJobWorker, sessionIdLabel, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
 import { StatusBadge } from '../../ui/StatusBadge'
@@ -177,7 +177,7 @@ export function JobOverview({
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <MetaCard label="Task id (latest)" mono value={job.task_id ?? '—'} />
           <MetaCard
-            label={sessionKindLabel(worker) === 'thread' ? 'Codex thread' : 'Session'}
+            label={sessionIdLabel(worker)}
             mono
             value={job.opencode_session_id ?? '—'}
           />

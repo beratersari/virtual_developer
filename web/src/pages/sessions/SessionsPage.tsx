@@ -77,7 +77,7 @@ export function SessionsPage() {
       <PageHeader
         kicker="OpenCode"
         title="Sessions"
-        description="Each row is one repository + source + target. Open it to see the plan/build/test chats and every job that ran there."
+        description="OpenCode chats for one repository + source + target. Claude Code and Codex replies are on the job Transcript tab, not in this list."
         actions={
           <label className="block text-xs text-text-muted">
             Search
@@ -119,7 +119,7 @@ export function SessionsPage() {
           <div className="vd-panel px-5 py-10 text-center text-sm text-text-muted">
             {debouncedQuery
               ? `No workspaces match "${debouncedQuery}".`
-              : 'No bound workspaces yet. A plan, build, or test run creates one.'}
+              : 'No OpenCode workspaces yet. A plan, build, or test run creates one. Claude Code and Codex jobs are listed under Jobs.'}
           </div>
         )}
         {rows.map((w) => (

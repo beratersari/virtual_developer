@@ -10,6 +10,13 @@ import {
   sessionLogSortKey,
 } from '../../util/paths'
 import { PromptBlock } from '../../ui/PromptBlock'
+import { claudeDisplayText } from '../../util/claudeLog'
+import type { WorkerId } from '../../util/worker'
+
+function visibleLog(raw: string, worker: WorkerId): string {
+  if (worker !== 'claude') return raw
+  return claudeDisplayText(raw)
+}
 
 export function JobPromptTab({
   job,
@@ -148,9 +155,11 @@ export function JobPromptTab({
 export function JobSessionTab({
   job,
   sessionLogs,
+  worker = 'opencode',
 }: {
   job: JobItem
   sessionLogs: TextArtifact[]
+  worker?: WorkerId
 }) {
   const sessionPaths = useMemo(() => jobSessionPaths(job), [job])
   const entries = useMemo(() => {
@@ -205,7 +214,10 @@ export function JobSessionTab({
         highlight
         title={`Session log · ${job.job_id}${fallback.truncated ? ' (truncated)' : ''}`}
         meta={pathBasename(fallback.path)}
-        body={fallback.content || fallback.error || '(empty)'}
+        body={
+          visibleLog(fallback.content || fallback.error || '', worker) ||
+          (worker === 'claude' ? 'No Claude Code reply in this log.' : '(empty)')
+        }
       />
     )
   }
@@ -222,7 +234,11 @@ export function JobSessionTab({
   return (
     <div className="space-y-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-text-muted">Raw worker output. Latest attempt opens by default.</p>
+        <p className="text-xs text-text-muted">
+          {worker === 'claude'
+            ? 'Claude Code reply. CLI diagnostics are omitted.'
+            : 'Raw worker output. Latest attempt opens by default.'}
+        </p>
         {entries.length > 1 && (
           <div className="flex items-center gap-2">
             <button
@@ -255,7 +271,14 @@ export function JobSessionTab({
           const isLatest = entry.index === entries.length - 1
           const isOpen = openKeys[entry.path] ?? isLatest
           const titleLabel = entry.label === 'initial' ? 'initial' : `_${entry.label}`
-          const body = entry.match?.content || entry.match?.error || (entry.match ? '(empty)' : '')
+          const raw = entry.match?.content || entry.match?.error || ''
+          const body =
+            visibleLog(raw, worker) ||
+            (entry.match
+              ? worker === 'claude'
+                ? 'No Claude Code reply in this log.'
+                : '(empty)'
+              : '')
           return (
             <details
               key={entry.path}
