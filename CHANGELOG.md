@@ -8,6 +8,19 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.58] — 2026-09-23
+
+A reused clone no longer keeps leftover commits or dirty files from a
+failed push. The next job starts from a clean work branch.
+
+### Fixed
+
+- Before the next job, the work tree is hard-reset. The remote branch
+  is fetched when it exists, and recreated from the target when it
+  does not.
+
+[0.9.58]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.58
+
 ## [0.9.57] — 2026-09-23
 
 A plan-ready job can be implemented or revised from the dashboard.

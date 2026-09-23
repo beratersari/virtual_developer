@@ -2124,11 +2124,42 @@ class GitManager:
             text += f" (+{extra} more)"
         return text
 
+    def _discard_worktree_changes(self, reason: str) -> bool:
+        """Drop uncommitted edits so the next job is not blocked by them.
+
+        A failed push leaves modified and untracked files in the reused
+        clone. Stashing them keeps the same files for the next checkout
+        and the following push is rejected. ``reset --hard`` plus
+        ``clean -fd`` makes the directory match HEAD.
+        """
+        porcelain = self._working_tree_status()
+        if not porcelain:
+            return False
+        summary = self._dirty_paths_summary(porcelain)
+        logger.info(
+            f"Hard reset dirty worktree ({reason}; files: {summary})"
+        )
+        reset = self._run_git(["reset", "--hard", "HEAD"], check=False)
+        clean = self._run_git(["clean", "-fd"], check=False)
+        if reset.returncode != 0 or clean.returncode != 0:
+            detail = self._redact_secret_text(
+                (
+                    (reset.stderr or "")
+                    + "\n"
+                    + (clean.stderr or "")
+                ).strip()
+            )
+            logger.warning(
+                f"Could not hard reset worktree ({reason}): {detail[:300]}"
+            )
+            return False
+        return True
+
     def _stash_uncommitted(self, reason: str) -> bool:
         """Stash tracked + untracked edits so a branch switch can proceed.
 
-        Never ``reset --hard``: leftover work may be intentional. The stash
-        stays in the clone (``git stash list``) for recovery.
+        Job startup uses :meth:`_discard_worktree_changes` instead. This
+        remains for callers that still need a recoverable stash.
         """
         porcelain = self._working_tree_status()
         if not porcelain:
@@ -2186,7 +2217,9 @@ class GitManager:
             f"Source branch '{work_branch}' not on remote — creating from "
             f"origin/{target} (MR will be {work_branch} → {target})"
         )
-        self._stash_uncommitted(f"before creating {work_branch} from {target}")
+        self._discard_worktree_changes(
+            f"before creating {work_branch} from {target}"
+        )
         self._delete_local_branch(work_branch)
 
         start_point = f"origin/{target}"
@@ -2260,30 +2293,21 @@ class GitManager:
             )
 
         current = (self.get_current_branch() or "").strip()
-        if current == work_branch:
-            porcelain = self._working_tree_status()
-            if porcelain:
-                logger.info(
-                    f"Already on '{work_branch}'; keeping uncommitted files: "
-                    f"{self._dirty_paths_summary(porcelain)}"
-                )
-            else:
-                logger.info(f"Already on '{work_branch}'")
-        else:
+        self._discard_worktree_changes(f"before checkout {work_branch}")
+        if current != work_branch:
             logger.info(
                 f"Switching to existing work branch '{work_branch}' "
                 f"(currently '{current or '(detached)'}')"
             )
-            self._stash_uncommitted(f"before checkout {work_branch}")
             if self._branch_exists(work_branch, check_remote=False):
                 self._run_git(["checkout", work_branch])
             else:
                 self._run_git(["checkout", "-B", work_branch, start_point])
-            logger.info(
-                f"Checked out existing work branch '{work_branch}'"
-            )
-        # Queued follow-up on the same MR: origin may have the previous job's
-        # push. Fetch already ran; move HEAD onto that tip before the agent.
+            logger.info(f"Checked out existing work branch '{work_branch}'")
+        else:
+            logger.info(f"Already on '{work_branch}'")
+        # Fetch already ran. Move HEAD onto that tip, including when this
+        # clone is ahead with commits the last push never sent.
         self._sync_work_branch_to_origin(work_branch)
         self.work_branch = work_branch
         self.source_branch = work_branch
@@ -2310,39 +2334,23 @@ class GitManager:
         return _n(ahead), _n(behind)
 
     def _sync_work_branch_to_origin(self, work_branch: str) -> None:
-        """Move the work branch onto origin/{work} when the remote is ahead.
+        """Point the work branch at the fetched ``origin/{work}`` tip.
 
-        Equal to origin: leave uncommitted edits (same-job rework).
-        Behind only: fast-forward (stash first if dirty).
-        Diverged: reset to the remote tip so a queued second MR comment
-        starts from the first job's push, not a stale local T0.
+        A failed push leaves this clone ahead of the remote, sometimes with
+        a dirty tree. The next job must start from the remote tip. Keeping
+        those unpushed commits makes the following ``git push`` reject.
         """
         start_point = f"origin/{work_branch}"
         if not self._origin_ref_is_commit(work_branch):
             return
         ahead, behind = self._counts_vs_origin(work_branch)
-        if behind == 0:
+        self._discard_worktree_changes(f"before sync to {start_point}")
+        if ahead == 0 and behind == 0:
             return
-        dirty = self._working_tree_status()
-        if dirty:
-            self._stash_uncommitted(f"before sync to {start_point}")
-        if ahead == 0:
-            logger.info(
-                f"Fast-forwarding '{work_branch}' to {start_point} "
-                f"({behind} commit(s) behind)"
-            )
-            ff = self._run_git(["merge", "--ff-only", start_point], check=False)
-            if ff.returncode == 0:
-                return
-            logger.warning(
-                f"ff-only onto {start_point} failed; resetting to remote tip"
-            )
-        else:
-            logger.info(
-                f"Local '{work_branch}' diverged from {start_point} "
-                f"(ahead={ahead} behind={behind}); resetting to remote tip "
-                "so this job starts from the latest MR head"
-            )
+        logger.info(
+            f"Resetting '{work_branch}' to {start_point} "
+            f"(ahead={ahead} behind={behind})"
+        )
         self._run_git(["reset", "--hard", start_point], check=False)
 
     def _integrate_remote_before_push(self, branch: str) -> bool:
@@ -2407,10 +2415,10 @@ class GitManager:
             f"Source branch '{work_branch}' exists locally but not on remote — "
             f"checking out the local tip (not origin/{work_branch})"
         )
+        self._discard_worktree_changes(f"before checkout {work_branch}")
         current = (self.get_current_branch() or "").strip()
         if current != work_branch:
-            self._stash_uncommitted(f"before checkout {work_branch}")
-        self._run_git(["checkout", work_branch])
+            self._run_git(["checkout", work_branch])
         self.work_branch = work_branch
         self.source_branch = work_branch
         return work_branch
@@ -2437,20 +2445,14 @@ class GitManager:
                 )
             )
 
-        # 1) Prefer existing remote source tip (ls-remote). Do **not** treat
-        # a leftover local branch as "exists on remote" — that called
-        # checkout -B origin/{work} when the branch was never pushed
-        # (scheduled rework / shared Source). Git then fails:
-        #   fatal: 'origin/feature/…' is not a commit
+        # Dirty files from a failed push block the next checkout and push.
+        self._discard_worktree_changes(f"before preparing {work_branch}")
+
+        # Remote branch: fetch it and start at that tip.
+        # Missing on the remote: create it from the target. A local-only
+        # branch is the previous run's unpushed tip — do not resume it.
         if self._remote_head_exists(work_branch):
             return self._checkout_existing_remote_branch(work_branch)
-
-        # 2) Previous run created the work branch locally but did not push.
-        # Rework must keep that tip, not invent origin/{work}.
-        if self._branch_exists(work_branch, check_remote=False):
-            return self._checkout_local_work_branch(work_branch)
-
-        # 3) Missing locally and on remote → create from target
         return self._checkout_work_branch_from_target(work_branch, target)
 
     def _checkout_or_create_branch(self, branch_name: str) -> str:

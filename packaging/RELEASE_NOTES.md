@@ -1,3 +1,8 @@
+# Yaver 0.9.58
+
+A failed push used to leave unpushed commits and dirty files in the reused clone, so the next push was rejected.
+Yaver now hard-resets that work tree before the next job, fetches the remote branch when it exists, and recreates the branch from the target when it does not.
+
 # Yaver 0.9.57
 
 Implement and Revise on a plan-ready job write the same Jira label or Azure work-item comment the poller and webhook already accept, and the next poll does the work.
