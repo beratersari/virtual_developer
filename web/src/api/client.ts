@@ -369,6 +369,20 @@ export function cancelTask(issueKey: string) {
   )
 }
 
+export function planExecute(issueKey: string) {
+  return request<{ ok: boolean; message?: string; action?: string }>(
+    `/api/tasks/${encodeURIComponent(issueKey)}/plan-execute`,
+    { method: 'POST' },
+  )
+}
+
+export function planRefactor(issueKey: string, prompt: string) {
+  return request<{ ok: boolean; message?: string; action?: string }>(
+    `/api/tasks/${encodeURIComponent(issueKey)}/plan-refactor`,
+    { method: 'POST', body: JSON.stringify({ prompt }) },
+  )
+}
+
 export function deleteJob(jobId: string, opts?: { deleteArtifacts?: boolean }) {
   const params = new URLSearchParams()
   if (opts?.deleteArtifacts === false) params.set('delete_artifacts', 'false')

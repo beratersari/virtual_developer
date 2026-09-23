@@ -146,6 +146,28 @@ Mode: plan
     assert spec.target_branch == "develop"
 
 
+def test_invalid_mode_names_test_as_allowed():
+    def desc(mode: str) -> str:
+        return (
+            "{params}\n"
+            "Repository: https://gitlab.com/a/b.git\n"
+            "Source branch: feature/team-base\n"
+            "Target branch: main\n"
+            f"Mode: {mode}\n"
+            "{params}\n"
+        )
+
+    spec, err = parse_issue_git_spec("", desc("tests"))
+    assert spec is None
+    assert err is not None
+    assert "must be `plan`, `build`, or `test`" in err
+
+    ok, ok_err = parse_issue_git_spec("", desc("test"))
+    assert ok_err is None
+    assert ok is not None
+    assert ok.mode == "test"
+
+
 def test_parse_aliases():
     desc = """
 {params}

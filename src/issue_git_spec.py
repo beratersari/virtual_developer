@@ -489,7 +489,7 @@ def parse_issue_git_spec(
         )
     if mode_raw and mode_raw not in _MODE_ALIASES:
         missing.append(
-            f"Mode (got `{mode_raw}`; must be `plan` or `build`, or omit for build)"
+            f"Mode (got `{mode_raw}`; must be `plan`, `build`, or `test`, or omit for build)"
         )
 
     if missing:

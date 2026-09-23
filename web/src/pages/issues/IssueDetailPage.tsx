@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { cancelTask, fetchTaskDetail } from '../../api/client'
+import { cancelTask, fetchTaskDetail, planExecute, planRefactor } from '../../api/client'
 import type { GitDelivery, TaskDetail } from '../../api/types'
 import { peekTask, rememberJob, rememberTask } from '../../app/entityCache'
 import { useLive } from '../../app/live'
@@ -39,6 +39,11 @@ export function IssueDetailPage() {
   const [stale, setStale] = useState(false)
   const [tab, setTab] = useState<'overview' | 'logs'>('overview')
   const [confirmCancel, setConfirmCancel] = useState(false)
+  const [confirmImplement, setConfirmImplement] = useState(false)
+  const [reviseOpen, setReviseOpen] = useState(false)
+  const [reviseText, setReviseText] = useState('')
+  const [notice, setNotice] = useState<string | null>(null)
+  const [planActionSent, setPlanActionSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
@@ -76,6 +81,11 @@ export function IssueDetailPage() {
 
   useEffect(() => {
     setTab('overview')
+    setReviseOpen(false)
+    setReviseText('')
+    setNotice(null)
+    setPlanActionSent(false)
+    setConfirmImplement(false)
     lastSoft.current = Date.now()
     const seed = peekTask(issueKey.trim().toUpperCase())
     if (seed) {
@@ -95,6 +105,49 @@ export function IssueDetailPage() {
   }, [live.generation, load])
 
   const routeKey = issueKey.trim().toUpperCase()
+  const planReady =
+    detail?.status === 'plan_ready' &&
+    detail.issue_key === routeKey &&
+    !planActionSent
+
+  const onImplement = async () => {
+    if (!planReady) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const res = await planExecute(routeKey)
+      setConfirmImplement(false)
+      setPlanActionSent(true)
+      setNotice(res.message || 'Implementation queued.')
+      await load(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Implement failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onRevise = async () => {
+    const prompt = reviseText.trim()
+    if (!planReady || !prompt) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const res = await planRefactor(routeKey, prompt)
+      setReviseOpen(false)
+      setReviseText('')
+      setPlanActionSent(true)
+      setNotice(res.message || 'Revision queued.')
+      await load(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Revise failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const onCancel = async () => {
     if (!detail?.issue_key || detail.issue_key !== routeKey) return
     setBusy(true)
@@ -134,14 +187,39 @@ export function IssueDetailPage() {
               {detail.live && <LiveDot label="agent live" />}
             </div>
           )}
-          {detail?.status === 'plan_ready' && (
+          {planReady && (
             <p className="mt-2 text-xs text-text-muted">
-              Plan is ready. Rename label plan_ready → plan_execute while the
-              ticket is In Progress to implement. There is no Start button.
+              Plan is ready. Implement starts the build. Revise asks for a
+              change, then updates the plan. Jira labels and Azure comments
+              still work the same way.
             </p>
           )}
+          {notice && <p className="mt-2 text-sm text-text-secondary">{notice}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {planReady && (
+            <>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmImplement(true)}
+                className="vd-btn vd-btn-primary"
+              >
+                Implement
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setReviseOpen((open) => !open)
+                  setError(null)
+                }}
+                className="vd-btn vd-btn-secondary"
+              >
+                Revise
+              </button>
+            </>
+          )}
           {detail?.can_cancel && detail.issue_key === routeKey && (
             <button
               type="button"
@@ -168,6 +246,48 @@ export function IssueDetailPage() {
           </button>
         </div>
       </div>
+
+      {planReady && reviseOpen && (
+        <div className="vd-card px-4 py-3">
+          <label className="block text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+            What should change in the plan
+          </label>
+          <textarea
+            className="vd-input mt-1 min-h-[5.5rem] w-full resize-y py-1.5 text-sm leading-relaxed"
+            value={reviseText}
+            disabled={busy}
+            placeholder="Use Redis for the rate limit instead of memory"
+            onChange={(e) => setReviseText(e.target.value)}
+          />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="vd-btn vd-btn-primary"
+              disabled={busy || !reviseText.trim()}
+              onClick={() => void onRevise()}
+            >
+              {busy ? (
+                <>
+                  <Spinner /> Revising…
+                </>
+              ) : (
+                'Revise plan'
+              )}
+            </button>
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                setReviseOpen(false)
+                setReviseText('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {detail?.description?.trim() ? (
         <div className="vd-card px-4 py-3">
@@ -268,6 +388,15 @@ export function IssueDetailPage() {
         )}
       </div>
 
+      <ConfirmDialog
+        open={confirmImplement}
+        title={`Implement ${detail?.issue_key ?? 'this plan'}?`}
+        body="Starts the build from the saved plan. The ticket stays In Progress."
+        confirmLabel="Implement"
+        busy={busy}
+        onConfirm={() => void onImplement()}
+        onCancel={() => setConfirmImplement(false)}
+      />
       <ConfirmDialog
         open={confirmCancel}
         title={`Cancel work for ${detail?.issue_key}?`}

@@ -28,6 +28,7 @@ from src.dashboard.schemas import (
     GitlabConnectionTestRequest,
     IssueReportRequest,
     JiraConnectionTestRequest,
+    PlanRefactorRequest,
     ScheduleCreateRequest,
     ScheduleExistingRequest,
     ScheduleMrRequest,
@@ -1311,11 +1312,30 @@ def create_dashboard_app(
                 jobs=[item] if item is not None else None,
             )
         from src.dashboard.issue_logs import issue_log_ring
+        from src.dashboard.service import plan_document_for_issue, plan_followup_for_job
 
         system_logs = issue_log_ring.for_job(jid, limit=500)
+        issue_state = None
+        if issue_key and app.state.state_manager is not None:
+            try:
+                issue_state = app.state.state_manager.get_state(issue_key)
+            except Exception:
+                issue_state = None
+        stored = job_store.get_job(jid) if jid else None
+        follow = plan_followup_for_job(
+            stored if isinstance(stored, dict) else job,
+            issue_state,
+            job_store,
+        )
+        plan = None
+        visible = str((job or {}).get("status") or "").strip().lower()
+        if visible == "plan_ready" or (follow or {}).get("revise"):
+            plan = plan_document_for_issue(issue_key, issue_state)
         return {
             "job": job,
             "issue": detail,
+            "plan": plan,
+            "plan_followup": follow,
             "system_logs": system_logs,
             "server_time": build_meta().server_time,
         }
@@ -1410,6 +1430,34 @@ def create_dashboard_app(
                 "while the ticket is In Progress, or open a new Mode: build issue."
             ),
         )
+
+    @app.post("/api/tasks/{issue_key}/plan-execute")
+    async def task_plan_execute(issue_key: str) -> dict:
+        """Set plan_execute, or hand an Azure work item to /planExecute."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        result = await proc.request_plan_execute_from_dashboard(issue_key)
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400, detail=result.get("error") or "Implement failed"
+            )
+        return result
+
+    @app.post("/api/tasks/{issue_key}/plan-refactor")
+    async def task_plan_refactor(issue_key: str, body: PlanRefactorRequest) -> dict:
+        """Set plan_refactor plus a mention, or hand Azure /planRefactor."""
+        proc = app.state.processor
+        if proc is None:
+            raise HTTPException(status_code=503, detail="Processor not available")
+        result = await proc.request_plan_refactor_from_dashboard(
+            issue_key, body.prompt
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400, detail=result.get("error") or "Revise failed"
+            )
+        return result
 
     @app.get("/api/poll")
     def poll() -> dict:

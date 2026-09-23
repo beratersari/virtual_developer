@@ -441,6 +441,28 @@ class JobProcessor:
         prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
         return prev in {"in progress", "in_progress", "doing", "wip"}
 
+    def _jira_column_is_in_progress(self, issue_key: str) -> bool:
+        """True when the live board column is already In Progress.
+
+        Used to choose the failure hint. Does not write the poller tracker:
+        that is set only when a transition is accepted.
+        """
+        try:
+            client = self._tracker_for(issue_key)
+        except Exception:
+            return False
+        if client is None or not hasattr(client, "get_issue"):
+            return False
+        try:
+            issue = client.get_issue(issue_key, fields=["status"])
+        except Exception as exc:
+            logger.warning(f"{issue_key}: status read for failure hint failed: {exc}")
+            return False
+        fields = issue.get("fields") if isinstance(issue, dict) else None
+        from src.jira.plan_labels import is_in_progress_status
+
+        return is_in_progress_status(fields if isinstance(fields, dict) else None)
+
     def _ensure_job_for_failure(self, issue_key: str) -> None:
         """Create a job row if validation failed before ``_begin_workflow_run``.
 
@@ -607,17 +629,17 @@ class JobProcessor:
 
                 effective_suggestion = SUGGEST_PLAN_EXECUTE_RETRY
             elif not effective_suggestion:
-                if moved_ip or already_tracked_ip:
-                    from src.operator_copy import (
-                        SUGGEST_FIX_DESC_NO_IP,
-                        SUGGEST_FIX_DESC_TODO,
-                    )
+                from src.operator_copy import (
+                    SUGGEST_FIX_DESC_NO_IP,
+                    SUGGEST_FIX_DESC_TODO,
+                )
 
-                    effective_suggestion = (
-                        SUGGEST_FIX_DESC_TODO
-                        if (moved_ip or already_tracked_ip)
-                        else SUGGEST_FIX_DESC_NO_IP
-                    )
+                on_ip = bool(moved_ip or already_tracked_ip)
+                if not on_ip:
+                    on_ip = self._jira_column_is_in_progress(issue_key)
+                effective_suggestion = (
+                    SUGGEST_FIX_DESC_TODO if on_ip else SUGGEST_FIX_DESC_NO_IP
+                )
             comment_id = self.reporter.post_error(
                 state,
                 error_text,
@@ -2610,6 +2632,429 @@ class JobProcessor:
                         "issue_key": issue_key,
                     }
 
+    async def request_plan_execute_from_dashboard(self, issue_key: str) -> dict:
+        """Queue implement the same way a Jira label or Azure comment does."""
+        return await self._request_plan_from_dashboard(issue_key, action="execute")
+
+    async def request_plan_refactor_from_dashboard(
+        self, issue_key: str, prompt: str
+    ) -> dict:
+        """Queue a plan revision the same way a Jira label or Azure comment does."""
+        return await self._request_plan_from_dashboard(
+            issue_key, action="refactor", prompt=prompt
+        )
+
+    def _plan_dashboard_block(
+        self, issue_key: str, *, action: str, prompt: str
+    ) -> tuple[Optional[JiraAgentState], Optional[dict]]:
+        """Shared guards for dashboard Implement / Revise. No ticket writes."""
+        key = (issue_key or "").strip()
+        if not key:
+            return None, {"ok": False, "error": "Issue key is required"}
+        state = self.state_manager.get_state(key)
+        if state is None:
+            return None, {
+                "ok": False,
+                "error": "No local state for this issue",
+                "issue_key": key,
+            }
+        failed_plan = (
+            action == "refactor"
+            and state.status == TaskStatus.ERROR
+            and self._latest_plan_job_failed(key)
+        )
+        if state.status != TaskStatus.PLAN_READY and not failed_plan:
+            return None, {
+                "ok": False,
+                "error": f"Issue is not plan_ready (status={state.status.value})",
+                "issue_key": key,
+                "status": state.status.value,
+            }
+        if self._issue_is_in_flight(key):
+            return None, {
+                "ok": False,
+                "error": "Issue is already being processed",
+                "issue_key": key,
+                "status": state.status.value,
+            }
+        if action == "refactor":
+            text = (prompt or "").strip()
+            if not text:
+                return None, {
+                    "ok": False,
+                    "error": "Describe what should change in the plan",
+                    "issue_key": key,
+                }
+        else:
+            has_plan = self._durable_plan_path(key).is_file()
+            raw_path = (state.plan_path or "").strip()
+            if raw_path and not has_plan:
+                try:
+                    has_plan = Path(raw_path).is_file()
+                except OSError:
+                    has_plan = False
+            if not has_plan:
+                return None, {
+                    "ok": False,
+                    "error": "No plan file on disk for this issue",
+                    "issue_key": key,
+                }
+        source = str((state.metadata or {}).get("source") or "").strip().lower()
+        from src.azure.keys import is_azure_issue_key, is_azure_work_item_key
+        from src.gitlab.keys import is_gitlab_issue_key
+
+        if source.startswith("gitlab") or is_gitlab_issue_key(key):
+            return None, {
+                "ok": False,
+                "error": (
+                    "This job follows a GitLab merge request. "
+                    "Comment on the merge request to continue it."
+                ),
+                "issue_key": key,
+            }
+        if source in {"azure", "azure_pr"} or (
+            is_azure_issue_key(key) and not is_azure_work_item_key(key)
+        ):
+            return None, {
+                "ok": False,
+                "error": (
+                    "This job follows an Azure pull request. "
+                    "Comment on the pull request to continue it."
+                ),
+                "issue_key": key,
+            }
+        return state, None
+
+    def _latest_plan_job_failed(self, issue_key: str) -> bool:
+        """True when the newest plan run for this ticket ended in error."""
+        store = getattr(self, "job_store", None)
+        if store is None or not hasattr(store, "list_jobs"):
+            return False
+        try:
+            rows = store.list_jobs(issue_key=issue_key, limit=200) or []
+        except Exception as exc:
+            logger.warning(f"{issue_key}: latest plan job lookup failed: {exc}")
+            return False
+        plan_rows = [
+            row
+            for row in rows
+            if isinstance(row, dict) and self._record_is_plan_job(row)
+        ]
+        if not plan_rows:
+            return False
+        plan_rows.sort(
+            key=lambda row: (
+                str(row.get("started_at") or ""),
+                str(row.get("updated_at") or ""),
+                str(row.get("job_id") or ""),
+            ),
+            reverse=True,
+        )
+        return str(plan_rows[0].get("status") or "").strip().lower() == "error"
+
+    @staticmethod
+    def _record_is_plan_job(row: dict) -> bool:
+        status = str(row.get("status") or "").strip().lower()
+        workflow = str(row.get("workflow_type") or "").strip().lower()
+        if status in {"plan_ready", "planning"}:
+            return True
+        return workflow in {"planning", "plan"}
+
+    def _reopen_failed_plan(self, issue_key: str) -> tuple[Optional[JiraAgentState], Optional[dict]]:
+        """Put an errored plan back to plan_ready so the next poll can revise it."""
+        state = self.state_manager.get_state(issue_key)
+        if state is None or state.status != TaskStatus.ERROR:
+            return state, None
+        if not self._latest_plan_job_failed(issue_key):
+            return None, {
+                "ok": False,
+                "error": "Revise is available on the latest failed plan job",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+        restored = self.state_manager.update_state_if(
+            issue_key,
+            expected_statuses={TaskStatus.ERROR},
+            status=TaskStatus.PLAN_READY,
+            error_message="",
+            force=True,
+        )
+        if restored is None:
+            return None, {
+                "ok": False,
+                "error": "Could not reopen the plan after the failed revise",
+                "issue_key": issue_key,
+            }
+        logger.info(f"{issue_key}: reopened failed plan for another revise")
+        return restored, None
+
+    async def _request_plan_from_dashboard(
+        self, issue_key: str, *, action: str, prompt: str = ""
+    ) -> dict:
+        key = (issue_key or "").strip()
+        state, blocked = self._plan_dashboard_block(
+            key, action=action, prompt=prompt
+        )
+        if blocked:
+            return blocked
+        assert state is not None
+        from src.azure.keys import is_azure_work_item_key
+
+        source = str((state.metadata or {}).get("source") or "").strip().lower()
+        azure_item = self._is_azure_workitem_triggered(key) or (
+            is_azure_work_item_key(key) and source != "jira"
+        )
+        if azure_item:
+            state, reopen_err = self._reopen_failed_plan(key)
+            if reopen_err:
+                return reopen_err
+            assert state is not None
+            return await self._dashboard_azure_plan(
+                key, state, action=action, prompt=prompt
+            )
+        async with self._get_issue_lock(key):
+            state, blocked = self._plan_dashboard_block(
+                key, action=action, prompt=prompt
+            )
+            if blocked:
+                return blocked
+            assert state is not None
+            state, reopen_err = self._reopen_failed_plan(key)
+            if reopen_err:
+                return reopen_err
+            assert state is not None
+            return self._dashboard_jira_plan(
+                key, action=action, prompt=(prompt or "").strip()
+            )
+
+    async def _dashboard_azure_plan(
+        self,
+        issue_key: str,
+        state: JiraAgentState,
+        *,
+        action: str,
+        prompt: str,
+    ) -> dict:
+        """Hand Implement / Revise to the work-item comment ingest."""
+        import time
+
+        from src.azure.workitems import AzureWorkItemEvent, work_item_coords
+        from src.jira.plan_labels import HANDOFF_EXECUTE, HANDOFF_REFACTOR
+
+        coords = work_item_coords(issue_key, state)
+        if not coords or int(coords.get("work_item_id") or 0) <= 0:
+            return {
+                "ok": False,
+                "error": "Azure work item coordinates are missing for this issue",
+                "issue_key": issue_key,
+            }
+        names = list(getattr(settings, "azure_trigger_user_list", None) or [])
+        bot = str(names[0]).strip().lstrip("@") if names else ""
+        if not bot:
+            return {
+                "ok": False,
+                "error": "AZURE_TRIGGER_USER is not configured",
+                "issue_key": issue_key,
+            }
+        text = (prompt or "").strip()
+        if action == "refactor":
+            handoff = HANDOFF_REFACTOR
+            note = f"@{bot} /planRefactor {text}"
+            plan_comment = text[:8000]
+        else:
+            handoff = HANDOFF_EXECUTE
+            note = f"@{bot} /planExecute"
+            plan_comment = ""
+        event = AzureWorkItemEvent(
+            issue_key=issue_key,
+            work_item_id=int(coords["work_item_id"]),
+            project=str(coords.get("project") or ""),
+            host=str(coords.get("host") or ""),
+            collection_url=str(coords.get("collection_url") or ""),
+            web_url=str(coords.get("web_url") or ""),
+            event_type="workitem.updated",
+            change_kinds=["comment"],
+            rev=int(time.time() * 1000),
+            issue={"key": issue_key, "fields": {}, "azure": dict(coords)},
+            plan_handoff=handoff,
+            plan_comment=plan_comment,
+            comment_body=note,
+        )
+        result = await self.ingest_azure_work_item(event)
+        if not isinstance(result, dict) or not result.get("ok"):
+            reason = ""
+            if isinstance(result, dict):
+                reason = str(result.get("reason") or result.get("error") or "")
+            return {
+                "ok": False,
+                "error": reason or "Azure plan action failed",
+                "issue_key": issue_key,
+            }
+        if str(result.get("status") or "") == "skipped" or (
+            not result.get("queued") and not result.get("started")
+        ):
+            return {
+                "ok": False,
+                "error": str(result.get("reason") or "Azure plan action was not started"),
+                "issue_key": issue_key,
+            }
+        verb = "Revision" if action == "refactor" else "Implementation"
+        return {
+            "ok": True,
+            "issue_key": issue_key,
+            "action": action,
+            "queued": bool(result.get("queued")),
+            "started": bool(result.get("started")),
+            "message": f"{verb} handed to the Azure work-item path.",
+        }
+
+    def _dashboard_jira_plan(
+        self, issue_key: str, *, action: str, prompt: str
+    ) -> dict:
+        """Write the Jira label (and revise comment) the poller already accepts."""
+        from src.jira.plan_labels import (
+            PLAN_EXECUTE_LABEL,
+            PLAN_READY_LABEL,
+            PLAN_REFACTOR_LABEL,
+            is_in_progress_status,
+        )
+
+        client = self._jira_for_labels(issue_key)
+        if client is None:
+            return {
+                "ok": False,
+                "error": "Jira is not configured",
+                "issue_key": issue_key,
+            }
+        if action == "execute":
+            moved = False
+            if hasattr(client, "transition_to_in_progress"):
+                try:
+                    moved = bool(client.transition_to_in_progress(issue_key))
+                except Exception as exc:
+                    logger.warning(
+                        f"{issue_key}: dashboard implement transition failed: {exc}"
+                    )
+                    moved = False
+            if not moved:
+                fields: Dict[str, Any] = {}
+                try:
+                    issue = client.get_issue(issue_key, fields=["status"])
+                    if isinstance(issue, dict):
+                        fields = issue.get("fields") or {}
+                except Exception as exc:
+                    logger.warning(
+                        f"{issue_key}: dashboard implement status read failed: {exc}"
+                    )
+                if not is_in_progress_status(fields):
+                    return {
+                        "ok": False,
+                        "error": (
+                            "Could not move the ticket to In Progress. "
+                            "Move it there in Jira, then click Implement again."
+                        ),
+                        "issue_key": issue_key,
+                    }
+            if not hasattr(client, "replace_label"):
+                return {
+                    "ok": False,
+                    "error": "Jira client cannot update labels",
+                    "issue_key": issue_key,
+                }
+            try:
+                renamed = bool(
+                    client.replace_label(
+                        issue_key, PLAN_READY_LABEL, PLAN_EXECUTE_LABEL
+                    )
+                )
+            except Exception as exc:
+                logger.warning(f"{issue_key}: dashboard plan_execute label failed: {exc}")
+                renamed = False
+            if not renamed:
+                return {
+                    "ok": False,
+                    "error": "Could not rename label plan_ready to plan_execute",
+                    "issue_key": issue_key,
+                }
+            logger.info(
+                f"{issue_key}: dashboard set plan_execute; next poll implements"
+            )
+            return {
+                "ok": True,
+                "issue_key": issue_key,
+                "action": "execute",
+                "message": (
+                    "Label plan_execute is set. Implementation starts on the next poll."
+                ),
+            }
+
+        names = list(getattr(settings, "jira_trigger_user_list", None) or [])
+        mention = str(names[0]).strip().lstrip("@") if names else ""
+        if not mention:
+            return {
+                "ok": False,
+                "error": "JIRA_TRIGGER_USER is not configured",
+                "issue_key": issue_key,
+            }
+        text = prompt.strip()[:8000]
+        if " " in mention:
+            body = f"[~{mention}] {text}"
+        else:
+            body = f"@{mention} [~{mention}] {text}"
+        if not hasattr(client, "add_comment"):
+            return {
+                "ok": False,
+                "error": "Jira client cannot post comments",
+                "issue_key": issue_key,
+            }
+        try:
+            posted = client.add_comment(issue_key, body)
+        except Exception as exc:
+            logger.warning(f"{issue_key}: dashboard revise comment failed: {exc}")
+            posted = None
+        if not posted:
+            return {
+                "ok": False,
+                "error": "Could not post the revision comment on the ticket",
+                "issue_key": issue_key,
+            }
+        try:
+            removed = (
+                bool(
+                    client.remove_labels(
+                        issue_key, [PLAN_READY_LABEL, PLAN_EXECUTE_LABEL]
+                    )
+                )
+                if hasattr(client, "remove_labels")
+                else False
+            )
+            added = (
+                bool(client.add_labels(issue_key, [PLAN_REFACTOR_LABEL]))
+                if hasattr(client, "add_labels")
+                else False
+            )
+        except Exception as exc:
+            logger.warning(f"{issue_key}: dashboard plan_refactor label failed: {exc}")
+            removed = False
+            added = False
+        if not removed or not added:
+            return {
+                "ok": False,
+                "error": (
+                    "The revision comment was posted, but the labels could not "
+                    "be changed to plan_refactor. Remove plan_ready and "
+                    "plan_execute, then add plan_refactor on the ticket."
+                ),
+                "issue_key": issue_key,
+            }
+        logger.info(f"{issue_key}: dashboard set plan_refactor; next poll revises")
+        return {
+            "ok": True,
+            "issue_key": issue_key,
+            "action": "refactor",
+            "message": "Revision is queued. It starts on the next poll.",
+        }
+
     def _tracker_for(self, issue_key: str) -> Any:
         from src.azure.tracker import azure_tracker_for
 
@@ -4031,16 +4476,7 @@ class JobProcessor:
             logger.warning(
                 f"{state.issue_key} git template error: {e.user_message[:200]}"
             )
-            self._fail_issue(
-                state.issue_key,
-                e.user_message,
-                suggestion=(
-                    "Update the issue `{params}` block with Repository, "
-                    "Source branch, Target branch, and Mode (plan or build). "
-                    "The issue was moved to *In Progress* — after fixing the "
-                    "description, move it back to *To Do* to re-queue."
-                ),
-            )
+            self._fail_issue(state.issue_key, e.user_message)
             self._release_context(state.issue_key, success=False)
             return None
         except GitCancelledError:

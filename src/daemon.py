@@ -41,6 +41,15 @@ class JiraAgentDaemon:
         # Capture the running loop once so poller workers never call
         # run_coroutine_threadsafe on a closed/stale loop reference.
         self._main_loop = asyncio.get_running_loop()
+        # WinError 64 during AcceptEx must not close :8080. The poller
+        # would keep running and the dashboard would stop accepting.
+        from src.windows_accept import (
+            install_accept_exception_handler,
+            keep_listening_after_accept_reset,
+        )
+
+        keep_listening_after_accept_reset()
+        install_accept_exception_handler(self._main_loop)
 
         from src.paths import (
             agent_data_dir,

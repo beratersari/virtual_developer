@@ -298,7 +298,7 @@ Azure work item
 
 Plan and build keep **separate** OpenCode sessions for the same repo + source + target.
 
-Dashboard **Start** is disabled. Do not use `/planExecute` on Jira, GitLab, or Azure PR comments.
+On a plan-ready job, the dashboard **Implement** and **Revise** buttons make the same label or Azure comment the poller and webhook already accept. Generic dashboard **Start** stays disabled. Do not use `/planExecute` on Jira, GitLab, or Azure PR comments.
 
 ---
 
@@ -400,7 +400,7 @@ Useful pages:
 - **Scheduled** — create a Jira issue or Azure work item later, or look up an existing one. **Cancel** is only for `scheduled` / `error` (`dispatching` cannot be cancelled).
 - **Settings** — board id, poll interval, trigger names, Azure collection PATs (no token values shown)
 
-Dashboard **Start** is disabled. **Cancel** kills agent children immediately.
+On a plan-ready job, **Implement** and **Revise** sit next to **Refresh**. Generic **Start** stays disabled. **Stop work** kills agent children immediately.
 
 ```bash
 cd web && npm install && npm run build

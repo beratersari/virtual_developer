@@ -131,31 +131,16 @@ export function LineChart({
             <g key={s.id}>
               <path d={d} fill="none" stroke={s.color} strokeWidth="2.2" />
               {s.values.map((v, i) => (
-                <g key={`${s.id}-${i}`}>
-                  <circle
-                    cx={xAt(i)}
-                    cy={yAt(v)}
-                    r="11"
-                    fill="transparent"
-                    className="cursor-pointer"
-                    onPointerEnter={(event) => showPoint(event, i)}
-                    onPointerMove={(event) => showPoint(event, i)}
-                  >
-                    <title>
-                      {labels[i]}
-                      {chartPointRows(series, i)
-                        .map((row) => `\n${row.label}: ${row.value}`)
-                        .join('')}
-                    </title>
-                  </circle>
-                  <circle
-                    cx={xAt(i)}
-                    cy={yAt(v)}
-                    r={hover?.index === i ? 3.6 : 2.4}
-                    fill={s.color}
-                    pointerEvents="none"
-                  />
-                </g>
+                <circle
+                  key={`${s.id}-${i}`}
+                  cx={xAt(i)}
+                  cy={yAt(v)}
+                  r={hover?.index === i ? 3.6 : 2.4}
+                  fill={s.color}
+                  className="cursor-pointer"
+                  onPointerEnter={(event) => showPoint(event, i)}
+                  onPointerLeave={() => setHover(null)}
+                />
               ))}
             </g>
           )

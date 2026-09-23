@@ -9,6 +9,20 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.brand import PRODUCT_NAME
 
 
+class PlanRefactorRequest(BaseModel):
+    """Body for POST /api/tasks/{issue_key}/plan-refactor."""
+
+    prompt: str = Field(..., min_length=1, max_length=8000)
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_ok(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("prompt is required")
+        return text[:8000]
+
+
 class TempFolderDeleteRequest(BaseModel):
     """Body for POST /api/storage/delete — one temp clone folder."""
 
