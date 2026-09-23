@@ -441,6 +441,28 @@ class JobProcessor:
         prev = (poller._last_jira_status.get(issue_key) or "").strip().lower()
         return prev in {"in progress", "in_progress", "doing", "wip"}
 
+    def _jira_column_is_in_progress(self, issue_key: str) -> bool:
+        """True when the live board column is already In Progress.
+
+        Used to choose the failure hint. Does not write the poller tracker:
+        that is set only when a transition is accepted.
+        """
+        try:
+            client = self._tracker_for(issue_key)
+        except Exception:
+            return False
+        if client is None or not hasattr(client, "get_issue"):
+            return False
+        try:
+            issue = client.get_issue(issue_key, fields=["status"])
+        except Exception as exc:
+            logger.warning(f"{issue_key}: status read for failure hint failed: {exc}")
+            return False
+        fields = issue.get("fields") if isinstance(issue, dict) else None
+        from src.jira.plan_labels import is_in_progress_status
+
+        return is_in_progress_status(fields if isinstance(fields, dict) else None)
+
     def _ensure_job_for_failure(self, issue_key: str) -> None:
         """Create a job row if validation failed before ``_begin_workflow_run``.
 
@@ -607,17 +629,17 @@ class JobProcessor:
 
                 effective_suggestion = SUGGEST_PLAN_EXECUTE_RETRY
             elif not effective_suggestion:
-                if moved_ip or already_tracked_ip:
-                    from src.operator_copy import (
-                        SUGGEST_FIX_DESC_NO_IP,
-                        SUGGEST_FIX_DESC_TODO,
-                    )
+                from src.operator_copy import (
+                    SUGGEST_FIX_DESC_NO_IP,
+                    SUGGEST_FIX_DESC_TODO,
+                )
 
-                    effective_suggestion = (
-                        SUGGEST_FIX_DESC_TODO
-                        if (moved_ip or already_tracked_ip)
-                        else SUGGEST_FIX_DESC_NO_IP
-                    )
+                on_ip = bool(moved_ip or already_tracked_ip)
+                if not on_ip:
+                    on_ip = self._jira_column_is_in_progress(issue_key)
+                effective_suggestion = (
+                    SUGGEST_FIX_DESC_TODO if on_ip else SUGGEST_FIX_DESC_NO_IP
+                )
             comment_id = self.reporter.post_error(
                 state,
                 error_text,
@@ -2922,7 +2944,11 @@ class JobProcessor:
             }
         try:
             removed = (
-                bool(client.remove_labels(issue_key, [PLAN_READY_LABEL]))
+                bool(
+                    client.remove_labels(
+                        issue_key, [PLAN_READY_LABEL, PLAN_EXECUTE_LABEL]
+                    )
+                )
                 if hasattr(client, "remove_labels")
                 else False
             )
@@ -2940,8 +2966,8 @@ class JobProcessor:
                 "ok": False,
                 "error": (
                     "The revision comment was posted, but the labels could not "
-                    "be changed to plan_refactor. Remove plan_ready and add "
-                    "plan_refactor on the ticket."
+                    "be changed to plan_refactor. Remove plan_ready and "
+                    "plan_execute, then add plan_refactor on the ticket."
                 ),
                 "issue_key": issue_key,
             }
@@ -4374,16 +4400,7 @@ class JobProcessor:
             logger.warning(
                 f"{state.issue_key} git template error: {e.user_message[:200]}"
             )
-            self._fail_issue(
-                state.issue_key,
-                e.user_message,
-                suggestion=(
-                    "Update the issue `{params}` block with Repository, "
-                    "Source branch, Target branch, and Mode (plan, build, or test). "
-                    "The issue was moved to *In Progress* — after fixing the "
-                    "description, move it back to *To Do* to re-queue."
-                ),
-            )
+            self._fail_issue(state.issue_key, e.user_message)
             self._release_context(state.issue_key, success=False)
             return None
         except GitCancelledError:
