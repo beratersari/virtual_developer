@@ -1,6 +1,7 @@
 """Agent worker backends (OpenCode, Codex, …)."""
 
 from src.backends.base import (
+    BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_OPENCODE,
     SUPPORTED_BACKENDS,
@@ -12,6 +13,7 @@ from src.backends.base import (
 from src.backends.registry import get_agent_backend, resolve_backend_name
 
 __all__ = [
+    "BACKEND_CLAUDE",
     "BACKEND_CODEX",
     "BACKEND_OPENCODE",
     "SUPPORTED_BACKENDS",

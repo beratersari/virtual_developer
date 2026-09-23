@@ -126,6 +126,26 @@ def test_strip_params_block_keeps_task_text():
     assert "More acceptance notes." in out
     assert "{params}" not in out
     assert "Repository:" not in out
+
+
+def test_strip_params_block_drops_empty_code_fence():
+    desc = (
+        "Reply with exactly YaverFreeOk.\n\n"
+        "{code}\n"
+        "{params}\n"
+        "Repository: https://gitlab.com/org/app.git\n"
+        "Source branch: master\n"
+        "Target branch: master\n"
+        "Mode: build\n"
+        "{params}\n"
+        "{code}\n"
+    )
+    out = strip_params_block(desc)
+    assert out == "Reply with exactly YaverFreeOk."
+    assert "{code}" not in out
+    kept = strip_params_block("See\n\n{code}\nreal sample\n{code}\n")
+    assert "{code}" in kept
+    assert "real sample" in kept
     spec, err = parse_issue_git_spec("s", desc)
     assert err is None and spec is not None
     assert spec.mode == "build"

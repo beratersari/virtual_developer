@@ -145,7 +145,7 @@ class ScheduleCreateRequest(BaseModel):
     dispatch_now: bool = False
     # Optional OpenCode model id for this job only (empty = settings default)
     model: str = Field(default="", max_length=200)
-    # Optional worker: opencode | codex (empty = settings.agent_backend)
+    # Optional worker: opencode | codex | claude (empty = settings.agent_backend)
     backend: str = Field(default="", max_length=40)
     collection_url: str = Field(
         default="",
@@ -283,7 +283,7 @@ class JobItem(BaseModel):
     agent: str = ""
     # Worker model id used for this run (settings default_model at start)
     model: Optional[str] = None
-    # opencode | codex (empty = infer from session / {params})
+    # opencode | codex | claude (empty = infer from session / {params})
     backend: str = ""
     status: str = "running"
     task_id: Optional[str] = None
@@ -589,7 +589,7 @@ class SettingsView(BaseModel):
     # Runtime DEFAULT_MODEL only — full inventory is GET /api/models
     default_model: str = ""
     default_review_model: str = ""
-    # Unattended worker: opencode | codex
+    # Unattended worker: opencode | codex | claude
     agent_backend: str = "opencode"
     gitlab_webhook_enabled: bool = False
     gitlab_trigger_user: str = ""
@@ -839,7 +839,7 @@ class SettingsUpdate(BaseModel):
     agent_backend: Optional[str] = Field(
         default=None,
         max_length=40,
-        description="Unattended worker: opencode | codex",
+        description="Unattended worker: opencode | codex | claude",
     )
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,
@@ -938,7 +938,7 @@ class SettingsUpdate(BaseModel):
 
         name = normalize_backend_name(text)
         if not name:
-            raise ValueError("agent_backend must be 'opencode' or 'codex'")
+            raise ValueError("agent_backend must be 'opencode', 'codex', or 'claude'")
         return name
 
 

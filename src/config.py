@@ -305,9 +305,24 @@ class Settings(BaseSettings):
     )
     agent_backend: str = Field(
         default="opencode",
-        description="Unattended worker: opencode | codex",
+        description="Unattended worker: opencode | codex | claude",
     )
     codex_cli: str = Field(default="codex", description="Codex CLI binary for AGENT_BACKEND=codex")
+    claude_cli: str = Field(
+        default="claude",
+        description="Claude Code CLI binary for AGENT_BACKEND=claude",
+    )
+    anthropic_base_url: str = Field(
+        default="",
+        description=(
+            "Anthropic-compatible API base for Claude Code "
+            "(ANTHROPIC_BASE_URL). Empty keeps the CLI default."
+        ),
+    )
+    anthropic_auth_token: str = Field(
+        default="",
+        description="Token for ANTHROPIC_AUTH_TOKEN. Not shown in the dashboard.",
+    )
     opencode_context_limit: int = Field(
         default=0,
         description=(

@@ -397,7 +397,12 @@ def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) 
 
 def build_models_response(*, refresh: bool = False, backend: str = "") -> ModelsResponse:
     """Inventory models for the selected worker (OpenCode CLI or Codex config)."""
-    from src.backends.base import BACKEND_CODEX, BACKEND_OPENCODE, normalize_backend_name
+    from src.backends.base import (
+        BACKEND_CLAUDE,
+        BACKEND_CODEX,
+        BACKEND_OPENCODE,
+        normalize_backend_name,
+    )
 
     name = normalize_backend_name(backend) or BACKEND_OPENCODE
     default_model = (settings.default_model or "").strip()
@@ -424,6 +429,20 @@ def build_models_response(*, refresh: bool = False, backend: str = "") -> Models
             opencode_config_model=None,
             opencode_config_path=cfg_path,
             error=err,
+            server_time=datetime.now().isoformat(timespec="seconds"),
+        )
+
+    if name == BACKEND_CLAUDE:
+        options = []
+        if default_model:
+            options.append(_model_option(mid=default_model, source="settings"))
+        return ModelsResponse(
+            default_model=default_model,
+            models=options,
+            backend=BACKEND_CLAUDE,
+            opencode_config_model=None,
+            opencode_config_path=None,
+            error=None,
             server_time=datetime.now().isoformat(timespec="seconds"),
         )
 
@@ -987,28 +1006,29 @@ def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
 
 
 def _resolve_job_backend(j: Dict[str, Any], *, description: str = "") -> str:
-    """opencode | codex. Prefer the stored field, then session id / {params}."""
+    """opencode | codex | claude. Stored field, then {params}, then session id."""
     from src.backends.base import normalize_backend_name
 
     bid = normalize_backend_name(j.get("backend"))
     if bid:
         return bid
-    sid = str(j.get("opencode_session_id") or "").strip()
-    if sid.startswith("ses_"):
-        return "opencode"
-    if sid.count("-") >= 4 and len(sid) >= 16:
-        return "codex"
     text = description or (j.get("description") or "")
     if text:
         try:
-            from src.issue_git_spec import parse_issue_git_spec
+            from src.issue_git_spec import backend_name_from_text
 
-            spec, _err = parse_issue_git_spec("", text)
-            got = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            got = backend_name_from_text(text)
             if got:
                 return got
         except Exception:
             pass
+    sid = str(j.get("opencode_session_id") or "").strip()
+    if sid.startswith("ses_"):
+        return "opencode"
+    # Codex thread ids and Claude session ids are both UUIDs. Without a
+    # stored backend or a {params} Backend line, keep the older Codex guess.
+    if sid.count("-") >= 4 and len(sid) >= 16:
+        return "codex"
     return ""
 
 

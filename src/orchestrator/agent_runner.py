@@ -307,7 +307,7 @@ class AgentTask:
     original_prompt: Optional[str] = None
     # Incomplete-session resume must not abort a leftover busy turn.
     abort_busy_session: bool = True
-    # Worker: opencode | codex (empty = settings.agent_backend).
+    # Worker: opencode | codex | claude (empty = settings.agent_backend).
     backend: Optional[str] = None
     # Ops dashboard filter — logger prefixes ``[job_id=…]`` from log_context.
     job_id: Optional[str] = None
@@ -565,9 +565,18 @@ class AgentRunner:
             _publish_session(str(result_obj.session_id))
             task.session_id = result_obj.session_id
         try:
-            body = result_obj.stdout or ""
-            if result_obj.stderr:
-                body = body + ("\n" if body else "") + result_obj.stderr
+            if (result_obj.backend or "") == "claude":
+                from src.backends.claude import claude_session_log_text
+
+                body = claude_session_log_text(
+                    result_obj.stdout or "",
+                    result_obj.stderr or "",
+                    returncode=result_obj.returncode,
+                )
+            else:
+                body = result_obj.stdout or ""
+                if result_obj.stderr:
+                    body = body + ("\n" if body else "") + result_obj.stderr
             if body.strip():
                 session_file.write_text(body, encoding="utf-8")
         except Exception as e:
@@ -604,6 +613,8 @@ class AgentRunner:
         name = normalize_backend_name(getattr(task, "backend", None))
         if name == BACKEND_CODEX:
             return True
+        if name:
+            return False
         sid = (session_id or getattr(task, "session_id", None) or "").strip()
         if not sid or sid.startswith("ses_"):
             return False
@@ -711,6 +722,23 @@ class AgentRunner:
         hung; retrying Continue on that id stays stuck.
         """
         sid = (session_id or "").strip()
+        from src.backends.base import BACKEND_CLAUDE, normalize_backend_name
+
+        if normalize_backend_name(getattr(task, "backend", None)) == BACKEND_CLAUDE:
+            from src.backends.base import is_claude_session_id
+            from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
+
+            if sid and is_claude_session_id(sid):
+                task.session_id = sid
+                task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
+                task.abort_busy_session = False
+                logger.warning(f"Retry after {why}: resume Claude session {sid}")
+                return
+            task.session_id = None
+            logger.warning(
+                f"Retry after {why} has no Claude session id; starting cold"
+            )
+            return
         if self._task_is_codex(task, sid):
             from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
 
@@ -1273,6 +1301,7 @@ class AgentRunner:
             "serve",
             "opencode",
             "codex",
+            "claude",
         }:
             process["cancel"] = True
             logger.info(

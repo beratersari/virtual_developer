@@ -1572,8 +1572,10 @@ class JobProcessor:
         )
 
         from src.backends.base import (
+            BACKEND_CLAUDE,
             BACKEND_CODEX,
             BACKEND_OPENCODE,
+            is_claude_session_id,
             is_codex_thread_id,
             is_opencode_session_id,
             normalize_backend_name,
@@ -1588,6 +1590,8 @@ class JobProcessor:
             # Production always sets task.backend. Never give OpenCode a
             # Codex UUID (serve requires ses_*). Unset backend = legacy pick.
             if backend == BACKEND_CODEX and not is_codex_thread_id(sid):
+                continue
+            if backend == BACKEND_CLAUDE and not is_claude_session_id(sid):
                 continue
             if backend == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                 continue

@@ -117,7 +117,7 @@ class IssueGitSpec:
     target_branch: str
     mode: Optional[str] = None  # "plan" | "build" | "test" when present
     model: Optional[str] = None  # model id; empty = settings default
-    backend: Optional[str] = None  # opencode | codex; empty = settings default
+    backend: Optional[str] = None  # opencode | codex | claude; empty = settings default
 
 
 class IssueGitConfigError(Exception):
@@ -169,10 +169,18 @@ def _normalize_repo_url(raw: str) -> str:
 
 
 def _normalize_backend_id(raw: str) -> str:
-    """opencode | codex. Empty if unset."""
+    """opencode | codex | claude. Empty if unset."""
     from src.backends.base import normalize_backend_name
 
     return normalize_backend_name(raw)
+
+
+def backend_name_from_text(text: str) -> str:
+    """Worker id from a ``Backend:`` / ``Worker:`` line. Empty if unset."""
+    match = _BACKEND_FIELD.search(text or "")
+    if not match:
+        return ""
+    return _normalize_backend_id(match.group(1))
 
 
 def _normalize_model_id(raw: str) -> str:
@@ -299,7 +307,8 @@ def strip_params_block(text: str) -> str:
     if not text:
         return ""
     cleaned = _PARAMS_BLOCK.sub("", text)
-    # Collapse leftover blank runs from block removal
+    # A {code} fence that only wrapped {params} is empty after the strip.
+    cleaned = _EMPTY_CODE_FENCE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 

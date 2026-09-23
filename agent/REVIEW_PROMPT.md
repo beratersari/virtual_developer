@@ -1,6 +1,6 @@
 # derman-reviewer job (Yaver)
 
-OpenCode agent: **derman-reviewer**. Strictly unattended daemon job — no
+Agent: **derman-reviewer**. Strictly unattended daemon job — no
 human reply path. Do **not** ask any questions.
 
 - Ticket: `{ISSUE_KEY}`

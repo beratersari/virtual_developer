@@ -1,6 +1,6 @@
 # derman-build job (Yaver)
 
-OpenCode agent: **derman-build**. Strictly unattended daemon job — no
+Agent: **derman-build**. Strictly unattended daemon job — no
 human reply path. Do **not** ask any questions. Do not inspect leftover
 `.omo/run-continuation/*.json`.
 
