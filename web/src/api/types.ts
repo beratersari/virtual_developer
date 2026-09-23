@@ -662,9 +662,26 @@ export type TaskDetail = {
   server_time: string
 }
 
+export type PlanFollowup = {
+  actions: boolean
+  kind: 'current' | 'revising' | 'newer' | 'implemented' | 'other'
+  message?: string | null
+  job_id?: string | null
+  issue_key?: string | null
+}
+
+export type PlanDocument = {
+  text: string
+  path?: string | null
+  missing?: boolean
+  truncated?: boolean
+}
+
 export type JobDetailResponse = {
   job: JobItem
   issue: TaskDetail | null
+  plan?: PlanDocument | null
+  plan_followup?: PlanFollowup | null
   system_logs?: SystemLogLine[]
   server_time?: string
 }

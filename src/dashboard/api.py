@@ -1312,11 +1312,28 @@ def create_dashboard_app(
                 jobs=[item] if item is not None else None,
             )
         from src.dashboard.issue_logs import issue_log_ring
+        from src.dashboard.service import plan_document_for_issue, plan_followup_for_job
 
         system_logs = issue_log_ring.for_job(jid, limit=500)
+        issue_state = None
+        if issue_key and app.state.state_manager is not None:
+            try:
+                issue_state = app.state.state_manager.get_state(issue_key)
+            except Exception:
+                issue_state = None
+        stored = job_store.get_job(jid) if jid else None
+        plan = None
+        if str((job or {}).get("status") or "").strip().lower() == "plan_ready":
+            plan = plan_document_for_issue(issue_key, issue_state)
         return {
             "job": job,
             "issue": detail,
+            "plan": plan,
+            "plan_followup": plan_followup_for_job(
+                stored if isinstance(stored, dict) else job,
+                issue_state,
+                job_store,
+            ),
             "system_logs": system_logs,
             "server_time": build_meta().server_time,
         }

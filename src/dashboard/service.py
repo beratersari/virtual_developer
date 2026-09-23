@@ -1012,6 +1012,109 @@ def _resolve_job_backend(j: Dict[str, Any], *, description: str = "") -> str:
     return ""
 
 
+_PLAN_BODY_CHARS = 200_000
+
+
+def plan_document_for_issue(
+    issue_key: str,
+    state: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Current durable plan markdown for one issue.
+
+    Only ``{YAVER_DATA_DIR}/plans`` is read. The file is shared by every
+    revision of the ticket; callers show it on the latest plan-ready job.
+    """
+    key = (issue_key or "").strip()
+    if not key:
+        return None
+    from src.paths import plans_dir
+
+    root = plans_dir()
+    path = root / f"{key}.md"
+    raw_path = str(getattr(state, "plan_path", None) or "").strip() if state else ""
+    if raw_path:
+        cand = Path(raw_path)
+        try:
+            resolved = cand.resolve()
+            resolved.relative_to(root.resolve())
+        except (OSError, ValueError):
+            resolved = None
+        if resolved is not None and resolved.is_file():
+            path = resolved
+    try:
+        exists = path.is_file()
+    except OSError:
+        exists = False
+    if not exists:
+        return {
+            "text": "",
+            "path": str(path),
+            "missing": True,
+            "truncated": False,
+        }
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning(f"{key}: could not read plan {path}: {exc}")
+        return {
+            "text": "",
+            "path": str(path),
+            "missing": True,
+            "truncated": False,
+        }
+    truncated = len(text) > _PLAN_BODY_CHARS
+    if truncated:
+        text = text[:_PLAN_BODY_CHARS].rstrip() + "\n\n… (truncated)"
+    return {
+        "text": text,
+        "path": str(path),
+        "missing": False,
+        "truncated": truncated,
+    }
+
+
+def _latest_job_id(store: JobStore, issue_key: str) -> str:
+    """Newest job id for this issue. Empty when the lookup fails."""
+    key = (issue_key or "").strip()
+    if not key:
+        return ""
+    try:
+        rows = store.list_jobs(issue_key=key, limit=1) or []
+    except Exception as exc:
+        logger.warning(f"{key}: latest job lookup failed: {exc}")
+        return ""
+    if not rows or not isinstance(rows[0], dict):
+        return ""
+    return str(rows[0].get("job_id") or "").strip()
+
+
+def _visible_job_status(
+    job: Dict[str, Any],
+    *,
+    store: Optional[JobStore],
+    latest_job_ids: Optional[Dict[str, str]] = None,
+) -> str:
+    """Plan ready is shown only on the newest job for that issue.
+
+    Older plan rows keep ``plan_ready`` on disk. The badge says Superseded.
+    """
+    status = str(job.get("status") or "unknown")
+    if status.lower() != "plan_ready" or store is None:
+        return status
+    issue_key = str(job.get("issue_key") or "").strip()
+    this_id = str(job.get("job_id") or "").strip()
+    if not issue_key or not this_id:
+        return status
+    cache = latest_job_ids if latest_job_ids is not None else {}
+    cache_key = issue_key.upper()
+    if cache_key not in cache:
+        cache[cache_key] = _latest_job_id(store, issue_key)
+    latest = cache[cache_key]
+    if latest and latest != this_id:
+        return "superseded"
+    return status
+
+
 def job_dict_to_item(
     j: Dict[str, Any],
     *,
@@ -1020,6 +1123,7 @@ def job_dict_to_item(
     active_job_ids: Optional[set] = None,
     store: Optional[JobStore] = None,
     include_description: bool = True,
+    latest_job_ids: Optional[Dict[str, str]] = None,
 ) -> JobItem:
     """Enrich one JobStore dict into a JobItem (list or single-job detail)."""
     summaries = summaries or {}
@@ -1041,6 +1145,7 @@ def job_dict_to_item(
     live = jid in active_job_ids or (
         ik in live_keys and (j.get("status") or "") in ("running", "planning", "executing")
     )
+    status = _visible_job_status(j, store=js, latest_job_ids=latest_job_ids)
     session_paths = _job_session_log_paths(j)
     prompt_paths = _job_prompt_paths(j)
     return JobItem(
@@ -1052,7 +1157,7 @@ def job_dict_to_item(
         agent=j.get("agent") or "",
         model=(j.get("model") or None),
         backend=_resolve_job_backend(j, description=description),
-        status=j.get("status") or "unknown",
+        status=status,
         task_id=j.get("task_id"),
         task_ids=list(j.get("task_ids") or ([j["task_id"]] if j.get("task_id") else [])),
         opencode_session_id=j.get("opencode_session_id"),
@@ -1328,6 +1433,7 @@ def build_jobs(
             full = {**full, "job_id": jid}
         page_jobs.append(full or j)
 
+    latest_job_ids: Dict[str, str] = {}
     items: List[JobItem] = []
     for j in page_jobs:
         items.append(
@@ -1338,6 +1444,7 @@ def build_jobs(
                 active_job_ids=active_job_ids,
                 store=js,
                 include_description=bool(issue_key),
+                latest_job_ids=latest_job_ids,
             )
         )
     return JobsResponse(
@@ -2669,6 +2776,119 @@ def build_task_detail(
         "session_logs": artifacts["session_logs"],
         "system_logs": issue_log_ring.for_issue(key, limit=500),
         "server_time": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _job_time_key(job: Dict[str, Any]) -> tuple:
+    return (
+        str(job.get("started_at") or ""),
+        str(job.get("updated_at") or ""),
+        str(job.get("job_id") or ""),
+    )
+
+
+def _is_plan_run(job: Dict[str, Any]) -> bool:
+    status = str(job.get("status") or "").strip().lower()
+    workflow = str(job.get("workflow_type") or "").strip().lower()
+    if status in {"plan_ready", "planning"}:
+        return True
+    return workflow in {"planning", "plan"}
+
+
+def plan_followup_for_job(
+    job: Optional[Dict[str, Any]],
+    state: Any,
+    store: Any,
+) -> Optional[Dict[str, Any]]:
+    """Job-page Implement / Revise, only for a finished plan row.
+
+    Buttons belong to the latest plan run while the issue is still
+    ``plan_ready``. Older ``plan_ready`` rows get a note and a link.
+    Other jobs return None.
+    """
+    if not isinstance(job, dict):
+        return None
+    if str(job.get("status") or "").strip().lower() != "plan_ready":
+        return None
+    issue_key = str(job.get("issue_key") or "").strip()
+    issue_status = ""
+    current_job_id = ""
+    if state is not None:
+        raw_status = getattr(state, "status", None)
+        issue_status = (
+            raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+        ).strip().lower()
+        meta = getattr(state, "metadata", None) or {}
+        if isinstance(meta, dict):
+            current_job_id = str(meta.get("current_job_id") or "").strip()
+
+    rows: List[Dict[str, Any]] = []
+    if store is not None and issue_key and hasattr(store, "list_jobs"):
+        try:
+            listed = store.list_jobs(issue_key=issue_key, limit=200) or []
+            rows = [row for row in listed if isinstance(row, dict)]
+        except Exception as exc:
+            logger.warning(f"{issue_key}: plan follow-up job list failed: {exc}")
+            rows = []
+    this_id = str(job.get("job_id") or "").strip()
+    if this_id and all(str(row.get("job_id") or "") != this_id for row in rows):
+        rows.append(job)
+    plan_runs = [row for row in rows if _is_plan_run(row)]
+    plan_runs.sort(key=_job_time_key, reverse=True)
+    latest_id = str((plan_runs[0] if plan_runs else {}).get("job_id") or "").strip()
+    is_latest = bool(this_id) and this_id == latest_id
+
+    if issue_status == "plan_ready" and is_latest:
+        return {
+            "actions": True,
+            "kind": "current",
+            "message": None,
+            "job_id": None,
+            "issue_key": issue_key or None,
+        }
+
+    if issue_status == "planning":
+        running = next(
+            (
+                row
+                for row in plan_runs
+                if str(row.get("status") or "").strip().lower() == "planning"
+            ),
+            None,
+        )
+        link_id = str((running or {}).get("job_id") or current_job_id or "").strip()
+        return {
+            "actions": False,
+            "kind": "revising",
+            "message": "This plan is being revised.",
+            "job_id": link_id or None,
+            "issue_key": issue_key or None,
+        }
+
+    if issue_status == "plan_ready":
+        return {
+            "actions": False,
+            "kind": "newer",
+            "message": "A newer plan is the current one.",
+            "job_id": latest_id or None,
+            "issue_key": issue_key or None,
+        }
+
+    if issue_status in {"executing", "completed"}:
+        return {
+            "actions": False,
+            "kind": "implemented",
+            "message": "This plan was implemented.",
+            "job_id": None,
+            "issue_key": issue_key or None,
+        }
+
+    return {
+        "actions": False,
+        "kind": "other",
+        "message": "This plan is not the current run.",
+        "job_id": None,
+        "issue_key": issue_key or None,
     }
 
 

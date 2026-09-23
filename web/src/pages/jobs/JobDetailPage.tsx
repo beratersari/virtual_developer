@@ -8,7 +8,13 @@ import {
   planExecute,
   planRefactor,
 } from '../../api/client'
-import type { JobItem, SystemLogLine, TextArtifact } from '../../api/types'
+import type {
+  JobItem,
+  PlanDocument,
+  PlanFollowup,
+  SystemLogLine,
+  TextArtifact,
+} from '../../api/types'
 import { forgetJob, peekJob, rememberJob } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import {
@@ -22,6 +28,7 @@ import { useElapsedLabel } from '../../util/time'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
+import { PromptBlock } from '../../ui/PromptBlock'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { isDaemonChatter } from '../../util/daemonLogs'
@@ -31,7 +38,7 @@ import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
 import { JobChatTab } from './JobChatTab'
 
-type JobTab = 'overview' | 'prompt' | 'chat' | 'output' | 'logs'
+type JobTab = 'overview' | 'plan' | 'prompt' | 'chat' | 'output' | 'logs'
 
 export function JobDetailPage() {
   const { jobId = '' } = useParams()
@@ -52,6 +59,8 @@ export function JobDetailPage() {
   const [reviseText, setReviseText] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
   const [planActionSent, setPlanActionSent] = useState(false)
+  const [followup, setFollowup] = useState<PlanFollowup | null>(null)
+  const [plan, setPlan] = useState<PlanDocument | null>(null)
   const [busy, setBusy] = useState(false)
   const reqId = useRef(0)
   const lastSoft = useRef(0)
@@ -120,6 +129,8 @@ export function JobDetailPage() {
         if (!body.job.job_id) throw new Error(`Job ${id} not found`)
         rememberJob(body.job)
         setJob(body.job)
+        setFollowup(body.plan_followup ?? null)
+        setPlan(body.plan ?? null)
         setSystemLogs(Array.isArray(body.system_logs) ? body.system_logs : [])
         setStale(false)
         void loadArtifacts(id, !soft, jobArtifactPathSignature(body.job))
@@ -143,6 +154,8 @@ export function JobDetailPage() {
     setReviseText('')
     setNotice(null)
     setPlanActionSent(false)
+    setFollowup(null)
+    setPlan(null)
     setConfirm(null)
     artsGen.current += 1
     artsInFlight.current = false
@@ -200,11 +213,18 @@ export function JobDetailPage() {
     Boolean(job?.issue_key) && jobIsCancellable(job?.status || '', Boolean(job?.live))
   const canDelete = Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
 
-  const planReady =
-    (job?.status || '').toLowerCase() === 'plan_ready' &&
-    job?.job_id === jobId.trim() &&
-    Boolean(job?.issue_key) &&
-    !planActionSent
+  const planReady = Boolean(followup?.actions) && !planActionSent
+  const followupHref = followup?.job_id
+    ? `/jobs/${encodeURIComponent(followup.job_id)}`
+    : followup?.issue_key
+      ? `/tasks/${encodeURIComponent(followup.issue_key)}`
+      : ''
+  const followupLink =
+    followup?.kind === 'revising'
+      ? 'Open the revision'
+      : followup?.kind === 'newer'
+        ? 'Open the current plan'
+        : 'Open the issue'
 
   const onImplement = async () => {
     if (!planReady || !job?.issue_key) return
@@ -320,6 +340,16 @@ export function JobDetailPage() {
               Plan is ready. Implement starts the build. Revise asks for a change, then updates the plan.
             </p>
           )}
+          {followup && !followup.actions && followup.message && (
+            <p className="mt-2 max-w-xl text-xs text-text-muted">
+              {followup.message}{' '}
+              {followupHref && (
+                <Link className="text-accent-text hover:underline" to={followupHref}>
+                  {followupLink}
+                </Link>
+              )}
+            </p>
+          )}
           {notice && <p className="mt-2 text-sm text-text-secondary">{notice}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -426,6 +456,9 @@ export function JobDetailPage() {
       <Tabs
         tabs={[
           { id: 'overview', label: 'Details' },
+          ...(job?.status === 'plan_ready' && plan
+            ? [{ id: 'plan' as const, label: 'Plan' }]
+            : []),
           { id: 'prompt', label: 'Prompt', count: prompts.length },
           { id: 'chat', label: 'Transcript' },
           { id: 'output', label: 'Output' },
@@ -448,6 +481,23 @@ export function JobDetailPage() {
               elapsedLabel={elapsed}
               fallbackWorker={live.settings?.agent_backend || ''}
             />
+          </div>
+        )}
+        {job && tab === 'plan' && plan && (
+          <div key="plan" className="vd-fade">
+            {plan.missing || !plan.text.trim() ? (
+              <div className="vd-alert vd-alert-warning">
+                No plan file on disk for this issue.
+              </div>
+            ) : (
+              <div className="space-y-3 text-sm">
+                <p className="text-xs text-text-muted">
+                  Plan file for this issue. Later revisions overwrite the same file.
+                  {plan.truncated ? ' The file is longer than this page shows.' : ''}
+                </p>
+                <PromptBlock title="plan" body={plan.text} meta={plan.path || undefined} highlight />
+              </div>
+            )}
           </div>
         )}
         {job && tab === 'prompt' && (
