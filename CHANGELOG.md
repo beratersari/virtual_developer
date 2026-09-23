@@ -8,6 +8,42 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.57] — 2026-09-23
+
+A plan-ready job can be implemented or revised from the dashboard.
+Only the latest plan for a ticket shows Plan ready, and that page
+has a Plan tab. A failed revise can be revised again. On Windows the
+dashboard keeps listening after a dropped connection.
+
+### Added
+
+- Implement and Revise on a plan-ready job. They write the same Jira
+  label or Azure work-item comment the poller and webhook already
+  accept. The next poll does the work.
+- The current plan file is a Plan tab on the latest plan-ready job,
+  in the same row as Prompt.
+- Revise on the latest plan job when that job is error. It reopens
+  the ticket to plan_ready and queues another revision from the plan
+  file still on disk.
+
+### Changed
+
+- Only the newest job for a ticket shows Plan ready. Older plan rows
+  say Superseded.
+- Revise after Implement removes plan_execute as well as plan_ready,
+  so the next poll revises instead of starting the build.
+
+### Fixed
+
+- A missing `{params}` block no longer says the ticket moved to In
+  Progress when the board stayed on To Do. The hint matches the column.
+- Invalid Mode errors list plan, build, and test.
+- On Windows, a client that disappears during accept no longer closes
+  port 8080. The poller keeps running and the dashboard accepts the
+  next connection.
+
+[0.9.57]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.57
+
 ## [0.9.56] — 2026-09-22
 
 Schedules and Sessions use a SQLite index. Looking up an existing

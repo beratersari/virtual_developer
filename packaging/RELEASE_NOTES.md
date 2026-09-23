@@ -1,3 +1,14 @@
+# Yaver 0.9.57
+
+Implement and Revise on a plan-ready job write the same Jira label or Azure work-item comment the poller and webhook already accept, and the next poll does the work.
+Revise after Implement removes plan_execute as well as plan_ready, so the next poll revises instead of starting the build.
+Only the newest job for a ticket shows Plan ready. Older plan rows say Superseded.
+The current plan file is a Plan tab on that job, in the same row as Prompt.
+If that revision fails, Revise stays on the latest error plan job. It reopens the ticket to plan_ready and queues another revision from the plan file still on disk.
+A missing {params} block no longer says the ticket moved to In Progress when the board stayed on To Do.
+Invalid Mode errors list plan, build, and test.
+On Windows, a client that disappears during accept no longer closes port 8080. The poller keeps running and the dashboard accepts the next connection.
+
 # Yaver 0.9.56
 
 Scheduled and Sessions now use a local SQLite index, the same way Jobs does.
