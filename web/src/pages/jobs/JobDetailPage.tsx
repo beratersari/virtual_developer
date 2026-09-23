@@ -213,7 +213,8 @@ export function JobDetailPage() {
     Boolean(job?.issue_key) && jobIsCancellable(job?.status || '', Boolean(job?.live))
   const canDelete = Boolean(job) && jobIsDeletable(job!.status || '', Boolean(job!.live))
 
-  const planReady = Boolean(followup?.actions) && !planActionSent
+  const showImplement = Boolean(followup?.actions) && !planActionSent
+  const showRevise = Boolean(followup?.actions || followup?.revise) && !planActionSent
   const followupHref = followup?.job_id
     ? `/jobs/${encodeURIComponent(followup.job_id)}`
     : followup?.issue_key
@@ -227,7 +228,7 @@ export function JobDetailPage() {
         : 'Open the issue'
 
   const onImplement = async () => {
-    if (!planReady || !job?.issue_key) return
+    if (!showImplement || !job?.issue_key) return
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -246,7 +247,7 @@ export function JobDetailPage() {
 
   const onRevise = async () => {
     const prompt = reviseText.trim()
-    if (!planReady || !job?.issue_key || !prompt) return
+    if (!showRevise || !job?.issue_key || !prompt) return
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -335,9 +336,14 @@ export function JobDetailPage() {
               : ''}
             {job?.model ? ` · ${job.model}` : ''}
           </p>
-          {planReady && (
+          {showImplement && (
             <p className="mt-2 max-w-xl text-xs text-text-muted">
               Plan is ready. Implement starts the build. Revise asks for a change, then updates the plan.
+            </p>
+          )}
+          {showRevise && !showImplement && (
+            <p className="mt-2 max-w-xl text-xs text-text-muted">
+              This revision failed. The plan file is still here. Revise tries again from that file.
             </p>
           )}
           {followup && !followup.actions && followup.message && (
@@ -353,28 +359,28 @@ export function JobDetailPage() {
           {notice && <p className="mt-2 text-sm text-text-secondary">{notice}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {planReady && (
-            <>
-              <button
-                type="button"
-                className="vd-btn vd-btn-primary"
-                disabled={busy}
-                onClick={() => setConfirm('implement')}
-              >
-                Implement
-              </button>
-              <button
-                type="button"
-                className="vd-btn vd-btn-secondary"
-                disabled={busy}
-                onClick={() => {
-                  setReviseOpen((open) => !open)
-                  setError(null)
-                }}
-              >
-                Revise
-              </button>
-            </>
+          {showImplement && (
+            <button
+              type="button"
+              className="vd-btn vd-btn-primary"
+              disabled={busy}
+              onClick={() => setConfirm('implement')}
+            >
+              Implement
+            </button>
+          )}
+          {showRevise && (
+            <button
+              type="button"
+              className="vd-btn vd-btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                setReviseOpen((open) => !open)
+                setError(null)
+              }}
+            >
+              Revise
+            </button>
           )}
           {canCancel && (
             <button
@@ -411,7 +417,7 @@ export function JobDetailPage() {
         </div>
       </div>
 
-      {planReady && reviseOpen && (
+      {showRevise && reviseOpen && (
         <div className="vd-panel px-4 py-3">
           <label className="block text-[10px] font-semibold uppercase tracking-wide text-text-muted">
             What should change in the plan
@@ -456,9 +462,7 @@ export function JobDetailPage() {
       <Tabs
         tabs={[
           { id: 'overview', label: 'Details' },
-          ...(job?.status === 'plan_ready' && plan
-            ? [{ id: 'plan' as const, label: 'Plan' }]
-            : []),
+          ...(plan ? [{ id: 'plan' as const, label: 'Plan' }] : []),
           { id: 'prompt', label: 'Prompt', count: prompts.length },
           { id: 'chat', label: 'Transcript' },
           { id: 'output', label: 'Output' },

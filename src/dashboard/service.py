@@ -2800,15 +2800,18 @@ def plan_followup_for_job(
     state: Any,
     store: Any,
 ) -> Optional[Dict[str, Any]]:
-    """Job-page Implement / Revise, only for a finished plan row.
+    """Job-page Implement / Revise for the live plan, or Revise after a failed one.
 
-    Buttons belong to the latest plan run while the issue is still
-    ``plan_ready``. Older ``plan_ready`` rows get a note and a link.
-    Other jobs return None.
+    Both buttons belong to the latest plan run while the issue is still
+    ``plan_ready``. Revise alone belongs to the latest plan run when that
+    run and the issue are ``error``. Older rows get a note and a link.
     """
     if not isinstance(job, dict):
         return None
-    if str(job.get("status") or "").strip().lower() != "plan_ready":
+    job_status = str(job.get("status") or "").strip().lower()
+    if job_status == "error" and _is_plan_run(job):
+        return _error_plan_followup(job, state, store)
+    if job_status != "plan_ready":
         return None
     issue_key = str(job.get("issue_key") or "").strip()
     issue_status = ""
@@ -2841,6 +2844,7 @@ def plan_followup_for_job(
     if issue_status == "plan_ready" and is_latest:
         return {
             "actions": True,
+            "revise": True,
             "kind": "current",
             "message": None,
             "job_id": None,
@@ -2885,6 +2889,63 @@ def plan_followup_for_job(
 
     return {
         "actions": False,
+        "revise": False,
+        "kind": "other",
+        "message": "This plan is not the current run.",
+        "job_id": None,
+        "issue_key": issue_key or None,
+    }
+
+
+def _error_plan_followup(
+    job: Dict[str, Any],
+    state: Any,
+    store: Any,
+) -> Dict[str, Any]:
+    """Revise on the newest plan run when that run failed."""
+    issue_key = str(job.get("issue_key") or "").strip()
+    issue_status = ""
+    if state is not None:
+        raw_status = getattr(state, "status", None)
+        issue_status = (
+            raw_status.value if hasattr(raw_status, "value") else str(raw_status or "")
+        ).strip().lower()
+    rows: List[Dict[str, Any]] = []
+    if store is not None and issue_key and hasattr(store, "list_jobs"):
+        try:
+            listed = store.list_jobs(issue_key=issue_key, limit=200) or []
+            rows = [row for row in listed if isinstance(row, dict)]
+        except Exception as exc:
+            logger.warning(f"{issue_key}: failed-plan follow-up list failed: {exc}")
+            rows = []
+    this_id = str(job.get("job_id") or "").strip()
+    if this_id and all(str(row.get("job_id") or "") != this_id for row in rows):
+        rows.append(job)
+    plan_runs = [row for row in rows if _is_plan_run(row)]
+    plan_runs.sort(key=_job_time_key, reverse=True)
+    latest_id = str((plan_runs[0] if plan_runs else {}).get("job_id") or "").strip()
+    is_latest = bool(this_id) and this_id == latest_id
+    if is_latest and issue_status == "error":
+        return {
+            "actions": False,
+            "revise": True,
+            "kind": "retry",
+            "message": None,
+            "job_id": None,
+            "issue_key": issue_key or None,
+        }
+    if not is_latest and latest_id:
+        return {
+            "actions": False,
+            "revise": False,
+            "kind": "newer",
+            "message": "A newer plan is the current one.",
+            "job_id": latest_id,
+            "issue_key": issue_key or None,
+        }
+    return {
+        "actions": False,
+        "revise": False,
         "kind": "other",
         "message": "This plan is not the current run.",
         "job_id": None,

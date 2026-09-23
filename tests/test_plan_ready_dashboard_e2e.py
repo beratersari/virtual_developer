@@ -129,13 +129,64 @@ async def test_e2e_revise_after_implement_then_only_latest_job_shows_the_plan(
         _close_jira(proc)
 
 
+@pytest.mark.asyncio
+async def test_e2e_revise_from_the_latest_failed_plan_job(
+    tmp_path, isolate_jira_agent_artifacts, monkeypatch
+):
+    """A failed revise leaves the ticket in error. Revise on that job tries again."""
+    board = _JiraBoard(
+        status_name="In Progress",
+        category="indeterminate",
+        labels=["plan_refactor"],
+        description="Mode: plan",
+    )
+    httpd = _serve_jira(board)
+    proc = _processor_on(httpd, tmp_path, monkeypatch)
+    try:
+        sm = proc.state_manager
+        sm.create_state("KAN-1", "plan login", "Mode: plan")
+        sm.update_state("KAN-1", status=TaskStatus.ERROR, error_message="agent hung")
+        plan = _plan_file("KAN-1")
+        plan.write_text("# Login\n\nKeep Redis.\n", encoding="utf-8")
+        store = proc.job_store
+        _job(store, "KAN-1", status="plan_ready", started="2026-09-22T10:00:00")
+        failed = _job(store, "KAN-1", status="error", started="2026-09-22T12:00:00")
+        monkeypatch.setattr("src.dashboard.api.job_store", store)
+        monkeypatch.setattr("src.dashboard.service.default_job_store", store)
+        app = create_dashboard_app(processor=proc, state_manager=sm)
+        client = TestClient(app)
+
+        detail = client.get(f"/api/jobs/{failed['job_id']}").json()
+        assert detail["plan_followup"]["revise"] is True
+        assert detail["plan_followup"]["actions"] is False
+        assert "Keep Redis." in detail["plan"]["text"]
+
+        revised = client.post(
+            "/api/tasks/KAN-1/plan-refactor",
+            json={"prompt": "Use the database instead"},
+        )
+        assert revised.status_code == 200, revised.text
+        assert sm.get_state("KAN-1").status == TaskStatus.PLAN_READY
+        assert "plan_refactor" in board.labels
+        assert any("Use the database instead" in c["body"] for c in board.comments)
+
+        poller = JiraPoller(client=proc.jira_client, board_id="1", state_manager=sm)
+        poller._seen_issues.add("KAN-1")
+        rows = [row for row in poller.poll_board() if row.get("key") == "KAN-1"]
+        assert rows and rows[0].get("_plan_handoff") == "refactor"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        _close_jira(proc)
+
+
 def test_e2e_plan_tab_matches_the_prompt_tab():
     """Plan content lives in the same tab row as Prompt, not above the page."""
     page = JOB_PAGE.read_text(encoding="utf-8")
     assert "id: 'plan'" in page or 'id: "plan"' in page
     assert "PromptBlock" in page
     assert 'title="plan"' in page
-    assert "job?.status === 'plan_ready' && plan" in page
+    assert "followup?.revise" in page
     assert "tab === 'plan'" in page
 
 

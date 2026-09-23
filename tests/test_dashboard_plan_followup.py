@@ -170,6 +170,31 @@ def test_plan_ready_job_detail_includes_the_plan_file(tmp_path, monkeypatch):
     assert previous["plan"] is None
 
 
+def test_latest_failed_plan_job_offers_revise_only(tmp_path):
+    sm, store = _stores(tmp_path)
+    sm.create_state("KAN-1", "plan login", "Mode: plan")
+    sm.update_state("KAN-1", status=TaskStatus.ERROR, error_message="agent hung")
+    older = _job(store, "KAN-1", status="plan_ready", started="2026-09-22T10:00:00")
+    failed = _job(store, "KAN-1", status="error", started="2026-09-22T12:00:00")
+    build = _job(
+        store,
+        "KAN-1",
+        status="error",
+        started="2026-09-22T11:00:00",
+        workflow="execution",
+    )
+
+    view = plan_followup_for_job(failed, sm.get_state("KAN-1"), store)
+    assert view is not None
+    assert view["revise"] is True
+    assert view["actions"] is False
+    assert view["kind"] == "retry"
+    older_view = plan_followup_for_job(older, sm.get_state("KAN-1"), store)
+    assert older_view is not None
+    assert older_view.get("revise") is not True
+    assert plan_followup_for_job(build, sm.get_state("KAN-1"), store) is None
+
+
 def test_job_detail_includes_plan_followup(tmp_path):
     sm, store = _stores(tmp_path)
     sm.create_state("KAN-1", "plan login", "Mode: plan")

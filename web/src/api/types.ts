@@ -664,7 +664,8 @@ export type TaskDetail = {
 
 export type PlanFollowup = {
   actions: boolean
-  kind: 'current' | 'revising' | 'newer' | 'implemented' | 'other'
+  revise?: boolean
+  kind: 'current' | 'revising' | 'newer' | 'implemented' | 'retry' | 'other'
   message?: string | null
   job_id?: string | null
   issue_key?: string | null

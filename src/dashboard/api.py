@@ -1322,18 +1322,20 @@ def create_dashboard_app(
             except Exception:
                 issue_state = None
         stored = job_store.get_job(jid) if jid else None
+        follow = plan_followup_for_job(
+            stored if isinstance(stored, dict) else job,
+            issue_state,
+            job_store,
+        )
         plan = None
-        if str((job or {}).get("status") or "").strip().lower() == "plan_ready":
+        visible = str((job or {}).get("status") or "").strip().lower()
+        if visible == "plan_ready" or (follow or {}).get("revise"):
             plan = plan_document_for_issue(issue_key, issue_state)
         return {
             "job": job,
             "issue": detail,
             "plan": plan,
-            "plan_followup": plan_followup_for_job(
-                stored if isinstance(stored, dict) else job,
-                issue_state,
-                job_store,
-            ),
+            "plan_followup": follow,
             "system_logs": system_logs,
             "server_time": build_meta().server_time,
         }

@@ -2658,7 +2658,12 @@ class JobProcessor:
                 "error": "No local state for this issue",
                 "issue_key": key,
             }
-        if state.status != TaskStatus.PLAN_READY:
+        failed_plan = (
+            action == "refactor"
+            and state.status == TaskStatus.ERROR
+            and self._latest_plan_job_failed(key)
+        )
+        if state.status != TaskStatus.PLAN_READY and not failed_plan:
             return None, {
                 "ok": False,
                 "error": f"Issue is not plan_ready (status={state.status.value})",
@@ -2720,6 +2725,69 @@ class JobProcessor:
             }
         return state, None
 
+    def _latest_plan_job_failed(self, issue_key: str) -> bool:
+        """True when the newest plan run for this ticket ended in error."""
+        store = getattr(self, "job_store", None)
+        if store is None or not hasattr(store, "list_jobs"):
+            return False
+        try:
+            rows = store.list_jobs(issue_key=issue_key, limit=200) or []
+        except Exception as exc:
+            logger.warning(f"{issue_key}: latest plan job lookup failed: {exc}")
+            return False
+        plan_rows = [
+            row
+            for row in rows
+            if isinstance(row, dict) and self._record_is_plan_job(row)
+        ]
+        if not plan_rows:
+            return False
+        plan_rows.sort(
+            key=lambda row: (
+                str(row.get("started_at") or ""),
+                str(row.get("updated_at") or ""),
+                str(row.get("job_id") or ""),
+            ),
+            reverse=True,
+        )
+        return str(plan_rows[0].get("status") or "").strip().lower() == "error"
+
+    @staticmethod
+    def _record_is_plan_job(row: dict) -> bool:
+        status = str(row.get("status") or "").strip().lower()
+        workflow = str(row.get("workflow_type") or "").strip().lower()
+        if status in {"plan_ready", "planning"}:
+            return True
+        return workflow in {"planning", "plan"}
+
+    def _reopen_failed_plan(self, issue_key: str) -> tuple[Optional[JiraAgentState], Optional[dict]]:
+        """Put an errored plan back to plan_ready so the next poll can revise it."""
+        state = self.state_manager.get_state(issue_key)
+        if state is None or state.status != TaskStatus.ERROR:
+            return state, None
+        if not self._latest_plan_job_failed(issue_key):
+            return None, {
+                "ok": False,
+                "error": "Revise is available on the latest failed plan job",
+                "issue_key": issue_key,
+                "status": state.status.value,
+            }
+        restored = self.state_manager.update_state_if(
+            issue_key,
+            expected_statuses={TaskStatus.ERROR},
+            status=TaskStatus.PLAN_READY,
+            error_message="",
+            force=True,
+        )
+        if restored is None:
+            return None, {
+                "ok": False,
+                "error": "Could not reopen the plan after the failed revise",
+                "issue_key": issue_key,
+            }
+        logger.info(f"{issue_key}: reopened failed plan for another revise")
+        return restored, None
+
     async def _request_plan_from_dashboard(
         self, issue_key: str, *, action: str, prompt: str = ""
     ) -> dict:
@@ -2737,6 +2805,10 @@ class JobProcessor:
             is_azure_work_item_key(key) and source != "jira"
         )
         if azure_item:
+            state, reopen_err = self._reopen_failed_plan(key)
+            if reopen_err:
+                return reopen_err
+            assert state is not None
             return await self._dashboard_azure_plan(
                 key, state, action=action, prompt=prompt
             )
@@ -2746,6 +2818,10 @@ class JobProcessor:
             )
             if blocked:
                 return blocked
+            assert state is not None
+            state, reopen_err = self._reopen_failed_plan(key)
+            if reopen_err:
+                return reopen_err
             assert state is not None
             return self._dashboard_jira_plan(
                 key, action=action, prompt=(prompt or "").strip()
