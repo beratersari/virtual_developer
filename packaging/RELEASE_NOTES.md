@@ -351,7 +351,7 @@ Each archive is an **onedir** folder:
 - `yaver.exe` / `yaver` — CLI + daemon
 - `_internal/` — bundled Python runtime, SPA, prompts
 - `opencoderman/agents` + `opencoderman/skills` — derman-build, derman-plan, skills
-- `install-opencode-agents.bat` (Windows) or `install-opencode-agents.sh` (Linux)
+- `install-agents.bat` (Windows) or `install-agents.sh` (Linux)
 - `.env.example`, `START_HERE.txt`, `VERSION`
 
 ```text
@@ -366,8 +366,8 @@ yaver.exe start            # Windows
 Then, if OpenCode is already installed:
 
 ```text
-install-opencode-agents.bat    # Windows
-./install-opencode-agents.sh   # Linux
+install-agents.bat    # Windows
+./install-agents.sh   # Linux
 ```
 
 OpenCode and Codex are **not** inside these binaries.

@@ -37,8 +37,8 @@ opencoderman/ next to this binary has agents/ (derman-build, derman-plan
 only — not gitlab-reviewer) and skills/.
 After OpenCode is installed, copy them into that home:
 
-  Windows:  install-opencode-agents.bat
-  Linux:    ./install-opencode-agents.sh
+  Windows:  install-agents.bat
+  Linux:    ./install-agents.sh
 
 The script finds OPENCODE_HOME, %USERPROFILE%\.opencode / ~/.opencode,
 or opencode on PATH. It does not install the CLI.

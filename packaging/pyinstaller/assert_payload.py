@@ -204,15 +204,15 @@ def assert_payload(
         if (root / rel).exists():
             errors.append(f"duplicate OpenCode config must not ship: {rel}")
     if plat.startswith("win"):
-        if not (root / "install-opencode-agents.bat").is_file():
-            errors.append("missing install-opencode-agents.bat")
-        if (root / "install-opencode-agents.sh").is_file():
-            errors.append("Windows zip must not include install-opencode-agents.sh")
+        if not (root / "install-agents.bat").is_file():
+            errors.append("missing install-agents.bat")
+        if (root / "install-agents.sh").is_file():
+            errors.append("Windows zip must not include install-agents.sh")
     else:
-        if not (root / "install-opencode-agents.sh").is_file():
-            errors.append("missing install-opencode-agents.sh")
-        if (root / "install-opencode-agents.bat").is_file():
-            errors.append("Linux zip must not include install-opencode-agents.bat")
+        if not (root / "install-agents.sh").is_file():
+            errors.append("missing install-agents.sh")
+        if (root / "install-agents.bat").is_file():
+            errors.append("Linux zip must not include install-agents.bat")
         if max_glibc is not None or require_glibc_check:
             errors.extend(
                 assert_linux_glibc(

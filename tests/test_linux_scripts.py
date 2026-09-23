@@ -40,7 +40,7 @@ _WRAPPERS = (
     "install.sh",
     "install-dashboard.sh",
     "install-backends.sh",
-    "install-opencode-agents.sh",
+    "install-agents.sh",
     "install-codex.sh",
     "start.sh",
     "start-backend.sh",

@@ -10,7 +10,7 @@ for rel in \
   .env.example \
   install-dashboard.sh \
   install-backends.sh \
-  install-opencode-agents.sh \
+  install-agents.sh \
   packaging/install_opencode_agents.py \
   install-codex.sh \
   start.sh \

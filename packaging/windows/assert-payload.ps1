@@ -36,7 +36,7 @@ $required = @(
     "install-dashboard-system-python.bat",
     "install-opencode-online.bat",
     "install-backends.bat",
-    "install-opencode-agents.bat",
+    "install-agents.bat",
     "packaging\windows\Install-OpencodeAgents.ps1",
     "install-codex.bat",
     "packaging\install_opencode.py",
