@@ -404,7 +404,7 @@ def _add_safe_environ(zf: zipfile.ZipFile) -> None:
             text = str(val)
             if any(
                 token in upper
-                for token in ("TOKEN", "PAT", "SECRET", "PASSWORD", "PASS")
+                for token in ("TOKEN", "PAT", "SECRET", "PASSWORD", "PASS", "KEY")
             ):
                 out[key] = "***"
             else:
