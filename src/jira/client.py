@@ -939,8 +939,10 @@ class JiraClient:
                     total_n = 0
                 if returned == 0:
                     break
-                if total_n and start_at >= total_n:
-                    break
+                if total_n:
+                    if start_at >= total_n:
+                        break
+                    continue
                 if returned < page_size:
                     break
             return all_comments
