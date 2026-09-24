@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import uuid
@@ -108,6 +109,7 @@ class JobStore:
         self._lock = threading.RLock()
         self._index: Optional[JobIndex] = None
         self._index_ready = False
+        self._index_stale = False
         try:
             self._index = JobIndex(default_index_path(self.jobs_dir))
         except Exception as e:
@@ -158,7 +160,7 @@ class JobStore:
         repository_url: Optional[str] = None,
         model: Optional[str] = None,
         backend: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Create a job snapshot for one agent run.
 
         ``summary`` and ``description`` are frozen at start time so later Jira
@@ -206,7 +208,8 @@ class JobStore:
         }
         if merge_request_url:
             job["merge_request_url"] = merge_request_url
-        self._write(job)
+        if not self._write(job):
+            return None
         logger.info(
             f"Job created: {job_id} issue={issue_key} workflow={workflow_type} "
             f"source={src}"
@@ -263,7 +266,8 @@ class JobStore:
                 else:
                     job[key] = value
             job["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            self._write(job)
+            if not self._write(job):
+                return None
             return job
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -301,7 +305,7 @@ class JobStore:
     def iter_jobs(self) -> List[Dict[str, Any]]:
         """Every indexed job (unsorted). Analytics walks this set."""
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.iter_jobs()
             except Exception as e:
@@ -321,9 +325,9 @@ class JobStore:
     def query_jobs(self, **filters: Any) -> List[Dict[str, Any]]:
         """Analytics rows with period/filters applied in SQLite."""
         self.ensure_index()
-        if self._index is None:
-            raise RuntimeError("job sqlite index unavailable")
-        return self._index.query_jobs(**filters)
+        if self._index_ok():
+            return self._index.query_jobs(**filters)
+        return self._query_jobs_from_json(**filters)
 
     def _iter_jobs_json(self) -> List[Dict[str, Any]]:
         jobs: List[Dict[str, Any]] = []
@@ -356,7 +360,7 @@ class JobStore:
         ``offset`` skips that many rows after sorting (for pagination).
         """
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 ids = self._index.list_ids(
                     issue_key=issue_key, limit=limit, offset=offset
@@ -409,7 +413,7 @@ class JobStore:
     def count_jobs(self, *, issue_key: Optional[str] = None) -> int:
         """Count stored jobs matching optional issue filter."""
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.count(issue_key=issue_key)
             except Exception as e:
@@ -473,7 +477,26 @@ class JobStore:
             )
         return job
 
-    def _write(self, job: Dict[str, Any]) -> None:
+    def _index_ok(self) -> bool:
+        return self._index is not None and not self._index_stale
+
+    def _query_jobs_from_json(self, **filters: Any) -> List[Dict[str, Any]]:
+        """Analytics query from job JSON when the sqlite index is stale."""
+        import tempfile
+
+        fd, name = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        path = Path(name)
+        fresh = JobIndex(path)
+        try:
+            for job in self._iter_jobs_json():
+                fresh.upsert(job)
+            return fresh.query_jobs(**filters)
+        finally:
+            fresh.close()
+            path.unlink(missing_ok=True)
+
+    def _write(self, job: Dict[str, Any]) -> bool:
         path = self._path(job["job_id"])
         tmp = path.with_suffix(".tmp")
         with self._lock:
@@ -481,7 +504,6 @@ class JobStore:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(job, f, indent=2, ensure_ascii=False)
                 tmp.replace(path)
-                self._index_upsert(job)
             except Exception as e:
                 logger.error(f"Error saving job {job.get('job_id')}: {e}")
                 try:
@@ -489,6 +511,9 @@ class JobStore:
                         tmp.unlink()
                 except OSError:
                     pass
+                return False
+        self._index_upsert(job)
+        return True
 
     def _index_upsert(self, job: Dict[str, Any]) -> None:
         if self._index is None:
@@ -496,6 +521,7 @@ class JobStore:
         try:
             self._index.upsert(job)
         except Exception as e:
+            self._index_stale = True
             logger.debug(f"Job index upsert failed: {e}")
 
     def _index_delete(self, job_id: str) -> None:

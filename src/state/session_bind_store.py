@@ -138,21 +138,55 @@ def bind_id_for(
     target_branch: str = "",
     issue_key: str = "",
     kind: str = "",
+    backend: str = "",
 ) -> str:
     repo_key = normalize_repo_key(repository_url)
     br = normalize_branch(branch)
     tgt = normalize_branch(target_branch)
     issue = (issue_key or "").strip().upper()
     kind_n = normalize_session_kind(kind)
+    backend_n = _normalize_bind_backend(backend)
     # Kind-specific maps are (repo, source/work, target, kind) — no issue
     # in the key so a later same-kind job resumes that chat. Plan, build,
-    # and test stay on three different ses_* until Dashboard Reset.
+    # and test stay on three different sessions until Dashboard Reset.
+    # Backend is part of the key so OpenCode, Codex, and Claude do not
+    # replace each other's row. Empty backend keeps the pre-Claude id.
     if kind_n:
         material = f"{repo_key}\0{br}\0{tgt}\0{kind_n}"
     else:
         material = f"{repo_key}\0{br}\0{tgt}\0{issue}"
+    if backend_n:
+        material = f"{material}\0{backend_n}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"osb_{digest}"
+
+
+def _normalize_bind_backend(backend: str) -> str:
+    from src.backends.base import normalize_backend_name
+
+    return normalize_backend_name(backend) or ""
+
+
+def inferred_bind_backend(rec: Optional[Dict[str, Any]]) -> str:
+    """Backend that owns this row. Untagged UUIDs stay Codex (pre-Claude)."""
+    if not rec:
+        return ""
+    explicit = _normalize_bind_backend(str(rec.get("backend") or ""))
+    if explicit:
+        return explicit
+    from src.backends.base import (
+        BACKEND_CODEX,
+        BACKEND_OPENCODE,
+        is_codex_thread_id,
+        is_opencode_session_id,
+    )
+
+    sid = str(rec.get("session_id") or "").strip()
+    if is_opencode_session_id(sid):
+        return BACKEND_OPENCODE
+    if sid.startswith("thread_") or is_codex_thread_id(sid):
+        return BACKEND_CODEX
+    return ""
 
 
 def workspace_id_for(
@@ -193,6 +227,7 @@ class SessionBindStore:
         self._lock = threading.RLock()
         self._index = None
         self._index_ready = False
+        self._index_stale = False
         try:
             from src.state.session_index import SessionBindIndex, default_index_path
 
@@ -232,9 +267,13 @@ class SessionBindStore:
             try:
                 self._index.upsert(rec)
             except Exception as e:
+                self._index_stale = True
                 logger.warning(
                     f"Session index upsert failed for {rec.get('bind_id')}: {e}"
                 )
+
+    def _index_ok(self) -> bool:
+        return self._index is not None and not self._index_stale
 
     def get(
         self,
@@ -243,16 +282,31 @@ class SessionBindStore:
         target_branch: str = "",
         issue_key: str = "",
         kind: str = "",
+        backend: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_repo_key(repository_url) or not normalize_branch(branch):
             return None
         if not normalize_branch(target_branch):
             return None
         kind_n = normalize_session_kind(kind)
+        backend_n = _normalize_bind_backend(backend)
         if kind_n:
             # Plan, build, and test maps are separate. A miss must not
             # fall back to another kind (derman-plan cannot implement).
-            return self.get_by_id(
+            hit = self.get_by_id(
+                bind_id_for(
+                    repository_url,
+                    branch,
+                    target_branch,
+                    issue_key="",
+                    kind=kind_n,
+                    backend=backend_n,
+                )
+            )
+            if hit or not backend_n:
+                return hit
+            # Rows saved before backend was part of the id.
+            legacy = self.get_by_id(
                 bind_id_for(
                     repository_url,
                     branch,
@@ -261,6 +315,9 @@ class SessionBindStore:
                     kind=kind_n,
                 )
             )
+            if legacy and inferred_bind_backend(legacy) == backend_n:
+                return legacy
+            return None
         bid = bind_id_for(
             repository_url, branch, target_branch, issue_key=issue_key
         )
@@ -288,7 +345,7 @@ class SessionBindStore:
         if not repo or not br or not tgt:
             return None
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.newest_live(repo, br, tgt)
             except Exception as e:
@@ -333,6 +390,7 @@ class SessionBindStore:
         working_directory: Optional[str] = None,
         target_branch: str = "",
         kind: str = "",
+        backend: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(repository_url, str) or not isinstance(branch, str):
             return None
@@ -345,10 +403,16 @@ class SessionBindStore:
         tgt = normalize_branch(target_branch)
         sid = session_id.strip()
         kind_n = normalize_session_kind(kind)
+        backend_n = _normalize_bind_backend(backend)
         if not normalize_repo_key(repo) or not br or not tgt or not sid:
             return None
         bid = bind_id_for(
-            repo, br, tgt, issue_key="" if kind_n else issue_key, kind=kind_n
+            repo,
+            br,
+            tgt,
+            issue_key="" if kind_n else issue_key,
+            kind=kind_n,
+            backend=backend_n,
         )
         now = _now_iso()
         wd = (working_directory or "").strip() or None
@@ -377,6 +441,7 @@ class SessionBindStore:
                 "target_branch": tgt,
                 "session_id": sid,
                 "kind": kind_n or prev.get("kind") or "",
+                "backend": backend_n or inferred_bind_backend(prev) or "",
                 "issue_key": (issue_key or "").strip().upper(),
                 "job_id": job_id or prev.get("job_id"),
                 "working_directory": wd or prev.get("working_directory"),
@@ -411,6 +476,7 @@ class SessionBindStore:
                 try:
                     self._index.delete(bid)
                 except Exception as e:
+                    self._index_stale = True
                     logger.warning(f"Session index delete failed for {bid}: {e}")
         logger.info(f"OpenCode session bind reset: {bid}")
         return True
@@ -494,10 +560,12 @@ class SessionBindStore:
         reason: str = "abandoned",
         issue_key: str = "",
         kind: str = "",
+        backend: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_branch(target_branch):
             return None
         kind_n = normalize_session_kind(kind)
+        backend_n = _normalize_bind_backend(backend)
         rec = self.forget_session(
             bind_id_for(
                 repository_url,
@@ -505,6 +573,7 @@ class SessionBindStore:
                 target_branch,
                 issue_key="" if kind_n else issue_key,
                 kind=kind_n,
+                backend=backend_n,
             ),
             session_id=session_id,
             reason=reason,
@@ -570,7 +639,7 @@ class SessionBindStore:
         )
         _add(self.get_by_id(bind_id_for(repository_url, branch, target_branch)))
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 for rec in self._index.rows_for_checkout(repo, br, tgt):
                     _add(rec)
@@ -606,7 +675,7 @@ class SessionBindStore:
         if not key:
             return None
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.newest_live_for_issue(key)
             except Exception as e:
@@ -625,7 +694,7 @@ class SessionBindStore:
 
     def list_binds(self, *, limit: Optional[int] = 200) -> List[Dict[str, Any]]:
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.list_live(limit=limit)
             except Exception as e:
@@ -741,7 +810,7 @@ class SessionBindStore:
         updated = 0
         self.ensure_index()
         rows: Optional[List[Dict[str, Any]]] = None
-        if self._index is not None:
+        if self._index_ok():
             try:
                 rows = self._index.rows_with_directory()
             except Exception as e:
