@@ -66,7 +66,9 @@ export function JobsTable({
                     GitLab
                   </span>
                 )}
-                {!channel && (j.source || 'jira') === 'azure' && (
+                {!channel &&
+                  ((j.source || 'jira') === 'azure' ||
+                    (j.source || 'jira') === 'azure_workitem') && (
                   <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                     Azure
                   </span>

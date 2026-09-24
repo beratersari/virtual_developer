@@ -343,7 +343,7 @@ export function JobsPage() {
                     <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                       {q.source === 'gitlab'
                         ? 'GitLab'
-                        : q.source === 'azure'
+                        : q.source === 'azure' || q.source === 'azure_workitem'
                           ? 'Azure'
                           : 'Jira'}
                     </span>

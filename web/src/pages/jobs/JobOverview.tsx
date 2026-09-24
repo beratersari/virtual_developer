@@ -60,7 +60,9 @@ export function JobOverview({
               ? 'GitLab MR'
               : (job.source || 'jira') === 'azure'
                 ? 'Azure PR'
-                : 'Jira'
+                : (job.source || 'jira') === 'azure_workitem'
+                  ? 'Azure Boards'
+                  : 'Jira'
           }
         />
         {job.gitlab_project && (

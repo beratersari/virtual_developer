@@ -383,7 +383,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
           const rec = block as Record<string, unknown>
           if (rec.type === 'text') {
             const said = stripLeakedJson(asText(rec.text).trim())
-            if (said) events.push({ kind: 'message', title: 'Claude Code', body: said })
+            if (said) events.push({ kind: 'user', title: 'You', body: said })
             continue
           }
           if (rec.type !== 'tool_result') continue
