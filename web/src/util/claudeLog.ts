@@ -340,19 +340,39 @@ function withoutRawEnvelope(text: string): string {
     .trim()
 }
 
+function foldTranscriptText(value: string): string {
+  let text = value.replace(/\s+/g, ' ').trim()
+  while (text.includes('\\\\')) text = text.replace(/\\\\/g, '\\')
+  return text
+}
+
+function sameTranscriptText(a: string, b: string): boolean {
+  const left = foldTranscriptText(a)
+  const right = foldTranscriptText(b)
+  return Boolean(left) && left === right
+}
+
 /** One dashboard row per assistant text, tool call, result, or plain log line. */
 export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
   const events: CodexLogEvent[] = []
   const text = normalize(raw).replace(ANSI, '')
+  const plain: string[] = []
+  const flushPlain = () => {
+    const body = stripLeakedJson(plain.join('\n').trim())
+    plain.length = 0
+    if (!body) return
+    if (events.some((ev) => sameTranscriptText(ev.body || '', body))) return
+    events.push({ kind: 'message', title: 'Claude Code', body })
+  }
   for (const line of text.split('\n')) {
     const piece = line.trim()
     if (!piece) continue
     if (!piece.startsWith('{')) {
-      const plain = stripCliDiagnostics(piece).trim()
-      const shown = stripLeakedJson(plain)
-      if (shown) events.push({ kind: 'meta', title: 'Claude Code', body: shown })
+      const shown = stripLeakedJson(stripCliDiagnostics(piece).trim())
+      if (shown) plain.push(shown)
       continue
     }
+    flushPlain()
     let parsed: unknown
     try {
       parsed = JSON.parse(piece)
@@ -420,8 +440,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
     }
     if (kind === 'result' || obj.result != null || obj.is_error != null) {
       const result = stripLeakedJson(withoutRawEnvelope(asText(obj.result).trim() || asText(obj.error).trim()))
-      const previous = events[events.length - 1]
-      if (result && previous?.body !== result) {
+      if (result && !events.some((ev) => sameTranscriptText(ev.body || '', result))) {
         events.push({
           kind: obj.is_error ? 'error' : 'message',
           title: 'Claude Code',
@@ -431,6 +450,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
       continue
     }
   }
+  flushPlain()
   return events
 }
 

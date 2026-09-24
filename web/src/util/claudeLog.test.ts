@@ -212,4 +212,29 @@ assert(errorEvents.every((ev) => (ev.body || '').startsWith('API Error: Request 
 assert(!JSON.stringify(events).includes('query_source'), 'transcript has no diagnostic json')
 assert(!JSON.stringify(events).includes('unrecognized_model'), 'transcript has no warning tag')
 
+const prettyReply = [
+  JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text: '"name": "Read",\n"parameters": {\n"file_path": "C:\\\\vd\\\\yaver\\\\plans\\\\KAN-551.md"\n}\n\nThis function call reads the plan file.',
+        },
+      ],
+    },
+  }),
+  '"name": "Read",',
+  '"parameters": {',
+  '"file_path": "C:\\vd\\yaver\\plans\\KAN-551.md"',
+  '}',
+  'This function call reads the plan file.',
+].join('\n')
+const prettyEvents = claudeTranscriptEventsFromLog(prettyReply)
+const claudeCards = prettyEvents.filter((ev) => ev.title === 'Claude Code')
+assert(claudeCards.length === 1, 'multiline reply is one Claude Code row')
+assert(claudeCards[0].body?.includes('"name": "Read"'), 'reply keeps the name line')
+assert(claudeCards[0].body?.includes('plan file'), 'reply keeps the closing sentence')
+
 console.log('claudeLog.test.ts ok')
