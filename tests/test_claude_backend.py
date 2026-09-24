@@ -55,6 +55,8 @@ def test_build_claude_argv_is_unattended_and_has_no_secret():
     )
     assert argv[0] == "claude"
     assert "--print" in argv
+    assert "stream-json" in argv
+    assert "--verbose" in argv
     assert "bypassPermissions" in argv
     assert "AskUserQuestion" in argv
     assert "--agent" in argv
@@ -178,6 +180,24 @@ def test_parse_claude_output_shapes():
     )
     stream_parsed = parse_claude_output(stream)
     assert stream_parsed["text"] == "Working."
+    mixed = "\n".join(
+        [
+            "[claude] running: claude --print",
+            '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"1\\t# test_project',
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": False,
+                    "result": "The task was ambiguous. No modifications were made.",
+                    "session_id": SESSION,
+                }
+            ),
+        ]
+    )
+    mixed_parsed = parse_claude_output(mixed)
+    assert mixed_parsed["text"] == "The task was ambiguous. No modifications were made."
+    assert "tool_result" not in mixed_parsed["text"]
+    assert "[claude] running" not in mixed_parsed["text"]
     assert "Bash" in stream_parsed["tools"]
     assert "total_cost_usd" not in stream_parsed["text"]
 

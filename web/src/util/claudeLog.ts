@@ -209,7 +209,6 @@ function walkLines(text: string): string {
     try {
       parsed = JSON.parse(piece)
     } catch {
-      plain.push(line)
       continue
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -252,6 +251,160 @@ export function claudePromptText(raw: string): string {
   return (raw || '').replace(/(^|\n)([ \t]*)OpenCode agent:/g, '$1$2Agent:')
 }
 
+function toolSummary(input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const rec = input as Record<string, unknown>
+  const preferred = ['command', 'file_path', 'filePath', 'path', 'pattern', 'query']
+  const bits: string[] = []
+  for (const key of preferred) {
+    const value = rec[key]
+    if (typeof value === 'string' && value.trim()) bits.push(value.trim())
+  }
+  if (!bits.length) {
+    try {
+      bits.push(JSON.stringify(input))
+    } catch {
+      return ''
+    }
+  }
+  const text = bits.join(' · ')
+  return text.length > 500 ? `${text.slice(0, 500)}…` : text
+}
+
+function unescapeJsonString(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string
+  } catch {
+    return value.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"')
+  }
+}
+
+/** Pull a tool result out of a stream line that was cut off before the closing brace. */
+function salvageTruncated(piece: string): CodexLogEvent | null {
+  const marker = '"type":"tool_result","content":"'
+  const alt = '"type": "tool_result", "content": "'
+  let at = piece.indexOf(marker)
+  let width = marker.length
+  if (at < 0) {
+    at = piece.indexOf(alt)
+    width = alt.length
+  }
+  if (at < 0) return null
+  const raw = piece.slice(at + width)
+  const body = unescapeJsonString(raw).trim()
+  if (!body) return null
+  const preview = body.length > 800 ? `${body.slice(0, 800)}…` : body
+  return { kind: 'command', title: 'tool result', body: preview }
+}
+
+function withoutRawEnvelope(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed.includes('{')) return trimmed
+  return trimmed
+    .replace(/\{[^{}]*\}/g, (chunk) => {
+      try {
+        const obj = JSON.parse(chunk) as Record<string, unknown>
+        const inner = asText(obj.message || obj.error || obj.content || obj.result).trim()
+        return inner || ''
+      } catch {
+        return ''
+      }
+    })
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** One dashboard row per assistant text, tool call, result, or plain log line. */
+export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
+  const events: CodexLogEvent[] = []
+  const text = normalize(raw).replace(ANSI, '')
+  for (const line of text.split('\n')) {
+    const piece = line.trim()
+    if (!piece) continue
+    if (!piece.startsWith('{')) {
+      const plain = stripCliDiagnostics(piece).trim()
+      if (plain) events.push({ kind: 'meta', title: 'Claude Code', body: plain })
+      continue
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(piece)
+    } catch {
+      const saved = salvageTruncated(piece)
+      if (saved) events.push(saved)
+      continue
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+    const obj = parsed as Record<string, unknown>
+    if (isDiagnosticObject(obj)) continue
+    const kind = String(obj.type || '')
+    if (kind === 'system') {
+      const sub = String(obj.subtype || '')
+      if (sub === 'api_retry') {
+        const attempt = obj.attempt != null ? ` ${obj.attempt}` : ''
+        const why = String(obj.error || obj.message || 'retry')
+        events.push({ kind: 'meta', title: 'Claude Code', body: `API retry${attempt}: ${why}` })
+      }
+      continue
+    }
+    if (kind === 'user') {
+      const message = (obj.message && typeof obj.message === 'object' ? obj.message : {}) as Record<string, unknown>
+      const content = message.content
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (!block || typeof block !== 'object') continue
+          const rec = block as Record<string, unknown>
+          if (rec.type === 'text') {
+            const said = asText(rec.text).trim()
+            if (said) events.push({ kind: 'message', title: 'Claude Code', body: said })
+            continue
+          }
+          if (rec.type !== 'tool_result') continue
+          const body = asText(rec.content).trim()
+          if (!body) continue
+          if (!body) continue
+          const preview = body.length > 800 ? `${body.slice(0, 800)}…` : body
+          events.push({
+            kind: rec.is_error ? 'error' : 'command',
+            title: 'tool result',
+            body: preview,
+          })
+        }
+      }
+      continue
+    }
+    if (kind === 'assistant') {
+      const message = (obj.message && typeof obj.message === 'object' ? obj.message : {}) as Record<string, unknown>
+      const content = message.content
+      const said = textFromContent(content)
+      if (said) events.push({ kind: 'message', title: 'Claude Code', body: said })
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (!block || typeof block !== 'object') continue
+          const rec = block as Record<string, unknown>
+          if (rec.type !== 'tool_use') continue
+          const name = String(rec.name || 'tool')
+          events.push({ kind: 'command', title: name, body: toolSummary(rec.input) })
+        }
+      }
+      continue
+    }
+    if (kind === 'result' || obj.result != null || obj.is_error != null) {
+      const result = withoutRawEnvelope(asText(obj.result).trim() || asText(obj.error).trim())
+      const previous = events[events.length - 1]
+      if (result && previous?.body !== result) {
+        events.push({
+          kind: obj.is_error ? 'error' : 'message',
+          title: 'Claude Code',
+          body: result,
+        })
+      }
+      continue
+    }
+  }
+  return events
+}
+
 export function buildClaudeTranscriptEvents(
   logs: TextArtifact[],
   prompts: TextArtifact[],
@@ -262,6 +415,12 @@ export function buildClaudeTranscriptEvents(
     if (body) events.push({ kind: 'user', title: 'You', body })
   }
   for (const log of logs) {
+    const streamed = claudeTranscriptEventsFromLog(log.content || '')
+    const hasTurns = streamed.some((ev) => ev.kind === 'message' || ev.kind === 'command' || ev.kind === 'error')
+    if (hasTurns) {
+      events.push(...streamed)
+      continue
+    }
     const body = claudeDisplayText(log.content || '')
     if (body) events.push({ kind: 'message', title: 'Claude Code', body })
   }

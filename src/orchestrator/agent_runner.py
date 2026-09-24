@@ -573,6 +573,19 @@ class AgentRunner:
                     result_obj.stderr or "",
                     returncode=result_obj.returncode,
                 )
+                # Live stream-json lines are already in the file. Keep them
+                # so the Transcript tab can show each turn. Append the
+                # parsed reply only when it is not already in that stream.
+                try:
+                    existing = session_file.read_text(encoding="utf-8")
+                except OSError:
+                    existing = ""
+                extra = (body or "").strip()
+                if existing.strip():
+                    if extra and extra not in existing:
+                        with open(session_file, "a", encoding="utf-8") as fh:
+                            fh.write("\n" + extra + "\n")
+                    body = ""
             else:
                 body = result_obj.stdout or ""
                 if result_obj.stderr:

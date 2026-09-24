@@ -1,7 +1,7 @@
 /**
  * Run: npx tsx src/util/claudeLog.test.ts
  */
-import { buildClaudeTranscriptEvents, claudeDisplayText } from './claudeLog'
+import { buildClaudeTranscriptEvents, claudeDisplayText, claudeTranscriptEventsFromLog } from './claudeLog'
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg)
@@ -85,6 +85,9 @@ const stream = [
     total_cost_usd: 0,
   }),
 ].join('\n')
+const turns = claudeTranscriptEventsFromLog(stream)
+assert(turns.some((ev) => ev.kind === 'message' && ev.body === 'Working.'), 'transcript keeps assistant text')
+assert(turns.some((ev) => ev.kind === 'command' && ev.title === 'Bash' && (ev.body || '').includes('ls')), 'transcript keeps the tool call')
 assert(claudeDisplayText(stream) === 'Working.', 'stream-json keeps the result only')
 assert(!claudeDisplayText(stream).includes('tool_use'), 'stream-json hides tool json')
 assert(!claudeDisplayText(stream).includes('total_cost_usd'), 'stream-json hides usage')
@@ -138,6 +141,51 @@ assert(events[0].body?.includes('Agent: **derman-build**'), 'prompt is not label
 assert(!events[0].body?.includes('OpenCode agent:'), 'old header rewritten')
 assert(events[1].title === 'Claude Code', 'title')
 assert(events[1].body === 'YaverFreeOk\nHere’s a quick check for you.', 'reply')
+
+const toolResult = JSON.stringify({
+  type: 'user',
+  message: {
+    role: 'user',
+    content: [
+      {
+        tool_use_id: 'chatcmpl-tool-1',
+        type: 'tool_result',
+        content: '1\t# test_project\n2\t\n## Getting started',
+      },
+    ],
+  },
+})
+const toolEvents = claudeTranscriptEventsFromLog(toolResult)
+assert(toolEvents.length === 1 && toolEvents[0].title === 'tool result', 'tool result is not an assistant message')
+assert(!toolEvents[0].body?.includes('"type":"user"'), 'tool result hides the json envelope')
+assert(toolEvents[0].body?.includes('# test_project'), 'tool result keeps the file text')
+
+const cutOff = toolResult.slice(0, toolResult.length - 8)
+const cutEvents = claudeTranscriptEventsFromLog(cutOff)
+assert(!JSON.stringify(cutEvents).includes('"type":"user"'), 'truncated json is not shown raw')
+assert(!cutEvents.some((ev) => (ev.body || '').includes('{"type"')), 'truncated json body is dropped')
+assert(cutEvents.some((ev) => ev.title === 'tool result' && (ev.body || '').includes('# test_project')), 'truncated tool result keeps the file text')
+
+const mixed = [
+  JSON.stringify({ type: 'system', subtype: 'init', session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', tools: ['Read'] }),
+  JSON.stringify({ type: 'system', subtype: 'api_retry', error: 'rate_limit', attempt: 1 }),
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text: 'Please continue.' }] },
+  }),
+  JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    result: 'API Error: Request rejected (429)',
+    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  }),
+].join('\n')
+const mixedEvents = claudeTranscriptEventsFromLog(mixed)
+assert(!JSON.stringify(mixedEvents).includes('"tools"'), 'init event is not dumped')
+assert(mixedEvents.some((ev) => ev.body === 'API retry 1: rate_limit'), 'api retry is a short line')
+assert(mixedEvents.some((ev) => ev.body === 'Please continue.'), 'user text is kept')
+assert(mixedEvents.some((ev) => ev.kind === 'error' && ev.body === 'API Error: Request rejected (429)'), 'error result is kept')
 assert(!JSON.stringify(events).includes('query_source'), 'transcript has no diagnostic json')
 assert(!JSON.stringify(events).includes('unrecognized_model'), 'transcript has no warning tag')
 

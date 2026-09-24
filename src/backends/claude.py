@@ -103,7 +103,8 @@ def build_claude_argv(
         "--permission-mode",
         "bypassPermissions",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         "--disallowedTools",
         "AskUserQuestion",
     ]
@@ -369,7 +370,6 @@ def _walk_claude_lines(text: str) -> Dict[str, Any]:
         try:
             parsed = json.loads(piece)
         except json.JSONDecodeError:
-            plain.append(line)
             continue
         if not isinstance(parsed, dict):
             plain.append(line)
@@ -382,12 +382,9 @@ def _walk_claude_lines(text: str) -> Dict[str, Any]:
         plain.append(line)
     prose = _strip_cli_diagnostics("\n".join(plain))
     extracted = _taken_text(state)
-    if not prose:
-        body = extracted
-    elif not extracted or extracted in prose or prose in extracted:
-        body = prose
-    else:
-        body = _strip_cli_diagnostics(prose + "\n" + extracted)
+    # A result event, or the last assistant text, is the final message.
+    # The launch line and a cut-off tool-result object are not.
+    body = extracted or prose
     return _state_payload(state, body)
 
 
@@ -504,21 +501,53 @@ class ClaudeBackend:
             )
             handle["proc"] = proc
             handle["pid"] = proc.pid
+            stdout_parts: List[str] = []
+            stderr_parts: List[str] = []
+
+            def _emit(kind: str, raw: bytes) -> None:
+                text = raw.decode("utf-8", errors="replace").rstrip("\r")
+                if not text.strip():
+                    return
+                if kind == "stdout":
+                    stdout_parts.append(text)
+                    log_lines.append(text)
+                else:
+                    stderr_parts.append(text)
+                if request.on_output:
+                    # The session log is this line. Cutting it makes the
+                    # tool-result JSON invalid, and the transcript then
+                    # shows the raw object.
+                    request.on_output(kind, text)
+
+            async def _pump(stream: asyncio.StreamReader | None, kind: str) -> None:
+                if stream is None:
+                    return
+                pending = b""
+                while True:
+                    chunk = await stream.read(65536)
+                    if not chunk:
+                        if pending.strip():
+                            _emit(kind, pending)
+                        return
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        _emit(kind, line)
+
             try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        _pump(proc.stdout, "stdout"),
+                        _pump(proc.stderr, "stderr"),
+                        proc.wait(),
+                    ),
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 self.cancel(handle)
                 return {"timed_out": True, "text": "", "session_id": resume_id}
-            stdout = (stdout_b or b"").decode("utf-8", errors="replace")
-            stderr = (stderr_b or b"").decode("utf-8", errors="replace")
-            if stdout.strip():
-                log_lines.append(stdout.strip())
-                if request.on_output:
-                    request.on_output("stdout", stdout.strip()[:4000])
-            if stderr.strip() and request.on_output:
-                request.on_output("stderr", stderr.strip()[:2000])
+            stdout = "\n".join(stdout_parts)
+            stderr = "\n".join(stderr_parts)
             parsed = parse_claude_output(stdout)
             if not parsed["session_id"]:
                 parsed["session_id"] = resume_id
