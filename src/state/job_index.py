@@ -69,6 +69,14 @@ _SOURCE_SQL = """CASE
     ELSE LOWER(source)
 END"""
 
+def _like_contains(text: str) -> str:
+    """Literal substring for LIKE ... ESCAPE '\\'."""
+    escaped = (
+        text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return f"%{escaped}%"
+
+
 _STATUS_GROUPS = {
     "completed": ("completed",),
     "error": ("error", "unknown"),
@@ -389,8 +397,10 @@ class JobIndex:
                 text = needle.strip().rstrip("/").lower()
                 if text.endswith(".git"):
                     text = text[:-4].rstrip("/")
-                repo_bits.append("LOWER(IFNULL(repository_url,'')) LIKE ?")
-                args.append(f"%{text}%")
+                repo_bits.append(
+                    "LOWER(IFNULL(repository_url,'')) LIKE ? ESCAPE '\\'"
+                )
+                args.append(_like_contains(text))
             where.append("(" + " OR ".join(repo_bits) + ")")
 
         want_keys = [p.strip().upper() for p in (issue_key or "").split(",") if p.strip()]
@@ -399,15 +409,15 @@ class JobIndex:
 
         search = (q or "").strip().lower()
         if search:
-            like = f"%{search}%"
+            like = _like_contains(search)
             where.append(
                 "("
-                "LOWER(IFNULL(issue_key,'')) LIKE ? OR "
-                "LOWER(IFNULL(summary,'')) LIKE ? OR "
-                "LOWER(IFNULL(description,'')) LIKE ? OR "
-                "LOWER(IFNULL(repository_url,'')) LIKE ? OR "
-                "LOWER(IFNULL(agent,'')) LIKE ? OR "
-                "LOWER(IFNULL(model,'')) LIKE ?"
+                "LOWER(IFNULL(issue_key,'')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(IFNULL(summary,'')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(IFNULL(description,'')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(IFNULL(repository_url,'')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(IFNULL(agent,'')) LIKE ? ESCAPE '\\' OR "
+                "LOWER(IFNULL(model,'')) LIKE ? ESCAPE '\\'"
                 ")"
             )
             args.extend([like] * 6)

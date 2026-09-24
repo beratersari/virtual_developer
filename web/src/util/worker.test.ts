@@ -2,7 +2,7 @@
  * Run: npx tsx src/util/worker.test.ts
  */
 import type { JobItem } from '../api/types'
-import { resolveJobWorker, workerLabel } from './worker'
+import { resolveJobWorker, sessionIdLabel, workerLabel } from './worker'
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg)
@@ -33,6 +33,18 @@ assert(
   'uuid thread',
 )
 assert(resolveJobWorker(job({ opencode_session_id: 'ses_abc123xyz' })) === 'opencode', 'ses_')
+assert(resolveJobWorker(job({ backend: 'claude' })) === 'claude', 'stored claude')
+assert(
+  resolveJobWorker(
+    job({
+      opencode_session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      description: '{params}\nBackend: claude\n{params}',
+    }),
+  ) === 'claude',
+  'params claude beats uuid',
+)
 assert(workerLabel('codex') === 'Codex', 'label codex')
 assert(workerLabel('opencode') === 'OpenCode', 'label opencode')
+assert(workerLabel('claude') === 'Claude Code', 'label claude')
+assert(sessionIdLabel('claude') === 'Claude session', 'claude session label')
 console.log('worker.test.ts ok')

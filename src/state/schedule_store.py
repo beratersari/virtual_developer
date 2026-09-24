@@ -53,6 +53,7 @@ class ScheduleStore:
         self._lock = threading.RLock()
         self._index = None
         self._index_ready = False
+        self._index_stale = False
         try:
             from src.state.schedule_index import ScheduleIndex, default_index_path
 
@@ -93,9 +94,13 @@ class ScheduleStore:
             try:
                 self._index.upsert(rec)
             except Exception as e:
+                self._index_stale = True
                 logger.warning(
                     f"Schedule index upsert failed for {rec.get('schedule_id')}: {e}"
                 )
+
+    def _index_ok(self) -> bool:
+        return self._index is not None and not self._index_stale
 
     def create(
         self,
@@ -268,7 +273,7 @@ class ScheduleStore:
         recovered = 0
         self.ensure_index()
         paths = None
-        if self._index is not None:
+        if self._index_ok():
             try:
                 paths = [self._path(sid) for sid in self._index.ids_with_status("dispatching")]
             except Exception as e:
@@ -328,7 +333,7 @@ class ScheduleStore:
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 ids = self._index.list_ids(status=status, limit=limit, offset=offset)
                 items: List[Dict[str, Any]] = []
@@ -368,7 +373,7 @@ class ScheduleStore:
     def count_schedules(self, *, status: Optional[str] = None) -> int:
         """How many schedules match *status* (all rows when unset)."""
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.count(status=status)
             except Exception as e:
@@ -400,7 +405,7 @@ class ScheduleStore:
         if not want:
             return False
         self.ensure_index()
-        if self._index is not None:
+        if self._index_ok():
             try:
                 return self._index.has_issue_status(key, want)
             except Exception as e:

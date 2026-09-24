@@ -9,7 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 BACKEND_OPENCODE = "opencode"
 BACKEND_CODEX = "codex"
-SUPPORTED_BACKENDS = (BACKEND_OPENCODE, BACKEND_CODEX)
+BACKEND_CLAUDE = "claude"
+SUPPORTED_BACKENDS = (BACKEND_OPENCODE, BACKEND_CODEX, BACKEND_CLAUDE)
 
 _BACKEND_ALIASES = {
     "opencode": BACKEND_OPENCODE,
@@ -19,6 +20,9 @@ _BACKEND_ALIASES = {
     "codex": BACKEND_CODEX,
     "openai-codex": BACKEND_CODEX,
     "openai": BACKEND_CODEX,
+    "claude": BACKEND_CLAUDE,
+    "claude-code": BACKEND_CLAUDE,
+    "anthropic": BACKEND_CLAUDE,
 }
 
 
@@ -45,9 +49,21 @@ def is_codex_thread_id(sid: Optional[str]) -> bool:
     return s.count("-") >= 4 and len(s) >= 16
 
 
+def is_claude_session_id(sid: Optional[str]) -> bool:
+    """True for a Claude Code session id (UUID, not an OpenCode ``ses_*``)."""
+    s = (sid or "").strip()
+    if not s or s.startswith("ses_") or s.startswith("thread_"):
+        return False
+    return s.count("-") >= 4 and len(s) >= 16
+
+
 def is_session_or_thread_id(sid: Optional[str]) -> bool:
-    """True for an OpenCode ``ses_*`` id or a Codex thread UUID."""
-    return is_opencode_session_id(sid) or is_codex_thread_id(sid)
+    """True for an OpenCode, Codex, or Claude session id."""
+    return (
+        is_opencode_session_id(sid)
+        or is_codex_thread_id(sid)
+        or is_claude_session_id(sid)
+    )
 
 
 OnOutput = Callable[[str, str], None]

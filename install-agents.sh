@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Copy opencoderman/agents and opencoderman/skills into the OpenCode home.
 # Does not install the OpenCode CLI. Never writes ~/.config/opencode.
+# Claude agent files are copied by install-agents.bat on Windows (needs Python).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -179,7 +179,7 @@ def test_assert_payload_accepts_onedir(tmp_path: Path):
         skill = ocm_skills / f"skill-{i}"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(f"skill {i}\n", encoding="utf-8")
-    (payload / "install-opencode-agents.bat").write_text("@echo off\n", encoding="utf-8")
+    (payload / "install-agents.bat").write_text("@echo off\n", encoding="utf-8")
     assert ap.assert_payload(payload, platform="windows") == []
     (payload / "opencode_configs").mkdir()
     dup = ap.assert_payload(payload, platform="windows")
@@ -269,12 +269,12 @@ def test_stage_agent_installers_ships_one_script(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(build, "ROOT", ROOT)
     build.stage_agent_installers(bundled)
     if __import__("os").name == "nt":
-        assert (bundled / "install-opencode-agents.bat").is_file()
-        assert not (bundled / "install-opencode-agents.sh").exists()
+        assert (bundled / "install-agents.bat").is_file()
+        assert not (bundled / "install-agents.sh").exists()
         assert not (bundled / "Install-OpencodeAgents.ps1").exists()
     else:
-        assert (bundled / "install-opencode-agents.sh").is_file()
-        assert not (bundled / "install-opencode-agents.bat").exists()
+        assert (bundled / "install-agents.sh").is_file()
+        assert not (bundled / "install-agents.bat").exists()
         assert not (bundled / "install_opencode_agents.py").exists()
 
 
@@ -302,7 +302,7 @@ def test_start_here_does_not_claim_opencode_is_bundled():
     assert ".env.example" in text
     assert "yaver start" in text or "yaver.exe start" in text
     assert "opencode_configs" not in text
-    assert "install-opencode-agents" in text
+    assert "install-agents" in text
     assert "opencoderman/" in text
     assert "agents/" in text
     assert "skills/" in text

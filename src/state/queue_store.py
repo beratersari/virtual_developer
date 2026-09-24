@@ -298,6 +298,13 @@ class WorkQueueStore:
     ) -> Optional[Dict[str, Any]]:
         if status not in _TERMINAL:
             status = "completed"
+        with self._lock:
+            current = self.get(queue_id)
+            if current is None:
+                return None
+            held = (current.get("status") or "").strip().lower()
+            if held in _TERMINAL:
+                return current
         patch: Dict[str, Any] = {
             "status": status,
             "finished_at": _now_iso(),

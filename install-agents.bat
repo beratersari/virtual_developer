@@ -1,6 +1,7 @@
 @echo off
-REM Copy opencoderman\agents and opencoderman\skills into the OpenCode home.
-REM Does not install the OpenCode CLI. Does not write %USERPROFILE%\.config\opencode.
+REM Copy opencoderman agents and skills into the OpenCode home, then into
+REM the Claude Code home when Python is available.
+REM Does not install the OpenCode or Claude CLI. Does not write %USERPROFILE%\.config\opencode.
 REM IMPORTANT (cmd.exe): never write unescaped ">" in echo lines.
 setlocal EnableExtensions
 
@@ -102,6 +103,17 @@ if not exist "%OC_HOME%\agents\derman-reviewer.md" (
 
 echo [OK] agents -^> %OC_HOME%\agents
 echo [OK] skills -^> %OC_HOME%\skills
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Python was not found. Claude agents were not copied.
+    call :maybe_pause
+    exit /b 0
+)
+python "%SCRIPT_DIR%\packaging\install_claude_agents.py" --source "%SCRIPT_DIR%"
+if errorlevel 1 (
+    echo [WARN] Claude agent copy failed. OpenCode agents were copied.
+)
 call :maybe_pause
 exit /b 0
 

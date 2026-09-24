@@ -1,3 +1,21 @@
+# Yaver 0.9.59
+
+Claude Code is now a third unattended worker beside OpenCode and Codex.
+A plan, build, test, or review job can run claude in print mode with the derman agents, stream the transcript to the dashboard, and resume that same session later.
+The dashboard shows Claude jobs in the worker views.
+The offline CLI zip installs pinned OpenCode, Codex, and Claude Code, and install-agents copies the derman agents into both homes.
+OpenCode, Codex, and Claude each keep their own session for the same repository, branch, target, and kind.
+A Claude resume uses the Claude continue prompt, and the one follow-up after a question stays on that process.
+A stream that goes silent is stopped, and the session id from the first line is kept so the next run can resume.
+The reviewer agent cannot edit files or run a shell, and the cost on the Claude result line is stored on the job.
+A plan command on an Azure work item is kept when the same save also changes state.
+Jira comment paging continues while total says more comments remain.
+A failed disk write no longer looks saved, a cancelled queue row stays cancelled, and Analytics search treats percent and underscore as literal text.
+If the SQLite index write fails, Jobs, schedules, and sessions read the JSON files.
+Diagnostic zips redact environment names that contain KEY, including CODEX_API_KEY.
+Job transcripts can be read from the legacy .jira-agent folder.
+Azure Boards jobs are labeled Azure Boards, a Claude user line is labeled You, and a multiline Claude reply is one transcript row.
+
 # Yaver 0.9.58
 
 A failed push used to leave unpushed commits and dirty files in the reused clone, so the next push was rejected.
@@ -351,7 +369,7 @@ Each archive is an **onedir** folder:
 - `yaver.exe` / `yaver` — CLI + daemon
 - `_internal/` — bundled Python runtime, SPA, prompts
 - `opencoderman/agents` + `opencoderman/skills` — derman-build, derman-plan, skills
-- `install-opencode-agents.bat` (Windows) or `install-opencode-agents.sh` (Linux)
+- `install-agents.bat` (Windows) or `install-agents.sh` (Linux)
 - `.env.example`, `START_HERE.txt`, `VERSION`
 
 ```text
@@ -366,8 +384,8 @@ yaver.exe start            # Windows
 Then, if OpenCode is already installed:
 
 ```text
-install-opencode-agents.bat    # Windows
-./install-opencode-agents.sh   # Linux
+install-agents.bat    # Windows
+./install-agents.sh   # Linux
 ```
 
 OpenCode and Codex are **not** inside these binaries.

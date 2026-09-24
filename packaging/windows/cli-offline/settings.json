@@ -1,0 +1,6 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://YOUR_HOST",
+    "ANTHROPIC_AUTH_TOKEN": "YOUR_TOKEN"
+  }
+}

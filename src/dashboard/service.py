@@ -397,7 +397,12 @@ def _model_option(*, mid: str, name: str = "", provider: str = "", source: str) 
 
 def build_models_response(*, refresh: bool = False, backend: str = "") -> ModelsResponse:
     """Inventory models for the selected worker (OpenCode CLI or Codex config)."""
-    from src.backends.base import BACKEND_CODEX, BACKEND_OPENCODE, normalize_backend_name
+    from src.backends.base import (
+        BACKEND_CLAUDE,
+        BACKEND_CODEX,
+        BACKEND_OPENCODE,
+        normalize_backend_name,
+    )
 
     name = normalize_backend_name(backend) or BACKEND_OPENCODE
     default_model = (settings.default_model or "").strip()
@@ -424,6 +429,20 @@ def build_models_response(*, refresh: bool = False, backend: str = "") -> Models
             opencode_config_model=None,
             opencode_config_path=cfg_path,
             error=err,
+            server_time=datetime.now().isoformat(timespec="seconds"),
+        )
+
+    if name == BACKEND_CLAUDE:
+        options = []
+        if default_model:
+            options.append(_model_option(mid=default_model, source="settings"))
+        return ModelsResponse(
+            default_model=default_model,
+            models=options,
+            backend=BACKEND_CLAUDE,
+            opencode_config_model=None,
+            opencode_config_path=None,
+            error=None,
             server_time=datetime.now().isoformat(timespec="seconds"),
         )
 
@@ -987,28 +1006,29 @@ def _job_prompt_paths(j: Dict[str, Any]) -> List[str]:
 
 
 def _resolve_job_backend(j: Dict[str, Any], *, description: str = "") -> str:
-    """opencode | codex. Prefer the stored field, then session id / {params}."""
+    """opencode | codex | claude. Stored field, then {params}, then session id."""
     from src.backends.base import normalize_backend_name
 
     bid = normalize_backend_name(j.get("backend"))
     if bid:
         return bid
-    sid = str(j.get("opencode_session_id") or "").strip()
-    if sid.startswith("ses_"):
-        return "opencode"
-    if sid.count("-") >= 4 and len(sid) >= 16:
-        return "codex"
     text = description or (j.get("description") or "")
     if text:
         try:
-            from src.issue_git_spec import parse_issue_git_spec
+            from src.issue_git_spec import backend_name_from_text
 
-            spec, _err = parse_issue_git_spec("", text)
-            got = normalize_backend_name(getattr(spec, "backend", None) if spec else "")
+            got = backend_name_from_text(text)
             if got:
                 return got
         except Exception:
             pass
+    sid = str(j.get("opencode_session_id") or "").strip()
+    if sid.startswith("ses_"):
+        return "opencode"
+    # Codex thread ids and Claude session ids are both UUIDs. Without a
+    # stored backend or a {params} Backend line, keep the older Codex guess.
+    if sid.count("-") >= 4 and len(sid) >= 16:
+        return "codex"
     return ""
 
 
@@ -1957,8 +1977,21 @@ def _path_under(root: Path, path: Path) -> bool:
         return False
 
 
-def _read_text_capped(path: Path, max_chars: int, *, root: Optional[Path] = None) -> Dict[str, Any]:
-    if root is not None and not _path_under(root, path):
+def _read_text_capped(
+    path: Path,
+    max_chars: int,
+    *,
+    root: Optional[Path] = None,
+    roots: Optional[List[Path]] = None,
+) -> Dict[str, Any]:
+    allowed = [item for item in (roots or []) if item is not None]
+    if root is not None:
+        allowed.append(root)
+
+    def _inside(candidate: Path) -> bool:
+        return any(_path_under(item, candidate) for item in allowed)
+
+    if allowed and not _inside(path):
         return {
             "path": str(path),
             "error": "path outside allowed directory",
@@ -1969,7 +2002,7 @@ def _read_text_capped(path: Path, max_chars: int, *, root: Optional[Path] = None
     try:
         if path.is_symlink():
             resolved = path.resolve()
-            if root is not None and not _path_under(root, resolved):
+            if allowed and not _inside(resolved):
                 return {
                     "path": str(path),
                     "error": "symlink escape blocked",
@@ -2101,7 +2134,10 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
         job = job.model_dump()
     if not isinstance(job, dict):
         return {"prompts": [], "session_logs": []}
-    root = _artifacts_root()
+    from src.paths import agent_data_roots
+
+    roots = list(agent_data_roots())
+    roots.append(_artifacts_root())
     prompts: List[Dict[str, Any]] = []
     logs: List[Dict[str, Any]] = []
     seen_p: set = set()
@@ -2113,12 +2149,12 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
         if not p or p in seen_p:
             continue
         seen_p.add(p)
-        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, root=root))
+        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, roots=roots))
     for p in log_paths:
         if not p or p in seen_l:
             continue
         seen_l.add(p)
-        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, root=root))
+        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, roots=roots))
     return {"prompts": prompts, "session_logs": logs}
 
 

@@ -369,6 +369,7 @@ export function IssueDetailPage() {
               <JobsTable
                 jobs={detail.jobs ?? []}
                 compact
+                fallbackWorker={live.settings?.agent_backend || ''}
                 onOpenJob={(_key, jobId) => navigate(`/jobs/${encodeURIComponent(jobId)}`)}
               />
             </div>

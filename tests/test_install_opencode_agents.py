@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BAT = ROOT / "install-opencode-agents.bat"
+BAT = ROOT / "install-agents.bat"
 PS1 = ROOT / "packaging" / "windows" / "Install-OpencodeAgents.ps1"
-SH = ROOT / "install-opencode-agents.sh"
+SH = ROOT / "install-agents.sh"
 PY = ROOT / "packaging" / "install_opencode_agents.py"
 
 

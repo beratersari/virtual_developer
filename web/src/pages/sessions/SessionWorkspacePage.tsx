@@ -130,6 +130,7 @@ export function SessionWorkspacePage() {
         <JobsTable
           jobs={detail?.jobs || []}
           compact
+          fallbackWorker={live.settings?.agent_backend || ''}
           empty="No jobs recorded for this repository + source + target yet."
           onOpenJob={(_issueKey, jobId) =>
             navigate(`/jobs/${encodeURIComponent(jobId)}`)

@@ -426,6 +426,15 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --cov=src --cov-branch
 ```
 
+### Live checks
+
+Claude Code live checks use a free model through `ANTHROPIC_BASE_URL`.
+Do not try to connect Claude's own login. Do not run `claude` OAuth
+refresh, and do not call `api.anthropic.com`. Point the CLI at an
+Anthropic-shaped proxy for a keyless model (Pollinations `openai` is
+the usual one). OpenCode's free id `opencode/hy3-free` is a different
+worker.
+
 ### Rules
 
 - Put tests under `tests/`; use fixtures in `tests/conftest.py`.
@@ -625,6 +634,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Reintroduce Jira username/basic auth without an explicit product decision.
 - Enable TLS certificate verification on outbound HTTP without an explicit secure-path decision.
 - Ship Windows packaging that prunes plugin `*.md`, uses junctions for Bun cache, or registers legacy `oh-my-opencode` without the openagent id (see §9).
+- Try to connect Claude's own login for a live check. Use a free model through `ANTHROPIC_BASE_URL` (see §4).
 
 ---
 
@@ -643,7 +653,8 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 | Product launchers | **`start-backend.bat`** (daemon :8080), **`start-frontend.bat`** (SPA proxy :5173, no Node), **`start.bat`** (both). Prefer project `.venv`; fall back to system `python` when `.venv` is missing (`install-dashboard-system-python.bat`). SPA is prebuilt **`web/dist`** (CI `npm run build`). **Never** ship `web/node_modules`. Default bind **`0.0.0.0`** (`DASHBOARD_HOST` / `DASHBOARD_ALLOW_REMOTE=true`). See **§9.8**. |
 | Online OpenCode | **`install-opencode-online.bat`** only (does **not** change offline **`install-backends.bat`**). Runs `opencoderman/packaging/build_artifact.py --in-place` then `install.py`. Needs **Python** + network to the official OpenCode GitHub release. Offline CLI sources: `opencoderman/vendor/bin/<os>/`, `vendor/bin/opencode`, or `vendor/opencode-home.zip`. |
 | Codex CLI | Pin **`CODEX_VERSION`** / **`CODEX_WINDOWS_ASSET`** in `packaging/windows/versions.env`. CI downloads **`codex-package-x86_64-pc-windows-msvc.tar.gz`** from `openai/codex` (`rust-vX.Y.Z`) and ships **that tar.gz only** under **`vendor/`** (never `vendor/bin/codex.exe`, never inside `opencode-home.zip`). **`install-codex.bat`** extracts it with **`tar.exe`**, installs to **`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`**, and copies a dummy **`%USERPROFILE%\.codex\config.toml`** when missing. |
-| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only), **`install-opencode-agents.bat`** (copy `agents/` + `skills/` into the detected OpenCode home). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
+| CLI offline zip | A second release zip **`yaver-clis-windows-x64-*.zip`**. Three bats (`install-opencode.bat`, `install-codex.bat`, `install-claude.bat`) copy only that CLI plus its host config (`opencode.json`, `config.toml`, `settings.json`). No agents and no skills. Agents stay on **`install-agents.bat`** in the product zip. Root **`VERSIONS.txt`** records OpenCode **1.18.10**, Codex **0.149.0**, and Claude Code **2.1.280**. CI refuses any other value. |
+| Split installers | **`install-dashboard.bat`** (Python `.venv` + wheels + SPA launchers + `cli.py init`), **`install-backends.bat`** (OpenCode; also Codex if run with no args), **`install-codex.bat`** (Codex only), **`install-agents.bat`** (copy `agents/` + `skills/` into the OpenCode home, and into the Claude Code home when Python is available). Do **not** ship a combined `install.bat`. No separate Python installer — dashboard already owns Python. |
 | Product version | Repo root **`VERSION`** (`MAJOR.MINOR.PATCH`). CI names zips via `packaging/windows/resolve-version.ps1` (develop prerelease / main build metadata / `v*` releases). |
 
 ### 9.2 cmd.exe / installer landmines
@@ -848,7 +859,7 @@ Additive track. **Does not replace** the Windows/Linux offline zips.
 |------|------|
 | Layout | **onedir** only (`yaver.exe` / `yaver` + `_internal/`). Do not switch `yaver.spec` to onefile. |
 | Config | Operator `.env` next to the exe (`install_root`). Never bake tokens into the spec or binary. |
-| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-opencode-agents.bat` on Windows, `.sh` on Linux) |
+| Bundled | `web/dist`, `agent/`, `VERSION`, `.env.example`, `opencoderman/` (**only** `agents/derman-build.md` + `derman-plan.md` + `derman-test.md` + `derman-reviewer.md` and `skills/`; no gitlab-reviewer), one copy script (`install-agents.bat` on Windows, `.sh` on Linux) |
 | Not bundled | OpenCode CLI, Codex, Git, glab — still installed separately |
 | CI | `.github/workflows/executables.yml` reads `packaging/pyinstaller/versions.env`. Linux ships **one freeze per Ubuntu** (`yaver-linux-x64-ubuntu-18.04` / `20.04` / `22.04` / `24.04`) via Docker `ubuntu:X.YY` + `freeze-in-ubuntu.sh`. Do **not** freeze Linux on `ubuntu-latest` — a 24.04 `libpython` needs `GLIBC_2.38` and will not start on 22.04 / 20.04 / 18.04. |
 | Paths | `src/install_paths.py` — `resource_root` is `_MEIPASS`; `install_root` is the exe folder |

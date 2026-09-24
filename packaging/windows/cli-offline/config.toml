@@ -1,0 +1,13 @@
+# Edit YOUR_HOST and YOUR_MODEL, then run install-codex.bat again.
+# The token is read from the CUSTOM_HOST_TOKEN environment variable.
+
+model = "YOUR_MODEL"
+model_provider = "custom"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[model_providers.custom]
+name = "Custom host"
+base_url = "https://YOUR_HOST/v1"
+wire_api = "responses"
+env_key = "CUSTOM_HOST_TOKEN"

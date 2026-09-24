@@ -8,6 +8,50 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.59] — 2026-09-24
+
+Claude Code is a third unattended worker beside OpenCode and Codex.
+Jobs run `claude` in print mode with the derman agents, stream the
+transcript, and resume that session later. The dashboard shows those
+jobs in the worker views. The offline CLI zip installs pinned
+OpenCode, Codex, and Claude, and install-agents copies the derman
+agents into both homes.
+
+### Added
+
+- Claude Code backend for plan, build, test, and review. One question
+  gets a single follow-up on the same process. A silent stream is
+  stopped, and the session id from the first line is kept for resume.
+- Claude jobs, transcripts, and the worker picker on the dashboard.
+- Pinned offline CLI installers for OpenCode, Codex, and Claude Code.
+  install-agents copies the derman agents into the OpenCode home and
+  the Claude home.
+
+### Changed
+
+- OpenCode, Codex, and Claude each keep their own session for the
+  same repository, branch, target, and kind. A Claude resume uses the
+  Claude continue prompt. The reviewer agent cannot edit files or run
+  a shell.
+- The cost on the Claude result line is stored on the job.
+
+### Fixed
+
+- A plan command on an Azure work item is kept when the same save
+  also changes state. Jira comment paging continues while total says
+  more comments remain.
+- A failed disk write no longer looks saved. A cancelled queue row
+  stays cancelled. Analytics search treats % and _ as literal text.
+  If the SQLite index write fails, Jobs, schedules, and sessions read
+  the JSON files.
+- Diagnostic zips redact environment names that contain KEY, including
+  CODEX_API_KEY.
+- Job transcripts can be read from the legacy .jira-agent folder.
+- Azure Boards jobs are labeled Azure Boards. A Claude user line is
+  labeled You. A multiline Claude reply is one transcript row.
+
+[0.9.59]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.59
+
 ## [0.9.58] — 2026-09-23
 
 A reused clone no longer keeps leftover commits or dirty files from a

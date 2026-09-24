@@ -124,15 +124,15 @@ def stage_opencoderman(bundled: Path, *, repo_root: Path | None = None) -> Path:
 def stage_agent_installers(bundled: Path) -> None:
     """Ship one copy script for this OS (bat on Windows, sh on Linux)."""
     if os.name == "nt":
-        bat = ROOT / "install-opencode-agents.bat"
+        bat = ROOT / "install-agents.bat"
         if not bat.is_file():
             raise FileNotFoundError(f"missing {bat}")
-        shutil.copy2(bat, bundled / "install-opencode-agents.bat")
+        shutil.copy2(bat, bundled / "install-agents.bat")
         return
-    sh = ROOT / "install-opencode-agents.sh"
+    sh = ROOT / "install-agents.sh"
     if not sh.is_file():
         raise FileNotFoundError(f"missing {sh}")
-    dest_sh = bundled / "install-opencode-agents.sh"
+    dest_sh = bundled / "install-agents.sh"
     shutil.copy2(sh, dest_sh)
     dest_sh.chmod(dest_sh.stat().st_mode | 0o111)
 

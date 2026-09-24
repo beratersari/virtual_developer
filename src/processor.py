@@ -1427,7 +1427,7 @@ class JobProcessor:
         return ""
 
     def _resume_session_candidates(
-        self, issue_key: str, git: Any = None
+        self, issue_key: str, git: Any = None, backend: str = ""
     ) -> tuple[List[str], List[str], Optional[str]]:
         """Session ids to try for this issue, plus forgotten ids and bind wd.
 
@@ -1457,7 +1457,7 @@ class JobProcessor:
                     other_kind_sids.add(fx)
 
         if repo and branch and target and kind:
-            hit = store.get(repo, branch, target, kind=kind)
+            hit = store.get(repo, branch, target, kind=kind, backend=backend)
             if hit:
                 recs.append(hit)
             for other in session_binds.other_session_kinds(kind):
@@ -1493,11 +1493,45 @@ class JobProcessor:
         sids: List[str] = []
 
         def _add_sid(raw: Any) -> None:
-            from src.backends.base import is_session_or_thread_id
+            from src.backends.base import (
+                BACKEND_CLAUDE,
+                BACKEND_CODEX,
+                BACKEND_OPENCODE,
+                is_codex_thread_id,
+                is_opencode_session_id,
+                is_session_or_thread_id,
+                normalize_backend_name,
+            )
+            from src.state.session_bind_store import inferred_bind_backend
 
             sid = str(raw or "").strip()
             if sid in other_kind_sids:
                 return
+            want = normalize_backend_name(backend)
+            if want:
+                owned = {
+                    str(rec.get("session_id") or "").strip()
+                    for rec in recs
+                    if inferred_bind_backend(rec) == want
+                    and str(rec.get("session_id") or "").strip()
+                }
+                claude_owned = set()
+                if repo and branch and target:
+                    for other in ("plan", "build", "test", "review"):
+                        row = store.get(
+                            repo, branch, target, kind=other, backend=BACKEND_CLAUDE
+                        )
+                        saved = str((row or {}).get("session_id") or "").strip()
+                        if saved:
+                            claude_owned.add(saved)
+                if want == BACKEND_OPENCODE and not is_opencode_session_id(sid):
+                    return
+                if want == BACKEND_CODEX and (
+                    not is_codex_thread_id(sid) or sid in claude_owned
+                ):
+                    return
+                if want == BACKEND_CLAUDE and sid not in owned and sid not in claude_owned:
+                    return
             if is_session_or_thread_id(sid) and sid not in sids:
                 sids.append(sid)
 
@@ -1543,8 +1577,13 @@ class JobProcessor:
         """
         if getattr(task, "session_id", None):
             return task.session_id
+        from src.backends.base import normalize_backend_name
+
+        backend = normalize_backend_name(getattr(task, "backend", None))
         repo, branch, target = self._session_bind_key(issue_key, git)
-        sids, forgotten, bind_wd = self._resume_session_candidates(issue_key, git)
+        sids, forgotten, bind_wd = self._resume_session_candidates(
+            issue_key, git, backend=backend
+        )
         if forgotten:
             task.forgotten_session_ids = list(
                 dict.fromkeys(
@@ -1572,14 +1611,13 @@ class JobProcessor:
         )
 
         from src.backends.base import (
+            BACKEND_CLAUDE,
             BACKEND_CODEX,
             BACKEND_OPENCODE,
+            is_claude_session_id,
             is_codex_thread_id,
             is_opencode_session_id,
-            normalize_backend_name,
         )
-
-        backend = normalize_backend_name(getattr(task, "backend", None))
 
         chosen: Optional[str] = None
         for sid in sids:
@@ -1588,6 +1626,8 @@ class JobProcessor:
             # Production always sets task.backend. Never give OpenCode a
             # Codex UUID (serve requires ses_*). Unset backend = legacy pick.
             if backend == BACKEND_CODEX and not is_codex_thread_id(sid):
+                continue
+            if backend == BACKEND_CLAUDE and not is_claude_session_id(sid):
                 continue
             if backend == BACKEND_OPENCODE and not is_opencode_session_id(sid):
                 continue
@@ -1639,7 +1679,11 @@ class JobProcessor:
                 )
 
         task.session_id = chosen
-        if not is_opencode:
+        if backend == BACKEND_CLAUDE:
+            from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
+
+            task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
+        elif not is_opencode:
             from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
 
             task.prompt = DEFAULT_CODEX_RESUME_PROMPT
@@ -1683,6 +1727,7 @@ class JobProcessor:
             reason="abandoned",
             issue_key=issue_key,
             kind=kind,
+            backend=self._backend_for_session_id(issue_key, sid),
         )
 
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
@@ -1725,6 +1770,7 @@ class JobProcessor:
             job_id=job_id,
             working_directory=wd,
             kind=kind,
+            backend=self._backend_for_session_id(issue_key, sid),
         )
         self._record_job_working_directory(issue_key, wd)
 
@@ -1809,6 +1855,28 @@ class JobProcessor:
             if rev:
                 return rev
         return (getattr(settings, "default_model", "") or "").strip()
+
+    def _backend_for_session_id(self, issue_key: str, session_id: str) -> str:
+        """Which worker produced this id. UUIDs follow the issue backend."""
+        from src.backends.base import (
+            BACKEND_CLAUDE,
+            BACKEND_CODEX,
+            BACKEND_OPENCODE,
+            is_codex_thread_id,
+            is_opencode_session_id,
+        )
+
+        sid = (session_id or "").strip()
+        if is_opencode_session_id(sid):
+            return BACKEND_OPENCODE
+        if sid.startswith("thread_"):
+            return BACKEND_CODEX
+        issue_backend = self._backend_for_issue(self.state_manager.get_state(issue_key))
+        if issue_backend == BACKEND_CLAUDE:
+            return BACKEND_CLAUDE
+        if is_codex_thread_id(sid) or issue_backend == BACKEND_CODEX:
+            return BACKEND_CODEX
+        return issue_backend or BACKEND_OPENCODE
 
     def _backend_for_issue(self, state: Any) -> str:
         """Per-issue Backend: from {params}, else settings.agent_backend."""
@@ -2046,6 +2114,15 @@ class JobProcessor:
             patch: Dict[str, Any] = {}
             if sid:
                 patch["opencode_session_id"] = sid
+            cost = result.get("total_cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                patch["estimated_cost"] = float(cost)
+                try:
+                    self.state_manager.update_state(
+                        issue_key, estimated_cost=float(cost)
+                    )
+                except Exception as e:
+                    logger.debug(f"{issue_key}: could not store Claude cost: {e}")
             # Fold every attempt's session log under this job (initial + _retryN)
             all_files = []
             if result.get("retry_info"):
@@ -2262,6 +2339,11 @@ class JobProcessor:
                 model=model_id,
                 backend=self._backend_for_issue(state),
             )
+            if not job:
+                logger.error(
+                    f"_start_job_record could not persist job for {state.issue_key}"
+                )
+                return None
             job_id = job["job_id"]
             self._active_jobs[state.issue_key] = job_id
             self._finish_job_record(
@@ -2311,6 +2393,11 @@ class JobProcessor:
             model=model_id,
             backend=self._backend_for_issue(state),
         )
+        if not job:
+            logger.error(
+                f"_start_job_record could not persist job for {state.issue_key}"
+            )
+            return None
         job_id = job["job_id"]
         self._active_jobs[state.issue_key] = job_id
         try:
@@ -3983,6 +4070,9 @@ class JobProcessor:
                 triggered_by=("scheduled" if scheduled_job else "poller"),
                 jira_assignee=assignee,
             )
+            if state is None:
+                logger.error(f"{issue_key}: create_state did not persist")
+                return False, "could not save issue state"
             meta = {"workflow_type": workflow_type.value}
             meta.update(self._azure_workitem_meta_from_event(event))
             self.state_manager.update_state(
@@ -5767,6 +5857,9 @@ class JobProcessor:
             st = self.state_manager.create_state(
                 issue_key, summary, description
             )
+            if st is None:
+                logger.error(f"{issue_key}: create_state did not persist")
+                return False
             self.state_manager.update_state(issue_key, metadata=meta)
         else:
             if st.status in self.IN_FLIGHT_STATUSES:
@@ -6608,6 +6701,9 @@ class JobProcessor:
             st = self.state_manager.create_state(
                 issue_key, summary, description
             )
+            if st is None:
+                azure_info(f"job skip create_state failed issue={issue_key}")
+                return False
             self.state_manager.update_state(issue_key, metadata=meta)
         else:
             if st.status in self.IN_FLIGHT_STATUSES:

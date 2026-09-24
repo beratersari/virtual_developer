@@ -529,7 +529,11 @@ export function JobDetailPage() {
             {artsLoading && sessionLogs.length === 0 && (
               <p className="mb-3 text-sm text-text-muted">Loading output…</p>
             )}
-            <JobSessionTab job={job} sessionLogs={sessionLogs} />
+            <JobSessionTab
+              job={job}
+              sessionLogs={sessionLogs}
+              worker={resolveJobWorker(job, live.settings?.agent_backend || '')}
+            />
           </div>
         )}
         {job && tab === 'logs' && (

@@ -827,7 +827,9 @@ def test_settings_update_rejects_unknown_backend():
     from src.dashboard.schemas import SettingsUpdate
 
     with pytest.raises(ValidationError):
-        SettingsUpdate(agent_backend="claude")
+        SettingsUpdate(agent_backend="not-a-worker")
+    accepted = SettingsUpdate(agent_backend="claude")
+    assert accepted.agent_backend == "claude"
 
 
 def test_settings_update_persists_backend_not_codex_provider(tmp_path, monkeypatch):

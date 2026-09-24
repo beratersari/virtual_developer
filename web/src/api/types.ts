@@ -249,7 +249,7 @@ export type JobItem = {
   agent: string
   /** Worker model id used for this run */
   model?: string | null
-  /** opencode | codex (empty = infer on the client) */
+  /** opencode | codex | claude (empty = infer on the client) */
   backend?: string
   status: string
   task_id?: string | null

@@ -14,6 +14,7 @@ export function JobsTable({
   onToggleSelect,
   onOpenJob,
   empty = 'Nothing here for this filter.',
+  fallbackWorker = '',
 }: {
   jobs: JobItem[]
   compact?: boolean
@@ -22,6 +23,7 @@ export function JobsTable({
   onToggleSelect?: (jobId: string) => void
   onOpenJob: (issueKey: string, jobId: string) => void
   empty?: string
+  fallbackWorker?: string
 }) {
   if (jobs.length === 0) {
     return (
@@ -64,7 +66,9 @@ export function JobsTable({
                     GitLab
                   </span>
                 )}
-                {!channel && (j.source || 'jira') === 'azure' && (
+                {!channel &&
+                  ((j.source || 'jira') === 'azure' ||
+                    (j.source || 'jira') === 'azure_workitem') && (
                   <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
                     Azure
                   </span>
@@ -77,7 +81,7 @@ export function JobsTable({
                   </span>
                 )}
                 <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
-                  {workerLabel(resolveJobWorker(j))}
+                  {workerLabel(resolveJobWorker(j, fallbackWorker))}
                 </span>
               </div>
               <div className={`mt-1 truncate text-text ${compact ? 'text-sm' : 'text-[15px]'}`}>

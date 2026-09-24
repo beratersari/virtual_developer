@@ -1076,7 +1076,18 @@ def is_azure_workitem_comment_event(
     if parsed is None:
         return False
     kinds = set(parsed.change_kinds)
-    return kinds == {"comment"}
+    if kinds == {"comment"}:
+        return True
+    # A Boards save often sends System.State and the discussion together.
+    # A plan command in that comment is still the implement signal.
+    if "comment" not in kinds:
+        return False
+    note = extract_workitem_comment_text(data)
+    if not note:
+        return False
+    from src.config import settings
+
+    return bool(workitem_plan_command(note, settings.azure_bot_mentions_list))
 
 
 def decide_azure_workitem_comment_webhook(

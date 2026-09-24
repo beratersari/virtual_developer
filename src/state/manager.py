@@ -178,8 +178,12 @@ class JiraStateManager:
         description: str = "",
         triggered_by: Optional[str] = None,
         jira_assignee: Optional[str] = None,
-    ) -> JiraAgentState:
-        """Create a new state for an issue."""
+    ) -> Optional[JiraAgentState]:
+        """Create a new state for an issue.
+
+        Returns None when the first disk write fails and nothing is stored.
+        Callers must not treat that as an owned pending issue.
+        """
         logger.info(f"state {issue_key}: created -> {TaskStatus.PENDING.value}")
 
         state = JiraAgentState(
@@ -196,6 +200,7 @@ class JiraStateManager:
             existing = self.get_state(issue_key)
             if existing is not None:
                 return existing
+            return None
         return state
 
     def update_state(

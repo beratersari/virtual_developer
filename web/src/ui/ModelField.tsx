@@ -30,6 +30,7 @@ export function ModelField({
   const loadGen = useRef(0)
   const worker = (backend || '').trim().toLowerCase() || 'opencode'
   const isCodex = worker === 'codex'
+  const isClaude = worker === 'claude' || worker === 'claude-code'
   const loading = fetching || loadedWorker !== worker
 
   const load = async (refresh: boolean) => {
@@ -144,7 +145,13 @@ export function ModelField({
               setCustom(true)
               onChange(e.target.value)
             }}
-            placeholder={isCodex ? 'model id Codex accepts' : 'provider/model-id'}
+            placeholder={
+              isCodex
+                ? 'model id Codex accepts'
+                : isClaude
+                  ? 'model id the Claude server accepts'
+                  : 'provider/model-id'
+            }
           />
         </label>
       )}
@@ -154,14 +161,18 @@ export function ModelField({
           : showInput
             ? isCodex
               ? 'Type any id Codex accepts.'
-              : 'Type a provider/model id.'
+              : isClaude
+                ? 'Type the model id your Claude server serves.'
+                : 'Type a provider/model id.'
             : isCodex
               ? allowEmpty
                 ? 'This job only. List is from ~/.codex/config.toml. Choose Other id… to type a custom model.'
                 : 'Ids from ~/.codex/config.toml. Choose Other id… to type a custom model.'
-              : allowEmpty
-                ? 'This job only. Leave default to use Settings. Choose Other id… to type a custom model.'
-                : 'Inventory from OpenCode. Choose Other id… to type a custom model.'}
+              : isClaude
+                ? 'Claude Code uses the model id sent to ANTHROPIC_BASE_URL. Choose Other id… to type one.'
+                : allowEmpty
+                  ? 'This job only. Leave default to use Settings. Choose Other id… to type a custom model.'
+                  : 'Inventory from OpenCode. Choose Other id… to type a custom model.'}
       </span>
       {inventory?.error && <p className="text-xs text-warning-text">{inventory.error}</p>}
     </div>

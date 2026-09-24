@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from src.backends.base import (
+    BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_OPENCODE,
     AgentBackend,
@@ -34,6 +35,10 @@ def get_agent_backend(name: Optional[str] = None) -> AgentBackend:
         from src.backends.codex import CodexBackend
 
         return CodexBackend()
+    if resolved == BACKEND_CLAUDE:
+        from src.backends.claude import ClaudeBackend
+
+        return ClaudeBackend()
     from src.backends.opencode import OpenCodeBackend
 
     return OpenCodeBackend()
