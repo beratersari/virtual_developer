@@ -426,6 +426,15 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest tests/ --ignore=tests/test_logical_issues.py --cov=src --cov-branch
 ```
 
+### Live checks
+
+Claude Code live checks use a free model through `ANTHROPIC_BASE_URL`.
+Do not try to connect Claude's own login. Do not run `claude` OAuth
+refresh, and do not call `api.anthropic.com`. Point the CLI at an
+Anthropic-shaped proxy for a keyless model (Pollinations `openai` is
+the usual one). OpenCode's free id `opencode/hy3-free` is a different
+worker.
+
 ### Rules
 
 - Put tests under `tests/`; use fixtures in `tests/conftest.py`.
@@ -625,6 +634,7 @@ cp .env.example .env   # set JIRA_HOST, JIRA_API_TOKEN, PROJECT_GITLAB_URL, GITL
 - Reintroduce Jira username/basic auth without an explicit product decision.
 - Enable TLS certificate verification on outbound HTTP without an explicit secure-path decision.
 - Ship Windows packaging that prunes plugin `*.md`, uses junctions for Bun cache, or registers legacy `oh-my-opencode` without the openagent id (see §9).
+- Try to connect Claude's own login for a live check. Use a free model through `ANTHROPIC_BASE_URL` (see §4).
 
 ---
 
