@@ -1977,8 +1977,21 @@ def _path_under(root: Path, path: Path) -> bool:
         return False
 
 
-def _read_text_capped(path: Path, max_chars: int, *, root: Optional[Path] = None) -> Dict[str, Any]:
-    if root is not None and not _path_under(root, path):
+def _read_text_capped(
+    path: Path,
+    max_chars: int,
+    *,
+    root: Optional[Path] = None,
+    roots: Optional[List[Path]] = None,
+) -> Dict[str, Any]:
+    allowed = [item for item in (roots or []) if item is not None]
+    if root is not None:
+        allowed.append(root)
+
+    def _inside(candidate: Path) -> bool:
+        return any(_path_under(item, candidate) for item in allowed)
+
+    if allowed and not _inside(path):
         return {
             "path": str(path),
             "error": "path outside allowed directory",
@@ -1989,7 +2002,7 @@ def _read_text_capped(path: Path, max_chars: int, *, root: Optional[Path] = None
     try:
         if path.is_symlink():
             resolved = path.resolve()
-            if root is not None and not _path_under(root, resolved):
+            if allowed and not _inside(resolved):
                 return {
                     "path": str(path),
                     "error": "symlink escape blocked",
@@ -2121,7 +2134,10 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
         job = job.model_dump()
     if not isinstance(job, dict):
         return {"prompts": [], "session_logs": []}
-    root = _artifacts_root()
+    from src.paths import agent_data_roots
+
+    roots = list(agent_data_roots())
+    roots.append(_artifacts_root())
     prompts: List[Dict[str, Any]] = []
     logs: List[Dict[str, Any]] = []
     seen_p: set = set()
@@ -2133,12 +2149,12 @@ def collect_job_text_artifacts(job: Any) -> Dict[str, List[Dict[str, Any]]]:
         if not p or p in seen_p:
             continue
         seen_p.add(p)
-        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, root=root))
+        prompts.append(_read_text_capped(Path(p), _MAX_PROMPT_CHARS, roots=roots))
     for p in log_paths:
         if not p or p in seen_l:
             continue
         seen_l.add(p)
-        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, root=root))
+        logs.append(_read_text_capped(Path(p), _MAX_SESSION_CHARS, roots=roots))
     return {"prompts": prompts, "session_logs": logs}
 
 
