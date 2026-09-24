@@ -2114,6 +2114,15 @@ class JobProcessor:
             patch: Dict[str, Any] = {}
             if sid:
                 patch["opencode_session_id"] = sid
+            cost = result.get("total_cost_usd")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                patch["estimated_cost"] = float(cost)
+                try:
+                    self.state_manager.update_state(
+                        issue_key, estimated_cost=float(cost)
+                    )
+                except Exception as e:
+                    logger.debug(f"{issue_key}: could not store Claude cost: {e}")
             # Fold every attempt's session log under this job (initial + _retryN)
             all_files = []
             if result.get("retry_info"):

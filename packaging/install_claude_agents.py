@@ -45,12 +45,18 @@ def to_claude_agent(text: str, name: str) -> str:
         "Does not git push."
     )
     body = _split_frontmatter(text)
+    if name == "derman-reviewer":
+        tools = "Read, Grep, Glob"
+        denied = "AskUserQuestion, Edit, Write, Bash"
+    else:
+        tools = "Read, Edit, Write, Grep, Glob, Bash"
+        denied = "AskUserQuestion"
     return (
         "---\n"
         f"name: {name}\n"
         f"description: {description}\n"
-        "tools: Read, Edit, Write, Grep, Glob, Bash\n"
-        "disallowedTools: AskUserQuestion\n"
+        f"tools: {tools}\n"
+        f"disallowedTools: {denied}\n"
         "---\n\n"
         + body
     )

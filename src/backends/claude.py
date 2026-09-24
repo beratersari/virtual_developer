@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -79,29 +80,37 @@ def _is_plan_agent(agent: str) -> bool:
     return "plan" in (agent or "").lower()
 
 
+def prepare_claude_prompt(prompt: str) -> str:
+    """Standing unattended rules in front of the job text."""
+    text = (prompt or "").strip()
+    if "UNATTENDED JOB:" in text or "no human in this" in text.lower():
+        return text
+    return (
+        "UNATTENDED JOB: do not ask clarifying questions, confirmations, "
+        "or wait for a human. Choose defaults and finish the work. "
+        "Do not git push or open a merge request.\n\n"
+        + text
+    )
+
+
 def build_claude_argv(
     *,
     cli: str,
-    prompt: str,
+    prompt: str = "",
     model: str = "",
     agent: str = "",
     resume_id: str = "",
 ) -> List[str]:
-    """``claude --print`` argv. Prompt last. No secrets."""
+    """``claude --print`` argv. The prompt is written to stdin, not argv."""
+    del prompt
     exe = (cli or "claude").strip() or "claude"
-    text = (prompt or "").strip()
-    if "UNATTENDED JOB:" not in text and "no human in this" not in text.lower():
-        text = (
-            "UNATTENDED JOB: do not ask clarifying questions, confirmations, "
-            "or wait for a human. Choose defaults and finish the work. "
-            "Do not git push or open a merge request.\n\n"
-            + text
-        )
     cmd = [
         exe,
         "--print",
         "--permission-mode",
         "bypassPermissions",
+        "--input-format",
+        "stream-json",
         "--output-format",
         "stream-json",
         "--verbose",
@@ -117,8 +126,23 @@ def build_claude_argv(
     rid = (resume_id or "").strip()
     if is_claude_session_id(rid):
         cmd.extend(["--resume", rid])
-    cmd.append(text)
     return cmd
+
+
+# No assistant, tool, or result line for this long means the stream is stuck.
+SILENCE_SECONDS = 180.0
+
+
+def claude_user_line(text: str) -> bytes:
+    """One stdin turn for ``--input-format stream-json``."""
+    payload = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+    return (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _windows_spawn_argv(argv: List[str]) -> List[str]:
@@ -292,6 +316,9 @@ def _take_claude_event(state: Dict[str, Any], event: Dict[str, Any]) -> None:
         err = _as_text(event.get("error")).strip()
         if err:
             state["error"] = err
+        cost = event.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            state["total_cost_usd"] = float(cost)
 
 
 def _taken_text(state: Dict[str, Any]) -> str:
@@ -319,6 +346,7 @@ def _empty_take() -> Dict[str, Any]:
         "session_id": "",
         "tools": [],
         "saw": False,
+        "total_cost_usd": None,
     }
 
 
@@ -353,6 +381,7 @@ def _state_payload(state: Dict[str, Any], text: str) -> Dict[str, Any]:
         "tools": list(state.get("tools") or []),
         "is_error": bool(state.get("is_error")),
         "error": str(state.get("error") or ""),
+        "total_cost_usd": state.get("total_cost_usd"),
     }
 
 
@@ -479,11 +508,10 @@ class ClaudeBackend:
             )
             session_id = ""
 
-        async def _once(prompt: str, *, resume_id: str) -> Dict[str, Any]:
+        async def _drive(prompt: str, *, resume_id: str) -> Dict[str, Any]:
             argv = _windows_spawn_argv(
                 build_claude_argv(
                     cli=cli,
-                    prompt=prompt,
                     model=model,
                     agent=agent,
                     resume_id=resume_id,
@@ -495,6 +523,7 @@ class ClaudeBackend:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(request.working_directory) if request.working_directory else None,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=claude_child_env(),
@@ -503,23 +532,48 @@ class ClaudeBackend:
             handle["pid"] = proc.pid
             stdout_parts: List[str] = []
             stderr_parts: List[str] = []
+            seen = {"session_id": resume_id, "published": False}
+            last_event = time.monotonic()
+            deadline = last_event + timeout
+            nudged = {"done": False}
+
+            def _publish(sid: str) -> None:
+                if not sid or seen["published"]:
+                    return
+                seen["session_id"] = sid
+                seen["published"] = True
+                if request.on_session:
+                    try:
+                        request.on_session(sid)
+                    except Exception:
+                        pass
 
             def _emit(kind: str, raw: bytes) -> None:
+                nonlocal last_event
                 text = raw.decode("utf-8", errors="replace").rstrip("\r")
                 if not text.strip():
                     return
                 if kind == "stdout":
                     stdout_parts.append(text)
                     log_lines.append(text)
+                    piece = text.strip()
+                    if piece.startswith("{"):
+                        try:
+                            event = json.loads(piece)
+                        except json.JSONDecodeError:
+                            event = None
+                        if isinstance(event, dict) and _is_claude_event(event):
+                            last_event = time.monotonic()
+                            sid = str(event.get("session_id") or "").strip()
+                            if sid:
+                                _publish(sid)
                 else:
                     stderr_parts.append(text)
                 if request.on_output:
-                    # The session log is this line. Cutting it makes the
-                    # tool-result JSON invalid, and the transcript then
-                    # shows the raw object.
                     request.on_output(kind, text)
 
-            async def _pump(stream: asyncio.StreamReader | None, kind: str) -> None:
+            async def _pump_stderr() -> None:
+                stream = proc.stderr
                 if stream is None:
                     return
                 pending = b""
@@ -527,38 +581,117 @@ class ClaudeBackend:
                     chunk = await stream.read(65536)
                     if not chunk:
                         if pending.strip():
-                            _emit(kind, pending)
+                            _emit("stderr", pending)
                         return
                     pending += chunk
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
-                        _emit(kind, line)
+                        _emit("stderr", line)
+
+            stderr_task = asyncio.create_task(_pump_stderr())
+
+            async def _send(text: str) -> None:
+                if proc.stdin is None:
+                    return
+                proc.stdin.write(claude_user_line(text))
+                await proc.stdin.drain()
+
+            async def _read_until_result() -> str:
+                """Return result, stall, timeout, or eof."""
+                stream = proc.stdout
+                if stream is None:
+                    return "eof"
+                pending = b""
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        return "timeout"
+                    wait = min(SILENCE_SECONDS, deadline - now)
+                    try:
+                        chunk = await asyncio.wait_for(stream.read(65536), timeout=wait)
+                    except asyncio.TimeoutError:
+                        if time.monotonic() >= deadline:
+                            return "timeout"
+                        return "stall"
+                    if not chunk:
+                        if pending.strip():
+                            _emit("stdout", pending)
+                        return "eof"
+                    pending += chunk
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        _emit("stdout", line)
+                        piece = line.decode("utf-8", errors="replace").strip()
+                        if not piece.startswith("{"):
+                            continue
+                        try:
+                            event = json.loads(piece)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(event, dict) and event.get("type") == "result":
+                            return "result"
+
+            def _parsed() -> Dict[str, Any]:
+                parsed = parse_claude_output("\n".join(stdout_parts))
+                if not parsed.get("session_id"):
+                    parsed["session_id"] = seen["session_id"]
+                parsed["stderr"] = "\n".join(stderr_parts).strip()
+                return parsed
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        _pump(proc.stdout, "stdout"),
-                        _pump(proc.stderr, "stderr"),
-                        proc.wait(),
-                    ),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                self.cancel(handle)
-                return {"timed_out": True, "text": "", "session_id": resume_id}
-            stdout = "\n".join(stdout_parts)
-            stderr = "\n".join(stderr_parts)
-            parsed = parse_claude_output(stdout)
-            if not parsed["session_id"]:
-                parsed["session_id"] = resume_id
-            parsed["returncode"] = proc.returncode
-            parsed["stderr"] = stderr.strip()
-            if parsed["session_id"] and request.on_session:
+                await _send(prepare_claude_prompt(prompt))
+                status = await _read_until_result()
+                if status in {"stall", "timeout"}:
+                    self.cancel(handle)
+                    parsed = _parsed()
+                    parsed["timed_out"] = True
+                    parsed["stall"] = status == "stall"
+                    return parsed
+                first = _parsed()
+                if (
+                    claude_reply_asks_question(first)
+                    and not nudged["done"]
+                    and not (request.should_abort and request.should_abort())
+                ):
+                    nudged["done"] = True
+                    logger.info(
+                        "[claude] assistant asked a clarifying question "
+                        "— sending one unattended nudge"
+                    )
+                    nudge = (
+                        DEFAULT_CLAUDE_PLAN_NUDGE_PROMPT
+                        if _is_plan_agent(agent)
+                        else DEFAULT_CLAUDE_NUDGE_PROMPT
+                    )
+                    await _send(nudge)
+                    status = await _read_until_result()
+                    if status in {"stall", "timeout"}:
+                        self.cancel(handle)
+                        parsed = _parsed()
+                        parsed["timed_out"] = True
+                        parsed["stall"] = status == "stall"
+                        parsed["nudged"] = True
+                        return parsed
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                remain = max(1.0, deadline - time.monotonic())
                 try:
-                    request.on_session(parsed["session_id"])
-                except Exception:
+                    await asyncio.wait_for(proc.wait(), timeout=remain)
+                except asyncio.TimeoutError:
+                    self.cancel(handle)
+                    parsed = _parsed()
+                    parsed["timed_out"] = True
+                    return parsed
+                parsed = _parsed()
+                parsed["returncode"] = proc.returncode
+                parsed["nudged"] = nudged["done"]
+                return parsed
+            finally:
+                stderr_task.cancel()
+                try:
+                    await stderr_task
+                except asyncio.CancelledError:
                     pass
-            return parsed
 
         if request.should_abort and request.should_abort():
             return AgentRunResult(
@@ -567,7 +700,7 @@ class ClaudeBackend:
                 backend=self.name,
             )
         try:
-            first = await _once(request.prompt or "", resume_id=session_id)
+            outcome = await _drive(request.prompt or "", resume_id=session_id)
         except FileNotFoundError:
             return AgentRunResult(
                 returncode=127,
@@ -577,90 +710,60 @@ class ClaudeBackend:
                 ),
                 backend=self.name,
             )
-        if first.get("timed_out"):
+        sid = str(outcome.get("session_id") or "") or None
+        cost = outcome.get("total_cost_usd")
+        extra: Dict[str, Any] = {}
+        if isinstance(cost, float):
+            extra["total_cost_usd"] = cost
+        if outcome.get("nudged"):
+            extra["unattended_nudge"] = True
+        if outcome.get("timed_out"):
+            why = (
+                f"[claude] no stream output for {int(SILENCE_SECONDS)}s"
+                if outcome.get("stall")
+                else f"[claude] timed out after {int(timeout)}s"
+            )
             return AgentRunResult(
                 returncode=-1,
-                stdout="\n".join(log_lines),
-                stderr=f"[claude] timed out after {int(timeout)}s",
-                session_id=first.get("session_id") or None,
+                stdout=str(outcome.get("text") or ""),
+                stderr=why,
+                session_id=sid,
                 timed_out=True,
+                incomplete=bool(outcome.get("nudged")),
+                incomplete_reasons=(
+                    ["assistant asked a clarifying question"]
+                    if outcome.get("nudged")
+                    else []
+                ),
                 backend=self.name,
+                extra=extra,
             )
-        sid = str(first.get("session_id") or "")
-        if not claude_reply_asks_question(first):
-            code = 0 if not first.get("is_error") and first.get("returncode") == 0 else (
-                first.get("returncode") if first.get("returncode") not in (None, 0) else 1
-            )
-            if first.get("is_error"):
-                code = code or 1
-            return AgentRunResult(
-                returncode=int(code or 0),
-                stdout=str(first.get("text") or ""),
-                stderr=str(first.get("stderr") or first.get("error") or ""),
-                session_id=sid or None,
-                backend=self.name,
-            )
-
-        logger.info("[claude] assistant asked a clarifying question — sending one unattended nudge")
-        nudge = (
-            DEFAULT_CLAUDE_PLAN_NUDGE_PROMPT
-            if _is_plan_agent(agent)
-            else DEFAULT_CLAUDE_NUDGE_PROMPT
-        )
-        if request.should_abort and request.should_abort():
-            return AgentRunResult(
-                returncode=-1,
-                stdout=str(first.get("text") or ""),
-                stderr="[claude] cancelled before nudge",
-                session_id=sid or None,
-                incomplete=True,
-                incomplete_reasons=["assistant asked a clarifying question"],
-                backend=self.name,
-            )
-        try:
-            second = await _once(nudge, resume_id=sid)
-        except FileNotFoundError:
-            return AgentRunResult(
-                returncode=127,
-                stderr="[claude] Claude Code CLI was not found.",
-                session_id=sid or None,
-                backend=self.name,
-            )
-        if second.get("timed_out"):
-            return AgentRunResult(
-                returncode=-1,
-                stdout=str(first.get("text") or ""),
-                stderr=f"[claude] timed out after nudge ({int(timeout)}s)",
-                session_id=sid or None,
-                timed_out=True,
-                incomplete=True,
-                incomplete_reasons=["assistant asked a clarifying question"],
-                backend=self.name,
-            )
-        if claude_reply_asks_question(second):
+        if claude_reply_asks_question(outcome):
             return AgentRunResult(
                 returncode=1,
-                stdout=str(second.get("text") or first.get("text") or ""),
+                stdout=str(outcome.get("text") or ""),
                 stderr=(
                     "[claude] assistant asked a clarifying question "
                     "(unattended; no human reply path). After one nudge still asking."
                 ),
-                session_id=str(second.get("session_id") or sid) or None,
+                session_id=sid,
                 incomplete=True,
                 incomplete_reasons=["assistant asked a clarifying question"],
                 backend=self.name,
-                extra={"unattended_nudge": True},
+                extra=extra,
             )
-        code = 0 if not second.get("is_error") and second.get("returncode") == 0 else (
-            second.get("returncode") if second.get("returncode") not in (None, 0) else 1
+        code = 0 if not outcome.get("is_error") and outcome.get("returncode") == 0 else (
+            outcome.get("returncode") if outcome.get("returncode") not in (None, 0) else 1
         )
+        if outcome.get("is_error"):
+            code = code or 1
         return AgentRunResult(
             returncode=int(code or 0),
-            stdout=str(second.get("text") or ""),
-            stderr=str(second.get("stderr") or ""),
-            session_id=str(second.get("session_id") or sid) or None,
+            stdout=str(outcome.get("text") or ""),
+            stderr=str(outcome.get("stderr") or outcome.get("error") or ""),
+            session_id=sid,
             backend=self.name,
-            extra={"unattended_nudge": True},
+            extra=extra,
         )
 
     def cancel(self, handle: Dict[str, Any]) -> None:

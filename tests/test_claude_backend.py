@@ -36,6 +36,10 @@ def test_install_claude_agents_rewrites_frontmatter(tmp_path):
     assert "name: derman-build" in header or "name: derman-build" in text.split("---")[1]
     assert "AskUserQuestion" in text
     assert "mode: primary" not in text.split("---")[1]
+    reviewer = (dest / "agents" / "derman-reviewer.md").read_text(encoding="utf-8")
+    reviewer_head = reviewer.split("---", 2)[1]
+    assert "tools: Read, Grep, Glob" in reviewer_head
+    assert "Edit" in reviewer_head.split("disallowedTools:", 1)[1]
     assert "strictly unattended" in body.lower()
     assert (dest / "skills" / "python" / "SKILL.md").is_file()
 
@@ -63,8 +67,8 @@ def test_build_claude_argv_is_unattended_and_has_no_secret():
     assert "derman-build" in argv
     assert "--model" in argv
     assert "qwen2.5-coder" in argv
-    assert argv[-1].startswith("UNATTENDED JOB:")
-    assert "do the work" in argv[-1]
+    assert "--input-format" in argv
+    assert "do the work" not in argv
     assert "sk-" not in " ".join(argv)
 
 
@@ -278,26 +282,42 @@ def test_parse_claude_json_and_question_tool():
     assert claude_reply_asks_question({"text": "Committed the fix.", "tools": []}) is False
 
 
-def _write_fake_claude(tmp_path: Path) -> Path:
+def _write_fake_claude(tmp_path: Path, *, stall: bool = False) -> Path:
     script = tmp_path / "fake_claude.py"
     script.write_text(
         "\n".join(
             [
-                "import json, sys",
-                "args = sys.argv[1:]",
-                "prompt = args[-1] if args else ''",
-                "resume = '--resume' in args",
-                "if resume or 'no human in this' in prompt.lower():",
-                "    text = 'Finished the work.'",
-                "else:",
-                "    text = 'Which database should I use?'",
-                "print(json.dumps({",
-                "    'type': 'result',",
-                "    'subtype': 'success',",
-                "    'is_error': False,",
-                f"    'session_id': '{SESSION}',",
-                "    'result': text,",
-                "}))",
+                "import json, sys, time",
+                f"SESSION = '{SESSION}'",
+                "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': SESSION}), flush=True)",
+                "stall = '--stall' in sys.argv",
+                "if stall:",
+                "    time.sleep(30)",
+                "    sys.exit(0)",
+                "turn = 0",
+                "for line in sys.stdin:",
+                "    line = line.strip()",
+                "    if not line:",
+                "        continue",
+                "    turn += 1",
+                "    text = ''",
+                "    try:",
+                "        msg = json.loads(line).get('message') or {}",
+                "        content = msg.get('content') or []",
+                "        if content:",
+                "            text = content[0].get('text') or ''",
+                "    except Exception:",
+                "        text = line",
+                "    if turn == 1 and 'no human in this' not in text.lower():",
+                "        reply = 'Which database should I use?'",
+                "        cost = 0.42",
+                "    else:",
+                "        reply = 'Finished the work.'",
+                "        cost = 0.15",
+                "    print(json.dumps({",
+                "        'type': 'result', 'subtype': 'success', 'is_error': False,",
+                "        'session_id': SESSION, 'result': reply, 'total_cost_usd': cost,",
+                "    }), flush=True)",
                 "",
             ]
         ),
@@ -345,3 +365,42 @@ async def test_claude_backend_nudges_once_then_finishes(tmp_path, monkeypatch):
     assert result.returncode == 0
     assert "Finished the work." in result.stdout
     assert result.extra.get("unattended_nudge") is True
+    assert result.extra.get("total_cost_usd") == 0.15
+
+
+@pytest.mark.asyncio
+async def test_claude_backend_kills_a_silent_stream(tmp_path, monkeypatch):
+    from src.backends.base import AgentRunRequest
+    from src.backends.claude import ClaudeBackend
+    import src.backends.claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "SILENCE_SECONDS", 0.4)
+    cli = _write_fake_claude(tmp_path)
+    script = tmp_path / "fake_claude.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json, sys, time",
+                f"print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': '{SESSION}'}}), flush=True)",
+                "time.sleep(30)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "src.backends.claude.resolve_claude_cli", lambda *_a, **_k: str(cli)
+    )
+    result = await ClaudeBackend().run(
+        AgentRunRequest(
+            prompt="implement the ticket",
+            agent="derman-build",
+            working_directory=tmp_path,
+            timeout_seconds=30,
+            on_session=seen.append,
+        )
+    )
+    assert result.timed_out is True
+    assert result.session_id == SESSION
+    assert seen == [SESSION]
+    assert "no stream output" in result.stderr
