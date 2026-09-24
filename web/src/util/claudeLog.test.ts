@@ -186,6 +186,29 @@ assert(!JSON.stringify(mixedEvents).includes('"tools"'), 'init event is not dump
 assert(mixedEvents.some((ev) => ev.body === 'API retry 1: rate_limit'), 'api retry is a short line')
 assert(mixedEvents.some((ev) => ev.body === 'Please continue.'), 'user text is kept')
 assert(mixedEvents.some((ev) => ev.kind === 'error' && ev.body === 'API Error: Request rejected (429)'), 'error result is kept')
+
+const pollinationsError = [
+  JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text:
+            'API Error: Request rejected (429) · {"error":"400 Bad Request","status":400,"deprecation_notice":"NOTE: migrate"}',
+        },
+      ],
+    },
+    session_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  }),
+  'API Error: Request rejected (429) · {"error":"400 Bad Request","status":400,"deprecation_notice":"NOTE: The legacy text API is being',
+].join('\n')
+const errorEvents = claudeTranscriptEventsFromLog(pollinationsError)
+assert(errorEvents.length === 2, 'error sentence stays, blob does not add a row')
+assert(!JSON.stringify(errorEvents).includes('deprecation_notice'), 'pollinations error json is not shown')
+assert(!JSON.stringify(errorEvents).includes('{"error"'), 'cut-off error json is not shown')
+assert(errorEvents.every((ev) => (ev.body || '').startsWith('API Error: Request rejected (429)')), 'error prefix stays')
 assert(!JSON.stringify(events).includes('query_source'), 'transcript has no diagnostic json')
 assert(!JSON.stringify(events).includes('unrecognized_model'), 'transcript has no warning tag')
 

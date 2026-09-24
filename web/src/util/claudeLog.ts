@@ -21,6 +21,32 @@ function collapse(text: string): string {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
+const LEAKED_JSON = /"error"|"type"|"usage"|tool_use_id|deprecation_notice|total_cost_usd/
+
+/** Drop a Claude/proxy JSON blob glued onto an error sentence, even if the brace was cut off. */
+function stripLeakedJson(text: string): string {
+  if (!text.includes('{')) return text
+  const cleaned = text.replace(/\{[\s\S]*$/g, (chunk) => {
+    if (!LEAKED_JSON.test(chunk)) return chunk
+    const end = jsonObjectEnd(chunk, 0)
+    const slice = end > 0 ? chunk.slice(0, end) : ''
+    if (slice) {
+      try {
+        const obj = JSON.parse(slice) as Record<string, unknown>
+        const err = obj.error
+        if (typeof err === 'string' && err.trim()) return err.trim()
+        if (typeof obj.message === 'string' && obj.message.trim() && !String(obj.message).includes('{')) {
+          return obj.message.trim()
+        }
+      } catch {
+        /* unclosed blob */
+      }
+    }
+    return ''
+  })
+  return cleaned.replace(/\s+·\s*$/g, '').replace(/[ \t]{2,}/g, ' ').trim()
+}
+
 /** Index just past the `{…}` that starts at `start`, respecting strings. */
 function jsonObjectEnd(text: string, start: number): number {
   if (text[start] !== '{') return -1
@@ -223,8 +249,8 @@ function walkLines(text: string): string {
     }
     plain.push(line)
   }
-  const prose = collapse(plain.join('\n'))
-  const extracted = takenText(state)
+  const prose = collapse(stripLeakedJson(plain.join('\n')))
+  const extracted = stripLeakedJson(takenText(state))
   if (!prose) return extracted
   if (!extracted || prose.includes(extracted) || extracted.includes(prose)) return prose
   return collapse(`${prose}\n${extracted}`)
@@ -323,7 +349,8 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
     if (!piece) continue
     if (!piece.startsWith('{')) {
       const plain = stripCliDiagnostics(piece).trim()
-      if (plain) events.push({ kind: 'meta', title: 'Claude Code', body: plain })
+      const shown = stripLeakedJson(plain)
+      if (shown) events.push({ kind: 'meta', title: 'Claude Code', body: shown })
       continue
     }
     let parsed: unknown
@@ -342,8 +369,8 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
       const sub = String(obj.subtype || '')
       if (sub === 'api_retry') {
         const attempt = obj.attempt != null ? ` ${obj.attempt}` : ''
-        const why = String(obj.error || obj.message || 'retry')
-        events.push({ kind: 'meta', title: 'Claude Code', body: `API retry${attempt}: ${why}` })
+        const why = stripLeakedJson(String(obj.error || obj.message || 'retry'))
+        events.push({ kind: 'meta', title: 'Claude Code', body: `API retry${attempt}: ${why || 'retry'}` })
       }
       continue
     }
@@ -355,7 +382,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
           if (!block || typeof block !== 'object') continue
           const rec = block as Record<string, unknown>
           if (rec.type === 'text') {
-            const said = asText(rec.text).trim()
+            const said = stripLeakedJson(asText(rec.text).trim())
             if (said) events.push({ kind: 'message', title: 'Claude Code', body: said })
             continue
           }
@@ -363,7 +390,9 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
           const body = asText(rec.content).trim()
           if (!body) continue
           if (!body) continue
-          const preview = body.length > 800 ? `${body.slice(0, 800)}…` : body
+          const shown = stripLeakedJson(body)
+          if (!shown) continue
+          const preview = shown.length > 800 ? `${shown.slice(0, 800)}…` : shown
           events.push({
             kind: rec.is_error ? 'error' : 'command',
             title: 'tool result',
@@ -376,7 +405,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
     if (kind === 'assistant') {
       const message = (obj.message && typeof obj.message === 'object' ? obj.message : {}) as Record<string, unknown>
       const content = message.content
-      const said = textFromContent(content)
+      const said = stripLeakedJson(textFromContent(content))
       if (said) events.push({ kind: 'message', title: 'Claude Code', body: said })
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -390,7 +419,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
       continue
     }
     if (kind === 'result' || obj.result != null || obj.is_error != null) {
-      const result = withoutRawEnvelope(asText(obj.result).trim() || asText(obj.error).trim())
+      const result = stripLeakedJson(withoutRawEnvelope(asText(obj.result).trim() || asText(obj.error).trim()))
       const previous = events[events.length - 1]
       if (result && previous?.body !== result) {
         events.push({

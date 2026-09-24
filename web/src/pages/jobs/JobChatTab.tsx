@@ -228,6 +228,65 @@ function CodexTranscript({
   )
 }
 
+function ClaudeToolBlock({
+  title,
+  command,
+  output,
+  failed,
+}: {
+  title: string
+  command: string
+  output: string
+  failed: boolean
+}) {
+  const summary = command.length > 240 ? `${command.slice(0, 240)}…` : command
+  return (
+    <details className="rounded border border-border bg-bg px-3 py-2">
+      <summary className="cursor-pointer font-mono text-[11px] text-text-secondary">
+        <span className="font-semibold text-text">{title || 'tool'}</span>
+        {failed ? <span className="ml-2 text-danger-text">error</span> : null}
+        {summary ? <span className="ml-2 text-text-muted">{summary}</span> : null}
+      </summary>
+      {output ? (
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
+          {output}
+        </pre>
+      ) : (
+        <p className="mt-2 text-[11px] text-text-muted">No tool output stored.</p>
+      )}
+    </details>
+  )
+}
+
+function claudeRows(events: { kind: string; title: string; body?: string }[]) {
+  const rows: Array<
+    | { type: 'event'; ev: { kind: string; title: string; body?: string }; i: number }
+    | { type: 'tool'; title: string; command: string; output: string; failed: boolean; i: number }
+  > = []
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i]
+    const next = events[i + 1]
+    const isCall = ev.kind === 'command' && ev.title !== 'tool result'
+    const nextIsResult = Boolean(
+      next && next.title === 'tool result' && (next.kind === 'command' || next.kind === 'error'),
+    )
+    if (isCall) {
+      rows.push({
+        type: 'tool',
+        title: ev.title,
+        command: ev.body || '',
+        output: nextIsResult && next ? next.body || '' : '',
+        failed: Boolean(nextIsResult && next && next.kind === 'error'),
+        i,
+      })
+      if (nextIsResult) i += 1
+      continue
+    }
+    rows.push({ type: 'event', ev, i })
+  }
+  return rows
+}
+
 function ClaudeTranscript({
   logs,
   prompts,
@@ -269,27 +328,35 @@ function ClaudeTranscript({
         ) : null}
       </p>
       <div className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
-        {events.map((ev, i) =>
-          ev.kind === 'user' ? (
-            <div key={`${ev.kind}-${i}`} className="flex justify-end">
+        {claudeRows(events).map((row) =>
+          row.type === 'tool' ? (
+            <ClaudeToolBlock
+              key={`tool-${row.i}`}
+              title={row.title}
+              command={row.command}
+              output={row.output}
+              failed={row.failed}
+            />
+          ) : row.ev.kind === 'user' ? (
+            <div key={`${row.ev.kind}-${row.i}`} className="flex justify-end">
               <div className="max-w-[min(52rem,92%)] rounded-2xl border border-accent/35 bg-accent-muted px-4 py-3">
                 <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
                   You
                 </div>
                 <div className="max-h-[min(70vh,36rem)] overflow-auto">
-                  <MarkdownBody text={ev.body || ''} />
+                  <MarkdownBody text={row.ev.body || ''} />
                 </div>
               </div>
             </div>
           ) : (
             <div
-              key={`${ev.kind}-${i}`}
+              key={`${row.ev.kind}-${row.i}`}
               className="rounded-lg border border-border bg-surface px-3 py-2"
             >
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-text-muted">
-                {ev.title}
+                {row.ev.title}
               </div>
-              {ev.body ? <MarkdownBody text={ev.body} /> : null}
+              {row.ev.body ? <MarkdownBody text={row.ev.body} /> : null}
             </div>
           ),
         )}
