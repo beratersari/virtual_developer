@@ -247,7 +247,9 @@ class SessionBindStore:
                 n = self._index.reconcile(self.binds_dir)
             except Exception as e:
                 logger.warning(f"Session index backfill failed: {e}")
+                self._index_stale = True
                 return 0
+            self._index_stale = False
             self._index_ready = True
             if n:
                 logger.info(f"Session index backfilled {n} bind(s) from JSON")

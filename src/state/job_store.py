@@ -131,7 +131,9 @@ class JobStore:
                 n = self._index.reconcile(self.jobs_dir)
             except Exception as e:
                 logger.warning(f"Job index backfill failed: {e}")
+                self._index_stale = True
                 return 0
+            self._index_stale = False
             self._index_ready = True
             if n:
                 logger.info(f"Job index backfilled {n} job(s) from JSON")
