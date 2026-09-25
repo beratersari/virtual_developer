@@ -184,6 +184,23 @@ const mixed = [
 const mixedEvents = claudeTranscriptEventsFromLog(mixed)
 assert(!JSON.stringify(mixedEvents).includes('"tools"'), 'init event is not dumped')
 assert(mixedEvents.some((ev) => ev.body === 'API retry 1: rate_limit'), 'api retry is a short line')
+
+const serverRetry = JSON.stringify({
+  type: 'system',
+  subtype: 'api_retry',
+  attempt: 4,
+  max_retries: 10,
+  retry_delay_ms: 8200,
+  error_status: 500,
+  error: 'server error',
+  request_id: 'req_011example',
+})
+const serverEvents = claudeTranscriptEventsFromLog(serverRetry)
+const serverBody = serverEvents.find((ev) => ev.kind === 'meta')?.body || ''
+assert(serverBody.includes('API retry 4 of 10: server error'), 'retry names the attempt and the reason')
+assert(serverBody.includes('HTTP 500'), 'retry keeps the HTTP status')
+assert(serverBody.includes('next try in 8.2s'), 'retry keeps the wait')
+assert(serverBody.includes('request req_011example'), 'retry keeps the request id')
 assert(mixedEvents.some((ev) => ev.body === 'Please continue.'), 'user text is kept')
 assert(mixedEvents.some((ev) => ev.kind === 'error' && ev.body === 'API Error: Request rejected (429)'), 'error result is kept')
 

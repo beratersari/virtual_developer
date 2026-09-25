@@ -371,6 +371,51 @@ function sameTranscriptText(a: string, b: string): boolean {
   return Boolean(left) && left === right
 }
 
+function retryScalar(value: unknown): string {
+  if (typeof value === 'string') return stripLeakedJson(value).trim()
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return ''
+}
+
+function retryReason(obj: Record<string, unknown>): string {
+  const error = obj.error
+  if (typeof error === 'string') return stripLeakedJson(error).trim()
+  if (error && typeof error === 'object') {
+    const rec = error as Record<string, unknown>
+    const message = retryScalar(rec.message)
+    const type = retryScalar(rec.type)
+    if (message && type) return `${type}: ${message}`
+    return message || type
+  }
+  return retryScalar(obj.message)
+}
+
+function formatRetryDelay(value: unknown): string {
+  const ms = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.round(ms)}ms`
+}
+
+/** Claude's api_retry line also carries the HTTP status, the wait, and the request id. */
+function formatApiRetry(obj: Record<string, unknown>): string {
+  const attempt = obj.attempt != null ? String(obj.attempt) : ''
+  const max = obj.max_retries ?? obj.maxRetries
+  const count = attempt && max != null && String(max) !== '' ? `${attempt} of ${max}` : attempt
+  const why = retryReason(obj) || 'retry'
+  const lines = [`API retry${count ? ` ${count}` : ''}: ${why}`]
+  const status = obj.error_status ?? obj.status_code
+  const statusText = retryScalar(status)
+  if (statusText) lines.push(`HTTP ${statusText}`)
+  const delay = formatRetryDelay(obj.retry_delay_ms ?? obj.retryDelayMs)
+  if (delay) lines.push(`next try in ${delay}`)
+  const requestId = retryScalar(obj.request_id ?? obj.requestId)
+  if (requestId) lines.push(`request ${requestId}`)
+  const extra = retryScalar(obj.error_message ?? obj.message)
+  if (extra && extra !== why && !why.includes(extra)) lines.push(extra)
+  return lines.join('\n')
+}
+
 /** One dashboard row per assistant text, tool call, result, or plain log line. */
 export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
   const events: CodexLogEvent[] = []
@@ -407,9 +452,7 @@ export function claudeTranscriptEventsFromLog(raw: string): CodexLogEvent[] {
     if (kind === 'system') {
       const sub = String(obj.subtype || '')
       if (sub === 'api_retry') {
-        const attempt = obj.attempt != null ? ` ${obj.attempt}` : ''
-        const why = stripLeakedJson(String(obj.error || obj.message || 'retry'))
-        events.push({ kind: 'meta', title: 'Claude Code', body: `API retry${attempt}: ${why || 'retry'}` })
+        events.push({ kind: 'meta', title: 'Claude Code', body: formatApiRetry(obj) })
       }
       continue
     }
