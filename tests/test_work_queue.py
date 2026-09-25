@@ -141,6 +141,104 @@ async def test_cancel_unblocks_reschedule_of_same_issue(
     assert second["status"] != "queued"
 
 
+@pytest.mark.asyncio
+async def test_schedule_rerun_creates_job_when_cancel_left_queue_running(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """Stop can leave the queue row running. Schedule dispatch must start a new job.
+
+    The live log was ``already running as q_…; not queueing a duplicate`` and
+    the schedule was marked dispatched against that old row, so Jobs stayed empty.
+    """
+    from src.state.models import TaskStatus
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.job_store = isolate_jira_agent_artifacts["job_store"]
+
+    state_manager.create_state("KAN-1447", "again", "d")
+    state_manager.update_state("KAN-1447", status=TaskStatus.EXECUTING)
+    stale = proc.queue_store.enqueue(
+        source="jira",
+        issue_key="KAN-1447",
+        summary="first run",
+    )
+    claimed = proc.queue_store.claim_next(max_running=4)
+    assert claimed["queue_id"] == stale["queue_id"]
+    state_manager.update_state("KAN-1447", status=TaskStatus.CANCELLED)
+    assert proc.queue_store.get(stale["queue_id"])["status"] == "running"
+
+    event = {
+        "webhookEvent": "jira:issue_created",
+        "scheduled_job": True,
+        "schedule_id": "sched_d2ed54f5227e",
+        "issue": {
+            "key": "KAN-1447",
+            "fields": {
+                "summary": "again",
+                "description": (
+                    "{params}\nRepository: https://gitlab.com/g/r.git\n"
+                    "Source branch: develop\nTarget branch: develop\n"
+                    "Mode: build\n{params}\n"
+                ),
+            },
+        },
+    }
+
+    async def fake_process(ev):
+        proc.job_store.create_job(
+            issue_key="KAN-1447",
+            summary="again",
+            workflow_type="execution",
+            status="running",
+            source="jira",
+        )
+        state_manager.update_state("KAN-1447", status=TaskStatus.EXECUTING)
+        return {"ok": True, "work_started": True}
+
+    proc.process_event = fake_process  # type: ignore[method-assign]
+    outcome = await proc.enqueue_jira_event(event)
+    assert outcome.get("duplicate") is not True
+    assert outcome.get("queue_id") != stale["queue_id"]
+    assert proc.queue_store.get(stale["queue_id"])["status"] == "cancelled"
+    for _ in range(50):
+        jobs = proc.job_store.list_jobs(issue_key="KAN-1447")
+        if jobs:
+            break
+        await asyncio.sleep(0.01)
+    jobs = proc.job_store.list_jobs(issue_key="KAN-1447")
+    assert [row["issue_key"] for row in jobs] == ["KAN-1447"]
+    assert jobs[0]["status"] == "running"
+
+
+def test_stop_keeps_queue_row_started_after_cancel(tmp_path):
+    """A schedule claimed during Stop must not be closed by that same Stop."""
+    from src.state.queue_store import WorkQueueStore
+
+    qs = WorkQueueStore(queue_dir=tmp_path / "q")
+    old = qs.enqueue(source="jira", issue_key="KAN-1447", summary="old")
+    qs.claim_next(max_running=4)
+    qs.update(old["queue_id"], started_at="2026-09-25T15:11:00.000")
+    fresh = qs.enqueue(source="jira", issue_key="KAN-1447", summary="rerun")
+    qs.update(fresh["queue_id"], status="running", started_at="2026-09-25T15:12:00.000")
+    gitlab = qs.enqueue(source="gitlab", issue_key="KAN-1447", summary="follow-up")
+    n = qs.finish_open_for_issue(
+        "KAN-1447",
+        status="cancelled",
+        include_queued=True,
+        include_running=True,
+        queued_sources={"jira"},
+        started_before="2026-09-25T15:11:46.300",
+    )
+    assert n == 1
+    assert qs.get(old["queue_id"])["status"] == "cancelled"
+    assert qs.get(fresh["queue_id"])["status"] == "running"
+    assert qs.get(gitlab["queue_id"])["status"] == "queued"
+
+
 def test_reap_stale_running_after_cancel(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
 ):
@@ -281,10 +379,13 @@ async def test_second_jira_enqueue_while_running_does_not_appear_in_queue(
     tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts
 ):
     """Second dispatch while the issue is live must not add a Queue row."""
+    from src.state.manager import JiraStateManager
+
     monkeypatch.chdir(tmp_path)
     with patch("src.processor.create_jira_client", return_value=fake_jira):
         proc = JobProcessor()
     proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    proc.state_manager = JiraStateManager(state_dir=tmp_path / "state")
 
     # First item claimed and "running" (simulates live work)
     first = proc.queue_store.enqueue(
