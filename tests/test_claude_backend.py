@@ -282,6 +282,47 @@ def test_parse_claude_json_and_question_tool():
     assert claude_reply_asks_question({"text": "Committed the fix.", "tools": []}) is False
 
 
+def test_finish_after_question_tool_is_not_still_asking():
+    lines = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "AskUserQuestion",
+                        "input": {"question": "Which database?"},
+                    },
+                    {"type": "text", "text": "Which database should I use?"},
+                ],
+            },
+        },
+        {
+            "type": "result",
+            "is_error": False,
+            "result": "Which database should I use?",
+            "session_id": SESSION,
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Committed the fix."}],
+            },
+        },
+        {
+            "type": "result",
+            "is_error": False,
+            "result": "Committed the fix.",
+            "session_id": SESSION,
+        },
+    ]
+    parsed = parse_claude_output("\n".join(json.dumps(line) for line in lines))
+    assert parsed["text"] == "Committed the fix."
+    assert claude_reply_asks_question(parsed) is False
+
+
 def _write_fake_claude(tmp_path: Path, *, stall: bool = False) -> Path:
     script = tmp_path / "fake_claude.py"
     script.write_text(

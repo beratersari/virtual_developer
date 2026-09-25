@@ -306,9 +306,14 @@ def _take_claude_event(state: Dict[str, Any], event: Dict[str, Any]) -> None:
         text = _text_from_content(content)
         if text:
             state["assistant"].append(text)
-        state["tools"].extend(_tool_names(content))
+        # Tools belong to the open turn. A later finish must not inherit
+        # AskUserQuestion from the turn that was nudged.
+        state["pending_tools"].extend(_tool_names(content))
+        state["tools"] = list(state["pending_tools"])
         return
     if kind == "result" or "result" in event or event.get("is_error") is not None:
+        state["tools"] = list(state.get("pending_tools") or [])
+        state["pending_tools"] = []
         state["is_error"] = bool(event.get("is_error"))
         result = _as_text(event.get("result")).strip()
         if result:
@@ -345,6 +350,7 @@ def _empty_take() -> Dict[str, Any]:
         "is_error": False,
         "session_id": "",
         "tools": [],
+        "pending_tools": [],
         "saw": False,
         "total_cost_usd": None,
     }
