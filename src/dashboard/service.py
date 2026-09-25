@@ -433,16 +433,28 @@ def build_models_response(*, refresh: bool = False, backend: str = "") -> Models
         )
 
     if name == BACKEND_CLAUDE:
+        from src.backends.claude import list_claude_server_models
+
+        pairs, source, err = list_claude_server_models()
         options = []
+        seen: set[str] = set()
         if default_model:
             options.append(_model_option(mid=default_model, source="settings"))
+            seen.add(default_model)
+        for mid, label in pairs:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            options.append(
+                _model_option(mid=mid, name=label or mid, source="cli")
+            )
         return ModelsResponse(
             default_model=default_model,
             models=options,
             backend=BACKEND_CLAUDE,
             opencode_config_model=None,
-            opencode_config_path=None,
-            error=None,
+            opencode_config_path=source,
+            error=err,
             server_time=datetime.now().isoformat(timespec="seconds"),
         )
 

@@ -155,6 +155,160 @@ def _windows_spawn_argv(argv: List[str]) -> List[str]:
     return argv
 
 
+def claude_config_dir() -> Path:
+    """Claude Code config directory. ``CLAUDE_CONFIG_DIR`` overrides the home default."""
+    raw = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path.home() / ".claude"
+
+
+def _model_pair(mid: str, label: str = "") -> Optional[tuple[str, str]]:
+    key = (mid or "").strip()
+    if not key:
+        return None
+    shown = (label or "").strip() or key
+    return key, shown
+
+
+def models_from_claude_files(settings_text: str, cache_text: str) -> List[tuple[str, str]]:
+    """Model ids saved by Claude Code (settings.json model, options cache)."""
+    found: List[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(mid: str, label: str = "") -> None:
+        pair = _model_pair(mid, label)
+        if pair is None or pair[0] in seen:
+            return
+        seen.add(pair[0])
+        found.append(pair)
+
+    try:
+        settings_obj = json.loads(settings_text) if (settings_text or "").strip() else {}
+    except json.JSONDecodeError:
+        settings_obj = {}
+    if isinstance(settings_obj, dict):
+        _add(str(settings_obj.get("model") or ""))
+
+    try:
+        cache_obj = json.loads(cache_text) if (cache_text or "").strip() else {}
+    except json.JSONDecodeError:
+        cache_obj = {}
+    options = []
+    if isinstance(cache_obj, dict):
+        options = cache_obj.get("additionalModelOptionsCache") or []
+    if isinstance(options, list):
+        for item in options:
+            if not isinstance(item, dict):
+                continue
+            _add(str(item.get("value") or item.get("id") or ""), str(item.get("label") or ""))
+    return found
+
+
+def models_from_api_payload(payload: Any) -> List[tuple[str, str]]:
+    """Anthropic ``/v1/models`` or an OpenAI-shaped ``data`` list."""
+    raw: Any = []
+    if isinstance(payload, dict):
+        raw = payload.get("data")
+        if raw is None:
+            raw = payload.get("models")
+    elif isinstance(payload, list):
+        raw = payload
+    if not isinstance(raw, list):
+        return []
+    found: List[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        mid = ""
+        label = ""
+        if isinstance(item, str):
+            mid = item
+        elif isinstance(item, dict):
+            mid = str(item.get("id") or item.get("value") or item.get("name") or "")
+            label = str(
+                item.get("display_name") or item.get("label") or item.get("name") or ""
+            )
+        pair = _model_pair(mid, label)
+        if pair is None or pair[0] in seen:
+            continue
+        seen.add(pair[0])
+        found.append(pair)
+    return found
+
+
+def claude_models_url(base_url: str) -> str:
+    """Models endpoint for an Anthropic-compatible base (with or without ``/v1``)."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1"):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+def list_claude_server_models() -> tuple[List[tuple[str, str]], Optional[str], Optional[str]]:
+    """Return ``(id, label)`` pairs, the source, and an error.
+
+    Local Claude settings are included. When ``ANTHROPIC_BASE_URL`` is set,
+    the server's ``/v1/models`` list is added. The shared OpenCode inventory
+    is not consulted.
+    """
+    import httpx
+
+    config_dir = claude_config_dir()
+    settings_path = config_dir / "settings.json"
+    cache_path = Path.home() / ".claude.json"
+    settings_text = ""
+    cache_text = ""
+    if settings_path.is_file():
+        try:
+            settings_text = settings_path.read_text(encoding="utf-8")
+        except OSError:
+            settings_text = ""
+    if cache_path.is_file():
+        try:
+            cache_text = cache_path.read_text(encoding="utf-8")
+        except OSError:
+            cache_text = ""
+    found = models_from_claude_files(settings_text, cache_text)
+    seen = {mid for mid, _label in found}
+
+    base = (getattr(settings, "anthropic_base_url", None) or "").strip()
+    if not base:
+        base = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
+    url = claude_models_url(base)
+    if not url:
+        err = None if found else "ANTHROPIC_BASE_URL is not set, so Claude models cannot be listed."
+        return found, str(settings_path), err
+
+    token = (getattr(settings, "anthropic_auth_token", None) or "").strip()
+    if not token:
+        token = (os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    headers = {"accept": "application/json", "anthropic-version": "2023-06-01"}
+    if token:
+        headers["x-api-key"] = token
+        headers["authorization"] = f"Bearer {token}"
+    try:
+        with httpx.Client(timeout=8.0, verify=False, headers=headers) as client:
+            response = client.get(url)
+    except httpx.HTTPError as exc:
+        return found, url, f"Could not list Claude models: {exc.__class__.__name__}"
+    if response.status_code >= 400:
+        return found, url, f"Claude models request failed ({response.status_code})."
+    try:
+        payload = response.json()
+    except ValueError:
+        return found, url, "Claude models response was not JSON."
+    for mid, label in models_from_api_payload(payload):
+        if mid in seen:
+            continue
+        seen.add(mid)
+        found.append((mid, label))
+    if not found:
+        return found, url, "Claude server returned no models."
+    return found, url, None
+
+
 def claude_child_env() -> Dict[str, str]:
     """Process env for ``claude``. URL and token come from settings when set."""
     env = dict(os.environ)
