@@ -225,6 +225,15 @@ def main(argv: list[str] | None = None) -> int:
         exe.chmod(exe.stat().st_mode | 0o111)
 
     shutil.copy2(ROOT / ".env.example", bundled / ".env.example")
+    if os.name != "nt":
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "packaging" / "linux" / "env_example.py"),
+                str(bundled / ".env.example"),
+            ],
+            check=True,
+        )
     shutil.copy2(HERE / "START_HERE.txt", bundled / "START_HERE.txt")
     shutil.copy2(ROOT / "VERSION", bundled / "VERSION")
     shutil.copy2(HERE / "versions.env", bundled / "versions.env")
