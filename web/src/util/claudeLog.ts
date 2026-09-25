@@ -23,28 +23,47 @@ function collapse(text: string): string {
 
 const LEAKED_JSON = /"error"|"type"|"usage"|tool_use_id|deprecation_notice|total_cost_usd/
 
+function leakedJsonText(obj: Record<string, unknown>): string {
+  const err = obj.error
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  if (err && typeof err === 'object') {
+    const message = (err as Record<string, unknown>).message
+    if (typeof message === 'string' && message.trim()) return message.trim()
+  }
+  if (typeof obj.message === 'string' && obj.message.trim() && !obj.message.includes('{')) {
+    return obj.message.trim()
+  }
+  return ''
+}
+
 /** Drop a Claude/proxy JSON blob glued onto an error sentence, even if the brace was cut off. */
 function stripLeakedJson(text: string): string {
   if (!text.includes('{')) return text
-  const cleaned = text.replace(/\{[\s\S]*$/g, (chunk) => {
-    if (!LEAKED_JSON.test(chunk)) return chunk
-    const end = jsonObjectEnd(chunk, 0)
-    const slice = end > 0 ? chunk.slice(0, end) : ''
-    if (slice) {
-      try {
-        const obj = JSON.parse(slice) as Record<string, unknown>
-        const err = obj.error
-        if (typeof err === 'string' && err.trim()) return err.trim()
-        if (typeof obj.message === 'string' && obj.message.trim() && !String(obj.message).includes('{')) {
-          return obj.message.trim()
-        }
-      } catch {
-        /* unclosed blob */
-      }
+  let kept = ''
+  let cursor = 0
+  while (cursor < text.length) {
+    const brace = text.indexOf('{', cursor)
+    if (brace < 0) {
+      kept += text.slice(cursor)
+      break
     }
-    return ''
-  })
-  return cleaned.replace(/\s+·\s*$/g, '').replace(/[ \t]{2,}/g, ' ').trim()
+    const chunk = text.slice(brace)
+    if (!LEAKED_JSON.test(chunk)) {
+      kept += text.slice(cursor, brace + 1)
+      cursor = brace + 1
+      continue
+    }
+    const end = jsonObjectEnd(chunk, 0)
+    kept += text.slice(cursor, brace)
+    if (end <= 0) break
+    try {
+      kept += leakedJsonText(JSON.parse(chunk.slice(0, end)) as Record<string, unknown>)
+    } catch {
+      /* closed blob that is not one object */
+    }
+    cursor = brace + end
+  }
+  return kept.replace(/\s+·\s*$/g, '').replace(/[ \t]{2,}/g, ' ').trim()
 }
 
 /** Index just past the `{…}` that starts at `start`, respecting strings. */
