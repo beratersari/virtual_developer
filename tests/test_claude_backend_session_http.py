@@ -187,6 +187,54 @@ def test_claude_resume_of_its_own_id_still_uses_codex_prompt(
     assert task.prompt == DEFAULT_CLAUDE_RESUME_PROMPT
 
 
+def test_claude_resume_keeps_the_first_prompt_in_history(
+    tmp_path, monkeypatch, isolate_jira_agent_artifacts
+):
+    """A later run sends the short continue line, but the first prompt stays visible."""
+    proc, sm, binds = _proc(tmp_path, monkeypatch, isolate_jira_agent_artifacts)
+    jobs = isolate_jira_agent_artifacts["job_store"]
+    first_prompt = tmp_path / "first.prompt.txt"
+    first_log = tmp_path / "first.log"
+    first_prompt.write_text("FULL BUILD KIT\nfix the login form\n", encoding="utf-8")
+    first_log.write_text('{"type":"result","is_error":true,"result":"server error"}\n', encoding="utf-8")
+    sm.create_state("KAN-3", "session check", "Mode: build")
+    failed = jobs.create_job(issue_key="KAN-3", summary="first", status="error", backend="claude")
+    jobs.update_job(
+        failed["job_id"],
+        opencode_session_id=CLAUDE_ID,
+        session_log_path=str(first_log),
+        session_log_paths=[str(first_log)],
+        prompt_path=str(first_prompt),
+        prompt_paths=[str(first_prompt)],
+    )
+    live = jobs.create_job(issue_key="KAN-3", summary="retry", status="executing", backend="claude")
+    proc._active_jobs["KAN-3"] = live["job_id"]
+    binds.upsert(
+        repository_url=REPO,
+        branch=BRANCH,
+        target_branch=TARGET,
+        session_id=CLAUDE_ID,
+        issue_key="KAN-3",
+        kind="build",
+        backend="claude",
+    )
+    _ready(sm, "KAN-3", "build")
+    task = AgentTask(
+        description="check",
+        prompt="FULL BUILD KIT\nfix the login form\n",
+        agent="derman-build",
+        issue_key="KAN-3",
+        backend="claude",
+    )
+    chosen = proc._attach_bound_opencode_session("KAN-3", task, _git(tmp_path))
+    assert chosen == CLAUDE_ID
+    assert task.prompt == DEFAULT_CLAUDE_RESUME_PROMPT
+    saved = jobs.get_job(live["job_id"])
+    assert saved is not None
+    assert str(first_prompt) in (saved.get("prompt_paths") or [])
+    assert str(first_log) in (saved.get("session_log_paths") or [])
+
+
 def test_opencode_does_not_resume_a_claude_uuid(
     tmp_path, monkeypatch, isolate_jira_agent_artifacts
 ):

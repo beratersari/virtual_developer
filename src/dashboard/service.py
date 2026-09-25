@@ -2097,8 +2097,8 @@ def _prepend_codex_thread_artifact_paths(
     *,
     store: Any = None,
 ) -> tuple[List[str], List[str]]:
-    """Older jobs on the same Codex thread belong in this job's transcript."""
-    if _resolve_job_backend(job) != "codex":
+    """Older jobs on the same Codex thread or Claude session belong in this transcript."""
+    if _resolve_job_backend(job) not in {"codex", "claude"}:
         return prompt_paths, log_paths
     tid = _codex_thread_id(job)
     if not tid:
