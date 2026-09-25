@@ -164,6 +164,48 @@ def test_models_from_codex_config_reads_declared_ids():
     assert models_from_codex_config("") == []
 
 
+def test_build_models_response_claude_uses_server_models(monkeypatch):
+    from src.config import settings
+    from src.dashboard.service import build_models_response
+
+    monkeypatch.setattr(settings, "default_model", "ollama/local")
+    monkeypatch.setattr(
+        "src.backends.claude.list_claude_server_models",
+        lambda: (
+            [("openai", "openai"), ("openai-fast", "Fast")],
+            "https://proxy.example/v1/models",
+            None,
+        ),
+    )
+    with patch("src.dashboard.service.list_available_models") as mocked:
+        resp = build_models_response(backend="claude")
+        mocked.assert_not_called()
+    ids = [m.id for m in resp.models]
+    assert resp.backend == "claude"
+    assert ids == ["ollama/local", "openai", "openai-fast"]
+    assert resp.error is None
+    assert resp.opencode_config_path == "https://proxy.example/v1/models"
+
+
+def test_claude_models_payload_and_files():
+    from src.backends.claude import models_from_api_payload, models_from_claude_files
+
+    api = models_from_api_payload(
+        {
+            "data": [
+                {"id": "claude-sonnet-4-5", "display_name": "Sonnet"},
+                {"id": "openai"},
+            ]
+        }
+    )
+    assert api == [("claude-sonnet-4-5", "Sonnet"), ("openai", "openai")]
+    local = models_from_claude_files(
+        '{"model": "openai-fast"}',
+        '{"additionalModelOptionsCache": [{"value": "claude-fable-5", "label": "Fable"}]}',
+    )
+    assert local == [("openai-fast", "openai-fast"), ("claude-fable-5", "Fable")]
+
+
 def test_build_models_response_codex_skips_opencode_inventory(tmp_path, monkeypatch):
     from src.config import settings
     from src.dashboard.service import build_models_response

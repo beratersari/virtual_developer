@@ -8,6 +8,30 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.61] — 2026-09-25
+
+A resumed Claude job shows the original prompt, not only the continue
+line. The Claude model list comes from the server. Reply comments name
+the backend.
+
+### Added
+
+- Choosing Claude lists the models from ANTHROPIC_BASE_URL, plus any
+  model saved in Claude's own settings.
+
+### Fixed
+
+- A later Claude run keeps the first prompt and the earlier log in the
+  transcript. The model still receives the short continue line.
+- An API retry in the transcript shows the attempt count, HTTP status,
+  wait, and request id.
+- Jira, GitLab, and Azure comments name OpenCode, Codex, or Claude
+  Code next to the version and model.
+- Opening a collapsed tool row in the transcript no longer traps the
+  mouse wheel.
+
+[0.9.61]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.61
+
 ## [0.9.60] — 2026-09-25
 
 Jira keys written in a job title or description open that ticket.

@@ -27,10 +27,15 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _header_for_state(kind: str, state: Optional[JiraAgentState]) -> str:
-    from src.brand import format_reply_header, resolve_reply_ids
+    from src.brand import (
+        format_reply_header,
+        resolve_reply_backend,
+        resolve_reply_ids,
+    )
 
     model, job_id = resolve_reply_ids(state)
-    return format_reply_header(kind, model=model, job_id=job_id)
+    backend = resolve_reply_backend(state, job_id=job_id)
+    return format_reply_header(kind, model=model, job_id=job_id, backend=backend)
 
 
 def _human_agent_answer(text: str) -> str:

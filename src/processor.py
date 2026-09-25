@@ -1683,6 +1683,9 @@ class JobProcessor:
             from src.backends.claude import DEFAULT_CLAUDE_RESUME_PROMPT
 
             task.prompt = DEFAULT_CLAUDE_RESUME_PROMPT
+            # The model gets the short continue line. The transcript still
+            # needs the prompt from the run that opened this session.
+            self._inherit_codex_thread_artifacts(issue_key, chosen)
         elif not is_opencode:
             from src.backends.codex import DEFAULT_CODEX_RESUME_PROMPT
 
@@ -2451,6 +2454,7 @@ class JobProcessor:
         patch = {
             "job_ids": job_ids[-200:],
             "current_job_id": job_id,
+            "backend": self._backend_for_issue(state),
         }
         if task_id:
             patch["task_ids"] = task_ids[-100:]

@@ -169,7 +169,7 @@ export function ModelField({
                 ? 'This job only. List is from ~/.codex/config.toml. Choose Other id… to type a custom model.'
                 : 'Ids from ~/.codex/config.toml. Choose Other id… to type a custom model.'
               : isClaude
-                ? 'Claude Code uses the model id sent to ANTHROPIC_BASE_URL. Choose Other id… to type one.'
+                ? 'Models served by ANTHROPIC_BASE_URL. Choose Other id… to type one the server accepts.'
                 : allowEmpty
                   ? 'This job only. Leave default to use Settings. Choose Other id… to type a custom model.'
                   : 'Inventory from OpenCode. Choose Other id… to type a custom model.'}
