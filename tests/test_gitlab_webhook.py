@@ -493,6 +493,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     proc.state_manager = sm
     proc.reporter = reporter
     proc.jira_client = fake_jira
+    monkeypatch.setattr("src.config.settings.agent_backend", "codex")
 
     clone = tmp_path / "clone"
     clone.mkdir()
@@ -557,6 +558,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert posted.get("mr_iid") == 4
     assert body.startswith("**Yaver ")
     assert "— Yanıt**" in body
+    assert "`Codex`" in body.split("\n", 1)[0]
     assert "`job_" in body.split("\n", 1)[0]
     assert "## Login" in body
     assert "`AuthService` issues a JWT" in body
@@ -694,6 +696,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     proc.state_manager = sm
     proc.reporter = reporter
     proc.jira_client = fake_jira
+    monkeypatch.setattr("src.config.settings.agent_backend", "codex")
 
     clone = tmp_path / "clone"
     clone.mkdir()
@@ -763,6 +766,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     body = posted.get("body") or ""
     assert body.startswith("**Yaver ")
     assert "— Yanıt**" in body
+    assert "`Codex`" in body.split("\n", 1)[0]
     assert "Fixed the login bug." in body
     assert "Pushed new commits" in body
     assert posted.get("discussion_id") == "disc-1"

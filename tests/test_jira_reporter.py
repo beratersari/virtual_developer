@@ -14,12 +14,14 @@ def test_post_completion_uses_opencode_session_id(reporter, fake_jira):
         completed_at=datetime(2026, 1, 1, 12, 0, 0),
         current_opencode_session_id="ses_abc123",
         estimated_cost=0.0,
+        metadata={"backend": "codex"},
     )
     comment_id = reporter.post_completion(state, summary="All good")
     assert comment_id is not None
     body = fake_jira.comments[-1]["body"]
     assert "ses_abc123" in body
-    assert "Work Completed" in body
+    assert "`Codex`" in body
+    assert "Tamamlandı" in body
     assert "token" not in body.lower()
     assert "Cost" not in body
 

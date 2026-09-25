@@ -442,7 +442,14 @@ class JiraReporter:
         text = _human_agent_answer(response)
         text = (text or "").strip() or ANSWER_EMPTY
         text = _clip(text, _MAX_RESPONSE_CHARS)
-        body = f"""{_header_for_state("Answer", None)}
+        state = None
+        try:
+            from src.state.manager import JiraStateManager
+
+            state = JiraStateManager().get_state(issue_key)
+        except Exception:
+            state = None
+        body = f"""{_header_for_state("Answer", state)}
 
 {_optional_h3(ANSWER_HEADING)}{text}
 """
