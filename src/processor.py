@@ -8390,7 +8390,33 @@ class JobProcessor:
         remote = repo or str(meta.get("repository_url") or "").strip()
         if remote and src and tgt:
             candidates.append((remote, src, tgt))
+        from src.backends.base import SUPPORTED_BACKENDS
         from src.state.session_bind_store import session_bind_store
+
+        def _plan_bind_for_repo(store: Any, remote_u: str, work: str, tgt_b: str):
+            """Plan row for this repo, including a bind id that contains the backend."""
+            rows: list[dict] = []
+            seen_ids: set[str] = set()
+
+            def _keep(row: Any) -> None:
+                if not isinstance(row, dict):
+                    return
+                bid = str(row.get("bind_id") or "")
+                if bid and bid in seen_ids:
+                    return
+                if not str(row.get("issue_key") or "").strip():
+                    return
+                if bid:
+                    seen_ids.add(bid)
+                rows.append(row)
+
+            _keep(store.get(remote_u, work, tgt_b, kind="plan"))
+            for backend in SUPPORTED_BACKENDS:
+                _keep(store.get(remote_u, work, tgt_b, kind="plan", backend=backend))
+            if not rows:
+                return None
+            rows.sort(key=lambda row: str(row.get("updated_at") or ""))
+            return rows[-1]
 
         seen: set[tuple[str, str, str]] = set()
         for remote_u, work, tgt_b in candidates:
@@ -8398,7 +8424,7 @@ class JobProcessor:
             if key in seen:
                 continue
             seen.add(key)
-            rec = session_bind_store.get(remote_u, work, tgt_b, kind="plan")
+            rec = _plan_bind_for_repo(session_bind_store, remote_u, work, tgt_b)
             other = str((rec or {}).get("issue_key") or "").strip()
             if not other or other.upper() == issue_key.upper():
                 continue
