@@ -2451,6 +2451,7 @@ class JobProcessor:
         patch = {
             "job_ids": job_ids[-200:],
             "current_job_id": job_id,
+            "backend": self._backend_for_issue(state),
         }
         if task_id:
             patch["task_ids"] = task_ids[-100:]

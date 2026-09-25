@@ -400,6 +400,17 @@ def test_operator_reply_header_has_version_job_model():
     body = wrap_operator_reply("Answer", "Fixed login.", model="glm", job_id="job_abc")
     assert body.startswith(line)
     assert "Fixed login." in body
+    claude = format_reply_header(
+        "Answer", model="glm", job_id="job_abc", backend="claude"
+    )
+    assert claude == (
+        f"**Yaver {__version__} — Yanıt** · `Claude Code` · `glm` · `job_abc`"
+    )
+    state = type("S", (), {"metadata": {"backend": "codex", "model": "glm"}})()
+    stamped = wrap_operator_reply("Answer", "ok", state=state, job_id="job_abc")
+    assert stamped.startswith(
+        f"**Yaver {__version__} — Yanıt** · `Codex` · `glm` · `job_abc`"
+    )
 
 
 def test_operator_reply_header_keeps_job_id_after_current_cleared():
