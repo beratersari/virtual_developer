@@ -8,6 +8,36 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.60] — 2026-09-25
+
+Jira keys written in a job title or description open that ticket.
+A later build finds a plan that was saved for Claude.
+Claude API errors show up on the job, and a finished turn is not
+treated as another question.
+
+### Added
+
+- Each Jira key in a job title, a job description, an issue title, or
+  an issue description links to that ticket on the configured Jira
+  host. A key already inside a URL stays text. GL- and AZ- ids stay
+  text.
+
+### Fixed
+
+- A plan bind stored with a backend is found when a new ticket builds
+  the same repository, source, and target.
+- A Claude result marked as an error is the failure text on the job
+  and in the Jira comment.
+- AskUserQuestion from the turn that was nudged does not stay on the
+  next finish.
+- Text after a closed error object stays in the Claude transcript. A
+  failed tool result keeps its message. Two tool calls in one turn
+  show each result on its own tool.
+- Diagnostic zips redact Anthropic and Codex key values, the dashboard
+  password, and an Authorization Basic header from the daemon log.
+
+[0.9.60]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.60
+
 ## [0.9.59] — 2026-09-24
 
 Claude Code is a third unattended worker beside OpenCode and Codex.

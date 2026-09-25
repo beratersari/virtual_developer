@@ -1,3 +1,13 @@
+# Yaver 0.9.60
+
+Jira keys written in a job title or description, and on the issue page, now open that ticket on the configured Jira host.
+A key that is already inside a URL stays as text, and GL- and AZ- ids stay as text because those are Yaver's own GitLab and Azure keys.
+A new build ticket finds a plan that was saved for Claude on the same repository, source, and target.
+A Claude result marked as an error is the text on the job and in the Jira comment, instead of a generic execution failure.
+AskUserQuestion from the turn that was nudged does not make the next finish look like another question.
+The Claude transcript keeps the sentence after a closed error object, keeps the message on a failed tool result, and shows each tool result on its own tool when one turn calls two tools.
+Diagnostic zips redact Anthropic and Codex key values, the dashboard password, and an Authorization Basic header copied from the daemon log.
+
 # Yaver 0.9.59
 
 Claude Code is now a third unattended worker beside OpenCode and Codex.
