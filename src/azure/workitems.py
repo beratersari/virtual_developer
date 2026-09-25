@@ -499,7 +499,7 @@ def find_work_item_key_by_id(
             have = _collection_norm(
                 str(meta.get("azure_collection_url") or "")
             ) or _collection_norm(str((work_item_coords(key) or {}).get("collection_url") or ""))
-            if have and have != want_col:
+            if have != want_col:
                 continue
         if key not in seen:
             seen.add(key)
