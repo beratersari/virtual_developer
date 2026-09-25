@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -43,8 +44,67 @@ def extract_session_ids_from_text(text: str) -> List[str]:
     return out
 
 
+def opencode_data_dir() -> Path:
+    """Directory OpenCode uses for ``opencode.db``.
+
+    OpenCode honors ``OPENCODE_DATA``, then ``$XDG_DATA_HOME/opencode``, then
+    ``~/.local/share/opencode``. A Linux service often sets ``XDG_DATA_HOME``;
+    reading only the home default misses that database and the Chat tab falls
+    back to the short task line.
+    """
+    explicit = (os.environ.get("OPENCODE_DATA") or "").strip()
+    if explicit:
+        return Path(explicit)
+    xdg = (os.environ.get("XDG_DATA_HOME") or "").strip()
+    if xdg:
+        return Path(xdg) / "opencode"
+    return Path.home() / ".local" / "share" / "opencode"
+
+
+def opencode_db_path() -> Path:
+    """SQLite file OpenCode is writing, including a channel database."""
+    override = (os.environ.get("OPENCODE_DB") or "").strip()
+    if override:
+        return Path(override)
+    data = opencode_data_dir()
+    primary = data / "opencode.db"
+    if primary.is_file():
+        return primary
+    try:
+        channel = [
+            p
+            for p in data.glob("opencode-*.db")
+            if p.is_file() and not p.name.endswith(("-wal", "-shm"))
+        ]
+    except OSError:
+        channel = []
+    if channel:
+        channel.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return channel[0]
+    return primary
+
+
 def _default_db_path() -> Path:
-    return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    return opencode_db_path()
+
+
+def _connect_ro(path: Path) -> sqlite3.Connection:
+    """Read OpenCode's database without blocking ``opencode serve``.
+
+    URI ``mode=ro`` cannot read a WAL database on Linux when the server holds
+    it (SQLite refuses the shared-memory file). ``query_only`` still sees the
+    uncheckpointed messages.
+    """
+    try:
+        con = sqlite3.connect(str(path), timeout=1.0)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only = ON")
+        con.execute("SELECT 1")
+        return con
+    except sqlite3.Error:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        con.row_factory = sqlite3.Row
+        return con
 
 
 def paths_equivalent(left: Any, right: Any) -> bool:
@@ -186,7 +246,7 @@ def find_sessions_for_issue(
             )
 
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = _connect_ro(path)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         # Precise queries first so a flood of PROJ-10 substring hits cannot
@@ -273,7 +333,7 @@ def find_sessions_for_directory(
     if not path.is_file():
         return []
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        con = _connect_ro(path)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         placeholders = ",".join("?" * len(variants))
@@ -403,7 +463,7 @@ def lookup_session_directory(
         # No OpenCode DB yet — treat as "not found", not a read error.
         return None, True
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = _connect_ro(path)
         cur = con.cursor()
         cur.execute("SELECT directory FROM session WHERE id = ? LIMIT 1", (sid,))
         row = cur.fetchone()
@@ -1013,7 +1073,7 @@ def list_session_chat(
         return result
     cap = max(1, min(int(limit or _MAX_CHAT_MESSAGES), _MAX_CHAT_MESSAGES))
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+        con = _connect_ro(path)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         result["db_checked"] = True
@@ -1662,7 +1722,7 @@ def assess_session_completeness(
     use_db_messages = not api_messages
     if sid and path.is_file() and (use_db_todos or use_db_messages):
         try:
-            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            con = _connect_ro(path)
             con.row_factory = sqlite3.Row
             cur = con.cursor()
             result["db_checked"] = True
