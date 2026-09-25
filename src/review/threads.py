@@ -48,7 +48,9 @@ def is_finding_body(body: str) -> bool:
 
 
 def _norm_path(path: str) -> str:
-    return (path or "").replace("\\", "/").lstrip("./")
+    from src.review.diffmap import strip_dot_slash
+
+    return strip_dot_slash(path).lstrip("/")
 
 
 def _as_line(value: Any) -> int:

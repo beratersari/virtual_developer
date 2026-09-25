@@ -179,7 +179,9 @@ def _parse_block(raw: str, *, require_tag: bool) -> Optional[list[Finding]]:
 def _coerce(item: Any) -> Optional[Finding]:
     if not isinstance(item, dict):
         return None
-    path = str(item.get("path") or "").replace("\\", "/").lstrip("./").strip()
+    from src.review.diffmap import strip_dot_slash
+
+    path = strip_dot_slash(str(item.get("path") or "")).lstrip("/")
     if not path:
         return None
     start = _as_line(item.get("start_line"), item.get("line"))
