@@ -326,6 +326,9 @@ def test_finish_after_question_tool_is_not_still_asking():
 @pytest.mark.asyncio
 async def test_claude_api_error_is_the_failure_text(tmp_path, monkeypatch):
     """A 429 result is the failure text. Jira reads stderr."""
+    from src.backends.base import AgentRunRequest
+    from src.backends.claude import ClaudeBackend
+
     cli = _write_fake_claude(tmp_path)
     (tmp_path / "fake_claude.py").write_text(
         "\n".join(
