@@ -8,6 +8,34 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.62] — 2026-09-25
+
+Jobs, schedules, and session resume stay available when the search index cannot rebuild.
+A cancelled issue can be scheduled again and shows up in Jobs.
+The Queue tab loads its rows when you open it.
+Linux releases include the CLI zip, and installers keep the previous binary with today's date on the name.
+
+### Added
+
+- Linux releases include `yaver-clis-linux-x64-*.zip` with OpenCode, Codex, and Claude Code.
+- Installing a CLI finds the binary already on PATH, renames it with the date at the end, and copies the new one into that same directory.
+
+### Fixed
+
+- A failed job, schedule, or session index rebuild no longer hides the JSON files behind an empty index.
+- Stop and a finishing worker no longer overwrite each other's queue status.
+- Scheduling an issue after Stop starts a new job when the old queue row was still running.
+- Opening Queue loads the waiting rows immediately.
+- Settings keeps each project's source branch.
+- A failed replan does not put `plan_execute` back on the ticket.
+- GitLab fallback keys include the host and no longer treat `acme/demo` and `acme-demo` as the same issue.
+- Cancel removes the token from the clone's origin URL.
+- An Azure review of `.github/...` is posted on that file.
+- Jira answer comments name the backend.
+- The dashboard hides the notice that appears when the Jira poller is turned off.
+
+[0.9.62]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.62
+
 ## [0.9.61] — 2026-09-25
 
 A resumed Claude job shows the original prompt, not only the continue
