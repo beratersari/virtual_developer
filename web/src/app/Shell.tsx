@@ -175,12 +175,13 @@ export function Shell() {
       <main className="vd-main">
         <div className="vd-main-inner space-y-5">
           {live.error && <Alert>{live.error}</Alert>}
-          {live.poll?.error && (
+          {live.poll?.error &&
+          live.poll.error.trim().toLowerCase() !== 'jira disabled' ? (
             <Alert tone="warning">
               <span className="font-medium">Poller: </span>
               {live.poll.error}
             </Alert>
-          )}
+          ) : null}
           <div className="vd-page">
             <Outlet />
           </div>

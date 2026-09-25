@@ -77,10 +77,13 @@ def test_poll_board_no_board(poller):
 def test_poll_board_skipped_when_jira_disabled(poller, monkeypatch):
     from src.config import settings
 
+    from src.dashboard.snapshot import poll_snapshot_store
+
     monkeypatch.setattr(settings, "jira_enabled", False)
     poller.client = MagicMock()
     assert poller.poll_board() == []
     poller.client.get_active_sprint.assert_not_called()
+    assert not (poll_snapshot_store.snapshot().get("error") or "").strip()
 
 
 def test_poll_board_no_sprint(poller):
