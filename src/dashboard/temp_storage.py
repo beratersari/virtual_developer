@@ -1055,6 +1055,16 @@ def _validate_delete_target(name: str, *, area: str = "temp") -> Path:
     return target
 
 
+def clone_delete_in_progress(path: Path) -> bool:
+    """True when a dashboard force-delete is already running for this folder."""
+    name = Path(path).name
+    if not name:
+        return False
+    with _jobs_lock:
+        job = _jobs.get(name)
+    return bool(job and job.get("status") == "deleting" and job.get("area", "temp") != "sessions")
+
+
 def _raise_if_clone_in_use(target: Path) -> None:
     """Refuse Storage delete while a live job still owns this clone."""
     try:
@@ -1547,6 +1557,7 @@ def _run_delete_job(name: str, target: Path, area: str = "temp") -> None:
             _delete_session_file(target)
             on_progress(1, 1)
         else:
+            _raise_if_clone_in_use(target)
             force_rmtree_progress(target, on_progress=on_progress)
         if target.exists():
             raise OSError(f"force delete left remnants at {target}")

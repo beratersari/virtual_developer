@@ -310,6 +310,15 @@ class GitManager:
             base_temp, self._workspace_folder_name()
         )
         if short_path.exists():
+            from src.dashboard.temp_storage import clone_delete_in_progress
+
+            if clone_delete_in_progress(short_path):
+                raise GitCloneError(
+                    f"*Yaver* did not reuse {short_path.name} because a "
+                    "dashboard delete is still removing that clone.\n\n"
+                    "Wait until Storage shows the delete finished, then "
+                    "run the job again."
+                )
             logger.info(f"Reusing temp directory: {short_path}")
             return short_path
 
