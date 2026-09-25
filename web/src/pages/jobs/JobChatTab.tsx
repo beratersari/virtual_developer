@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJobChat } from '../../api/client'
 import type { ChatPart, JobChatPayload, TextArtifact } from '../../api/types'
 import { buildCodexTranscriptEvents } from '../../util/codexLog'
@@ -8,6 +8,32 @@ import { useLive } from '../../app/live'
 import { MarkdownBody } from '../../ui/MarkdownBody'
 import { groupChatMessages, type ChatGroup } from '../../util/chatParts'
 import { formatChatTime } from '../../util/time'
+
+/** Wheel events over an open `<details>` do not move an ancestor scroller. */
+function attachTranscriptWheel(el: HTMLDivElement): () => void {
+  const onWheel = (event: WheelEvent) => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const details = target.closest('details')
+    if (!details?.open || !el.contains(details)) return
+    if (el.scrollHeight <= el.clientHeight + 1) return
+    const before = el.scrollTop
+    el.scrollTop += event.deltaY
+    if (el.scrollTop !== before) event.preventDefault()
+  }
+  el.addEventListener('wheel', onWheel, { passive: false })
+  return () => el.removeEventListener('wheel', onWheel)
+}
+
+function useTranscriptScroller() {
+  const cleanup = useRef<(() => void) | null>(null)
+  const setRef = useCallback((el: HTMLDivElement | null) => {
+    cleanup.current?.()
+    cleanup.current = el ? attachTranscriptWheel(el) : null
+  }, [])
+  useEffect(() => () => cleanup.current?.(), [])
+  return setRef
+}
 
 function formatToolInput(input?: Record<string, unknown>): string {
   if (!input || Object.keys(input).length === 0) return ''
@@ -45,7 +71,7 @@ function ToolBlock({ part }: { part: ChatPart }) {
         {summary ? <span className="ml-2 text-text-muted">{summary}</span> : null}
       </summary>
       {part.output ? (
-        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
+        <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
           {part.output}
         </pre>
       ) : (
@@ -59,7 +85,7 @@ function ThinkingBlock({ part }: { part: ChatPart }) {
   return (
     <details className="rounded border border-border bg-bg px-3 py-2">
       <summary className="cursor-pointer text-[11px] font-medium text-text-muted">Thinking</summary>
-      <div className="mt-2 max-h-64 overflow-auto text-text-secondary">
+      <div className="mt-2 text-text-secondary">
         <MarkdownBody text={part.text || ''} />
       </div>
     </details>
@@ -152,6 +178,7 @@ function CodexTranscript({
   liveRun: boolean
 }) {
   const events = useMemo(() => buildCodexTranscriptEvents(logs, prompts), [logs, prompts])
+  const setScroller = useTranscriptScroller()
   if (events.length === 0) {
     if (liveRun) {
       return (
@@ -182,7 +209,7 @@ function CodexTranscript({
           </span>
         ) : null}
       </p>
-      <div className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
+      <div ref={setScroller} className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
         {events.map((ev, i) =>
           ev.kind === 'user' ? (
             <div key={`${ev.kind}-${i}`} className="flex justify-end">
@@ -248,7 +275,7 @@ function ClaudeToolBlock({
         {summary ? <span className="ml-2 text-text-muted">{summary}</span> : null}
       </summary>
       {output ? (
-        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
+        <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-text-secondary">
           {output}
         </pre>
       ) : (
@@ -308,6 +335,7 @@ function ClaudeTranscript({
   liveRun: boolean
 }) {
   const events = useMemo(() => buildClaudeTranscriptEvents(logs, prompts), [logs, prompts])
+  const setScroller = useTranscriptScroller()
   if (events.length === 0) {
     if (liveRun) {
       return (
@@ -338,7 +366,7 @@ function ClaudeTranscript({
           </span>
         ) : null}
       </p>
-      <div className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
+      <div ref={setScroller} className="max-h-[min(78vh,52rem)] space-y-2 overflow-auto pr-1">
         {claudeRows(events).map((row) =>
           row.type === 'tool' ? (
             <ClaudeToolBlock
@@ -478,6 +506,12 @@ export function JobChatTab({
       sessionFilter === 'all' ? all : all.filter((m) => m.session_id === sessionFilter)
     return groupChatMessages(filtered)
   }, [data, sessionFilter])
+
+  useEffect(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    return attachTranscriptWheel(el)
+  }, [groups.length])
 
   useEffect(() => {
     if (!stickToBottom.current) return
