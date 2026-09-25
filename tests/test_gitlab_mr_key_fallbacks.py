@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from src.azure.workitems import find_work_item_key_by_git
-from src.gitlab.keys import resolve_mr_issue_key
+from src.gitlab.keys import gitlab_issue_key, resolve_mr_issue_key
 from src.gitlab.webhook import decide_gitlab_note_webhook
 from src.state.manager import JiraStateManager
 from tests.test_gitlab_webhook import _mr_payload
@@ -14,6 +14,7 @@ _REPO = "https://gitlab.example.com/acme/demo.git"
 _REPO_BARE = "https://gitlab.example.com/acme/demo"
 _SRC = "feature/login"
 _TGT = "develop"
+_GL = gitlab_issue_key(_PATH, 4, host="gitlab.example.com")
 
 
 def _resolve(**kwargs):
@@ -120,17 +121,17 @@ def test_9_repo_normalized_dot_git(tmp_path):
 
 def test_10_source_mismatch_falls_back_to_gl(tmp_path):
     sm = _seed_work_item(tmp_path, "WIT-DEMO-42", source="feature/other")
-    assert _resolve(mr_title="Add login", state_manager=sm) == "GL-ACME-DEMO-4"
+    assert _resolve(mr_title="Add login", state_manager=sm) == _GL
 
 
 def test_11_target_mismatch_falls_back_to_gl(tmp_path):
     sm = _seed_work_item(tmp_path, "WIT-DEMO-42", target="main")
-    assert _resolve(mr_title="Add login", state_manager=sm) == "GL-ACME-DEMO-4"
+    assert _resolve(mr_title="Add login", state_manager=sm) == _GL
 
 
 def test_12_repo_mismatch_falls_back_to_gl(tmp_path):
     sm = _seed_work_item(tmp_path, "WIT-DEMO-42", repo="https://other.example/r.git")
-    assert _resolve(mr_title="Add login", state_manager=sm) == "GL-ACME-DEMO-4"
+    assert _resolve(mr_title="Add login", state_manager=sm) == _GL
 
 
 def test_13_two_matching_work_items_do_not_guess(tmp_path):
@@ -146,7 +147,7 @@ def test_13_two_matching_work_items_do_not_guess(tmp_path):
         },
     )
     assert find_work_item_key_by_git(_REPO, _SRC, _TGT, state_manager=sm) == ""
-    assert _resolve(mr_title="Add login", state_manager=sm) == "GL-ACME-DEMO-4"
+    assert _resolve(mr_title="Add login", state_manager=sm) == _GL
 
 
 def test_14_jira_state_with_same_git_is_ignored(tmp_path):
@@ -162,7 +163,7 @@ def test_14_jira_state_with_same_git_is_ignored(tmp_path):
         },
     )
     assert find_work_item_key_by_git(_REPO, _SRC, _TGT, state_manager=sm) == ""
-    assert _resolve(mr_title="Add login", state_manager=sm) == "GL-ACME-DEMO-4"
+    assert _resolve(mr_title="Add login", state_manager=sm) == _GL
 
 
 def test_15_title_wit_wins_over_git_match(tmp_path):
@@ -250,7 +251,7 @@ def test_20_webhook_closes_and_gl_fallback():
         _mr_payload(title="Add login", note="@berat_ai /yaver go")
     )
     assert az.accepted is True
-    assert az.event.issue_key == "GL-ACME-DEMO-4"
+    assert az.event.issue_key == _GL
 
 
 def test_21_webhook_git_match(tmp_path, monkeypatch):

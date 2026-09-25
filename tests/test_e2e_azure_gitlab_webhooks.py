@@ -16,7 +16,7 @@ import pytest
 
 from src.azure.keys import prompt_ticket_label, resolve_pr_issue_key
 from src.azure.webhook import decide_azure_comment_webhook, decide_azure_pr_webhook
-from src.gitlab.keys import resolve_mr_issue_key
+from src.gitlab.keys import gitlab_issue_key, resolve_mr_issue_key
 from src.gitlab.webhook import decide_gitlab_note_webhook
 from src.orchestrator.prompt_builder import PromptBuilder
 from src.state.manager import JiraStateManager
@@ -262,7 +262,9 @@ def test_e2e_gitlab_git_match_and_fallback(tmp_path, e2e_remote):
     )
     d = _gl_note(title="Add login", note="@berat_ai /yaver go")
     assert d.accepted
-    assert d.event.issue_key == "GL-ACME-DEMO-4"
+    assert d.event.issue_key == gitlab_issue_key(
+        "acme/demo", 4, host="gitlab.example.com"
+    )
 
 
 def test_e2e_review_location_in_prompt():

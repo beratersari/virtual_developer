@@ -26,6 +26,9 @@ from src.gitlab.webhook import (
 from src.state.manager import JiraStateManager
 from src.state.models import TaskStatus
 
+# Fallback key for acme/demo!4 on gitlab.example.com (host is part of the key).
+_GL_DEMO = gitlab_issue_key("acme/demo", 4, host="gitlab.example.com")
+
 
 def _mr_payload(
     *,
@@ -211,7 +214,7 @@ def test_decide_accepts_mr_mention():
     assert d.accepted
     assert d.event is not None
     # Title has no Jira key → GL- fallback from project path
-    assert d.event.issue_key == "GL-ACME-DEMO-4"
+    assert d.event.issue_key == _GL_DEMO
     assert d.event.source_branch == "feature/login"
     assert d.event.prompt == "what does login do?"
 
@@ -544,7 +547,7 @@ async def test_processor_gitlab_posts_codex_answer_not_jsonl(
     assert decision.event
 
     def fake_init(*_a, **_k):
-        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc._contexts[_GL_DEMO] = {"git": git, "runner": runner}
         proc.git_manager = git
         proc.agent_runner = runner
         return git
@@ -582,6 +585,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     from tests.test_opencode_sessions import _make_session_db
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("src.config.settings.agent_backend", "opencode")
     sm = JiraStateManager(state_dir=tmp_path / "state")
     binds = SessionBindStore(binds_dir=tmp_path / "binds")
     monkeypatch.setattr("src.state.session_bind_store.session_bind_store", binds)
@@ -589,7 +593,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     clone.mkdir()
     db = _make_session_db(
         tmp_path / "oc.db",
-        [{"id": "ses_gl1", "directory": str(clone), "title": "GL-ACME-DEMO-4: x"}],
+        [{"id": "ses_gl1", "directory": str(clone), "title": f"{_GL_DEMO}: x"}],
     )
     monkeypatch.setattr("src.opencode_sessions._default_db_path", lambda: db)
 
@@ -640,13 +644,13 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
         branch="feature/login",
         target_branch="develop",
         session_id="ses_gl1",
-        issue_key="GL-ACME-DEMO-4",
+        issue_key=_GL_DEMO,
         working_directory=str(clone),
         kind="build",
     )
 
     def fake_init(*_a, **_k):
-        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc._contexts[_GL_DEMO] = {"git": git, "runner": runner}
         proc.git_manager = git
         proc.agent_runner = runner
         return git
@@ -656,7 +660,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
     ), patch("src.gitlab.client.GitlabClient.post_mr_note", fake_post):
         await proc.handle_gitlab_mr_comment(decision.event)
 
-    st = sm.get_state("GL-ACME-DEMO-4")
+    st = sm.get_state(_GL_DEMO)
     assert st is not None
     assert st.status == TaskStatus.COMPLETED
     assert runner.run_agent_with_retry.await_count == 1
@@ -668,7 +672,7 @@ async def test_processor_gitlab_job_reuses_session_and_posts_mr(
         "Login is wired in src/auth.cpp" in (c.get("body") or "")
         for c in fake_jira.comments
     )
-    jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key="GL-ACME-DEMO-4")
+    jobs = isolate_jira_agent_artifacts["job_store"].list_jobs(issue_key=_GL_DEMO)
     assert jobs
     assert jobs[0]["source"] == "gitlab"
     assert jobs[0]["status"] == "completed"
@@ -714,7 +718,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     ]
     git.commits_ahead_of_target.return_value = 1
     git.push.return_value = True
-    git.get_last_commit_subject.return_value = "[GL-ACME-DEMO-4] fix: login"
+    git.get_last_commit_subject.return_value = f"[{_GL_DEMO}] fix: login"
     git.get_last_commit_message.return_value = "fix login"
     git.build_commit_url.return_value = (
         "https://gitlab.example.com/acme/demo/-/commit/bbb222newhead"
@@ -745,7 +749,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     assert decision.event
 
     def fake_init(*_a, **_k):
-        proc._contexts["GL-ACME-DEMO-4"] = {"git": git, "runner": runner}
+        proc._contexts[_GL_DEMO] = {"git": git, "runner": runner}
         proc.git_manager = git
         proc.agent_runner = runner
         return git
@@ -757,7 +761,7 @@ async def test_processor_gitlab_build_pushes_existing_mr(
     ):
         await proc.handle_gitlab_mr_comment(decision.event)
 
-    st = sm.get_state("GL-ACME-DEMO-4")
+    st = sm.get_state(_GL_DEMO)
     assert st is not None
     assert st.status == TaskStatus.COMPLETED
     git.push.assert_called()
@@ -793,7 +797,7 @@ def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira)
             "ok": True,
             "queued": True,
             "queue_id": "q_test",
-            "issue_key": "GL-ACME-DEMO-4",
+            "issue_key": _GL_DEMO,
             "status": "queued",
         }
     )
@@ -807,7 +811,7 @@ def test_dashboard_webhook_endpoint_dispatches(tmp_path, monkeypatch, fake_jira)
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["issue_key"] == "GL-ACME-DEMO-4"
+    assert body["issue_key"] == _GL_DEMO
     assert body["queue_id"] == "q_test"
     assert proc.enqueue_gitlab_note.await_count == 1
 
