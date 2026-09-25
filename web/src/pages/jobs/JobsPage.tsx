@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
+import { shouldRefreshQueueList } from './queueRefresh'
 import type { JobsPayload, QueueItem } from '../../api/types'
 import { useLive } from '../../app/live'
 import { sortJobsByCreatedAt } from '../../util/jobs'
@@ -44,6 +45,8 @@ export function JobsPage() {
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [cancelQueueId, setCancelQueueId] = useState<string | null>(null)
   const reqId = useRef(0)
+  const queueReq = useRef(0)
+  const lastFetchedQueued = useRef(-1)
   const lastGenReload = useRef(0)
 
   useEffect(() => {
@@ -55,19 +58,21 @@ export function JobsPage() {
   }, [issueFilter])
 
   const loadQueue = useCallback(async () => {
+    const req = ++queueReq.current
     try {
       const q = await fetchQueue({ status: 'queued', limit: 200 })
+      if (req !== queueReq.current) return
       const rows = (q.items || []).filter((r) => r.status === 'queued')
       rows.sort((a, b) =>
         String(b.created_at || '').localeCompare(String(a.created_at || '')),
       )
+      const count =
+        typeof q.queued_count === 'number' ? q.queued_count : rows.length
+      lastFetchedQueued.current = count
       setQueueItems(rows)
-      setQueueQueued(
-        typeof q.queued_count === 'number' ? q.queued_count : rows.length,
-      )
+      setQueueQueued(count)
     } catch {
-      setQueueItems([])
-      setQueueQueued(0)
+      // A failed refresh must not wipe rows that are already on screen.
     }
   }, [])
 
@@ -105,6 +110,13 @@ export function JobsPage() {
     lastGenReload.current = now
     void load()
   }, [live.generation, load])
+
+  useEffect(() => {
+    if (!shouldRefreshQueueList(statusFilter, live.queueQueued, lastFetchedQueued.current)) {
+      return
+    }
+    void loadQueue()
+  }, [statusFilter, live.queueQueued, loadQueue])
 
   const showQueue = statusFilter === 'queue'
 

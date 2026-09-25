@@ -84,6 +84,7 @@ function fromSettings(s: SettingsPayload): Draft {
       label: p.label || '',
       url: p.url || '',
       target_branch: p.target_branch || '',
+      source_branch: p.source_branch || '',
     })),
   }
 }
@@ -250,7 +251,7 @@ export function SettingsPage() {
             label: p.label.trim(),
             url: p.url.trim(),
             target_branch: (p.target_branch || '').trim(),
-            source_branch: '',
+            source_branch: (p.source_branch || '').trim(),
           }))
           .filter((p) => p.url)
       }
