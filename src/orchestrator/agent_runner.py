@@ -1453,6 +1453,9 @@ class AgentRunner:
         last_session_id = None
         attempt = 0
         incomplete_used = 0
+        # Error, timeout, and thread-lock share this cap. Separate counters
+        # let a job post 4/3, 5/3, 6/3 after three different failure kinds.
+        generic_used = 0
         error_used = 0
         timeout_used = 0
         lock_used = 0
@@ -1533,7 +1536,7 @@ class AgentRunner:
             retry_reason = ""
 
             if self._result_thread_locked(result):
-                if lock_used < effective_max_retries:
+                if generic_used < effective_max_retries:
                     should_retry = True
                     retry_reason = "thread_locked"
                     logger.warning(
@@ -1558,7 +1561,7 @@ class AgentRunner:
                         f"Timeout after compact/question — not sending another "
                         f"user prompt: task_id={task.task_id} reasons={to_reasons}"
                     )
-                elif retry_on_timeout and timeout_used < effective_max_retries:
+                elif retry_on_timeout and generic_used < effective_max_retries:
                     should_retry = True
                     retry_reason = "timeout"
                     logger.warning(f"Agent timed out on attempt {attempt + 1}, will retry: task_id={task.task_id}")
@@ -1605,7 +1608,7 @@ class AgentRunner:
                     f"Unknown OpenCode agent — not retrying: "
                     f"task_id={task.task_id} attempt={attempt + 1}"
                 )
-            elif retry_on_error and error_used < effective_max_retries:
+            elif retry_on_error and generic_used < effective_max_retries:
                 should_retry = True
                 retry_reason = "error"
                 logger.warning(f"Agent failed with error on attempt {attempt + 1}, will retry: task_id={task.task_id}, returncode={result.get('returncode')}")
@@ -1658,12 +1661,18 @@ class AgentRunner:
 
                 if retry_reason == "incomplete_session":
                     incomplete_used += 1
-                elif retry_reason == "timeout":
-                    timeout_used += 1
-                elif retry_reason == "thread_locked":
-                    lock_used += 1
+                    budget_used = incomplete_used
+                    budget_cap = incomplete_budget
                 else:
-                    error_used += 1
+                    generic_used += 1
+                    budget_used = generic_used
+                    budget_cap = effective_max_retries
+                    if retry_reason == "timeout":
+                        timeout_used += 1
+                    elif retry_reason == "thread_locked":
+                        lock_used += 1
+                    else:
+                        error_used += 1
                 attempt += 1
 
                 # Lock conflicts fail in seconds; do not apply the
@@ -1707,6 +1716,8 @@ class AgentRunner:
                         return_code,
                         result.get("opencode_session_id"),
                         task.task_id,  # new_task_id for state sync
+                        budget_used,
+                        budget_cap,
                     )
 
                 # Log retry attempt

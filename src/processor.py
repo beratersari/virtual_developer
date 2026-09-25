@@ -34,6 +34,33 @@ from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
 
 
+def _retry_progress_text(
+    reason: str,
+    attempt_number: int,
+    *,
+    budget_used: Optional[int] = None,
+    budget_cap: Optional[int] = None,
+) -> str:
+    """Jira line ``attempt used/cap`` for the budget that allowed this retry.
+
+    Incomplete resumes use ``agent_task_max_incomplete_retries``. Error,
+    timeout, and thread-lock share ``agent_task_max_retries``. The numerator
+    is that budget's own count, so it cannot read 4/3, 5/3, 6/3.
+    """
+    if budget_cap is None:
+        if (reason or "") == "incomplete_session":
+            budget_cap = int(
+                getattr(settings, "agent_task_max_incomplete_retries", 0) or 0
+            )
+        if not budget_cap:
+            budget_cap = int(getattr(settings, "agent_task_max_retries", 0) or 0)
+    used = int(attempt_number if budget_used is None else budget_used)
+    cap = int(budget_cap or 0)
+    if cap > 0 and used > cap:
+        used = cap
+    return f"Retrying after {reason} (attempt {used}/{cap})"
+
+
 def _plain_int(val: Any, default: int = 0) -> int:
     """Coerce settings/mocks to int (MagicMock is not JSON-serializable)."""
     try:
@@ -1042,6 +1069,8 @@ class JobProcessor:
         session_id: Optional[str] = None,
         new_task_id: Optional[str] = None,
         progress_percentage: int = 0,
+        budget_used: Optional[int] = None,
+        budget_cap: Optional[int] = None,
     ) -> None:
         """Record a retry attempt without overwriting CANCELLED/ERROR status.
 
@@ -1112,7 +1141,12 @@ class JobProcessor:
 
         self.reporter.post_progress_update(
             updated,
-            f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+            _retry_progress_text(
+                reason,
+                attempt_number,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
+            ),
             progress_percentage=progress_percentage,
         )
 
@@ -2301,7 +2335,22 @@ class JobProcessor:
         )
         if job_id:
             task.job_id = job_id
-        return job_id
+            return job_id
+        live = self.state_manager.get_state(state.issue_key)
+        if (
+            live is not None
+            and live.status == status
+            and live.current_task_id == task.task_id
+        ):
+            self._fail_issue(
+                state.issue_key,
+                "Could not persist the job record, so this run was not started.",
+                suggestion=(
+                    "Check free space under the Yaver data directory, then "
+                    "move the ticket back to To Do to retry."
+                ),
+            )
+        return None
 
     def _start_job_record(
         self,
@@ -7409,6 +7458,8 @@ class JobProcessor:
             return_code: Optional[int] = None,
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
+            budget_used: Optional[int] = None,
+            budget_cap: Optional[int] = None,
         ):
             self._record_agent_retry(
                 state.issue_key,
@@ -7421,6 +7472,8 @@ class JobProcessor:
                 session_id=session_id,
                 new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
             )
 
         from src.config import get_settings as _get_settings
@@ -7734,6 +7787,8 @@ class JobProcessor:
             return_code: Optional[int] = None,
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
+            budget_used: Optional[int] = None,
+            budget_cap: Optional[int] = None,
         ):
             self._record_agent_retry(
                 state.issue_key,
@@ -7746,6 +7801,8 @@ class JobProcessor:
                 session_id=session_id,
                 new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
             )
 
         from src.config import get_settings as _get_settings
