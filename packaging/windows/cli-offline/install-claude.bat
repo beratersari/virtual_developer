@@ -24,14 +24,17 @@ if not exist "%SRC_CFG%" (
     exit /b 1
 )
 
-if not exist "%DEST_BIN%" mkdir "%DEST_BIN%"
 if not exist "%DEST_DIR%" mkdir "%DEST_DIR%"
-copy /Y "%SRC_EXE%" "%DEST_EXE%" >nul
-if errorlevel 1 (
-    echo [ERROR] Could not copy claude.exe
+set "INSTALLED="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%\Backup-CliBinary.ps1" -Source "%SRC_EXE%" -Name "claude.exe" -Fallback "%DEST_EXE%"`) do set "INSTALLED=%%I"
+if not defined INSTALLED (
+    echo [ERROR] Could not install claude.exe
     call :maybe_pause
     exit /b 1
 )
+for %%D in ("%INSTALLED%") do set "DEST_BIN=%%~dpD"
+set "DEST_BIN=%DEST_BIN:~0,-1%"
+set "DEST_EXE=%INSTALLED%"
 copy /Y "%SRC_CFG%" "%DEST_CFG%" >nul
 if errorlevel 1 (
     echo [ERROR] Could not copy settings.json
@@ -39,7 +42,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-powershell -NoProfile -Command "$d=$env:USERPROFILE + '\.local\bin'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not $p) { $p='' }; $parts=@($p -split ';' | Where-Object { $_ -and ($_ -ne $d) }); $parts += $d; [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')"
+powershell -NoProfile -Command "$d='%DEST_BIN%'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not $p) { $p='' }; $parts=@($p -split ';' | Where-Object { $_ -and ($_ -ne $d) }); $parts += $d; [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')"
 if errorlevel 1 (
     echo [ERROR] Could not update user PATH
     call :maybe_pause

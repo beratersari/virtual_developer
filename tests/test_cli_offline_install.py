@@ -20,6 +20,7 @@ def test_each_worker_has_its_own_bat_and_host_config():
         text = bat.read_text(encoding="utf-8")
         assert f"{name}\\" in text
         assert "copy /Y" in text
+        assert "Backup-CliBinary.ps1" in text
         assert "curl" not in text.lower()
         assert "github.com" not in text.lower()
         assert "agents\\" not in text.lower()
@@ -49,4 +50,18 @@ def test_build_dist_ships_a_separate_cli_zip_without_agents():
     linux = (ROOT / "packaging" / "linux" / "build-dist.sh").read_text(encoding="utf-8")
     assert 'OpenCode must be 1.18.10' in linux
     assert 'Codex must be 0.149.0' in linux
+    assert "Claude Code must be 2.1.280" in linux
     assert "ClaudeCode=2.1.280" in linux
+    assert "yaver-clis-" in linux
+    assert "linux-x64/claude" in linux
+    assert "cli-offline" in linux
+    linux_cli = ROOT / "packaging" / "linux" / "cli-offline"
+    for name in ("install-opencode.sh", "install-codex.sh", "install-claude.sh"):
+        script = (linux_cli / name).read_text(encoding="utf-8")
+        assert "vd_install_binary" in script
+        assert "agents/" not in script
+    helper = (linux_cli / "lib.sh").read_text(encoding="utf-8")
+    assert "date +%Y%m%d" in helper
+    assert (ROOT / "packaging" / "windows" / "Backup-CliBinary.ps1").is_file()
+    workflow = (ROOT / ".github" / "workflows" / "linux-dist.yml").read_text(encoding="utf-8")
+    assert "yaver-clis-linux-x64-" in workflow

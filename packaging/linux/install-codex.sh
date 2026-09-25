@@ -30,15 +30,13 @@ if [[ -n "$vendor_pkg" && -f "$vendor_pkg" ]]; then
     echo "[ERROR] No codex binary in $vendor_pkg"
     exit 1
   fi
-  cp -f "$bin" "$DEST_DIR/codex"
-  chmod +x "$DEST_DIR/codex"
+  installed="$(vd_install_binary "$bin" codex "$DEST_DIR")"
   rm -rf "$tmp"
-  export PATH="$DEST_DIR:$PATH"
+  export PATH="$(dirname "$installed"):$PATH"
 elif [[ -x "$ROOT/vendor/bin/codex" ]]; then
   echo "Installing Codex from vendor/bin/codex (offline)..."
-  cp -f "$ROOT/vendor/bin/codex" "$DEST_DIR/codex"
-  chmod +x "$DEST_DIR/codex"
-  export PATH="$DEST_DIR:$PATH"
+  installed="$(vd_install_binary "$ROOT/vendor/bin/codex" codex "$DEST_DIR")"
+  export PATH="$(dirname "$installed"):$PATH"
 elif command -v codex >/dev/null 2>&1; then
   echo "[OK] Codex already on PATH: $(command -v codex)"
 else

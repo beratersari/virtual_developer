@@ -123,6 +123,7 @@ jobs:
           path: |
             dist/${{ steps.meta.outputs.dist_name }}.tar.gz
             dist/${{ steps.meta.outputs.dist_name }}.zip
+            dist/yaver-clis-linux-x64-*.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -135,6 +136,7 @@ jobs:
           files: |
             dist/${{ steps.meta.outputs.dist_name }}.tar.gz
             dist/${{ steps.meta.outputs.dist_name }}.zip
+            dist/yaver-clis-linux-x64-*.zip
             dist/opencoderman-*.zip
           body_path: dist/RELEASE_NOTES.md
           fail_on_unmatched_files: false
