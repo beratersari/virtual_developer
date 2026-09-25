@@ -763,10 +763,15 @@ class ClaudeBackend:
         )
         if outcome.get("is_error"):
             code = code or 1
+        stderr = str(outcome.get("stderr") or outcome.get("error") or "")
+        if outcome.get("is_error"):
+            text = str(outcome.get("text") or "").strip()
+            if text and text not in stderr:
+                stderr = f"{text}\n{stderr}".strip() if stderr.strip() else text
         return AgentRunResult(
             returncode=int(code or 0),
             stdout=str(outcome.get("text") or ""),
-            stderr=str(outcome.get("stderr") or outcome.get("error") or ""),
+            stderr=stderr,
             session_id=sid,
             backend=self.name,
             extra=extra,

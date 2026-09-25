@@ -323,6 +323,42 @@ def test_finish_after_question_tool_is_not_still_asking():
     assert claude_reply_asks_question(parsed) is False
 
 
+@pytest.mark.asyncio
+async def test_claude_api_error_is_the_failure_text(tmp_path, monkeypatch):
+    """A 429 result is the failure text. Jira reads stderr."""
+    cli = _write_fake_claude(tmp_path)
+    (tmp_path / "fake_claude.py").write_text(
+        "\n".join(
+            [
+                "import json, sys",
+                f"SESSION = '{SESSION}'",
+                "sys.stdin.readline()",
+                "print(json.dumps({",
+                "  'type': 'result', 'subtype': 'success', 'is_error': True,",
+                "  'session_id': SESSION,",
+                "  'result': 'API Error: Request rejected (429)',",
+                "}), flush=True)",
+                "sys.exit(0)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.backends.claude.resolve_claude_cli", lambda *_a, **_k: str(cli)
+    )
+    result = await ClaudeBackend().run(
+        AgentRunRequest(
+            prompt="implement the ticket",
+            agent="derman-build",
+            working_directory=tmp_path,
+            timeout_seconds=15,
+        )
+    )
+    assert result.returncode != 0
+    assert "API Error: Request rejected (429)" in (result.stderr or "")
+
+
 def _write_fake_claude(tmp_path: Path, *, stall: bool = False) -> Path:
     script = tmp_path / "fake_claude.py"
     script.write_text(
