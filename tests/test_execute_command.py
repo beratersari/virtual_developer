@@ -428,11 +428,12 @@ def test_operator_reply_header_keeps_job_id_after_current_cleared():
             "current_job_id": None,
             "job_ids": ["job_old", "job_live"],
             "model": "mimo",
+            "backend": "opencode",
         },
     )
     body = wrap_operator_reply("Answer", "done", state=st)
     assert body.startswith(
-        f"**Yaver {__version__} — Yanıt** · `mimo` · `job_live`"
+        f"**Yaver {__version__} — Yanıt** · `OpenCode` · `mimo` · `job_live`"
     )
 
 
@@ -443,9 +444,14 @@ def test_operator_reply_header_uses_log_context_job_id():
 
     set_job_id("job_ctx")
     try:
-        body = wrap_operator_reply("Failed", "boom", model="glm")
+        body = wrap_operator_reply(
+            "Failed",
+            "boom",
+            model="glm",
+            state=type("S", (), {"metadata": {"backend": "claude"}})(),
+        )
         assert body.startswith(
-            f"**Yaver {__version__} — Başarısız** · `glm` · `job_ctx`"
+            f"**Yaver {__version__} — Başarısız** · `Claude Code` · `glm` · `job_ctx`"
         )
     finally:
         clear_log_context()

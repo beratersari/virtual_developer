@@ -275,6 +275,18 @@ if ($doOpenCode) {
         throw "No OpenCode CLI. Need opencoderman\vendor\bin\windows\opencode.exe, vendor\bin\opencode.exe, or vendor\opencode-home.zip (CI zip). Online: install-opencode-online.bat"
     }
 
+    $backupCli = Join-Path $PSScriptRoot "Backup-CliBinary.ps1"
+    if (-not (Test-Path -LiteralPath $backupCli)) {
+        throw "Missing $backupCli"
+    }
+    $seedExe = $ocmExe
+    if (Test-Path -LiteralPath $vendorExe) { $seedExe = $vendorExe }
+    elseif (Test-Path -LiteralPath $expanded) { $seedExe = $expanded }
+    if (Test-Path -LiteralPath $seedExe) {
+        $placedOc = & $backupCli -Source $seedExe -Name "opencode.exe" -Fallback (Join-Path $userOc "bin\opencode.exe")
+        Write-Host "  OpenCode binary placed at $placedOc"
+    }
+
     Write-Host "Step 1-3: OpenCode via opencoderman (backup ~/.opencode, CLI + agents + skills)..."
     $pyArgs = @(
         $installer,
@@ -343,8 +355,12 @@ if ($doCodex) {
         throw "Codex package missing. Need vendor\$codexAsset in the CI offline zip. No download; no vendor\bin\codex.exe."
     }
 
-    New-Item -ItemType Directory -Path $codexBin -Force | Out-Null
-    Copy-Item -LiteralPath $srcExe -Destination $codexExe -Force
+    $backupCli = Join-Path $PSScriptRoot "Backup-CliBinary.ps1"
+    if (-not (Test-Path -LiteralPath $backupCli)) {
+        throw "Missing $backupCli"
+    }
+    $codexExe = & $backupCli -Source $srcExe -Name "codex.exe" -Fallback $codexExe
+    $codexBin = Split-Path -Parent $codexExe
     Unblock-File -LiteralPath $codexExe -ErrorAction SilentlyContinue
     $stale = Join-Path $ocBin "codex.exe"
     if (Test-Path -LiteralPath $stale) {

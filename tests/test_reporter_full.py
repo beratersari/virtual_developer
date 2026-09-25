@@ -17,7 +17,7 @@ def state():
         issue_summary="sum",
         description="d",
         status=TaskStatus.EXECUTING,
-        metadata={"workflow_type": "execution"},
+        metadata={"workflow_type": "execution", "backend": "opencode"},
         progress_percentage=50,
         retry_count=1,
         max_retries=3,
@@ -62,6 +62,7 @@ def test_post_initial_ack_success(state):
     cid = r.post_initial_acknowledgment(state)
     assert cid == "1"
     assert "İş başladı" in client.comments[0]["body"]
+    assert "`OpenCode`" in client.comments[0]["body"]
 
 
 def test_post_initial_ack_exception(state):
@@ -228,6 +229,28 @@ def test_post_comment_response():
     assert "hello" in body
     assert "Yanıt" in body
     assert "Yapay zekâ —" not in body
+
+
+def test_answer_header_names_the_backend(monkeypatch):
+    state = type(
+        "S",
+        (),
+        {"metadata": {"backend": "claude", "model": "openai", "current_job_id": "job_1"}},
+    )()
+    monkeypatch.setattr(
+        "src.state.manager.JiraStateManager.get_state",
+        lambda self, key: state,
+    )
+    client = FakeJiraClient()
+    r = JiraReporter(client=client)
+    from src.log_context import clear_log_context
+
+    clear_log_context()
+    r.post_comment_response("R-1", "hello")
+    body = client.comments[-1]["body"]
+    assert "`Claude Code`" in body
+    assert "`openai`" in body
+    assert "`job_1`" in body
 
 
 def test_post_comment_response_formats_codex_jsonl_keeps_opencode():

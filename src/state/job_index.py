@@ -448,7 +448,7 @@ class JobIndex:
             paths = list(jobs_dir.glob("job_*.json"))
         except OSError as e:
             logger.warning(f"Job index glob failed: {e}")
-            return 0
+            raise
         kept: set[str] = set()
         unread: set[str] = set()
         upserted = 0

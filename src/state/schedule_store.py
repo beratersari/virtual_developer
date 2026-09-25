@@ -73,7 +73,9 @@ class ScheduleStore:
                 n = self._index.reconcile(self.schedules_dir)
             except Exception as e:
                 logger.warning(f"Schedule index backfill failed: {e}")
+                self._index_stale = True
                 return 0
+            self._index_stale = False
             self._index_ready = True
             if n:
                 logger.info(f"Schedule index backfilled {n} schedule(s) from JSON")

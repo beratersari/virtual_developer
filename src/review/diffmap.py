@@ -171,5 +171,13 @@ def _strip_prefix(value: str) -> str:
     return path
 
 
+def strip_dot_slash(path: str) -> str:
+    """Drop a leading ``./`` prefix without eating a dotfile name."""
+    norm = (path or "").replace("\\", "/").strip()
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
 def _norm(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./").strip()
+    return strip_dot_slash(path).lstrip("/")

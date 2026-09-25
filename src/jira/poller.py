@@ -128,7 +128,6 @@ class JiraPoller:
                 source="disabled",
                 issues=[],
                 interval_seconds=self.interval,
-                error="Jira disabled",
             )
             return []
         if not self.board_id:

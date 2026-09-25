@@ -27,7 +27,7 @@ def _state(**kwargs) -> JiraAgentState:
         issue_key="MSG-1",
         issue_summary="Sample issue",
         status=TaskStatus.EXECUTING,
-        metadata={"workflow_type": "execution"},
+        metadata={"workflow_type": "execution", "backend": "claude"},
         progress_percentage=40,
         retry_count=0,
         max_retries=3,
@@ -42,10 +42,11 @@ def test_clip_helper():
 
 
 def test_ack_includes_issue_and_workflow(reporter, client):
-    st = _state(metadata={"workflow_type": "planning"})
+    st = _state(metadata={"workflow_type": "planning", "backend": "claude"})
     reporter.post_initial_acknowledgment(st)
     body = client.comments[-1]["body"]
     assert "İş başladı" in body
+    assert "`Claude Code`" in body
     assert "MSG-1" in body
     assert "planning" in body.lower()
     assert "Devam Ediyor" in body
@@ -65,6 +66,7 @@ def test_plan_summary_empty_plan_explains_next_steps(reporter, client):
     reporter.post_plan_summary(st, "")
     body = client.comments[-1]["body"]
     assert "— Plan**" in body
+    assert "`Claude Code`" in body
     assert "plan içeriği" in body.lower() or "bulunamadı" in body.lower()
     assert "Mode: build" in body
     assert "yorumda" in body.lower()
@@ -82,6 +84,7 @@ def test_progress_empty_message_and_clamps_pct(reporter, client):
     reporter.post_progress_update(st, "", progress_percentage=150)
     body = client.comments[-1]["body"]
     assert "İlerleme" in body
+    assert "`Claude Code`" in body
     assert "100%" in body
     assert "ayrıntı yok" in body.lower()
 
@@ -112,6 +115,7 @@ def test_completion_with_mr_and_branch(reporter, client):
         execution_duration_seconds=12.5,
         metadata={
             "workflow_type": "execution",
+            "backend": "claude",
             "merge_request_url": "https://gitlab.example/mr/1",
             "feature_branch": "feature/MSG-1",
         },
@@ -119,6 +123,7 @@ def test_completion_with_mr_and_branch(reporter, client):
     reporter.post_completion(st, "Implemented main.cpp")
     body = client.comments[-1]["body"]
     assert "tamamlandı" in body.lower()
+    assert "`Claude Code`" in body
     assert "https://gitlab.example/mr/1" in body
     assert "feature/MSG-1" in body
     assert "12.5" in body
@@ -149,6 +154,7 @@ def test_error_empty_message_and_default_suggestion(reporter, client):
     reporter.post_error(st, "")
     body = client.comments[-1]["body"]
     assert "Başarısız" in body
+    assert "`Claude Code`" in body
     assert "Bilinmeyen hata" in body
     assert "Öneri" in body
     assert "Yapılacaklar" in body

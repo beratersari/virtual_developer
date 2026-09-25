@@ -1368,7 +1368,11 @@ class GitManager:
         if not self.remote_url or not self.temp_dir:
             return
         try:
-            self._run_git(["remote", "set-url", "origin", self.remote_url], check=False)
+            self._run_git(
+                ["remote", "set-url", "origin", self.remote_url],
+                check=False,
+                ignore_cancel=True,
+            )
             logger.debug("Scrubbed credentials from origin remote URL")
         except Exception as e:
             logger.warning(
@@ -1493,6 +1497,7 @@ class GitManager:
         text: bool = True,
         encoding: Optional[str] = None,
         errors: Optional[str] = None,
+        ignore_cancel: bool = False,
     ) -> subprocess.CompletedProcess:
         """Run a subprocess that cancel can force-kill (process group).
 
@@ -1500,7 +1505,7 @@ class GitManager:
         through that mock so existing fixtures keep working.
         """
         self._init_proc_state()
-        if self._cancelled:
+        if self._cancelled and not ignore_cancel:
             raise GitCancelledError(
                 self._redact_secret_text(
                     f"git cancelled before start: {' '.join(str(c) for c in cmd[:6])}"
@@ -1714,6 +1719,7 @@ class GitManager:
         *,
         auth: bool = False,
         timeout: Optional[int] = None,
+        ignore_cancel: bool = False,
     ) -> subprocess.CompletedProcess:
         """Run a git command in the temp working directory.
 
@@ -1770,6 +1776,7 @@ class GitManager:
                         errors="replace",
                         timeout=cmd_timeout,
                         env=git_env,
+                        ignore_cancel=ignore_cancel,
                     )
                 except GitCancelledError:
                     raise

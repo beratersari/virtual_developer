@@ -39,6 +39,8 @@ Extract the artifact so the install scripts sit next to `vendor/` and `src/`, th
 ./start-backend.sh
 ```
 
+A second release file, `yaver-clis-linux-x64-*.zip`, holds only the three CLIs and their host configs. `install-opencode.sh`, `install-codex.sh`, and `install-claude.sh` find the binary already on PATH, rename it with the date at the end, and put the new binary in that directory. Agents stay in the product zip.
+
 Without that zip, OpenCode falls back to `opencoderman/packaging/build_artifact.py --in-place` (official GitHub release). Dashboard still uses PyPI when wheels are missing.
 
 ## Online / from git

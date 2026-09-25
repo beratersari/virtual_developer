@@ -305,15 +305,17 @@ class WorkQueueStore:
             held = (current.get("status") or "").strip().lower()
             if held in _TERMINAL:
                 return current
-        patch: Dict[str, Any] = {
-            "status": status,
-            "finished_at": _now_iso(),
-        }
-        if error_message is not None:
-            patch["error_message"] = (error_message or "")[:2000]
-        if job_id:
-            patch["job_id"] = job_id
-        rec = self.update(queue_id, **patch)
+            patch: Dict[str, Any] = {
+                "status": status,
+                "finished_at": _now_iso(),
+            }
+            if error_message is not None:
+                patch["error_message"] = (error_message or "")[:2000]
+            if job_id:
+                patch["job_id"] = job_id
+            # update() re-enters this lock. Keep the terminal check and the
+            # write in one hold so a second finish cannot land in between.
+            rec = self.update(queue_id, **patch)
         if rec:
             logger.info(
                 f"Queue finish {queue_id} status={status} "
@@ -332,19 +334,26 @@ class WorkQueueStore:
         sources: Optional[set] = None,
         include_queued: bool = True,
         include_running: bool = True,
+        queued_sources: Optional[set] = None,
+        started_before: Optional[str] = None,
     ) -> int:
         """Terminal-finish open rows for one issue.
 
         Dashboard Stop must close the leftover ``running`` claim and any
         Jira poller leftover. GitLab/Azure follow-ups that are still
-        ``queued`` are extra work and stay unless *include_queued* is true
-        for those sources.
+        ``queued`` stay unless they are in *queued_sources* (or
+        *include_queued* is true and *queued_sources* is unset).
+
+        *started_before* leaves a row that began after Stop wrote its
+        terminal time, so a schedule fired during the kill cannot be
+        closed by the same Stop.
         """
         key = (issue_key or "").strip().upper()
         if not key:
             return 0
         if status not in _TERMINAL:
             status = "cancelled"
+        cutoff = (started_before or "").strip()
         n = 0
         with self._lock:
             for rec in list(self._iter_records()):
@@ -355,10 +364,25 @@ class WorkQueueStore:
                 src = (rec.get("source") or "jira").strip().lower()
                 if sources is not None and src not in sources:
                     continue
-                if rec.get("status") == "queued" and not include_queued:
+                row_status = rec.get("status")
+                if row_status == "queued" and not include_queued:
                     continue
-                if rec.get("status") == "running" and not include_running:
+                if row_status == "running" and not include_running:
                     continue
+                if (
+                    row_status == "queued"
+                    and queued_sources is not None
+                    and src not in queued_sources
+                ):
+                    continue
+                if cutoff:
+                    stamp = (
+                        rec.get("started_at")
+                        if row_status == "running"
+                        else rec.get("created_at")
+                    )
+                    if str(stamp or "") >= cutoff:
+                        continue
                 qid = rec.get("queue_id")
                 if not qid:
                     continue

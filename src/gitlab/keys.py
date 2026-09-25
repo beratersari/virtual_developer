@@ -5,27 +5,64 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any, List, Optional, Sequence
+from urllib.parse import urlparse
 
 
 def project_path_slug(project_path: str, *, max_len: int = 48) -> str:
     """Filesystem-safe project slug for ``GL-`` / ``AZ-`` fallback keys.
 
-    Short paths stay readable. Paths that would be cut at *max_len* keep an
-    8-hex digest of the full slug so two long remotes cannot collide.
+    Short paths stay readable. ``/`` still becomes ``-`` so ``acme/demo``
+    stays ``ACME-DEMO``. ``-``, ``_``, and ``.`` are marked first so they
+    do not collapse into that same hyphen. A trailing ``.git`` stays the
+    historical ``-GIT`` suffix. Paths that would be cut at *max_len* keep
+    an 8-hex digest of the original path.
     """
     raw = (project_path or "project").strip().strip("/")
-    parts = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper()
+    body = raw
+    git_suffix = ""
+    if body.lower().endswith(".git"):
+        body = body[:-4].strip().strip("/")
+        git_suffix = "-GIT"
+    marked = body.replace("-", "-H-").replace("_", "-U-").replace(".", "-D-")
+    parts = re.sub(r"[^A-Za-z0-9]+", "-", marked).strip("-").upper()
+    if git_suffix:
+        parts = f"{parts}{git_suffix}" if parts else "GIT"
     if not parts:
         parts = "PROJECT"
     if len(parts) <= max_len:
         return parts
-    digest = hashlib.sha256(parts.encode("utf-8")).hexdigest()[:8].upper()
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8].upper()
     head_len = max(1, max_len - 1 - len(digest))
     head = parts[:head_len].rstrip("-") or "PROJECT"
     return f"{head}-{digest}"
 
 
-def gitlab_issue_key(project_path: str, mr_iid: int) -> str:
+def _host_from_repository_url(repository_url: str) -> str:
+    raw = (repository_url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("git@"):
+        rest = raw[4:]
+        return rest.split(":", 1)[0].strip().lower()
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        return (urlparse(raw).hostname or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _host_slug(host: str) -> str:
+    """Hostname slug. Dots become hyphens; a hyphen in the hostname stays marked."""
+    raw = (host or "").strip().lower()
+    if not raw:
+        return ""
+    marked = raw.replace("-", "-H-")
+    parts = re.sub(r"[^a-z0-9]+", "-", marked).strip("-").upper()
+    return "" if parts == "PROJECT" else parts
+
+
+def gitlab_issue_key(project_path: str, mr_iid: int, host: str = "") -> str:
     """Build a filesystem-safe fallback key: ``GL-{PROJECT-PATH}-{iid}``.
 
     Example: ``group/sub/repo`` + 12 → ``GL-GROUP-SUB-REPO-12``.
@@ -37,6 +74,9 @@ def gitlab_issue_key(project_path: str, mr_iid: int) -> str:
         iid = int(mr_iid)
     except (TypeError, ValueError):
         iid = 0
+    host_slug = _host_slug(host)
+    if host_slug:
+        return f"GL-{host_slug}-{parts}-{iid}"
     return f"GL-{parts}-{iid}"
 
 
@@ -209,4 +249,8 @@ def resolve_mr_issue_key(
         )
         if found:
             return found
-    return gitlab_issue_key(project_path or "project", mr_iid)
+    return gitlab_issue_key(
+        project_path or "project",
+        mr_iid,
+        host=_host_from_repository_url(repository_url),
+    )

@@ -889,6 +889,7 @@ if (Test-Path -LiteralPath $clisStage) {
 Ensure-Dir (Join-Path $clisStage "opencode")
 Ensure-Dir (Join-Path $clisStage "codex")
 Ensure-Dir (Join-Path $clisStage "claude")
+Copy-Item -LiteralPath (Join-Path $root "packaging\windows\Backup-CliBinary.ps1") -Destination (Join-Path $clisStage "Backup-CliBinary.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $clisSrc "install-opencode.bat") -Destination (Join-Path $clisStage "install-opencode.bat") -Force
 Copy-Item -LiteralPath (Join-Path $clisSrc "install-codex.bat") -Destination (Join-Path $clisStage "install-codex.bat") -Force
 Copy-Item -LiteralPath (Join-Path $clisSrc "install-claude.bat") -Destination (Join-Path $clisStage "install-claude.bat") -Force

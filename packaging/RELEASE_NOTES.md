@@ -1,3 +1,18 @@
+# Yaver 0.9.62
+
+Jobs, schedules, and saved sessions stay on the dashboard when the search index cannot rebuild, because Yaver reads the JSON files instead of an empty index.
+Stopping a job and a worker finishing it no longer overwrite each other, so a cancelled queue row stays cancelled.
+Scheduling that issue again starts a new job even when the old queue row was still marked running, and that run shows up in Jobs.
+Opening the Queue tab loads the waiting rows immediately.
+Saving projects in Settings keeps each repository's source branch.
+A failed plan, after the ticket is sent back to To Do, no longer puts the implement label back on the ticket.
+GitLab merge requests that do not name a Jira key now include the GitLab host in the fallback key, so two servers with the same project path no longer share one plan.
+An Azure review of a file such as .github/workflows/ci.yml is posted on that file.
+Cancelling a job removes the token from the clone's origin URL.
+Installing OpenCode, Codex, or Claude Code renames the binary already on PATH with today's date and copies the new binary into that same directory.
+Linux releases include yaver-clis-linux-x64, with the same three CLIs as the Windows CLI zip.
+Jira answer comments name OpenCode, Codex, or Claude Code, and the dashboard no longer warns when the Jira poller is turned off.
+
 # Yaver 0.9.61
 
 A Claude job that resumes an earlier run now shows that run's prompt and log in the transcript, then the short continue line and the new reply.

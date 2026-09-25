@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from src.review.diffmap import DiffMap
+from src.review.diffmap import DiffMap, strip_dot_slash
 from src.review.findings import Finding
 from src.review.threads import ExistingThread, is_finding_body
 
@@ -115,8 +115,8 @@ def _last_finding_body(comments: list) -> str:
 
 
 def _file_path(path: str) -> str:
-    norm = (path or "").replace("\\", "/").lstrip("./")
-    return "/" + norm if norm and not norm.startswith("/") else norm
+    norm = strip_dot_slash(path).lstrip("/")
+    return "/" + norm if norm else ""
 
 
 def _norm_path(path: str) -> str:

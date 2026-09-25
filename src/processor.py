@@ -959,6 +959,9 @@ class JobProcessor:
         )
         meta_patch = self._archive_run_identifiers(issue_key)
         meta_patch["requeue_eligible"] = False
+        # A To Do rework is a new run. A leftover implement latch would make
+        # the next plan failure put plan_execute back on the ticket.
+        meta_patch["plan_execute_run"] = False
         # Drop live pointer only; history keys stay in meta_patch
         meta_patch["current_job_id"] = None
         st0 = self.state_manager.get_state(issue_key)
@@ -1223,6 +1226,24 @@ class JobProcessor:
     def _is_live_processing(self, issue_key: str) -> bool:
         """True when this process holds an in-memory processing slot for the issue."""
         return issue_key in self._contexts
+
+    def _running_queue_row_is_live(self, issue_key: str) -> bool:
+        """True when a running queue row still belongs to a live job.
+
+        A terminal issue (Stop / error / completed) with a leftover
+        ``running`` row is not live, even if ``_contexts`` has not been
+        dropped yet. A row with no local state is a first claim and is live.
+        """
+        key = (issue_key or "").strip()
+        if not key:
+            return False
+        try:
+            st = self.state_manager.get_state(key)
+        except Exception:
+            return True
+        if st is not None and st.status in self.TERMINAL_STATUSES:
+            return False
+        return self._issue_is_in_flight(key) or st is None
 
     def _issue_is_in_flight(self, issue_key: str) -> bool:
         """True when this issue is already running (cache or local planning/executing)."""
@@ -2596,25 +2617,27 @@ class JobProcessor:
                 logger.warning(f"cancel_job kill failed for {issue_key}: {e}")
 
             live_job_id = self._active_jobs.get(issue_key)
-            # Close the running claim and leftover Jira poller rows. GitLab/Azure
-            # follow-ups still queued for this key are extra work — leave them.
+            # One hold: a claim between two passes can turn a queued row
+            # into running after the running pass and leave it open.
+            # GitLab/Azure follow-ups still queued for this key stay.
+            cutoff = ""
+            refreshed_for_cutoff = self.state_manager.get_state(issue_key)
+            if refreshed_for_cutoff and refreshed_for_cutoff.completed_at:
+                done_at = refreshed_for_cutoff.completed_at
+                if hasattr(done_at, "isoformat"):
+                    cutoff = done_at.isoformat(timespec="milliseconds")
+                else:
+                    cutoff = str(done_at)
             try:
                 nq = self.queue_store.finish_open_for_issue(
                     issue_key,
                     status="cancelled",
                     error_message=reason,
                     job_id=live_job_id,
-                    include_queued=False,
-                    include_running=True,
-                )
-                nq += self.queue_store.finish_open_for_issue(
-                    issue_key,
-                    status="cancelled",
-                    error_message=reason,
-                    job_id=live_job_id,
-                    sources={"jira"},
                     include_queued=True,
-                    include_running=False,
+                    include_running=True,
+                    queued_sources={"jira"},
+                    started_before=cutoff or None,
                 )
                 if nq:
                     logger.info(
@@ -3254,6 +3277,9 @@ class JobProcessor:
         """Leave/restore ``plan_execute`` after a failed implement so poller retries."""
         st = state or self.state_manager.get_state(issue_key)
         if st is None or not (st.metadata or {}).get("plan_execute_run"):
+            return False
+        workflow = str((st.metadata or {}).get("workflow_type") or "").strip().lower()
+        if workflow != WorkflowType.EXECUTION.value:
             return False
         from src.jira.plan_labels import PLAN_EXECUTE_LABEL, PLAN_EXECUTED_LABEL
 
@@ -5110,20 +5136,43 @@ class JobProcessor:
                 "status": live.get("status"),
             }
         if existing and (existing.get("status") or "") == "running":
+            if self._running_queue_row_is_live(key):
+                logger.info(
+                    f"{key}: already running as {existing.get('queue_id')}; "
+                    f"not queueing a duplicate"
+                )
+                return {
+                    "ok": True,
+                    "queued": False,
+                    "started": True,
+                    "duplicate": True,
+                    "queue_id": existing.get("queue_id"),
+                    "issue_key": key,
+                    "status": "running",
+                    "reason": "already in-flight",
+                }
+            # Stop left the claim running (or a claim landed after the
+            # running pass). A schedule must start a new job, not attach
+            # to that leftover row.
+            closed = []
+            for rec in list(self.queue_store.list_items(status="running", limit=200)):
+                if (rec.get("issue_key") or "").strip().upper() != key.upper():
+                    continue
+                if (rec.get("source") or "jira").strip().lower() != "jira":
+                    continue
+                qid = rec.get("queue_id") or ""
+                if not qid:
+                    continue
+                self.queue_store.finish(
+                    qid,
+                    status="cancelled",
+                    error_message="Reaped stale running queue row (issue not live)",
+                )
+                closed.append(qid)
             logger.info(
-                f"{key}: already running as {existing.get('queue_id')}; "
-                f"not queueing a duplicate"
+                f"{key}: closed stale running queue row(s) {', '.join(closed) or '-'} "
+                f"so a new schedule can start"
             )
-            return {
-                "ok": True,
-                "queued": False,
-                "started": True,
-                "duplicate": True,
-                "queue_id": existing.get("queue_id"),
-                "issue_key": key,
-                "status": "running",
-                "reason": "already in-flight",
-            }
         if self._issue_is_in_flight(key):
             logger.info(f"{key}: already in-flight; not queueing a duplicate")
             return {

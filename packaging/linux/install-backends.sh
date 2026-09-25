@@ -54,6 +54,11 @@ install_opencode() {
     echo "[ERROR] missing $installer"
     exit 1
   fi
+  if [[ -x "$vendor/bin/opencode" ]]; then
+    vd_install_binary "$vendor/bin/opencode" opencode "${HOME}/.opencode/bin" >/dev/null
+  elif [[ -x "$ocm/vendor/bin/linux/opencode" ]]; then
+    vd_install_binary "$ocm/vendor/bin/linux/opencode" opencode "${HOME}/.opencode/bin" >/dev/null
+  fi
   if [[ -f "$ocm/vendor/bin/linux/opencode" || -x "$vendor/bin/opencode" || -f "$vendor/opencode-home.zip" ]]; then
     echo "Installing OpenCode via opencoderman (offline CLI from vendor/ or opencode-home.zip)..."
   else

@@ -54,6 +54,7 @@ GLAB_VERSION="$(read_versions GLAB_VERSION)"
 CODEX_VERSION="$(read_versions CODEX_VERSION)"
 CODEX_LINUX_ASSET="$(read_versions CODEX_LINUX_ASSET || true)"
 CODEX_LINUX_ASSET="${CODEX_LINUX_ASSET:-codex-x86_64-unknown-linux-musl.tar.gz}"
+CLAUDE_CODE_VERSION="$(read_versions CLAUDE_CODE_VERSION || true)"
 PYTHON_MIN_VERSION="$(read_versions PYTHON_MIN_VERSION || true)"
 PYTHON_MIN_VERSION="${PYTHON_MIN_VERSION:-3.10}"
 WHEEL_VERS="$(read_versions PYTHON_WHEEL_VERSIONS || true)"
@@ -66,6 +67,10 @@ if [[ "$OPENCODE_VERSION" != "1.18.10" ]]; then
 fi
 if [[ "$CODEX_VERSION" != "0.149.0" ]]; then
   echo "Codex must be 0.149.0 (versions.env has '$CODEX_VERSION')" >&2
+  exit 1
+fi
+if [[ "$CLAUDE_CODE_VERSION" != "2.1.280" ]]; then
+  echo "Claude Code must be 2.1.280 (versions.env has '$CLAUDE_CODE_VERSION')" >&2
   exit 1
 fi
 if [[ -z "$GLAB_VERSION" ]]; then
@@ -234,6 +239,20 @@ cp -f "$CODEX_BIN" "$VENDOR/bin/codex"
 echo "  Codex SHA256: $(sha256sum "$VENDOR/bin/codex" | awk '{print $1}')"
 
 echo
+echo "Step 3c: Fetching Claude Code CLI v$CLAUDE_CODE_VERSION..."
+CLAUDE_BIN="$DL/claude"
+download \
+  "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/linux-x64/claude" \
+  "$CLAUDE_BIN"
+chmod +x "$CLAUDE_BIN"
+claude_bytes="$(wc -c <"$CLAUDE_BIN" | tr -d ' ')"
+if [[ "$claude_bytes" -lt 5000000 ]]; then
+  echo "claude binary is too small ($claude_bytes bytes)" >&2
+  exit 1
+fi
+echo "  Claude SHA256: $(sha256sum "$CLAUDE_BIN" | awk '{print $1}')"
+
+echo
 echo "Step 4: Building vendor/opencode-home.zip..."
 OC_HOME="$DL/opencode-home"
 rm -rf "$OC_HOME"
@@ -312,4 +331,46 @@ PY
 echo
 echo "[OK] $OUT_DIR/${DIST_NAME}.tar.gz"
 echo "[OK] $OUT_DIR/${DIST_NAME}.zip"
+
+echo
+echo "Step 7: CLI-only offline zip..."
+CLIS_NAME="${DIST_NAME/virtual_developer-/yaver-clis-}"
+if [[ "$CLIS_NAME" == "$DIST_NAME" ]]; then
+  CLIS_NAME="yaver-clis-linux-x64"
+fi
+CLIS_STAGE="$OUT_DIR/stage-clis/$CLIS_NAME"
+rm -rf "$CLIS_STAGE"
+mkdir -p "$CLIS_STAGE/opencode" "$CLIS_STAGE/codex" "$CLIS_STAGE/claude"
+CLI_SRC="$HERE/cli-offline"
+WIN_CLI="$ROOT/packaging/windows/cli-offline"
+cp -f "$CLI_SRC/install-opencode.sh" "$CLI_SRC/install-codex.sh" "$CLI_SRC/install-claude.sh" "$CLI_SRC/lib.sh" "$CLIS_STAGE/"
+chmod +x "$CLIS_STAGE"/*.sh
+cp -f "$VENDOR/bin/opencode" "$CLIS_STAGE/opencode/opencode"
+cp -f "$WIN_CLI/opencode.json" "$CLIS_STAGE/opencode/opencode.json"
+cp -f "$VENDOR/bin/codex" "$CLIS_STAGE/codex/codex"
+cp -f "$WIN_CLI/config.toml" "$CLIS_STAGE/codex/config.toml"
+cp -f "$CLAUDE_BIN" "$CLIS_STAGE/claude/claude"
+cp -f "$WIN_CLI/settings.json" "$CLIS_STAGE/claude/settings.json"
+chmod +x "$CLIS_STAGE/opencode/opencode" "$CLIS_STAGE/codex/codex" "$CLIS_STAGE/claude/claude"
+cat >"$CLIS_STAGE/VERSIONS.txt" <<EOF
+OPENCODE_VERSION=$OPENCODE_VERSION
+CODEX_VERSION=$CODEX_VERSION
+CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION
+EOF
+if find "$CLIS_STAGE" -type d -name agents | grep -q .; then
+  echo "CLI zip must not contain an agents directory" >&2
+  exit 1
+fi
+python3 - "$CLIS_STAGE" "$OUT_DIR/${CLIS_NAME}.zip" <<'PY'
+import sys, zipfile
+from pathlib import Path
+root = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+    for path in root.rglob("*"):
+        if path.is_file():
+            zf.write(path, path.relative_to(root).as_posix())
+print("wrote", dest)
+PY
+echo "[OK] $OUT_DIR/${CLIS_NAME}.zip"
 echo "Payload: $PAYLOAD"
