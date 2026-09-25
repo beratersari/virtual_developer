@@ -258,31 +258,42 @@ function ClaudeToolBlock({
   )
 }
 
+function isToolResult(ev: { kind: string; title: string } | undefined): boolean {
+  return Boolean(ev && ev.title === 'tool result' && (ev.kind === 'command' || ev.kind === 'error'))
+}
+
 function claudeRows(events: { kind: string; title: string; body?: string }[]) {
   const rows: Array<
     | { type: 'event'; ev: { kind: string; title: string; body?: string }; i: number }
     | { type: 'tool'; title: string; command: string; output: string; failed: boolean; i: number }
   > = []
+  const paired = new Set<number>()
   for (let i = 0; i < events.length; i += 1) {
+    if (paired.has(i)) continue
     const ev = events[i]
-    const next = events[i + 1]
     const isCall = ev.kind === 'command' && ev.title !== 'tool result'
-    const nextIsResult = Boolean(
-      next && next.title === 'tool result' && (next.kind === 'command' || next.kind === 'error'),
-    )
-    if (isCall) {
-      rows.push({
-        type: 'tool',
-        title: ev.title,
-        command: ev.body || '',
-        output: nextIsResult && next ? next.body || '' : '',
-        failed: Boolean(nextIsResult && next && next.kind === 'error'),
-        i,
-      })
-      if (nextIsResult) i += 1
+    if (!isCall) {
+      rows.push({ type: 'event', ev, i })
       continue
     }
-    rows.push({ type: 'event', ev, i })
+    let resultAt = -1
+    for (let j = i + 1; j < events.length; j += 1) {
+      if (paired.has(j)) continue
+      if (isToolResult(events[j])) {
+        resultAt = j
+        break
+      }
+    }
+    const next = resultAt >= 0 ? events[resultAt] : undefined
+    rows.push({
+      type: 'tool',
+      title: ev.title,
+      command: ev.body || '',
+      output: next?.body || '',
+      failed: Boolean(next && next.kind === 'error'),
+      i,
+    })
+    if (resultAt >= 0) paired.add(resultAt)
   }
   return rows
 }

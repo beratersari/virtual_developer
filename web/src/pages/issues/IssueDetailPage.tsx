@@ -5,6 +5,7 @@ import type { GitDelivery, TaskDetail } from '../../api/types'
 import { peekTask, rememberJob, rememberTask } from '../../app/entityCache'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
+import { JiraLinkedText } from '../../ui/JiraLinkedText'
 import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
@@ -175,7 +176,13 @@ export function IssueDetailPage() {
           <h1 className="font-mono text-2xl font-semibold tracking-tight text-text">
             {detail?.issue_key ?? (loading ? '…' : '—')}
           </h1>
-          <p className="mt-1 text-lg text-text">{detail?.summary || '—'}</p>
+          <p className="mt-1 text-lg text-text">
+            {detail?.summary ? (
+              <JiraLinkedText text={detail.summary} jiraHost={live.settings?.jira_host || ''} />
+            ) : (
+              '—'
+            )}
+          </p>
           {detail && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <StatusBadge status={detail.status} />
@@ -294,7 +301,9 @@ export function IssueDetailPage() {
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
             {detail.jira_live ? 'Live issue description' : 'Issue description'}
           </div>
-          <p className="whitespace-pre-wrap text-sm text-text-secondary">{detail.description}</p>
+          <p className="whitespace-pre-wrap text-sm text-text-secondary">
+            <JiraLinkedText text={detail.description} jiraHost={live.settings?.jira_host || ''} />
+          </p>
         </div>
       ) : null}
 

@@ -29,6 +29,7 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { Spinner } from '../../ui/Spinner'
 import { LiveDot } from '../../ui/LiveDot'
 import { PromptBlock } from '../../ui/PromptBlock'
+import { JiraLinkedText } from '../../ui/JiraLinkedText'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { isDaemonChatter } from '../../util/daemonLogs'
@@ -326,7 +327,13 @@ export function JobDetailPage() {
             )}
           </div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-            {job?.summary || (loading ? 'Loading…' : 'Job')}
+            {job?.summary ? (
+              <JiraLinkedText text={job.summary} jiraHost={live.settings?.jira_host || ''} />
+            ) : loading ? (
+              'Loading…'
+            ) : (
+              'Job'
+            )}
           </h1>
           <p className="mt-1 font-mono text-xs text-text-muted">
             {job?.job_id}
@@ -484,6 +491,7 @@ export function JobDetailPage() {
               job={job}
               elapsedLabel={elapsed}
               fallbackWorker={live.settings?.agent_backend || ''}
+              jiraHost={live.settings?.jira_host || ''}
             />
           </div>
         )}

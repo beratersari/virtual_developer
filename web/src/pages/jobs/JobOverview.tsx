@@ -5,16 +5,19 @@ import { jobChannelLabel } from '../../util/jobChannel'
 import { resolveJobWorker, sessionIdLabel, workerLabel } from '../../util/worker'
 import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
+import { JiraLinkedText } from '../../ui/JiraLinkedText'
 import { StatusBadge } from '../../ui/StatusBadge'
 
 export function JobOverview({
   job,
   elapsedLabel,
   fallbackWorker = '',
+  jiraHost = '',
 }: {
   job: JobItem
   elapsedLabel: string
   fallbackWorker?: string
+  jiraHost?: string
 }) {
   const retries: JobRetryAttempt[] = job.retry_attempts || []
   const worker = resolveJobWorker(job, fallbackWorker)
@@ -31,7 +34,9 @@ export function JobOverview({
           Description
         </div>
         {job.description?.trim() ? (
-          <p className="whitespace-pre-wrap text-sm text-text-secondary">{job.description}</p>
+          <p className="whitespace-pre-wrap text-sm text-text-secondary">
+            <JiraLinkedText text={job.description} jiraHost={jiraHost} />
+          </p>
         ) : (
           <p className="text-sm italic text-text-muted">
             No description was stored when this job started.

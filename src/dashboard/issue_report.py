@@ -50,7 +50,7 @@ _SERVE_TIMEOUT = httpx.Timeout(1.2, connect=0.35)
 _serve_cache: Dict[str, Dict[str, Any]] = {}
 _GLPAT = re.compile(r"glpat-[A-Za-z0-9_\-]{8,}")
 _BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
-_BASIC = re.compile(r"(?i)(basic\s+)[A-Za-z0-9+/=]{8,}")
+_BASIC = re.compile(r"(?i)(basic\s+)[A-Za-z0-9+/=_\-]{8,}")
 
 
 def _resolved_job_ids(body: IssueReportRequest) -> List[str]:
@@ -1287,8 +1287,21 @@ def _redact_report_text(text: str) -> str:
         "gitlab_webhook_secret",
         "azure_pat",
         "azure_webhook_secret",
+        "anthropic_api_key",
+        "anthropic_auth_token",
+        "codex_api_key",
+        "dashboard_password",
     ):
         val = str(getattr(settings, attr, "") or "").strip()
+        if val:
+            secrets.append(val)
+    for env_name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CODEX_API_KEY",
+        "DASHBOARD_PASSWORD",
+    ):
+        val = str(os.environ.get(env_name) or "").strip()
         if val:
             secrets.append(val)
     try:
