@@ -1,3 +1,11 @@
+# Yaver 0.9.61
+
+A Claude job that resumes an earlier run now shows that run's prompt and log in the transcript, then the short continue line and the new reply.
+Choosing Claude in Settings lists the models served at ANTHROPIC_BASE_URL, and any model saved in Claude's own settings.
+An API retry in the transcript shows the attempt count, the HTTP status, how long Claude will wait, and the request id when Claude sends one.
+Jira, GitLab, and Azure comments name the backend, OpenCode, Codex, or Claude Code, on the same line as the version and model.
+Opening a collapsed tool row in the transcript no longer traps the mouse wheel.
+
 # Yaver 0.9.60
 
 Jira keys written in a job title or description, and on the issue page, now open that ticket on the configured Jira host.
