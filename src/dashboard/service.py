@@ -17,6 +17,7 @@ from src.config import (
 from src.dashboard.issue_logs import issue_log_ring
 from src.dashboard.webhook_paths import AZURE_WEBHOOK_PATH, GITLAB_WEBHOOK_PATH
 from src.logger import logger
+from src.work_modes import all_modes, apply_saved_modes
 from src.dashboard.project_repos import (
     parse_project_repositories,
     project_repositories_to_json,
@@ -41,6 +42,7 @@ from src.dashboard.schemas import (
     ProjectRepositoryItem,
     SettingsUpdate,
     SettingsView,
+    WorkModeItem,
     TaskItem,
     TasksResponse,
     QueueItem,
@@ -372,6 +374,7 @@ def build_settings_view() -> SettingsView:
             getattr(settings, "trigger_mentions_list", None) or []
         ),
         project_repositories=_settings_project_repositories(),
+        work_modes=[WorkModeItem(**row) for row in all_modes()],
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
@@ -757,6 +760,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
+    if "work_modes" in data and data["work_modes"] is not None:
+        runtime_persist.update(apply_saved_modes(data["work_modes"]))
     from src.config import format_trigger_users
 
     jira_trigger = None

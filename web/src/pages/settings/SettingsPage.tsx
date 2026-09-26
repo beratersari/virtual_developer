@@ -12,8 +12,10 @@ import type {
   JiraConnectionTestResult,
   ProjectRepository,
   SettingsPayload,
+  WorkMode,
 } from '../../api/types'
 import { useLive } from '../../app/live'
+import { ModesPanel } from './ModesPanel'
 import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
@@ -43,6 +45,7 @@ type Draft = {
   gitlab_cred_rows: GitlabHostCredentialDraft[]
   azure_cred_rows: GitlabHostCredentialDraft[]
   project_repositories: ProjectRepository[]
+  work_modes: WorkMode[]
 }
 
 function fromSettings(s: SettingsPayload): Draft {
@@ -85,6 +88,12 @@ function fromSettings(s: SettingsPayload): Draft {
       url: p.url || '',
       target_branch: p.target_branch || '',
       source_branch: p.source_branch || '',
+    })),
+    work_modes: (s.work_modes ?? []).map((row) => ({
+      name: row.name,
+      behavior: row.behavior,
+      agent: row.agent,
+      builtin: Boolean(row.builtin),
     })),
   }
 }
@@ -244,6 +253,16 @@ export function SettingsPage() {
             return row
           })
           .filter((r) => r.host)
+      }
+      if (dirtyKeys.has('work_modes')) {
+        body.work_modes = draft.work_modes
+          .map((row) => ({
+            name: row.name.trim().toLowerCase(),
+            behavior: row.builtin ? row.name : row.behavior || 'build',
+            agent: row.agent.trim(),
+            builtin: Boolean(row.builtin),
+          }))
+          .filter((row) => row.name && row.agent)
       }
       if (dirtyKeys.has('project_repositories')) {
         body.project_repositories = draft.project_repositories
@@ -965,6 +984,13 @@ export function SettingsPage() {
         allowEmpty
         showRefresh
         onLoadingChange={setModelsLoading}
+      />
+      <ModesPanel
+        modes={draft.work_modes}
+        onChange={(work_modes) => {
+          touch('work_modes')
+          setDraft((d) => (d ? { ...d, work_modes } : d))
+        }}
       />
       </div>
       )}

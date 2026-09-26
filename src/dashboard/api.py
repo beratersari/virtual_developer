@@ -27,6 +27,8 @@ from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
     IssueReportRequest,
+    AgentCreate,
+    AgentWrite,
     JiraConnectionTestRequest,
     PlanRefactorRequest,
     ScheduleCreateRequest,
@@ -1466,6 +1468,43 @@ def create_dashboard_app(
     @app.get("/api/settings")
     def get_settings() -> dict:
         return build_settings_view().model_dump()
+
+    @app.get("/api/opencode-agents")
+    def opencode_agents() -> dict:
+        from src.opencode_agents import list_agents
+
+        return {"agents": list_agents()}
+
+    @app.get("/api/opencode-agents/{name}")
+    def opencode_agent(name: str) -> dict:
+        from src.opencode_agents import AgentFileError, read_agent
+
+        try:
+            text = read_agent(name)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"name": name, "text": text}
+
+    @app.put("/api/opencode-agents/{name}")
+    def opencode_agent_save(name: str, body: AgentWrite) -> dict:
+        from src.opencode_agents import AgentFileError, write_agent
+
+        try:
+            path = write_agent(name, body.text)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"name": name, "path": str(path)}
+
+    @app.post("/api/opencode-agents")
+    def opencode_agent_create(body: AgentCreate) -> dict:
+        from src.opencode_agents import AgentFileError, new_agent_template, write_agent
+
+        text = body.text.strip() or new_agent_template()
+        try:
+            path = write_agent(body.name, text, create=True)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"name": body.name.strip(), "path": str(path), "text": text}
 
     @app.post("/api/settings/gitlab/test")
     def settings_gitlab_test(body: GitlabConnectionTestRequest) -> dict:

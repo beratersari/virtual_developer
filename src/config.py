@@ -461,6 +461,11 @@ class Settings(BaseSettings):
         default="derman-reviewer",
         description="OpenCode agent for MR/PR /review and /ask (opencoderman derman-reviewer)",
     )
+    # Custom Mode: rows. Built-in plan/build/test agents stay on the fields above.
+    work_modes: str = Field(
+        default="",
+        description="JSON list of extra modes: name, behavior (plan|build|test), agent",
+    )
     yaver_review_skip_drafts: bool = Field(
         default=True,
         description=(
@@ -1088,6 +1093,10 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "jira_email",
         "default_model",
         "default_review_model",
+        "default_agent",
+        "default_plan_agent",
+        "default_test_agent",
+        "work_modes",
         "agent_backend",
         "project_repositories",
         "trigger_mentions",

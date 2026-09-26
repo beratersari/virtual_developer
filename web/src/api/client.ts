@@ -407,6 +407,30 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
   })
 }
 
+export function fetchOpencodeAgents() {
+  return request<{ agents: string[] }>('/api/opencode-agents')
+}
+
+export function fetchOpencodeAgent(name: string) {
+  return request<{ name: string; text: string }>(
+    `/api/opencode-agents/${encodeURIComponent(name)}`,
+  )
+}
+
+export function saveOpencodeAgent(name: string, text: string) {
+  return request<{ name: string; path: string }>(
+    `/api/opencode-agents/${encodeURIComponent(name)}`,
+    { method: 'PUT', body: JSON.stringify({ text }) },
+  )
+}
+
+export function createOpencodeAgent(name: string, text = '') {
+  return request<{ name: string; path: string; text: string }>('/api/opencode-agents', {
+    method: 'POST',
+    body: JSON.stringify({ name, text }),
+  })
+}
+
 export function fetchSettings() {
   return request<SettingsPayload>('/api/settings')
 }

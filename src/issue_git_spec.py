@@ -405,7 +405,14 @@ def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     token = (m.group(1) or "").strip().lower().strip("`").strip()
     # Drop trailing punctuation
     token = token.rstrip(".,;:")
-    return _MODE_ALIASES.get(token)
+    known = _MODE_ALIASES.get(token)
+    if known:
+        return known
+    from src.work_modes import lookup
+
+    if lookup(token):
+        return token
+    return None
 
 
 def _extract_repo(text: str) -> str:

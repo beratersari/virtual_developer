@@ -7379,10 +7379,15 @@ class JobProcessor:
             )
 
         # Claim in-flight BEFORE slow git clone so poll cannot double-start
+        plan_agent = WorkflowRouter.agent_for_issue(
+            state.issue_summary or "",
+            state.description or "",
+            WorkflowType.PLANNING,
+        )
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
             prompt=prompt,
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
+            agent=plan_agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -7392,7 +7397,7 @@ class JobProcessor:
             status=TaskStatus.PLANNING,
             task=task,
             workflow_type="planning",
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
+            agent=plan_agent,
             job_status="planning",
             started_at=workflow_start_time,
         )
@@ -7646,7 +7651,11 @@ class JobProcessor:
             kind_n = "build"
         is_test = kind_n == "test"
         wf = WorkflowType.TESTING if is_test else WorkflowType.EXECUTION
-        agent = WorkflowRouter.get_agent_for_workflow(wf)
+        agent = WorkflowRouter.agent_for_issue(
+            state.issue_summary or "",
+            state.description or "",
+            wf,
+        )
         logger.info(
             f"Starting {'test' if is_test else 'execution (build)'} workflow "
             f"for {state.issue_key}"

@@ -33,6 +33,17 @@ class WorkflowRouter:
         """
         del issue_key  # reserved for future per-key rules
         mode = parse_issue_mode(summary, description)
+        from src.work_modes import lookup, workflow_value
+
+        spec = lookup(mode) if mode else None
+        if spec:
+            kind = workflow_value(str(spec.get("behavior") or ""))
+            if kind == WorkflowType.PLANNING.value:
+                return WorkflowType.PLANNING
+            if kind == WorkflowType.EXECUTION.value:
+                return WorkflowType.EXECUTION
+            if kind == WorkflowType.TESTING.value:
+                return WorkflowType.TESTING
         if mode == "plan":
             return WorkflowType.PLANNING
         if mode == "build":
@@ -91,6 +102,29 @@ class WorkflowRouter:
         if isinstance(agent, str) and agent.strip():
             return agent.strip()
         return "derman-build"
+
+    @classmethod
+    def agent_for_issue(
+        cls,
+        summary: str,
+        description: str,
+        workflow_type: WorkflowType,
+    ) -> str:
+        """Agent for this issue when its mode behavior matches the workflow.
+
+        ``plan_execute`` starts execution while Mode is still plan. That must
+        keep the build agent. A custom mode uses its agent only for the
+        workflow its behavior selects.
+        """
+        from src.work_modes import lookup, workflow_value
+
+        mode = parse_issue_mode(summary, description)
+        spec = lookup(mode) if mode else None
+        if spec and workflow_value(str(spec.get("behavior") or "")) == workflow_type.value:
+            agent = str(spec.get("agent") or "").strip()
+            if agent:
+                return agent
+        return cls.get_agent_for_workflow(workflow_type)
 
     @classmethod
     def extract_mention_command(cls, comment_text: str) -> Optional[str]:
