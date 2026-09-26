@@ -100,8 +100,30 @@ def parse_tfs_collection_url(raw: str) -> str:
     if not collection or collection.lower() in _RESERVED_COLLECTION:
         return ""
     return urlunparse(
-        (parsed.scheme, parsed.netloc, path_out, "", "", "")
+        (parsed.scheme, _collection_netloc(parsed), path_out, "", "", "")
     ).rstrip("/")
+
+
+def _collection_netloc(parsed) -> str:
+    """Hostname in lower case, without the scheme's default port.
+
+    ``https://TFS.example.com:443/...`` and ``https://tfs.example.com/...``
+    are the same collection. A non-default port stays. The scheme stays, so
+    http and https remain different keys.
+    """
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return parsed.netloc
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    default = 443 if parsed.scheme == "https" else 80
+    if port and port != default:
+        return f"{host}:{port}"
+    return host
 
 
 def tfs_collection_host(url: str) -> str:
