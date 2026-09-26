@@ -1277,6 +1277,10 @@ class JobProcessor:
             return True
         if st is not None and st.status in self.TERMINAL_STATUSES:
             return False
+        # PENDING is the accept window: no _contexts yet, and it is not
+        # PLANNING/EXECUTING. Reaping that running row starts a second worker.
+        if st is not None and st.status == TaskStatus.PENDING:
+            return True
         return self._issue_is_in_flight(key) or st is None
 
     def _issue_is_in_flight(self, issue_key: str) -> bool:
