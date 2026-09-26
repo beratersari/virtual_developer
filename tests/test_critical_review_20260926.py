@@ -214,3 +214,24 @@ def test_cancel_does_not_terminalize_a_claim(tmp_path):
     assert q.cancel(rec["queue_id"]) is False
     assert q.get(rec["queue_id"])["status"] == "running"
 
+def test_cancel_update_must_not_clobber_dispatching(tmp_path):
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="t",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2020-01-01T00:00:00",
+        issue_key="KAN-1",
+        issue_description="x",
+    )
+    sid = rec["schedule_id"]
+    assert store.claim_due(sid)["status"] == "dispatching"
+    updated = store.update(sid, status="cancelled", error_message=None)
+    assert updated["status"] == "dispatching"
+    assert store.get(sid)["status"] == "dispatching"
+

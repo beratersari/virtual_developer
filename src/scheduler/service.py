@@ -1539,6 +1539,13 @@ def cancel_scheduled_job(
         return {"ok": True, "schedule": rec, "message": "Already cancelled"}
     _ = processor
     updated = ss.update(schedule_id, status="cancelled", error_message=None)
+    if not updated or (updated.get("status") or "").lower() != "cancelled":
+        live = updated or ss.get(schedule_id) or rec
+        return {
+            "ok": False,
+            "error": f"Cannot cancel schedule in status {live.get('status')}",
+            "schedule": live,
+        }
     return {"ok": True, "schedule": updated, "message": "Schedule cancelled"}
 
 

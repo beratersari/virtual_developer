@@ -207,10 +207,19 @@ class ScheduleStore:
             if expected_status is not None and (rec.get("status") or "") != expected_status:
                 return rec
             new_status = fields.get("status")
+            held = (rec.get("status") or "")
             if (
                 new_status in ("dispatched", "error")
-                and (rec.get("status") or "") != "dispatching"
+                and held != "dispatching"
                 and expected_status is None
+            ):
+                return rec
+            # Cancel is only for scheduled/error. A claim can land between
+            # the unlocked read and this write; do not cover dispatching.
+            if (
+                new_status == "cancelled"
+                and expected_status is None
+                and held not in ("scheduled", "error", "cancelled")
             ):
                 return rec
             for key, value in fields.items():
