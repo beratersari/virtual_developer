@@ -531,6 +531,26 @@ def _normalize_gitlab_host(raw: Any) -> str:
     return host.strip()
 
 
+def _stored_gitlab_pat(current: Dict[str, str], host: str) -> str:
+    """PAT already saved for this host, including a scheme-prefixed map key.
+
+    Settings shows the raw key and posts it back with an empty PAT.
+    ``https://gitlab.example.com`` and ``gitlab.example.com`` are one host.
+    A different hostname is not a match (that would copy the secret across).
+    """
+    want = _normalize_gitlab_host(host)
+    if not want:
+        return ""
+    direct = str(current.get(want) or "").strip()
+    if direct:
+        return direct
+    for key, value in current.items():
+        pat = str(value or "").strip()
+        if pat and _normalize_gitlab_host(key) == want:
+            return pat
+    return ""
+
+
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets).
 
@@ -595,11 +615,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[host] = pat
-            elif host in current:
-                new_map[host] = current[host]
-            elif previous_host and previous_host in current:
-                # Explicit rename from the Settings UI — not an inferred swap.
-                new_map[host] = current[previous_host]
+            else:
+                kept = _stored_gitlab_pat(current, host)
+                if not kept and previous_host:
+                    # Explicit rename from the Settings UI — not an inferred swap.
+                    kept = _stored_gitlab_pat(current, previous_host)
+                if kept:
+                    new_map[host] = kept
         # [] from Settings means "no host rows", not "wipe a legacy GITLAB_PAT
         # that was never projected as a row". Only clear when host rows existed.
         clearing_hosts = bool(current) and not new_map
