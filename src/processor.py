@@ -19,7 +19,6 @@ from src.git_manager import (
 from src.issue_git_spec import (
     IssueGitConfigError,
     parse_issue_git_spec,
-    parse_issue_mode,
     require_issue_git_spec,
 )
 from src.jira.client import create_jira_client
@@ -240,19 +239,11 @@ class JobProcessor:
     ) -> WorkflowType:
         """Pick plan vs build vs test from the issue text.
 
-        * Explicit ``Mode: plan|build|test`` selects the workflow.
-        * Otherwise ``WorkflowRouter.route_issue`` (defaults to planning).
-        * Template validity (Repository, Source, Target, **Mode**) is **not**
-          checked here — same path as always: ``require_issue_git_spec`` inside
-          ``_prepare_git_workspace`` after a job is opened.
+        ``WorkflowRouter`` reads the mode token and the delivery behavior
+        saved for that row. ``Mode: plan`` stays planning until that row's
+        behavior is changed. Template validity is not checked here —
+        ``require_issue_git_spec`` does that inside ``_prepare_git_workspace``.
         """
-        mode = parse_issue_mode(summary, description)
-        if mode == "plan":
-            return WorkflowType.PLANNING
-        if mode == "build":
-            return WorkflowType.EXECUTION
-        if mode == "test":
-            return WorkflowType.TESTING
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
     def _is_gitlab_triggered(
