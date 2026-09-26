@@ -117,14 +117,13 @@ def _accepted_mode(mode_raw: str) -> str:
     token = (mode_raw or "").strip().lower().strip("`").strip().rstrip(".,;:")
     if not token:
         return ""
-    known = _MODE_ALIASES.get(token)
-    if known:
-        return known
     from src.work_modes import lookup
 
+    # A row saved under this name wins. Aliases apply only when it is not saved,
+    # so Mode: implement still means build until a mode named implement exists.
     if lookup(token):
         return token
-    return ""
+    return _MODE_ALIASES.get(token) or ""
 
 
 @dataclass(frozen=True)
