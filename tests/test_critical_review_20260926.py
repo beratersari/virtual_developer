@@ -130,3 +130,36 @@ def test_azure_collection_case_keeps_pat(monkeypatch):
     assert client.pat == "secret-pat"
     assert client.api_base
 
+def test_removed_sql_comment_stays_on_the_finding_file():
+    """A deleted ``-- comment`` line is ``--- comment`` inside the hunk.
+
+    Treating that as a diff header posts the review on the wrong file.
+    """
+    from src.review.azure_threads import azure_thread_context
+    from src.review.diffmap import parse_unified_diff
+    from src.review.findings import Finding
+
+    diff = (
+        "diff --git a/db/migrate.sql b/db/migrate.sql\n"
+        "--- a/db/migrate.sql\n"
+        "+++ b/db/migrate.sql\n"
+        "@@ -1,3 +1,2 @@\n"
+        " keep\n"
+        "--- drop the old column\n"
+        " still\n"
+    )
+    parsed = parse_unified_diff(diff)
+    assert parsed.files[0].new_path == "db/migrate.sql"
+    finding = Finding(
+        path="db/migrate.sql",
+        start_line=2,
+        end_line=2,
+        side="new",
+        severity="major",
+        title="column",
+        body="why",
+    )
+    ctx = azure_thread_context(finding, parsed)
+    assert ctx is not None
+    assert ctx["filePath"] == "/db/migrate.sql"
+

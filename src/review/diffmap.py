@@ -118,14 +118,14 @@ def parse_unified_diff(text: str) -> DiffMap:
         if raw.startswith("deleted file mode"):
             current.deleted = True
             continue
-        if raw.startswith("--- "):
+        if not in_hunk and raw.startswith("--- "):
             path = _strip_prefix(raw[4:])
             if path == "/dev/null":
                 current.added = True
             else:
                 current.old_path = path
             continue
-        if raw.startswith("+++ "):
+        if not in_hunk and raw.startswith("+++ "):
             path = _strip_prefix(raw[4:])
             if path == "/dev/null":
                 current.deleted = True
