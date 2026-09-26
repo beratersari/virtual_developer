@@ -1425,6 +1425,70 @@ def test_settings_apply_azure_credentials(monkeypatch, tmp_path):
     )
 
 
+def test_settings_save_drops_azure_collections_that_have_no_pat(monkeypatch):
+    """Remove + Save must clear URL-only rows. They are not in the PAT map."""
+    import json
+
+    from src.config import Settings
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    s = Settings()
+    s.azure_collection_pats = ""
+    s.azure_collection_urls = json.dumps(
+        [
+            "http://127.0.0.1:58070/tfs/DefaultCollection",
+            "https://tfs.example.com/tfs/DefaultCollection",
+        ]
+    )
+    monkeypatch.setattr("src.dashboard.service.settings", s)
+    monkeypatch.setattr("src.config.settings", s)
+    stored: dict = {}
+    monkeypatch.setattr(
+        "src.dashboard.service.save_runtime_settings",
+        lambda updates, *_a, **_k: stored.update(updates or {}),
+    )
+    monkeypatch.setattr(
+        "src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None
+    )
+    view = apply_settings_update(SettingsUpdate(azure_credentials=[]))
+    assert view.azure_credentials == []
+    assert view.azure_collection_urls == []
+    assert s.azure_collection_url_list() == []
+    assert stored["azure_collection_urls"] == "[]"
+
+
+def test_settings_save_rejects_a_bare_azure_name(monkeypatch):
+    """A name with no collection path must fail the save, not vanish later."""
+    import pytest
+
+    from src.config import Settings
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    s = Settings()
+    s.azure_collection_pats = ""
+    s.azure_collection_urls = "[]"
+    monkeypatch.setattr("src.dashboard.service.settings", s)
+    monkeypatch.setattr("src.config.settings", s)
+    monkeypatch.setattr(
+        "src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        "src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None
+    )
+    with pytest.raises(ValueError, match="collection name"):
+        apply_settings_update(
+            SettingsUpdate(
+                azure_credentials=[
+                    {"host": "dafsfasdf", "pat": "x"},
+                    {"host": "ASfdasdf", "pat": "y"},
+                ]
+            )
+        )
+    assert s.azure_collection_url_list() == []
+
+
 def test_probe_azure_requires_pat(monkeypatch):
     from src.azure_connection import probe_azure_connection
     from src.config import Settings

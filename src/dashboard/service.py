@@ -864,17 +864,18 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             f"settings save collections={len(collections)} "
             f"urls={collections} pats={len(new_map)}"
         )
-        clearing = bool(current) and not new_map
+        # The posted list is the whole set, including an empty one.
+        # URL-only rows have no PAT map entry, so "clear only when the
+        # map was non-empty" left the old azure_collection_urls in place
+        # and the next settings read showed the removed collections again.
         if hasattr(settings, "set_azure_collection_pat_map"):
-            if new_map or clearing:
-                settings.set_azure_collection_pat_map(new_map)
+            settings.set_azure_collection_pat_map(new_map)
+        if hasattr(settings, "azure_collection_urls"):
+            settings.azure_collection_urls = json.dumps(collections)
         dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
             settings, "azure_collection_pats", ""
         ) or ""
-        # URL list for Schedule dropdowns (runtime JSON, not extra .env keys).
-        runtime_persist["azure_collection_urls"] = getattr(
-            settings, "azure_collection_urls", ""
-        ) or json.dumps(list(new_map.keys()))
+        runtime_persist["azure_collection_urls"] = json.dumps(collections)
     azure_trigger = None
     if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
         azure_trigger = str(data["azure_trigger_user"]).strip()
