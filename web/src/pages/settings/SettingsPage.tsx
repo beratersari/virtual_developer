@@ -15,8 +15,10 @@ import type {
   WorkMode,
 } from '../../api/types'
 import { useLive } from '../../app/live'
+import { azureCollectionProblem } from './azureCollection'
 import { ModesPanel } from './ModesPanel'
 import { ModelField } from '../../ui/ModelField'
+import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
 
@@ -170,8 +172,12 @@ export function SettingsPage() {
         }
       }
       for (const r of draft.azure_cred_rows) {
-        if (r.host.trim() && !r.pat_configured && !r.pat.trim()) {
-          throw new Error(`Azure DevOps host "${r.host}" needs a PAT`)
+        const host = r.host.trim()
+        if (!host) continue
+        const problem = azureCollectionProblem(host)
+        if (problem) throw new Error(problem)
+        if (!r.pat_configured && !r.pat.trim()) {
+          throw new Error(`Azure DevOps host "${host}" needs a PAT`)
         }
       }
       const body: Parameters<typeof patchSettings>[0] = {}
@@ -258,7 +264,7 @@ export function SettingsPage() {
         body.work_modes = draft.work_modes
           .map((row) => ({
             name: row.name.trim().toLowerCase(),
-            behavior: row.builtin ? row.name : row.behavior || 'build',
+            behavior: row.behavior || 'build',
             agent: row.agent.trim(),
             builtin: Boolean(row.builtin),
           }))
@@ -332,7 +338,6 @@ export function SettingsPage() {
       </div>
 
       <div className="vd-panel space-y-5 p-5">
-      {error && <p className="err">{error}</p>}
 
       {section === 'jira' && (
       <div key="jira" className="vd-fade space-y-3">
@@ -1113,6 +1118,14 @@ export function SettingsPage() {
         </button>
       </p>
       </div>
+      <ConfirmDialog
+        open={error != null}
+        title="Could not save"
+        body={error || ''}
+        confirmLabel="OK"
+        onConfirm={() => setError(null)}
+        onCancel={() => setError(null)}
+      />
     </section>
   )
 }
