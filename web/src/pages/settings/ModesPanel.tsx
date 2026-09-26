@@ -27,6 +27,8 @@ export function ModesPanel({ modes, onChange }: Props) {
   const [synced, setSynced] = useState(true)
   const [editor, setEditor] = useState<Editor | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editName, setEditName] = useState('')
   const [nameDraft, setNameDraft] = useState('')
   const [creating, setCreating] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -38,6 +40,7 @@ export function ModesPanel({ modes, onChange }: Props) {
   const nameRef = useRef<HTMLInputElement | null>(null)
   const titleId = useId()
   const createTitleId = useId()
+  const editTitleId = useId()
 
   async function reloadAgents() {
     const payload = await fetchOpencodeAgents()
@@ -82,6 +85,15 @@ export function ModesPanel({ modes, onChange }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [createOpen, creating])
 
+  useEffect(() => {
+    if (!editOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeEdit()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editOpen])
+
   function update(index: number, patch: Partial<WorkMode>) {
     onChange(modes.map((row, i) => (i === index ? { ...row, ...patch } : row)))
   }
@@ -91,10 +103,10 @@ export function ModesPanel({ modes, onChange }: Props) {
     returnFocus.current = active instanceof HTMLElement ? active : null
   }
 
-  async function openAgent(name: string) {
+  async function openAgent(name: string, keepFocus = false) {
     const trimmed = name.trim()
     if (!trimmed) return
-    rememberFocus()
+    if (!keepFocus) rememberFocus()
     setError(null)
     setMessage(null)
     setEditor({ name: trimmed, text: '', loading: true, saving: false, error: null })
@@ -163,6 +175,21 @@ export function ModesPanel({ modes, onChange }: Props) {
     } finally {
       setSyncing(false)
     }
+  }
+
+  function openEdit() {
+    if (creating || syncing || agents.length === 0) return
+    rememberFocus()
+    setEditName(agents[0] || '')
+    setError(null)
+    setEditOpen(true)
+  }
+
+  function closeEdit() {
+    setEditOpen(false)
+    const back = returnFocus.current
+    returnFocus.current = null
+    back?.focus()
   }
 
   function openCreate() {
@@ -262,16 +289,8 @@ export function ModesPanel({ modes, onChange }: Props) {
               ))}
             </select>
           </label>
-          <div className="flex flex-wrap gap-2 sm:col-span-2">
-            <button
-              type="button"
-              className="vd-btn vd-btn-secondary"
-              disabled={!row.agent}
-              onClick={() => openAgent(row.agent)}
-            >
-              Edit agent text
-            </button>
-            {!row.builtin && (
+          {!row.builtin && (
+            <div className="flex flex-wrap gap-2 sm:col-span-2">
               <button
                 type="button"
                 className="vd-btn vd-btn-secondary text-danger-text"
@@ -279,8 +298,8 @@ export function ModesPanel({ modes, onChange }: Props) {
               >
                 Remove mode
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       ))}
       <div className="flex flex-wrap gap-2">
@@ -307,12 +326,76 @@ export function ModesPanel({ modes, onChange }: Props) {
         <button
           type="button"
           className="vd-btn vd-btn-secondary"
+          disabled={creating || syncing || agents.length === 0}
+          onClick={openEdit}
+        >
+          Edit agents
+        </button>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
           disabled={creating || syncing}
           onClick={() => syncAgents()}
         >
           {syncing ? 'Syncing…' : 'Sync'}
         </button>
       </div>
+      {editOpen && (
+        <div
+          className="vd-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeEdit()
+          }}
+        >
+          <form
+            className="vd-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={editTitleId}
+            onSubmit={(e) => {
+              e.preventDefault()
+              const name = editName.trim()
+              if (!name) return
+              setEditOpen(false)
+              void openAgent(name, true)
+            }}
+          >
+            <h3 id={editTitleId} className="vd-modal-title">
+              Edit agents
+            </h3>
+            <label className="field">
+              <span>Agent</span>
+              <select
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              >
+                {agents.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="vd-modal-actions">
+              <button
+                type="button"
+                className="vd-btn vd-btn-secondary px-3 py-1.5 text-sm"
+                onClick={closeEdit}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="vd-btn vd-btn-primary px-3 py-1.5 text-sm"
+                disabled={!editName.trim()}
+              >
+                Edit
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {message && <p className="text-xs text-text-muted">{message}</p>}
       {error && <p className="err">{error}</p>}
       {createOpen && (
@@ -373,7 +456,7 @@ export function ModesPanel({ modes, onChange }: Props) {
         title="Agent already exists"
         body={
           existsName
-            ? `${existsName} is already in the list. Choose it on a mode, or use Edit agent text.`
+            ? `${existsName} is already in the list. Choose it on a mode, or use Edit agents.`
             : ''
         }
         confirmLabel="OK"
