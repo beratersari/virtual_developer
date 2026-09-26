@@ -1200,6 +1200,12 @@ class GitManager:
             )
             return True
         except GitCancelledError:
+            # set-url can finish before cancel is observed. The caller never
+            # receives True, so its finally block does not scrub.
+            try:
+                self._scrub_remote_credentials()
+            except Exception:
+                pass
             raise
         except Exception as e:
             logger.warning(
