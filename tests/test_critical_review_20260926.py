@@ -204,3 +204,13 @@ def test_claude_cancel_kills_tool_child():
         for kid in kids:
             subprocess.run(["kill", "-9", kid], capture_output=True)
 
+def test_cancel_does_not_terminalize_a_claim(tmp_path):
+    from src.state.queue_store import WorkQueueStore
+
+    q = WorkQueueStore(queue_dir=tmp_path / "queue")
+    rec = q.enqueue(source="jira", issue_key="KAN-1", summary="s")
+    claimed = q.claim_next(max_running=6)
+    assert claimed and claimed["status"] == "running"
+    assert q.cancel(rec["queue_id"]) is False
+    assert q.get(rec["queue_id"])["status"] == "running"
+
