@@ -545,7 +545,7 @@ export type ScheduleCreateBody = {
   repository_url: string
   source_branch?: string
   target_branch: string
-  mode: 'plan' | 'build' | 'test'
+  mode: string
   scheduled_at: string
   project_key?: string
   issue_type?: string
