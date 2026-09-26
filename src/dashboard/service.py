@@ -534,6 +534,28 @@ def _normalize_gitlab_host(raw: Any) -> str:
     return host.strip()
 
 
+def _stored_azure_pat(
+    current: Dict[str, str], collection: str, previous: str
+) -> str:
+    """PAT already saved for this collection, ignoring path case.
+
+    The settings page omits ``previous_host`` when the lowercased URL did
+    not change, so a case-only edit has to match the stored spelling.
+    """
+    if collection in current:
+        return str(current[collection] or "").strip()
+    if previous and previous in current:
+        return str(current[previous] or "").strip()
+    want = collection.lower()
+    prev = previous.lower() if previous else ""
+    for key, value in current.items():
+        pat = str(value or "").strip()
+        key_l = str(key).lower()
+        if pat and (key_l == want or (prev and key_l == prev)):
+            return pat
+    return ""
+
+
 def _stored_gitlab_pat(current: Dict[str, str], host: str) -> str:
     """PAT already saved for this host, including a scheme-prefixed map key.
 
@@ -854,10 +876,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[collection] = pat
-            elif collection in current:
-                new_map[collection] = current[collection]
-            elif previous and previous in current:
-                new_map[collection] = current[previous]
+            else:
+                copied = _stored_azure_pat(current, collection, previous)
+                if copied:
+                    new_map[collection] = copied
         from src.azure.log import azure_info
 
         azure_info(

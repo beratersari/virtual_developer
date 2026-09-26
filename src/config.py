@@ -940,11 +940,18 @@ class Settings(BaseSettings):
         from src.azure.urls import parse_tfs_collection_url
 
         url = parse_tfs_collection_url(collection_url)
+        mapping = self.azure_collection_pat_map()
         if url:
-            mapped = self.azure_collection_pat_map().get(url) or ""
+            mapped = mapping.get(url) or ""
+            if not mapped:
+                want = url.lower()
+                for key, pat in mapping.items():
+                    if str(key).lower() == want and pat:
+                        mapped = pat
+                        break
             if mapped:
                 return mapped
-        if self.azure_collection_pat_map():
+        if mapping:
             return ""
         return (self.azure_pat or "").strip()
 

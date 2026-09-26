@@ -80,3 +80,53 @@ def test_gitlab_scheme_key_authenticates_client(monkeypatch):
     client = GitlabClient(host="gitlab.example.com")
     assert client.pat == "glpat-secret"
 
+def test_azure_collection_case_keeps_pat(monkeypatch):
+    """A case-only collection edit must not drop the PAT.
+
+    The settings page omits previous_host when the lowercased URL is
+    unchanged, and lookup must still find the saved spelling.
+    """
+    from src.azure.client import AzureDevOpsClient
+    from src.config import Settings
+    from src.dashboard.schemas import SettingsUpdate
+    from src.dashboard.service import apply_settings_update
+
+    s = Settings()
+    s.azure_collection_pats = json.dumps(
+        {"https://tfs.corp/tfs/DefaultCollection": "secret-pat"}
+    )
+    s.azure_collection_urls = "[]"
+    s.azure_pat = ""
+    monkeypatch.setattr("src.dashboard.service.settings", s)
+    monkeypatch.setattr("src.config.settings", s)
+    monkeypatch.setattr("src.azure.client.settings", s)
+    monkeypatch.setattr(
+        "src.dashboard.service.save_runtime_settings", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        "src.dashboard.service.upsert_dotenv_keys", lambda *_a, **_k: None
+    )
+    assert (
+        s.azure_pat_for_collection("https://tfs.corp/tfs/defaultcollection")
+        == "secret-pat"
+    )
+    apply_settings_update(
+        SettingsUpdate(
+            azure_credentials=[
+                {
+                    "host": "https://tfs.corp/tfs/defaultcollection",
+                    "pat": "",
+                }
+            ]
+        )
+    )
+    assert (
+        s.azure_pat_for_collection("https://tfs.corp/tfs/defaultcollection")
+        == "secret-pat"
+    )
+    client = AzureDevOpsClient(
+        collection_url="https://tfs.corp/tfs/defaultcollection"
+    )
+    assert client.pat == "secret-pat"
+    assert client.api_base
+
