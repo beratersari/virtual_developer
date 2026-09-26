@@ -687,6 +687,7 @@ class ClaudeBackend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=claude_child_env(),
+                start_new_session=(os.name != "nt"),
             )
             handle["proc"] = proc
             handle["pid"] = proc.pid
@@ -944,6 +945,11 @@ class ClaudeBackend:
                 text=True,
             )
             return
+        from src.process_kill import kill_pid
+
+        # proc.kill() signals only this pid. A tool child (bash, npm)
+        # survives and keeps editing the clone after Cancel.
+        kill_pid(int(pid), force=True)
         try:
             proc.kill()
         except Exception:

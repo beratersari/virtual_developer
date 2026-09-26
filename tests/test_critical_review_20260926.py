@@ -163,3 +163,44 @@ def test_removed_sql_comment_stays_on_the_finding_file():
     assert ctx is not None
     assert ctx["filePath"] == "/db/migrate.sql"
 
+def test_claude_cancel_kills_tool_child():
+    """Cancel must kill the tool process Claude spawned, not only Claude."""
+    import os
+    import time
+
+    from src.backends.claude import ClaudeBackend
+
+    if os.name == "nt":
+        return
+    proc = subprocess.Popen(
+        ["bash", "-c", "sleep 45 & wait"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    kids: list[str] = []
+    try:
+        time.sleep(0.25)
+        kids = subprocess.check_output(
+            ["pgrep", "-P", str(proc.pid)], text=True
+        ).split()
+        assert kids
+
+        class _Proc:
+            def __init__(self, inner: subprocess.Popen) -> None:
+                self.pid = inner.pid
+                self._inner = inner
+
+            def kill(self) -> None:
+                self._inner.kill()
+
+        ClaudeBackend().cancel({"proc": _Proc(proc), "pid": proc.pid})
+        time.sleep(0.25)
+        for kid in kids:
+            live = subprocess.run(["ps", "-p", kid], capture_output=True)
+            assert live.returncode != 0
+    finally:
+        subprocess.run(["kill", "-9", str(proc.pid)], capture_output=True)
+        for kid in kids:
+            subprocess.run(["kill", "-9", kid], capture_output=True)
+
