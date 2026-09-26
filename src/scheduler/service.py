@@ -70,9 +70,13 @@ def parse_schedule_at(raw: str) -> datetime:
 
 def _canonical_mode(mode: str) -> str:
     key = (mode or "").strip().lower()
-    if key not in _MODE_ALIASES:
-        raise ValueError("mode must be 'plan', 'build', or 'test'")
-    return _MODE_ALIASES[key]
+    if key in _MODE_ALIASES:
+        return _MODE_ALIASES[key]
+    from src.work_modes import lookup
+
+    if lookup(key):
+        return key
+    raise ValueError("mode must be 'plan', 'build', or 'test'")
 
 
 def build_issue_description(

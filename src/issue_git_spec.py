@@ -108,6 +108,25 @@ _MODE_ALIASES = {
 }
 
 
+def _accepted_mode(mode_raw: str) -> str:
+    """Alias (``implement`` → ``build``) or a mode saved in Settings.
+
+    Empty when the token is unknown. Callers that omit Mode still default
+    to build themselves.
+    """
+    token = (mode_raw or "").strip().lower().strip("`").strip().rstrip(".,;:")
+    if not token:
+        return ""
+    known = _MODE_ALIASES.get(token)
+    if known:
+        return known
+    from src.work_modes import lookup
+
+    if lookup(token):
+        return token
+    return ""
+
+
 @dataclass(frozen=True)
 class IssueGitSpec:
     """Git target resolved from a Jira issue."""
@@ -378,7 +397,7 @@ def peek_issue_git_fields(summary: str = "", description: str = "") -> Dict[str,
     mode_raw = (
         (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
     )
-    mode = _MODE_ALIASES.get(mode_raw, "")
+    mode = _accepted_mode(mode_raw)
     return {
         "repository_url": repo if _looks_like_git_url(repo) else "",
         "source_branch": source if _looks_like_branch(source) else "",
@@ -405,14 +424,7 @@ def parse_issue_mode(summary: str = "", description: str = "") -> Optional[str]:
     token = (m.group(1) or "").strip().lower().strip("`").strip()
     # Drop trailing punctuation
     token = token.rstrip(".,;:")
-    known = _MODE_ALIASES.get(token)
-    if known:
-        return known
-    from src.work_modes import lookup
-
-    if lookup(token):
-        return token
-    return None
+    return _accepted_mode(token) or None
 
 
 def _extract_repo(text: str) -> str:
@@ -486,8 +498,9 @@ def parse_issue_git_spec(
     source = _normalize_branch(source_m.group(1)) if source_m else ""
     target = _normalize_branch(target_m.group(1)) if target_m else ""
     mode_raw = (mode_m.group(1) or "").strip().lower().strip("`").rstrip(".,;:") if mode_m else ""
-    # Mode is optional — default build (Model / Backend already optional)
-    mode = _MODE_ALIASES.get(mode_raw) if mode_raw else "build"
+    # Mode is optional — default build (Model / Backend already optional).
+    # A name saved in Settings is accepted and kept as itself.
+    mode = _accepted_mode(mode_raw) if mode_raw else "build"
     model_m = _MODEL_FIELD.search(text)
     model = _normalize_model_id(model_m.group(1)) if model_m else ""
     backend_m = _BACKEND_FIELD.search(text)
@@ -503,7 +516,7 @@ def parse_issue_git_spec(
             "Source branch (e.g. `Source branch: feature/PROJ-123` "
             "or `Source branch: develop` to auto-use feature/{KEY})"
         )
-    if mode_raw and mode_raw not in _MODE_ALIASES:
+    if mode_raw and not mode:
         missing.append(
             f"Mode (got `{mode_raw}`; must be `plan`, `build`, or `test`, or omit for build)"
         )
