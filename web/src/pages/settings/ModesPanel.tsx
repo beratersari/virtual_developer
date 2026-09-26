@@ -276,7 +276,7 @@ export function ModesPanel({ modes, onChange }: Props) {
             />
           </label>
           <label className="field">
-            <span>OpenCode agent</span>
+            <span>Agent</span>
             <select
               value={row.agent}
               onChange={(e) => update(index, { agent: e.target.value })}
