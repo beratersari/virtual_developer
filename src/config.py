@@ -13,6 +13,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from src.logger import logger
 
 
+def _gitlab_host_key(raw: str) -> str:
+    """Bare hostname[:port] for a host or a pasted GitLab URL."""
+    from urllib.parse import urlparse
+
+    host = (raw or "").strip().lower()
+    if not host:
+        return ""
+    if "://" not in host and "/" not in host:
+        return host
+    parsed = urlparse(host if "://" in host else f"https://{host}")
+    name = (parsed.hostname or "").lower()
+    if not name:
+        return host.split("/")[0]
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port and port not in (80, 443):
+        return f"{name}:{port}"
+    return name
+
+
 def bootstrap_dotenv_into_environ(
     *paths: Path,
     override: bool = False,
@@ -804,10 +826,17 @@ class Settings(BaseSettings):
         if h in mapping:
             return mapping[h]
         # Settings used to persist hostname without :port. Same host.
-        if ":" in h:
+        if ":" in h and "://" not in h:
             name = h.rsplit(":", 1)[0]
             if name in mapping:
                 return mapping[name]
+        want = _gitlab_host_key(h)
+        if want and want in mapping:
+            return mapping[want]
+        if want:
+            for key, pat in mapping.items():
+                if _gitlab_host_key(key) == want and pat:
+                    return pat
         return ""
 
     def gitlab_has_any_pat(self) -> bool:

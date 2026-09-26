@@ -61,3 +61,22 @@ def test_cancel_during_submodule_set_url_scrubs_origin(tmp_path, monkeypatch):
     assert "super-secret-pat" not in shown
     assert shown == clean
 
+def test_gitlab_scheme_key_authenticates_client(monkeypatch):
+    """A map key saved as ``https://host`` must still auth API calls.
+
+    Settings re-save already accepts that key. ``GitlabClient`` looks up
+    the bare host and, because the map is non-empty, skips leftover GITLAB_PAT.
+    """
+    from src.config import Settings
+    from src.gitlab.client import GitlabClient
+
+    s = Settings()
+    s.gitlab_host_pats = json.dumps(
+        {"https://gitlab.example.com": "glpat-secret"}
+    )
+    s.gitlab_pat = ""
+    monkeypatch.setattr("src.gitlab.client.settings", s)
+    monkeypatch.setattr("src.config.settings", s)
+    client = GitlabClient(host="gitlab.example.com")
+    assert client.pat == "glpat-secret"
+
