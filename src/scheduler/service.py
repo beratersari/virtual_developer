@@ -2340,7 +2340,12 @@ def _latest_queue_row_for_schedule(queue_store: Any, schedule_id: str) -> Option
         return None
     best: Optional[Dict[str, Any]] = None
     try:
-        rows = queue_store.list_items(limit=500)
+        # list_items keeps the oldest N. Finished rows are not deleted, so
+        # a newer skipped fire falls out of that window and stays dispatched.
+        if hasattr(queue_store, "_iter_records"):
+            rows = list(queue_store._iter_records())
+        else:
+            rows = queue_store.list_items(limit=500)
     except Exception:
         return None
     for rec in rows:

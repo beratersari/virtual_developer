@@ -235,3 +235,55 @@ def test_cancel_update_must_not_clobber_dispatching(tmp_path):
     assert updated["status"] == "dispatching"
     assert store.get(sid)["status"] == "dispatching"
 
+def test_reopen_sees_skipped_row_beyond_500_older_files(tmp_path):
+    from unittest.mock import MagicMock
+
+    from src.scheduler.service import _reopen_skipped_dispatched_schedules
+    from src.state.queue_store import WorkQueueStore
+    from src.state.schedule_store import ScheduleStore
+
+    qdir = tmp_path / "queue"
+    q = WorkQueueStore(queue_dir=qdir)
+    for i in range(500):
+        (qdir / f"q_old{i:04d}.json").write_text(
+            json.dumps(
+                {
+                    "queue_id": f"q_old{i:04d}",
+                    "status": "completed",
+                    "created_at": "2000-01-01T00:00:00.000",
+                    "payload": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    rec = store.create(
+        title="t",
+        description="",
+        repository_url="https://example.com/r.git",
+        source_branch="a",
+        target_branch="b",
+        mode="build",
+        scheduled_at="2020-01-01T00:00:00",
+        issue_key="KAN-9",
+        issue_description="x",
+    )
+    sid = rec["schedule_id"]
+    store.update(sid, status="dispatching")
+    store.update(sid, expected_status="dispatching", status="dispatched")
+    q.enqueue(source="jira", issue_key="KAN-9", payload={"schedule_id": sid})
+    new = next(p for p in qdir.glob("q_*.json") if not p.name.startswith("q_old"))
+    data = json.loads(new.read_text(encoding="utf-8"))
+    data["status"] = "skipped"
+    data["error_message"] = "Reaped stale running queue row (issue not live)"
+    data["created_at"] = "2026-09-26T00:00:00.000"
+    new.write_text(json.dumps(data), encoding="utf-8")
+    proc = MagicMock()
+    proc.queue_store = q
+    proc.state_manager.get_state.return_value = None
+    proc.list_live_processing_keys.return_value = []
+    proc.IN_FLIGHT_STATUSES = set()
+    n = _reopen_skipped_dispatched_schedules(proc, store)
+    assert n == 1
+    assert store.get(sid)["status"] == "scheduled"
+
