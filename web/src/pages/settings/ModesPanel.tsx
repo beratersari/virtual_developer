@@ -1,28 +1,48 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import {
   createOpencodeAgent,
   fetchOpencodeAgent,
   fetchOpencodeAgents,
   saveOpencodeAgent,
+  syncOpencodeAgents,
 } from '../../api/client'
 import type { WorkMode } from '../../api/types'
+import { ConfirmDialog } from '../../ui/ConfirmDialog'
 
 type Props = {
   modes: WorkMode[]
   onChange: (modes: WorkMode[]) => void
 }
 
+type Editor = {
+  name: string
+  text: string
+  loading: boolean
+  saving: boolean
+  error: string | null
+}
+
 export function ModesPanel({ modes, onChange }: Props) {
   const [agents, setAgents] = useState<string[]>([])
-  const [editorName, setEditorName] = useState('')
-  const [editorText, setEditorText] = useState('')
-  const [newName, setNewName] = useState('')
+  const [synced, setSynced] = useState(true)
+  const [editor, setEditor] = useState<Editor | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  const [existsName, setExistsName] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const returnFocus = useRef<HTMLElement | null>(null)
+  const textRef = useRef<HTMLTextAreaElement | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+  const titleId = useId()
+  const createTitleId = useId()
 
   async function reloadAgents() {
     const payload = await fetchOpencodeAgents()
     setAgents(payload.agents)
+    setSynced(payload.synced !== false)
   }
 
   useEffect(() => {
@@ -31,65 +51,188 @@ export function ModesPanel({ modes, onChange }: Props) {
     )
   }, [])
 
+  function closeEditor() {
+    setEditor(null)
+    const back = returnFocus.current
+    returnFocus.current = null
+    back?.focus()
+  }
+
+  useEffect(() => {
+    if (!editor || editor.saving) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeEditor()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editor])
+
+  useEffect(() => {
+    if (!editor || editor.loading) return
+    textRef.current?.focus()
+  }, [editor?.name, editor?.loading])
+
+  useEffect(() => {
+    if (!createOpen || creating) return
+    nameRef.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCreateOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [createOpen, creating])
+
   function update(index: number, patch: Partial<WorkMode>) {
     onChange(modes.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
+  function rememberFocus() {
+    const active = document.activeElement
+    returnFocus.current = active instanceof HTMLElement ? active : null
   }
 
   async function openAgent(name: string) {
     const trimmed = name.trim()
     if (!trimmed) return
+    rememberFocus()
     setError(null)
     setMessage(null)
+    setEditor({ name: trimmed, text: '', loading: true, saving: false, error: null })
     try {
       const row = await fetchOpencodeAgent(trimmed)
-      setEditorName(row.name)
-      setEditorText(row.text)
+      setEditor({
+        name: row.name,
+        text: row.text,
+        loading: false,
+        saving: false,
+        error: null,
+      })
     } catch (e) {
-      setEditorName(trimmed)
-      setEditorText('')
+      setEditor(null)
+      returnFocus.current = null
       setError(e instanceof Error ? e.message : 'Could not read agent')
     }
   }
 
   async function saveText() {
-    setError(null)
-    setMessage(null)
+    if (!editor || editor.loading || editor.saving) return
+    setEditor({ ...editor, saving: true, error: null })
     try {
-      await saveOpencodeAgent(editorName, editorText)
-      setMessage(`Saved ${editorName}`)
+      await saveOpencodeAgent(editor.name, editor.text)
       await reloadAgents()
+      setMessage(`Saved ${editor.name}`)
+      closeEditor()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save agent')
+      setEditor({
+        ...editor,
+        saving: false,
+        error: e instanceof Error ? e.message : 'Could not save agent',
+      })
     }
   }
 
-  async function createAgent(linkIndex: number | null) {
-    const name = newName.trim()
-    if (!name) return
+  function agentChoices(current: string): string[] {
+    const names = Array.isArray(agents) ? agents : []
+    const selected = (current || '').trim()
+    if (selected && !names.some((name) => name.toLowerCase() === selected.toLowerCase())) {
+      return [selected, ...names]
+    }
+    return names
+  }
+
+  function listedAgent(name: string): string {
+    const want = name.trim().toLowerCase()
+    if (!want) return ''
+    const fromList = agents.find((item) => item.toLowerCase() === want)
+    if (fromList) return fromList
+    const fromMode = modes.find((row) => row.agent.trim().toLowerCase() === want)
+    return fromMode?.agent.trim() ?? ''
+  }
+
+  async function syncAgents() {
+    if (syncing) return
+    setSyncing(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await syncOpencodeAgents()
+      setMessage(`Synced ${result.agents.length} agents to OpenCode and Claude.`)
+      await reloadAgents()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not sync agents')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  function openCreate() {
+    if (creating || syncing) return
+    rememberFocus()
+    setNameDraft('')
+    setError(null)
+    setCreateOpen(true)
+  }
+
+  function closeCreate() {
+    if (creating) return
+    setCreateOpen(false)
+    const back = returnFocus.current
+    returnFocus.current = null
+    back?.focus()
+  }
+
+  async function createAgent() {
+    const name = nameDraft.trim()
+    if (!name || creating) return
+    const known = listedAgent(name)
+    if (known) {
+      setCreateOpen(false)
+      setError(null)
+      setExistsName(known)
+      return
+    }
+    setCreating(true)
     setError(null)
     setMessage(null)
     try {
       const created = await createOpencodeAgent(name)
-      setNewName('')
-      setEditorName(created.name)
-      setEditorText(created.text)
+      setNameDraft('')
+      setCreateOpen(false)
       await reloadAgents()
-      if (linkIndex != null) update(linkIndex, { agent: created.name })
+      setEditor({
+        name: created.name,
+        text: created.text,
+        loading: false,
+        saving: false,
+        error: null,
+      })
       setMessage(`Created ${created.name}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create agent')
+      const text = e instanceof Error ? e.message : 'Could not create agent'
+      const match = text.match(/^Agent (.+) already exists$/)
+      if (match) {
+        setCreateOpen(false)
+        setExistsName(match[1])
+      } else setError(text)
+    } finally {
+      setCreating(false)
     }
   }
 
   return (
     <div className="space-y-3">
+      {synced === false && (
+        <div className="vd-alert vd-alert-warning" role="status">
+          Your agent files are not synced.
+        </div>
+      )}
       <div className="text-sm font-semibold text-text">Modes</div>
       <p className="text-xs text-text-muted">
-        Pick an agent from the list. Create one below if it is missing, then
-        choose it. Plan stops without a push. Build and test push and open a
-        merge request. A mode you add follows build. Write <span className="font-mono">Mode: name</span> in
-        the issue params. Agent text is saved in ~/.opencode/agents and is
-        separate from Save settings.
+        The list is only the agents in opencoderman/agents. Edit those files
+        here. Sync copies them into the OpenCode and Claude homes, which is
+        where jobs read agents. Plan stops without a push. Build and test push
+        and open a merge request. A mode you add follows build. Write{' '}
+        <span className="font-mono">Mode: name</span> in the issue params.
       </p>
       {modes.map((row, index) => (
         <div key={row.builtin ? `builtin-${row.name}` : `custom-${index}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-2">
@@ -112,19 +255,18 @@ export function ModesPanel({ modes, onChange }: Props) {
               onChange={(e) => update(index, { agent: e.target.value })}
             >
               <option value="">Select an agent</option>
-              {(row.agent && !agents.includes(row.agent) ? [row.agent, ...agents] : agents).map(
-                (name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ),
-              )}
+              {agentChoices(row.agent).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
             </select>
           </label>
           <div className="flex flex-wrap gap-2 sm:col-span-2">
             <button
               type="button"
               className="vd-btn vd-btn-secondary"
+              disabled={!row.agent}
               onClick={() => openAgent(row.agent)}
             >
               Edit agent text
@@ -141,7 +283,7 @@ export function ModesPanel({ modes, onChange }: Props) {
           </div>
         </div>
       ))}
-      <p>
+      <div className="flex flex-wrap gap-2">
         <button
           type="button"
           className="vd-btn vd-btn-secondary"
@@ -154,37 +296,144 @@ export function ModesPanel({ modes, onChange }: Props) {
         >
           Add mode
         </button>
-      </p>
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-        <label className="field">
-          <span>New agent name</span>
-          <input
-            value={newName}
-            placeholder="derman-docs"
-            onChange={(e) => setNewName(e.target.value)}
-          />
-        </label>
-        <div className="flex items-end">
-          <button type="button" className="vd-btn vd-btn-secondary" onClick={() => createAgent(null)}>
-            Create agent
-          </button>
-        </div>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={creating || syncing}
+          onClick={openCreate}
+        >
+          Create agent
+        </button>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          disabled={creating || syncing}
+          onClick={() => syncAgents()}
+        >
+          {syncing ? 'Syncing…' : 'Sync'}
+        </button>
       </div>
-      {editorName && (
-        <label className="field">
-          <span>Agent text · {editorName}</span>
-          <textarea
-            className="min-h-64 font-mono text-xs"
-            value={editorText}
-            onChange={(e) => setEditorText(e.target.value)}
-          />
-          <button type="button" className="vd-btn vd-btn-primary mt-2" onClick={saveText}>
-            Save agent text
-          </button>
-        </label>
-      )}
       {message && <p className="text-xs text-text-muted">{message}</p>}
       {error && <p className="err">{error}</p>}
+      {createOpen && (
+        <div
+          className="vd-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeCreate()
+          }}
+        >
+          <form
+            className="vd-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={createTitleId}
+            onSubmit={(e) => {
+              e.preventDefault()
+              void createAgent()
+            }}
+          >
+            <h3 id={createTitleId} className="vd-modal-title">
+              Create agent
+            </h3>
+            <label className="field">
+              <span>Agent name</span>
+              <input
+                ref={nameRef}
+                value={nameDraft}
+                placeholder="derman-docs"
+                spellCheck={false}
+                disabled={creating}
+                onChange={(e) => setNameDraft(e.target.value)}
+              />
+            </label>
+            {error && <p className="err">{error}</p>}
+            <div className="vd-modal-actions">
+              <button
+                type="button"
+                className="vd-btn vd-btn-secondary px-3 py-1.5 text-sm"
+                disabled={creating}
+                onClick={closeCreate}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="vd-btn vd-btn-primary px-3 py-1.5 text-sm"
+                disabled={creating || !nameDraft.trim()}
+              >
+                {creating ? 'Checking…' : 'Create'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      <ConfirmDialog
+        open={existsName != null}
+        title="Agent already exists"
+        body={
+          existsName
+            ? `${existsName} is already in the list. Choose it on a mode, or use Edit agent text.`
+            : ''
+        }
+        confirmLabel="OK"
+        onConfirm={() => setExistsName(null)}
+        onCancel={() => setExistsName(null)}
+      />
+      {editor && (
+        <div
+          className="vd-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !editor.saving) closeEditor()
+          }}
+        >
+          <div
+            className="vd-modal vd-modal-wide"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+          >
+            <h3 id={titleId} className="vd-modal-title">
+              Agent text · {editor.name}
+            </h3>
+            <label className="field">
+              <textarea
+                ref={textRef}
+                className="vd-agent-text"
+                aria-label={`Agent text for ${editor.name}`}
+                value={editor.text}
+                disabled={editor.loading || editor.saving}
+                autoFocus
+                aria-invalid={editor.error ? true : undefined}
+                onChange={(e) =>
+                  setEditor({ ...editor, text: e.target.value, error: null })
+                }
+              />
+            </label>
+            {editor.loading && <p className="vd-modal-body">Loading agent text…</p>}
+            {editor.error && <p className="err mt-2">{editor.error}</p>}
+            <div className="vd-modal-actions">
+              <button
+                type="button"
+                className="vd-btn vd-btn-secondary px-3 py-1.5 text-sm"
+                disabled={editor.saving}
+                onClick={closeEditor}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="vd-btn vd-btn-primary px-3 py-1.5 text-sm"
+                disabled={editor.loading || editor.saving}
+                onClick={() => saveText()}
+              >
+                {editor.saving ? 'Saving…' : 'Save agent text'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1471,9 +1471,19 @@ def create_dashboard_app(
 
     @app.get("/api/opencode-agents")
     def opencode_agents() -> dict:
-        from src.opencode_agents import list_agents
+        from src.opencode_agents import list_agents, sync_status
 
-        return {"agents": list_agents()}
+        status = sync_status()
+        return {"agents": list_agents(), **status}
+
+    @app.post("/api/opencode-agents/sync")
+    def opencode_agents_sync() -> dict:
+        from src.opencode_agents import AgentFileError, sync_agents
+
+        try:
+            return sync_agents()
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/opencode-agents/{name}")
     def opencode_agent(name: str) -> dict:

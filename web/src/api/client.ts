@@ -408,7 +408,9 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
 }
 
 export function fetchOpencodeAgents() {
-  return request<{ agents: string[] }>('/api/opencode-agents')
+  return request<{ agents: string[]; synced?: boolean; pending?: string[] }>(
+    '/api/opencode-agents',
+  )
 }
 
 export function fetchOpencodeAgent(name: string) {
@@ -429,6 +431,13 @@ export function createOpencodeAgent(name: string, text = '') {
     method: 'POST',
     body: JSON.stringify({ name, text }),
   })
+}
+
+export function syncOpencodeAgents() {
+  return request<{ agents: string[]; opencode: string; claude: string }>(
+    '/api/opencode-agents/sync',
+    { method: 'POST', body: '{}' },
+  )
 }
 
 export function fetchSettings() {

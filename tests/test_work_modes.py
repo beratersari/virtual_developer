@@ -96,7 +96,6 @@ def test_agent_file_round_trip(tmp_path, monkeypatch):
 
 def test_agent_http_create_and_edit(tmp_path, monkeypatch):
     monkeypatch.setattr("src.opencode_agents.agents_dir", lambda: tmp_path)
-    monkeypatch.setattr("src.opencode_agents._packaged_dir", lambda: tmp_path / "missing")
     app = create_dashboard_app()
     client = TestClient(app)
     created = client.post("/api/opencode-agents", json={"name": "derman-docs", "text": ""})

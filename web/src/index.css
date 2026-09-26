@@ -383,6 +383,26 @@ body {
   animation: vd-pop 0.2s ease;
 }
 
+.vd-modal.vd-modal-wide {
+  max-width: min(44rem, 100%);
+  max-height: min(90vh, 44rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.vd-modal-wide .field {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+}
+
+.vd-agent-text {
+  min-height: 16rem;
+  max-height: min(60vh, 28rem);
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
 .vd-report-panel {
   position: absolute;
   z-index: 40;
@@ -530,6 +550,10 @@ body {
   color: var(--text-muted);
   opacity: 0.65;
   cursor: not-allowed;
+}
+.field select option {
+  color: #1a1a1a;
+  background: #fff;
 }
 .field textarea { min-height: 5rem; }
 .go {
