@@ -287,3 +287,49 @@ def test_reopen_sees_skipped_row_beyond_500_older_files(tmp_path):
     assert n == 1
     assert store.get(sid)["status"] == "scheduled"
 
+def test_queued_row_takes_later_plan_execute_payload(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import patch
+
+    from src.processor import JobProcessor
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=object()):
+        proc = JobProcessor()
+    proc.queue_store = __import__(
+        "src.state.queue_store", fromlist=["WorkQueueStore"]
+    ).WorkQueueStore(queue_dir=tmp_path / "queue")
+
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(proc, "dispatch_queue", _noop)
+    old = {
+        "issue": {
+            "key": "KAN-1",
+            "fields": {
+                "summary": "t",
+                "description": "Mode: plan",
+                "status": {"name": "To Do"},
+                "labels": ["plan_ready"],
+            },
+        }
+    }
+    proc.queue_store.enqueue(
+        source="jira", issue_key="KAN-1", summary="t", payload=old
+    )
+    new = {
+        "plan_handoff": "execute",
+        "issue": {
+            "key": "KAN-1",
+            "fields": {
+                "summary": "t",
+                "description": "Mode: plan",
+                "status": {"name": "In Progress"},
+                "labels": ["plan_execute"],
+            },
+        },
+    }
+    result = asyncio.run(proc.enqueue_jira_event(new))
+    row = proc.queue_store.get(result["queue_id"])
+    assert row["payload"].get("plan_handoff") == "execute"

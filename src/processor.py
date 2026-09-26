@@ -5164,9 +5164,20 @@ class JobProcessor:
         # start a duplicate run when the live job finishes.
         existing = self.queue_store.find_open_jira(key)
         if existing and (existing.get("status") or "") == "queued":
+            # The open row still has the payload from the first poll.
+            # A later plan_execute event must replace it or the worker
+            # replans and the poller latch never retries implement.
+            qid = existing.get("queue_id") or ""
+            if qid:
+                self.queue_store.update(
+                    qid,
+                    payload=event,
+                    summary=summary,
+                    message=(desc or summary)[:8000],
+                )
             logger.info(
-                f"{key}: already queued as {existing.get('queue_id')}; "
-                f"dispatching existing row (not creating a duplicate)"
+                f"{key}: already queued as {qid}; "
+                f"updated payload and dispatching existing row"
             )
             await self.dispatch_queue()
             live = self.queue_store.get(existing.get("queue_id") or "") or existing
