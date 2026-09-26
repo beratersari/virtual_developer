@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set
 from src.config import settings
 from src.logger import logger
 from src.temp_fs import (
+    _is_dir_link,
     disk_usage_for,
     force_rmtree_progress,
     format_bytes,
@@ -82,6 +83,10 @@ def _safe_child(base: Path, name: str) -> Path:
         if folder in {".", ".."} or folder.startswith(".."):
             raise TempStorageError("Invalid folder name")
     candidate = (base / folder)
+    # A junction/symlink named in the temp base must be unlinked in place.
+    # Path.resolve() follows it, and force_rmtree then deletes the target.
+    if _is_dir_link(candidate):
+        return candidate
     try:
         resolved = candidate.resolve()
         resolved.relative_to(base.resolve())
