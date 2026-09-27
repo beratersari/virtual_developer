@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   fetchSettings,
@@ -58,6 +58,21 @@ type Draft = {
   work_modes: WorkMode[]
 }
 
+function SettingsGroup({
+  title,
+  children,
+}: {
+  title?: string
+  children: ReactNode
+}) {
+  return (
+    <div className="vd-panel space-y-3 p-5">
+      {title ? <div className="text-sm font-semibold text-text">{title}</div> : null}
+      {children}
+    </div>
+  )
+}
+
 function fromSettings(s: SettingsPayload): Draft {
   return {
     jira_enabled: s.jira_enabled !== false,
@@ -108,6 +123,58 @@ function fromSettings(s: SettingsPayload): Draft {
   }
 }
 
+function savedShape(d: Draft) {
+  return {
+    jira_enabled: d.jira_enabled,
+    jira_host: d.jira_host.trim(),
+    jira_api_token: d.jira_api_token.trim(),
+    jira_board_id: d.jira_board_id.trim(),
+    jira_projects: d.jira_projects.trim(),
+    poll_interval_seconds: Number(d.poll_interval_seconds),
+    jira_trigger_user: d.jira_trigger_user,
+    jira_trigger_label: d.jira_trigger_label,
+    gitlab_trigger_user: d.gitlab_trigger_user,
+    azure_trigger_user: d.azure_trigger_user,
+    gitlab_webhook_enabled: d.gitlab_webhook_enabled,
+    gitlab_webhook_secret: d.gitlab_webhook_secret.trim(),
+    azure_webhook_enabled: d.azure_webhook_enabled,
+    max_concurrent_jobs: Number(d.max_concurrent_jobs),
+    temp_clone_max_age_days: Number(d.temp_clone_max_age_days),
+    agent_task_timeout_seconds: Number(d.agent_task_timeout_seconds),
+    agent_task_max_retries: Number(d.agent_task_max_retries),
+    agent_task_max_incomplete_retries: Number(d.agent_task_max_incomplete_retries),
+    default_model: d.default_model.trim(),
+    default_review_model: d.default_review_model.trim(),
+    agent_backend: d.agent_backend,
+    gitlab_cred_rows: d.gitlab_cred_rows
+      .map((r) => ({ host: r.host.trim(), pat: r.pat.trim() }))
+      .filter((r) => r.host || r.pat),
+    azure_cred_rows: d.azure_cred_rows
+      .map((r) => ({ host: r.host.trim(), pat: r.pat.trim() }))
+      .filter((r) => r.host || r.pat),
+    project_repositories: d.project_repositories
+      .map((p) => ({
+        label: p.label.trim(),
+        url: p.url.trim(),
+        target_branch: (p.target_branch || '').trim(),
+        source_branch: (p.source_branch || '').trim(),
+      }))
+      .filter((p) => p.url || p.label || p.target_branch || p.source_branch),
+    work_modes: d.work_modes
+      .map((row) => ({
+        name: row.name.trim().toLowerCase(),
+        behavior: row.behavior || 'build',
+        agent: row.agent.trim(),
+        builtin: Boolean(row.builtin),
+      }))
+      .filter((row) => row.name || row.agent),
+  }
+}
+
+function draftChanged(draft: Draft, saved: SettingsPayload): boolean {
+  return JSON.stringify(savedShape(draft)) !== JSON.stringify(savedShape(fromSettings(saved)))
+}
+
 export function SettingsPage() {
   const { section: sectionParam = '' } = useParams()
   const navigate = useNavigate()
@@ -120,7 +187,6 @@ export function SettingsPage() {
   const [draft, setDraft] = useState<Draft | null>(() =>
     live.settings ? fromSettings(live.settings) : null,
   )
-  const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
@@ -137,10 +203,8 @@ export function SettingsPage() {
   const [modelsLoading, setModelsLoading] = useState(false)
   const [dirtyKeys, setDirtyKeys] = useState<Set<keyof Draft>>(new Set())
   const dirtyRef = useRef(false)
-  dirtyRef.current = dirty
 
   const touch = (key: keyof Draft) => {
-    setDirty(true)
     setDirtyKeys((prev) => {
       const next = new Set(prev)
       next.add(key)
@@ -300,7 +364,6 @@ export function SettingsPage() {
       setSettings(updated)
       pushSettings(updated)
       setDraft(fromSettings(updated))
-      setDirty(false)
       setDirtyKeys(new Set())
       setSaved(true)
       window.setTimeout(() => setSaved(false), 1800)
@@ -311,19 +374,46 @@ export function SettingsPage() {
     }
   }
 
+  const dirty = settings != null && draft != null && draftChanged(draft, settings)
+  dirtyRef.current = dirty
+
   if (!settings || !draft) {
     return <p className="text-sm text-text-muted">{error || 'Loading settings…'}</p>
   }
 
+  const saveButton = (
+    <button
+      type="button"
+      className="go"
+      disabled={saving || modelsLoading || !dirty}
+      onClick={() => void onSave()}
+    >
+      {saving ? (
+        <>
+          <Spinner /> Saving…
+        </>
+      ) : modelsLoading ? (
+        <>
+          <Spinner /> Loading models…
+        </>
+      ) : saved ? (
+        'Saved'
+      ) : (
+        'Save'
+      )}
+    </button>
+  )
+
   return (
-    <section className="max-w-2xl space-y-5">
+    <section className="space-y-5">
       <PageHeader
         kicker="Configuration"
         title="Settings"
         description="Save writes only the fields you changed. After restart, a .env key is used unless you later save that same field here. Leave secret fields blank to keep the current value."
+        actions={saveButton}
       />
 
-      <div className="flex w-fit flex-wrap gap-1 rounded-full border border-border bg-bg-elevated p-1">
+      <div className="flex w-full gap-1 overflow-x-auto rounded-full border border-border bg-bg-elevated p-1 lg:w-fit lg:overflow-visible">
         {(
           [
             ['jira', 'Jira'],
@@ -350,24 +440,25 @@ export function SettingsPage() {
         ))}
       </div>
 
-      <div className="vd-panel space-y-5 p-5">
-
       {section === 'jira' && (
-      <div key="jira" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Connection</div>
-      <label className="field">
-        <span>Enabled</span>
+      <div key="jira" className="vd-fade space-y-5">
+      <div className="vd-panel px-5 py-4">
+      <label className="field field-check !mb-0">
         <input
           type="checkbox"
           checked={draft.jira_enabled}
           onChange={(e) => mark('jira_enabled', e.target.checked)}
         />
+        <span>Enabled</span>
       </label>
-      <span className="text-xs text-text-muted">
+      <p className="mt-2 text-xs text-text-muted">
         Off: skip the board poller and Jira comments. GitLab and Azure
         jobs still run. Test Jira still works so you can check the
         token before turning this on.
-      </span>
+      </p>
+      </div>
+      <div className="grid items-start gap-5 lg:grid-cols-2">
+      <SettingsGroup title="Connection">
       <p className="text-xs text-text-muted">
         Site URL and API token. A blank token keeps the saved value.
       </p>
@@ -424,7 +515,9 @@ export function SettingsPage() {
         </ul>
       )}
 
-      <div className="text-sm font-semibold text-text">Board</div>
+      </SettingsGroup>
+      <div className="grid gap-5">
+      <SettingsGroup title="Board">
       <label className="field">
         <span>Board ID</span>
         <input
@@ -461,7 +554,8 @@ export function SettingsPage() {
         </span>
       </label>
 
-      <div className="text-sm font-semibold text-text">Intake</div>
+      </SettingsGroup>
+      <SettingsGroup title="Intake">
       <label className="field">
         <span>Trigger user (JIRA_TRIGGER_USER)</span>
         <input
@@ -492,12 +586,29 @@ export function SettingsPage() {
         Optional later: set JIRA_EMAIL in .env for Cloud HTTP Basic. Daily
         use is host + token (Bearer).
       </p>
+      </SettingsGroup>
+      </div>
+      </div>
       </div>
       )}
 
       {section === 'gitlab' && (
-      <div key="gitlab" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Credentials</div>
+      <div key="gitlab" className="vd-fade space-y-5">
+      <div className="vd-panel px-5 py-4">
+        <label className="field field-check !mb-0">
+          <input
+            type="checkbox"
+            checked={draft.gitlab_webhook_enabled}
+            onChange={(e) => mark('gitlab_webhook_enabled', e.target.checked)}
+          />
+          <span>Enabled</span>
+        </label>
+        <p className="mt-2 text-xs text-text-muted">
+          Project webhook. Off: comment and merge-request events are ignored.
+        </p>
+      </div>
+      <div className="grid items-start gap-5 lg:grid-cols-2">
+      <SettingsGroup title="Credentials">
       <p className="text-xs text-text-muted">
         One personal access token per GitLab host. A host with a PAT is
         allowed — there is no separate host list. Leave PAT blank to keep
@@ -614,8 +725,10 @@ export function SettingsPage() {
           Add GitLab host
         </button>
       </p>
+      </SettingsGroup>
 
-      <div className="text-sm font-semibold text-text">Trigger username</div>
+      <div className="grid gap-5">
+      <SettingsGroup title="Trigger username">
       <label className="field">
         <span>Trigger user (GITLAB_TRIGGER_USER)</span>
         <input
@@ -631,22 +744,15 @@ export function SettingsPage() {
           Code review (below) is on.
         </span>
       </label>
+      </SettingsGroup>
 
-      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
-        <div className="text-sm font-semibold text-text">Project webhook</div>
+      <SettingsGroup title="Project webhook">
+        <div className="text-sm">
         <p className="mt-1 text-xs text-text-muted">
           Register a project hook for comments and merge-request events. Merged
           or closed merge requests delete the matching temp clone. The secret
           is sent as X-Gitlab-Token.
         </p>
-        <label className="field mt-2">
-          <span>Enabled</span>
-          <input
-            type="checkbox"
-            checked={draft.gitlab_webhook_enabled}
-            onChange={(e) => mark('gitlab_webhook_enabled', e.target.checked)}
-          />
-        </label>
         <label className="field">
           <span>
             Secret{' '}
@@ -671,13 +777,30 @@ export function SettingsPage() {
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
           {settings?.gitlab_webhook_path || '/yaver/webhook/gitlab'}
         </p>
+        </div>
+      </SettingsGroup>
+      </div>
       </div>
       </div>
       )}
 
       {section === 'azure' && (
-      <div key="azure" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Credentials</div>
+      <div key="azure" className="vd-fade space-y-5">
+      <div className="vd-panel px-5 py-4">
+        <label className="field field-check !mb-0">
+          <input
+            type="checkbox"
+            checked={draft.azure_webhook_enabled}
+            onChange={(e) => mark('azure_webhook_enabled', e.target.checked)}
+          />
+          <span>Enabled</span>
+        </label>
+        <p className="mt-2 text-xs text-text-muted">
+          Service hook. Off: pull-request and work-item events are ignored.
+        </p>
+      </div>
+      <div className="grid items-start gap-5 lg:grid-cols-2">
+      <SettingsGroup title="Credentials">
       <p className="text-xs text-text-muted">
         Add the collection URL, not the hostname. Use
         https://tfs.example.com/tfs/DefaultCollection when the server
@@ -802,8 +925,10 @@ export function SettingsPage() {
           Add collection
         </button>
       </p>
+      </SettingsGroup>
 
-      <div className="text-sm font-semibold text-text">Trigger username</div>
+      <div className="grid gap-5">
+      <SettingsGroup title="Trigger username">
       <label className="field">
         <span>Trigger user (AZURE_TRIGGER_USER)</span>
         <input
@@ -817,9 +942,10 @@ export function SettingsPage() {
           one of these names. Comma-separated if there is more than one.
         </span>
       </label>
+      </SettingsGroup>
 
-      <div className="rounded border border-border bg-bg px-4 py-3 text-sm">
-        <div className="text-sm font-semibold text-text">Service hook</div>
+      <SettingsGroup title="Service hook">
+        <div className="text-sm">
         <p className="mt-1 text-xs text-text-muted">
           Register a project Web Hook for pull-request commented,
           pull-request updated / merged / abandoned, and work item
@@ -832,32 +958,28 @@ export function SettingsPage() {
           without those commands gets a usage note on the work item. No
           webhook secret.
         </p>
-        <label className="field mt-2">
-          <span>Enabled</span>
-          <input
-            type="checkbox"
-            checked={draft.azure_webhook_enabled}
-            onChange={(e) => mark('azure_webhook_enabled', e.target.checked)}
-          />
-        </label>
         <p className="mt-2 font-mono text-[11px] text-text-secondary">
           URL: http://&lt;host&gt;:{settings?.dashboard_port ?? 8080}
           {settings?.azure_webhook_path || '/yaver/webhook/azure'}
         </p>
+        </div>
+      </SettingsGroup>
+      </div>
       </div>
       </div>
       )}
 
       {section === 'projects' && (
-      <div key="projects" className="vd-fade space-y-3">
+      <div key="projects" className="vd-fade space-y-5">
         <div>
           <div className="text-sm font-semibold text-text">Saved projects</div>
           <p className="mt-1 text-xs text-text-muted">
             Named remotes for Scheduled → New issue.
           </p>
         </div>
+        <div className="grid items-start gap-5 lg:grid-cols-2">
         {draft.project_repositories.map((row, idx) => (
-          <div key={idx} className="space-y-2 rounded-lg border border-border p-3">
+          <div key={idx} className="vd-panel space-y-2 p-5">
             <label className="field">
               <span>Label</span>
               <input
@@ -932,6 +1054,7 @@ export function SettingsPage() {
             </p>
           </div>
         ))}
+        </div>
         <p className="actions">
           <button
             type="button"
@@ -957,7 +1080,8 @@ export function SettingsPage() {
       )}
 
       {section === 'model' && (
-      <div key="model" className="vd-fade space-y-3">
+      <div key="model" className="vd-fade grid items-start gap-5 lg:grid-cols-2">
+      <SettingsGroup>
       <label className="field">
         <span>Worker</span>
         <select
@@ -1003,6 +1127,8 @@ export function SettingsPage() {
         showRefresh
         onLoadingChange={setModelsLoading}
       />
+      </SettingsGroup>
+      <SettingsGroup>
       <ModesPanel
         modes={draft.work_modes}
         onChange={(work_modes) => {
@@ -1010,12 +1136,13 @@ export function SettingsPage() {
           setDraft((d) => (d ? { ...d, work_modes } : d))
         }}
       />
+      </SettingsGroup>
       </div>
       )}
 
       {section === 'runtime' && (
-      <div key="runtime" className="vd-fade space-y-3">
-      <div className="text-sm font-semibold text-text">Jobs</div>
+      <div key="runtime" className="vd-fade grid items-start gap-5 lg:grid-cols-2">
+      <SettingsGroup title="Jobs">
       <label className="field">
         <span>Max concurrent jobs</span>
         <input
@@ -1056,7 +1183,9 @@ export function SettingsPage() {
         </span>
       </label>
 
-      <div className="text-sm font-semibold text-text">Retries</div>
+      </SettingsGroup>
+      <div className="grid gap-5">
+      <SettingsGroup title="Retries">
       <label className="field">
         <span>Error / timeout retries</span>
         <input
@@ -1087,7 +1216,8 @@ export function SettingsPage() {
         </span>
       </label>
 
-      <div className="text-sm font-semibold text-text">Data location</div>
+      </SettingsGroup>
+      <SettingsGroup title="Data location">
       <p className="text-xs text-text-muted">
         Set <span className="font-mono">YAVER_BASE_DIR</span> in .env. Yaver
         creates <span className="font-mono">yaver</span> and{' '}
@@ -1105,32 +1235,11 @@ export function SettingsPage() {
         {settings.azure_pat_configured ? 'set' : 'missing'} · dashboard{' '}
         {settings.dashboard_host}:{settings.dashboard_port}
       </p>
+      </SettingsGroup>
+      </div>
       </div>
       )}
 
-      <p>
-        <button
-          type="button"
-          className="go"
-          disabled={saving || modelsLoading || (!dirty && !saved)}
-          onClick={() => void onSave()}
-        >
-          {saving ? (
-            <>
-              <Spinner /> Saving…
-            </>
-          ) : modelsLoading ? (
-            <>
-              <Spinner /> Loading models…
-            </>
-          ) : saved ? (
-            'Saved'
-          ) : (
-            'Save'
-          )}
-        </button>
-      </p>
-      </div>
       <ConfirmDialog
         open={error != null}
         title="Could not save"

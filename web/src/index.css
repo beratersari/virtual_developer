@@ -556,6 +556,27 @@ body {
   background: #fff;
 }
 .field textarea { min-height: 5rem; }
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: fit-content;
+}
+.field-check span {
+  display: inline;
+  margin: 0;
+}
+.field-check input[type="checkbox"] {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
 .go {
   display: inline-flex;
   align-items: center;
@@ -571,7 +592,14 @@ body {
 }
 .go:hover:not(:disabled) { transform: translateY(-1px); }
 .go:active:not(:disabled) { transform: translateY(1px) scale(0.98); }
-.go:disabled { opacity: 0.45; cursor: not-allowed; }
+.go:disabled {
+  opacity: 1;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  cursor: not-allowed;
+  transform: none;
+}
 .quiet { color: var(--text-muted); font-size: 0.875rem; }
 .err { color: var(--danger-text); font-size: 0.875rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.5rem 0 1rem; }
