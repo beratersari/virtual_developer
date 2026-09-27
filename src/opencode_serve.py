@@ -1710,7 +1710,7 @@ class ServeOrchestrator:
         wait_seconds: float = 30.0,
         abort_busy: bool = True,
     ) -> bool:
-        """Return True when the session is idle and a new prompt may be posted.
+        """True when the caller may post. False only blocks a compact Continue.
 
         Make the session idle before posting a new user prompt.
 
@@ -1718,7 +1718,14 @@ class ServeOrchestrator:
         POST /message then 500s while the old turn keeps editing files.
 
         Incomplete-session resume must **not** abort: the leftover turn is
-        still the job (finish=unknown + open todos). Wait it out.
+        still the job (finish=unknown + open todos). Wait it out, then
+        return True so the job prompt is posted anyway.
+
+        False means the status read failed, the wait was aborted, or the
+        session is still busy after abort. The compact-loop restart checks
+        that and does not send Continue. The resume path ignores this
+        return and still posts the job prompt. That prompt is the work,
+        not a compact Continue.
         """
         try:
             status = await self.client.session_status()
@@ -1750,6 +1757,7 @@ class ServeOrchestrator:
                 "stdout",
                 "[serve] leftover turn still busy after wait — posting anyway",
             )
+            # True on purpose: the leftover turn is the job, so resume posts.
             return True
         _emit(
             "stdout",
@@ -1769,6 +1777,7 @@ class ServeOrchestrator:
                 _emit("stdout", "[serve] session idle after abort")
                 return True
         _emit("stdout", "[serve] session still busy after abort wait")
+        # False stops a compact-loop Continue. Resume still posts the job.
         return False
 
     async def run(
@@ -1859,6 +1868,8 @@ class ServeOrchestrator:
                 )
         else:
             _emit("stdout", f"[serve] session resumed: {sid}")
+            # Ignore the bool. It only gates a compact-loop Continue.
+            # This job prompt is posted after the wait, even if still busy.
             await self._ensure_session_idle(
                 sid,
                 _emit=_emit,
@@ -1997,6 +2008,7 @@ class ServeOrchestrator:
             idle = await self._ensure_session_idle(
                 sid, _emit=_emit, _aborted=_aborted
             )
+            # Only this Continue is withheld. Resume does not check the bool.
             if not idle:
                 _emit(
                     "stdout",
