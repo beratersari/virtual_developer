@@ -256,8 +256,8 @@ export function ModesPanel({ modes, onChange }: Props) {
       <div className="text-sm font-semibold text-text">Modes</div>
       <p className="text-xs text-text-muted">
         The list is only the agents in opencoderman/agents. Edit those files
-        here. Sync copies them into the OpenCode and Claude homes, which is
-        where jobs read agents. Plan stops without a push. Build and test push
+        here. Sync copies them into ~/.opencode and ~/.config/opencode, and
+        into the Claude home, which is where jobs read agents. Plan stops without a push. Build and test push
         and open a merge request. A mode you add follows build. Write{' '}
         <span className="font-mono">Mode: name</span> in the issue params.
       </p>

@@ -2,7 +2,8 @@
 
 That folder is the copy in the release zip. Settings reads and writes only
 those files. OpenCode and Claude do not load that folder. Sync copies each
-agent into ``~/.opencode/agents`` and ``~/.claude/agents``.
+agent into ``~/.opencode/agents``, ``~/.config/opencode/agents``, and
+``~/.claude/agents``.
 """
 
 from __future__ import annotations
@@ -39,6 +40,21 @@ def agents_dir() -> Path:
 
 def opencode_agents_dir() -> Path:
     return Path.home() / ".opencode" / "agents"
+
+
+def opencode_xdg_agents_dir() -> Path:
+    """OpenCode's other home: ``$XDG_CONFIG_HOME/opencode/agents`` or ``~/.config/opencode/agents``."""
+    xdg = (os.environ.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg:
+        root = Path(xdg)
+    else:
+        profile = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+        root = (Path(profile) if profile else Path.home()) / ".config"
+    return root / "opencode" / "agents"
+
+
+def _opencode_agent_dirs() -> List[Path]:
+    return [opencode_agents_dir(), opencode_xdg_agents_dir()]
 
 
 def claude_agents_dir() -> Path:
@@ -167,7 +183,7 @@ def sync_status() -> Dict[str, Any]:
     the catalog; it does not delete other agents the operator already had.
     """
     catalog = _agent_files(agents_dir())
-    opencode = opencode_agents_dir()
+    opencode_dirs = _opencode_agent_dirs()
     claude = claude_agents_dir()
     pending: List[str] = []
     for src in catalog:
@@ -176,7 +192,7 @@ def sync_status() -> Dict[str, Any]:
         if text is None:
             pending.append(stem)
             continue
-        if not _same_text(_read_text(opencode / src.name), text):
+        if any(not _same_text(_read_text(home / src.name), text) for home in opencode_dirs):
             pending.append(stem)
             continue
         if not _same_text(_read_text(claude / src.name), _claude_agent_text(text, stem)):
@@ -186,20 +202,27 @@ def sync_status() -> Dict[str, Any]:
 
 
 def sync_agents() -> Dict[str, Any]:
-    """Copy ``opencoderman/agents`` into the OpenCode and Claude homes."""
+    """Copy ``opencoderman/agents`` into both OpenCode homes and the Claude home."""
     files = _agent_files(agents_dir())
     if not files:
         raise AgentFileError("No agents to sync")
-    opencode = opencode_agents_dir()
+    opencode_dirs = _opencode_agent_dirs()
     claude = claude_agents_dir()
-    opencode.mkdir(parents=True, exist_ok=True)
+    for home in opencode_dirs:
+        home.mkdir(parents=True, exist_ok=True)
     claude.mkdir(parents=True, exist_ok=True)
     names: List[str] = []
     for src in files:
         stem = src.name[:-3]
         text = src.read_text(encoding="utf-8")
-        shutil.copyfile(src, opencode / src.name)
+        for home in opencode_dirs:
+            shutil.copyfile(src, home / src.name)
         (claude / src.name).write_text(_claude_agent_text(text, stem), encoding="utf-8")
         names.append(stem)
     names.sort()
-    return {"agents": names, "opencode": str(opencode), "claude": str(claude)}
+    return {
+        "agents": names,
+        "opencode": str(opencode_dirs[0]),
+        "opencode_config": str(opencode_dirs[1]),
+        "claude": str(claude),
+    }

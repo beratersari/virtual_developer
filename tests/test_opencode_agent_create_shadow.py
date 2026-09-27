@@ -32,18 +32,29 @@ def test_sync_copies_catalog_into_opencode_and_claude(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     opencode = tmp_path / "opencode"
+    opencode_config = tmp_path / "config-opencode"
     claude = tmp_path / "claude"
     monkeypatch.setattr("src.opencode_agents.agents_dir", lambda: catalog)
     monkeypatch.setattr("src.opencode_agents.opencode_agents_dir", lambda: opencode)
+    monkeypatch.setattr("src.opencode_agents.opencode_xdg_agents_dir", lambda: opencode_config)
     monkeypatch.setattr("src.opencode_agents.claude_agents_dir", lambda: claude)
     result = sync_agents()
     assert result["agents"] == ["derman-docs"]
     assert "Write the guide." in (opencode / "derman-docs.md").read_text(encoding="utf-8")
+    assert "Write the guide." in (opencode_config / "derman-docs.md").read_text(encoding="utf-8")
     claude_text = (claude / "derman-docs.md").read_text(encoding="utf-8")
     assert "name: derman-docs" in claude_text
     assert "Write the guide." in claude_text
     assert sync_status()["synced"] is True
     (opencode / "leftover.md").write_text("old home agent\n", encoding="utf-8")
+    assert sync_status()["synced"] is True
+    (opencode_config / "derman-docs.md").write_text("stale config copy\n", encoding="utf-8")
+    assert sync_status()["synced"] is False
+    assert sync_status()["pending"] == ["derman-docs"]
+    (opencode_config / "derman-docs.md").write_text(
+        (catalog / "derman-docs.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
     assert sync_status()["synced"] is True
     (catalog / "derman-docs.md").write_text(
         "---\nmode: primary\n---\n\nChanged.\n",
