@@ -24,20 +24,13 @@ const PERIODS = [
   { id: 'custom', label: 'Custom' },
 ] as const
 
-type SeriesKey =
-  | 'total'
-  | 'completed'
-  | 'error'
-  | 'cancelled'
-  | 'plan_ready'
-  | 'in_flight'
+type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
   { id: 'total', label: 'Total', color: '#ff7a45' },
   { id: 'completed', label: 'Completed', color: '#3ecf8e' },
   { id: 'error', label: 'Error', color: '#f25c54' },
   { id: 'cancelled', label: 'Cancelled', color: '#7b88a8' },
-  { id: 'plan_ready', label: 'Plan ready', color: '#6ea8ff' },
   { id: 'in_flight', label: 'In flight', color: '#c9a227' },
 ]
 
@@ -172,7 +165,6 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
             <th>Completed</th>
             <th>Error</th>
             <th>Cancelled</th>
-            <th>Plan ready</th>
             <th>In flight</th>
             <th className="w-1/3">Share</th>
           </tr>
@@ -185,7 +177,6 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
               <td className="font-mono text-success-text">{row.completed}</td>
               <td className="font-mono text-danger-text">{row.error}</td>
               <td className="font-mono text-text-muted">{row.cancelled}</td>
-              <td className="font-mono">{row.plan_ready}</td>
               <td className="font-mono">{row.in_flight}</td>
               <td>
                 <div className="flex items-center gap-2">
@@ -223,7 +214,7 @@ export function AnalyticsPage() {
   const [agent, setAgent] = useState<Set<string>>(() => new Set())
   const [repository, setRepository] = useState<Set<string>>(() => new Set())
   const [visible, setVisible] = useState<Set<SeriesKey>>(
-    () => new Set(['total', 'completed', 'error', 'plan_ready']),
+    () => new Set(['total', 'completed', 'error']),
   )
   const [payload, setPayload] = useState<AnalyticsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -474,7 +465,7 @@ export function AnalyticsPage() {
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <CountCard label="Total jobs" value={payload?.totals.jobs ?? 0} />
         <CountCard
           label="Completed"
@@ -493,11 +484,6 @@ export function AnalyticsPage() {
           value={payload?.totals.cancelled ?? 0}
           tone="muted"
           to={jobsFilterPath('cancelled')}
-        />
-        <CountCard
-          label="Plan ready"
-          value={payload?.totals.plan_ready ?? 0}
-          to={jobsFilterPath('plan_ready')}
         />
         <CountCard label="In flight" value={payload?.totals.in_flight ?? 0} />
         <CountCard

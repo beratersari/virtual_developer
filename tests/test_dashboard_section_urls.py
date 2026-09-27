@@ -91,7 +91,6 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     assert "jobsFilterPath('completed')" in analytics
     assert "jobsFilterPath('error')" in analytics
     assert "jobsFilterPath('cancelled')" in analytics
-    assert "jobsFilterPath('plan_ready')" in analytics
 
     settings = _read("src/pages/settings/SettingsPage.tsx")
     assert "navigate(settingsSectionPath(id))" in settings

@@ -22,10 +22,11 @@ from src.dashboard.schemas import (
 )
 from src.state.job_store import JobStore, job_store as default_job_store
 
-_COMPLETED = frozenset({"completed"})
+# A plan that reached plan_ready finished successfully. It is not a
+# separate outcome on Analytics.
+_COMPLETED = frozenset({"completed", "plan_ready"})
 _ERROR = frozenset({"error", "unknown"})
 _CANCELLED = frozenset({"cancelled", "canceled", "superseded"})
-_PLAN_READY = frozenset({"plan_ready"})
 _IN_FLIGHT = frozenset({"pending", "planning", "executing", "running"})
 _UNSET = "(unset)"
 
@@ -187,8 +188,6 @@ def _outcome(status: str) -> str:
         return "error"
     if st in _CANCELLED:
         return "cancelled"
-    if st in _PLAN_READY:
-        return "plan_ready"
     if st in _IN_FLIGHT:
         return "in_flight"
     return "other"
@@ -809,7 +808,8 @@ def build_analytics(
         facet_backend[_backend_id(job)] += 1
         facet_agent[_agent_id(job)] += 1
         st = str(job.get("status") or "unknown").strip().lower() or "unknown"
-        facet_status[st] += 1
+        # Same bucket as the totals: a finished plan is Completed.
+        facet_status["completed" if st == "plan_ready" else st] += 1
         repo = _repo_key(job)
         if repo:
             facet_repo[repo] += 1
