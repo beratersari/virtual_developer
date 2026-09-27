@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, fetchAnalytics } from '../../api/client'
 import type {
   AnalyticsFacet,
@@ -11,6 +11,7 @@ import { Alert } from '../../ui/Alert'
 import { LineChart, type LineSeries } from '../../ui/LineChart'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
+import { analyticsPeriodFromParam, analyticsPeriodPath } from './analyticsPeriodUrl'
 
 const PERIODS = [
   { id: '24h', label: '24 hours' },
@@ -207,8 +208,10 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
 }
 
 export function AnalyticsPage() {
+  const { period: periodParam = '' } = useParams()
+  const navigate = useNavigate()
+  const period = analyticsPeriodFromParam(periodParam) ?? '30d'
   const live = useLive()
-  const [period, setPeriod] = useState<string>('30d')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
   const [status, setStatus] = useState<Set<string>>(() => new Set())
@@ -227,6 +230,12 @@ export function AnalyticsPage() {
   const reqId = useRef(0)
   const lastGenReload = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (periodParam && analyticsPeriodFromParam(periodParam) === null) {
+      navigate(analyticsPeriodPath('30d'), { replace: true })
+    }
+  }, [navigate, periodParam])
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
@@ -395,7 +404,7 @@ export function AnalyticsPage() {
                   setCustomFrom((prev) => prev || localInputFromIso(start))
                   setCustomTo((prev) => prev || localInputFromIso(end))
                 }
-                setPeriod(p.id)
+                navigate(analyticsPeriodPath(p.id))
               }}
               className={`rounded-full px-3 py-1 text-xs font-semibold ${
                 period === p.id

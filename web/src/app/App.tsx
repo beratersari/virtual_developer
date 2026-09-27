@@ -23,19 +23,25 @@ export default function App() {
           <Route element={<Shell />}>
             <Route path="/" element={<Navigate to="/jobs" replace />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/jobs/in-flight" element={<JobsPage />} />
+            <Route path="/jobs/queue" element={<JobsPage />} />
+            <Route path="/jobs/error" element={<JobsPage />} />
+            <Route path="/jobs/completed" element={<JobsPage />} />
+            <Route path="/jobs/cancelled" element={<JobsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/analytics/reviews" element={<AnalyticsReviewsPage />} />
+            <Route path="/analytics/:period" element={<AnalyticsPage />} />
             {/* Queue is shown on Jobs; keep old path as redirect */}
             <Route path="/queue" element={<Navigate to="/jobs" replace />} />
-            <Route path="/jobs/:jobId" element={<JobDetailPage />} />
-            <Route path="/tasks/:issueKey" element={<IssueDetailPage />} />
+            <Route path="/jobs/:jobId/:section?" element={<JobDetailPage />} />
+            <Route path="/tasks/:issueKey/:section?" element={<IssueDetailPage />} />
             <Route path="/poll" element={<PollPage />} />
-            <Route path="/scheduled" element={<SchedulesPage />} />
-            <Route path="/schedules" element={<Navigate to="/scheduled" replace />} />
+            <Route path="/scheduled/:mode?/:tracker?" element={<SchedulesPage />} />
+            <Route path="/schedules" element={<Navigate to="/scheduled/jira" replace />} />
             <Route path="/sessions" element={<SessionsPage />} />
             <Route path="/sessions/:workspaceId" element={<SessionWorkspacePage />} />
             <Route path="/storage" element={<StoragePage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/:section?" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/jobs" replace />} />
           </Route>
         </Routes>

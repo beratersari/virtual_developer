@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
 import { shouldRefreshQueueList } from './queueRefresh'
 import type { JobsPayload, QueueItem } from '../../api/types'
@@ -17,6 +17,7 @@ import { PageHeader } from '../../ui/PageHeader'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { peekJobsPayload, rememberJobsPayload } from '../../app/entityCache'
 import { JobsTable } from './JobsTable'
+import { jobsFilterFromPath, jobsFilterPath } from './jobsFilterUrl'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -31,10 +32,11 @@ const PAGE_SIZE = 25
 
 export function JobsPage() {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const live = useLive()
+  const statusFilter = jobsFilterFromPath(pathname)
   const [issueFilter, setIssueFilter] = useState('')
   const [debouncedFilter, setDebouncedFilter] = useState('')
-  const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
   const [page, setPage] = useState(1)
   const [payload, setPayload] = useState<JobsPayload | null>(() => peekJobsPayload())
   const [queueItems, setQueueItems] = useState<QueueItem[]>([])
@@ -256,7 +258,7 @@ export function JobsPage() {
             <button
               key={f.id}
               type="button"
-              onClick={() => setStatusFilter(f.id)}
+              onClick={() => navigate(jobsFilterPath(f.id))}
               className={`rounded-full px-3 py-1 text-xs font-semibold transition-transform duration-150 active:scale-95 ${
                 statusFilter === f.id
                   ? 'bg-accent text-[#1a0d08]'

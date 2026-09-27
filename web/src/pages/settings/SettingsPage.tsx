@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   fetchSettings,
   patchSettings,
@@ -17,6 +18,13 @@ import type {
 import { useLive } from '../../app/live'
 import { azureCollectionProblem } from './azureCollection'
 import { ModesPanel } from './ModesPanel'
+import {
+  canonicalSettingsPath,
+  settingsHere,
+  settingsSectionFromParam,
+  settingsSectionPath,
+  type SettingsSection,
+} from './settingsSectionUrl'
 import { ModelField } from '../../ui/ModelField'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { PageHeader } from '../../ui/PageHeader'
@@ -101,6 +109,9 @@ function fromSettings(s: SettingsPayload): Draft {
 }
 
 export function SettingsPage() {
+  const { section: sectionParam = '' } = useParams()
+  const navigate = useNavigate()
+  const section: SettingsSection = settingsSectionFromParam(sectionParam) ?? 'jira'
   const live = useLive()
   const pushSettings = live.setSettings
   const [settings, setSettings] = useState<SettingsPayload | null>(
@@ -112,9 +123,6 @@ export function SettingsPage() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [section, setSection] = useState<
-    'jira' | 'gitlab' | 'azure' | 'projects' | 'model' | 'runtime'
-  >('jira')
   const [jiraResult, setJiraResult] = useState<JiraConnectionTestResult | null>(null)
   const [gitlabResults, setGitlabResults] = useState<Record<string, GitlabConnectionTestResult>>(
     {},
@@ -144,6 +152,11 @@ export function SettingsPage() {
     touch(key)
     setDraft((d) => (d ? { ...d, [key]: value } : d))
   }
+
+  useEffect(() => {
+    const want = canonicalSettingsPath(sectionParam)
+    if (settingsHere(sectionParam) !== want) navigate(want, { replace: true })
+  }, [navigate, sectionParam])
 
   useEffect(() => {
     if (settings || !live.settings) return
@@ -326,7 +339,7 @@ export function SettingsPage() {
             type="button"
             onClick={() => {
               if (id === 'model' && section !== 'model') setModelsLoading(true)
-              setSection(id)
+              navigate(settingsSectionPath(id))
             }}
             className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-transform duration-150 active:scale-95 ${
               section === id ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'

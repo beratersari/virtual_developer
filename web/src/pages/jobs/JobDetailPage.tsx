@@ -38,12 +38,12 @@ import { resolveJobWorker, workerLabel } from '../../util/worker'
 import { JobOverview } from './JobOverview'
 import { JobPromptTab, JobSessionTab } from './JobArtifacts'
 import { JobChatTab } from './JobChatTab'
-
-type JobTab = 'overview' | 'plan' | 'prompt' | 'chat' | 'output' | 'logs'
+import { jobTabFromSection, jobTabPath, type JobTab } from './jobTabUrl'
 
 export function JobDetailPage() {
-  const { jobId = '' } = useParams()
+  const { jobId = '', section = '' } = useParams()
   const navigate = useNavigate()
+  const tab: JobTab = jobTabFromSection(section) ?? 'overview'
   const live = useLive()
   const cached = peekJob(jobId.trim())
   const [job, setJob] = useState<JobItem | null>(cached)
@@ -54,7 +54,6 @@ export function JobDetailPage() {
   const [artsLoading, setArtsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
-  const [tab, setTab] = useState<JobTab>('overview')
   const [confirm, setConfirm] = useState<'cancel' | 'delete' | 'implement' | null>(null)
   const [reviseOpen, setReviseOpen] = useState(false)
   const [reviseText, setReviseText] = useState('')
@@ -150,7 +149,12 @@ export function JobDetailPage() {
   )
 
   useEffect(() => {
-    setTab('overview')
+    if (section && jobTabFromSection(section) === null) {
+      navigate(jobTabPath(jobId, 'overview'), { replace: true })
+    }
+  }, [jobId, navigate, section])
+
+  useEffect(() => {
     setReviseOpen(false)
     setReviseText('')
     setNotice(null)
@@ -476,7 +480,7 @@ export function JobDetailPage() {
           { id: 'logs', label: 'Daemon', count: systemLogs.length },
         ]}
         value={tab}
-        onChange={setTab}
+        onChange={(next) => navigate(jobTabPath(jobId, next))}
       />
 
       <div className="vd-panel min-h-[50vh] p-5">
