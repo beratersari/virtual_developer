@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
 import { ApiError, fetchAnalyticsReviews } from '../../api/client'
 import type { AnalyticsReviewsPayload } from '../../api/types'
 import { Alert } from '../../ui/Alert'
@@ -52,10 +53,14 @@ function fallbackLabel(row: {
 }
 
 export function AnalyticsReviewsPage() {
-  const [params, setParams] = useSearchParams()
+  const { page: pageParam = '' } = useParams()
+  const navigate = useNavigate()
+  const [params] = useSearchParams()
   const state = params.get('state') || 'all'
   const origin = params.get('origin') || 'all'
-  const page = Math.max(1, Number(params.get('page') || 1) || 1)
+  const pathPage = listPageFromSegment(pageParam)
+  const queryPage = listPageFromSegment(params.get('page') || '')
+  const page = pathPage ?? queryPage ?? 1
   const [payload, setPayload] = useState<AnalyticsReviewsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -102,25 +107,38 @@ export function AnalyticsReviewsPage() {
     void load()
   }, [load])
 
+  useEffect(() => {
+    if (pathPage || !queryPage) return
+    const p = new URLSearchParams(params)
+    p.delete('page')
+    const search = p.toString()
+    navigate(
+      { pathname: withListPage('/analytics/reviews', queryPage), search: search ? `?${search}` : '' },
+      { replace: true },
+    )
+  }, [navigate, params, pathPage, queryPage])
+
+  const reviewsPath = (nextPage: number, search: URLSearchParams) => {
+    search.delete('page')
+    const q = search.toString()
+    const path = withListPage('/analytics/reviews', nextPage)
+    return q ? `${path}?${q}` : path
+  }
+
   const setState = (next: string) => {
     const p = new URLSearchParams(params)
     p.set('state', next)
-    p.delete('page')
-    setParams(p)
+    navigate(reviewsPath(1, p))
   }
 
   const setOrigin = (next: string) => {
     const p = new URLSearchParams(params)
     p.set('origin', next)
-    p.delete('page')
-    setParams(p)
+    navigate(reviewsPath(1, p))
   }
 
   const setPage = (next: number) => {
-    const p = new URLSearchParams(params)
-    if (next <= 1) p.delete('page')
-    else p.set('page', String(next))
-    setParams(p)
+    navigate(reviewsPath(next, new URLSearchParams(params)))
   }
 
   const backParams = new URLSearchParams(params)

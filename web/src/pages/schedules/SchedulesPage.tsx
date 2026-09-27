@@ -38,12 +38,14 @@ import {
   localNaiveNowIso,
   splitDatetimeLocal,
 } from '../../util/time'
+import { withListPage } from '../../util/listPageUrl'
 import {
   canonicalSchedulePath,
   parseSchedulePath,
   scheduleHere,
   schedulePath,
   type ScheduleMode,
+  type ScheduleTracker,
 } from './scheduleTabUrl'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
@@ -81,14 +83,15 @@ function scheduledAtForSubmit(when: string, dispatchNow: boolean): string {
 }
 
 export function SchedulesPage() {
-  const { mode: modeParam = '', tracker: trackerParam = '' } = useParams()
+  const { mode: modeParam = '', tracker: trackerParam = '', page: pageParam = '' } = useParams()
   const navigate = useNavigate()
-  const parsed = parseSchedulePath(modeParam, trackerParam)
+  const parsed = parseSchedulePath(modeParam, trackerParam, pageParam)
   const mode: ScheduleMode = parsed?.mode ?? 'existing'
+  const tracker: ScheduleTracker = parsed?.tracker ?? 'jira'
+  const page = parsed?.page ?? 1
   const live = useLive()
   const [rows, setRows] = useState<ScheduleItem[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
   const [cancelId, setCancelId] = useState<string | null>(null)
@@ -98,10 +101,10 @@ export function SchedulesPage() {
   const reqId = useRef(0)
 
   useEffect(() => {
-    const want = canonicalSchedulePath(modeParam, trackerParam)
-    const here = scheduleHere(modeParam, trackerParam)
+    const want = canonicalSchedulePath(modeParam, trackerParam, pageParam)
+    const here = scheduleHere(modeParam, trackerParam, pageParam)
     if (here !== want) navigate(want, { replace: true })
-  }, [modeParam, navigate, trackerParam])
+  }, [modeParam, navigate, pageParam, trackerParam])
 
   const reload = useCallback(async (pageOverride?: number) => {
     const nextPage = pageOverride ?? page
@@ -118,15 +121,13 @@ export function SchedulesPage() {
       setPageSize(size)
       setError(null)
       if (landed > pages) {
-        setPage(pages)
-        return
+        navigate(withListPage(schedulePath(mode, tracker), pages), { replace: true })
       }
-      if (landed !== nextPage) setPage(landed)
     } catch (e) {
       if (req !== reqId.current) return
       setError(e instanceof Error ? e.message : 'Load failed')
     }
-  }, [page])
+  }, [mode, navigate, page, tracker])
 
   useEffect(() => {
     void reload()
@@ -196,13 +197,25 @@ export function SchedulesPage() {
         </button>
       </div>
       {mode === 'existing' ? (
-        <Existing onDone={() => { setPage(1); void reload(1) }} />
+        <Existing onDone={() => {
+          if (page > 1) navigate(schedulePath('existing', tracker))
+          else void reload(1)
+        }} />
       ) : mode === 'mr' ? (
-        <ExistingMr onDone={() => { setPage(1); void reload(1) }} />
+        <ExistingMr onDone={() => {
+          if (page > 1) navigate(schedulePath('mr'))
+          else void reload(1)
+        }} />
       ) : mode === 'pr' ? (
-        <ExistingPr onDone={() => { setPage(1); void reload(1) }} />
+        <ExistingPr onDone={() => {
+          if (page > 1) navigate(schedulePath('pr'))
+          else void reload(1)
+        }} />
       ) : (
-        <CreateNew onDone={() => { setPage(1); void reload(1) }} />
+        <CreateNew onDone={() => {
+          if (page > 1) navigate(schedulePath('new', tracker))
+          else void reload(1)
+        }} />
       )}
       {error && <p className="text-sm text-danger-text">{error}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-text-muted">
@@ -212,7 +225,7 @@ export function SchedulesPage() {
         <button
           type="button"
           disabled={currentPage <= 1}
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
+          onClick={() => navigate(withListPage(schedulePath(mode, tracker), currentPage - 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Prev
@@ -220,7 +233,7 @@ export function SchedulesPage() {
         <button
           type="button"
           disabled={currentPage >= totalPages}
-          onClick={() => setPage((p) => p + 1)}
+          onClick={() => navigate(withListPage(schedulePath(mode, tracker), currentPage + 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Next

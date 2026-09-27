@@ -45,16 +45,17 @@ def test_section_url_modules_match_their_tsx_checks() -> None:
 
 def test_routes_keep_a_section_slot_for_each_tabbed_page() -> None:
     for route in (
-        'path="/jobs/in-flight"',
-        'path="/jobs/queue"',
-        'path="/jobs/error"',
-        'path="/jobs/completed"',
-        'path="/jobs/cancelled"',
+        'path="/jobs/in-flight/:page?"',
+        'path="/jobs/queue/:page?"',
+        'path="/jobs/error/:page?"',
+        'path="/jobs/completed/:page?"',
+        'path="/jobs/cancelled/:page?"',
         'path="/jobs/:jobId/:section?"',
-        'path="/analytics/reviews"',
+        'path="/analytics/reviews/:page?"',
         'path="/analytics/:period"',
         'path="/tasks/:issueKey/:section?"',
-        'path="/scheduled/:mode?/:tracker?"',
+        'path="/scheduled/:mode?/:tracker?/:page?"',
+        'path="/sessions/:workspaceId"',
         'path="/settings/:section?"',
     ):
         assert route in APP, route
@@ -75,6 +76,13 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     jobs = _read("src/pages/jobs/JobsPage.tsx")
     assert "navigate(jobsFilterPath(f.id))" in jobs
     assert "jobsFilterFromPath(pathname)" in jobs
+    assert "navigate(withListPage(jobsFilterPath(statusFilter), currentPage + 1))" in jobs
+
+    sessions = _read("src/pages/sessions/SessionsPage.tsx")
+    assert "navigate(withListPage('/sessions', currentPage + 1))" in sessions
+
+    reviews = _read("src/pages/analytics/AnalyticsReviewsPage.tsx")
+    assert "withListPage('/analytics/reviews', nextPage)" in reviews
 
     analytics = _read("src/pages/analytics/AnalyticsPage.tsx")
     assert "navigate(analyticsPeriodPath(p.id))" in analytics
@@ -90,5 +98,6 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     assert "navigate(schedulePath('new', 'jira'))" in scheduled
     assert "navigate(schedulePath('new', 'azure'))" in scheduled
     assert "navigate(schedulePath('existing', 'jira'))" in scheduled
-    assert "canonicalSchedulePath(modeParam, trackerParam)" in scheduled
-    assert "scheduleHere(modeParam, trackerParam)" in scheduled
+    assert "canonicalSchedulePath(modeParam, trackerParam, pageParam)" in scheduled
+    assert "scheduleHere(modeParam, trackerParam, pageParam)" in scheduled
+    assert "navigate(withListPage(schedulePath(mode, tracker), currentPage + 1))" in scheduled

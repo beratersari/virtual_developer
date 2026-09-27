@@ -3,7 +3,8 @@
  */
 import { analyticsPeriodFromParam, analyticsPeriodPath } from './analytics/analyticsPeriodUrl'
 import { issueTabFromSection, issueTabPath } from './issues/issueTabUrl'
-import { jobsFilterFromPath, jobsFilterPath } from './jobs/jobsFilterUrl'
+import { jobsFilterFromPath, jobsFilterPath, jobsPageFromPath } from './jobs/jobsFilterUrl'
+import { listPageFromSegment, withListPage } from '../util/listPageUrl'
 import {
   canonicalSchedulePath,
   parseSchedulePath,
@@ -56,6 +57,14 @@ assert(jobsFilterPath('error') === '/jobs/error', 'error path')
 assert(jobsFilterPath('completed') === '/jobs/completed', 'completed path')
 assert(jobsFilterPath('queue') === '/jobs/queue', 'queue path')
 assert(jobsFilterFromPath('/jobs/job_1') === 'all', 'a job id is not a list filter')
+assert(jobsFilterFromPath('/jobs/queue/2') === 'queue', 'queue page keeps the queue filter')
+assert(jobsPageFromPath('/jobs') === 1, 'jobs page 1 has no suffix')
+assert(jobsPageFromPath('/jobs/2') === 2, 'jobs page is the last segment')
+assert(jobsPageFromPath('/jobs/queue/3') === 3, 'filtered jobs page is the last segment')
+assert(jobsPageFromPath('/jobs/job_1') === 1, 'a job id is not a page number')
+assert(listPageFromSegment('0') === null, 'page 0 is not a page segment')
+assert(withListPage('/jobs/queue', 1) === '/jobs/queue', 'page 1 omits the number')
+assert(withListPage('/sessions', 4) === '/sessions/4', 'later pages append the number')
 
 assert(analyticsPeriodFromParam(undefined) === '30d', 'analytics default is 30d')
 assert(analyticsPeriodFromParam('7d') === '7d', '7d period')
@@ -93,6 +102,14 @@ assert(canonicalSchedulePath('azure', undefined) === '/scheduled/azure', 'existi
 assert(canonicalSchedulePath('mr', undefined) === '/scheduled/mr', 'mr is not given a jira suffix')
 assert(canonicalSchedulePath('pr', 'jira') === '/scheduled/pr', 'pr ignores a jira tracker')
 assert(canonicalSchedulePath('nope', undefined) === '/scheduled/jira', 'unknown mode becomes existing jira')
+assert(parseSchedulePath('jira', '2')?.page === 2, 'scheduled jira page is the last segment')
+assert(parseSchedulePath('new', 'jira', '3')?.page === 3, 'new jira page is the last segment')
+assert(parseSchedulePath('mr', '4')?.mode === 'mr', 'mr page does not become a tracker')
+assert(canonicalSchedulePath('jira', '2') === '/scheduled/jira/2', 'scheduled page stays on the jira path')
+assert(canonicalSchedulePath('new', 'azure', '2') === '/scheduled/new/azure/2', 'new azure page suffix')
+assert(canonicalSchedulePath('mr', '2') === '/scheduled/mr/2', 'mr page suffix')
+assert(canonicalSchedulePath('2', undefined) === '/scheduled/jira/2', 'bare page becomes existing jira')
+assert(scheduleHere('jira', '2') === '/scheduled/jira/2', 'typed scheduled page is kept')
 assert(
   scheduleHere('new', undefined) !== canonicalSchedulePath('new', undefined),
   'new without jira must be replaced',
