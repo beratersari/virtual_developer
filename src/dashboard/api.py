@@ -738,6 +738,10 @@ def create_dashboard_app(
     @app.get("/api/jobs")
     def jobs(
         issue_key: Optional[str] = None,
+        status: Optional[str] = Query(
+            default=None,
+            description="Jobs pill: all, active, error, completed, cancelled",
+        ),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=25, ge=1, le=100),
         limit: Optional[int] = Query(
@@ -750,6 +754,7 @@ def create_dashboard_app(
         size = page_size if limit is None else limit
         return build_jobs(
             issue_key=issue_key,
+            status=status,
             page=page,
             page_size=size,
             processor=app.state.processor,

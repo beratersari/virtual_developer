@@ -302,12 +302,15 @@ export function fetchAnalyticsReviews(opts?: {
 
 export async function fetchJobs(opts?: {
   issueKey?: string
+  status?: string
   page?: number
   pageSize?: number
 }): Promise<JobsPayload> {
   const params = new URLSearchParams()
   const key = opts?.issueKey?.trim()
   if (key) params.set('issue_key', key)
+  const status = opts?.status?.trim()
+  if (status && status !== 'all' && status !== 'queue') params.set('status', status)
   if (opts?.page != null) params.set('page', String(opts.page))
   if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
   const q = params.toString() ? `?${params.toString()}` : ''

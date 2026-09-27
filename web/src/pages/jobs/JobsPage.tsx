@@ -96,6 +96,7 @@ export function JobsPage() {
       try {
         const data = await fetchJobs({
           issueKey: (opts?.filter ?? debouncedFilter) || undefined,
+          status: statusFilter,
           page: opts?.page ?? page,
           pageSize: PAGE_SIZE,
         })
@@ -326,9 +327,8 @@ export function JobsPage() {
           restart. Queue is waiting messages, not these runs.
         </p>
       )}
-      {statusFilter !== 'all' && statusFilter !== 'queue' && statusFilter !== 'active' && (
+      {statusFilter !== 'queue' && (
         <p className="text-xs text-text-muted">
-          Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
           Search matches issue key, title, and description.
         </p>
       )}

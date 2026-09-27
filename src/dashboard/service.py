@@ -1434,12 +1434,30 @@ def _job_matches_exact_key(job: Dict[str, Any], issue_key: Optional[str]) -> boo
     return str(job.get("issue_key") or "").strip().upper() == want
 
 
+def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) -> bool:
+    """Same buckets as the Jobs page pills. Empty and ``all`` keep every row."""
+    want = (status or "").strip().lower().replace("_", "-")
+    if not want or want == "all":
+        return True
+    st = str(job.get("status") or "").lower()
+    if want in {"active", "live", "in-flight"}:
+        return live or st in {"pending", "planning", "executing", "running"}
+    if want == "error":
+        return st in {"error", "unknown"}
+    if want == "completed":
+        return st == "completed"
+    if want == "cancelled":
+        return st in {"cancelled", "canceled", "superseded"}
+    return True
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
     limit: int = 25,
     page: int = 1,
     page_size: Optional[int] = None,
+    status: Optional[str] = None,
     processor: Optional["JobProcessor"] = None,
     store: Optional[JobStore] = None,
     state_manager: Optional[JiraStateManager] = None,
@@ -1493,6 +1511,8 @@ def build_jobs(
             or j.get("job_id") in active_job_ids
             or st in {"executing", "planning", "running", "pending"}
         )
+        if not _job_matches_status(j, live, status):
+            continue
         (inflight if live else rest).append(j)
     inflight.sort(key=job_created_stamp, reverse=True)
     rest.sort(key=job_created_stamp, reverse=True)
