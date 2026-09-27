@@ -439,6 +439,11 @@ def parse_codex_thread_id(text: str) -> Optional[str]:
                 if tid:
                     last = str(tid).strip()
                     continue
+                # Command stdout may contain "session_id: <uuid>". That is
+                # not the Codex thread and must not replace thread_id.
+                item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                if str(item.get("type") or "") == "command_execution":
+                    continue
         m = _THREAD_RE.search(raw)
         if m:
             last = m.group(1)

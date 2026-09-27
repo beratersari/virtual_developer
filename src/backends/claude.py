@@ -454,6 +454,11 @@ def _take_claude_event(state: Dict[str, Any], event: Dict[str, Any]) -> None:
     kind = str(event.get("type") or "")
     if kind in {"system", "user"} or kind.startswith("rate_limit"):
         return
+    # A result often includes message. Handle it before the assistant
+    # branch so the finish clears the nudged turn's question tool.
+    if kind == "result":
+        _take_claude_result(state, event)
+        return
     if kind == "assistant" or isinstance(event.get("message"), dict):
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         content = message.get("content")
@@ -465,19 +470,29 @@ def _take_claude_event(state: Dict[str, Any], event: Dict[str, Any]) -> None:
         state["pending_tools"].extend(_tool_names(content))
         state["tools"] = list(state["pending_tools"])
         return
-    if kind == "result" or "result" in event or event.get("is_error") is not None:
-        state["tools"] = list(state.get("pending_tools") or [])
-        state["pending_tools"] = []
-        state["is_error"] = bool(event.get("is_error"))
-        result = _as_text(event.get("result")).strip()
-        if result:
-            state["result"] = result
-        err = _as_text(event.get("error")).strip()
-        if err:
-            state["error"] = err
-        cost = event.get("total_cost_usd")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            state["total_cost_usd"] = float(cost)
+    if "result" in event or event.get("is_error") is not None:
+        _take_claude_result(state, event)
+
+
+def _take_claude_result(state: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Record a Claude result and drop question tools from the prior turn."""
+    kept = []
+    for name in state.get("pending_tools") or []:
+        key = str(name).strip().lower().replace("-", "_")
+        if key not in _QUESTION_TOOLS:
+            kept.append(name)
+    state["tools"] = kept
+    state["pending_tools"] = []
+    state["is_error"] = bool(event.get("is_error"))
+    result = _as_text(event.get("result")).strip()
+    if result:
+        state["result"] = result
+    err = _as_text(event.get("error")).strip()
+    if err:
+        state["error"] = err
+    cost = event.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        state["total_cost_usd"] = float(cost)
 
 
 def _taken_text(state: Dict[str, Any]) -> str:
