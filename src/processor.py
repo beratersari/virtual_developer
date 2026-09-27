@@ -5170,6 +5170,7 @@ class JobProcessor:
             # The schedule form is already in the event built at dispatch.
             qid = existing.get("queue_id") or ""
             if qid:
+                # Accepted: payload is replaced; jira_event_id stays the first id.
                 self.queue_store.update(
                     qid,
                     payload=event,
@@ -5350,6 +5351,7 @@ class JobProcessor:
         queued; ``claim_next`` waits on issue key and on repo+source+target.
         """
         n = 0
+        # Accepted: only the oldest 500 queued rows are considered here.
         for rec in list(self.queue_store.list_items(status="queued", limit=500)):
             source = (rec.get("source") or "jira").strip().lower()
             if source != "jira":

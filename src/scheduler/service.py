@@ -668,7 +668,7 @@ def schedule_existing_issue(
                 logger.warning(f"{key}: add_labels soft-failed: {e}")
 
         ss = store or schedule_store
-        # Avoid duplicate pending schedules for the same issue
+        # Accepted: duplicate check looks at the newest 500 pending rows.
         for existing in ss.list_schedules(status="scheduled", limit=500):
             if (existing.get("issue_key") or "").upper() == key:
                 return {
@@ -2377,6 +2377,7 @@ def _reopen_skipped_dispatched_schedules(
     when = (now or datetime.now()).isoformat(timespec="seconds")
     pending_keys: Set[str] = set()
     try:
+        # Accepted: recovery and the sibling guard both stop at 500 rows.
         for other in store.list_schedules(limit=500):
             st = (other.get("status") or "").lower()
             if st in ("scheduled", "dispatching"):

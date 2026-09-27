@@ -1617,6 +1617,7 @@ def _apply_message_list(
         and not _message_has_compaction_part(last_any)
     )
     if last_is_user:
+        # Accepted: this flag does not by itself mark the session incomplete.
         result["awaiting_assistant_after_user"] = True
     if (
         last_assistant is not None

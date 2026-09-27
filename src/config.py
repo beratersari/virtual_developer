@@ -21,6 +21,7 @@ def _gitlab_host_key(raw: str) -> str:
     if not host:
         return ""
     if "://" not in host and "/" not in host:
+        # Accepted: a saved "host:443" key stays distinct from the bare host.
         return host
     parsed = urlparse(host if "://" in host else f"https://{host}")
     name = (parsed.hostname or "").lower()

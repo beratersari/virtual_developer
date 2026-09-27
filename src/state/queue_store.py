@@ -405,6 +405,7 @@ class WorkQueueStore:
     def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
         """Re-queue durable ``running`` rows after a crash (no live worker)."""
         n = 0
+        # Accepted: startup requeue covers the oldest 500 running rows.
         for rec in list(self.list_items(status="running", limit=500)):
             qid = rec.get("queue_id")
             if not qid:

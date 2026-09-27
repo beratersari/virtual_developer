@@ -1441,6 +1441,7 @@ def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) 
         return True
     st = str(job.get("status") or "").lower()
     if want in {"active", "live", "in-flight"}:
+        # Accepted: a live issue keeps its older jobs on this pill.
         return live or st in {"pending", "planning", "executing", "running"}
     if want == "error":
         return st in {"error", "unknown"}
@@ -3317,6 +3318,7 @@ def build_opencode_workspaces(
     page_ids.discard("")
     counts: Dict[str, int] = {}
     if page_ids:
+        # Accepted: job counts use the newest 500 jobs.
         for job in js.list_jobs(limit=500):
             wid = _workspace_id_from_job(job)
             if not wid or wid not in page_ids:
@@ -3363,6 +3365,7 @@ def build_opencode_workspace_detail(
         for r in recs
         if str(r.get("job_id") or "").strip()
     }
+    # Accepted: workspace detail uses the newest 500 jobs.
     matched = [
         job
         for job in js.list_jobs(limit=500)

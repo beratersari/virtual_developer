@@ -108,8 +108,8 @@ def _collection_netloc(parsed) -> str:
     """Hostname in lower case, without the scheme's default port.
 
     ``https://TFS.example.com:443/...`` and ``https://tfs.example.com/...``
-    are the same collection. A non-default port stays. The scheme stays, so
-    http and https remain different keys.
+    are the same collection. A non-default port stays. Accepted: the scheme
+    stays, so http and https remain different collection keys.
     """
     host = (parsed.hostname or "").lower()
     if not host:

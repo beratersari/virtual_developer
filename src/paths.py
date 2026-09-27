@@ -292,6 +292,7 @@ def _migrate_legacy_if_empty(dest: Path) -> None:
         return
     for child in children:
         target = dest / child.name
+        # Accepted: an existing dest child (including empty plans/) is left as-is.
         if target.exists():
             continue
         try:

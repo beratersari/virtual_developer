@@ -88,6 +88,7 @@ def parse_azure_thread(raw: dict[str, Any]) -> Optional[ExistingThread]:
     discussion_id = str(raw.get("id") or "").strip()
     if not discussion_id:
         return None
+    # Accepted: resolved is the status name, not the numeric enum.
     status = str(raw.get("status") or "").strip().lower()
     resolved = status in {"fixed", "wontfix", "closed", "bydesign"}
     return ExistingThread(

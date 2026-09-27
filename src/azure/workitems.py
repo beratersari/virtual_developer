@@ -642,6 +642,7 @@ def work_item_fields_to_jira(
     state_category: str = "",
 ) -> Dict[str, Any]:
     title = _s(fields.get("System.Title"))
+    # Accepted: a non-empty Description string wins over Repro Steps.
     description = azure_html_to_text(
         fields.get("System.Description")
         or fields.get("Microsoft.VSTS.TCM.ReproSteps")

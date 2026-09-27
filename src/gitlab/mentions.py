@@ -260,9 +260,8 @@ def note_has_slash_command(
             flags=re.IGNORECASE,
         ):
             return True
-        # "@Yaver Bot /yaver" when configured as yaver. Extra words must
-        # look like a display-name tail (capitalized). "@bot please /cmd"
-        # and "@bot @alice /cmd" stay misses.
+        # Accepted: a capitalized word between @name and /cmd counts as a
+        # display-name tail ("@Yaver Bot /yaver"). "@bot please /cmd" stays a miss.
         tail_hit = re.search(
             rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}((?:\s+\S+)*)\s*{cmd_re}",
             text,
