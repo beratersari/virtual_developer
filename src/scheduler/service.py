@@ -2365,11 +2365,13 @@ def _reopen_skipped_dispatched_schedules(
     *,
     now: Optional[datetime] = None,
 ) -> int:
-    """Turn ``dispatched`` + stale-reap skip back into a due schedule.
+    """Recover a ``dispatched`` schedule whose queue row never started work.
 
     Enqueue marks the schedule dispatched before the queue worker runs. If
-    the row is then reaped as skipped (never started), the UI stays
-    Dispatched and Run now is refused. Re-open those so the next tick fires.
+    the row is then skipped, the UI stays Dispatched and Run now is refused.
+    A stale reap is put back to ``scheduled`` so the next tick fires. Any
+    other skip (plan_ready wait, unknown event) becomes ``error`` so the
+    tick does not loop and Run now stays available.
     """
     qs = getattr(processor, "queue_store", None)
     if qs is None:
@@ -2414,19 +2416,30 @@ def _reopen_skipped_dispatched_schedules(
         qrow = _latest_queue_row_for_schedule(qs, sid)
         if not qrow or (qrow.get("status") or "") != "skipped":
             continue
-        if _STALE_REAP_SKIP not in str(qrow.get("error_message") or ""):
-            continue
-        store.update(
-            sid,
-            status="scheduled",
-            scheduled_at=when,
-            error_message=None,
-        )
+        msg = str(qrow.get("error_message") or "")
+        if _STALE_REAP_SKIP in msg:
+            store.update(
+                sid,
+                status="scheduled",
+                scheduled_at=when,
+                error_message=None,
+            )
+            logger.info(
+                f"Schedule {sid} re-opened after skipped queue "
+                f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+            )
+        else:
+            store.update(
+                sid,
+                expected_status="dispatched",
+                status="error",
+                error_message=(msg or "queue row skipped before work started")[:1000],
+            )
+            logger.info(
+                f"Schedule {sid} marked error after skipped queue "
+                f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+            )
         n += 1
-        logger.info(
-            f"Schedule {sid} re-opened after skipped queue "
-            f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
-        )
     return n
 
 

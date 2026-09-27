@@ -1257,9 +1257,11 @@ _CONTINUE_PROMPT_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Finish values that mean the agent was still mid-tool-loop when the process
-# stopped (not a clean terminal answer).
-_UNFINISHED_FINISH = frozenset({"tool-calls", "unknown", ""})
+# Finish values that mean the agent was still mid-tool-loop, or the turn
+# ended as an error / abort / length cut. None of these is a clean answer.
+_UNFINISHED_FINISH = frozenset(
+    {"tool-calls", "unknown", "", "error", "abort", "length"}
+)
 
 
 def detect_compact_in_output(text: str) -> bool:

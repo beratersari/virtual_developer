@@ -1143,7 +1143,14 @@ def decide_azure_workitem_comment_webhook(
         resource.get("revisedBy")
         or _as_dict(resource.get("comment")).get("author")
     )
-    if author_is_configured_bot(author, mentions) or actor_is_pat_user(
+    # author_is_configured_bot walks strings. A dict yields keys ("id"),
+    # so the bot's own display name never matches and the comment is accepted.
+    author_names = [
+        _s(author.get("uniqueName") or author.get("unique_name")),
+        _s(author.get("displayName") or author.get("display_name")),
+        _s(author.get("directoryAlias") or author.get("principalName")),
+    ]
+    if author_is_configured_bot(author_names, mentions) or actor_is_pat_user(
         identity_as_assignee(author) or author,
         host=parsed.host,
         collection_url=parsed.collection_url,

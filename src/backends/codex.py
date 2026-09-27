@@ -422,6 +422,9 @@ def parse_codex_thread_id(text: str) -> Optional[str]:
     if not (text or "").strip():
         return None
     last: Optional[str] = None
+    # A real thread id from thread.started must survive later session_id
+    # lines (command stdout and agent text both quote that field).
+    anchored = False
     for line in text.splitlines():
         raw = line.strip()
         if not raw:
@@ -438,6 +441,7 @@ def parse_codex_thread_id(text: str) -> Optional[str]:
                     tid = thread.get("id")
                 if tid:
                     last = str(tid).strip()
+                    anchored = True
                     continue
                 # Command stdout may contain "session_id: <uuid>". That is
                 # not the Codex thread and must not replace thread_id.
@@ -446,7 +450,12 @@ def parse_codex_thread_id(text: str) -> Optional[str]:
                     continue
         m = _THREAD_RE.search(raw)
         if m:
+            label = m.group(0).split(":", 1)[0].split("=", 1)[0].strip().lower()
+            if anchored and label == "session_id":
+                continue
             last = m.group(1)
+            if label in {"thread_id", "thread"}:
+                anchored = True
     return last
 
 

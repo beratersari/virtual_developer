@@ -485,6 +485,11 @@ def _take_claude_result(state: Dict[str, Any], event: Dict[str, Any]) -> None:
     state["pending_tools"] = []
     state["is_error"] = bool(event.get("is_error"))
     result = _as_text(event.get("result")).strip()
+    if not result:
+        # An empty result string must not keep an earlier question. The
+        # final text, when present, is on this event's message.
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        result = _text_from_content(message.get("content")).strip()
     if result:
         state["result"] = result
     err = _as_text(event.get("error")).strip()
