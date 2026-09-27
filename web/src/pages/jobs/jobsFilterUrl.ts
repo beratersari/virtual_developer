@@ -9,6 +9,7 @@ const SECTION_FOR_FILTER: Record<JobStatusFilter, string> = {
   error: 'error',
   completed: 'completed',
   cancelled: 'cancelled',
+  plan_ready: 'plan-ready',
 }
 
 const FILTER_FOR_SECTION: Record<string, JobStatusFilter> = {
@@ -18,6 +19,7 @@ const FILTER_FOR_SECTION: Record<string, JobStatusFilter> = {
   error: 'error',
   completed: 'completed',
   cancelled: 'cancelled',
+  'plan-ready': 'plan_ready',
 }
 
 export function jobsFilterFromPath(pathname: string): JobStatusFilter {

@@ -24,6 +24,7 @@ import { JobDetailPage } from './JobDetailPage'
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
   { id: 'active', label: 'In flight' },
+  { id: 'plan_ready', label: 'Plan ready' },
   { id: 'queue', label: 'Queue' },
   { id: 'error', label: 'Error' },
   { id: 'completed', label: 'Completed' },

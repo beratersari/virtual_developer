@@ -11,6 +11,7 @@ import { Alert } from '../../ui/Alert'
 import { LineChart, type LineSeries } from '../../ui/LineChart'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
+import { jobsFilterPath } from '../jobs/jobsFilterUrl'
 import { analyticsPeriodFromParam, analyticsPeriodPath } from './analyticsPeriodUrl'
 
 const PERIODS = [
@@ -479,14 +480,25 @@ export function AnalyticsPage() {
           label="Completed"
           value={payload?.totals.completed ?? 0}
           tone="success"
+          to={jobsFilterPath('completed')}
         />
-        <CountCard label="Error" value={payload?.totals.error ?? 0} tone="danger" />
+        <CountCard
+          label="Error"
+          value={payload?.totals.error ?? 0}
+          tone="danger"
+          to={jobsFilterPath('error')}
+        />
         <CountCard
           label="Cancelled"
           value={payload?.totals.cancelled ?? 0}
           tone="muted"
+          to={jobsFilterPath('cancelled')}
         />
-        <CountCard label="Plan ready" value={payload?.totals.plan_ready ?? 0} />
+        <CountCard
+          label="Plan ready"
+          value={payload?.totals.plan_ready ?? 0}
+          to={jobsFilterPath('plan_ready')}
+        />
         <CountCard label="In flight" value={payload?.totals.in_flight ?? 0} />
         <CountCard
           label="Models used"

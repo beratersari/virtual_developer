@@ -1449,6 +1449,8 @@ def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) 
         return st == "completed"
     if want == "cancelled":
         return st in {"cancelled", "canceled", "superseded"}
+    if want == "plan-ready":
+        return st == "plan_ready"
     return True
 
 

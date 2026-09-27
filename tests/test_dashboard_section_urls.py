@@ -50,6 +50,7 @@ def test_routes_keep_a_section_slot_for_each_tabbed_page() -> None:
         'path="/jobs/error/:page?"',
         'path="/jobs/completed/:page?"',
         'path="/jobs/cancelled/:page?"',
+        'path="/jobs/plan-ready/:page?"',
         'path="/jobs/:jobId/:section?"',
         'path="/analytics/reviews/:page?"',
         'path="/analytics/:period"',
@@ -87,6 +88,10 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     analytics = _read("src/pages/analytics/AnalyticsPage.tsx")
     assert "navigate(analyticsPeriodPath(p.id))" in analytics
     assert "analyticsPeriodFromParam(periodParam)" in analytics
+    assert "jobsFilterPath('completed')" in analytics
+    assert "jobsFilterPath('error')" in analytics
+    assert "jobsFilterPath('cancelled')" in analytics
+    assert "jobsFilterPath('plan_ready')" in analytics
 
     settings = _read("src/pages/settings/SettingsPage.tsx")
     assert "navigate(settingsSectionPath(id))" in settings

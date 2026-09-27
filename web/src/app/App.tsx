@@ -26,6 +26,7 @@ export default function App() {
             <Route path="/jobs/error/:page?" element={<JobsPage />} />
             <Route path="/jobs/completed/:page?" element={<JobsPage />} />
             <Route path="/jobs/cancelled/:page?" element={<JobsPage />} />
+            <Route path="/jobs/plan-ready/:page?" element={<JobsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/analytics/reviews/:page?" element={<AnalyticsReviewsPage />} />
             <Route path="/analytics/:period" element={<AnalyticsPage />} />

@@ -819,6 +819,11 @@ def test_build_jobs_status_filter_pages_the_matching_rows(tmp_path):
     completed = build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm)
     assert completed.total == 10
     assert all(j.status == "completed" for j in completed.jobs)
+    jobs.create_job(issue_key="PLAN-1", summary="plan", status="plan_ready")
+    ready = build_jobs(status="plan-ready", page=1, page_size=25, store=jobs, state_manager=sm)
+    assert ready.total == 1
+    assert ready.jobs[0].status == "plan_ready"
+    assert build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm).total == 10
 
 
 def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
