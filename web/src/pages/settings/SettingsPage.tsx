@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   fetchSettings,
@@ -187,6 +187,169 @@ function draftChanged(draft: Draft, saved: SettingsPayload): boolean {
   return JSON.stringify(savedShape(draft)) !== JSON.stringify(savedShape(fromSettings(saved)))
 }
 
+function RepoSetList({
+  sets,
+  projects,
+  editor,
+  titleId,
+  onOpenNew,
+  onOpenEdit,
+  onClose,
+  onChangeEditor,
+  onSave,
+  onRemove,
+}: {
+  sets: RepositorySet[]
+  projects: ProjectRepository[]
+  editor: { index: number | null; name: string; repositories: string[] } | null
+  titleId: string
+  onOpenNew: () => void
+  onOpenEdit: (index: number) => void
+  onClose: () => void
+  onChangeEditor: (
+    next: { index: number | null; name: string; repositories: string[] } | null,
+  ) => void
+  onSave: () => void
+  onRemove: () => void
+}) {
+  const saved = projects
+    .map((row) => ({ url: row.url.trim(), label: (row.label || '').trim() }))
+    .filter((row) => row.url)
+  const known = new Set(saved.map((row) => row.url))
+  const choices = [
+    ...saved,
+    ...(editor?.repositories || [])
+      .map((url) => url.trim())
+      .filter((url) => url && !known.has(url))
+      .map((url) => ({ url, label: '' })),
+  ]
+  const canSave = Boolean(
+    editor && editor.name.trim() && editor.repositories.filter(Boolean).length >= 2,
+  )
+  return (
+    <div className="mt-6 rounded-xl border border-border p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-text">Repo sets</div>
+          <p className="mt-1 text-xs text-text-muted">
+            A named group of projects you already saved. A scheduled job can
+            select the set and work in every repository.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="vd-btn vd-btn-secondary"
+          aria-label="Add repo set"
+          onClick={onOpenNew}
+        >
+          +
+        </button>
+      </div>
+      {sets.length === 0 ? (
+        <p className="mt-3 text-xs text-text-muted">No repo sets yet.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-border">
+          {sets.map((row, idx) => (
+            <li key={`${row.name}-${idx}`} className="flex items-center justify-between gap-3 py-2">
+              <span className="text-sm text-text">{row.name || 'Untitled set'}</span>
+              <button
+                type="button"
+                className="vd-btn-ghost"
+                aria-label={`Edit ${row.name || 'repo set'}`}
+                onClick={() => onOpenEdit(idx)}
+              >
+                <PencilIcon />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {editor ? (
+        <div
+          className="vd-modal-backdrop"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose()
+          }}
+        >
+          <form
+            className="vd-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (canSave) onSave()
+            }}
+          >
+            <h3 id={titleId} className="vd-modal-title">
+              {editor.index == null ? 'Add repo set' : 'Edit repo set'}
+            </h3>
+            <label className="field">
+              <span>Name</span>
+              <input
+                value={editor.name}
+                onChange={(e) =>
+                  onChangeEditor({ ...editor, name: e.target.value })
+                }
+                required
+              />
+            </label>
+            <div className="mt-3 flex flex-col gap-2">
+              {choices.length === 0 ? (
+                <p className="text-xs text-text-muted">Add a project first.</p>
+              ) : (
+                choices.map((row) => (
+                  <label key={row.url} className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={editor.repositories.includes(row.url)}
+                      onChange={() => {
+                        const repositories = editor.repositories.includes(row.url)
+                          ? editor.repositories.filter((url) => url !== row.url)
+                          : [...editor.repositories, row.url]
+                        onChangeEditor({ ...editor, repositories })
+                      }}
+                    />
+                    <span className="font-mono">{row.label || row.url}</span>
+                  </label>
+                ))
+              )}
+            </div>
+            <p className="mt-2 text-xs text-text-muted">Select at least two projects.</p>
+            <div className="vd-modal-actions">
+              {editor.index != null ? (
+                <button type="button" className="vd-btn vd-btn-danger mr-auto" onClick={onRemove}>
+                  Remove
+                </button>
+              ) : null}
+              <button type="button" className="vd-btn vd-btn-secondary" onClick={onClose}>
+                Cancel
+              </button>
+              <button type="submit" className="vd-btn vd-btn-primary" disabled={!canSave}>
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function PencilIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none">
+      <path
+        d="M9.2 2.8l4 4M2.5 13.5l.7-3.2 7.2-7.2a1.2 1.2 0 0 1 1.7 0l.8.8a1.2 1.2 0 0 1 0 1.7l-7.2 7.2-3.2.7z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function SettingsPage() {
   const { section: sectionParam = '' } = useParams()
   const navigate = useNavigate()
@@ -196,6 +359,12 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<SettingsPayload | null>(
     () => live.settings,
   )
+  const [repoSetEditor, setRepoSetEditor] = useState<{
+    index: number | null
+    name: string
+    repositories: string[]
+  } | null>(null)
+  const repoSetTitleId = useId()
   const [draft, setDraft] = useState<Draft | null>(() =>
     live.settings ? fromSettings(live.settings) : null,
   )
@@ -1096,100 +1265,56 @@ export function SettingsPage() {
             Add project
           </button>
         </p>
-        <div className="mt-6 space-y-3">
-          <div className="text-sm font-semibold text-text">Repo sets</div>
-          <p className="text-xs text-text-muted">
-            A set is an ordered group of saved repositories. A dashboard job can
-            select the set and work in every repository. A Jira ticket you
-            create by hand stays one repository.
-          </p>
-          {draft.repository_sets.map((row, idx) => (
-            <div key={idx} className="rounded-xl border border-border p-3">
-              <label className="field">
-                <span>Set name</span>
-                <input
-                  value={row.name}
-                  onChange={(e) => {
-                    touch('repository_sets')
-                    const name = e.target.value
-                    setDraft((d) => {
-                      if (!d) return d
-                      const next = d.repository_sets.slice()
-                      next[idx] = { ...next[idx], name }
-                      return { ...d, repository_sets: next }
-                    })
-                  }}
-                />
-              </label>
-              <div className="mt-2 flex flex-col gap-1">
-                {draft.project_repositories
-                  .map((p) => p.url.trim())
-                  .filter(Boolean)
-                  .map((url) => (
-                    <label key={url} className="flex items-center gap-2 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={row.repositories.includes(url)}
-                        onChange={() => {
-                          touch('repository_sets')
-                          setDraft((d) => {
-                            if (!d) return d
-                            const next = d.repository_sets.slice()
-                            const cur = next[idx].repositories
-                            const repositories = cur.includes(url)
-                              ? cur.filter((item) => item !== url)
-                              : [...cur, url]
-                            next[idx] = { ...next[idx], repositories }
-                            return { ...d, repository_sets: next }
-                          })
-                        }}
-                      />
-                      <span className="font-mono">{url}</span>
-                    </label>
-                  ))}
-              </div>
-              <p className="actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    touch('repository_sets')
-                    setDraft((d) =>
-                      d
-                        ? {
-                            ...d,
-                            repository_sets: d.repository_sets.filter((_, i) => i !== idx),
-                          }
-                        : d,
-                    )
-                  }}
-                >
-                  Remove set
-                </button>
-              </p>
-            </div>
-          ))}
-          <p className="actions">
-            <button
-              type="button"
-              onClick={() => {
-                touch('repository_sets')
-                setDraft((d) =>
-                  d
-                    ? {
-                        ...d,
-                        repository_sets: [
-                          ...d.repository_sets,
-                          { name: '', repositories: [] },
-                        ],
-                      }
-                    : d,
-                )
-              }}
-            >
-              Add repo set
-            </button>
-          </p>
-        </div>
+        <RepoSetList
+          sets={draft.repository_sets}
+          projects={draft.project_repositories}
+          editor={repoSetEditor}
+          titleId={repoSetTitleId}
+          onOpenNew={() =>
+            setRepoSetEditor({ index: null, name: '', repositories: [] })
+          }
+          onOpenEdit={(index) => {
+            const row = draft.repository_sets[index]
+            if (!row) return
+            setRepoSetEditor({
+              index,
+              name: row.name,
+              repositories: [...row.repositories],
+            })
+          }}
+          onClose={() => setRepoSetEditor(null)}
+          onChangeEditor={setRepoSetEditor}
+          onSave={() => {
+            if (!repoSetEditor) return
+            const name = repoSetEditor.name.trim()
+            const repositories = repoSetEditor.repositories.filter(Boolean)
+            if (!name || repositories.length < 2) return
+            touch('repository_sets')
+            setDraft((d) => {
+              if (!d) return d
+              const next = d.repository_sets.slice()
+              const row: RepositorySet = { name, repositories }
+              if (repoSetEditor.index == null) next.push(row)
+              else next[repoSetEditor.index] = row
+              return { ...d, repository_sets: next }
+            })
+            setRepoSetEditor(null)
+          }}
+          onRemove={() => {
+            if (!repoSetEditor || repoSetEditor.index == null) return
+            const index = repoSetEditor.index
+            touch('repository_sets')
+            setDraft((d) =>
+              d
+                ? {
+                    ...d,
+                    repository_sets: d.repository_sets.filter((_, i) => i !== index),
+                  }
+                : d,
+            )
+            setRepoSetEditor(null)
+          }}
+        />
       </div>
       )}
 
