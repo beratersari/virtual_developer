@@ -10,6 +10,37 @@ from src.dashboard.repo_sets import normalize_repository_urls, parse_repository_
 from src.git_manager import GitManager
 
 
+def test_running_multi_repo_row_blocks_each_repository(tmp_path):
+    from src.state.queue_store import WorkQueueStore, workspace_lock_key
+
+    store = WorkQueueStore(queue_dir=tmp_path)
+    api = workspace_lock_key(
+        "https://gitlab.example.com/acme/api.git", "feature/shared", "develop"
+    )
+    web = workspace_lock_key(
+        "https://gitlab.example.com/acme/web.git", "feature/shared", "develop"
+    )
+    store.enqueue(
+        source="jira",
+        issue_key="KAN-20",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        work_branch="feature/shared",
+        target_branch="develop",
+        lock_key=api,
+        lock_keys=[api, web],
+    )
+    assert store.claim_next() is not None
+    store.enqueue(
+        source="jira",
+        issue_key="KAN-21",
+        repository_url="https://gitlab.example.com/acme/web.git",
+        work_branch="feature/shared",
+        target_branch="develop",
+        lock_key=web,
+    )
+    assert store.claim_next() is None
+
+
 def test_workspace_root_does_not_run_git(monkeypatch):
     ran = []
 

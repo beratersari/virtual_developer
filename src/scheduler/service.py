@@ -1628,10 +1628,21 @@ def _note_schedule_workspace_lock(
     if not callable(note) or not (issue_key or "").strip():
         return ""
     try:
-        return (
-            note(issue_key, **_schedule_workspace_lock_kwargs(rec, issue_key))
-            or ""
-        )
+        kwargs = _schedule_workspace_lock_kwargs(rec, issue_key)
+        noted = note(issue_key, **kwargs) or ""
+        urls = rec.get("repository_urls") if isinstance(rec, dict) else None
+        if isinstance(urls, list):
+            for raw_url in urls:
+                url = str(raw_url or "").strip()
+                if not url or url == kwargs.get("repository_url"):
+                    continue
+                note(
+                    issue_key,
+                    repository_url=url,
+                    work_branch=kwargs.get("work_branch") or "",
+                    target_branch=kwargs.get("target_branch") or "",
+                )
+        return noted
     except Exception as e:
         logger.debug(f"{issue_key}: schedule workspace lock note failed: {e}")
         return ""

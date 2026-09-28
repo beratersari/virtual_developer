@@ -5371,6 +5371,13 @@ class JobProcessor:
         tgt = (spec.target_branch if spec else "") or ""
         work = GitManager.resolve_work_branch_name(key, src, tgt) if (src or tgt) else ""
         lock = workspace_lock_key(repo, work, tgt)
+        lock_keys = [lock] if lock else []
+        raw_urls = event.get("repository_urls") if isinstance(event, dict) else None
+        if isinstance(raw_urls, list) and work and tgt:
+            for raw_url in raw_urls:
+                child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
+                if child_lock and child_lock not in lock_keys:
+                    lock_keys.append(child_lock)
         rec = self.queue_store.enqueue(
             source="jira",
             issue_key=key,
@@ -5381,6 +5388,7 @@ class JobProcessor:
             work_branch=work,
             target_branch=tgt,
             lock_key=lock,
+            lock_keys=lock_keys,
             job_id=self._active_jobs.get(key),
             jira_event_id=event_id,
             payload=event,

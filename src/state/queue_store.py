@@ -30,6 +30,24 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
+def queue_lock_keys(rec: Dict[str, Any]) -> List[str]:
+    """Every workspace lock this row holds. ``lock_key`` stays the primary."""
+    found: List[str] = []
+    seen: set[str] = set()
+    primary = str((rec or {}).get("lock_key") or "").strip()
+    extra = (rec or {}).get("lock_keys")
+    raws: List[Any] = [primary]
+    if isinstance(extra, list):
+        raws.extend(extra)
+    for raw in raws:
+        key = str(raw or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        found.append(key)
+    return found
+
+
 def workspace_lock_key(
     repository_url: str, work_branch: str, target_branch: str = ""
 ) -> str:
@@ -89,6 +107,7 @@ class WorkQueueStore:
         work_branch: str = "",
         target_branch: str = "",
         lock_key: str = "",
+        lock_keys: Optional[List[str]] = None,
         job_id: Optional[str] = None,
         gitlab_note_id: str = "",
         azure_comment_id: str = "",
@@ -113,6 +132,11 @@ class WorkQueueStore:
             "work_branch": work_branch or "",
             "target_branch": target_branch or "",
             "lock_key": lock_key or "",
+            "lock_keys": [
+                str(k).strip()
+                for k in (lock_keys or [])
+                if str(k or "").strip()
+            ],
             "job_id": job_id,
             "gitlab_note_id": gitlab_note_id or "",
             "azure_comment_id": azure_comment_id or "",
@@ -246,9 +270,10 @@ class WorkQueueStore:
             ]
             if len(running) >= max(1, int(max_running)):
                 return None
-            blocked_locks = {
-                (r.get("lock_key") or "") for r in running if r.get("lock_key")
-            } | extra_locks
+            blocked_locks = set()
+            for running_row in running:
+                blocked_locks.update(queue_lock_keys(running_row))
+            blocked_locks |= extra_locks
             blocked_issues = {
                 (r.get("issue_key") or "").strip().upper() for r in running
             } | blocked
@@ -256,8 +281,7 @@ class WorkQueueStore:
                 ik = (rec.get("issue_key") or "").strip().upper()
                 if ik and ik in blocked_issues:
                     continue
-                lk = rec.get("lock_key") or ""
-                if lk and lk in blocked_locks:
+                if any(key in blocked_locks for key in queue_lock_keys(rec)):
                     continue
                 # Re-read under lock in case status changed
                 live = self.get(rec["queue_id"])
