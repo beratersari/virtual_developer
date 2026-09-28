@@ -854,6 +854,7 @@ def create_dashboard_app(
             backend=body.backend or "",
             collection_url=getattr(body, "collection_url", "") or "",
             azure_project=getattr(body, "azure_project", "") or "",
+            repository_urls=list(getattr(body, "repository_urls", None) or []),
         )
         if not result.get("ok"):
             raise HTTPException(

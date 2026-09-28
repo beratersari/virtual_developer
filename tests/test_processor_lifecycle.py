@@ -44,13 +44,60 @@ def test_recover_orphaned_executing_marks_error(processor, state_manager, fake_j
         started_at=datetime.now(),
         current_task_id="t-dead",
     )
+    processor.job_store.create_job(
+        issue_key="ORPH-1",
+        summary="s",
+        status="executing",
+    )
+    # Crash drops the live pointer. The jobs list must not stay executing.
+    state_manager.update_state("ORPH-1", metadata={"current_job_id": None})
     n = processor.recover_orphaned_in_flight()
     assert n == 1
     st = state_manager.get_state("ORPH-1")
     assert st.status == TaskStatus.ERROR
+    rows = processor.job_store.list_jobs(issue_key="ORPH-1", limit=5)
+    assert rows and rows[0]["status"] == "error"
     assert st.current_task_id is None
     assert st.error_message
     assert fake_jira.comments, "Jira must be notified on orphan recovery"
+
+
+def test_multi_repo_delivery_ignores_the_parent_folder(processor):
+    """The workspace root is not a git repo. Delivery reads each clone."""
+
+    class _Child:
+        def __init__(self, url: str, sha: str, ahead: int) -> None:
+            self.remote_url = url
+            self._sha = sha
+            self._ahead = ahead
+
+        def get_last_commit_sha(self, short: bool = False) -> str:
+            return self._sha
+
+        def commits_ahead_of_target(self, branch: str) -> int:
+            return self._ahead
+
+    class _Parent:
+        def __init__(self) -> None:
+            self.issue_key = "KAN-573"
+            self.work_branch = "feature/KAN-573"
+            self.repo_checkouts = [
+                _Child("https://gitlab.example/api.git", "aaa", 1),
+                _Child("https://gitlab.example/web.git", "bbb", 1),
+            ]
+
+        def ensure_on_work_branch(self) -> bool:
+            return True
+
+        def get_last_commit_sha(self, short: bool = False):
+            return None
+
+    parent = _Parent()
+    processor._contexts["KAN-573"] = {"git": parent}
+    assert processor._assert_build_delivery("KAN-573") is None
+    sha = processor._snapshot_delivery_baseline("KAN-573", parent)
+    assert sha == "aaa"
+    assert parent.delivery_baselines["https://gitlab.example/web.git"] == "bbb"
 
 
 def test_recover_orphaned_planning_marks_error(processor, state_manager, fake_jira):

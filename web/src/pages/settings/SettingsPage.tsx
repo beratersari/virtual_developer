@@ -12,6 +12,7 @@ import type {
   GitlabHostCredentialDraft,
   JiraConnectionTestResult,
   ProjectRepository,
+  RepositorySet,
   SettingsPayload,
   WorkMode,
 } from '../../api/types'
@@ -55,6 +56,7 @@ type Draft = {
   gitlab_cred_rows: GitlabHostCredentialDraft[]
   azure_cred_rows: GitlabHostCredentialDraft[]
   project_repositories: ProjectRepository[]
+  repository_sets: RepositorySet[]
   work_modes: WorkMode[]
 }
 
@@ -114,6 +116,10 @@ function fromSettings(s: SettingsPayload): Draft {
       target_branch: p.target_branch || '',
       source_branch: p.source_branch || '',
     })),
+    repository_sets: (s.repository_sets ?? []).map((row) => ({
+      name: row.name || '',
+      repositories: [...(row.repositories || [])],
+    })),
     work_modes: (s.work_modes ?? []).map((row) => ({
       name: row.name,
       behavior: row.behavior,
@@ -160,6 +166,12 @@ function savedShape(d: Draft) {
         source_branch: (p.source_branch || '').trim(),
       }))
       .filter((p) => p.url || p.label || p.target_branch || p.source_branch),
+    repository_sets: d.repository_sets
+      .map((row) => ({
+        name: row.name.trim(),
+        repositories: row.repositories.map((url) => url.trim()).filter(Boolean),
+      }))
+      .filter((row) => row.name && row.repositories.length >= 2),
     work_modes: d.work_modes
       .map((row) => ({
         name: row.name.trim().toLowerCase(),
@@ -346,6 +358,14 @@ export function SettingsPage() {
             builtin: Boolean(row.builtin),
           }))
           .filter((row) => row.name && row.agent)
+      }
+      if (dirtyKeys.has('repository_sets')) {
+        body.repository_sets = draft.repository_sets
+          .map((row) => ({
+            name: row.name.trim(),
+            repositories: row.repositories.map((url) => url.trim()).filter(Boolean),
+          }))
+          .filter((row) => row.name && row.repositories.length >= 2)
       }
       if (dirtyKeys.has('project_repositories')) {
         body.project_repositories = draft.project_repositories
@@ -1076,6 +1096,100 @@ export function SettingsPage() {
             Add project
           </button>
         </p>
+        <div className="mt-6 space-y-3">
+          <div className="text-sm font-semibold text-text">Repo sets</div>
+          <p className="text-xs text-text-muted">
+            A set is an ordered group of saved repositories. A dashboard job can
+            select the set and work in every repository. A Jira ticket you
+            create by hand stays one repository.
+          </p>
+          {draft.repository_sets.map((row, idx) => (
+            <div key={idx} className="rounded-xl border border-border p-3">
+              <label className="field">
+                <span>Set name</span>
+                <input
+                  value={row.name}
+                  onChange={(e) => {
+                    touch('repository_sets')
+                    const name = e.target.value
+                    setDraft((d) => {
+                      if (!d) return d
+                      const next = d.repository_sets.slice()
+                      next[idx] = { ...next[idx], name }
+                      return { ...d, repository_sets: next }
+                    })
+                  }}
+                />
+              </label>
+              <div className="mt-2 flex flex-col gap-1">
+                {draft.project_repositories
+                  .map((p) => p.url.trim())
+                  .filter(Boolean)
+                  .map((url) => (
+                    <label key={url} className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={row.repositories.includes(url)}
+                        onChange={() => {
+                          touch('repository_sets')
+                          setDraft((d) => {
+                            if (!d) return d
+                            const next = d.repository_sets.slice()
+                            const cur = next[idx].repositories
+                            const repositories = cur.includes(url)
+                              ? cur.filter((item) => item !== url)
+                              : [...cur, url]
+                            next[idx] = { ...next[idx], repositories }
+                            return { ...d, repository_sets: next }
+                          })
+                        }}
+                      />
+                      <span className="font-mono">{url}</span>
+                    </label>
+                  ))}
+              </div>
+              <p className="actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    touch('repository_sets')
+                    setDraft((d) =>
+                      d
+                        ? {
+                            ...d,
+                            repository_sets: d.repository_sets.filter((_, i) => i !== idx),
+                          }
+                        : d,
+                    )
+                  }}
+                >
+                  Remove set
+                </button>
+              </p>
+            </div>
+          ))}
+          <p className="actions">
+            <button
+              type="button"
+              onClick={() => {
+                touch('repository_sets')
+                setDraft((d) =>
+                  d
+                    ? {
+                        ...d,
+                        repository_sets: [
+                          ...d.repository_sets,
+                          { name: '', repositories: [] },
+                        ],
+                      }
+                    : d,
+                )
+              }}
+            >
+              Add repo set
+            </button>
+          </p>
+        </div>
       </div>
       )}
 

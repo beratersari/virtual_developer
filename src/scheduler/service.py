@@ -1116,6 +1116,7 @@ def _create_scheduled_azure_work_item(
     model: str,
     backend: str,
     store: Optional[ScheduleStore],
+    repository_urls: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Create a TFS work item + local schedule (same picker as Jira New)."""
     from src.azure.client import AzureDevOpsClient
@@ -1256,6 +1257,7 @@ def _create_scheduled_azure_work_item(
         azure_host=str(coords.get("host") or ""),
         azure_collection_url=collection_url,
         azure_project=project,
+        repository_urls=repository_urls or [],
     )
     logger.info(
         f"Created Azure work item {issue_key} project={project} "
@@ -1286,6 +1288,7 @@ def create_scheduled_job(
     backend: str = "",
     collection_url: str = "",
     azure_project: str = "",
+    repository_urls: Optional[list] = None,
     jira_client: Any = None,
     store: Optional[ScheduleStore] = None,
 ) -> Dict[str, Any]:
@@ -1324,6 +1327,13 @@ def create_scheduled_job(
     repo = _normalize_repo_url(repository_url)
     if not repo:
         return {"ok": False, "error": "repository_url is required"}
+    from src.dashboard.repo_sets import normalize_repository_urls
+
+    repo_urls = normalize_repository_urls(repo, repository_urls)
+    if repo not in repo_urls:
+        repo_urls.insert(0, repo)
+    if len(repo_urls) < 2:
+        repo_urls = []
     tgt = _normalize_branch(target_branch)
     if not tgt:
         return {"ok": False, "error": "target_branch is required"}
@@ -1366,6 +1376,7 @@ def create_scheduled_job(
             model=mid,
             backend=bid,
             store=store,
+            repository_urls=repo_urls,
         )
 
     project = (project_key or "").strip() or (
@@ -1485,6 +1496,7 @@ def create_scheduled_job(
             project_key=project,
             issue_type=itype,
             source="new",
+            repository_urls=repo_urls,
         )
         return {
             "ok": True,
@@ -2243,6 +2255,7 @@ async def _dispatch_claimed_schedule(
                 "timestamp": int(time.time() * 1000),
                 "scheduled_job": True,
                 "schedule_id": schedule_id,
+                "repository_urls": list(live.get("repository_urls") or []),
             }
         enqueue = getattr(processor, "enqueue_jira_event", None)
         # Prefer the work queue so a busy issue leaves a visible ``queued`` row.

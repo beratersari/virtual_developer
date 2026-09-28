@@ -22,6 +22,7 @@ from src.dashboard.project_repos import (
     parse_project_repositories,
     project_repositories_to_json,
 )
+from src.dashboard.repo_sets import parse_repository_sets, repository_sets_to_json
 from src.dashboard.schemas import (
     AzureHostCredentialView,
     GitlabHostCredentialView,
@@ -40,6 +41,7 @@ from src.dashboard.schemas import (
     PolledIssueItem,
     PollStatusResponse,
     ProjectRepositoryItem,
+    RepositorySetItem,
     SettingsUpdate,
     SettingsView,
     WorkModeItem,
@@ -238,6 +240,11 @@ def _settings_project_repositories() -> List[ProjectRepositoryItem]:
     return [ProjectRepositoryItem(**item) for item in parse_project_repositories(raw)]
 
 
+def _settings_repository_sets() -> List[RepositorySetItem]:
+    raw = getattr(settings, "repository_sets", "") or ""
+    return [RepositorySetItem(**item) for item in parse_repository_sets(raw)]
+
+
 def _settings_base_dir() -> str:
     from src.paths import configured_base_dir
 
@@ -374,6 +381,7 @@ def build_settings_view() -> SettingsView:
             getattr(settings, "trigger_mentions_list", None) or []
         ),
         project_repositories=_settings_project_repositories(),
+        repository_sets=_settings_repository_sets(),
         work_modes=[WorkModeItem(**row) for row in all_modes()],
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
@@ -782,6 +790,10 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
+    if "repository_sets" in data and data["repository_sets"] is not None:
+        encoded_sets = repository_sets_to_json(data["repository_sets"])
+        settings.repository_sets = encoded_sets
+        runtime_persist["repository_sets"] = encoded_sets
     if "work_modes" in data and data["work_modes"] is not None:
         runtime_persist.update(apply_saved_modes(data["work_modes"]))
     from src.config import format_trigger_users
@@ -1261,6 +1273,9 @@ def job_dict_to_item(
         commit_sha=j.get("commit_sha") or None,
         commit_subject=j.get("commit_subject") or None,
         commit_url=j.get("commit_url") or None,
+        deliveries=[
+            row for row in (j.get("deliveries") or []) if isinstance(row, dict)
+        ],
         delivery_status=j.get("delivery_status") or None,
         delivery_note=j.get("delivery_note") or None,
         working_directory=(j.get("working_directory") or None),
@@ -2522,6 +2537,24 @@ def _fetch_live_jira_fields(
     }
 
 
+def _repository_label(raw: Dict[str, Any]) -> str:
+    """Repo name for grouping. Prefer the stored remote, else the GitLab URL path."""
+    explicit = str(raw.get("repository_url") or "").strip().rstrip("/")
+    if explicit:
+        name = explicit.split("/")[-1]
+        return name[:-4] if name.lower().endswith(".git") else name
+    for key in ("merge_request_url", "commit_url"):
+        url = str(raw.get(key) or "")
+        marker = "/-/"
+        if marker not in url:
+            continue
+        path = url.split("://", 1)[-1].split("/", 1)[-1]
+        path = path.split(marker, 1)[0].strip("/")
+        if path:
+            return path.split("/")[-1]
+    return ""
+
+
 def _collect_git_deliveries(
     *,
     issue_key: str,
@@ -2555,7 +2588,9 @@ def _collect_git_deliveries(
             ids.append(("mr", mr))
         if sha:
             ids.append(("sha", sha))
-        if jid:
+        # Same job can deliver one commit and one merge request per repository.
+        # job_id alone must not collapse those rows into the last repository.
+        if not ids and jid:
             ids.append(("job", jid))
         if not ids:
             branch = str(d.get("feature_branch") or "").strip()
@@ -2573,6 +2608,7 @@ def _collect_git_deliveries(
             "commit_url",
             "created_at",
             "status",
+            "repository_url",
         ):
             if not dst.get(key) and src.get(key):
                 dst[key] = src[key]
@@ -2596,6 +2632,7 @@ def _collect_git_deliveries(
             "commit_url": raw.get("commit_url") or None,
             "created_at": raw.get("created_at") or None,
             "status": raw.get("status") or None,
+            "repository_url": _repository_label(raw) or None,
         }
         ids = _identities(row)
         if not ids:
@@ -2628,18 +2665,33 @@ def _collect_git_deliveries(
             j = j.model_dump()
         if not isinstance(j, dict):
             continue
-        _add(
-            {
-                "job_id": j.get("job_id"),
-                "feature_branch": j.get("feature_branch"),
-                "merge_request_url": j.get("merge_request_url"),
-                "commit_sha": j.get("commit_sha"),
-                "commit_subject": j.get("commit_subject"),
-                "commit_url": j.get("commit_url"),
-                "created_at": j.get("completed_at") or j.get("updated_at") or j.get("started_at"),
-                "status": j.get("status"),
-            }
-        )
+        created = j.get("completed_at") or j.get("updated_at") or j.get("started_at")
+        listed = j.get("deliveries")
+        if isinstance(listed, list) and listed:
+            for entry in listed:
+                if isinstance(entry, dict):
+                    _add(
+                        {
+                            **entry,
+                            "job_id": j.get("job_id"),
+                            "status": j.get("status"),
+                            "created_at": entry.get("created_at") or created,
+                        }
+                    )
+        else:
+            _add(
+                {
+                    "job_id": j.get("job_id"),
+                    "feature_branch": j.get("feature_branch"),
+                    "merge_request_url": j.get("merge_request_url"),
+                    "commit_sha": j.get("commit_sha"),
+                    "commit_subject": j.get("commit_subject"),
+                    "commit_url": j.get("commit_url"),
+                    "repository_url": j.get("repository_url"),
+                    "created_at": created,
+                    "status": j.get("status"),
+                }
+            )
 
     # 2) Explicit history on issue metadata
     hist = meta.get("git_deliveries")

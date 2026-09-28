@@ -251,6 +251,8 @@ class JobStore:
                         paths.append(value)
                     job["prompt_paths"] = paths
                     job["prompt_path"] = value  # latest
+                elif key == "deliveries" and isinstance(value, list):
+                    job["deliveries"] = value
                 elif key == "retry_attempt" and isinstance(value, dict):
                     # Append one failed-attempt record under this job
                     history = list(job.get("retry_attempts") or [])

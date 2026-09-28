@@ -1361,6 +1361,8 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [repo, setRepo] = useState('')
   const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
   const [rememberRepo, setRememberRepo] = useState(false)
+  const [extraRepos, setExtraRepos] = useState<string[]>([])
+  const [addRepo, setAddRepo] = useState('')
   const [projects, setProjects] = useState<ProjectRepository[]>(
     live.settings?.project_repositories || [],
   )
@@ -1441,10 +1443,14 @@ function CreateNew({ onDone }: { onDone: () => void }) {
     setErr(null)
     try {
       const url = repo.trim()
+      const repositoryUrls = [url, ...extraRepos.map((item) => item.trim())].filter(
+        (item, index, all) => item && all.indexOf(item) === index,
+      )
       await createSchedule({
         title: title.trim(),
         description: description.trim(),
         repository_url: url,
+        repository_urls: repositoryUrls.length > 1 ? repositoryUrls : undefined,
         source_branch: srcMode === 'custom' ? source.trim() : undefined,
         source_branch_mode: srcMode,
         target_branch: target.trim(),
@@ -1482,6 +1488,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       setTitle('')
       setDescription('')
       setRememberRepo(false)
+      setExtraRepos([])
       onDone()
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : 'Create failed')
@@ -1590,6 +1597,78 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         rememberRepo={rememberRepo}
         setRememberRepo={setRememberRepo}
       />
+      <div className="rounded-xl border border-border p-3">
+        <div className="text-sm font-semibold text-text">More repositories</div>
+        <p className="mt-1 text-xs text-text-muted">
+          Optional. This dashboard job clones each repository, and Yaver pushes
+          and opens a merge request for each one that changes. A ticket created
+          on Jira stays a single repository.
+        </p>
+        {(live.settings?.repository_sets || []).length > 0 ? (
+          <label className="field mt-2">
+            <span>Repo set</span>
+            <select
+              value=""
+              onChange={(e) => {
+                const picked = (live.settings?.repository_sets || []).find(
+                  (row) => row.name === e.target.value,
+                )
+                if (!picked || picked.repositories.length < 2) return
+                const [first, ...rest] = picked.repositories.filter(Boolean)
+                setRepo(first)
+                setRepoPick(projects.some((p) => p.url === first) ? first : CUSTOM_REPO)
+                setExtraRepos(rest.filter((item) => item !== first))
+              }}
+            >
+              <option value="">Select a saved set</option>
+              {(live.settings?.repository_sets || []).map((row) => (
+                <option key={row.name} value={row.name}>
+                  {row.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {extraRepos.length > 0 ? (
+          <ul className="mt-2 space-y-1 text-xs">
+            {extraRepos.map((item) => (
+              <li key={item} className="flex items-center justify-between gap-2">
+                <span className="font-mono">{item}</span>
+                <button
+                  type="button"
+                  className="vd-btn-ghost text-danger-text"
+                  onClick={() => setExtraRepos((cur) => cur.filter((url) => url !== item))}
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <select value={addRepo} onChange={(e) => setAddRepo(e.target.value)}>
+            <option value="">Add a saved repository</option>
+            {projects
+              .filter((p) => p.url && p.url !== repo.trim() && !extraRepos.includes(p.url))
+              .map((p) => (
+                <option key={p.url} value={p.url}>
+                  {p.label || p.url}
+                </option>
+              ))}
+          </select>
+          <button
+            type="button"
+            className="vd-btn vd-btn-secondary"
+            disabled={!addRepo}
+            onClick={() => {
+              setExtraRepos((cur) => (cur.includes(addRepo) ? cur : [...cur, addRepo]))
+              setAddRepo('')
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </div>
       <label className="field">
         <span>{tracker === 'azure' ? 'Work item type' : 'Issue type'}</span>
         {tracker === 'azure' ? (
