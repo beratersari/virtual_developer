@@ -2584,7 +2584,12 @@ def _collect_git_deliveries(
         mr = str(d.get("merge_request_url") or "").strip().rstrip("/")
         sha = str(d.get("commit_sha") or "").strip().lower()
         jid = str(d.get("job_id") or "").strip()
-        if mr:
+        # The SHA is part of the MR key. A second job that pushes another
+        # commit to the same merge request must stay visible. Copies of one
+        # push that omit the SHA still share the bare MR key.
+        if mr and sha:
+            ids.append(("mr", mr, sha))
+        elif mr:
             ids.append(("mr", mr))
         if sha:
             ids.append(("sha", sha))
@@ -2637,12 +2642,16 @@ def _collect_git_deliveries(
         ids = _identities(row)
         if not ids:
             return
+        mr = str(row.get("merge_request_url") or "").strip().rstrip("/")
+        sha = str(row.get("commit_sha") or "").strip().lower()
         existing: Optional[Dict[str, Any]] = None
         for ident in ids:
             hit = index.get(ident)
             if hit is not None:
                 existing = hit
                 break
+        if existing is None and mr and not sha:
+            existing = index.get(("mr-open", mr))
         if existing is not None:
             _merge_into(existing, row)
             target = existing
@@ -2651,6 +2660,9 @@ def _collect_git_deliveries(
             target = row
         for ident in _identities(target):
             index[ident] = target
+        target_mr = str(target.get("merge_request_url") or "").strip().rstrip("/")
+        if target_mr:
+            index[("mr-open", target_mr)] = target
 
     # 1) Jobs (source of truth per run)
     job_rows: List[Any] = list(jobs or [])

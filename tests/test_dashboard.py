@@ -698,6 +698,40 @@ def test_git_deliveries_dedupe_same_mr_from_job_history_and_legacy():
     assert deliveries[0]["feature_branch"] == branch
 
 
+def test_git_deliveries_keep_each_commit_when_the_mr_is_reused():
+    """A later job on the same branch pushes another SHA to the same MR."""
+    from src.dashboard.service import _collect_git_deliveries
+
+    mr = "https://gitlab.com/beratersari0/yaver-orders-api/-/merge_requests/3"
+    deliveries = _collect_git_deliveries(
+        issue_key="KAN-592",
+        meta={
+            "merge_request_url": mr,
+            "last_commit_sha": "edd1033742e4",
+            "current_job_id": "job_second",
+            "git_deliveries": [
+                {
+                    "job_id": "job_first",
+                    "merge_request_url": mr,
+                    "commit_sha": "8ca3ae9760ce",
+                    "repository_url": "https://gitlab.com/beratersari0/yaver-orders-api",
+                    "created_at": "2026-09-28T19:55:00",
+                },
+                {
+                    "job_id": "job_second",
+                    "merge_request_url": mr,
+                    "commit_sha": "edd1033742e4",
+                    "repository_url": "https://gitlab.com/beratersari0/yaver-orders-api",
+                    "created_at": "2026-09-28T20:05:00",
+                },
+            ],
+        },
+        jobs=[],
+    )
+    shas = {row["commit_sha"] for row in deliveries}
+    assert shas == {"8ca3ae9760ce", "edd1033742e4"}
+
+
 def test_git_deliveries_keep_each_repo_from_one_job():
     from src.dashboard.service import _collect_git_deliveries
 
