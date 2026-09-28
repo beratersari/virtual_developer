@@ -208,7 +208,7 @@ def test_analytics_unset_model_is_in_table_not_series(
     assert gpt["share"] + unset["share"] == 100.0
 
 
-def test_analytics_plan_ready_is_its_own_outcome(
+def test_analytics_plan_ready_counts_as_completed(
     tmp_path, isolate_jira_agent_artifacts, monkeypatch
 ):
     http, jobs = _client(tmp_path, isolate_jira_agent_artifacts, monkeypatch)
@@ -234,26 +234,30 @@ def test_analytics_plan_ready_is_its_own_outcome(
     body = http.get("/api/analytics", params={"period": "7d"}).json()
     totals = body["totals"]
     assert totals["jobs"] == 2
-    assert totals["completed"] == 1
-    assert totals["plan_ready"] == 1
+    assert totals["completed"] == 2
+    assert totals["plan_ready"] == 0
     assert totals["error"] == 0
     assert (
         totals["completed"]
         + totals["error"]
         + totals["cancelled"]
-        + totals["plan_ready"]
         + totals["in_flight"]
         == totals["jobs"]
     )
-    assert sum(p["plan_ready"] for p in body["series"]) == 1
+    assert sum(p["completed"] for p in body["series"]) == 2
+    assert sum(p["plan_ready"] for p in body["series"]) == 0
     agents = {row["id"]: row["jobs"] for row in body["agents"]}
     assert agents.get("derman-plan") == 1
     assert agents.get("derman-build") == 1
+    status_ids = [row["id"] for row in body["facets"]["status"]]
+    assert "plan_ready" not in status_ids
+    assert "completed" in status_ids
     only_ready = http.get(
         "/api/analytics", params={"period": "7d", "status": "plan_ready"}
     ).json()
     assert only_ready["totals"]["jobs"] == 1
-    assert only_ready["totals"]["plan_ready"] == 1
+    assert only_ready["totals"]["completed"] == 1
+    assert only_ready["totals"]["plan_ready"] == 0
 
 
 def test_analytics_merges_repo_urls_with_and_without_git_suffix(

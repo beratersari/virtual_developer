@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -117,6 +118,32 @@ def test_wsl_integration_probe_has_thirty_named_requests():
     assert "mimo-v2.5-free" in cfg
     assert '"plugin": []' in cfg
     assert len(names) >= 30, names
+
+
+def test_linux_release_env_example_uses_shared_base():
+    spec = importlib.util.spec_from_file_location(
+        "linux_env_example", LINUX / "env_example.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / ".env.example").read_text(encoding="utf-8")
+    assert "# YAVER_BASE_DIR=" in source
+    assert "YAVER_BASE_DIR=/var/tmp/yaver" not in source
+    rewritten = mod.linux_release_env_example(source)
+    assert "YAVER_BASE_DIR=/var/tmp/yaver\n" in rewritten
+    assert "# YAVER_BASE_DIR=" not in rewritten
+    assert "/var/tmp/yaver" in rewritten
+    build = (LINUX / "build-dist.sh").read_text(encoding="utf-8")
+    assert "packaging/linux/env_example.py" in build
+    assert_sh = (LINUX / "assert-payload.sh").read_text(encoding="utf-8")
+    assert "YAVER_BASE_DIR=/var/tmp/yaver" in assert_sh
+    freeze = (root / "packaging" / "pyinstaller" / "build.py").read_text(
+        encoding="utf-8"
+    )
+    assert "packaging" in freeze and "env_example.py" in freeze
 
 
 def test_linux_dist_ci_and_offline_vendor_hooks():

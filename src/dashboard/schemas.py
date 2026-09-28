@@ -559,6 +559,26 @@ class OpencodeWorkspaceDetail(BaseModel):
     server_time: str = ""
 
 
+class AgentWrite(BaseModel):
+    """Markdown body for an OpenCode agent file."""
+
+    text: str = Field(..., max_length=200_000)
+
+
+class AgentCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    text: str = Field(default="", max_length=200_000)
+
+
+class WorkModeItem(BaseModel):
+    """One Mode: row. Behavior is plan, build, or test."""
+
+    name: str = Field(..., min_length=1, max_length=32)
+    behavior: str = Field(..., min_length=1, max_length=16)
+    agent: str = Field(default="", max_length=64)
+    builtin: bool = False
+
+
 class SettingsView(BaseModel):
     """Safe settings projection (secrets never included as plaintext values)."""
 
@@ -612,6 +632,7 @@ class SettingsView(BaseModel):
     trigger_assignee_names: str = ""
     # Saved remotes for the schedule New-issue picker (not secrets)
     project_repositories: List["ProjectRepositoryItem"] = Field(default_factory=list)
+    work_modes: List["WorkModeItem"] = Field(default_factory=list)
     # {YAVER_BASE_DIR}/yaver and {YAVER_BASE_DIR}/t
     base_dir: str = ""
     data_dir: str = ""
@@ -845,6 +866,11 @@ class SettingsUpdate(BaseModel):
         default=None,
         max_length=40,
         description="Full replace of saved git remotes for the New-issue form",
+    )
+    work_modes: Optional[List[WorkModeItem]] = Field(
+        default=None,
+        max_length=40,
+        description="Full replace of modes and their OpenCode agents",
     )
     jira_trigger_user: Optional[str] = Field(
         default=None,

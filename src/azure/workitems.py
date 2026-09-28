@@ -499,7 +499,7 @@ def find_work_item_key_by_id(
             have = _collection_norm(
                 str(meta.get("azure_collection_url") or "")
             ) or _collection_norm(str((work_item_coords(key) or {}).get("collection_url") or ""))
-            if have and have != want_col:
+            if have != want_col:
                 continue
         if key not in seen:
             seen.add(key)
@@ -642,6 +642,7 @@ def work_item_fields_to_jira(
     state_category: str = "",
 ) -> Dict[str, Any]:
     title = _s(fields.get("System.Title"))
+    # Accepted: a non-empty Description string wins over Repro Steps.
     description = azure_html_to_text(
         fields.get("System.Description")
         or fields.get("Microsoft.VSTS.TCM.ReproSteps")
@@ -1142,7 +1143,14 @@ def decide_azure_workitem_comment_webhook(
         resource.get("revisedBy")
         or _as_dict(resource.get("comment")).get("author")
     )
-    if author_is_configured_bot(author, mentions) or actor_is_pat_user(
+    # author_is_configured_bot walks strings. A dict yields keys ("id"),
+    # so the bot's own display name never matches and the comment is accepted.
+    author_names = [
+        _s(author.get("uniqueName") or author.get("unique_name")),
+        _s(author.get("displayName") or author.get("display_name")),
+        _s(author.get("directoryAlias") or author.get("principalName")),
+    ]
+    if author_is_configured_bot(author_names, mentions) or actor_is_pat_user(
         identity_as_assignee(author) or author,
         host=parsed.host,
         collection_url=parsed.collection_url,

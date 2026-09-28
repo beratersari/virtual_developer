@@ -8,11 +8,11 @@ import { useLive } from './live'
 const NAV = [
   { to: '/jobs', label: 'Jobs', match: (p: string) => p.startsWith('/jobs') || p.startsWith('/tasks') },
   { to: '/analytics', label: 'Analytics', match: (p: string) => p.startsWith('/analytics') },
-  { to: '/scheduled', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
+  { to: '/scheduled/jira', label: 'Scheduled', match: (p: string) => p.startsWith('/scheduled') },
   { to: '/sessions', label: 'Sessions', match: (p: string) => p.startsWith('/sessions') },
   { to: '/storage', label: 'Storage', match: (p: string) => p.startsWith('/storage') },
   { to: '/poll', label: 'Board', match: (p: string) => p.startsWith('/poll') },
-  { to: '/settings', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
+  { to: '/settings/jira', label: 'Settings', match: (p: string) => p.startsWith('/settings') },
 ] as const
 
 function IconJobs() {

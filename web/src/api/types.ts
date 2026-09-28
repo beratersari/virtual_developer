@@ -162,6 +162,13 @@ export type ProjectRepository = {
   source_branch?: string
 }
 
+export type WorkMode = {
+  name: string
+  behavior: 'plan' | 'build' | 'test' | string
+  agent: string
+  builtin?: boolean
+}
+
 export type SettingsPayload = {
   jira_enabled?: boolean
   jira_host: string
@@ -204,6 +211,7 @@ export type SettingsPayload = {
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
+  work_modes?: WorkMode[]
   base_dir?: string
   data_dir?: string
   temp_dir_base?: string
@@ -537,7 +545,7 @@ export type ScheduleCreateBody = {
   repository_url: string
   source_branch?: string
   target_branch: string
-  mode: 'plan' | 'build' | 'test'
+  mode: string
   scheduled_at: string
   project_key?: string
   issue_type?: string
@@ -759,6 +767,7 @@ export type SettingsPatch = Partial<
     | 'agent_backend'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
+    | 'work_modes'
     | 'trigger_mentions'
     | 'trigger_assignee_names'
     | 'jira_trigger_user'

@@ -201,9 +201,27 @@ class AzureDevOpsClient:
             self.pat = (
                 settings.azure_pat_for_collection(self.collection_url) or ""
             ).strip()
-        if not self.pat and self.host and hasattr(settings, "azure_pat_for_host"):
+            if not self.pat and hasattr(settings, "azure_collection_pat_map"):
+                try:
+                    configured = bool(settings.azure_collection_pat_map() or {})
+                except Exception:
+                    configured = False
+                if configured:
+                    # Do not send another collection's PAT to this baseUrl.
+                    azure_info(
+                        "client skip unconfigured collection="
+                        f"{self.collection_url}"
+                    )
+                    self.api_base = ""
+                    self.pat = ""
+        if (
+            not self.pat
+            and not self.collection_url
+            and self.host
+            and hasattr(settings, "azure_pat_for_host")
+        ):
             self.pat = (settings.azure_pat_for_host(self.host) or "").strip()
-        if not self.pat and self.host:
+        if not self.pat and self.host and not self.collection_url:
             leftover = (getattr(settings, "azure_pat", "") or "").strip()
             mapping = {}
             if hasattr(settings, "azure_host_pat_map"):

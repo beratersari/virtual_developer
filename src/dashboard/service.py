@@ -17,6 +17,7 @@ from src.config import (
 from src.dashboard.issue_logs import issue_log_ring
 from src.dashboard.webhook_paths import AZURE_WEBHOOK_PATH, GITLAB_WEBHOOK_PATH
 from src.logger import logger
+from src.work_modes import all_modes, apply_saved_modes
 from src.dashboard.project_repos import (
     parse_project_repositories,
     project_repositories_to_json,
@@ -41,6 +42,7 @@ from src.dashboard.schemas import (
     ProjectRepositoryItem,
     SettingsUpdate,
     SettingsView,
+    WorkModeItem,
     TaskItem,
     TasksResponse,
     QueueItem,
@@ -372,6 +374,7 @@ def build_settings_view() -> SettingsView:
             getattr(settings, "trigger_mentions_list", None) or []
         ),
         project_repositories=_settings_project_repositories(),
+        work_modes=[WorkModeItem(**row) for row in all_modes()],
         base_dir=_settings_base_dir(),
         data_dir=_settings_data_dir(),
         temp_dir_base=_settings_temp_dir(),
@@ -531,6 +534,48 @@ def _normalize_gitlab_host(raw: Any) -> str:
     return host.strip()
 
 
+def _stored_azure_pat(
+    current: Dict[str, str], collection: str, previous: str
+) -> str:
+    """PAT already saved for this collection, ignoring path case.
+
+    The settings page omits ``previous_host`` when the lowercased URL did
+    not change, so a case-only edit has to match the stored spelling.
+    """
+    if collection in current:
+        return str(current[collection] or "").strip()
+    if previous and previous in current:
+        return str(current[previous] or "").strip()
+    want = collection.lower()
+    prev = previous.lower() if previous else ""
+    for key, value in current.items():
+        pat = str(value or "").strip()
+        key_l = str(key).lower()
+        if pat and (key_l == want or (prev and key_l == prev)):
+            return pat
+    return ""
+
+
+def _stored_gitlab_pat(current: Dict[str, str], host: str) -> str:
+    """PAT already saved for this host, including a scheme-prefixed map key.
+
+    Settings shows the raw key and posts it back with an empty PAT.
+    ``https://gitlab.example.com`` and ``gitlab.example.com`` are one host.
+    A different hostname is not a match (that would copy the secret across).
+    """
+    want = _normalize_gitlab_host(host)
+    if not want:
+        return ""
+    direct = str(current.get(want) or "").strip()
+    if direct:
+        return direct
+    for key, value in current.items():
+        pat = str(value or "").strip()
+        if pat and _normalize_gitlab_host(key) == want:
+            return pat
+    return ""
+
+
 def apply_settings_update(body: SettingsUpdate) -> SettingsView:
     """Apply runtime settings (including write-only secrets).
 
@@ -595,11 +640,13 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[host] = pat
-            elif host in current:
-                new_map[host] = current[host]
-            elif previous_host and previous_host in current:
-                # Explicit rename from the Settings UI — not an inferred swap.
-                new_map[host] = current[previous_host]
+            else:
+                kept = _stored_gitlab_pat(current, host)
+                if not kept and previous_host:
+                    # Explicit rename from the Settings UI — not an inferred swap.
+                    kept = _stored_gitlab_pat(current, previous_host)
+                if kept:
+                    new_map[host] = kept
         # [] from Settings means "no host rows", not "wipe a legacy GITLAB_PAT
         # that was never projected as a row". Only clear when host rows existed.
         clearing_hosts = bool(current) and not new_map
@@ -735,6 +782,8 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
         encoded = project_repositories_to_json(data["project_repositories"])
         settings.project_repositories = encoded
         runtime_persist["project_repositories"] = encoded
+    if "work_modes" in data and data["work_modes"] is not None:
+        runtime_persist.update(apply_saved_modes(data["work_modes"]))
     from src.config import format_trigger_users
 
     jira_trigger = None
@@ -827,27 +876,28 @@ def apply_settings_update(body: SettingsUpdate) -> SettingsView:
             pat = str(pat_raw or "").strip()
             if pat:
                 new_map[collection] = pat
-            elif collection in current:
-                new_map[collection] = current[collection]
-            elif previous and previous in current:
-                new_map[collection] = current[previous]
+            else:
+                copied = _stored_azure_pat(current, collection, previous)
+                if copied:
+                    new_map[collection] = copied
         from src.azure.log import azure_info
 
         azure_info(
             f"settings save collections={len(collections)} "
             f"urls={collections} pats={len(new_map)}"
         )
-        clearing = bool(current) and not new_map
+        # The posted list is the whole set, including an empty one.
+        # URL-only rows have no PAT map entry, so "clear only when the
+        # map was non-empty" left the old azure_collection_urls in place
+        # and the next settings read showed the removed collections again.
         if hasattr(settings, "set_azure_collection_pat_map"):
-            if new_map or clearing:
-                settings.set_azure_collection_pat_map(new_map)
+            settings.set_azure_collection_pat_map(new_map)
+        if hasattr(settings, "azure_collection_urls"):
+            settings.azure_collection_urls = json.dumps(collections)
         dotenv_updates["AZURE_COLLECTION_PATS"] = getattr(
             settings, "azure_collection_pats", ""
         ) or ""
-        # URL list for Schedule dropdowns (runtime JSON, not extra .env keys).
-        runtime_persist["azure_collection_urls"] = getattr(
-            settings, "azure_collection_urls", ""
-        ) or json.dumps(list(new_map.keys()))
+        runtime_persist["azure_collection_urls"] = json.dumps(collections)
     azure_trigger = None
     if "azure_trigger_user" in data and data["azure_trigger_user"] is not None:
         azure_trigger = str(data["azure_trigger_user"]).strip()
@@ -1384,12 +1434,34 @@ def _job_matches_exact_key(job: Dict[str, Any], issue_key: Optional[str]) -> boo
     return str(job.get("issue_key") or "").strip().upper() == want
 
 
+def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) -> bool:
+    """Same buckets as the Jobs page pills. Empty and ``all`` keep every row."""
+    want = (status or "").strip().lower().replace("_", "-")
+    if not want or want == "all":
+        return True
+    st = str(job.get("status") or "").lower()
+    if want in {"active", "live", "in-flight"}:
+        # Accepted: a live issue keeps its older jobs on this pill.
+        return live or st in {"pending", "planning", "executing", "running"}
+    if want == "error":
+        return st in {"error", "unknown"}
+    if want == "completed":
+        # Same bucket as Analytics: a plan that reached plan_ready is finished.
+        return st in {"completed", "plan_ready"}
+    if want == "cancelled":
+        return st in {"cancelled", "canceled", "superseded"}
+    if want == "plan-ready":
+        return st == "plan_ready"
+    return True
+
+
 def build_jobs(
     *,
     issue_key: Optional[str] = None,
     limit: int = 25,
     page: int = 1,
     page_size: Optional[int] = None,
+    status: Optional[str] = None,
     processor: Optional["JobProcessor"] = None,
     store: Optional[JobStore] = None,
     state_manager: Optional[JiraStateManager] = None,
@@ -1443,6 +1515,8 @@ def build_jobs(
             or j.get("job_id") in active_job_ids
             or st in {"executing", "planning", "running", "pending"}
         )
+        if not _job_matches_status(j, live, status):
+            continue
         (inflight if live else rest).append(j)
     inflight.sort(key=job_created_stamp, reverse=True)
     rest.sort(key=job_created_stamp, reverse=True)
@@ -3247,6 +3321,7 @@ def build_opencode_workspaces(
     page_ids.discard("")
     counts: Dict[str, int] = {}
     if page_ids:
+        # Accepted: job counts use the newest 500 jobs.
         for job in js.list_jobs(limit=500):
             wid = _workspace_id_from_job(job)
             if not wid or wid not in page_ids:
@@ -3293,6 +3368,7 @@ def build_opencode_workspace_detail(
         for r in recs
         if str(r.get("job_id") or "").strip()
     }
+    # Accepted: workspace detail uses the newest 500 jobs.
     matched = [
         job
         for job in js.list_jobs(limit=500)

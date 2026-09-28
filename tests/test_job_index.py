@@ -171,6 +171,28 @@ def test_query_jobs_applies_period_and_filters(tmp_path: Path):
         issue_key="KAN-2",
     )
     assert [r["job_id"] for r in key] == ["job_new"]
+    idx.upsert(
+        {
+            "job_id": "job_plan",
+            "issue_key": "KAN-3",
+            "status": "plan_ready",
+            "workflow_type": "planning",
+            "source": "jira",
+            "started_at": "2026-09-20T12:00:00",
+        }
+    )
+    done = idx.query_jobs(
+        start="2026-01-01T00:00:00",
+        end="2026-12-31T23:59:59",
+        status="completed",
+    )
+    assert {r["job_id"] for r in done} == {"job_old", "job_plan"}
+    still_plan = idx.query_jobs(
+        start="2026-01-01T00:00:00",
+        end="2026-12-31T23:59:59",
+        status="plan_ready",
+    )
+    assert [r["job_id"] for r in still_plan] == ["job_plan"]
     assert idx.min_when() == "2026-01-01T10:00:00"
     idx.close()
 

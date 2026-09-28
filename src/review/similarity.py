@@ -9,6 +9,7 @@ _MARKDOWN = re.compile(r"<!--.*?-->|[*_`#>]+", re.DOTALL)
 _WS = re.compile(r"\s+")
 _WORD = re.compile(r"[a-z0-9_./:+-]+")
 
+# Accepted: 0.90 skips near-duplicate replies, including one-word edits.
 SIMILARITY_SKIP = 0.90
 
 

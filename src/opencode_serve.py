@@ -1709,22 +1709,31 @@ class ServeOrchestrator:
         _aborted: Callable[[], bool],
         wait_seconds: float = 30.0,
         abort_busy: bool = True,
-    ) -> None:
-        """Make the session idle before posting a new user prompt.
+    ) -> bool:
+        """True when the caller may post. False only blocks a compact Continue.
+
+        Make the session idle before posting a new user prompt.
 
         Cancel often kills our HTTP client without aborting OpenCode. A new
         POST /message then 500s while the old turn keeps editing files.
 
         Incomplete-session resume must **not** abort: the leftover turn is
-        still the job (finish=unknown + open todos). Wait it out.
+        still the job (finish=unknown + open todos). Wait it out, then
+        return True so the job prompt is posted anyway.
+
+        False means the status read failed, the wait was aborted, or the
+        session is still busy after abort. The compact-loop restart checks
+        that and does not send Continue. The resume path ignores this
+        return and still posts the job prompt. That prompt is the work,
+        not a compact Continue.
         """
         try:
             status = await self.client.session_status()
         except Exception as e:
             _emit("stdout", f"[serve] status check failed: {e}")
-            return
+            return False
         if not session_is_busy(status, sid):
-            return
+            return True
         if not abort_busy:
             _emit(
                 "stdout",
@@ -1735,20 +1744,21 @@ class ServeOrchestrator:
             poll_s = max(0.15, float(self.compact_poll_seconds or 0.5))
             while time.time() < deadline:
                 if _aborted():
-                    return
+                    return False
                 await asyncio.sleep(poll_s)
                 try:
                     status = await self.client.session_status()
                 except Exception:
-                    return
+                    return False
                 if not session_is_busy(status, sid):
                     _emit("stdout", "[serve] session idle after leftover turn")
-                    return
+                    return True
             _emit(
                 "stdout",
                 "[serve] leftover turn still busy after wait — posting anyway",
             )
-            return
+            # True on purpose: the leftover turn is the job, so resume posts.
+            return True
         _emit(
             "stdout",
             f"[serve] session {sid} still busy; aborting leftover turn",
@@ -1757,16 +1767,18 @@ class ServeOrchestrator:
         deadline = time.time() + max(1.0, float(wait_seconds))
         while time.time() < deadline:
             if _aborted():
-                return
+                return False
             await asyncio.sleep(0.15)
             try:
                 status = await self.client.session_status()
             except Exception:
-                return
+                return False
             if not session_is_busy(status, sid):
                 _emit("stdout", "[serve] session idle after abort")
-                return
+                return True
         _emit("stdout", "[serve] session still busy after abort wait")
+        # False stops a compact-loop Continue. Resume still posts the job.
+        return False
 
     async def run(
         self,
@@ -1856,6 +1868,8 @@ class ServeOrchestrator:
                 )
         else:
             _emit("stdout", f"[serve] session resumed: {sid}")
+            # Ignore the bool. It only gates a compact-loop Continue.
+            # This job prompt is posted after the wait, even if still busy.
             await self._ensure_session_idle(
                 sid,
                 _emit=_emit,
@@ -1991,9 +2005,17 @@ class ServeOrchestrator:
                 await self.client.abort(sid)
             except Exception as e:
                 _emit("stderr", f"[serve] abort after compact loop failed: {e}")
-            await self._ensure_session_idle(
+            idle = await self._ensure_session_idle(
                 sid, _emit=_emit, _aborted=_aborted
             )
+            # Only this Continue is withheld. Resume does not check the bool.
+            if not idle:
+                _emit(
+                    "stdout",
+                    f"[serve] compact loop — session {sid} still busy after "
+                    "abort; not sending Continue",
+                )
+                return False
             _emit(
                 "stdout",
                 f"[serve] compact loop — aborted in-flight turn; "

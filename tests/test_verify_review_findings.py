@@ -885,7 +885,7 @@ _JOB_CHAT = (
 
 def _job_id_effect_block(src: str) -> str:
     """The useEffect that reseeds state when the route :jobId changes."""
-    start = src.find("useEffect(() => {\n    setTab('overview')")
+    start = src.find("useEffect(() => {\n    setReviseOpen(false)")
     assert start != -1, "JobDetailPage jobId effect not found"
     end = src.find("}, [jobId])", start)
     assert end != -1, "JobDetailPage jobId effect end not found"

@@ -646,7 +646,7 @@ This section exists so agents **do not reintroduce** bugs we already paid for in
 
 | Item | Rule |
 |------|------|
-| OpenCode home | **`%USERPROFILE%\.opencode` only** (CLI, stock `opencode.json`, **opencoderman** agents/skills). Install via `opencoderman/install.py` (wrapper: `packaging/install_opencode.py`). The pack **backs up** `~/.opencode` instead of deleting it. Do not write a second tree under `~/.config/opencode`. |
+| OpenCode home | CLI install stays **`%USERPROFILE%\.opencode` only** (stock `opencode.json`, **opencoderman** agents/skills) via `opencoderman/install.py`. The pack **backs up** `~/.opencode` instead of deleting it. Do not install a second CLI tree under `~/.config/opencode`. Settings **Sync** copies agent files into both `~/.opencode/agents` and `~/.config/opencode/agents` (`$XDG_CONFIG_HOME/opencode/agents` when that env var is set). |
 | OpenCode source | Git submodule **`opencoderman/`** (`https://github.com/beratersari/opencoderman.git`). Pins live in `opencoderman/packaging/versions.env`. Do not re-implement a parallel installer. |
 | Plugin cache | Stock OpenCode only (`plugin: []`). Seed **`rg.exe`** into `%USERPROFILE%\.cache\opencode\bin` from `vendor\bin\rg.exe`. Do **not** junction or copy an oh-my plugin tree. |
 | TUI launcher | Ship **`start-opencode.bat`** that `cd`s to the **project** directory. Document: never run `opencode` from `C:\Users\<name>` (home as project = multi-minute black screen indexing the profile). |

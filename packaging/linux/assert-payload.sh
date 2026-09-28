@@ -42,6 +42,10 @@ do
   fi
   echo "OK $rel"
 done
+if ! grep -q '^YAVER_BASE_DIR=/var/tmp/yaver$' "$p/.env.example"; then
+  echo ".env.example must set YAVER_BASE_DIR=/var/tmp/yaver" >&2
+  exit 1
+fi
 if [[ -d "$p/web/node_modules" ]]; then
   echo "web/node_modules must not be in the offline zip" >&2
   exit 1

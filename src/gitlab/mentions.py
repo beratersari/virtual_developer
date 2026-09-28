@@ -221,12 +221,24 @@ def _name_is_configured_bot(raw_name: str, names: List[str]) -> bool:
     return False
 
 
+_FENCED_BLOCK = re.compile(
+    r"```.*?```|\{\{code(?::[^}]*)?\}\}.*?\{\{code\}\}",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _without_fenced_blocks(text: str) -> str:
+    """Drop fenced examples so a pasted ``@bot /yaver`` does not start a job."""
+    return _FENCED_BLOCK.sub(" ", text or "")
+
+
 def note_has_slash_command(
     note: str, bot_mentions: Iterable[str], command: str
 ) -> bool:
     """True when the comment contains ``@bot /command`` for a configured bot.
 
     Command match is a word boundary so ``/asking`` is not ``/ask``.
+    Text inside ``` fences or ``{{code}}`` blocks is an example, not a command.
     """
     cmd = (command or "").strip().lstrip("/")
     if not cmd:
@@ -234,7 +246,7 @@ def note_has_slash_command(
     names = _ask_handoff_names(bot_mentions)
     if not names:
         return False
-    raw = note or ""
+    raw = _without_fenced_blocks(note or "")
     cmd_re = rf"/{re.escape(cmd)}(?![A-Za-z0-9_-])"
     configured_guids = {normalize_guid(n) for n in names}
     configured_guids.discard("")
@@ -260,9 +272,8 @@ def note_has_slash_command(
             flags=re.IGNORECASE,
         ):
             return True
-        # "@Yaver Bot /yaver" when configured as yaver. Extra words must
-        # look like a display-name tail (capitalized). "@bot please /cmd"
-        # and "@bot @alice /cmd" stay misses.
+        # Accepted: a capitalized word between @name and /cmd counts as a
+        # display-name tail ("@Yaver Bot /yaver"). "@bot please /cmd" stays a miss.
         tail_hit = re.search(
             rf"(?<![A-Za-z0-9_.-])@{re.escape(name)}((?:\s+\S+)*)\s*{cmd_re}",
             text,

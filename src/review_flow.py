@@ -372,7 +372,8 @@ def azure_reviewer_just_assigned(
     added = _AZURE_ADDED.search(msg)
     if added:
         who = (added.group("who") or "").strip().lower()
-        if who in aliases or any(a in who for a in aliases):
+        who_tokens = {tok for tok in re.split(r"[^a-z0-9_.\\-]+", who) if tok}
+        if who in aliases or who_tokens & aliases:
             return True
     key = _azure_pr_key(pr, collection_url)
     current = _azure_reviewer_ids(pr)

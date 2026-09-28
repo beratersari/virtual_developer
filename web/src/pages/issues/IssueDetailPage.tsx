@@ -12,6 +12,7 @@ import { MetaCard } from '../../ui/MetaCard'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { Tabs } from '../../ui/Tabs'
 import { JobsTable } from '../jobs/JobsTable'
+import { issueTabFromSection, issueTabPath, type IssueTab } from './issueTabUrl'
 
 function collectDeliveries(detail: TaskDetail): GitDelivery[] {
   if (detail.git_deliveries && detail.git_deliveries.length > 0) return detail.git_deliveries
@@ -30,15 +31,15 @@ function collectDeliveries(detail: TaskDetail): GitDelivery[] {
 }
 
 export function IssueDetailPage() {
-  const { issueKey = '' } = useParams()
+  const { issueKey = '', section = '' } = useParams()
   const navigate = useNavigate()
+  const tab: IssueTab = issueTabFromSection(section) ?? 'overview'
   const live = useLive()
   const cached = peekTask(issueKey.trim().toUpperCase())
   const [detail, setDetail] = useState<TaskDetail | null>(cached)
   const [loading, setLoading] = useState(!cached)
   const [error, setError] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
-  const [tab, setTab] = useState<'overview' | 'logs'>('overview')
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [confirmImplement, setConfirmImplement] = useState(false)
   const [reviseOpen, setReviseOpen] = useState(false)
@@ -81,7 +82,12 @@ export function IssueDetailPage() {
   )
 
   useEffect(() => {
-    setTab('overview')
+    if (section && issueTabFromSection(section) === null) {
+      navigate(issueTabPath(issueKey, 'overview'), { replace: true })
+    }
+  }, [issueKey, navigate, section])
+
+  useEffect(() => {
     setReviseOpen(false)
     setReviseText('')
     setNotice(null)
@@ -313,7 +319,7 @@ export function IssueDetailPage() {
           { id: 'logs', label: 'System logs' },
         ]}
         value={tab}
-        onChange={setTab}
+        onChange={(next) => navigate(issueTabPath(issueKey, next))}
       />
 
       <div className="vd-card min-h-[50vh] p-5">

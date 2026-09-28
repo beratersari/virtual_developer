@@ -785,6 +785,50 @@ def test_build_jobs_pagination(tmp_path):
     assert len(ids) == 7
 
 
+def test_build_jobs_status_filter_pages_the_matching_rows(tmp_path):
+    """Cancelled pages use the cancelled count, not the full job list."""
+    from src.dashboard.service import build_jobs
+    from src.state.job_store import JobStore
+
+    jobs = JobStore(jobs_dir=tmp_path / "jobs")
+    sm = JiraStateManager(state_dir=tmp_path / "state")
+    for i in range(10):
+        jobs.create_job(issue_key=f"DONE-{i}", summary="done", status="completed")
+    for i in range(5):
+        jobs.create_job(issue_key=f"STOP-{i}", summary="stopped", status="cancelled")
+    jobs.create_job(issue_key="OLD-1", summary="replaced", status="superseded")
+    page1 = build_jobs(status="cancelled", page=1, page_size=2, store=jobs, state_manager=sm)
+    assert page1.total == 6
+    assert len(page1.jobs) == 2
+    assert {j.status for j in page1.jobs} <= {"cancelled", "superseded"}
+    page3 = build_jobs(status="cancelled", page=3, page_size=2, store=jobs, state_manager=sm)
+    assert page3.total == 6
+    assert len(page3.jobs) == 2
+    page4 = build_jobs(status="cancelled", page=4, page_size=2, store=jobs, state_manager=sm)
+    assert page4.total == 6
+    assert page4.jobs == []
+    seen = {
+        j.job_id
+        for j in (
+            page1.jobs
+            + build_jobs(status="cancelled", page=2, page_size=2, store=jobs, state_manager=sm).jobs
+            + page3.jobs
+        )
+    }
+    assert len(seen) == 6
+    completed = build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm)
+    assert completed.total == 10
+    assert all(j.status == "completed" for j in completed.jobs)
+    jobs.create_job(issue_key="PLAN-1", summary="plan", status="plan_ready")
+    ready = build_jobs(status="plan-ready", page=1, page_size=25, store=jobs, state_manager=sm)
+    assert ready.total == 1
+    assert ready.jobs[0].status == "plan_ready"
+    # Analytics counts a finished plan as completed and links here.
+    finished = build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm)
+    assert finished.total == 11
+    assert "PLAN-1" in [j.issue_key for j in finished.jobs]
+
+
 def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
     from src.dashboard.service import build_jobs
     from src.state.job_store import JobStore

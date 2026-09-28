@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, fetchAnalytics } from '../../api/client'
 import type {
   AnalyticsFacet,
@@ -11,6 +11,8 @@ import { Alert } from '../../ui/Alert'
 import { LineChart, type LineSeries } from '../../ui/LineChart'
 import { PageHeader } from '../../ui/PageHeader'
 import { Spinner } from '../../ui/Spinner'
+import { jobsFilterPath } from '../jobs/jobsFilterUrl'
+import { analyticsPeriodFromParam, analyticsPeriodPath } from './analyticsPeriodUrl'
 
 const PERIODS = [
   { id: '24h', label: '24 hours' },
@@ -22,20 +24,13 @@ const PERIODS = [
   { id: 'custom', label: 'Custom' },
 ] as const
 
-type SeriesKey =
-  | 'total'
-  | 'completed'
-  | 'error'
-  | 'cancelled'
-  | 'plan_ready'
-  | 'in_flight'
+type SeriesKey = 'total' | 'completed' | 'error' | 'cancelled' | 'in_flight'
 
 const OUTCOME_SERIES: { id: SeriesKey; label: string; color: string }[] = [
   { id: 'total', label: 'Total', color: '#ff7a45' },
   { id: 'completed', label: 'Completed', color: '#3ecf8e' },
   { id: 'error', label: 'Error', color: '#f25c54' },
   { id: 'cancelled', label: 'Cancelled', color: '#7b88a8' },
-  { id: 'plan_ready', label: 'Plan ready', color: '#6ea8ff' },
   { id: 'in_flight', label: 'In flight', color: '#c9a227' },
 ]
 
@@ -170,7 +165,6 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
             <th>Completed</th>
             <th>Error</th>
             <th>Cancelled</th>
-            <th>Plan ready</th>
             <th>In flight</th>
             <th className="w-1/3">Share</th>
           </tr>
@@ -183,7 +177,6 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
               <td className="font-mono text-success-text">{row.completed}</td>
               <td className="font-mono text-danger-text">{row.error}</td>
               <td className="font-mono text-text-muted">{row.cancelled}</td>
-              <td className="font-mono">{row.plan_ready}</td>
               <td className="font-mono">{row.in_flight}</td>
               <td>
                 <div className="flex items-center gap-2">
@@ -207,10 +200,17 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
 }
 
 export function AnalyticsPage() {
+  const { period: periodParam = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const period = analyticsPeriodFromParam(periodParam) ?? '30d'
   const live = useLive()
-  const [period, setPeriod] = useState<string>('30d')
-  const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState('')
+  const [customFrom, setCustomFrom] = useState(() =>
+    period === 'custom' ? localInputFromIso(searchParams.get('from') || '') : '',
+  )
+  const [customTo, setCustomTo] = useState(() =>
+    period === 'custom' ? localInputFromIso(searchParams.get('to') || '') : '',
+  )
   const [status, setStatus] = useState<Set<string>>(() => new Set())
   const [category, setCategory] = useState<Set<string>>(() => new Set())
   const [source, setSource] = useState<Set<string>>(() => new Set())
@@ -219,7 +219,7 @@ export function AnalyticsPage() {
   const [agent, setAgent] = useState<Set<string>>(() => new Set())
   const [repository, setRepository] = useState<Set<string>>(() => new Set())
   const [visible, setVisible] = useState<Set<SeriesKey>>(
-    () => new Set(['total', 'completed', 'error', 'plan_ready']),
+    () => new Set(['total', 'completed', 'error']),
   )
   const [payload, setPayload] = useState<AnalyticsPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -227,6 +227,12 @@ export function AnalyticsPage() {
   const reqId = useRef(0)
   const lastGenReload = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (periodParam && analyticsPeriodFromParam(periodParam) === null) {
+      navigate(analyticsPeriodPath('30d'), { replace: true })
+    }
+  }, [navigate, periodParam])
 
   const load = useCallback(
     async (opts?: { quiet?: boolean }) => {
@@ -395,7 +401,7 @@ export function AnalyticsPage() {
                   setCustomFrom((prev) => prev || localInputFromIso(start))
                   setCustomTo((prev) => prev || localInputFromIso(end))
                 }
-                setPeriod(p.id)
+                navigate(analyticsPeriodPath(p.id))
               }}
               className={`rounded-full px-3 py-1 text-xs font-semibold ${
                 period === p.id
@@ -464,20 +470,26 @@ export function AnalyticsPage() {
         )}
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <CountCard label="Total jobs" value={payload?.totals.jobs ?? 0} />
         <CountCard
           label="Completed"
           value={payload?.totals.completed ?? 0}
           tone="success"
+          to={jobsFilterPath('completed')}
         />
-        <CountCard label="Error" value={payload?.totals.error ?? 0} tone="danger" />
+        <CountCard
+          label="Error"
+          value={payload?.totals.error ?? 0}
+          tone="danger"
+          to={jobsFilterPath('error')}
+        />
         <CountCard
           label="Cancelled"
           value={payload?.totals.cancelled ?? 0}
           tone="muted"
+          to={jobsFilterPath('cancelled')}
         />
-        <CountCard label="Plan ready" value={payload?.totals.plan_ready ?? 0} />
         <CountCard label="In flight" value={payload?.totals.in_flight ?? 0} />
         <CountCard
           label="Models used"

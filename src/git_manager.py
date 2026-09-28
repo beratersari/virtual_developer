@@ -240,9 +240,8 @@ class GitManager:
         repo_key = normalize_repo_key(self.remote_url or "")
         branch = normalize_branch(work)
         target = normalize_branch(self.target_branch or "")
-        issue = (self.issue_key or "").strip().upper()
         digest = hashlib.sha256(
-            f"{repo_key}\0{branch}\0{target}\0{issue}".encode("utf-8")
+            f"{repo_key}\0{branch}\0{target}".encode("utf-8")
         ).hexdigest()[:12]
         return {
             "repo_key": repo_key,
@@ -310,6 +309,15 @@ class GitManager:
             base_temp, self._workspace_folder_name()
         )
         if short_path.exists():
+            from src.dashboard.temp_storage import clone_delete_in_progress
+
+            if clone_delete_in_progress(short_path):
+                raise GitCloneError(
+                    f"*Yaver* did not reuse {short_path.name} because a "
+                    "dashboard delete is still removing that clone.\n\n"
+                    "Wait until Storage shows the delete finished, then "
+                    "run the job again."
+                )
             logger.info(f"Reusing temp directory: {short_path}")
             return short_path
 
@@ -1191,6 +1199,12 @@ class GitManager:
             )
             return True
         except GitCancelledError:
+            # set-url can finish before cancel is observed. The caller never
+            # receives True, so its finally block does not scrub.
+            try:
+                self._scrub_remote_credentials()
+            except Exception:
+                pass
             raise
         except Exception as e:
             logger.warning(
@@ -3027,7 +3041,9 @@ class GitManager:
             or mr.get("targetBranch")
             or ""
         ).strip().lower()
-        return not got or got == want
+        # A payload that omits the target is not "this" MR. Reusing it
+        # attaches the job to a request opened against another branch.
+        return bool(got) and got == want
 
     def _get_existing_mr_url(
         self, branch: str, target_branch: Optional[str] = None

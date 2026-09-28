@@ -8,6 +8,17 @@ GitHub Releases are cut from tags `vMAJOR.MINOR.PATCH`.
 
 ## [Unreleased]
 
+## [0.9.63] — 2026-09-28
+
+The Completed total on Analytics opens a jobs list that includes a finished plan. Back to Analytics returns to the same period, including a custom range.
+
+### Fixed
+
+- The completed jobs list and index include a `plan_ready` job, matching the Analytics completed total. The Plan ready pill still lists only those jobs.
+- Back to Analytics opens `/analytics/7d` (or `/analytics/custom` with the same from and to) instead of a query the chart ignores.
+
+[0.9.63]: https://github.com/beratersari/virtual_developer/releases/tag/v0.9.63
+
 ## [0.9.62] — 2026-09-25
 
 Jobs, schedules, and session resume stay available when the search index cannot rebuild.

@@ -1,3 +1,7 @@
+# Yaver 0.9.63
+
+The Completed total on Analytics opens a jobs list that includes a finished plan, which is the same set that total already counts. Back to Analytics returns to the period you were viewing, and a custom range keeps the same from and to.
+
 # Yaver 0.9.62
 
 Jobs, schedules, and saved sessions stay on the dashboard when the search index cannot rebuild, because Yaver reads the JSON files instead of an empty index.

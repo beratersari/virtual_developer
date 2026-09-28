@@ -13,6 +13,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from src.logger import logger
 
 
+def _gitlab_host_key(raw: str) -> str:
+    """Bare hostname[:port] for a host or a pasted GitLab URL."""
+    from urllib.parse import urlparse
+
+    host = (raw or "").strip().lower()
+    if not host:
+        return ""
+    if "://" not in host and "/" not in host:
+        # Accepted: a saved "host:443" key stays distinct from the bare host.
+        return host
+    parsed = urlparse(host if "://" in host else f"https://{host}")
+    name = (parsed.hostname or "").lower()
+    if not name:
+        return host.split("/")[0]
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port and port not in (80, 443):
+        return f"{name}:{port}"
+    return name
+
+
 def bootstrap_dotenv_into_environ(
     *paths: Path,
     override: bool = False,
@@ -461,6 +484,11 @@ class Settings(BaseSettings):
         default="derman-reviewer",
         description="OpenCode agent for MR/PR /review and /ask (opencoderman derman-reviewer)",
     )
+    # Custom Mode: rows. Built-in plan/build/test agents stay on the fields above.
+    work_modes: str = Field(
+        default="",
+        description="JSON list of extra modes: name, behavior (plan|build|test), agent",
+    )
     yaver_review_skip_drafts: bool = Field(
         default=True,
         description=(
@@ -799,10 +827,17 @@ class Settings(BaseSettings):
         if h in mapping:
             return mapping[h]
         # Settings used to persist hostname without :port. Same host.
-        if ":" in h:
+        if ":" in h and "://" not in h:
             name = h.rsplit(":", 1)[0]
             if name in mapping:
                 return mapping[name]
+        want = _gitlab_host_key(h)
+        if want and want in mapping:
+            return mapping[want]
+        if want:
+            for key, pat in mapping.items():
+                if _gitlab_host_key(key) == want and pat:
+                    return pat
         return ""
 
     def gitlab_has_any_pat(self) -> bool:
@@ -906,11 +941,18 @@ class Settings(BaseSettings):
         from src.azure.urls import parse_tfs_collection_url
 
         url = parse_tfs_collection_url(collection_url)
+        mapping = self.azure_collection_pat_map()
         if url:
-            mapped = self.azure_collection_pat_map().get(url) or ""
+            mapped = mapping.get(url) or ""
+            if not mapped:
+                want = url.lower()
+                for key, pat in mapping.items():
+                    if str(key).lower() == want and pat:
+                        mapped = pat
+                        break
             if mapped:
                 return mapped
-        if self.azure_collection_pat_map():
+        if mapping:
             return ""
         return (self.azure_pat or "").strip()
 
@@ -1088,6 +1130,10 @@ _RUNTIME_PERSIST_KEYS = frozenset(
         "jira_email",
         "default_model",
         "default_review_model",
+        "default_agent",
+        "default_plan_agent",
+        "default_test_agent",
+        "work_modes",
         "agent_backend",
         "project_repositories",
         "trigger_mentions",

@@ -108,6 +108,62 @@ def _chat_db(
     return path
 
 
+def test_chat_reads_database_under_xdg_data_home(tmp_path: Path, monkeypatch) -> None:
+    """Linux OpenCode follows XDG_DATA_HOME. The home default is the wrong file."""
+    from src.opencode_sessions import opencode_db_path
+
+    xdg = tmp_path / "xdg"
+    db = _chat_db(
+        xdg / "opencode" / "opencode.db",
+        messages=[
+            ("msg_u", {"role": "user"}, [{"type": "text", "text": "add 2 + 3"}]),
+            (
+                "msg_a",
+                {"role": "assistant", "finish": "stop"},
+                [{"type": "text", "text": "The sum is 5."}],
+            ),
+        ],
+    )
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    monkeypatch.delenv("OPENCODE_DATA", raising=False)
+    assert opencode_db_path() == db
+    chat = list_session_chat("ses_chat1", db_path=opencode_db_path())
+    assert chat["error"] is None
+    assert [m["parts"][0]["text"] for m in chat["messages"]] == [
+        "add 2 + 3",
+        "The sum is 5.",
+    ]
+
+
+def test_chat_reads_when_first_open_cannot_lock_the_wal(tmp_path: Path, monkeypatch) -> None:
+    """A locked OpenCode database must not collapse the transcript to the task line."""
+    db = _chat_db(
+        tmp_path / "opencode.db",
+        messages=[
+            ("msg_u", {"role": "user"}, [{"type": "text", "text": "add 2 + 3"}]),
+            (
+                "msg_a",
+                {"role": "assistant", "finish": "stop"},
+                [{"type": "text", "text": "The sum is 5."}],
+            ),
+        ],
+    )
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def _flaky(target, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", _flaky)
+    chat = list_session_chat("ses_chat1", db_path=db)
+    assert chat["error"] is None
+    assert chat["messages"][1]["parts"][0]["text"] == "The sum is 5."
+
+
 def test_list_session_chat_joins_parts(tmp_path: Path):
     db = _chat_db(
         tmp_path / "chat.db",

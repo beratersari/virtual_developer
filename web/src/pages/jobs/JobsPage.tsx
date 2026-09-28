@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { cancelQueueItem, deleteJobs, fetchJobs, fetchQueue } from '../../api/client'
 import { shouldRefreshQueueList } from './queueRefresh'
 import type { JobsPayload, QueueItem } from '../../api/types'
@@ -17,10 +17,14 @@ import { PageHeader } from '../../ui/PageHeader'
 import { StatusBadge } from '../../ui/StatusBadge'
 import { peekJobsPayload, rememberJobsPayload } from '../../app/entityCache'
 import { JobsTable } from './JobsTable'
+import { jobsFilterFromPath, jobsFilterPath, jobsPageFromPath } from './jobsFilterUrl'
+import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
+import { JobDetailPage } from './JobDetailPage'
 
 const FILTERS: { id: JobStatusFilter; label: string }[] = [
   { id: 'all', label: 'All' },
   { id: 'active', label: 'In flight' },
+  { id: 'plan_ready', label: 'Plan ready' },
   { id: 'queue', label: 'Queue' },
   { id: 'error', label: 'Error' },
   { id: 'completed', label: 'Completed' },
@@ -29,13 +33,21 @@ const FILTERS: { id: JobStatusFilter; label: string }[] = [
 
 const PAGE_SIZE = 25
 
+/** `/jobs/2` is a list page. `/jobs/job_…` is a job. */
+export function JobsAtJobOrPage() {
+  const { jobId = '', section = '' } = useParams()
+  if (!section && listPageFromSegment(jobId)) return <JobsPage />
+  return <JobDetailPage />
+}
+
 export function JobsPage() {
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const live = useLive()
+  const statusFilter = jobsFilterFromPath(pathname)
+  const page = jobsPageFromPath(pathname)
   const [issueFilter, setIssueFilter] = useState('')
   const [debouncedFilter, setDebouncedFilter] = useState('')
-  const [statusFilter, setStatusFilter] = useState<JobStatusFilter>('all')
-  const [page, setPage] = useState(1)
   const [payload, setPayload] = useState<JobsPayload | null>(() => peekJobsPayload())
   const [queueItems, setQueueItems] = useState<QueueItem[]>([])
   const [queueQueued, setQueueQueued] = useState(0)
@@ -49,13 +61,16 @@ export function JobsPage() {
   const lastFetchedQueued = useRef(-1)
   const lastGenReload = useRef(0)
 
+  const filterRef = useRef(issueFilter)
   useEffect(() => {
     const t = window.setTimeout(() => {
+      const changed = filterRef.current !== issueFilter
+      filterRef.current = issueFilter
       setDebouncedFilter(issueFilter.trim())
-      setPage(1)
+      if (changed && jobsPageFromPath(pathname) > 1) navigate(jobsFilterPath(statusFilter))
     }, 250)
     return () => window.clearTimeout(t)
-  }, [issueFilter])
+  }, [issueFilter, navigate, pathname, statusFilter])
 
   const loadQueue = useCallback(async () => {
     const req = ++queueReq.current
@@ -82,6 +97,7 @@ export function JobsPage() {
       try {
         const data = await fetchJobs({
           issueKey: (opts?.filter ?? debouncedFilter) || undefined,
+          status: statusFilter,
           page: opts?.page ?? page,
           pageSize: PAGE_SIZE,
         })
@@ -89,6 +105,13 @@ export function JobsPage() {
         rememberJobsPayload(data)
         setPayload(data)
         setError(null)
+        const total = data.total ?? 0
+        const size = data.page_size ?? PAGE_SIZE
+        const pages = Math.max(1, Math.ceil(total / size) || 1)
+        const landed = data.page ?? page
+        if (landed > pages) {
+          navigate(withListPage(jobsFilterPath(statusFilter), pages), { replace: true })
+        }
         void loadQueue()
         return
       } catch (e) {
@@ -97,7 +120,7 @@ export function JobsPage() {
       }
       void loadQueue()
     },
-    [debouncedFilter, page, loadQueue],
+    [debouncedFilter, loadQueue, navigate, page, statusFilter],
   )
 
   useEffect(() => {
@@ -256,7 +279,7 @@ export function JobsPage() {
             <button
               key={f.id}
               type="button"
-              onClick={() => setStatusFilter(f.id)}
+              onClick={() => navigate(jobsFilterPath(f.id))}
               className={`rounded-full px-3 py-1 text-xs font-semibold transition-transform duration-150 active:scale-95 ${
                 statusFilter === f.id
                   ? 'bg-accent text-[#1a0d08]'
@@ -276,7 +299,7 @@ export function JobsPage() {
             <button
               type="button"
               disabled={currentPage <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => navigate(withListPage(jobsFilterPath(statusFilter), currentPage - 1))}
               className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
             >
               Prev
@@ -284,7 +307,7 @@ export function JobsPage() {
             <button
               type="button"
               disabled={currentPage >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
+              onClick={() => navigate(withListPage(jobsFilterPath(statusFilter), currentPage + 1))}
               className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
             >
               Next
@@ -305,9 +328,8 @@ export function JobsPage() {
           restart. Queue is waiting messages, not these runs.
         </p>
       )}
-      {statusFilter !== 'all' && statusFilter !== 'queue' && statusFilter !== 'active' && (
+      {statusFilter !== 'queue' && (
         <p className="text-xs text-text-muted">
-          Status filter is this page only ({filteredJobs.length} of {payload?.jobs.length ?? 0}).
           Search matches issue key, title, and description.
         </p>
       )}

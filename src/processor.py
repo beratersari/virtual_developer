@@ -19,7 +19,6 @@ from src.git_manager import (
 from src.issue_git_spec import (
     IssueGitConfigError,
     parse_issue_git_spec,
-    parse_issue_mode,
     require_issue_git_spec,
 )
 from src.jira.client import create_jira_client
@@ -32,6 +31,33 @@ from src.state.job_store import JobStore, job_store
 from src.state.queue_store import WorkQueueStore, work_queue_store, workspace_lock_key
 from src.state.manager import JiraStateManager
 from src.state.models import JiraAgentState, RetryAttempt, TaskStatus
+
+
+def _retry_progress_text(
+    reason: str,
+    attempt_number: int,
+    *,
+    budget_used: Optional[int] = None,
+    budget_cap: Optional[int] = None,
+) -> str:
+    """Jira line ``attempt used/cap`` for the budget that allowed this retry.
+
+    Incomplete resumes use ``agent_task_max_incomplete_retries``. Error,
+    timeout, and thread-lock share ``agent_task_max_retries``. The numerator
+    is that budget's own count, so it cannot read 4/3, 5/3, 6/3.
+    """
+    if budget_cap is None:
+        if (reason or "") == "incomplete_session":
+            budget_cap = int(
+                getattr(settings, "agent_task_max_incomplete_retries", 0) or 0
+            )
+        if not budget_cap:
+            budget_cap = int(getattr(settings, "agent_task_max_retries", 0) or 0)
+    used = int(attempt_number if budget_used is None else budget_used)
+    cap = int(budget_cap or 0)
+    if cap > 0 and used > cap:
+        used = cap
+    return f"Retrying after {reason} (attempt {used}/{cap})"
 
 
 def _plain_int(val: Any, default: int = 0) -> int:
@@ -213,19 +239,11 @@ class JobProcessor:
     ) -> WorkflowType:
         """Pick plan vs build vs test from the issue text.
 
-        * Explicit ``Mode: plan|build|test`` selects the workflow.
-        * Otherwise ``WorkflowRouter.route_issue`` (defaults to planning).
-        * Template validity (Repository, Source, Target, **Mode**) is **not**
-          checked here — same path as always: ``require_issue_git_spec`` inside
-          ``_prepare_git_workspace`` after a job is opened.
+        ``WorkflowRouter`` reads the mode token and the delivery behavior
+        saved for that row. ``Mode: plan`` stays planning until that row's
+        behavior is changed. Template validity is not checked here —
+        ``require_issue_git_spec`` does that inside ``_prepare_git_workspace``.
         """
-        mode = parse_issue_mode(summary, description)
-        if mode == "plan":
-            return WorkflowType.PLANNING
-        if mode == "build":
-            return WorkflowType.EXECUTION
-        if mode == "test":
-            return WorkflowType.TESTING
         return WorkflowRouter.route_issue(issue_key, summary, description)
 
     def _is_gitlab_triggered(
@@ -1042,6 +1060,8 @@ class JobProcessor:
         session_id: Optional[str] = None,
         new_task_id: Optional[str] = None,
         progress_percentage: int = 0,
+        budget_used: Optional[int] = None,
+        budget_cap: Optional[int] = None,
     ) -> None:
         """Record a retry attempt without overwriting CANCELLED/ERROR status.
 
@@ -1112,7 +1132,12 @@ class JobProcessor:
 
         self.reporter.post_progress_update(
             updated,
-            f"Retrying after {reason} (attempt {attempt_number}/{settings.agent_task_max_retries})",
+            _retry_progress_text(
+                reason,
+                attempt_number,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
+            ),
             progress_percentage=progress_percentage,
         )
 
@@ -1243,6 +1268,10 @@ class JobProcessor:
             return True
         if st is not None and st.status in self.TERMINAL_STATUSES:
             return False
+        # PENDING is the accept window: no _contexts yet, and it is not
+        # PLANNING/EXECUTING. Reaping that running row starts a second worker.
+        if st is not None and st.status == TaskStatus.PENDING:
+            return True
         return self._issue_is_in_flight(key) or st is None
 
     def _issue_is_in_flight(self, issue_key: str) -> bool:
@@ -2301,7 +2330,22 @@ class JobProcessor:
         )
         if job_id:
             task.job_id = job_id
-        return job_id
+            return job_id
+        live = self.state_manager.get_state(state.issue_key)
+        if (
+            live is not None
+            and live.status == status
+            and live.current_task_id == task.task_id
+        ):
+            self._fail_issue(
+                state.issue_key,
+                "Could not persist the job record, so this run was not started.",
+                suggestion=(
+                    "Check free space under the Yaver data directory, then "
+                    "move the ticket back to To Do to retry."
+                ),
+            )
+        return None
 
     def _start_job_record(
         self,
@@ -5120,9 +5164,22 @@ class JobProcessor:
         # start a duplicate run when the live job finishes.
         existing = self.queue_store.find_open_jira(key)
         if existing and (existing.get("status") or "") == "queued":
+            # Latest intake replaces this row, including a plain poll over a
+            # queued schedule. Keeping the first payload drops plan_execute:
+            # the worker replans and the poller latch never retries implement.
+            # The schedule form is already in the event built at dispatch.
+            qid = existing.get("queue_id") or ""
+            if qid:
+                # Accepted: payload is replaced; jira_event_id stays the first id.
+                self.queue_store.update(
+                    qid,
+                    payload=event,
+                    summary=summary,
+                    message=(desc or summary)[:8000],
+                )
             logger.info(
-                f"{key}: already queued as {existing.get('queue_id')}; "
-                f"dispatching existing row (not creating a duplicate)"
+                f"{key}: already queued as {qid}; "
+                f"updated payload and dispatching existing row"
             )
             await self.dispatch_queue()
             live = self.queue_store.get(existing.get("queue_id") or "") or existing
@@ -5294,6 +5351,7 @@ class JobProcessor:
         queued; ``claim_next`` waits on issue key and on repo+source+target.
         """
         n = 0
+        # Accepted: only the oldest 500 queued rows are considered here.
         for rec in list(self.queue_store.list_items(status="queued", limit=500)):
             source = (rec.get("source") or "jira").strip().lower()
             if source != "jira":
@@ -7326,10 +7384,15 @@ class JobProcessor:
             )
 
         # Claim in-flight BEFORE slow git clone so poll cannot double-start
+        plan_agent = WorkflowRouter.agent_for_issue(
+            state.issue_summary or "",
+            state.description or "",
+            WorkflowType.PLANNING,
+        )
         task = AgentTask(
             description=f"Plan: {state.issue_key}",
             prompt=prompt,
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
+            agent=plan_agent,
             issue_key=state.issue_key,
             model=self._model_for_issue(state),
             backend=self._backend_for_issue(state),
@@ -7339,7 +7402,7 @@ class JobProcessor:
             status=TaskStatus.PLANNING,
             task=task,
             workflow_type="planning",
-            agent=WorkflowRouter.get_agent_for_workflow(WorkflowType.PLANNING),
+            agent=plan_agent,
             job_status="planning",
             started_at=workflow_start_time,
         )
@@ -7409,6 +7472,8 @@ class JobProcessor:
             return_code: Optional[int] = None,
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
+            budget_used: Optional[int] = None,
+            budget_cap: Optional[int] = None,
         ):
             self._record_agent_retry(
                 state.issue_key,
@@ -7421,6 +7486,8 @@ class JobProcessor:
                 session_id=session_id,
                 new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
             )
 
         from src.config import get_settings as _get_settings
@@ -7589,7 +7656,11 @@ class JobProcessor:
             kind_n = "build"
         is_test = kind_n == "test"
         wf = WorkflowType.TESTING if is_test else WorkflowType.EXECUTION
-        agent = WorkflowRouter.get_agent_for_workflow(wf)
+        agent = WorkflowRouter.agent_for_issue(
+            state.issue_summary or "",
+            state.description or "",
+            wf,
+        )
         logger.info(
             f"Starting {'test' if is_test else 'execution (build)'} workflow "
             f"for {state.issue_key}"
@@ -7734,6 +7805,8 @@ class JobProcessor:
             return_code: Optional[int] = None,
             session_id: Optional[str] = None,
             new_task_id: Optional[str] = None,
+            budget_used: Optional[int] = None,
+            budget_cap: Optional[int] = None,
         ):
             self._record_agent_retry(
                 state.issue_key,
@@ -7746,6 +7819,8 @@ class JobProcessor:
                 session_id=session_id,
                 new_task_id=new_task_id,
                 progress_percentage=state.progress_percentage,
+                budget_used=budget_used,
+                budget_cap=budget_cap,
             )
 
         from src.config import get_settings as _get_settings

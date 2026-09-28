@@ -109,6 +109,79 @@ class _SettingsCtx:
 
 
 @pytest.mark.asyncio
+async def test_timeout_and_error_share_one_retry_budget():
+    """Three timeouts plus errors must not become attempt 4/3, 5/3, 6/3."""
+    runner = AgentRunner()
+    seen: List[tuple] = []
+    calls = {"n": 0}
+
+    async def fail(*a, **k):
+        n = calls["n"]
+        calls["n"] += 1
+        return _fail_result(timed_out=(n % 2 == 0))
+
+    def on_retry(*args):
+        seen.append(args)
+
+    with _SettingsCtx(max_retries=3, delay=0.0, backoff=1.0):
+        with patch.object(runner, "run_agent", side_effect=fail):
+            await runner.run_agent_with_retry(
+                AgentTask(description="d", prompt="p", agent="a"),
+                max_retries=3,
+                max_incomplete_retries=0,
+                on_retry=on_retry,
+            )
+
+    assert len(seen) == 3
+    assert [row[8] for row in seen] == [1, 2, 3]
+    assert [row[9] for row in seen] == [3, 3, 3]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_comment_uses_its_own_cap():
+    runner = AgentRunner()
+    seen: List[tuple] = []
+
+    async def fail(*a, **k):
+        out = _fail_result()
+        out["incomplete"] = True
+        out["incomplete_reasons"] = ["open todos"]
+        return out
+
+    def on_retry(*args):
+        seen.append(args)
+
+    with _SettingsCtx(max_retries=3, delay=0.0, backoff=1.0):
+        with patch.object(runner, "run_agent", side_effect=fail):
+            await runner.run_agent_with_retry(
+                AgentTask(description="d", prompt="p", agent="a"),
+                max_retries=3,
+                max_incomplete_retries=2,
+                on_retry=on_retry,
+            )
+
+    assert [(row[2], row[8], row[9]) for row in seen] == [
+        ("incomplete_session", 1, 2),
+        ("incomplete_session", 2, 2),
+    ]
+
+
+def test_retry_progress_text_does_not_pass_its_cap():
+    from src.processor import _retry_progress_text
+
+    assert (
+        _retry_progress_text("timeout", 6, budget_used=2, budget_cap=3)
+        == "Retrying after timeout (attempt 2/3)"
+    )
+    assert (
+        _retry_progress_text(
+            "incomplete_session", 6, budget_used=2, budget_cap=2
+        )
+        == "Retrying after incomplete_session (attempt 2/2)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_max_retries_n_means_n_plus_one_attempts_on_always_fail():
     """while attempt <= max_retries → max_retries+1 run_agent calls when failing."""
     runner = AgentRunner()
@@ -434,8 +507,9 @@ async def test_on_retry_arg_order_and_task_id_mint():
 
     assert len(captured) == 1
     attempt_number, delay, reason, session_file, error_message, return_code, session_id, new_task_id = (
-        captured[0]
+        captured[0][:8]
     )
+    assert captured[0][8:] == (1, 1)
     assert attempt_number == 1
     assert delay == pytest.approx(0.02)  # 0.02 * 3^0
     assert reason == "error"

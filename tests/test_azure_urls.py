@@ -53,6 +53,18 @@ def test_parse_collection_url_keeps_or_omits_tfs():
         == "https://tfs.example.com/tfs/DefaultCollection"
     )
     assert (
+        parse_tfs_collection_url(
+            "https://TFS.example.com:443/tfs/DefaultCollection"
+        )
+        == "https://tfs.example.com/tfs/DefaultCollection"
+    )
+    assert (
+        parse_tfs_collection_url(
+            "http://tfs.example.com/tfs/DefaultCollection"
+        )
+        == "http://tfs.example.com/tfs/DefaultCollection"
+    )
+    assert (
         parse_tfs_collection_url("https://ado.example.com/DefaultCollection")
         == "https://ado.example.com/DefaultCollection"
     )

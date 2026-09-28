@@ -42,6 +42,7 @@ export type JobStatusFilter =
   | 'error'
   | 'completed'
   | 'cancelled'
+  | 'plan_ready'
 
 export function jobMatchesFilter(
   status: string,
@@ -72,6 +73,8 @@ export function jobMatchesFilter(
       return s === 'completed'
     case 'cancelled':
       return s === 'cancelled' || s === 'superseded'
+    case 'plan_ready':
+      return s === 'plan_ready'
     default:
       return true
   }

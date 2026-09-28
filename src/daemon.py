@@ -517,7 +517,7 @@ class JiraAgentDaemon:
                     limit_seconds = compute_stuck_limit_seconds(
                         timeout, retries, extra_attempts=extra
                     )
-                    # Clone phase (live context, no agent task id yet) uses git budget
+                    # Accepted: clone budget applies only before current_task_id is set.
                     live = False
                     try:
                         live = self.processor._is_live_processing(state.issue_key)

@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
+import { SessionWorkspacePage } from './SessionWorkspacePage'
 import { fetchOpencodeWorkspaces } from '../../api/client'
 import type { OpencodeWorkspaceItem, OpencodeWorkspaceList } from '../../api/types'
 import { useLive } from '../../app/live'
 import { PageHeader } from '../../ui/PageHeader'
 
 const PAGE_SIZE = 25
+
+/** `/sessions/2` is a list page. `/sessions/osw_…` is a workspace. */
+export function SessionsAtId() {
+  const { workspaceId = '' } = useParams()
+  if (listPageFromSegment(workspaceId)) return <SessionsPage />
+  return <SessionWorkspacePage />
+}
 
 function kindChips(kinds: string[]): string {
   const labels = kinds.map((k) => (k === '' ? 'legacy' : k))
@@ -15,21 +24,26 @@ function kindChips(kinds: string[]): string {
 export function SessionsPage() {
   const live = useLive()
   const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const page = listPageFromSegment(pathname.split('/').filter(Boolean)[1]) ?? 1
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [payload, setPayload] = useState<OpencodeWorkspaceList | null>(null)
-  const [page, setPage] = useState(1)
   const [error, setError] = useState<string | null>(null)
   const lastGenReload = useRef(0)
   const reqId = useRef(0)
 
+  const queryRef = useRef(query)
   useEffect(() => {
     const t = window.setTimeout(() => {
+      const changed = queryRef.current !== query
+      queryRef.current = query
       setDebouncedQuery(query.trim())
-      setPage(1)
+      const onLaterPage = (listPageFromSegment(pathname.split('/').filter(Boolean)[1]) ?? 1) > 1
+      if (changed && onLaterPage) navigate('/sessions')
     }, 250)
     return () => window.clearTimeout(t)
-  }, [query])
+  }, [navigate, pathname, query])
 
   const reload = useCallback(async (pageOverride?: number) => {
     const nextPage = pageOverride ?? page
@@ -47,12 +61,12 @@ export function SessionsPage() {
       const size = p.page_size ?? PAGE_SIZE
       const pages = Math.max(1, Math.ceil(total / size) || 1)
       const landed = p.page ?? nextPage
-      if (landed > pages) setPage(pages)
+      if (landed > pages) navigate(withListPage('/sessions', pages), { replace: true })
     } catch (e) {
       if (req !== reqId.current) return
       setError(e instanceof Error ? e.message : 'Load failed')
     }
-  }, [page, debouncedQuery])
+  }, [debouncedQuery, navigate, page])
 
   useEffect(() => {
     void reload()
@@ -98,7 +112,7 @@ export function SessionsPage() {
         <button
           type="button"
           disabled={currentPage <= 1}
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
+          onClick={() => navigate(withListPage('/sessions', currentPage - 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Prev
@@ -106,7 +120,7 @@ export function SessionsPage() {
         <button
           type="button"
           disabled={currentPage >= totalPages}
-          onClick={() => setPage((p) => p + 1)}
+          onClick={() => navigate(withListPage('/sessions', currentPage + 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Next

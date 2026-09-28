@@ -405,6 +405,7 @@ class WorkQueueStore:
     def recover_stuck_running(self, *, reason: str = "startup: orphaned running") -> int:
         """Re-queue durable ``running`` rows after a crash (no live worker)."""
         n = 0
+        # Accepted: startup requeue covers the oldest 500 running rows.
         for rec in list(self.list_items(status="running", limit=500)):
             qid = rec.get("queue_id")
             if not qid:
@@ -434,13 +435,21 @@ class WorkQueueStore:
             return rec
 
     def cancel(self, queue_id: str) -> bool:
-        rec = self.get(queue_id)
-        if not rec:
-            return False
-        if rec.get("status") != "queued":
-            return False
-        self.finish(queue_id, status="cancelled")
-        return True
+        """Cancel a row that is still queued.
+
+        The status check and the write share the lock. ``finish`` would
+        also cancel a row that ``claim_next`` already marked running.
+        """
+        with self._lock:
+            rec = self.get(queue_id)
+            if not rec or rec.get("status") != "queued":
+                return False
+            now = _now_iso()
+            rec["status"] = "cancelled"
+            rec["finished_at"] = now
+            rec["updated_at"] = now
+            self._write(rec)
+            return True
 
 
 work_queue_store = WorkQueueStore()

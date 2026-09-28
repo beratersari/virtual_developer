@@ -27,6 +27,8 @@ from src.dashboard.schemas import (
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
     IssueReportRequest,
+    AgentCreate,
+    AgentWrite,
     JiraConnectionTestRequest,
     PlanRefactorRequest,
     ScheduleCreateRequest,
@@ -736,6 +738,10 @@ def create_dashboard_app(
     @app.get("/api/jobs")
     def jobs(
         issue_key: Optional[str] = None,
+        status: Optional[str] = Query(
+            default=None,
+            description="Jobs pill: all, active, error, completed, cancelled",
+        ),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=25, ge=1, le=100),
         limit: Optional[int] = Query(
@@ -748,6 +754,7 @@ def create_dashboard_app(
         size = page_size if limit is None else limit
         return build_jobs(
             issue_key=issue_key,
+            status=status,
             page=page,
             page_size=size,
             processor=app.state.processor,
@@ -1466,6 +1473,53 @@ def create_dashboard_app(
     @app.get("/api/settings")
     def get_settings() -> dict:
         return build_settings_view().model_dump()
+
+    @app.get("/api/opencode-agents")
+    def opencode_agents() -> dict:
+        from src.opencode_agents import list_agents, sync_status
+
+        status = sync_status()
+        return {"agents": list_agents(), **status}
+
+    @app.post("/api/opencode-agents/sync")
+    def opencode_agents_sync() -> dict:
+        from src.opencode_agents import AgentFileError, sync_agents
+
+        try:
+            return sync_agents()
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/opencode-agents/{name}")
+    def opencode_agent(name: str) -> dict:
+        from src.opencode_agents import AgentFileError, read_agent
+
+        try:
+            text = read_agent(name)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"name": name, "text": text}
+
+    @app.put("/api/opencode-agents/{name}")
+    def opencode_agent_save(name: str, body: AgentWrite) -> dict:
+        from src.opencode_agents import AgentFileError, write_agent
+
+        try:
+            path = write_agent(name, body.text)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"name": name, "path": str(path)}
+
+    @app.post("/api/opencode-agents")
+    def opencode_agent_create(body: AgentCreate) -> dict:
+        from src.opencode_agents import AgentFileError, new_agent_template, write_agent
+
+        text = body.text.strip() or new_agent_template()
+        try:
+            path = write_agent(body.name, text, create=True)
+        except AgentFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"name": body.name.strip(), "path": str(path), "text": text}
 
     @app.post("/api/settings/gitlab/test")
     def settings_gitlab_test(body: GitlabConnectionTestRequest) -> dict:

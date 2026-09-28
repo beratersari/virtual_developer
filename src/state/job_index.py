@@ -78,7 +78,7 @@ def _like_contains(text: str) -> str:
 
 
 _STATUS_GROUPS = {
-    "completed": ("completed",),
+    "completed": ("completed", "plan_ready"),
     "error": ("error", "unknown"),
     "cancelled": ("cancelled", "canceled", "superseded"),
     "plan_ready": ("plan_ready",),

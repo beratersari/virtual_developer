@@ -302,12 +302,15 @@ export function fetchAnalyticsReviews(opts?: {
 
 export async function fetchJobs(opts?: {
   issueKey?: string
+  status?: string
   page?: number
   pageSize?: number
 }): Promise<JobsPayload> {
   const params = new URLSearchParams()
   const key = opts?.issueKey?.trim()
   if (key) params.set('issue_key', key)
+  const status = opts?.status?.trim()
+  if (status && status !== 'all' && status !== 'queue') params.set('status', status)
   if (opts?.page != null) params.set('page', String(opts.page))
   if (opts?.pageSize != null) params.set('page_size', String(opts.pageSize))
   const q = params.toString() ? `?${params.toString()}` : ''
@@ -405,6 +408,39 @@ export function deleteJobs(jobIds: string[], opts?: { deleteArtifacts?: boolean 
       delete_artifacts: opts?.deleteArtifacts !== false,
     }),
   })
+}
+
+export function fetchOpencodeAgents() {
+  return request<{ agents: string[]; synced?: boolean; pending?: string[] }>(
+    '/api/opencode-agents',
+  )
+}
+
+export function fetchOpencodeAgent(name: string) {
+  return request<{ name: string; text: string }>(
+    `/api/opencode-agents/${encodeURIComponent(name)}`,
+  )
+}
+
+export function saveOpencodeAgent(name: string, text: string) {
+  return request<{ name: string; path: string }>(
+    `/api/opencode-agents/${encodeURIComponent(name)}`,
+    { method: 'PUT', body: JSON.stringify({ text }) },
+  )
+}
+
+export function createOpencodeAgent(name: string, text = '') {
+  return request<{ name: string; path: string; text: string }>('/api/opencode-agents', {
+    method: 'POST',
+    body: JSON.stringify({ name, text }),
+  })
+}
+
+export function syncOpencodeAgents() {
+  return request<{ agents: string[]; opencode: string; claude: string }>(
+    '/api/opencode-agents/sync',
+    { method: 'POST', body: '{}' },
+  )
 }
 
 export function fetchSettings() {

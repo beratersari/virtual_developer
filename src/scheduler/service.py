@@ -70,9 +70,13 @@ def parse_schedule_at(raw: str) -> datetime:
 
 def _canonical_mode(mode: str) -> str:
     key = (mode or "").strip().lower()
-    if key not in _MODE_ALIASES:
-        raise ValueError("mode must be 'plan', 'build', or 'test'")
-    return _MODE_ALIASES[key]
+    from src.work_modes import lookup
+
+    if lookup(key):
+        return key
+    if key in _MODE_ALIASES:
+        return _MODE_ALIASES[key]
+    raise ValueError("mode must be 'plan', 'build', or 'test'")
 
 
 def build_issue_description(
@@ -664,7 +668,7 @@ def schedule_existing_issue(
                 logger.warning(f"{key}: add_labels soft-failed: {e}")
 
         ss = store or schedule_store
-        # Avoid duplicate pending schedules for the same issue
+        # Accepted: duplicate check looks at the newest 500 pending rows.
         for existing in ss.list_schedules(status="scheduled", limit=500):
             if (existing.get("issue_key") or "").upper() == key:
                 return {
@@ -1535,6 +1539,13 @@ def cancel_scheduled_job(
         return {"ok": True, "schedule": rec, "message": "Already cancelled"}
     _ = processor
     updated = ss.update(schedule_id, status="cancelled", error_message=None)
+    if not updated or (updated.get("status") or "").lower() != "cancelled":
+        live = updated or ss.get(schedule_id) or rec
+        return {
+            "ok": False,
+            "error": f"Cannot cancel schedule in status {live.get('status')}",
+            "schedule": live,
+        }
     return {"ok": True, "schedule": updated, "message": "Schedule cancelled"}
 
 
@@ -2329,7 +2340,12 @@ def _latest_queue_row_for_schedule(queue_store: Any, schedule_id: str) -> Option
         return None
     best: Optional[Dict[str, Any]] = None
     try:
-        rows = queue_store.list_items(limit=500)
+        # list_items keeps the oldest N. Finished rows are not deleted, so
+        # a newer skipped fire falls out of that window and stays dispatched.
+        if hasattr(queue_store, "_iter_records"):
+            rows = list(queue_store._iter_records())
+        else:
+            rows = queue_store.list_items(limit=500)
     except Exception:
         return None
     for rec in rows:
@@ -2349,11 +2365,13 @@ def _reopen_skipped_dispatched_schedules(
     *,
     now: Optional[datetime] = None,
 ) -> int:
-    """Turn ``dispatched`` + stale-reap skip back into a due schedule.
+    """Recover a ``dispatched`` schedule whose queue row never started work.
 
     Enqueue marks the schedule dispatched before the queue worker runs. If
-    the row is then reaped as skipped (never started), the UI stays
-    Dispatched and Run now is refused. Re-open those so the next tick fires.
+    the row is then skipped, the UI stays Dispatched and Run now is refused.
+    A stale reap is put back to ``scheduled`` so the next tick fires. Any
+    other skip (plan_ready wait, unknown event) becomes ``error`` so the
+    tick does not loop and Run now stays available.
     """
     qs = getattr(processor, "queue_store", None)
     if qs is None:
@@ -2361,6 +2379,7 @@ def _reopen_skipped_dispatched_schedules(
     when = (now or datetime.now()).isoformat(timespec="seconds")
     pending_keys: Set[str] = set()
     try:
+        # Accepted: recovery and the sibling guard both stop at 500 rows.
         for other in store.list_schedules(limit=500):
             st = (other.get("status") or "").lower()
             if st in ("scheduled", "dispatching"):
@@ -2397,19 +2416,30 @@ def _reopen_skipped_dispatched_schedules(
         qrow = _latest_queue_row_for_schedule(qs, sid)
         if not qrow or (qrow.get("status") or "") != "skipped":
             continue
-        if _STALE_REAP_SKIP not in str(qrow.get("error_message") or ""):
-            continue
-        store.update(
-            sid,
-            status="scheduled",
-            scheduled_at=when,
-            error_message=None,
-        )
+        msg = str(qrow.get("error_message") or "")
+        if _STALE_REAP_SKIP in msg:
+            store.update(
+                sid,
+                status="scheduled",
+                scheduled_at=when,
+                error_message=None,
+            )
+            logger.info(
+                f"Schedule {sid} re-opened after skipped queue "
+                f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+            )
+        else:
+            store.update(
+                sid,
+                expected_status="dispatched",
+                status="error",
+                error_message=(msg or "queue row skipped before work started")[:1000],
+            )
+            logger.info(
+                f"Schedule {sid} marked error after skipped queue "
+                f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
+            )
         n += 1
-        logger.info(
-            f"Schedule {sid} re-opened after skipped queue "
-            f"(issue={key or '-'} queue_id={qrow.get('queue_id') or '-'})"
-        )
     return n
 
 

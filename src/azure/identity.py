@@ -187,16 +187,21 @@ def fetch_bot_identity(
             text = f"{'http' if local else 'https'}://{text}"
         roots.extend(identity_roots(identity_root(text) or text))
     token = (pat or "").strip()
+    supplied_collection = bool((collection_url or "").strip() or collection)
     if not token and collection and hasattr(settings, "azure_pat_for_collection"):
         token = (settings.azure_pat_for_collection(collection) or "").strip()
+    if supplied_collection and not token:
+        # A hook-supplied collection that is not in AZURE_COLLECTION_PATS
+        # must not borrow the only configured PAT, and must not be fetched.
+        azure_warning(
+            f"mention identity skip unconfigured collection="
+            f"{collection or collection_url or '-'} host={host or '-'}"
+        )
+        return None
     if not token and host and hasattr(settings, "azure_pat_for_host"):
         parsed = urlparse(host if "://" in host else f"https://{host}")
         h = (parsed.hostname or host).lower()
         token = (settings.azure_pat_for_host(h) or "").strip()
-    if not token and hasattr(settings, "azure_collection_pat_map"):
-        mapping = settings.azure_collection_pat_map() or {}
-        if len(mapping) == 1:
-            token = str(next(iter(mapping.values())) or "").strip()
     cache_key = f"{collection or '|'.join(roots)}|{_token_fingerprint(token)}"
     if cache_key in _CACHE:
         return _CACHE[cache_key] or None

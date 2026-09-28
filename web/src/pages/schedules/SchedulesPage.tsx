@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   cancelSchedule,
   createSchedule,
@@ -23,6 +23,7 @@ import type {
   ScheduleMrPreview,
   SchedulePrPreview,
   SchedulePreview,
+  WorkMode,
 } from '../../api/types'
 import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
@@ -37,10 +38,37 @@ import {
   localNaiveNowIso,
   splitDatetimeLocal,
 } from '../../util/time'
+import { withListPage } from '../../util/listPageUrl'
+import {
+  canonicalSchedulePath,
+  parseSchedulePath,
+  scheduleHere,
+  schedulePath,
+  type ScheduleMode,
+  type ScheduleTracker,
+} from './scheduleTabUrl'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
 const CUSTOM_REPO = '__custom__'
 const PAGE_SIZE = 25
+const BUILTIN_MODES = ['build', 'plan', 'test']
+
+function scheduleModeNames(saved: WorkMode[] | undefined, current: string): string[] {
+  const names: string[] = []
+  const seen = new Set<string>()
+  const push = (raw: string) => {
+    const name = raw.trim().toLowerCase()
+    if (!name || seen.has(name)) return
+    seen.add(name)
+    names.push(name)
+  }
+  for (const row of saved || []) push(row.name)
+  if (!names.length) {
+    for (const name of BUILTIN_MODES) push(name)
+  }
+  push(current)
+  return names
+}
 
 /** Picker default for "schedule later" only — not used by Run now. */
 function defaultWhen(): string {
@@ -55,18 +83,28 @@ function scheduledAtForSubmit(when: string, dispatchNow: boolean): string {
 }
 
 export function SchedulesPage() {
+  const { mode: modeParam = '', tracker: trackerParam = '', page: pageParam = '' } = useParams()
+  const navigate = useNavigate()
+  const parsed = parseSchedulePath(modeParam, trackerParam, pageParam)
+  const mode: ScheduleMode = parsed?.mode ?? 'existing'
+  const tracker: ScheduleTracker = parsed?.tracker ?? 'jira'
+  const page = parsed?.page ?? 1
   const live = useLive()
   const [rows, setRows] = useState<ScheduleItem[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(PAGE_SIZE)
   const [error, setError] = useState<string | null>(null)
   const [cancelId, setCancelId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [mode, setMode] = useState<'existing' | 'new' | 'mr' | 'pr'>('existing')
   const lastGenReload = useRef(0)
   const reqId = useRef(0)
+
+  useEffect(() => {
+    const want = canonicalSchedulePath(modeParam, trackerParam, pageParam)
+    const here = scheduleHere(modeParam, trackerParam, pageParam)
+    if (here !== want) navigate(want, { replace: true })
+  }, [modeParam, navigate, pageParam, trackerParam])
 
   const reload = useCallback(async (pageOverride?: number) => {
     const nextPage = pageOverride ?? page
@@ -83,15 +121,13 @@ export function SchedulesPage() {
       setPageSize(size)
       setError(null)
       if (landed > pages) {
-        setPage(pages)
-        return
+        navigate(withListPage(schedulePath(mode, tracker), pages), { replace: true })
       }
-      if (landed !== nextPage) setPage(landed)
     } catch (e) {
       if (req !== reqId.current) return
       setError(e instanceof Error ? e.message : 'Load failed')
     }
-  }, [page])
+  }, [mode, navigate, page, tracker])
 
   useEffect(() => {
     void reload()
@@ -128,7 +164,7 @@ export function SchedulesPage() {
           className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
             mode === 'existing' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setMode('existing')}
+          onClick={() => navigate(schedulePath('existing'))}
         >
           Existing issue
         </button>
@@ -137,7 +173,7 @@ export function SchedulesPage() {
           className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
             mode === 'new' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setMode('new')}
+          onClick={() => navigate(schedulePath('new'))}
         >
           New issue
         </button>
@@ -146,7 +182,7 @@ export function SchedulesPage() {
           className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
             mode === 'mr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setMode('mr')}
+          onClick={() => navigate(schedulePath('mr'))}
         >
           Existing MR
         </button>
@@ -155,19 +191,31 @@ export function SchedulesPage() {
           className={`rounded-full px-3.5 py-1.5 text-sm font-medium ${
             mode === 'pr' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setMode('pr')}
+          onClick={() => navigate(schedulePath('pr'))}
         >
           Existing PR
         </button>
       </div>
       {mode === 'existing' ? (
-        <Existing onDone={() => { setPage(1); void reload(1) }} />
+        <Existing onDone={() => {
+          if (page > 1) navigate(schedulePath('existing', tracker))
+          else void reload(1)
+        }} />
       ) : mode === 'mr' ? (
-        <ExistingMr onDone={() => { setPage(1); void reload(1) }} />
+        <ExistingMr onDone={() => {
+          if (page > 1) navigate(schedulePath('mr'))
+          else void reload(1)
+        }} />
       ) : mode === 'pr' ? (
-        <ExistingPr onDone={() => { setPage(1); void reload(1) }} />
+        <ExistingPr onDone={() => {
+          if (page > 1) navigate(schedulePath('pr'))
+          else void reload(1)
+        }} />
       ) : (
-        <CreateNew onDone={() => { setPage(1); void reload(1) }} />
+        <CreateNew onDone={() => {
+          if (page > 1) navigate(schedulePath('new', tracker))
+          else void reload(1)
+        }} />
       )}
       {error && <p className="text-sm text-danger-text">{error}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-text-muted">
@@ -177,7 +225,7 @@ export function SchedulesPage() {
         <button
           type="button"
           disabled={currentPage <= 1}
-          onClick={() => setPage((p) => Math.max(1, p - 1))}
+          onClick={() => navigate(withListPage(schedulePath(mode, tracker), currentPage - 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Prev
@@ -185,7 +233,7 @@ export function SchedulesPage() {
         <button
           type="button"
           disabled={currentPage >= totalPages}
-          onClick={() => setPage((p) => p + 1)}
+          onClick={() => navigate(withListPage(schedulePath(mode, tracker), currentPage + 1))}
           className="vd-btn vd-btn-secondary px-3 py-1 text-xs"
         >
           Next
@@ -820,8 +868,10 @@ function azureCollectionsFromSettings(
 }
 
 function Existing({ onDone }: { onDone: () => void }) {
+  const { mode: modeParam = '', tracker: trackerParam = '' } = useParams()
+  const navigate = useNavigate()
+  const tracker = parseSchedulePath(modeParam, trackerParam)?.tracker ?? 'jira'
   const live = useLive()
-  const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
   const collections = azureCollectionsFromSettings(live.settings)
   const [collection, setCollection] = useState('')
   const [witId, setWitId] = useState('')
@@ -843,7 +893,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
   const [source, setSource] = useState('develop')
   const [target, setTarget] = useState('develop')
-  const [mode, setMode] = useState<'plan' | 'build' | 'test'>('build')
+  const [mode, setMode] = useState('build')
 
   const needsParams = Boolean(preview && !preview.template_valid)
 
@@ -886,7 +936,7 @@ function Existing({ onDone }: { onDone: () => void }) {
       if (lookedUpSource) setSource(lookedUpSource)
     }
     if (p.target_branch) setTarget(p.target_branch)
-    if (p.mode === 'plan' || p.mode === 'build' || p.mode === 'test') setMode(p.mode)
+    if ((p.mode || '').trim()) setMode(p.mode.trim().toLowerCase())
   }
 
   useEffect(() => {
@@ -984,7 +1034,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
           onClick={() => {
-            setTracker('jira')
+            navigate(schedulePath('existing', 'jira'))
             setPreview(null)
           }}
         >
@@ -996,7 +1046,7 @@ function Existing({ onDone }: { onDone: () => void }) {
             tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
           onClick={() => {
-            setTracker('azure')
+            navigate(schedulePath('existing', 'azure'))
             setPreview(null)
           }}
         >
@@ -1197,13 +1247,15 @@ function ProjectBranchFields({
   setSource: (v: string) => void
   target: string
   setTarget: (v: string) => void
-  mode: 'plan' | 'build' | 'test'
-  setMode: (v: 'plan' | 'build' | 'test') => void
+  mode: string
+  setMode: (v: string) => void
   showRemember: boolean
   rememberRepo: boolean
   setRememberRepo: (v: boolean) => void
 }) {
   const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
+  const live = useLive()
+  const modeNames = scheduleModeNames(live.settings?.work_modes, mode)
   return (
     <>
       {projects.length > 0 && (
@@ -1259,7 +1311,7 @@ function ProjectBranchFields({
       ) : null}
       <p className="quiet text-xs">
         Saved remotes live in{' '}
-        <Link to="/settings" className="text-accent-text hover:underline">
+        <Link to="/settings/jira" className="text-accent-text hover:underline">
           Settings → Projects
         </Link>
         .
@@ -1283,16 +1335,12 @@ function ProjectBranchFields({
       </label>
       <label className="field">
         <span>Mode</span>
-        <select
-          value={mode}
-          onChange={(e) => {
-            const v = e.target.value
-            setMode(v === 'plan' || v === 'test' ? v : 'build')
-          }}
-        >
-          <option value="build">build</option>
-          <option value="plan">plan</option>
-          <option value="test">test</option>
+        <select value={mode} onChange={(e) => setMode(e.target.value.trim().toLowerCase())}>
+          {modeNames.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
         </select>
       </label>
     </>
@@ -1300,8 +1348,10 @@ function ProjectBranchFields({
 }
 
 function CreateNew({ onDone }: { onDone: () => void }) {
+  const { mode: modeParam = '', tracker: trackerParam = '' } = useParams()
+  const navigate = useNavigate()
+  const tracker = parseSchedulePath(modeParam, trackerParam)?.tracker ?? 'jira'
   const live = useLive()
-  const [tracker, setTracker] = useState<'jira' | 'azure'>('jira')
   const collections = azureCollectionsFromSettings(live.settings)
   const [collection, setCollection] = useState('')
   const [azureProject, setAzureProject] = useState('')
@@ -1317,7 +1367,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
   const [source, setSource] = useState('develop')
   const [target, setTarget] = useState('develop')
-  const [mode, setMode] = useState<'plan' | 'build' | 'test'>('build')
+  const [mode, setMode] = useState('build')
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
   const [issueType, setIssueType] = useState('Task')
@@ -1448,7 +1498,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
           className={`rounded-full px-3 py-1 text-sm font-medium ${
             tracker === 'jira' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setTracker('jira')}
+          onClick={() => navigate(schedulePath('new', 'jira'))}
         >
           Jira
         </button>
@@ -1457,7 +1507,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
           className={`rounded-full px-3 py-1 text-sm font-medium ${
             tracker === 'azure' ? 'bg-accent text-[#1a0d08]' : 'text-text-muted hover:text-text'
           }`}
-          onClick={() => setTracker('azure')}
+          onClick={() => navigate(schedulePath('new', 'azure'))}
         >
           Azure work item
         </button>
