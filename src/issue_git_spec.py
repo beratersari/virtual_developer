@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 # First {params} ... {params} block (case-insensitive tag; body may span lines)
@@ -136,6 +136,8 @@ class IssueGitSpec:
     mode: Optional[str] = None  # "plan" | "build" | "test" when present
     model: Optional[str] = None  # model id; empty = settings default
     backend: Optional[str] = None  # opencode | codex | claude; empty = settings default
+    # (url, source, target) for every repository. Empty when the block has one.
+    repository_refs: Tuple[Tuple[str, str, str], ...] = ()
 
 
 class IssueGitConfigError(Exception):
@@ -458,6 +460,35 @@ def _extract_repo(text: str) -> str:
     return _normalize_repo_url(blob)
 
 
+def _repository_rows(text: str) -> List[Tuple[str, str, str]]:
+    """Every Repository / Source / Target group inside one params block."""
+    repo_line = re.compile(rf"(?i)^\s*(?:{_REPO_KEY})\s*:\s*(.+?)\s*$")
+    source_line = re.compile(rf"(?i)^\s*(?:{_SOURCE_KEY})\s*:\s*(\S+)")
+    target_line = re.compile(rf"(?i)^\s*(?:{_TARGET_KEY})\s*:\s*(\S+)")
+    rows: List[List[str]] = []
+    current: Optional[List[str]] = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        repo_m = repo_line.match(line)
+        if repo_m:
+            if current is not None:
+                rows.append(current)
+            current = [_extract_repo(f"Repository: {repo_m.group(1)}"), "", ""]
+            continue
+        if current is None:
+            continue
+        source_m = source_line.match(line)
+        if source_m and not current[1]:
+            current[1] = _normalize_branch(source_m.group(1))
+            continue
+        target_m = target_line.match(line)
+        if target_m and not current[2]:
+            current[2] = _normalize_branch(target_m.group(1))
+    if current is not None:
+        rows.append(current)
+    return [(row[0], row[1], row[2]) for row in rows if row[0]]
+
+
 def parse_issue_git_spec(
     summary: str = "",
     description: str = "",
@@ -547,6 +578,30 @@ def parse_issue_git_spec(
             "Örnek: `Target branch: develop` (uzakta zaten olmalı)"
         )
 
+    rows = _repository_rows(text)
+    if not rows:
+        rows = [(repo, source, target)]
+    else:
+        rows[0] = (repo, source, target)
+    for url, row_source, row_target in rows[1:]:
+        if not url or not _looks_like_git_url(url):
+            from src.operator_copy import params_bad_url_block
+
+            return None, params_bad_url_block(url or "(empty)")
+        if not row_source or not _looks_like_branch(row_source):
+            return None, (
+                "*Yaver* başlayamadı: ek depo için kaynak dal eksik.\n\n"
+                f"Depo: `{url}`"
+            )
+        if row_target and not _looks_like_branch(row_target):
+            return None, (
+                "*Yaver* başlayamadı: ek depo için hedef dal geçersiz.\n\n"
+                f"Depo: `{url}`"
+            )
+    normalized = tuple(
+        (url, row_source, row_target or row_source) for url, row_source, row_target in rows
+    )
+
     return (
         IssueGitSpec(
             repository_url=repo,
@@ -555,6 +610,7 @@ def parse_issue_git_spec(
             mode=mode,
             model=model or None,
             backend=backend or None,
+            repository_refs=normalized if len(normalized) > 1 else (),
         ),
         None,
     )

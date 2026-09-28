@@ -97,6 +97,60 @@ def parse_repository_sets(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def normalize_repository_refs(
+    primary: str,
+    source_branch: str = "",
+    target_branch: str = "",
+    extras: Any = None,
+) -> List[Dict[str, str]]:
+    """Primary first, then extras. Each row has its own source and target.
+
+    A string extra copies the primary branches. A dict may set
+    ``source_branch`` and ``target_branch``. Fewer than two URLs returns
+    an empty list so a one-repo job stays the normal path.
+    """
+    source = (source_branch or "").strip()
+    target = (target_branch or "").strip()
+    raws: List[Any] = [{"url": primary, "source_branch": source, "target_branch": target}]
+    if isinstance(extras, str):
+        raws.append(extras)
+    elif isinstance(extras, list):
+        raws.extend(extras)
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in raws:
+        if isinstance(raw, dict):
+            url = _normalize_repo_url(
+                str(raw.get("url") or raw.get("repository_url") or "")
+            )
+            row_source = str(raw.get("source_branch") or source).strip()
+            row_target = str(raw.get("target_branch") or target).strip()
+        else:
+            url = _normalize_repo_url(str(raw or ""))
+            row_source = source
+            row_target = target
+        if not url or not _looks_like_git_url(url):
+            continue
+        if len(url) > 500:
+            url = url[:500]
+        key = _url_key(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "url": url,
+                "source_branch": row_source[:255],
+                "target_branch": row_target[:255],
+            }
+        )
+        if len(out) >= MAX_REPOS_IN_JOB:
+            break
+    if len(out) < 2:
+        return []
+    return out
+
+
 def repository_sets_to_json(raw: Any) -> str:
     items = parse_repository_sets(raw)
     if not items:

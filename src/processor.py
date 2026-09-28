@@ -350,12 +350,39 @@ class JobProcessor:
     def _repository_urls_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Dashboard multi-repo list. A Jira poll event does not send this."""
         raw = (event or {}).get("repository_urls")
-        if not isinstance(raw, list):
+        urls = [str(u).strip() for u in raw if str(u).strip()] if isinstance(raw, list) else []
+        if len(urls) >= 2:
+            out: Dict[str, Any] = {"repository_urls": urls[:12]}
+            refs = (event or {}).get("repository_refs")
+            if isinstance(refs, list) and refs:
+                from src.dashboard.repo_sets import normalize_repository_refs
+
+                primary = str((event or {}).get("repository_url") or urls[0])
+                normalized = normalize_repository_refs(primary, "", "", refs)
+                if normalized:
+                    out["repository_refs"] = normalized
+                    out["repository_urls"] = [row["url"] for row in normalized]
+            return out
+        issue = (event or {}).get("issue") or {}
+        fields = issue.get("fields") or {}
+        summary = str(fields.get("summary") or "")
+        description = fields.get("description")
+        if not isinstance(description, str) or not description.strip():
             return {}
-        urls = [str(u).strip() for u in raw if str(u).strip()]
-        if len(urls) < 2:
+        from src.issue_git_spec import parse_issue_git_spec
+
+        spec, _err = parse_issue_git_spec(summary, description)
+        refs = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
+        if len(refs) < 2:
             return {}
-        return {"repository_urls": urls[:12]}
+        rows = [
+            {"url": url, "source_branch": source, "target_branch": target}
+            for url, source, target in refs
+        ]
+        return {
+            "repository_urls": [row["url"] for row in rows],
+            "repository_refs": rows,
+        }
 
     def _with_repo_layout(self, issue_key: str, prompt: str) -> str:
         git = self._git_for(issue_key)
@@ -370,7 +397,12 @@ class JobProcessor:
         ]
         for child in children:
             folder = getattr(getattr(child, "temp_dir", None), "name", "") or "?"
-            lines.append(f"- `{folder}` — {getattr(child, 'remote_url', '')}")
+            work = getattr(child, "work_branch", None) or getattr(child, "source_branch", "")
+            target = getattr(child, "target_branch", "")
+            lines.append(
+                f"- `{folder}` — {getattr(child, 'remote_url', '')} "
+                f"(`{work}` → `{target}`)"
+            )
         return prompt.rstrip() + "\n\n" + "\n".join(lines) + "\n"
 
     def _azure_workitem_meta_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -1493,13 +1525,27 @@ class JobProcessor:
                 raw = str(getattr(child, "remote_url", "") or "").strip()
                 if raw:
                     urls.append(raw)
+        refs = None
         if len(urls) < 2:
             st = self.state_manager.get_state(issue_key)
             meta = dict((st.metadata if st else None) or {})
             extra = meta.get("repository_urls")
             if isinstance(extra, list):
                 urls = [str(u).strip() for u in extra if str(u).strip()]
-        return multi_session_scope(urls)
+            saved = meta.get("repository_refs")
+            if isinstance(saved, list):
+                refs = saved
+        elif len(children) > 1:
+            refs = [
+                {
+                    "url": getattr(child, "remote_url", ""),
+                    "source_branch": getattr(child, "work_branch", None)
+                    or getattr(child, "source_branch", ""),
+                    "target_branch": getattr(child, "target_branch", ""),
+                }
+                for child in children
+            ]
+        return multi_session_scope(urls, refs)
 
     def _session_kind_for_issue(self, issue_key: str) -> str:
         """``plan`` / ``build`` / ``test`` map for this issue's current workflow."""
@@ -4625,22 +4671,40 @@ class JobProcessor:
         src = (spec.source_branch or "").strip()
         tgt = (spec.target_branch or "").strip()
         extra_urls: list = []
+        extra_refs: list = []
         if st is not None:
             raw_urls = (st.metadata or {}).get("repository_urls")
             if isinstance(raw_urls, list):
                 extra_urls = [str(u).strip() for u in raw_urls if str(u).strip()]
-        claim_urls = extra_urls or [spec.repository_url]
-        if src and src != tgt and not GitManager._is_primary_base(src):
-            for claim_url in claim_urls:
-                if not self._claim_source_branch(
-                    issue_key, claim_url, spec.source_branch
-                ):
-                    self._release_source_branch(issue_key)
-                    raise GitSourceBranchError(
-                        f"{issue_key}: another job is already using source branch "
-                        f"`{spec.source_branch}` on `{claim_url}`. Wait for it to "
-                        f"finish or use a distinct Source branch."
-                    )
+            raw_refs = (st.metadata or {}).get("repository_refs")
+            if isinstance(raw_refs, list):
+                extra_refs = [row for row in raw_refs if isinstance(row, dict)]
+        claims = extra_refs or [
+            {
+                "url": url,
+                "source_branch": spec.source_branch,
+                "target_branch": spec.target_branch,
+            }
+            for url in (extra_urls or [spec.repository_url])
+        ]
+        for row in claims:
+            claim_url = str(row.get("url") or row.get("repository_url") or "").strip()
+            claim_src = str(row.get("source_branch") or src).strip()
+            claim_tgt = str(row.get("target_branch") or tgt).strip()
+            if (
+                not claim_url
+                or not claim_src
+                or claim_src == claim_tgt
+                or GitManager._is_primary_base(claim_src)
+            ):
+                continue
+            if not self._claim_source_branch(issue_key, claim_url, claim_src):
+                self._release_source_branch(issue_key)
+                raise GitSourceBranchError(
+                    f"{issue_key}: another job is already using source branch "
+                    f"`{claim_src}` on `{claim_url}`. Wait for it to "
+                    f"finish or use a distinct Source branch."
+                )
 
         try:
             git = GitManager(
@@ -4649,7 +4713,8 @@ class JobProcessor:
                 source_branch=spec.source_branch,
                 target_branch=spec.target_branch,
                 keep_source_work_branch=keep_source_work_branch,
-                repository_urls=extra_urls,
+                repository_urls=extra_urls or None,
+                repository_refs=extra_refs or None,
             )
         except GitCancelledError:
             logger.info(f"{issue_key}: clone aborted because the job was cancelled")
@@ -5372,8 +5437,25 @@ class JobProcessor:
         work = GitManager.resolve_work_branch_name(key, src, tgt) if (src or tgt) else ""
         lock = workspace_lock_key(repo, work, tgt)
         lock_keys = [lock] if lock else []
+        raw_refs = event.get("repository_refs") if isinstance(event, dict) else None
         raw_urls = event.get("repository_urls") if isinstance(event, dict) else None
-        if isinstance(raw_urls, list) and work and tgt:
+        if isinstance(raw_refs, list) and len(raw_refs) >= 2:
+            for row in raw_refs:
+                if not isinstance(row, dict):
+                    continue
+                row_src = str(row.get("source_branch") or src).strip()
+                row_tgt = str(row.get("target_branch") or tgt).strip()
+                row_work = (
+                    GitManager.resolve_work_branch_name(key, row_src, row_tgt)
+                    if (row_src or row_tgt)
+                    else work
+                )
+                child_lock = workspace_lock_key(
+                    str(row.get("url") or ""), row_work, row_tgt
+                )
+                if child_lock and child_lock not in lock_keys:
+                    lock_keys.append(child_lock)
+        elif isinstance(raw_urls, list) and work and tgt:
             for raw_url in raw_urls:
                 child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
                 if child_lock and child_lock not in lock_keys:

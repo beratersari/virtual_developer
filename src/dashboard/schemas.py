@@ -159,6 +159,8 @@ class ScheduleCreateRequest(BaseModel):
     )
     # Extra clones for this dashboard job only. The Jira description stays one repo.
     repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    # Per-repository source and target. Omitted branches copy the job branches.
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 class ScheduleMrRequest(BaseModel):
@@ -201,6 +203,8 @@ class ScheduleExistingRequest(BaseModel):
     target_branch: str = ""
     mode: str = ""
     source_branch_mode: str = ""
+    repository_urls: List[str] = Field(default_factory=list, max_length=12)
+    repository_refs: List[Dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 class ScheduleItem(BaseModel):

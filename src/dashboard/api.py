@@ -855,6 +855,7 @@ def create_dashboard_app(
             collection_url=getattr(body, "collection_url", "") or "",
             azure_project=getattr(body, "azure_project", "") or "",
             repository_urls=list(getattr(body, "repository_urls", None) or []),
+            repository_refs=list(getattr(body, "repository_refs", None) or []),
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -929,6 +930,8 @@ def create_dashboard_app(
             target_branch=body.target_branch or "",
             mode=body.mode or "",
             source_branch_mode=body.source_branch_mode or "",
+            repository_urls=list(getattr(body, "repository_urls", None) or []),
+            repository_refs=list(getattr(body, "repository_refs", None) or []),
             store=schedule_store,
         )
         if not result.get("ok"):

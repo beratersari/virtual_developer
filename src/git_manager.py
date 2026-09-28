@@ -113,6 +113,7 @@ class GitManager:
         target_branch: Optional[str] = None,
         keep_source_work_branch: bool = False,
         repository_urls: Optional[list] = None,
+        repository_refs: Optional[list] = None,
         workspace_dir: Optional[Path] = None,
         register_live: bool = True,
     ):
@@ -122,6 +123,7 @@ class GitManager:
         self.repository_urls = [
             str(u).strip() for u in (repository_urls or []) if str(u).strip()
         ]
+        self.repository_refs = list(repository_refs or [])
         self.repo_checkouts: List["GitManager"] = []
         self._register_live_on_setup = bool(register_live)
         self.remote_enabled: bool = False
@@ -153,7 +155,7 @@ class GitManager:
 
         if issue_key:
             if (
-                len(self.repository_urls) > 1
+                len(self._repository_specs()) > 1
                 and self.workspace_dir is None
             ):
                 self._setup_multi_repo_workspace()
@@ -310,31 +312,33 @@ class GitManager:
         if self._register_live_on_setup:
             self._register_live()
         try:
-            first = self.normalize_remote_url(self.repository_urls[0])
-            if not first:
+            specs = self._repository_specs()
+            if not specs:
                 raise GitCloneError(
                     "*Yaver* could not clone: no repository URL was provided."
                 )
-            self.remote_url = first
-            self.remote_name = self._extract_remote_name(first)
+            first_url = specs[0]["url"]
+            self.remote_url = first_url
+            self.remote_name = self._extract_remote_name(first_url)
             self.remote_enabled = True
-            if not self.target_branch:
+            if not (specs[0]["target_branch"] or self.target_branch):
                 raise GitTargetBranchError(
                     "*Yaver* could not prepare the workspace: no target branch."
                 )
-            if not self.source_branch:
-                self.source_branch = self.target_branch
+            first = specs[0]
+            self.source_branch = first["source_branch"] or self.source_branch
+            self.target_branch = first["target_branch"] or self.target_branch
             self.work_branch = self._resolve_work_branch_name(self.issue_key)
             self.temp_dir = self._multi_repo_root()
             self.temp_dir.mkdir(parents=True, exist_ok=True)
             used: set[str] = set()
-            for url in self.repository_urls:
-                slug = self._child_dirname(url, used)
+            for spec in specs:
+                slug = self._child_dirname(spec["url"], used)
                 child = GitManager(
                     issue_key=self.issue_key,
-                    remote_url=url,
-                    source_branch=self.source_branch,
-                    target_branch=self.target_branch,
+                    remote_url=spec["url"],
+                    source_branch=spec["source_branch"],
+                    target_branch=spec["target_branch"],
                     keep_source_work_branch=self.keep_source_work_branch,
                     workspace_dir=self.temp_dir / slug,
                     register_live=False,
@@ -354,18 +358,77 @@ class GitManager:
             self._unregister_live()
             raise
 
-    def _multi_repo_root(self) -> Path:
-        from src.paths import resolve_temp_dir_base
+    def _repository_specs(self) -> List[Dict[str, str]]:
+        """One entry per clone: url, source branch, target branch."""
+        raw_refs = getattr(self, "repository_refs", None) or []
+        specs: List[Dict[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(url: str, source: str, target: str) -> None:
+            normalized = self.normalize_remote_url(url)
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            specs.append(
+                {
+                    "url": normalized,
+                    "source_branch": (source or self.source_branch or "").strip(),
+                    "target_branch": (target or self.target_branch or "").strip(),
+                }
+            )
+
+        if isinstance(raw_refs, list):
+            for item in raw_refs:
+                if isinstance(item, str):
+                    _add(item, self.source_branch, self.target_branch)
+                elif isinstance(item, dict):
+                    _add(
+                        str(item.get("url") or item.get("repository_url") or ""),
+                        str(item.get("source_branch") or self.source_branch or ""),
+                        str(item.get("target_branch") or self.target_branch or ""),
+                    )
+        if len(specs) < 2:
+            specs = []
+            seen = set()
+            for url in self.repository_urls:
+                _add(url, self.source_branch, self.target_branch)
+        return specs
+
+    def _repository_identity_parts(self) -> List[tuple]:
         from src.state.session_bind_store import normalize_branch, normalize_repo_key
 
-        keys = "|".join(
-            sorted(normalize_repo_key(u) for u in self.repository_urls)
-        )
-        work = normalize_branch(self.work_branch or "")
-        target = normalize_branch(self.target_branch or "")
-        digest = hashlib.sha256(
-            f"{keys}\0{work}\0{target}".encode("utf-8")
-        ).hexdigest()[:12]
+        parts = []
+        for spec in self._repository_specs():
+            work = self.resolve_work_branch_name(
+                self.issue_key,
+                spec["source_branch"],
+                spec["target_branch"],
+                keep_source=self.keep_source_work_branch,
+            )
+            parts.append(
+                (
+                    normalize_repo_key(spec["url"]),
+                    normalize_branch(work),
+                    normalize_branch(spec["target_branch"]),
+                )
+            )
+        parts.sort()
+        return parts
+
+    def _multi_repo_root(self) -> Path:
+        from src.paths import resolve_temp_dir_base
+
+        parts = self._repository_identity_parts()
+        works = {part[1] for part in parts}
+        targets = {part[2] for part in parts}
+        if len(works) == 1 and len(targets) == 1:
+            material = (
+                f"{'|'.join(part[0] for part in parts)}\0"
+                f"{next(iter(works))}\0{next(iter(targets))}"
+            )
+        else:
+            material = "|".join(f"{key}\0{work}\0{target}" for key, work, target in parts)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
         base_temp = resolve_temp_dir_base(settings.temp_dir_base)
         base_temp.mkdir(parents=True, exist_ok=True)
         return self._safe_under_temp_base(base_temp, f"multi_{digest}")

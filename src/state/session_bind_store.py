@@ -134,8 +134,35 @@ def bind_compatible_with_kind(rec: Optional[Dict[str, Any]], kind: str) -> bool:
     return rec_kind == want
 
 
-def multi_session_scope(repository_urls: Any) -> str:
-    """Bind scope for a workspace of two or more repositories. Empty for one."""
+def multi_session_scope(repository_urls: Any, refs: Any = None) -> str:
+    """Bind scope for a workspace of two or more repositories. Empty for one.
+
+    The same branches keep the repo-only scope so a later job resumes that
+    chat. Different branches per repository get their own scope.
+    """
+    branched: List[str] = []
+    seen_branch: set[str] = set()
+    if isinstance(refs, (list, tuple)):
+        for item in refs:
+            if not isinstance(item, dict):
+                continue
+            key = normalize_repo_key(
+                str(item.get("url") or item.get("repository_url") or "")
+            )
+            work = normalize_branch(
+                str(item.get("work_branch") or item.get("source_branch") or "")
+            )
+            target = normalize_branch(str(item.get("target_branch") or ""))
+            if not key or not work or not target or key in seen_branch:
+                continue
+            seen_branch.add(key)
+            branched.append(f"{key}@{work}>{target}")
+    if len(branched) >= 2:
+        tails = {bit.split("@", 1)[1] for bit in branched}
+        if len(tails) == 1:
+            keys = sorted(bit.split("@", 1)[0] for bit in branched)
+            return "multi:" + "|".join(keys)
+        return "multi:" + "|".join(sorted(branched))
     keys: List[str] = []
     seen: set[str] = set()
     raw_urls = repository_urls if isinstance(repository_urls, (list, tuple)) else []

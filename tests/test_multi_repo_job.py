@@ -120,8 +120,152 @@ def test_dashboard_job_stores_extra_repos_outside_the_jira_description(tmp_path)
         "https://gitlab.example.com/acme/web.git",
     ]
     desc = client.create_issue.call_args.kwargs.get("description") or ""
-    assert desc.count("Repository:") == 1
-    assert "acme/web" not in desc
+    assert desc.count("Repository:") == 2
+    assert "acme/web" in desc
+    assert "Source branch: develop" in desc
+
+
+def test_schedule_keeps_a_branch_for_each_repository(tmp_path):
+    from src.scheduler.service import create_scheduled_job
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.create_issue.return_value = {"key": "KAN-21"}
+    client.transition_to_in_progress.return_value = True
+    out = create_scheduled_job(
+        title="Split branches",
+        description="add the field",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        scheduled_at=(datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds"),
+        project_key="KAN",
+        source_branch_mode="custom",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "develop",
+                "target_branch": "develop",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "feature/web-side",
+                "target_branch": "main",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    refs = out["schedule"]["repository_refs"]
+    assert refs[1]["source_branch"] == "feature/web-side"
+    assert refs[1]["target_branch"] == "main"
+    assert refs[0]["url"].endswith("/api.git")
+
+
+def test_existing_issue_schedule_keeps_each_repository_branch(tmp_path):
+    from src.scheduler.service import schedule_existing_issue
+    from src.state.schedule_store import ScheduleStore
+
+    store = ScheduleStore(schedules_dir=tmp_path / "schedules")
+    client = MagicMock()
+    client.get_issue.return_value = {
+        "key": "KAN-5",
+        "fields": {
+            "summary": "Existing",
+            "description": (
+                "{params}\n"
+                "Repository: https://gitlab.example.com/acme/api.git\n"
+                "Source branch: develop\n"
+                "Target branch: develop\n"
+                "Mode: build\n"
+                "{params}"
+            ),
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Task"},
+            "labels": [],
+        },
+    }
+    client.transition_to_in_progress.return_value = True
+    client.add_labels.return_value = True
+    client.update_issue.return_value = True
+    out = schedule_existing_issue(
+        "KAN-5",
+        scheduled_at="2026-12-01T10:00:00",
+        repository_url="https://gitlab.example.com/acme/api.git",
+        source_branch="develop",
+        target_branch="develop",
+        mode="build",
+        source_branch_mode="custom",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "develop",
+                "target_branch": "develop",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "feature/web-side",
+                "target_branch": "main",
+            },
+        ],
+        jira_client=client,
+        store=store,
+    )
+    assert out["ok"] is True
+    refs = out["schedule"]["repository_refs"]
+    assert refs[1]["source_branch"] == "feature/web-side"
+    assert refs[1]["target_branch"] == "main"
+    text = out["schedule"]["issue_description"]
+    assert text.count("Repository:") == 2
+    assert "acme/web" in text
+    assert "Source branch: feature/web-side" in text
+    assert "Target branch: main" in text
+
+
+def test_each_repository_keeps_its_own_branches(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "temp_dir_base", str(tmp_path))
+
+    def fake_clone(self):
+        assert self.temp_dir is not None
+        (self.temp_dir / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(GitManager, "_clone_into_temp", fake_clone)
+    git = GitManager(
+        issue_key="KAN-21",
+        remote_url="https://gitlab.example.com/acme/api.git",
+        source_branch="develop",
+        target_branch="develop",
+        repository_refs=[
+            {
+                "url": "https://gitlab.example.com/acme/api.git",
+                "source_branch": "develop",
+                "target_branch": "develop",
+            },
+            {
+                "url": "https://gitlab.example.com/acme/web.git",
+                "source_branch": "feature/web-side",
+                "target_branch": "main",
+            },
+        ],
+    )
+    by_name = {child.temp_dir.name: child for child in git.repo_checkouts}
+    assert by_name["api"].source_branch == "develop"
+    assert by_name["web"].source_branch == "feature/web-side"
+    assert by_name["web"].target_branch == "main"
+    same = GitManager(
+        issue_key="KAN-21",
+        remote_url="https://gitlab.example.com/acme/api.git",
+        source_branch="develop",
+        target_branch="develop",
+        repository_urls=[
+            "https://gitlab.example.com/acme/api.git",
+            "https://gitlab.example.com/acme/web.git",
+        ],
+    )
+    assert git.temp_dir is not None and same.temp_dir is not None
+    assert git.temp_dir.name != same.temp_dir.name
 
 
 def test_multi_repo_workspace_clones_each_repo_under_one_root(tmp_path, monkeypatch):

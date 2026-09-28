@@ -132,6 +132,7 @@ class ScheduleStore:
         azure_repository: str = "",
         azure_repository_id: str = "",
         repository_urls: Optional[list] = None,
+        repository_refs: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Persist a schedule after the Jira issue is known (created or existing)."""
         schedule_id = f"sched_{uuid.uuid4().hex[:12]}"
@@ -174,6 +175,11 @@ class ScheduleStore:
                 str(u).strip()
                 for u in (repository_urls or [])
                 if str(u).strip()
+            ][:12],
+            "repository_refs": [
+                row
+                for row in (repository_refs or [])
+                if isinstance(row, dict) and str(row.get("url") or "").strip()
             ][:12],
             "created_at": now,
             "updated_at": now,
