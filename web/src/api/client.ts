@@ -178,6 +178,7 @@ export function normalizeJob(raw: Partial<JobItem> | Record<string, unknown>): J
     commit_sha: j.commit_sha ?? null,
     commit_subject: j.commit_subject ?? null,
     commit_url: j.commit_url ?? null,
+    deliveries: j.deliveries || [],
     delivery_status: j.delivery_status ?? null,
     delivery_note: j.delivery_note ?? null,
     working_directory: j.working_directory ?? null,
@@ -645,6 +646,9 @@ export function createSchedule(body: ScheduleCreateBody) {
   if (body.backend) payload.backend = body.backend
   if (body.collection_url) payload.collection_url = body.collection_url
   if (body.azure_project) payload.azure_project = body.azure_project
+  if (body.repository_urls && body.repository_urls.length > 1) {
+    payload.repository_urls = body.repository_urls
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem

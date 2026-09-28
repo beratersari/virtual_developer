@@ -211,6 +211,7 @@ export type SettingsPayload = {
   trigger_mentions?: string
   trigger_assignee_names?: string
   project_repositories?: ProjectRepository[]
+  repository_sets?: RepositorySet[]
   work_modes?: WorkMode[]
   base_dir?: string
   data_dir?: string
@@ -226,6 +227,7 @@ export type GitlabHostCredentialDraft = {
 
 export type GitDelivery = {
   job_id?: string | null
+  repository_url?: string | null
   feature_branch?: string | null
   merge_request_url?: string | null
   commit_sha?: string | null
@@ -279,6 +281,7 @@ export type JobItem = {
   commit_sha?: string | null
   commit_subject?: string | null
   commit_url?: string | null
+  deliveries?: GitDelivery[]
   delivery_status?: string | null
   delivery_note?: string | null
   working_directory?: string | null
@@ -539,10 +542,16 @@ export type SchedulePrBody = {
   backend?: string
 }
 
+export type RepositorySet = {
+  name: string
+  repositories: string[]
+}
+
 export type ScheduleCreateBody = {
   title: string
   description?: string
   repository_url: string
+  repository_urls?: string[]
   source_branch?: string
   target_branch: string
   mode: string
@@ -767,6 +776,7 @@ export type SettingsPatch = Partial<
     | 'agent_backend'
     | 'gitlab_allowed_hosts'
     | 'project_repositories'
+    | 'repository_sets'
     | 'work_modes'
     | 'trigger_mentions'
     | 'trigger_assignee_names'

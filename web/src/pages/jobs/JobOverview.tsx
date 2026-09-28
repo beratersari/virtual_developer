@@ -7,6 +7,8 @@ import { LiveDot } from '../../ui/LiveDot'
 import { MetaCard } from '../../ui/MetaCard'
 import { JiraLinkedText } from '../../ui/JiraLinkedText'
 import { StatusBadge } from '../../ui/StatusBadge'
+import { groupDeliveries } from './repoDeliveries'
+import type { GitDelivery } from '../../api/types'
 
 export function JobOverview({
   job,
@@ -21,11 +23,21 @@ export function JobOverview({
 }) {
   const retries: JobRetryAttempt[] = job.retry_attempts || []
   const worker = resolveJobWorker(job, fallbackWorker)
-  const showDelivery =
-    job.merge_request_url ||
-    job.commit_url ||
-    job.commit_sha ||
-    (job.feature_branch && job.delivery_status !== 'no_new_commits')
+  const deliveryRows: GitDelivery[] =
+    job.deliveries && job.deliveries.length > 0
+      ? job.deliveries
+      : job.merge_request_url || job.commit_url || job.commit_sha || job.feature_branch
+        ? [
+            {
+              feature_branch: job.feature_branch,
+              merge_request_url: job.merge_request_url,
+              commit_sha: job.commit_sha,
+              commit_subject: job.commit_subject,
+              commit_url: job.commit_url,
+            },
+          ]
+        : []
+  const deliveryGroups = groupDeliveries(deliveryRows)
 
   return (
     <div className="space-y-6 text-sm">
@@ -133,50 +145,68 @@ export function JobOverview({
         </div>
       )}
 
-      {showDelivery && (
-        <div className="grid gap-3 border-t border-border pt-4 sm:grid-cols-2 lg:grid-cols-3">
-          {job.feature_branch && <MetaCard label="Branch" mono value={job.feature_branch} />}
-          {(job.commit_url || job.commit_sha) && (
-            <MetaCard
-              label="Commit"
-              className="sm:col-span-2"
-              valueNode={
-                job.commit_url ? (
-                  <div className="space-y-1">
-                    <a
-                      href={job.commit_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="break-all text-sm text-accent-text hover:underline"
-                    >
-                      {job.commit_sha ? job.commit_sha.slice(0, 12) : 'Open commit'}
-                    </a>
-                    {job.commit_subject && (
-                      <div className="break-words text-xs text-text-secondary">{job.commit_subject}</div>
-                    )}
-                  </div>
-                ) : (
-                  <span className="font-mono text-xs">{job.commit_sha}</span>
-                )
-              }
-            />
-          )}
-          {job.merge_request_url && (
-            <MetaCard
-              label="Merge request"
-              className="sm:col-span-2 lg:col-span-3"
-              valueNode={
-                <a
-                  href={job.merge_request_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="break-all text-sm text-accent-text hover:underline"
+      {deliveryGroups.length > 0 && (
+        <div className="space-y-4 border-t border-border pt-4">
+          {deliveryGroups.map((group) => (
+            <div key={group.repo} className="space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+                {group.repo}
+              </div>
+              {group.rows.map((row, index) => (
+                <div
+                  key={`${group.repo}-${row.commit_sha || row.merge_request_url || index}`}
+                  className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
                 >
-                  {job.merge_request_url}
-                </a>
-              }
-            />
-          )}
+                  {row.feature_branch && (
+                    <MetaCard label="Branch" mono value={row.feature_branch} />
+                  )}
+                  {(row.commit_url || row.commit_sha) && (
+                    <MetaCard
+                      label="Commit"
+                      className="sm:col-span-2"
+                      valueNode={
+                        row.commit_url ? (
+                          <div className="space-y-1">
+                            <a
+                              href={row.commit_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="break-all text-sm text-accent-text hover:underline"
+                            >
+                              {row.commit_sha ? row.commit_sha.slice(0, 12) : 'Open commit'}
+                            </a>
+                            {row.commit_subject && (
+                              <div className="break-words text-xs text-text-secondary">
+                                {row.commit_subject}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="font-mono text-xs">{row.commit_sha}</span>
+                        )
+                      }
+                    />
+                  )}
+                  {row.merge_request_url && (
+                    <MetaCard
+                      label="Merge request"
+                      className="sm:col-span-2 lg:col-span-3"
+                      valueNode={
+                        <a
+                          href={row.merge_request_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="break-all text-sm text-accent-text hover:underline"
+                        >
+                          {row.merge_request_url}
+                        </a>
+                      }
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
       )}
 
