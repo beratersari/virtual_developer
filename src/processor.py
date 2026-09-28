@@ -9222,6 +9222,9 @@ class JobProcessor:
                 reason = raw.strip() if isinstance(raw, str) and raw.strip() else (
                     "git push failed (see daemon log)"
                 )
+                remote = str(getattr(git, "remote_url", "") or "").strip()
+                if remote and remote not in reason:
+                    reason = f"{remote}: {reason}"
                 logger.warning(
                     f"Push failed or remote not configured for {state.issue_key}: "
                     f"{reason[:200]}"

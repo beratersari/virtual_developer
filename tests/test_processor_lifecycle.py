@@ -153,6 +153,35 @@ def test_failed_multi_repo_run_still_pushes_a_repo_that_moved(processor, state_m
     assert idle.pushed and not idle.mr_opened
 
 
+def test_multi_repo_push_failure_names_the_repository(processor, state_manager):
+    """One clone can be pushed while another is rejected.
+
+    The job stays failed, and the operator-facing reason names the remote
+    that rejected the push. The parent folder has no push error of its own.
+    """
+    state_manager.create_state("KAN-573", "span", "d")
+    state_manager.update_state("KAN-573", status=TaskStatus.EXECUTING)
+    good = _Repo("https://gitlab.example/api.git", "aaa111", 1)
+    bad = _Repo("https://gitlab.example/web.git", "bbb111", 1)
+
+    def fail_push(branch_name: str) -> bool:
+        bad.pushed = True
+        bad.last_push_error = "authentication failed"
+        return False
+
+    bad.push = fail_push
+    parent = _Multi([good, bad])
+    processor._contexts["KAN-573"] = {"git": parent}
+    state = state_manager.get_state("KAN-573")
+    outcome = asyncio.run(processor._deliver_if_new_commits(state))
+    assert outcome == "push_failed"
+    assert good.pushed and good.mr_opened
+    assert bad.pushed and not bad.mr_opened
+    reason = processor._push_failure_reason("KAN-573")
+    assert "web.git" in reason
+    assert "authentication failed" in reason
+
+
 def test_single_repo_failure_still_delivers_when_head_moved(processor, state_manager):
     """Control: the one-repo failure path already pushes a moved HEAD."""
     state_manager.create_state("KAN-575", "one", "d")
