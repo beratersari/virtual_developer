@@ -4,7 +4,9 @@ A later issue (or re-run) with the same remote, work/Source branch, **and**
 Target can resume the same OpenCode serve session *of that kind* (plan,
 build, test, or review). A different Target is a different MR base — new clone
 folder + new session so the model is not mixed with work aimed at another
-branch. Dashboard Reset drops the bind.
+branch. A multi-repo workspace uses its own key (``scope``), so a later
+single-repo job on the first repository does not resume or replace that chat.
+Dashboard Reset drops the bind.
 """
 
 from __future__ import annotations
@@ -132,6 +134,40 @@ def bind_compatible_with_kind(rec: Optional[Dict[str, Any]], kind: str) -> bool:
     return rec_kind == want
 
 
+def multi_session_scope(repository_urls: Any) -> str:
+    """Bind scope for a workspace of two or more repositories. Empty for one."""
+    keys: List[str] = []
+    seen: set[str] = set()
+    raw_urls = repository_urls if isinstance(repository_urls, (list, tuple)) else []
+    for raw in raw_urls:
+        key = normalize_repo_key(str(raw or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    if len(keys) < 2:
+        return ""
+    return "multi:" + "|".join(sorted(keys))
+
+
+def _layout_matches(rec: Dict[str, Any], scope: str) -> bool:
+    rec_scope = str(rec.get("scope") or "")
+    multi = rec_scope.startswith("multi") or bind_directory_is_multi(
+        str(rec.get("working_directory") or "")
+    )
+    if (scope or "").strip():
+        return rec_scope == scope
+    return not multi
+
+
+def bind_directory_is_multi(working_directory: str) -> bool:
+    """True when this path is a ``multi_*`` workspace root."""
+    text = (working_directory or "").strip()
+    if not text:
+        return False
+    return Path(text).name.startswith("multi_")
+
+
 def bind_id_for(
     repository_url: str,
     branch: str,
@@ -139,6 +175,7 @@ def bind_id_for(
     issue_key: str = "",
     kind: str = "",
     backend: str = "",
+    scope: str = "",
 ) -> str:
     repo_key = normalize_repo_key(repository_url)
     br = normalize_branch(branch)
@@ -146,17 +183,22 @@ def bind_id_for(
     issue = (issue_key or "").strip().upper()
     kind_n = normalize_session_kind(kind)
     backend_n = _normalize_bind_backend(backend)
+    scope_n = (scope or "").strip()
     # Kind-specific maps are (repo, source/work, target, kind) — no issue
     # in the key so a later same-kind job resumes that chat. Plan, build,
     # and test stay on three different sessions until Dashboard Reset.
     # Backend is part of the key so OpenCode, Codex, and Claude do not
     # replace each other's row. Empty backend keeps the pre-Claude id.
+    # ``scope`` separates a multi-repo workspace from a one-repo job that
+    # uses the same first remote and the same branches.
     if kind_n:
         material = f"{repo_key}\0{br}\0{tgt}\0{kind_n}"
     else:
         material = f"{repo_key}\0{br}\0{tgt}\0{issue}"
     if backend_n:
         material = f"{material}\0{backend_n}"
+    if scope_n:
+        material = f"{material}\0{scope_n}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"osb_{digest}"
 
@@ -277,6 +319,45 @@ class SessionBindStore:
     def _index_ok(self) -> bool:
         return self._index is not None and not self._index_stale
 
+    def _release_single_key_if_multi(self, rec: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """A ``multi_*`` folder saved on the single-repo key is moved aside.
+
+        A later one-repo job must not resume that chat or overwrite its file.
+        """
+        if not rec or not bind_directory_is_multi(str(rec.get("working_directory") or "")):
+            return rec
+        if str(rec.get("scope") or "").startswith("multi"):
+            return rec
+        moved = self._move_bind_scope(rec, "multi")
+        return None if moved else rec
+
+    def _move_bind_scope(self, rec: Dict[str, Any], scope: str) -> bool:
+        new_id = bind_id_for(
+            str(rec.get("repository_url") or ""),
+            str(rec.get("branch") or ""),
+            str(rec.get("target_branch") or ""),
+            issue_key="" if rec.get("kind") else str(rec.get("issue_key") or ""),
+            kind=str(rec.get("kind") or ""),
+            backend=str(rec.get("backend") or ""),
+            scope=scope,
+        )
+        old_id = str(rec.get("bind_id") or "")
+        if not new_id or new_id == old_id:
+            return False
+        if self.get_by_id(new_id):
+            self.delete(old_id)
+            return True
+        moved = dict(rec)
+        moved["bind_id"] = new_id
+        moved["scope"] = scope
+        moved["updated_at"] = _now_iso()
+        self._write(moved)
+        self.delete(old_id)
+        logger.info(
+            f"Session bind {old_id} moved to {new_id} (multi-repo workspace)"
+        )
+        return True
+
     def get(
         self,
         repository_url: str,
@@ -285,6 +366,7 @@ class SessionBindStore:
         issue_key: str = "",
         kind: str = "",
         backend: str = "",
+        scope: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_repo_key(repository_url) or not normalize_branch(branch):
             return None
@@ -292,9 +374,11 @@ class SessionBindStore:
             return None
         kind_n = normalize_session_kind(kind)
         backend_n = _normalize_bind_backend(backend)
+        scope_n = (scope or "").strip()
         if kind_n:
             # Plan, build, and test maps are separate. A miss must not
             # fall back to another kind (derman-plan cannot implement).
+            # A multi-repo scope must not fall back to the single-repo row.
             hit = self.get_by_id(
                 bind_id_for(
                     repository_url,
@@ -303,8 +387,12 @@ class SessionBindStore:
                     issue_key="",
                     kind=kind_n,
                     backend=backend_n,
+                    scope=scope_n,
                 )
             )
+            if scope_n:
+                return hit
+            hit = self._release_single_key_if_multi(hit)
             if hit or not backend_n:
                 return hit
             # Rows saved before backend was part of the id.
@@ -336,7 +424,11 @@ class SessionBindStore:
                 return legacy
         # Newest live bind for this repo+work+target (any issue). Forgotten
         # rows have an empty session_id and are skipped by list_binds.
-        return self._find_live_for(repository_url, branch, target_branch)
+        # Do not hand a multi-repo chat to a one-repo lookup, or the reverse.
+        live = self._find_live_for(repository_url, branch, target_branch)
+        if live and not _layout_matches(live, scope_n):
+            return None
+        return live
 
     def _find_live_for(
         self, repository_url: str, branch: str, target_branch: str
@@ -393,6 +485,7 @@ class SessionBindStore:
         target_branch: str = "",
         kind: str = "",
         backend: str = "",
+        scope: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(repository_url, str) or not isinstance(branch, str):
             return None
@@ -406,6 +499,7 @@ class SessionBindStore:
         sid = session_id.strip()
         kind_n = normalize_session_kind(kind)
         backend_n = _normalize_bind_backend(backend)
+        scope_n = (scope or "").strip()
         if not normalize_repo_key(repo) or not br or not tgt or not sid:
             return None
         bid = bind_id_for(
@@ -415,6 +509,7 @@ class SessionBindStore:
             issue_key="" if kind_n else issue_key,
             kind=kind_n,
             backend=backend_n,
+            scope=scope_n,
         )
         now = _now_iso()
         wd = (working_directory or "").strip() or None
@@ -425,6 +520,13 @@ class SessionBindStore:
                 wd = str(wd)
         with self._lock:
             prev = self.get_by_id(bid) or {}
+            if (
+                not scope_n
+                and prev
+                and bind_directory_is_multi(str(prev.get("working_directory") or ""))
+            ):
+                self._move_bind_scope(prev, "multi")
+                prev = {}
             forgotten = [
                 str(x).strip()
                 for x in (prev.get("forgotten_session_ids") or [])
@@ -444,6 +546,7 @@ class SessionBindStore:
                 "session_id": sid,
                 "kind": kind_n or prev.get("kind") or "",
                 "backend": backend_n or inferred_bind_backend(prev) or "",
+                "scope": scope_n or prev.get("scope") or "",
                 "issue_key": (issue_key or "").strip().upper(),
                 "job_id": job_id or prev.get("job_id"),
                 "working_directory": wd or prev.get("working_directory"),
@@ -563,11 +666,13 @@ class SessionBindStore:
         issue_key: str = "",
         kind: str = "",
         backend: str = "",
+        scope: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not normalize_branch(target_branch):
             return None
         kind_n = normalize_session_kind(kind)
         backend_n = _normalize_bind_backend(backend)
+        scope_n = (scope or "").strip()
         rec = self.forget_session(
             bind_id_for(
                 repository_url,
@@ -576,6 +681,7 @@ class SessionBindStore:
                 issue_key="" if kind_n else issue_key,
                 kind=kind_n,
                 backend=backend_n,
+                scope=scope_n,
             ),
             session_id=session_id,
             reason=reason,
@@ -600,6 +706,7 @@ class SessionBindStore:
         target_branch: str,
         issue_key: str = "",
         kind: str = "",
+        scope: str = "",
     ) -> List[str]:
         """Forgotten ses_* for this repo+work+target (any issue, including empty)."""
         out: List[str] = []
@@ -620,6 +727,7 @@ class SessionBindStore:
         if not repo or not br or not tgt:
             return out
         kind_n = normalize_session_kind(kind)
+        scope_n = (scope or "").strip()
         if kind_n:
             _add(
                 self.get_by_id(
@@ -629,6 +737,7 @@ class SessionBindStore:
                         target_branch,
                         issue_key="",
                         kind=kind_n,
+                        scope=scope_n,
                     )
                 )
             )

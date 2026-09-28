@@ -99,7 +99,10 @@ To Do + bot assignee
 ```
 
 Plan, build, and test keep **separate** OpenCode sessions per repo + source +
-target (`kind=plan` / `kind=build` / `kind=test`). One issue can have three
+target (`kind=plan` / `kind=build` / `kind=test`). A multi-repo job keeps
+its own session for that set of repositories. A later single-repo job on
+the first repository, even with the same source and target, does not resume
+it and does not replace it. One issue can have three
 `ses_*` chats until Dashboard Reset. Plan refactor resumes the plan session.
 A later build (or test) on that repo/source/target resumes that kind only.
 

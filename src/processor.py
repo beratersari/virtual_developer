@@ -1481,6 +1481,26 @@ class JobProcessor:
                     branch = source
         return repo, branch, target
 
+    def _session_scope(self, issue_key: str, git: Any = None) -> str:
+        """Empty for one repository. A set key for a multi-repo workspace."""
+        from src.state.session_bind_store import multi_session_scope
+
+        gm = git if git is not None else self._git_for(issue_key)
+        urls: List[str] = []
+        children = list(getattr(gm, "repo_checkouts", None) or []) if gm else []
+        if len(children) > 1:
+            for child in children:
+                raw = str(getattr(child, "remote_url", "") or "").strip()
+                if raw:
+                    urls.append(raw)
+        if len(urls) < 2:
+            st = self.state_manager.get_state(issue_key)
+            meta = dict((st.metadata if st else None) or {})
+            extra = meta.get("repository_urls")
+            if isinstance(extra, list):
+                urls = [str(u).strip() for u in extra if str(u).strip()]
+        return multi_session_scope(urls)
+
     def _session_kind_for_issue(self, issue_key: str) -> str:
         """``plan`` / ``build`` / ``test`` map for this issue's current workflow."""
         from src.state.session_bind_store import normalize_session_kind
@@ -1516,6 +1536,7 @@ class JobProcessor:
         import src.state.session_bind_store as session_binds
 
         repo, branch, target = self._session_bind_key(issue_key, git)
+        scope = self._session_scope(issue_key, git)
         recs: List[Dict[str, Any]] = []
         store = session_binds.session_bind_store
         kind = self._session_kind_for_issue(issue_key)
@@ -1533,13 +1554,30 @@ class JobProcessor:
                     other_kind_sids.add(fx)
 
         if repo and branch and target and kind:
-            hit = store.get(repo, branch, target, kind=kind, backend=backend)
+            hit = store.get(
+                repo, branch, target, kind=kind, backend=backend, scope=scope
+            )
             if hit:
                 recs.append(hit)
             for other in session_binds.other_session_kinds(kind):
-                _remember_other(store.get(repo, branch, target, kind=other))
+                _remember_other(
+                    store.get(repo, branch, target, kind=other, scope=scope)
+                )
         # Kind binds are keyed by work branch. A GitLab/Azure job on a
         # different source must still not resume the planner or tester chat.
+        def _same_layout(rec: Optional[Dict[str, Any]]) -> bool:
+            """A multi-repo bind must not satisfy a one-repo job, or the reverse."""
+            if not rec:
+                return False
+            rec_scope = str(rec.get("scope") or "")
+            multi_dir = session_binds.bind_directory_is_multi(
+                str(rec.get("working_directory") or "")
+            )
+            rec_multi = rec_scope.startswith("multi") or multi_dir
+            if scope:
+                return rec_scope == scope
+            return not rec_multi
+
         want_issue = (issue_key or "").strip().upper()
         if kind and want_issue:
             for rec in store.list_binds(limit=500):
@@ -1553,12 +1591,17 @@ class JobProcessor:
                     _remember_other(rec)
         if kind != "plan":
             if repo and branch and target:
-                hit = store.get(repo, branch, target, issue_key=issue_key)
+                hit = store.get(
+                    repo, branch, target, issue_key=issue_key, scope=scope
+                )
                 if hit and session_binds.bind_compatible_with_kind(hit, kind):
                     recs.append(hit)
                 elif hit:
                     _remember_other(hit)
             by_issue = store.find_by_issue_key(issue_key)
+            if by_issue and by_issue not in recs:
+                if not _same_layout(by_issue):
+                    by_issue = None
             if by_issue and by_issue not in recs:
                 if session_binds.bind_compatible_with_kind(by_issue, kind):
                     recs.append(by_issue)
@@ -1595,7 +1638,12 @@ class JobProcessor:
                 if repo and branch and target:
                     for other in ("plan", "build", "test", "review"):
                         row = store.get(
-                            repo, branch, target, kind=other, backend=BACKEND_CLAUDE
+                            repo,
+                            branch,
+                            target,
+                            kind=other,
+                            backend=BACKEND_CLAUDE,
+                            scope=scope,
                         )
                         saved = str((row or {}).get("session_id") or "").strip()
                         if saved:
@@ -1623,7 +1671,7 @@ class JobProcessor:
                     bind_wd = wd0.strip()
         if repo and branch and target:
             for fx in store.forgotten_ids_for(
-                repo, branch, target, issue_key=issue_key, kind=kind
+                repo, branch, target, issue_key=issue_key, kind=kind, scope=scope
             ):
                 if fx not in forgotten:
                     forgotten.append(fx)
@@ -1631,11 +1679,23 @@ class JobProcessor:
         if kind != "plan":
             st = self.state_manager.get_state(issue_key)
             if st is not None:
-                _add_sid(st.current_opencode_session_id)
-                meta = dict(st.metadata or {})
-                _add_sid(meta.get("last_opencode_session_id"))
-                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                def _add_if_layout(raw: Any) -> None:
+                    sid = str(raw or "").strip()
+                    if not sid:
+                        return
+                    for rec in store.list_binds(limit=500):
+                        if str(rec.get("session_id") or "").strip() != sid:
+                            continue
+                        full = store.get_by_id(str(rec.get("bind_id") or "")) or rec
+                        if not _same_layout(full):
+                            return
                     _add_sid(sid)
+
+                _add_if_layout(st.current_opencode_session_id)
+                meta = dict(st.metadata or {})
+                _add_if_layout(meta.get("last_opencode_session_id"))
+                for sid in reversed(list(meta.get("opencode_session_ids") or [])):
+                    _add_if_layout(sid)
         return sids, forgotten, bind_wd
 
     def _attach_bound_opencode_session(
@@ -1807,6 +1867,7 @@ class JobProcessor:
             issue_key=issue_key,
             kind=kind,
             backend=self._backend_for_session_id(issue_key, sid),
+            scope=self._session_scope(issue_key, git),
         )
 
     def _upsert_session_bind(self, issue_key: str, session_id: Optional[str]) -> None:
@@ -1850,6 +1911,7 @@ class JobProcessor:
             working_directory=wd,
             kind=kind,
             backend=self._backend_for_session_id(issue_key, sid),
+            scope=self._session_scope(issue_key, git),
         )
         self._record_job_working_directory(issue_key, wd)
 
