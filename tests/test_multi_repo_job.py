@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.config import settings
 from src.dashboard.repo_sets import normalize_repository_urls, parse_repository_sets
@@ -336,3 +339,135 @@ def test_incomplete_multi_repo_clone_is_still_discarded(tmp_path, monkeypatch):
     git.repo_checkouts = [done, missing]
     # web never got a .git. Cancel during setup must still delete the set.
     assert git.should_discard_on_cancel() is True
+
+
+def test_live_lock_uses_each_repository_target(
+    tmp_path, monkeypatch, fake_jira, state_manager
+):
+    """A child clone is locked on its own target, not the first repository's."""
+    from src.processor import JobProcessor
+    from src.state.queue_store import WorkQueueStore, workspace_lock_key
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "temp_dir_base", str(tmp_path))
+
+    def fake_clone(self):
+        assert self.temp_dir is not None
+        (self.temp_dir / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(GitManager, "_clone_into_temp", fake_clone)
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    state_manager.create_state("KAN-21", "span", "d")
+    state_manager.update_state(
+        "KAN-21",
+        metadata={
+            "repository_urls": [api, web],
+            "repository_refs": [
+                {
+                    "url": api,
+                    "source_branch": "develop",
+                    "target_branch": "develop",
+                },
+                {
+                    "url": web,
+                    "source_branch": "feature/web-side",
+                    "target_branch": "main",
+                },
+            ],
+        },
+    )
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.jira_client = fake_jira
+    git = proc._init_git_manager(
+        "KAN-21",
+        repository_url=api,
+        source_branch="develop",
+        target_branch="develop",
+    )
+    assert git is not None
+    expected = workspace_lock_key(web, "feature/web-side", "main")
+    store = WorkQueueStore(queue_dir=tmp_path / "queue")
+    store.enqueue(
+        source="jira",
+        issue_key="KAN-22",
+        repository_url=web,
+        work_branch="feature/web-side",
+        target_branch="main",
+        lock_key=expected,
+    )
+    assert (
+        store.claim_next(
+            blocked_locks=proc.live_workspace_lock_keys(),
+            max_running=6,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_board_rework_locks_every_repository_in_the_description(
+    tmp_path, monkeypatch, fake_jira, isolate_jira_agent_artifacts, state_manager
+):
+    """A To Do rework has no schedule payload. The description names every repo.
+
+    The second repository's branch must block another job before either clone starts.
+    """
+    from src.processor import JobProcessor
+    from src.state.queue_store import workspace_lock_key
+
+    monkeypatch.chdir(tmp_path)
+    with patch("src.processor.create_jira_client", return_value=fake_jira):
+        proc = JobProcessor()
+    proc.state_manager = state_manager
+    proc.jira_client = fake_jira
+    proc.queue_store = isolate_jira_agent_artifacts["queue_store"]
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_process(_event):
+        held.set()
+        await release.wait()
+        return {"ok": True, "work_started": True}
+
+    proc.process_event = fake_process  # type: ignore[method-assign]
+    api = "https://gitlab.example.com/acme/api.git"
+    web = "https://gitlab.example.com/acme/web.git"
+    event = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "KAN-30",
+            "fields": {
+                "summary": "Rework the pair",
+                "description": (
+                    "{params}\n"
+                    f"Repository: {api}\n"
+                    "Source branch: develop\n"
+                    "Target branch: develop\n"
+                    f"Repository: {web}\n"
+                    "Source branch: feature/web-side\n"
+                    "Target branch: main\n"
+                    "Mode: build\n"
+                    "{params}\n"
+                ),
+                "status": {"name": "To Do"},
+            },
+        },
+    }
+    result = await proc.enqueue_jira_event(event)
+    await asyncio.wait_for(held.wait(), timeout=2)
+    try:
+        web_lock = workspace_lock_key(web, "feature/web-side", "main")
+        proc.queue_store.enqueue(
+            source="jira",
+            issue_key="KAN-31",
+            repository_url=web,
+            work_branch="feature/web-side",
+            target_branch="main",
+            lock_key=web_lock,
+        )
+        assert proc.queue_store.claim_next(max_running=6) is None
+    finally:
+        release.set()

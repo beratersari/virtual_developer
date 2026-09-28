@@ -4734,11 +4734,17 @@ class JobProcessor:
                 target_branch=spec.target_branch,
             )
             for child in getattr(git, "repo_checkouts", None) or []:
+                child_work = (
+                    getattr(child, "work_branch", None) or work or ""
+                ).strip()
+                child_target = (
+                    getattr(child, "target_branch", None) or spec.target_branch or ""
+                ).strip()
                 self.note_workspace_lock(
                     issue_key,
                     repository_url=getattr(child, "remote_url", "") or "",
-                    work_branch=getattr(child, "work_branch", None) or work,
-                    target_branch=spec.target_branch,
+                    work_branch=child_work,
+                    target_branch=child_target,
                 )
         except Exception:
             pass
@@ -5439,22 +5445,30 @@ class JobProcessor:
         lock_keys = [lock] if lock else []
         raw_refs = event.get("repository_refs") if isinstance(event, dict) else None
         raw_urls = event.get("repository_urls") if isinstance(event, dict) else None
+
+        def _add_repo_lock(url: str, row_src: str, row_tgt: str) -> None:
+            row_work = (
+                GitManager.resolve_work_branch_name(key, row_src, row_tgt)
+                if (row_src or row_tgt)
+                else work
+            )
+            child_lock = workspace_lock_key(url, row_work, row_tgt)
+            if child_lock and child_lock not in lock_keys:
+                lock_keys.append(child_lock)
+
+        described = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
         if isinstance(raw_refs, list) and len(raw_refs) >= 2:
             for row in raw_refs:
                 if not isinstance(row, dict):
                     continue
-                row_src = str(row.get("source_branch") or src).strip()
-                row_tgt = str(row.get("target_branch") or tgt).strip()
-                row_work = (
-                    GitManager.resolve_work_branch_name(key, row_src, row_tgt)
-                    if (row_src or row_tgt)
-                    else work
+                _add_repo_lock(
+                    str(row.get("url") or row.get("repository_url") or ""),
+                    str(row.get("source_branch") or src).strip(),
+                    str(row.get("target_branch") or tgt).strip(),
                 )
-                child_lock = workspace_lock_key(
-                    str(row.get("url") or ""), row_work, row_tgt
-                )
-                if child_lock and child_lock not in lock_keys:
-                    lock_keys.append(child_lock)
+        elif len(described) >= 2:
+            for url, row_src, row_tgt in described:
+                _add_repo_lock(str(url or ""), str(row_src or ""), str(row_tgt or ""))
         elif isinstance(raw_urls, list) and work and tgt:
             for raw_url in raw_urls:
                 child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
@@ -8527,28 +8541,37 @@ class JobProcessor:
         """Succeed when any cloned repository has commits ahead of its target.
 
         The workspace root is only the OpenCode folder. It has no ``.git``.
+        Each clone is counted on its own work branch. The parent stores the
+        last clone's branch name, which is a different branch when the
+        repositories do not share one.
         """
-        work = (getattr(git, "work_branch", None) or "").strip()
-        if not work:
+        parent_work = (getattr(git, "work_branch", None) or "").strip()
+        branches = [
+            (getattr(child, "work_branch", None) or "").strip() or parent_work
+            for child in children
+        ]
+        if not any(branches):
             return "Work branch was not prepared; refusing to treat the run as successful."
         try:
             on_branch = git.ensure_on_work_branch()
         except Exception:
             on_branch = False
         if not on_branch:
+            named = ", ".join(f"`{branch}`" for branch in branches if branch)
             return (
-                "A repository is not on work branch "
-                f"`{work}`. Refusing to push a drifted branch."
+                f"A repository is not on its work branch ({named}). "
+                "Refusing to push a drifted branch."
             )
         unread: list[str] = []
         any_ahead = False
-        for child in children:
-            if not self._checkout_sha(child):
-                unread.append(str(getattr(child, "remote_url", "") or "repository"))
+        for child, child_work in zip(children, branches):
+            label = str(getattr(child, "remote_url", "") or "repository")
+            if not child_work or not self._checkout_sha(child):
+                unread.append(label)
                 continue
             ahead = 0
             try:
-                ahead = int(child.commits_ahead_of_target(work) or 0)
+                ahead = int(child.commits_ahead_of_target(child_work) or 0)
             except Exception:
                 ahead = 0
             if ahead >= 1:
@@ -8558,11 +8581,14 @@ class JobProcessor:
         if unread:
             names = ", ".join(unread)
             return (
-                f"Could not read HEAD on `{work}` in {names}; "
+                f"Could not read HEAD in {names}; "
                 "refusing to treat the run as successful."
             )
+        shown = ", ".join(
+            f"`{branch}`" for branch in dict.fromkeys(b for b in branches if b)
+        )
         return (
-            f"No commits on `{work}` ahead of the target branch "
+            f"No commits on {shown} ahead of the target branch "
             "in any repository. Agent exit code was 0 but nothing was delivered."
         )
 

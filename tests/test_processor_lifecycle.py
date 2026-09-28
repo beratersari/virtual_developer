@@ -153,6 +153,43 @@ def test_failed_multi_repo_run_still_pushes_a_repo_that_moved(processor, state_m
     assert idle.pushed and not idle.mr_opened
 
 
+def test_delivery_opens_mr_for_repo_on_its_own_branch(processor, state_manager):
+    """Each clone is ahead only on its own work branch.
+
+    ``ensure_feature_branch`` stores the last child's branch on the parent.
+    A commit on an earlier repository must still open that repository's
+    merge request.
+    """
+
+    class _OwnBranch(_Repo):
+        def commits_ahead_of_target(self, branch: str) -> int:
+            self.asked.append(branch)
+            if (branch or "") != self.work_branch:
+                return 0
+            return self._ahead
+
+    state_manager.create_state("KAN-580", "span", "d")
+    api = _OwnBranch("https://gitlab.example/api.git", "aaa111", 1)
+    api.work_branch = "feature/api-side"
+    api.target_branch = "develop"
+    api.asked = []
+    web = _OwnBranch("https://gitlab.example/web.git", "bbb111", 0)
+    web.work_branch = "feature/web-side"
+    web.target_branch = "main"
+    web.asked = []
+    web.push_ok = True
+    parent = _Multi([api, web])
+    parent.issue_key = "KAN-580"
+    parent.work_branch = web.work_branch
+    processor._contexts["KAN-580"] = {"git": parent}
+    state = state_manager.get_state("KAN-580")
+    outcome = asyncio.run(processor._deliver_if_new_commits(state))
+    assert outcome == "delivered", api.asked
+    assert api.mr_opened
+    assert api.pushed
+    assert web.pushed and not web.mr_opened
+
+
 def test_multi_repo_push_failure_names_the_repository(processor, state_manager):
     """One clone can be pushed while another is rejected.
 
