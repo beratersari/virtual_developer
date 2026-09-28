@@ -453,6 +453,7 @@ export type SchedulePreview = {
   repository_url: string
   source_branch: string
   target_branch: string
+  repository_refs?: { url: string; source_branch: string; target_branch: string }[]
   mode: string
   model?: string
   backend?: string
@@ -547,11 +548,18 @@ export type RepositorySet = {
   repositories: string[]
 }
 
+export type RepositoryRef = {
+  url: string
+  source_branch: string
+  target_branch: string
+}
+
 export type ScheduleCreateBody = {
   title: string
   description?: string
   repository_url: string
   repository_urls?: string[]
+  repository_refs?: RepositoryRef[]
   source_branch?: string
   target_branch: string
   mode: string

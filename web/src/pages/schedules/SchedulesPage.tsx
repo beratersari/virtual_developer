@@ -47,6 +47,13 @@ import {
   type ScheduleMode,
   type ScheduleTracker,
 } from './scheduleTabUrl'
+import {
+  RepositoryList,
+  emptyRepoRow,
+  rowFromProject,
+  scheduleRepositoryFields,
+  type RepoRow,
+} from './MoreRepositories'
 
 const LAST_REPO_KEY = 'vd.schedule.last_repo_url'
 const CUSTOM_REPO = '__custom__'
@@ -574,20 +581,14 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
               dashboard”. The agent answer is posted there when the worker finishes.
             </span>
           </label>
-          <BackendField
-            value={backend}
-            onChange={(v) => {
-              setModelsLoading(true)
-              setBackend(v)
-            }}
-            fallback={live.settings?.agent_backend || 'opencode'}
-          />
-          <ModelField
-            value={model}
-            onChange={setModel}
-            fallback={live.settings?.default_model || ''}
-            backend={backend || live.settings?.agent_backend || 'opencode'}
-            onLoadingChange={setModelsLoading}
+          <WorkerBlock
+            backend={backend}
+            setBackend={setBackend}
+            model={model}
+            setModel={setModel}
+            fallbackBackend={live.settings?.agent_backend || 'opencode'}
+            fallbackModel={live.settings?.default_model || ''}
+            setModelsLoading={setModelsLoading}
           />
           <ScheduleWhenField value={when} onChange={setWhen} />
           <p className="actions">
@@ -807,20 +808,14 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
               dashboard”. The agent answer is posted there when the worker finishes.
             </span>
           </label>
-          <BackendField
-            value={backend}
-            onChange={(v) => {
-              setModelsLoading(true)
-              setBackend(v)
-            }}
-            fallback={live.settings?.agent_backend || 'opencode'}
-          />
-          <ModelField
-            value={model}
-            onChange={setModel}
-            fallback={live.settings?.default_model || ''}
-            backend={backend || live.settings?.agent_backend || 'opencode'}
-            onLoadingChange={setModelsLoading}
+          <WorkerBlock
+            backend={backend}
+            setBackend={setBackend}
+            model={model}
+            setModel={setModel}
+            fallbackBackend={live.settings?.agent_backend || 'opencode'}
+            fallbackModel={live.settings?.default_model || ''}
+            setModelsLoading={setModelsLoading}
           />
           <ScheduleWhenField value={when} onChange={setWhen} />
           <p className="actions">
@@ -888,11 +883,7 @@ function Existing({ onDone }: { onDone: () => void }) {
   const [projects, setProjects] = useState<ProjectRepository[]>(
     live.settings?.project_repositories || [],
   )
-  const [repo, setRepo] = useState('')
-  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
-  const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
-  const [source, setSource] = useState('develop')
-  const [target, setTarget] = useState('develop')
+  const [repos, setRepos] = useState<RepoRow[]>([emptyRepoRow()])
   const [mode, setMode] = useState('build')
 
   const needsParams = Boolean(preview && !preview.template_valid)
@@ -915,27 +906,34 @@ function Existing({ onDone }: { onDone: () => void }) {
       rows.find((r) => r.url === fromIssue) ||
       rows.find((r) => r.url === last) ||
       (rows.length === 1 ? rows[0] : null)
-    if (fromIssue && !preferred) {
-      setRepoPick(CUSTOM_REPO)
-      setRepo(fromIssue)
-    } else if (preferred) {
-      setRepoPick(preferred.url)
-      applyProject(preferred, setRepo, setTarget, setSource)
-      if (fromIssue) setRepo(fromIssue)
-    } else {
-      setRepoPick(CUSTOM_REPO)
-      setRepo(fromIssue)
-    }
     const lookedUpSource = (p.source_branch || '').trim()
     const feature = featureBranchForKey(p.issue_key || '')
-    if (lookedUpSource && lookedUpSource.toLowerCase() !== feature.toLowerCase()) {
-      setSrcMode('custom')
-      setSource(lookedUpSource)
-    } else {
-      setSrcMode('issue_key')
-      if (lookedUpSource) setSource(lookedUpSource)
+    const asRow = (url: string, source: string, target: string): RepoRow => {
+      const branch = source.trim()
+      const custom = Boolean(branch) && branch.toLowerCase() !== feature.toLowerCase()
+      return {
+        url,
+        source: custom ? branch : 'develop',
+        target: target.trim() || 'develop',
+        sourceMode: custom ? 'custom' : 'issue_key',
+      }
     }
-    if (p.target_branch) setTarget(p.target_branch)
+    const loaded = (p.repository_refs || []).filter((row) => (row.url || '').trim())
+    if (loaded.length > 1) {
+      setRepos(loaded.map((row) => asRow(row.url, row.source_branch, row.target_branch)))
+    } else {
+      const custom =
+        Boolean(lookedUpSource) && lookedUpSource.toLowerCase() !== feature.toLowerCase()
+      const url = fromIssue || preferred?.url || ''
+      setRepos([
+        {
+          url,
+          source: custom ? lookedUpSource : preferred?.source_branch || 'develop',
+          target: (p.target_branch || preferred?.target_branch || 'develop').trim(),
+          sourceMode: custom ? 'custom' : 'issue_key',
+        },
+      ])
+    }
     if ((p.mode || '').trim()) setMode(p.mode.trim().toLowerCase())
   }
 
@@ -977,16 +975,17 @@ function Existing({ onDone }: { onDone: () => void }) {
   const submit = async (e: FormEvent, dispatchNow = false) => {
     e.preventDefault()
     if (!preview || modelsLoading) return
-    if (!repo.trim()) {
-      setErr('Pick a project or enter a repository URL')
+    const picked = scheduleRepositoryFields(repos)
+    if (!picked.repository_url) {
+      setErr('Add a repository')
       return
     }
-    if (srcMode === 'custom' && !source.trim()) {
-      setErr('Enter a source branch')
-      return
-    }
-    if (!target.trim()) {
+    if (!picked.target_branch) {
       setErr('Enter a target branch')
+      return
+    }
+    if (picked.source_branch_mode === 'custom' && !picked.source_branch) {
+      setErr('Enter a source branch')
       return
     }
     setBusy(true)
@@ -999,12 +998,14 @@ function Existing({ onDone }: { onDone: () => void }) {
         model: model.trim() || undefined,
         backend: backend.trim() || undefined,
         description: prompt,
-        repository_url: repo.trim(),
-        source_branch: srcMode === 'custom' ? source.trim() : undefined,
-        target_branch: target.trim(),
+        repository_url: picked.repository_url,
+        source_branch: picked.source_branch,
+        target_branch: picked.target_branch,
         mode,
-        source_branch_mode: srcMode,
+        source_branch_mode: picked.source_branch_mode,
+        repository_refs: picked.repository_refs,
       })
+      setRepos([emptyRepoRow()])
       setPreview(null)
       setKey('')
       setPrompt('')
@@ -1137,38 +1138,23 @@ function Existing({ onDone }: { onDone: () => void }) {
               below. Schedule or Run now writes them back to Jira when you change them.
             </span>
           </label>
-          <ProjectBranchFields
-              projects={projects}
-              repo={repo}
-              setRepo={setRepo}
-              repoPick={repoPick}
-              setRepoPick={setRepoPick}
-              srcMode={srcMode}
-              setSrcMode={setSrcMode}
-              source={source}
-              setSource={setSource}
-              target={target}
-              setTarget={setTarget}
-              mode={mode}
-              setMode={setMode}
-              showRemember={false}
-              rememberRepo={false}
-              setRememberRepo={() => undefined}
-            />
-          <BackendField
-            value={backend}
-            onChange={(v) => {
-              setModelsLoading(true)
-              setBackend(v)
-            }}
-            fallback={live.settings?.agent_backend || 'opencode'}
+          <RepositoryList
+            rows={repos}
+            setRows={setRepos}
+            sets={live.settings?.repository_sets || []}
+            projects={projects}
           />
-          <ModelField
-            value={model}
-            onChange={setModel}
-            fallback={live.settings?.default_model || ''}
-            backend={backend || live.settings?.agent_backend || 'opencode'}
-            onLoadingChange={setModelsLoading}
+          <WorkerBlock
+            backend={backend}
+            setBackend={setBackend}
+            model={model}
+            setModel={setModel}
+            mode={mode}
+            setMode={setMode}
+            workModes={live.settings?.work_modes}
+            fallbackBackend={live.settings?.agent_backend || 'opencode'}
+            fallbackModel={live.settings?.default_model || ''}
+            setModelsLoading={setModelsLoading}
           />
           <ScheduleWhenField value={when} onChange={setWhen} />
           <p className="actions">
@@ -1207,146 +1193,6 @@ function featureBranchForKey(issueKey: string): string {
   return `feature/${safe}`
 }
 
-function applyProject(
-  p: ProjectRepository,
-  setRepo: (v: string) => void,
-  setTarget: (v: string) => void,
-  setSource: (v: string) => void,
-) {
-  setRepo(p.url)
-  if (p.target_branch) setTarget(p.target_branch)
-  if (p.source_branch) setSource(p.source_branch)
-}
-
-function ProjectBranchFields({
-  projects,
-  repo,
-  setRepo,
-  repoPick,
-  setRepoPick,
-  srcMode,
-  setSrcMode,
-  source,
-  setSource,
-  target,
-  setTarget,
-  mode,
-  setMode,
-  showRemember,
-  rememberRepo,
-  setRememberRepo,
-}: {
-  projects: ProjectRepository[]
-  repo: string
-  setRepo: (v: string) => void
-  repoPick: string
-  setRepoPick: (v: string) => void
-  srcMode: 'issue_key' | 'custom'
-  setSrcMode: (v: 'issue_key' | 'custom') => void
-  source: string
-  setSource: (v: string) => void
-  target: string
-  setTarget: (v: string) => void
-  mode: string
-  setMode: (v: string) => void
-  showRemember: boolean
-  rememberRepo: boolean
-  setRememberRepo: (v: boolean) => void
-}) {
-  const isCustom = repoPick === CUSTOM_REPO || projects.length === 0
-  const live = useLive()
-  const modeNames = scheduleModeNames(live.settings?.work_modes, mode)
-  return (
-    <>
-      {projects.length > 0 && (
-        <label className="field">
-          <span>Project</span>
-          <select
-            value={repoPick}
-            onChange={(e) => {
-              const v = e.target.value
-              setRepoPick(v)
-              if (v === CUSTOM_REPO) {
-                setRepo('')
-                return
-              }
-              const hit = projects.find((p) => p.url === v)
-              if (hit) applyProject(hit, setRepo, setTarget, setSource)
-            }}
-          >
-            {projects.map((p) => (
-              <option key={p.url} value={p.url}>
-                {p.label || p.url}
-              </option>
-            ))}
-            <option value={CUSTOM_REPO}>Other URL…</option>
-          </select>
-        </label>
-      )}
-      {(isCustom || projects.length === 0) && (
-        <>
-          <label className="field">
-            <span>Repository</span>
-            <input
-              value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              placeholder="https://gitlab.com/group/repo.git"
-              required
-            />
-          </label>
-          {showRemember && (
-            <label className="field" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <input
-                type="checkbox"
-                checked={rememberRepo}
-                onChange={(e) => setRememberRepo(e.target.checked)}
-              />
-              <span style={{ margin: 0 }}>Remember this project</span>
-            </label>
-          )}
-        </>
-      )}
-      {!isCustom && repo ? (
-        <p className="quiet font-mono text-xs">{repo}</p>
-      ) : null}
-      <p className="quiet text-xs">
-        Saved remotes live in{' '}
-        <Link to="/settings/jira" className="text-accent-text hover:underline">
-          Settings → Projects
-        </Link>
-        .
-      </p>
-      <label className="field">
-        <span>Source</span>
-        <select value={srcMode} onChange={(e) => setSrcMode(e.target.value === 'custom' ? 'custom' : 'issue_key')}>
-          <option value="issue_key">feature/&lt;issue key&gt;</option>
-          <option value="custom">custom branch</option>
-        </select>
-      </label>
-      {srcMode === 'custom' && (
-        <label className="field">
-          <span>Branch</span>
-          <input value={source} onChange={(e) => setSource(e.target.value)} required />
-        </label>
-      )}
-      <label className="field">
-        <span>Target</span>
-        <input value={target} onChange={(e) => setTarget(e.target.value)} required />
-      </label>
-      <label className="field">
-        <span>Mode</span>
-        <select value={mode} onChange={(e) => setMode(e.target.value.trim().toLowerCase())}>
-          {modeNames.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </label>
-    </>
-  )
-}
-
 function CreateNew({ onDone }: { onDone: () => void }) {
   const { mode: modeParam = '', tracker: trackerParam = '' } = useParams()
   const navigate = useNavigate()
@@ -1358,17 +1204,11 @@ function CreateNew({ onDone }: { onDone: () => void }) {
   const [azureProjects, setAzureProjects] = useState<string[]>([])
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [repo, setRepo] = useState('')
-  const [repoPick, setRepoPick] = useState(CUSTOM_REPO)
+  const [repos, setRepos] = useState<RepoRow[]>([emptyRepoRow()])
   const [rememberRepo, setRememberRepo] = useState(false)
-  const [extraRepos, setExtraRepos] = useState<string[]>([])
-  const [addRepo, setAddRepo] = useState('')
   const [projects, setProjects] = useState<ProjectRepository[]>(
     live.settings?.project_repositories || [],
   )
-  const [srcMode, setSrcMode] = useState<'issue_key' | 'custom'>('issue_key')
-  const [source, setSource] = useState('develop')
-  const [target, setTarget] = useState('develop')
   const [mode, setMode] = useState('build')
   const [model, setModel] = useState('')
   const [backend, setBackend] = useState('')
@@ -1426,10 +1266,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         })()
         const preferred =
           rows.find((p) => p.url === last) || (rows.length === 1 ? rows[0] : null)
-        if (preferred) {
-          setRepoPick(preferred.url)
-          applyProject(preferred, setRepo, setTarget, setSource)
-        }
+        if (preferred) setRepos([rowFromProject(preferred)])
       })
       .catch(() => undefined)
   }, [])
@@ -1442,18 +1279,20 @@ function CreateNew({ onDone }: { onDone: () => void }) {
     setBusy(true)
     setErr(null)
     try {
-      const url = repo.trim()
-      const repositoryUrls = [url, ...extraRepos.map((item) => item.trim())].filter(
-        (item, index, all) => item && all.indexOf(item) === index,
-      )
+      const picked = scheduleRepositoryFields(repos)
+      if (!picked.repository_url) {
+        setErr('Add a repository')
+        setBusy(false)
+        return
+      }
       await createSchedule({
         title: title.trim(),
         description: description.trim(),
-        repository_url: url,
-        repository_urls: repositoryUrls.length > 1 ? repositoryUrls : undefined,
-        source_branch: srcMode === 'custom' ? source.trim() : undefined,
-        source_branch_mode: srcMode,
-        target_branch: target.trim(),
+        repository_url: picked.repository_url,
+        repository_refs: picked.repository_refs,
+        source_branch: picked.source_branch,
+        source_branch_mode: picked.source_branch_mode,
+        target_branch: picked.target_branch,
         mode,
         issue_type: issueType.trim(),
         scheduled_at: scheduledAtForSubmit(when, dispatchNow),
@@ -1464,18 +1303,19 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         azure_project: tracker === 'azure' ? azureProject.trim() : undefined,
       })
       try {
-        window.localStorage.setItem(LAST_REPO_KEY, url)
+        window.localStorage.setItem(LAST_REPO_KEY, picked.repository_url)
       } catch {
         /* ignore quota / private mode */
       }
-      if (rememberRepo && url && !projects.some((p) => p.url === url)) {
+      const first = repos.find((row) => row.url.trim())
+      if (rememberRepo && first && !projects.some((p) => p.url === first.url.trim())) {
         const next = [
           ...projects,
           {
             label: '',
-            url,
-            target_branch: target.trim(),
-            source_branch: srcMode === 'custom' ? source.trim() : '',
+            url: first.url.trim(),
+            target_branch: first.target.trim(),
+            source_branch: first.sourceMode === 'custom' ? first.source.trim() : '',
           },
         ]
         try {
@@ -1488,7 +1328,7 @@ function CreateNew({ onDone }: { onDone: () => void }) {
       setTitle('')
       setDescription('')
       setRememberRepo(false)
-      setExtraRepos([])
+      setRepos([emptyRepoRow()])
       onDone()
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : 'Create failed')
@@ -1579,96 +1419,15 @@ function CreateNew({ onDone }: { onDone: () => void }) {
         <span>Description</span>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
-      <ProjectBranchFields
+      <RepositoryList
+        rows={repos}
+        setRows={setRepos}
+        sets={live.settings?.repository_sets || []}
         projects={projects}
-        repo={repo}
-        setRepo={setRepo}
-        repoPick={repoPick}
-        setRepoPick={setRepoPick}
-        srcMode={srcMode}
-        setSrcMode={setSrcMode}
-        source={source}
-        setSource={setSource}
-        target={target}
-        setTarget={setTarget}
-        mode={mode}
-        setMode={setMode}
         showRemember
         rememberRepo={rememberRepo}
         setRememberRepo={setRememberRepo}
       />
-      <div className="rounded-xl border border-border p-3">
-        <div className="text-sm font-semibold text-text">More repositories</div>
-        <p className="mt-1 text-xs text-text-muted">
-          Optional. This dashboard job clones each repository, and Yaver pushes
-          and opens a merge request for each one that changes. A ticket created
-          on Jira stays a single repository.
-        </p>
-        {(live.settings?.repository_sets || []).length > 0 ? (
-          <label className="field mt-2">
-            <span>Repo set</span>
-            <select
-              value=""
-              onChange={(e) => {
-                const picked = (live.settings?.repository_sets || []).find(
-                  (row) => row.name === e.target.value,
-                )
-                if (!picked || picked.repositories.length < 2) return
-                const [first, ...rest] = picked.repositories.filter(Boolean)
-                setRepo(first)
-                setRepoPick(projects.some((p) => p.url === first) ? first : CUSTOM_REPO)
-                setExtraRepos(rest.filter((item) => item !== first))
-              }}
-            >
-              <option value="">Select a saved set</option>
-              {(live.settings?.repository_sets || []).map((row) => (
-                <option key={row.name} value={row.name}>
-                  {row.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {extraRepos.length > 0 ? (
-          <ul className="mt-2 space-y-1 text-xs">
-            {extraRepos.map((item) => (
-              <li key={item} className="flex items-center justify-between gap-2">
-                <span className="font-mono">{item}</span>
-                <button
-                  type="button"
-                  className="vd-btn-ghost text-danger-text"
-                  onClick={() => setExtraRepos((cur) => cur.filter((url) => url !== item))}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <select value={addRepo} onChange={(e) => setAddRepo(e.target.value)}>
-            <option value="">Add a saved repository</option>
-            {projects
-              .filter((p) => p.url && p.url !== repo.trim() && !extraRepos.includes(p.url))
-              .map((p) => (
-                <option key={p.url} value={p.url}>
-                  {p.label || p.url}
-                </option>
-              ))}
-          </select>
-          <button
-            type="button"
-            className="vd-btn vd-btn-secondary"
-            disabled={!addRepo}
-            onClick={() => {
-              setExtraRepos((cur) => (cur.includes(addRepo) ? cur : [...cur, addRepo]))
-              setAddRepo('')
-            }}
-          >
-            Add
-          </button>
-        </div>
-      </div>
       <label className="field">
         <span>{tracker === 'azure' ? 'Work item type' : 'Issue type'}</span>
         {tracker === 'azure' ? (
@@ -1691,20 +1450,17 @@ function CreateNew({ onDone }: { onDone: () => void }) {
           <input value={issueType} onChange={(e) => setIssueType(e.target.value)} />
         )}
       </label>
-      <BackendField
-        value={backend}
-        onChange={(v) => {
-          setModelsLoading(true)
-          setBackend(v)
-        }}
-        fallback={live.settings?.agent_backend || 'opencode'}
-      />
-      <ModelField
-        value={model}
-        onChange={setModel}
-        fallback={live.settings?.default_model || ''}
-        backend={backend || live.settings?.agent_backend || 'opencode'}
-        onLoadingChange={setModelsLoading}
+      <WorkerBlock
+        backend={backend}
+        setBackend={setBackend}
+        model={model}
+        setModel={setModel}
+        mode={mode}
+        setMode={setMode}
+        workModes={live.settings?.work_modes}
+        fallbackBackend={live.settings?.agent_backend || 'opencode'}
+        fallbackModel={live.settings?.default_model || ''}
+        setModelsLoading={setModelsLoading}
       />
       <ScheduleWhenField value={when} onChange={setWhen} />
       {err && <p className="err">{err}</p>}
@@ -1780,6 +1536,67 @@ function ScheduleWhenField({
         Time is 24-hour, for example 14:30 — not am/pm.
       </span>
     </label>
+  )
+}
+
+function WorkerBlock({
+  backend,
+  setBackend,
+  model,
+  setModel,
+  mode,
+  setMode,
+  workModes,
+  fallbackBackend,
+  fallbackModel,
+  setModelsLoading,
+}: {
+  backend: string
+  setBackend: (value: string) => void
+  model: string
+  setModel: (value: string) => void
+  mode?: string
+  setMode?: (value: string) => void
+  workModes?: WorkMode[]
+  fallbackBackend: string
+  fallbackModel: string
+  setModelsLoading: (loading: boolean) => void
+}) {
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <div className="text-sm font-semibold text-text">Worker</div>
+      <p className="mt-1 text-xs text-text-muted">
+        OpenCode, Codex, or Claude Code. The model list follows the worker.
+        Leave both empty to use Settings.
+      </p>
+      {mode != null && setMode ? (
+        <label className="field">
+          <span>Mode</span>
+          <select value={mode} onChange={(e) => setMode(e.target.value.trim().toLowerCase())}>
+            {scheduleModeNames(workModes, mode).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <BackendField
+        value={backend}
+        onChange={(v) => {
+          setModelsLoading(true)
+          setBackend(v)
+        }}
+        fallback={fallbackBackend}
+      />
+      <ModelField
+        value={model}
+        onChange={setModel}
+        fallback={fallbackModel}
+        backend={backend || fallbackBackend}
+        onLoadingChange={setModelsLoading}
+      />
+    </div>
   )
 }
 

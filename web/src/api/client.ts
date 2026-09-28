@@ -649,6 +649,10 @@ export function createSchedule(body: ScheduleCreateBody) {
   if (body.repository_urls && body.repository_urls.length > 1) {
     payload.repository_urls = body.repository_urls
   }
+  if (body.repository_refs && body.repository_refs.length > 1) {
+    payload.repository_refs = body.repository_refs
+    payload.repository_urls = body.repository_refs.map((row) => row.url)
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem
@@ -840,6 +844,7 @@ export function scheduleExistingIssue(body: {
   target_branch?: string
   mode?: string
   source_branch_mode?: 'custom' | 'issue_key'
+  repository_refs?: { url: string; source_branch: string; target_branch: string }[]
 }) {
   const payload: Record<string, unknown> = {
     issue_key: body.issue_key,
@@ -856,6 +861,10 @@ export function scheduleExistingIssue(body: {
   if (body.target_branch) payload.target_branch = body.target_branch
   if (body.mode) payload.mode = body.mode
   if (body.source_branch_mode) payload.source_branch_mode = body.source_branch_mode
+  if (body.repository_refs && body.repository_refs.length > 1) {
+    payload.repository_refs = body.repository_refs
+    payload.repository_urls = body.repository_refs.map((row) => row.url)
+  }
   return request<{
     ok: boolean
     schedule: ScheduleItem
