@@ -1446,7 +1446,8 @@ def _job_matches_status(job: Dict[str, Any], live: bool, status: Optional[str]) 
     if want == "error":
         return st in {"error", "unknown"}
     if want == "completed":
-        return st == "completed"
+        # Same bucket as Analytics: a plan that reached plan_ready is finished.
+        return st in {"completed", "plan_ready"}
     if want == "cancelled":
         return st in {"cancelled", "canceled", "superseded"}
     if want == "plan-ready":

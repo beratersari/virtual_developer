@@ -823,7 +823,10 @@ def test_build_jobs_status_filter_pages_the_matching_rows(tmp_path):
     ready = build_jobs(status="plan-ready", page=1, page_size=25, store=jobs, state_manager=sm)
     assert ready.total == 1
     assert ready.jobs[0].status == "plan_ready"
-    assert build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm).total == 10
+    # Analytics counts a finished plan as completed and links here.
+    finished = build_jobs(status="completed", page=1, page_size=25, store=jobs, state_manager=sm)
+    assert finished.total == 11
+    assert "PLAN-1" in [j.issue_key for j in finished.jobs]
 
 
 def test_build_jobs_search_matches_title_and_issue_key(tmp_path):
