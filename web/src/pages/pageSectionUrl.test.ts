@@ -1,7 +1,11 @@
 /**
  * Run: npx tsx src/pages/pageSectionUrl.test.ts
  */
-import { analyticsPeriodFromParam, analyticsPeriodPath } from './analytics/analyticsPeriodUrl'
+import {
+  analyticsBackHref,
+  analyticsPeriodFromParam,
+  analyticsPeriodPath,
+} from './analytics/analyticsPeriodUrl'
 import { issueTabFromSection, issueTabPath } from './issues/issueTabUrl'
 import { jobsFilterFromPath, jobsFilterPath, jobsPageFromPath } from './jobs/jobsFilterUrl'
 import { listPageFromSegment, withListPage } from '../util/listPageUrl'
@@ -79,6 +83,19 @@ assert(analyticsPeriodPath('90d') === '/analytics/90d', '90d suffix')
 assert(analyticsPeriodPath('1y') === '/analytics/1y', '1y suffix')
 assert(analyticsPeriodPath('all') === '/analytics/all', 'all suffix')
 assert(analyticsPeriodFromParam('24H') === '24h', 'period match is case-insensitive')
+assert(
+  analyticsBackHref('period=7d&state=opened&origin=ours') === '/analytics/7d',
+  'back from a 7 day review list opens /analytics/7d',
+)
+assert(
+  analyticsBackHref('state=merged') === '/analytics',
+  'a review list with no period returns to the 30 day chart',
+)
+assert(
+  analyticsBackHref('period=all&from=2026-09-01T00:00&to=2026-09-07T00:00&origin=ours') ===
+    '/analytics/custom?from=2026-09-01T00%3A00&to=2026-09-07T00%3A00',
+  'a custom range returns to /analytics/custom with the same from and to',
+)
 
 assert(parseSchedulePath(undefined, undefined)?.mode === 'existing', 'schedule default mode')
 assert(parseSchedulePath('azure', undefined)?.tracker === 'azure', 'existing azure path')

@@ -74,6 +74,13 @@ def test_tab_clicks_write_the_section_into_the_url() -> None:
     assert "navigate(issueTabPath(issueKey, next))" in issue
     assert "issueTabFromSection(section)" in issue
 
+    reviews = _read("src/pages/analytics/AnalyticsReviewsPage.tsx")
+    assert "analyticsBackHref(" in reviews
+    assert "/analytics?${" not in reviews
+    chart = _read("src/pages/analytics/AnalyticsPage.tsx")
+    assert "searchParams.get('from')" in chart
+    assert "searchParams.get('to')" in chart
+
     jobs = _read("src/pages/jobs/JobsPage.tsx")
     assert "navigate(jobsFilterPath(f.id))" in jobs
     assert "jobsFilterFromPath(pathname)" in jobs

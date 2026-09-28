@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, fetchAnalytics } from '../../api/client'
 import type {
   AnalyticsFacet,
@@ -201,11 +201,16 @@ function BreakdownTable({ rows }: { rows: AnalyticsNamedCount[] }) {
 
 export function AnalyticsPage() {
   const { period: periodParam = '' } = useParams()
+  const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const period = analyticsPeriodFromParam(periodParam) ?? '30d'
   const live = useLive()
-  const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState('')
+  const [customFrom, setCustomFrom] = useState(() =>
+    period === 'custom' ? localInputFromIso(searchParams.get('from') || '') : '',
+  )
+  const [customTo, setCustomTo] = useState(() =>
+    period === 'custom' ? localInputFromIso(searchParams.get('to') || '') : '',
+  )
   const [status, setStatus] = useState<Set<string>>(() => new Set())
   const [category, setCategory] = useState<Set<string>>(() => new Set())
   const [source, setSource] = useState<Set<string>>(() => new Set())

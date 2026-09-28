@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { listPageFromSegment, withListPage } from '../../util/listPageUrl'
+import { analyticsBackHref } from './analyticsPeriodUrl'
 import { ApiError, fetchAnalyticsReviews } from '../../api/client'
 import type { AnalyticsReviewsPayload } from '../../api/types'
 import { Alert } from '../../ui/Alert'
@@ -141,11 +142,7 @@ export function AnalyticsReviewsPage() {
     navigate(reviewsPath(next, new URLSearchParams(params)))
   }
 
-  const backParams = new URLSearchParams(params)
-  backParams.delete('state')
-  backParams.delete('origin')
-  backParams.delete('page')
-  const backTo = backParams.toString() ? `/analytics?${backParams}` : '/analytics'
+  const backTo = analyticsBackHref(params.toString())
 
   const total = payload?.total ?? 0
   const size = payload?.page_size ?? PAGE_SIZE
