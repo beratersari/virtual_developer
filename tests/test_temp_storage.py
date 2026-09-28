@@ -419,6 +419,87 @@ def test_merge_does_not_delete_jira_clone_that_only_shares_issue_key(
     assert "other_develop" not in deleted
 
 
+def test_multi_repo_folder_stays_until_every_review_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
+):
+    """One merged request must not delete the shared multi_* workspace."""
+    from src.config import settings
+    from src.dashboard.temp_storage import (
+        delete_clones_for_merge_request,
+        reset_delete_jobs,
+        reset_mr_state_cache,
+    )
+    from src.state.job_store import job_store
+
+    reset_delete_jobs()
+    base = tmp_path / "t"
+    root = base / "multi_abc123def456"
+    root.mkdir(parents=True)
+    (root / "one").mkdir()
+    (root / "two").mkdir()
+    monkeypatch.setattr(settings, "temp_dir_base", base)
+    one = "https://gitlab.example/group/one/-/merge_requests/1"
+    two = "https://gitlab.example/group/two/-/merge_requests/2"
+    job = job_store.create_job(issue_key="KAN-12", summary="multi")
+    job_store.update_job(
+        job["job_id"],
+        working_directory=str(root),
+        repository_url="https://gitlab.example/group/two.git",
+        merge_request_url=two,
+        deliveries=[
+            {"repository_url": "https://gitlab.example/group/one.git", "merge_request_url": one},
+            {"repository_url": "https://gitlab.example/group/two.git", "merge_request_url": two},
+        ],
+    )
+
+    def _state(url: str) -> str:
+        if url.rstrip("/").endswith("/2"):
+            return "opened"
+        return "merged"
+
+    monkeypatch.setattr("src.dashboard.temp_storage._lookup_review_state", _state)
+    deleted = delete_clones_for_merge_request(
+        mr_url=one,
+        mr_iid=1,
+        issue_key="KAN-12",
+        repository_url="https://gitlab.example/group/one.git",
+    )
+    assert "multi_abc123def456" not in deleted
+    assert root.is_dir()
+
+    reset_mr_state_cache()
+    monkeypatch.setattr(
+        "src.dashboard.temp_storage._lookup_review_state", lambda url: "merged"
+    )
+    deleted = delete_clones_for_merge_request(
+        mr_url=one,
+        mr_iid=1,
+        issue_key="KAN-12",
+        repository_url="https://gitlab.example/group/one.git",
+    )
+    assert "multi_abc123def456" in deleted
+
+
+def test_age_purge_deletes_an_unchanged_multi_repo_folder(tmp_path: Path):
+    """The day limit removes multi_* even while a review is still open."""
+    import os
+    import time
+
+    from src.git_manager import purge_stale_temp_dirs
+
+    old = tmp_path / "multi_unchanged01"
+    fresh = tmp_path / "multi_fresh000001"
+    old.mkdir()
+    fresh.mkdir()
+    (old / "repo").mkdir()
+    stamp = time.time() - (3 * 86400)
+    os.utime(old, (stamp, stamp))
+    removed = purge_stale_temp_dirs(max_age_days=1.0, base_dir=tmp_path)
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.is_dir()
+
+
 def test_fill_missing_mr_does_not_paint_jira_clone_with_pr_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolate_jira_agent_artifacts
 ):

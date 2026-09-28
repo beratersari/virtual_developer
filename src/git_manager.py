@@ -3561,6 +3561,10 @@ def purge_stale_temp_dirs(
     Live job clones in ``protect_paths`` are never removed. OpenCode
     session binds are kept so the next clone resumes the same ``ses_*``.
     ``max_age_days`` 0 or negative means do nothing. Default is 7 days.
+    A ``multi_*`` workspace is one folder here: it is removed when that
+    folder's age exceeds the limit, even if a merge request is still open.
+    Merge cleanup removes it sooner only after every review it recorded
+    is merged or closed.
     """
     if max_age_days is None:
         age = float(getattr(settings, "temp_clone_max_age_days", 7) or 0)
