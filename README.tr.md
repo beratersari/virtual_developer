@@ -340,6 +340,8 @@ pending → planning | executing → (plan_ready) → completed | error | cancel
 | `error` | Battı; yorum nedeni yazar. Jira: Yapılacaklar veya metni düzenle. Azure WIT: metni düzenle |
 | `cancelled` | Operatör iptali. Jira Yapılacaklar + bot yine yeniden iştir |
 
+Yapım ajanı commit atıp sonra hata verirse Yaver bu yeni commiti yine iter ve birleştirme isteğini açar. Bu hatalı koşudan önce dalda duran commitler bu işin teslimi sayılmaz. Ajan başarılı biterse ve dal hedeften ileride ama itilmemişse o eski commitler yine itilir.
+
 ---
 
 ## Hızlı kurulum

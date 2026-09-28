@@ -62,6 +62,113 @@ def test_recover_orphaned_executing_marks_error(processor, state_manager, fake_j
     assert fake_jira.comments, "Jira must be notified on orphan recovery"
 
 
+class _Repo:
+    def __init__(self, url: str, sha: str, ahead: int) -> None:
+        self.remote_url = url
+        self.work_branch = "feature/KAN-573"
+        self.target_branch = "main"
+        self._sha = sha
+        self._ahead = ahead
+        self.delivery_baseline_sha = None
+        self.pushed = False
+        self.mr_opened = False
+
+    def get_last_commit_sha(self, short: bool = False) -> str:
+        return self._sha
+
+    def commits_ahead_of_target(self, branch: str) -> int:
+        return self._ahead
+
+    def ensure_on_work_branch(self) -> bool:
+        return True
+
+    def get_current_branch(self) -> str:
+        return self.work_branch
+
+    def push(self, branch_name: str) -> bool:
+        self.pushed = True
+        if getattr(self, "push_ok", False):
+            return True
+        return self._ahead >= 1
+
+    def head_is_on_remote(self, branch_name: str) -> bool:
+        return False
+
+    def get_last_commit_subject(self) -> str:
+        return "chore: touch"
+
+    def get_last_commit_message(self) -> str:
+        return "chore: touch"
+
+    def build_commit_url(self, sha: str) -> str:
+        return f"https://gitlab.example/commit/{sha}"
+
+    def create_merge_request(self, **kwargs) -> str:
+        self.mr_opened = True
+        name = self.remote_url.rstrip("/").split("/")[-1]
+        return f"https://gitlab.example/{name}/-/merge_requests/1"
+
+
+class _Multi:
+    def __init__(self, children: list) -> None:
+        self.issue_key = "KAN-573"
+        self.work_branch = "feature/KAN-573"
+        self.target_branch = "main"
+        self.repo_checkouts = children
+        self.delivery_baseline_sha = None
+        self.delivery_baselines = {}
+
+    def ensure_on_work_branch(self) -> bool:
+        return all(child.ensure_on_work_branch() for child in self.repo_checkouts)
+
+    def get_last_commit_sha(self, short: bool = False):
+        if not self.repo_checkouts:
+            return None
+        return self.repo_checkouts[0].get_last_commit_sha(short=short)
+
+
+def test_failed_multi_repo_run_still_pushes_a_repo_that_moved(processor, state_manager):
+    """A failed agent that committed in a later clone must still open that MR.
+
+    Single-repo already does this when HEAD moved. Multi-repo must do the
+    same per clone. The parent folder is not a git repo.
+    """
+    state_manager.create_state("KAN-573", "span", "d")
+    idle = _Repo("https://gitlab.example/api.git", "aaa111", 0)
+    moved = _Repo("https://gitlab.example/web.git", "bbb111", 0)
+    parent = _Multi([idle, moved])
+    processor._contexts["KAN-573"] = {"git": parent}
+    processor._snapshot_delivery_baseline("KAN-573", parent)
+    moved._sha = "bbb222"
+    moved._ahead = 1
+    # Comment: a branch that is not ahead is still pushed, and gets no MR.
+    idle.push_ok = True
+
+    state = state_manager.get_state("KAN-573")
+    outcome = asyncio.run(
+        processor._deliver_if_new_commits(state, require_new_sha=True)
+    )
+    assert outcome == "delivered"
+    assert moved.pushed and moved.mr_opened
+    assert idle.pushed and not idle.mr_opened
+
+
+def test_single_repo_failure_still_delivers_when_head_moved(processor, state_manager):
+    """Control: the one-repo failure path already pushes a moved HEAD."""
+    state_manager.create_state("KAN-575", "one", "d")
+    repo = _Repo("https://gitlab.example/only.git", "old", 1)
+    repo.delivery_baseline_sha = "old"
+    repo._sha = "new"
+    repo.repo_checkouts = []
+    processor._contexts["KAN-575"] = {"git": repo}
+    state = state_manager.get_state("KAN-575")
+    outcome = asyncio.run(
+        processor._deliver_if_new_commits(state, require_new_sha=True)
+    )
+    assert outcome == "delivered"
+    assert repo.pushed and repo.mr_opened
+
+
 def test_multi_repo_delivery_ignores_the_parent_folder(processor):
     """The workspace root is not a git repo. Delivery reads each clone."""
 

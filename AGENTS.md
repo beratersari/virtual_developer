@@ -261,6 +261,24 @@ Orchestrator **always** owns remote delivery when the job returns success:
 Do **not** skip MR creation because the model ran `git push`. Nudge text tells the
 model not to push; if it still does, delivery must remain correct.
 
+#### Delivery after the agent errors (build)
+
+The rule is the docstring on `_deliver_if_new_commits`. Read both halves.
+
+- Agent **failed** (`require_new_sha`): do not treat **older** commits
+  already on the work branch as this job's delivery. If HEAD did not move,
+  those stay undelivered and the run stays an error. If HEAD **did** move,
+  the same function still pushes and opens the merge request.
+- Agent **succeeded**: prior unpushed commits (HEAD unchanged, branch
+  already ahead of the target) are still pushed and the merge request is
+  still opened. That is the comment on `_assert_build_delivery`.
+
+A multi-repo workspace root is not a git repo. The baseline comment says
+one SHA cannot stand for every repository, so `delivery_baseline_sha` on
+the parent is empty on purpose. "HEAD moved" is any clone whose SHA
+differs from that clone's own baseline. Push still runs for a clone that
+is not ahead of its target; that clone does not get a merge request.
+
 #### MR titles / UTF-8 (Windows)
 
 - MR title often comes from `git log` subject → `glab` or GitLab REST.

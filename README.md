@@ -342,6 +342,8 @@ pending → planning | executing → (plan_ready) → completed | error | cancel
 | `error` | Failed; comment explains why. Jira: To Do or edit text. Azure WIT: edit text |
 | `cancelled` | Operator cancel. Jira To Do + bot is still rework |
 
+If a build agent commits and then errors, Yaver still pushes that new commit and opens the merge request. Commits that were already on the branch before this failed run are not treated as this job's delivery. If the agent succeeds and the branch was already ahead but unpushed, those older commits are still pushed.
+
 ---
 
 ## Quick start

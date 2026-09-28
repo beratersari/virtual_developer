@@ -8414,11 +8414,47 @@ class JobProcessor:
             "in any repository. Agent exit code was 0 but nothing was delivered."
         )
 
+    def _clone_baseline_sha(self, issue_key: str, git: Any, child: Any) -> str:
+        """Job-start SHA for one clone. The parent folder has no single SHA."""
+        direct = str(getattr(child, "delivery_baseline_sha", None) or "").strip()
+        if direct:
+            return direct
+        url = str(getattr(child, "remote_url", "") or "").strip()
+        baselines = getattr(git, "delivery_baselines", None)
+        if isinstance(baselines, dict) and url:
+            hit = str(baselines.get(url) or "").strip()
+            if hit:
+                return hit
+        try:
+            st = self.state_manager.get_state(issue_key)
+            stored = (st.metadata or {}).get("delivery_baselines") if st else None
+            if isinstance(stored, dict) and url:
+                return str(stored.get(url) or "").strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _clone_head_moved(self, issue_key: str, git: Any, child: Any) -> bool:
+        """True when this clone's HEAD differs from its own job-start baseline."""
+        head = self._checkout_sha(child) or ""
+        baseline = self._clone_baseline_sha(issue_key, git, child)
+        return bool(head and baseline and head != baseline)
+
     def _head_moved_this_job(self, issue_key: str) -> bool:
-        """True when HEAD is a different SHA than the job-start baseline."""
+        """True when HEAD is a different SHA than the job-start baseline.
+
+        A multi-repo workspace root is not a git repo. Any child whose own
+        baseline moved counts. The parent ``delivery_baseline_sha`` is empty
+        on that path and must not hide a commit in a later clone.
+        """
         git = self._git_for(issue_key)
         if git is None:
             return False
+        children = self._repo_checkouts(git)
+        if len(children) > 1:
+            return any(
+                self._clone_head_moved(issue_key, git, child) for child in children
+            )
         try:
             raw = git.get_last_commit_sha() if hasattr(git, "get_last_commit_sha") else None
             head = str(raw).strip() if raw is not None else ""
@@ -8455,7 +8491,10 @@ class JobProcessor:
 
         ``require_new_sha=True`` (agent *failed*): do not treat older
         commits already on this work branch as this job's delivery. An
-        unknown-agent / no-work failure must stay ERROR.
+        unknown-agent / no-work failure must stay ERROR. When HEAD did
+        move, this function still pushes and opens the merge request.
+        A multi-repo root has no single SHA (see the baseline comment);
+        "moved" means any clone differs from its own baseline.
 
         Never open an MR when the work branch is not ahead of the target
         (empty ``feature/{KEY}`` cut from main must not get a 0-commit MR).
