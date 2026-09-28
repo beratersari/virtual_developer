@@ -1770,7 +1770,11 @@ class GitManager:
             return 0
 
     def should_discard_on_cancel(self) -> bool:
-        """True when cancel should delete this workspace (incomplete clone)."""
+        """True when cancel should delete this workspace (incomplete clone).
+
+        A multi-repo root is never a git repo. Completeness is each child
+        clone, so a finished set is kept for the next job on that folder.
+        """
         self._init_proc_state()
         if self._clone_in_progress:
             return True
@@ -1778,6 +1782,18 @@ class GitManager:
             return False
         try:
             if not self.temp_dir.exists():
+                return False
+            children = list(getattr(self, "repo_checkouts", None) or [])
+            if children:
+                for child in children:
+                    if getattr(child, "_clone_in_progress", False):
+                        return True
+                    child_dir = getattr(child, "temp_dir", None)
+                    if child_dir is None:
+                        return True
+                    path = Path(child_dir)
+                    if not path.exists() or not (path / ".git").exists():
+                        return True
                 return False
             if not (self.temp_dir / ".git").exists():
                 return True

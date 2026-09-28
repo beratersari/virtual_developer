@@ -119,3 +119,45 @@ def test_multi_repo_workspace_clones_each_repo_under_one_root(tmp_path, monkeypa
     assert all((child.temp_dir.parent == root) for child in git.repo_checkouts)
     assert all((child.temp_dir / ".git").is_dir() for child in git.repo_checkouts)
     assert not (root / ".git").exists()
+    # The root is not a git repo. Cancel must not treat a finished set as
+    # an incomplete clone, or the second job on this folder loses it.
+    assert git.should_discard_on_cancel() is False
+
+
+def test_incomplete_multi_repo_clone_is_still_discarded(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "temp_dir_base", str(tmp_path))
+
+    def fake_clone(self):
+        assert self.temp_dir is not None
+        if self.temp_dir.name == "api":
+            (self.temp_dir / ".git").mkdir(parents=True, exist_ok=True)
+            return
+        raise RuntimeError("second clone failed")
+
+    monkeypatch.setattr(GitManager, "_clone_into_temp", fake_clone)
+    try:
+        GitManager(
+            issue_key="KAN-21",
+            remote_url="https://gitlab.example.com/acme/api.git",
+            source_branch="develop",
+            target_branch="develop",
+            repository_urls=[
+                "https://gitlab.example.com/acme/api.git",
+                "https://gitlab.example.com/acme/web.git",
+            ],
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("second clone should fail")
+    roots = list(tmp_path.glob("multi_*"))
+    assert len(roots) == 1
+    git = GitManager(issue_key=None)
+    git.temp_dir = roots[0]
+    done = GitManager(issue_key=None)
+    done.temp_dir = roots[0] / "api"
+    missing = GitManager(issue_key=None)
+    missing.temp_dir = roots[0] / "web"
+    git.repo_checkouts = [done, missing]
+    # web never got a .git. Cancel during setup must still delete the set.
+    assert git.should_discard_on_cancel() is True
