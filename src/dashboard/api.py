@@ -26,6 +26,7 @@ from src.dashboard.schemas import (
     AzureWorkItemLookupRequest,
     BulkJobDeleteRequest,
     GitlabConnectionTestRequest,
+    ImportProjectsRequest,
     IssueReportRequest,
     AgentCreate,
     AgentWrite,
@@ -1539,6 +1540,15 @@ def create_dashboard_app(
         )
         result["server_time"] = build_meta().server_time
         # Always 200 with ok flag so UI can show soft failures cleanly
+        return result
+
+    @app.post("/api/settings/projects/import")
+    def import_accessible_projects(body: ImportProjectsRequest) -> dict:
+        """Save every Git repository the configured GitLab and Azure PATs can read."""
+        from src.dashboard.accessible_repos import import_accessible_repositories
+
+        result = import_accessible_repositories(body.project_repositories)
+        result["server_time"] = build_meta().server_time
         return result
 
     @app.get("/api/azure/projects")

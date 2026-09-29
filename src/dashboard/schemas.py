@@ -655,6 +655,12 @@ class RepositorySetItem(BaseModel):
     repositories: List[str] = Field(default_factory=list, max_length=12)
 
 
+class ImportProjectsRequest(BaseModel):
+    """Current saved-project rows to keep while importing token-visible repos."""
+
+    project_repositories: Optional[List[Dict[str, Any]]] = None
+
+
 class ProjectRepositoryItem(BaseModel):
     """One bookmarked git remote for the New-issue form."""
 

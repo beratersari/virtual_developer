@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 
 from src.issue_git_spec import _looks_like_git_url, _normalize_branch, _normalize_repo_url
 
-MAX_PROJECT_REPOS = 40
+# Saved remotes for the New-issue picker. Large enough for every repo
+# a GitLab or Azure DevOps Server token can read.
+MAX_PROJECT_REPOS = 500
 
 
 def label_from_repo_url(url: str) -> str:
