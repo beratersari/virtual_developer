@@ -29,7 +29,7 @@ import { useLive } from '../../app/live'
 import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { ModelField } from '../../ui/ModelField'
 import { PageHeader } from '../../ui/PageHeader'
-import { ProjectSelect } from '../../ui/ProjectSelect'
+import { SavedRepoSearch } from '../../ui/ProjectSelect'
 import { Spinner } from '../../ui/Spinner'
 import { StatusBadge } from '../../ui/StatusBadge'
 import {
@@ -503,11 +503,11 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={(e) => void submit(e)}>
       {projects.length > 0 && (
-        <ProjectSelect
+        <SavedRepoSearch
           label="Project"
           projects={projects}
-          value={repoPick}
-          onChange={(v) => {
+          selectedUrl={repoPick === CUSTOM_REPO ? '' : repoPick}
+          onPick={(v) => {
             setRepoPick(v)
             setPreview(null)
             if (v === CUSTOM_REPO) {
@@ -517,7 +517,7 @@ function ExistingMr({ onDone }: { onDone: () => void }) {
             const hit = projects.find((p) => p.url === v)
             if (hit) setRepo(hit.url)
           }}
-          trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
+          trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
         />
       )}
       {(isCustom || projects.length === 0) && (
@@ -722,11 +722,11 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={(e) => void submit(e)}>
       {projects.length > 0 && (
-        <ProjectSelect
+        <SavedRepoSearch
           label="Project"
           projects={projects}
-          value={repoPick}
-          onChange={(v) => {
+          selectedUrl={repoPick === CUSTOM_REPO ? '' : repoPick}
+          onPick={(v) => {
             setRepoPick(v)
             setPreview(null)
             if (v === CUSTOM_REPO) {
@@ -736,7 +736,7 @@ function ExistingPr({ onDone }: { onDone: () => void }) {
             const hit = projects.find((p) => p.url === v)
             if (hit) setRepo(hit.url)
           }}
-          trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
+          trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
         />
       )}
       {(isCustom || projects.length === 0) && (

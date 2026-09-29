@@ -20,6 +20,48 @@ _SRC = "feature/login"
 _TGT = "develop"
 
 
+def test_recorded_pr_id_binds_before_the_title(tmp_path, monkeypatch):
+    """A follow-up on a PR this job opened keeps that issue."""
+    from src.state.job_store import JobStore
+
+    store = JobStore(jobs_dir=tmp_path / "jobs")
+    monkeypatch.setattr("src.state.job_store.job_store", store)
+    job = store.create_job(issue_key="KAN-605", summary="multi")
+    store.update_job(
+        job["job_id"],
+        deliveries=[
+            {
+                "repository_url": _REPO,
+                "merge_request_url": (
+                    "https://tfs.example.com/tfs/Col/Demo/_git/app/pullrequest/9"
+                ),
+                "azure_pr_id": 9,
+            }
+        ],
+    )
+    assert (
+        resolve_pr_issue_key(
+            pr_title="note the live check",
+            project_path=_PATH,
+            pr_id=9,
+            project_keys=_KEYS,
+            repository_url=_REPO,
+        )
+        == "KAN-605"
+    )
+    assert (
+        resolve_pr_issue_key(
+            pr_title="feat(KAN-1): other",
+            project_path=_PATH,
+            pr_id=9,
+            project_keys=_KEYS,
+            repository_url=_REPO,
+        )
+        == "KAN-605"
+    )
+    assert _resolve(pr_title="feat(KAN-12): x", pr_id=4) == "KAN-12"
+
+
 def _resolve(**kwargs):
     base = dict(
         project_path=_PATH,

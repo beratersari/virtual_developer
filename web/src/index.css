@@ -200,6 +200,7 @@ body {
 }
 
 .vd-main-inner { max-width: 1120px; }
+.vd-main-inner.vd-main-wide { max-width: none; }
 
 .vd-panel,
 .vd-card {
@@ -315,6 +316,39 @@ body {
 .vd-table tbody tr.vd-row-selected { background: var(--accent-muted); }
 .vd-table.vd-table-compact th,
 .vd-table.vd-table-compact td { padding: 0.45rem 0.8rem; }
+.vd-analytics-chart {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  align-items: stretch;
+}
+@media (min-width: 1100px) {
+  .vd-analytics-chart {
+    grid-template-columns: minmax(0, 1.65fr) minmax(16rem, 0.85fr);
+  }
+}
+.vd-analytics-split {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+@media (min-width: 1680px) {
+  .vd-analytics-split { grid-template-columns: 1fr 1fr; }
+}
+.vd-table.vd-table-fit {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 42rem;
+}
+.vd-table.vd-table-fit th,
+.vd-table.vd-table-fit td { overflow: hidden; }
+.vd-table.vd-table-fit th { white-space: nowrap; }
+.vd-table.vd-table-fit th:first-child,
+.vd-table.vd-table-fit td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .vd-checkbox {
   width: 0.95rem;

@@ -154,6 +154,26 @@ class _JobSlotLimiter:
             self._cond.notify_all()
 
 
+def _remember_review_id(delivery: Dict[str, Any], url: Optional[str]) -> None:
+    """Store the GitLab MR iid or Azure PR id on one delivery row."""
+    raw = str(url or "").strip()
+    if not raw:
+        return
+    try:
+        from src.azure.webhook import parse_pull_request_url
+        from src.gitlab.client import parse_merge_request_url
+    except Exception:
+        return
+    gitlab = parse_merge_request_url(raw)
+    if gitlab:
+        delivery["gitlab_project"] = gitlab[1]
+        delivery["gitlab_mr_iid"] = int(gitlab[2])
+        return
+    azure = parse_pull_request_url(raw)
+    if azure:
+        delivery["azure_pr_id"] = int(azure[2])
+
+
 class JobProcessor:
     """Processes JIRA events and manages agent workflows."""
 
@@ -348,9 +368,19 @@ class JobProcessor:
         return str(meta.get("source") or "").strip().lower() == "azure_workitem"
 
     def _repository_urls_from_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        """Dashboard multi-repo list. A Jira poll event does not send this."""
+        """Dashboard multi-repo list. A Jira poll event does not send this.
+
+        An explicit list with fewer than two repositories clears a set
+        stored by an earlier run, even when the ticket text still names
+        the old pair. ``update_state`` merges metadata, so omitting the
+        keys would keep that set and the next clone would still include
+        it. A description that does not parse, when the event did not
+        send the list, leaves the stored set alone.
+        """
         raw = (event or {}).get("repository_urls")
         urls = [str(u).strip() for u in raw if str(u).strip()] if isinstance(raw, list) else []
+        if isinstance(raw, list) and len(urls) < 2:
+            return {"repository_urls": [], "repository_refs": []}
         if len(urls) >= 2:
             out: Dict[str, Any] = {"repository_urls": urls[:12]}
             refs = (event or {}).get("repository_refs")
@@ -372,9 +402,11 @@ class JobProcessor:
         from src.issue_git_spec import parse_issue_git_spec
 
         spec, _err = parse_issue_git_spec(summary, description)
-        refs = tuple(getattr(spec, "repository_refs", ()) or ()) if spec else ()
-        if len(refs) < 2:
+        if spec is None:
             return {}
+        refs = tuple(getattr(spec, "repository_refs", ()) or ())
+        if len(refs) < 2:
+            return {"repository_urls": [], "repository_refs": []}
         rows = [
             {"url": url, "source_branch": source, "target_branch": target}
             for url, source, target in refs
@@ -5474,6 +5506,9 @@ class JobProcessor:
                 child_lock = workspace_lock_key(str(raw_url or ""), work, tgt)
                 if child_lock and child_lock not in lock_keys:
                     lock_keys.append(child_lock)
+        # An overlap with a running multi-repo job stays queued. claim_next
+        # waits on these lock keys, then starts this job. A later run fetches
+        # the remote, so an open review is not a reason to refuse.
         rec = self.queue_store.enqueue(
             source="jira",
             issue_key=key,
@@ -6098,6 +6133,18 @@ class JobProcessor:
                 ):
                     continue
                 patch: Dict[str, Any] = {"merge_request_state": state}
+                deliveries = []
+                for row in job.get("deliveries") or []:
+                    if not isinstance(row, dict):
+                        deliveries.append(row)
+                        continue
+                    row_url = str(row.get("merge_request_url") or "").rstrip("/")
+                    if url and row_url == url:
+                        row = dict(row)
+                        row["merge_request_state"] = state
+                    deliveries.append(row)
+                if deliveries:
+                    patch["deliveries"] = deliveries
                 if url:
                     patch["merge_request_url"] = url
                 if path:
@@ -9169,9 +9216,10 @@ class JobProcessor:
         recording delivery so cancel after agent success does not stamp
         ``delivery_status=delivered`` or open an MR after terminal cancel.
 
-        When ``existing_mr_url`` is set (GitLab MR comment jobs), push onto
-        that branch and reuse the URL — do not open a second MR, and do not
-        post Jira progress (the caller replies on the MR).
+        When ``existing_mr_url`` is set (GitLab MR / Azure PR comment jobs),
+        push onto that branch and reuse the URL — do not open a second MR.
+        On a multi-repo workspace that URL is delivered only for the clone
+        whose remote is that review. The other clones are left untouched.
 
         ``open_mr=False`` stops after push (or already-on-remote).
 
@@ -9190,14 +9238,43 @@ class JobProcessor:
         git = git_manager or self._git_for(state.issue_key)
         if git_manager is None and git is not None:
             children = list(getattr(git, "repo_checkouts", None) or [])
-            if len(children) > 1 and not (existing_mr_url or "").strip():
+            if len(children) > 1:
+                # The workspace root is not a git repo. A review comment
+                # pushes only the clone that review belongs to. The other
+                # clones stay local: this job must not open a new MR for them.
+                from src.dashboard.temp_storage import _remote_matches_review
+
+                review = (existing_mr_url or "").strip()
+                targets = children
+                if review:
+                    targets = [
+                        child
+                        for child in children
+                        if _remote_matches_review(
+                            str(getattr(child, "remote_url", "") or ""),
+                            review,
+                        )
+                    ]
+                    if not targets:
+                        msg = (
+                            f"No cloned repository matches review {review}. "
+                            "Nothing was pushed."
+                        )
+                        logger.error(f"{state.issue_key}: {msg}")
+                        try:
+                            git.last_push_error = msg
+                        except Exception:
+                            pass
+                        if notify_on_fail:
+                            self._record_delivery_failure(state.issue_key, msg)
+                        return False
                 ok_all = True
-                for child in children:
+                for child in targets:
                     if self._is_aborted(state.issue_key):
                         return False
                     ok = await self._push_and_create_mr(
                         state,
-                        existing_mr_url=existing_mr_url,
+                        existing_mr_url=review or None,
                         open_mr=open_mr,
                         notify_on_fail=notify_on_fail,
                         git_manager=child,
@@ -9426,6 +9503,7 @@ class JobProcessor:
             commit_subject=commit_subject,
             commit_url=commit_url,
             repository_url=str(getattr(git, "remote_url", "") or "").strip() or None,
+            target_branch=target_branch,
         )
 
         if reuse_mr:
@@ -9485,6 +9563,7 @@ class JobProcessor:
         commit_subject: Optional[str] = None,
         commit_url: Optional[str] = None,
         repository_url: Optional[str] = None,
+        target_branch: Optional[str] = None,
     ) -> None:
         """Store push/MR/commit on the active job and append issue delivery history.
 
@@ -9502,8 +9581,12 @@ class JobProcessor:
             "commit_subject": commit_subject or None,
             "commit_url": commit_url or None,
             "repository_url": repository_url or None,
+            "target_branch": (target_branch or None),
             "created_at": now,
         }
+        if merge_request_url:
+            delivery["merge_request_state"] = "opened"
+        _remember_review_id(delivery, merge_request_url)
 
         if job_id:
             try:
@@ -9526,11 +9609,11 @@ class JobProcessor:
                 patch["deliveries"] = rows
                 if merge_request_url:
                     patch["merge_request_state"] = "opened"
-                    m = re.search(
-                        r"/merge_requests/(\d+)", str(merge_request_url), re.I
-                    )
-                    if m:
-                        patch["gitlab_mr_iid"] = int(m.group(1))
+                    if delivery.get("gitlab_mr_iid"):
+                        patch["gitlab_mr_iid"] = delivery["gitlab_mr_iid"]
+                        patch["gitlab_project"] = delivery.get("gitlab_project")
+                    if delivery.get("azure_pr_id"):
+                        patch["azure_pr_id"] = delivery["azure_pr_id"]
                 self.job_store.update_job(job_id, **patch)
             except Exception as e:
                 logger.warning(
@@ -9558,9 +9641,10 @@ class JobProcessor:
         if merge_request_url:
             meta_patch["merge_request_url"] = merge_request_url
             meta_patch.setdefault("merge_request_state", "opened")
-            m = re.search(r"/merge_requests/(\d+)", str(merge_request_url), re.I)
-            if m:
-                meta_patch.setdefault("gitlab_mr_iid", int(m.group(1)))
+            if delivery.get("gitlab_mr_iid"):
+                meta_patch.setdefault("gitlab_mr_iid", delivery["gitlab_mr_iid"])
+            if delivery.get("azure_pr_id"):
+                meta_patch.setdefault("azure_pr_id", delivery["azure_pr_id"])
         if commit_sha:
             meta_patch["last_commit_sha"] = commit_sha
         if commit_url:

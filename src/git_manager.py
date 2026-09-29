@@ -2995,6 +2995,9 @@ class GitManager:
         a successful return.
         """
         self.last_push_error = None
+        if self.repo_checkouts:
+            self.last_push_error = "workspace root is not a git repository"
+            return False
         if not self.remote_enabled:
             logger.info("Push not available (no remote configured).")
             self.last_push_error = "Push not available (no remote configured)."

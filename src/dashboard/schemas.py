@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.brand import PRODUCT_NAME
+from src.dashboard.project_repos import MAX_PROJECT_REPOS
 
 
 class PlanRefactorRequest(BaseModel):
@@ -886,7 +887,7 @@ class SettingsUpdate(BaseModel):
     )
     project_repositories: Optional[List[ProjectRepositoryItem]] = Field(
         default=None,
-        max_length=40,
+        max_length=MAX_PROJECT_REPOS,
         description="Full replace of saved git remotes for the New-issue form",
     )
     repository_sets: Optional[List[RepositorySetItem]] = Field(

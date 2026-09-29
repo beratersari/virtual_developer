@@ -1,7 +1,7 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ProjectRepository, RepositorySet } from '../../api/types'
-import { ProjectSelect } from '../../ui/ProjectSelect'
+import { SavedRepoSearch } from '../../ui/ProjectSelect'
 
 export type RepoRow = {
   url: string
@@ -24,6 +24,16 @@ export function rowFromProject(project: ProjectRepository): RepoRow {
     target: (project.target_branch || '').trim() || 'develop',
     sourceMode: source ? 'custom' : 'issue_key',
   }
+}
+
+export function rowsFromRepositorySet(
+  repositories: string[],
+  projects: ProjectRepository[],
+): RepoRow[] {
+  return repositories.filter(Boolean).map((url) => {
+    const saved = projects.find((project) => project.url === url)
+    return saved ? rowFromProject(saved) : { ...emptyRepoRow(), url }
+  })
 }
 
 export function scheduleRepositoryFields(rows: RepoRow[]) {
@@ -70,6 +80,7 @@ export function RepositoryList({
   rememberRepo?: boolean
   setRememberRepo?: (value: boolean) => void
 }) {
+  const [setName, setSetName] = useState('')
   const visible = rows.length > 0 ? rows : [emptyRepoRow()]
 
   const update = (idx: number, patch: Partial<RepoRow>) => {
@@ -102,14 +113,13 @@ export function RepositoryList({
         <label className="field">
           <span>Repo set</span>
           <select
-            value=""
+            value={setName}
             onChange={(e) => {
-              const picked = sets.find((row) => row.name === e.target.value)
+              const name = e.target.value
+              setSetName(name)
+              const picked = sets.find((row) => row.name === name)
               if (!picked) return
-              const next = picked.repositories.filter(Boolean).map((url) => {
-                const saved = projects.find((p) => p.url === url)
-                return saved ? rowFromProject(saved) : { ...emptyRepoRow(), url }
-              })
+              const next = rowsFromRepositorySet(picked.repositories, projects)
               if (next.length > 0) setRows(next)
             }}
           >
@@ -124,9 +134,10 @@ export function RepositoryList({
       ) : null}
       {visible.map((row, idx) => (
         <RepositoryRow
-          key={`${row.url}-${idx}`}
+          key={idx}
           row={row}
           projects={projects}
+          taken={visible.map((item) => item.url).filter((url) => url && url !== row.url)}
           canRemove={visible.length > 1}
           showRemember={showRemember && idx === 0}
           rememberRepo={rememberRepo}
@@ -161,6 +172,7 @@ export function RepositoryList({
 function RepositoryRow({
   row,
   projects,
+  taken,
   canRemove,
   showRemember,
   rememberRepo,
@@ -171,6 +183,7 @@ function RepositoryRow({
 }: {
   row: RepoRow
   projects: ProjectRepository[]
+  taken: string[]
   canRemove: boolean
   showRemember: boolean
   rememberRepo: boolean
@@ -180,27 +193,32 @@ function RepositoryRow({
   add?: ReactNode
 }) {
   const known = projects.some((p) => p.url === row.url)
-  const pick = row.url && known ? row.url : row.url ? CUSTOM_REPO : ''
-  const showUrl = projects.length === 0 || pick === CUSTOM_REPO || (!known && Boolean(row.url))
+  const [otherUrl, setOtherUrl] = useState(false)
+  useEffect(() => {
+    if (known) setOtherUrl(false)
+  }, [known])
+  const showUrl = projects.length === 0 || otherUrl || (!known && Boolean(row.url))
   return (
     <div className="space-y-2">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           {projects.length > 0 ? (
-            <ProjectSelect
+            <SavedRepoSearch
               label="Repository"
               projects={projects}
-              value={pick}
-              onChange={(value) => {
-                if (value === CUSTOM_REPO) {
+              exclude={taken}
+              selectedUrl={known ? row.url : ''}
+              trailing={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
+              onPick={(url) => {
+                if (url === CUSTOM_REPO) {
+                  setOtherUrl(true)
                   onChange({ url: '' })
                   return
                 }
-                const saved = projects.find((p) => p.url === value)
+                setOtherUrl(false)
+                const saved = projects.find((p) => p.url === url)
                 if (saved) onChange(rowFromProject(saved))
               }}
-              emptyOption="Select a repository"
-              trailingOptions={[{ value: CUSTOM_REPO, label: 'Other URL…' }]}
             />
           ) : null}
           {showUrl ? (
@@ -271,34 +289,16 @@ function AddRepository({
   used: string[]
   onAdd: (url: string) => void
 }) {
-  const [addRepo, setAddRepo] = useState('')
   const [addRepoUrl, setAddRepoUrl] = useState('')
-  const available = projects.filter((project) => project.url && !used.includes(project.url))
   return (
     <div className="mt-3 space-y-2">
-      {available.length > 0 ? (
-        <>
-          <ProjectSelect
-            label="Saved repository"
-            projects={available}
-            value={addRepo}
-            onChange={setAddRepo}
-            emptyOption="Add a saved repository"
-          />
-          <p className="actions">
-            <button
-              type="button"
-              className="vd-btn vd-btn-secondary"
-              disabled={!addRepo}
-              onClick={() => {
-                onAdd(addRepo)
-                setAddRepo('')
-              }}
-            >
-              Add
-            </button>
-          </p>
-        </>
+      {projects.some((project) => project.url) ? (
+        <SavedRepoSearch
+          label="Add a repository"
+          projects={projects}
+          exclude={used}
+          onPick={onAdd}
+        />
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <input
